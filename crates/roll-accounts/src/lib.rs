@@ -850,10 +850,12 @@ impl roll_auth::Sessions for Resolver {
     }
 
     fn person_by_email<'a>(&'a self, email: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SignedIn>, String>> {
-        let (accounts, email) = (self.0.clone(), email.trim().to_lowercase());
+        // As addresses are kept (ASCII, lower-cased): a look-alike letter never folds into one.
+        let (accounts, email) = (self.0.clone(), normalize_email(email).ok().filter(|e| e.is_ascii()));
         Box::pin(async move {
+            let Some(email) = email else { return Ok(None) };
             tokio::task::spawn_blocking(move || {
-                let id: Option<String> = accounts.db.read(|c| c.query_row("SELECT id FROM users WHERE lower(email) = ?", [email.as_str()], |r| r.get(0)).optional()).map_err(|e| e.to_string())?;
+                let id: Option<String> = accounts.db.read(|c| c.query_row("SELECT id FROM users WHERE email = ?", [email.as_str()], |r| r.get(0)).optional()).map_err(|e| e.to_string())?;
                 match id {
                     Some(id) => accounts.person(&id).map_err(|e| e.to_string()),
                     None => Ok(None),

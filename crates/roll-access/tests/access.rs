@@ -2065,6 +2065,9 @@ async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
     use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
     let d = Daemon::new(50);
     d.people.add("usr_alice", "alice");
+    d.people.add("usr_bob", "bob");
+    d.people.add("usr_root", "root");
+    d.people.set_admin("usr_root", true);
     let rng = ring::rand::SystemRandom::new();
     let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
     let point = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng).unwrap().public_key().as_ref().to_vec();
@@ -2072,7 +2075,12 @@ async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
     let jwks = json!({ "keys": [{ "kty": "EC", "crv": "P-256", "kid": "okta1", "x": b64(&point[1..33]), "y": b64(&point[33..]) }] }).to_string();
     let okta = "https://acme.okta.example";
     assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": [{ "issuer": "http://acme.okta.example", "jwks": jwks }] }))).await.0, StatusCode::BAD_REQUEST, "an https issuer");
-    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": [{ "issuer": okta, "jwks": jwks, "name": "Okta" }] }))).await.0, StatusCode::OK);
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": [{ "issuer": okta, "jwks": jwks }] }))).await.0, StatusCode::BAD_REQUEST, "email matching names its domains");
+    let trust = |admins: bool| {
+        let (d, jwks) = (&d, jwks.clone());
+        async move { d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": [{ "issuer": okta, "jwks": jwks, "name": "Okta", "domains": ["acme.test"], "admins": admins }] }))).await.0 }
+    };
+    assert_eq!(trust(false).await, StatusCode::OK);
     let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "write": "allow" } }]);
     let (s, app) = d.call(OPERATOR, Method::POST, "/v1/access/enterprise/apps", Some(json!({ "name": "Claude", "rules": rules }))).await;
     assert_eq!(s, StatusCode::CREATED, "{app}");
@@ -2088,7 +2096,7 @@ async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
         h.typ = Some("oauth-id-jag+jwt".into());
         jsonwebtoken::encode(&h, &claims, &jsonwebtoken::EncodingKey::from_ec_der(pkcs8.as_ref())).unwrap()
     };
-    let claims = |jti: &str, email: &str, aud: &str, client: &str| json!({ "iss": okta, "sub": "00u1alice", "aud": aud, "client_id": client, "jti": jti, "exp": now + 300, "iat": now, "email": email, "resource": format!("{api}/v1/mcp") });
+    let claims = |jti: &str, email: &str, aud: &str, client: &str| json!({ "iss": okta, "sub": "00u1alice", "aud": aud, "client_id": client, "jti": jti, "exp": now + 300, "iat": now, "email": email, "email_verified": true, "resource": format!("{api}/v1/mcp") });
     let sign_in = |assertion: String, secret: String| {
         let (d, id) = (&d, client_id.clone());
         async move { d.form("/v1/access/oauth/token", &[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("assertion", &assertion), ("client_id", &id), ("client_secret", &secret)]).await }
@@ -2108,12 +2116,32 @@ async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
     assert_eq!(sign_in(idjag(claims("j4", "alice@acme.test", &api, "ent_other")), secret.clone()).await.1["error"], "invalid_grant");
     assert_eq!(sign_in(idjag(claims("j5", "alice@acme.test", "https://elsewhere.example", &client_id)), secret.clone()).await.1["error"], "invalid_grant");
     assert_eq!(sign_in(idjag(claims("j6", "mallory@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied");
+    // An email the provider didn't say it verified, or outside its domains: no.
+    let mut unverified = claims("j8", "alice@acme.test", &api, &client_id);
+    unverified.as_object_mut().unwrap().remove("email_verified");
+    assert_eq!(sign_in(idjag(unverified), secret.clone()).await.1["error"], "access_denied");
+    assert_eq!(sign_in(idjag(claims("j9", "alice@elsewhere.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied");
+    // An admin acts as the operator: only from a provider the operator lets sign admins in.
+    assert_eq!(sign_in(idjag(claims("j10", "root@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied");
+    trust(true).await;
+    assert_eq!(sign_in(idjag(claims("j11", "root@acme.test", &api, &client_id)), secret.clone()).await.0, StatusCode::OK);
+    trust(false).await;
+    // The assertion's read-only scope: the token reads, never writes.
+    let mut reads = claims("j12", "bob@acme.test", &api, &client_id);
+    reads["scope"] = json!("read-only");
+    let (_, ro) = sign_in(idjag(reads), secret.clone()).await;
+    let ro_token = ro["access_token"].as_str().unwrap_or_else(|| panic!("{ro}")).to_string();
+    assert_eq!(d.call(&ro_token, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "nope" }))).await.0, StatusCode::FORBIDDEN, "read-only");
+    // Revoked in roll: the provider can't hand it back.
+    let bobs = d.call(&ro_token, Method::GET, "/v1/access", None).await.1["grant"]["id"].as_str().unwrap().to_string();
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{bobs}"), None).await.0, StatusCode::OK);
+    assert_eq!(sign_in(idjag(claims("j13", "bob@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied");
     // Again later: the same connection, a new token.
     let (_, again) = sign_in(idjag(claims("j7", "ALICE@acme.test", &api, &client_id)), secret.clone()).await;
     let token2 = again["access_token"].as_str().unwrap_or_else(|| panic!("{again}")).to_string();
     let (_, me2) = d.call(&token2, Method::GET, "/v1/access", None).await;
     assert_eq!(me2["grant"]["id"], me["grant"]["id"], "one connection per person and app");
-    // Removing the app ends its people's tokens.
-    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/enterprise/apps/{client_id}"), None).await.1["revoked"], 1);
+    // Removing the app ends its people's tokens (alice's and root's; bob's was revoked already).
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/enterprise/apps/{client_id}"), None).await.1["revoked"], 2);
     assert_eq!(d.call(&token2, Method::GET, "/v1/access", None).await.0, StatusCode::UNAUTHORIZED);
 }

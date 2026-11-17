@@ -83,6 +83,16 @@ pub enum Token {
     /// credentials). The operator's, or, signed in, a person's own acting as them.
     #[command(subcommand)]
     Client(MachineCmd),
+    /// Enterprise sign-in (SEP-990, ID-JAG): the identity providers roll trusts to vouch for
+    /// their people, and the apps they may sign people in to. Nothing to show them.
+    ///
+    /// Examples:
+    ///   roll token enterprise trust https://acme.okta.com --name Okta
+    ///   roll token enterprise app create Claude --product code,workspace --allow read,write
+    Enterprise {
+        #[command(subcommand)]
+        what: Option<EnterpriseCmd>,
+    },
     /// roll's rules for every token: `--max-days 90`, `--require-expiry`, `--no-limit`,
     /// `--max-idle-days 60` (`0` for no idle limit); nothing to show them.
     Policy {
@@ -145,6 +155,45 @@ pub enum MachineCmd {
     ///   roll token client rotate mcl_… --public-key ci-2026.pub.pem
     ///   roll token client rotate mcl_… --github acme/web --ref refs/heads/main   (CI's own identity)
     Rotate(Box<ClientRotate>),
+}
+
+#[derive(Subcommand)]
+pub enum EnterpriseCmd {
+    /// Trust an identity provider (its issuer, an https URL); again to change how it's set up.
+    Trust {
+        issuer: String,
+        /// What people call it ("Okta").
+        #[arg(long)]
+        name: Option<String>,
+        /// Its keys pinned (a JWKS file), for a provider roll can't reach.
+        #[arg(long)]
+        jwks: Option<std::path::PathBuf>,
+        /// How a person is found: by their verified email (default), or by `aud_sub` naming
+        /// their roll account.
+        #[arg(long = "match", value_parser = ["email", "aud_sub"], default_value = "email")]
+        matching: String,
+    },
+    /// Stop trusting an identity provider: no new sign-ins from it.
+    Untrust { issuer: String },
+    /// The apps an identity provider may sign people in to.
+    #[command(subcommand)]
+    App(EnterpriseAppCmd),
+}
+
+#[derive(Subcommand)]
+pub enum EnterpriseAppCmd {
+    /// Register an app (its client id is what the provider puts in an assertion): with
+    /// --public-key it signs its client assertions; without, roll makes a secret, shown once.
+    Create {
+        name: String,
+        #[command(flatten)]
+        rules: RuleArgs,
+        /// Its public key: a PEM file (Ed25519 or P-256) or a JWK.
+        #[arg(long)]
+        public_key: Option<std::path::PathBuf>,
+    },
+    /// Remove an app: every person's connection to it is revoked.
+    Remove { id: String },
 }
 
 /// CI's own identity as a machine client's credential (`create` and `rotate`): GitHub Actions,
@@ -625,6 +674,69 @@ fn span(s: &str, flag: &str) -> anyhow::Result<Option<i64>> {
 }
 
 /// The rules a `create` asks for: the preset's (its "project" filled in), then a rule of its own.
+async fn enterprise(api: &Api, json_out: bool, cmd: Option<EnterpriseCmd>) -> anyhow::Result<()> {
+    let current = api.get("/v1/access/enterprise").await?;
+    let idps = |v: &Value| v["idps"].as_array().cloned().unwrap_or_default();
+    let other = |list: Vec<Value>, issuer: &str| -> Vec<Value> { list.into_iter().filter(|i| i["issuer"].as_str().map(|s| s.trim_end_matches('/')) != Some(issuer.trim_end_matches('/'))).collect() };
+    let out = match cmd {
+        None => current,
+        Some(EnterpriseCmd::Trust { issuer, name, jwks, matching }) => {
+            let mut list = other(idps(&current), &issuer);
+            let mut idp = json!({ "issuer": issuer, "matching": matching });
+            if let Some(n) = name {
+                idp["name"] = json!(n);
+            }
+            if let Some(path) = jwks {
+                idp["jwks"] = json!(std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?);
+            }
+            list.push(idp);
+            api.call(reqwest::Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": list }))).await?;
+            api.get("/v1/access/enterprise").await?
+        }
+        Some(EnterpriseCmd::Untrust { issuer }) => {
+            let list = other(idps(&current), &issuer);
+            if list.len() == idps(&current).len() {
+                anyhow::bail!("roll doesn't trust {issuer}");
+            }
+            api.call(reqwest::Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": list }))).await?;
+            api.get("/v1/access/enterprise").await?
+        }
+        Some(EnterpriseCmd::App(EnterpriseAppCmd::Create { name, rules: r, public_key })) => {
+            let jwk = match &public_key {
+                Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
+                None => None,
+            };
+            let made = api.post("/v1/access/enterprise/apps", json!({ "name": name, "rules": rules(api, &r).await?, "public_jwk": jwk })).await?;
+            if !json_out {
+                println!("client_id: {}", s(&made["client_id"]));
+                if let Some(secret) = made["client_secret"].as_str() {
+                    println!("client_secret (shown once; it's the app's, never the identity provider's): {secret}");
+                }
+                println!("Give the identity provider this client id for the app: it puts it in each person's assertion.");
+                return Ok(());
+            }
+            made
+        }
+        Some(EnterpriseCmd::App(EnterpriseAppCmd::Remove { id })) => api.call(reqwest::Method::DELETE, &format!("/v1/access/enterprise/apps/{}", urlencoding::encode(&id)), None).await?,
+    };
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else if out.get("revoked").is_some() {
+        println!("removed; {} people's connections revoked", out["revoked"]);
+    } else {
+        for i in idps(&out) {
+            println!("trusts {} ({}; people by {})", s(&i["issuer"]), i["name"].as_str().unwrap_or("-"), s(&i["matching"]));
+        }
+        for app in out["apps"].as_array().into_iter().flatten() {
+            println!("app {}  {}  {}", s(&app["client_id"]), s(&app["name"]), if app["signs_with_key"] == true { "signs with a key" } else { "a secret" });
+        }
+        if idps(&out).is_empty() && out["apps"].as_array().is_none_or(|a| a.is_empty()) {
+            println!("no identity provider is trusted, and no app registered");
+        }
+    }
+    Ok(())
+}
+
 async fn rules(api: &Api, c: &RuleArgs) -> anyhow::Result<Value> {
     let mut rules = Vec::new();
     let selectors = || {
@@ -999,6 +1111,7 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
             }
         }
         Token::Client(cmd) => machine(api, json_out, cmd).await?,
+        Token::Enterprise { what } => enterprise(api, json_out, what).await?,
         Token::Presets => {
             let c = api.get("/v1/access/catalog").await?;
             if json_out {

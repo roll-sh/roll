@@ -224,10 +224,14 @@ Grant ("ID-JAG", Okta's Cross App Access) describe: the app trades the provider'
 roll token acting as that person, with no consent screen and no roll sign-in.
 
 - **Trusting a provider** (the operator): `PUT /v1/access/enterprise/idps {idps: [{issuer, jwks?,
-  matching?, name?}]}`. `issuer` is an `https` URL; its keys are fetched from its metadata through
-  the guarded client, or pinned (`jwks`). `matching` says how a person is found: `email` (the
-  default: the assertion's `email`, unless `email_verified` is `false`, is their roll account's) or
-  `aud_sub` (the assertion names the roll account, `usr_…`).
+  matching?, domains?, admins?, name?}]}` (`roll token enterprise trust <issuer> …`). `issuer` is an
+  `https` URL; its keys are fetched from its metadata through the guarded client, or pinned
+  (`jwks`). `matching` says how a person is found: `email` (the default: the assertion's `email`,
+  with `email_verified: true`, in one of the provider's `domains`, which email matching requires,
+  ASCII only, is their roll account's) or `aud_sub` (the assertion names the roll account,
+  `usr_…`). A provider names people of its own company, never anyone's: some let people set their
+  own email, so an unverified one or another domain is `access_denied`. roll's admins act as the
+  operator, past roll's own second factor: a provider signs them in only with `admins: true`.
 - **Registering an app** (the operator): `POST /v1/access/enterprise/apps {name, rules,
   public_jwk?}` answers its `client_id` (`ent_…`, what the provider puts in an assertion) and, with
   no key, a `client_secret` shown once. `rules` is the most the app may do for a person.
@@ -243,11 +247,13 @@ roll token acting as that person, with no consent screen and no roll sign-in.
 - **What it gets:** the person's own connection to the app (an OAuth grant, made the first time:
   the app's rules, acting as the person, so never past what their account reaches; waiting for an
   admin when roll's people policy says so, `access_denied` until then) and an hour's access token
-  on it. No refresh token: the app asks the provider again. `scope: read-only` in the assertion
+  on it. A connection revoked or denied in roll stays so (the provider can't hand it back); one that
+  lapsed (expired, or idle past roll's policy) is replaced. No refresh token: the app asks the provider again. `scope: read-only` in the assertion
   narrows the token to reads. Each sign-in is a `sign_in` row in the audit log with the provider
   and the person's subject there.
-- Revoking the person's connection ends its tokens now (the provider decides whether a new one is
-  made); removing the app ends all of them; un-trusting the provider stops new ones.
+- Revoking the person's connection ends its tokens and keeps them out of that app; removing the
+  app ends all of them (in the same write that removes it); un-trusting the provider stops new
+  ones. A used assertion's `jti` is kept past the verifier's clock leeway, so it never works twice.
 
 ### When a token is refused
 
