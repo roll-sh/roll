@@ -1314,6 +1314,10 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             .map(|pol| (k.clone(), rh.clone(), resp.headers().clone(), pol)),
         _ => None,
     };
+    // An answer's cache tags are for roll's cache, kept or not (Netlify's and Vercel's do the same).
+    for t in crate::resp_cache::TAG_HEADERS {
+        resp.headers_mut().remove(t);
+    }
     if resp.status() == StatusCode::SWITCHING_PROTOCOLS
         && let Some(client_upgrade) = client_upgrade
     {

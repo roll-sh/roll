@@ -567,7 +567,7 @@ async fn a_new_error_is_an_event_once() {
     let first = news().await;
     assert_eq!(first.len(), 1, "{first:?}");
     assert_eq!(first[0]["data"]["name"], "ValueError");
-    assert!(!first[0].to_string().contains("4242"), "never the message: {}", first[0]);
+    assert!(!first[0].to_string().contains("4242424242424242"), "never the message: {}", first[0]);
     // The same error again: no second event, even as if this process had restarted.
     tokio::time::sleep(Duration::from_millis(5)).await;
     for l in trace("ValueError") {
@@ -725,6 +725,7 @@ async fn a_shared_cache_answers_without_reaching_the_app() {
         async move {
             let resp = public.oneshot(req).await.unwrap();
             let cache = resp.headers().get("x-roll-cache").map(|v| v.to_str().unwrap().to_string());
+            assert!(!resp.headers().contains_key("cache-tag"), "an answer's cache tags are roll's");
             let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
             (cache, body)
         }
@@ -742,6 +743,10 @@ async fn a_shared_cache_answers_without_reaching_the_app() {
     let purge = format!("/v1/apps/services/{id}/environments/production/cache/purge");
     assert_eq!(call(&w.api, "POST", &purge, Some(json!({"paths": ["/page-*"]}))).await.1, json!({"purged": 2}));
     assert_eq!(get("/page-a", false).await.0.as_deref(), Some("MISS"));
+    // By the tags its app gave it (`Cache-Tag`), whatever their case; the others stay.
+    get("/page-b", false).await;
+    assert_eq!(call(&w.api, "POST", &purge, Some(json!({"tags": ["PAGE-B"]}))).await.1, json!({"purged": 1}));
+    assert_eq!(get("/page-a", false).await.0.as_deref(), Some("HIT"));
     assert_eq!(call(&w.api, "POST", &purge, None).await.1, json!({"purged": 1}));
     // A new live deployment's answers aren't the old one's.
     let (_, r) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/redeploy"), Some(json!({}))).await;

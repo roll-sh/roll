@@ -1211,7 +1211,7 @@
               }
             }
           },
-          "description": "`{ paths? }` (1–100 absolute paths, any query; a trailing `*` is a prefix; none: everything)"
+          "description": "`{ paths?, tags? }` (1–100 absolute paths, any query, a trailing `*` a prefix; 1–100 tags its answers carried, any case; neither: everything)"
         },
         "responses": {
           "200": {

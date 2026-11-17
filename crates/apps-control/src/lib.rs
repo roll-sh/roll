@@ -860,8 +860,9 @@ impl Apps {
         }
     }
 
-    /// `POST …/cache/purge {paths?}`: the environment's kept answers for those paths (a trailing
-    /// `*` is a prefix; at most 100), or all of them. Runs on the owner, which keeps them.
+    /// `POST …/cache/purge {paths?, tags?}`: the environment's kept answers for those paths (a
+    /// trailing `*` is a prefix; at most 100) and with those tags (at most 100), or all of them.
+    /// Runs on the owner, which keeps them.
     pub async fn purge_cache(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Value> {
         self.service_env(service, env).await?;
         let paths = match body.get("paths") {
@@ -873,7 +874,21 @@ impl Apps {
             ),
             Some(_) => return Err(Error::BadRequest("paths is 1–100 paths, or left out for everything".into())),
         };
-        let n = self.responses.purge(&env_key(service, env), paths.as_deref());
+        let tags = match body.get("tags") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(a)) if !a.is_empty() && a.len() <= 100 => Some(
+                a.iter()
+                    .map(|t| {
+                        t.as_str()
+                            .map(|t| t.trim().to_ascii_lowercase())
+                            .filter(|t| !t.is_empty() && t.len() <= crate::resp_cache::MAX_TAG && !t.contains(',') && !t.chars().any(char::is_whitespace))
+                            .ok_or_else(|| Error::BadRequest("tags are what the app's Cache-Tag or Surrogate-Key named (no commas or spaces, at most 1,024 bytes)".into()))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            Some(_) => return Err(Error::BadRequest("tags is 1–100 tags, or left out".into())),
+        };
+        let n = self.responses.purge(&env_key(service, env), paths.as_deref(), tags.as_deref());
         Ok(json!({ "purged": n }))
     }
 
