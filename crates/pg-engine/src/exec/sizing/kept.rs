@@ -296,6 +296,8 @@ fn lay_out(db: &Database, oid: u32, building: Building<'_>) {
     if moved || heap.read_shape(&r.shape).is_none() {
         return;
     }
+    let Ok(xmaxes) = kept_xmaxes(db, oid) else { return };
+    apply_xmaxes(&mut heap, xmaxes);
     let mut rf = db.relfiles.of(oid).write();
     // (Not if the table was dropped, truncated or rewritten meanwhile: `forget`.)
     if !rf.building.contains(&oid) || rf.heaps.contains_key(&oid) {

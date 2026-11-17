@@ -1951,6 +1951,7 @@ fn period_agg(
             let Some((_, Some(bytes))) = ctx.txn.borrow().get_latest(&dkey)? else {
                 continue;
             };
+            super::sizing::row_locked(&leaf, &dkey, RowLockMode::KeyShare, ctx)?;
             let row = decode_table_row(&leaf, &bytes)?;
             let p = &row[lcols[n - 1]];
             if p.is_null() || !period_overlaps(p, period) {
@@ -2233,7 +2234,10 @@ fn find_parent(
                 return Ok(false);
             }
             return match super::scan::lock_row_mode(parent, dkey, RowLockMode::KeyShare, Wait::Block, Xltw::Lock, ctx) {
-                Ok(Locked::Same) => Ok(true),
+                Ok(Locked::Same) => {
+                    super::sizing::row_locked(parent, dkey, RowLockMode::KeyShare, ctx)?;
+                    Ok(true)
+                }
                 Ok(_) => Ok(false),
                 Err(e) if e.code == code::SERIALIZATION_FAILURE => Err(Error::new(
                     code::SERIALIZATION_FAILURE,
@@ -2253,6 +2257,10 @@ fn find_parent(
             }, &xact_ctx)?;
         if !got {
             return Ok(false);
+        }
+        let present = matches!(ctx.txn.borrow().get_latest(dkey)?, Some((_, Some(_))));
+        if present {
+            super::sizing::row_locked(parent, dkey, RowLockMode::KeyShare, ctx)?;
         }
         let txn = ctx.txn.borrow();
         let latest = txn.get_latest(dkey)?;
@@ -4515,6 +4523,9 @@ impl InsertNode {
                     &xact_ctx,
                 )?;
                 let latest = ctx.txn.borrow().get_latest(&c.existing)?;
+                if let Some((_, Some(_))) = &latest {
+                    super::sizing::row_locked(t, &c.existing, mode, ctx)?;
+                }
                 let snapshot = ctx.txn.borrow().isolation.txn_snapshot();
                 let Some((ts, Some(bytes))) = latest else {
                     if snapshot {
@@ -5555,7 +5566,10 @@ impl Node for UpdateNode {
             }
             // heap_update: changing a key column takes the row FOR UPDATE (what FOR KEY
             // SHARE lockers, foreign key checks among them, conflict with).
-            if ctx.with_catalog(|cat| crate::exec::scan::any_key_column(&t, cat, |i| old.get(i) != new.get(i))) {
+            let keys = ctx.with_catalog(|cat| crate::exec::scan::any_key_column(&t, cat, |i| old.get(i) != new.get(i)));
+            // (What the heap model's xmax for it says: HEAP_KEYS_UPDATED.)
+            super::sizing::note_update_keys(keys);
+            if keys {
                 lock_row_mode(&t, &dkey, RowLockMode::Update, Wait::Block, Xltw::Update, ctx)?;
             }
             // A row leaving its partition moves through the partitioned table updated. (Not
@@ -6102,6 +6116,9 @@ pub fn truncate(t: &Arc<Table>, ctx: &ExecCtx) -> Result<()> {
     let end = super::toast::table_end(t.oid);
     // (One range deletion, however many rows, entries and values: `storage::rdel`.)
     ctx.txn.borrow_mut().delete_range(start, end)?;
+    // (And the xmax kept for its versions: `multixact::XMAX_PREFIX`.)
+    let (a, b) = crate::txn::multixact::xmax_range(t.oid);
+    ctx.txn.borrow_mut().delete_range(a, b)?;
     // (Its indexes' cached entries go with their records: `index_am::evict`.)
     crate::ext::index_am::evict(ctx.sess.db.instance, &crate::storage::keys::index_prefix(t.oid, 0)[..4]);
     super::sizing::truncated(t, &ctx.sess.db);

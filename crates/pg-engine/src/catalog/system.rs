@@ -3056,7 +3056,11 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     } else {
                         0
                     }),
-                    Value::Oid(matches!(r.kind, 'r' | 'm' | 't') as u32),
+                    Value::Oid(if matches!(r.kind, 'r' | 'm' | 't') {
+                        cat.min_mxids.get(&r.oid).map_or(crate::txn::multixact::FIRST_MULTI, |m| *m as u32)
+                    } else {
+                        0
+                    }),
                     if r.oid < super::FIRST_USER_OID && SysTable::by_oid(r.oid).is_some() {
                         arr(
                             DataType::Aclitem,
@@ -4564,7 +4568,9 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     b(login),
                     i4(opts.conn_limit as i64),
                     Value::Oid(0),
-                    Value::Oid(0),
+                    // datminmxid: initdb's, which only a VACUUM of every relation the
+                    // database has (its catalogs too) would advance.
+                    Value::Oid(crate::txn::multixact::FIRST_MULTI),
                     o(1663),
                     nm(&l.collate),
                     nm(&l.ctype),

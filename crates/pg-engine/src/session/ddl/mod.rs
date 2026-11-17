@@ -1043,6 +1043,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
                 if x != 0 && !old && !self.cat.frozen_xids.contains_key(&x) {
                     let v = *xmin.get_or_insert_with(|| self.recent_xmin());
                     self.cat.frozen_xids.insert(x, v);
+                    self.stamp_min_mxid(x);
                 }
             }
         }
@@ -1079,6 +1080,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
             .collect();
         for x in gone {
             self.cat.frozen_xids.remove(&x);
+            self.cat.min_mxids.remove(&x);
         }
         #[cfg(debug_assertions)]
         {
@@ -1117,8 +1119,29 @@ impl<'c, 'a> Ddl<'c, 'a> {
     /// table goes with it.
     pub(super) fn set_frozen_xid(&mut self, t: &Table, xid: u64) {
         self.cat.frozen_xids.insert(t.oid, xid);
+        self.stamp_min_mxid(t.oid);
         if t.toast != 0 {
             self.cat.frozen_xids.insert(t.toast, xid);
+            self.stamp_min_mxid(t.toast);
+        }
+    }
+
+    /// GetOldestMultiXactId: the oldest MultiXactId a running transaction may still need
+    /// (the next one when none may).
+    pub(super) fn oldest_mxact(&self) -> u32 {
+        let db = &self.ctx.sess.db;
+        let xids = db.xids();
+        let running = xids.oldest_running();
+        db.multis.lock().oldest_needed((running < xids.next()).then_some(running))
+    }
+
+    /// New storage's relminmxid: GetOldestMultiXactId (kept only when it isn't the first).
+    fn stamp_min_mxid(&mut self, rel: u32) {
+        let m = self.oldest_mxact();
+        if m == crate::txn::multixact::FIRST_MULTI {
+            self.cat.min_mxids.remove(&rel);
+        } else {
+            self.cat.min_mxids.insert(rel, m as u64);
         }
     }
 

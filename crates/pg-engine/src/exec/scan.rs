@@ -4579,11 +4579,13 @@ fn scan_row_rest(plan: &ScanPlan, key: &[u8], bytes: &[u8], mut row: Row, ctx: &
     if plan.sys {
         let mut sys = sys_values(key, row_xmin(bytes)?, 0, plan.table.oid);
         // The heap TID the version was written at, when it was modelled, and the
-        // command id its tuple header holds (cmin and cmax both read t_cid).
+        // command id its tuple header holds (cmin and cmax both read t_cid) and its raw
+        // xmax (a deleter's, an updater's, a locker's or a MultiXactId).
         if let Some((b, o)) = stored_tid(bytes) {
             sys[0] = Value::Tid(b, o);
-            if let Some(c) = super::sizing::raw_cid(plan.table.oid, (b, o), &ctx.sess.db) {
+            if let Some((c, xmax)) = super::sizing::raw_cid(plan.table.oid, (b, o), &ctx.sess.db) {
                 sys[2] = Value::Oid(c);
+                sys[3] = Value::Oid(xmax as u32);
                 sys[4] = Value::Oid(c);
             }
         }
@@ -6281,7 +6283,11 @@ impl ScanNode {
             return Ok(None);
         }
         if let Some((mark, wait)) = self.plan.mark {
-            match lock_row(&self.plan.table, key, mark, wait, Xltw::Lock, ctx)? {
+            let locked = lock_row(&self.plan.table, key, mark, wait, Xltw::Lock, ctx)?;
+            if !matches!(locked, Locked::Skip) {
+                super::sizing::row_locked(&self.plan.table, key, lock_mode(mark), ctx)?;
+            }
+            match locked {
                 Locked::Skip => return Ok(None),
                 Locked::Same => {}
                 Locked::Newer(fresh) => {
