@@ -8494,8 +8494,20 @@ impl Binder<'_, '_> {
                 self.procs.deferred = true;
             } else {
                 self.procs.folded = true;
+                let args = || s.params.iter().map(|p| match p {
+                    Expr::Const(v, _) => v.clone(),
+                    _ => Value::Null,
+                });
+                let oid = fdef.oid;
+                if let Some(v) = self.proc_memo.as_ref().and_then(|m| m.value(oid, &args().collect::<Vec<_>>()).cloned()) {
+                    self.note_proc_call(oid, args().collect(), v.clone());
+                    return Ok(Expr::Const(v, ret));
+                }
                 match crate::sql::expr::eval(&sub, &[], self.ctx) {
-                    Ok(v) => return Ok(Expr::Const(v, ret)),
+                    Ok(v) => {
+                        self.note_proc_call(oid, args().collect(), v.clone());
+                        return Ok(Expr::Const(v, ret));
+                    }
                     Err(err) => self.fold_failed(&sub, err)?,
                 }
             }

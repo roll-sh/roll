@@ -1814,7 +1814,10 @@ impl Binder<'_, '_> {
         }
         let locking = self.locking_spec(&s.locking_clause)?;
         // FROM
-        let mut plan = self.bind_from(&s.from_clause, locking.as_ref())?;
+        let saved_from = self.set_from_stmt(Some(s));
+        let from = self.bind_from(&s.from_clause, locking.as_ref());
+        self.from_stmt = saved_from;
+        let mut plan = from?;
 
         // Grouping sets null the columns a set leaves out: virtual generated columns that
         // wouldn't go NULL with them are computed below (their PlaceHolderVars).
@@ -1937,8 +1940,15 @@ impl Binder<'_, '_> {
                 .collect();
             self.level().st.pass_marks = marks;
         }
-        // Select list.
-        let targets = self.in_clause(Clause::Select, |b| b.bind_targets(&s.target_list))?;
+        // Select list. (Outputs the level above never reads are bound with their PL/pgSQL
+        // calls left: `unread`.)
+        let lvl = self.levels.len();
+        let reads = self.outer_reads.take_if(|r| r.level == lvl);
+        let targets = self.in_clause(Clause::Select, |b| {
+            b.bind_targets_read(&s.target_list, reads.as_ref().filter(|_| super::unread::prunable(s)))
+        });
+        self.outer_reads = reads;
+        let targets = targets?;
         // The collations the outputs derive, while the targets are in the FROM row's terms.
         let tgt_colls = targets
             .iter()
@@ -3190,6 +3200,11 @@ impl Binder<'_, '_> {
     // ── select list ──
 
     pub(crate) fn bind_targets(&mut self, list: &[Node]) -> Result<Vec<Target>> {
+        self.bind_targets_read(list, None)
+    }
+
+    /// `bind_targets` of a select whose outputs `reads` says the level above reads.
+    fn bind_targets_read(&mut self, list: &[Node], reads: Option<&super::unread::OuterReads>) -> Result<Vec<Target>> {
         let mut out = Vec::new();
         for t in list {
             let Some(NodeEnum::ResTarget(rt)) = inner(t) else {
@@ -3243,11 +3258,18 @@ impl Binder<'_, '_> {
                 }
                 continue;
             }
-            let expr = self.bind_expr(val)?;
             let name = if rt.name.is_empty() {
                 figure_colname(val)
             } else {
                 rt.name.clone()
+            };
+            let expr = if reads.is_some_and(|r| r.unread(out.len(), &name)) {
+                let skip = std::mem::replace(&mut self.skip_procs, true);
+                let e = self.bind_expr(val);
+                self.skip_procs = skip;
+                e?
+            } else {
+                self.bind_expr(val)?
             };
             let (table, attnum) = self.column_origin(&expr);
             let domain = self.declared_domain(&expr);
@@ -4122,7 +4144,15 @@ impl Binder<'_, '_> {
                 }
                 let pushed = push.is_some();
                 let saved_push = std::mem::replace(&mut self.pushed_lock, push);
+                let reads = if simple_select {
+                    let rename = rs.alias.as_ref().map(|a| names(&a.colnames)).unwrap_or_default();
+                    self.outer_reads(alias_name, rename)
+                } else {
+                    None
+                };
+                let saved_reads = std::mem::replace(&mut self.outer_reads, reads);
                 let r = self.bind_subquery(rs.subquery.as_deref().unwrap());
+                self.outer_reads = saved_reads;
                 let rt_up = (rt_lo, self.fresh_id(), self.last_rt_flat);
                 self.pushed_lock = saved_push;
                 let deferred = std::mem::take(&mut self.deferred);
@@ -4987,7 +5017,16 @@ impl Binder<'_, '_> {
                         let push = if self.deparse { None } else { self.push_lock(locking, &name) };
                         let saved_push = std::mem::replace(&mut self.pushed_lock, push);
                         let rt_lo = self.fresh_id();
+                        let mut rename: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
+                        if let Some(a) = &rv.alias {
+                            for (r, n) in rename.iter_mut().zip(names(&a.colnames)) {
+                                *r = n;
+                            }
+                        }
+                        let reads = self.outer_reads(&name, rename);
+                        let saved_reads = std::mem::replace(&mut self.outer_reads, reads);
                         let r = self.bind_view_query(&v);
+                        self.outer_reads = saved_reads;
                         // (The view's relations, once pulled up, after this level's.)
                         let rt_up = (rt_lo, self.fresh_id(), self.last_rt_flat);
                         self.level().pullups.push(rt_up);

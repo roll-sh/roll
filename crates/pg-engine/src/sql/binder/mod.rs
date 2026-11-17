@@ -31,6 +31,7 @@ mod xml;
 mod xmltable;
 pub(crate) use select::{figure_colname, figure_index_colname};
 mod types;
+pub(crate) mod unread;
 pub mod views;
 
 pub use dml::{bound_indexes, partition_routing, table_rules};
@@ -84,7 +85,7 @@ pub struct BoundQuery {
 
 /// A statement's immutable PL/pgSQL calls over constants, which PostgreSQL's planner runs
 /// (evaluate_function): their NOTICEs and errors come while it is planned, once per plan.
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct Procs {
     /// Some ran, and their values are constants of the plan: a plan made again (for other
     /// values, from a kept template) would run them again.
@@ -92,6 +93,26 @@ pub struct Procs {
     /// Some were left as calls, the statement being only analyzed (a Parse, a Describe:
     /// `Binder::defer_procs`): planning it for an execution binds it again.
     pub deferred: bool,
+    /// The calls planning ran, with their values: a prepared statement bound again after a
+    /// catalog change none of its plan's objects saw (PostgreSQL's plan stays valid) takes
+    /// them from here instead of running them again (`Binder::proc_memo`).
+    pub calls: Option<Arc<ProcCalls>>,
+}
+
+/// The immutable PL/pgSQL calls a binding ran while planning: (function, arguments, value).
+#[derive(Clone, Default, Debug)]
+pub struct ProcCalls {
+    pub calls: Vec<(u32, Vec<Value>, Value)>,
+    /// What its plan depended on (plancache's invalidation items) when it was bound, set by
+    /// the prepared statement keeping it (`session::plandeps`).
+    pub deps: std::sync::OnceLock<Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+impl ProcCalls {
+    /// The value an earlier planning got for `func` over `args`.
+    pub fn value(&self, func: u32, args: &[Value]) -> Option<&Value> {
+        self.calls.iter().find(|(f, a, _)| *f == func && a.as_slice() == args).map(|(.., v)| v)
+    }
 }
 
 /// A statement after parse analysis (`Binder::analyze_statement`), its top query level not
@@ -183,7 +204,7 @@ impl Analyzed {
             param_domains: self.param_domains.clone(),
             gathers: Default::default(),
             cost: Default::default(),
-            procs: self.procs,
+            procs: self.procs.clone(),
         })
     }
 
@@ -218,7 +239,7 @@ impl Analyzed {
             param_domains: self.param_domains,
             gathers: Default::default(),
             cost: Default::default(),
-            procs: self.procs,
+            procs: self.procs.clone(),
         })
     }
 
@@ -816,6 +837,14 @@ pub struct Binder<'b, 'a> {
     /// runs, its PL/pgSQL calls are run then.
     pub(crate) skip_procs: bool,
     pub(crate) procs: Procs,
+    /// Values an earlier planning of the statement got for its PL/pgSQL calls, still valid
+    /// (`Procs::calls`): taken instead of running them.
+    pub proc_memo: Option<Arc<ProcCalls>>,
+    /// The FROM list being bound (`bind_from` over a select at this level), whose names say
+    /// which outputs of its sub-selects and views nothing reads (`unread`).
+    pub(crate) from_stmt: Option<(usize, std::ptr::NonNull<pb::SelectStmt>)>,
+    /// What the level above reads of the FROM sub-select or view being bound.
+    pub(crate) outer_reads: Option<unread::OuterReads>,
     /// Inside `bind_statement`: the constant expressions that failed to fold, with their
     /// errors. Each stays unfolded; the statement fails with one only if it is still in
     /// the plan once the statement is planned (`fold::first_error`): Postgres folds in
@@ -1001,6 +1030,9 @@ impl<'b, 'a> Binder<'b, 'a> {
             defer_procs: false,
             skip_procs: false,
             procs: Procs::default(),
+            proc_memo: None,
+            from_stmt: None,
+            outer_reads: None,
             fold_err: None,
             agg_refs: None,
             sql_fn_statement: false,
@@ -1153,6 +1185,11 @@ impl<'b, 'a> Binder<'b, 'a> {
 
     pub(crate) fn scope(&self) -> &Scope {
         &self.levels.last().unwrap().scope
+    }
+
+    /// Planning ran immutable PL/pgSQL call `func` over `args`, which gave `value`.
+    pub(crate) fn note_proc_call(&mut self, func: u32, args: Vec<Value>, value: Value) {
+        Arc::make_mut(self.procs.calls.get_or_insert_default()).calls.push((func, args, value));
     }
 
     pub(crate) fn clause(&self) -> Clause {
@@ -1486,7 +1523,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             rls: Default::default(),
             replannable: self.planned_in_analysis == start,
             site: None,
-            procs: self.procs,
+            procs: self.procs.clone(),
         }
     }
 

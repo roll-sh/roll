@@ -726,7 +726,11 @@ impl Session {
         if let Some(cols) = cols
             && let Some(stmt) = p.stmt.clone()
         {
-            let b = self.bound(&p, &stmt, &values).map_err(strip)?;
+            // (Analyzed again, not planned: planning's PL/pgSQL calls run with the plan.)
+            let defer = std::mem::replace(&mut self.defer_procs, true);
+            let b = self.bound(&p, &stmt, &values);
+            self.defer_procs = defer;
+            let b = b.map_err(strip)?;
             let now: Vec<crate::types::DataType> = b.cols.iter().map(|c| c.ty.clone()).collect();
             if now != cols {
                 return Err(Error::new(
