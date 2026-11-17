@@ -1816,6 +1816,10 @@ async fn a_directory_hands_out_accounts_in_turn_and_a_user_per_lease() {
     let svc = "cn=svc-reports,ou=svc,dc=example,dc=com";
     api.directory.entries.lock().unwrap().insert(svc.into(), ("set-by-hand".into(), vec![], String::new()));
     let ad = api.ok(Method::POST, "/directories", Some(json!({ "name": "ad", "url": "ldaps://ldap.example:636", "bind_dn": "cn=roll,dc=example,dc=com", "bind_password": "fake-bind-pw", "flavor": "active_directory", "user_base_dn": base, "managed_accounts": [svc] }))).await;
+    // "Link a resource" offers what each directory issues: an account name and a UPN only on AD.
+    let targets = api.ok(Method::GET, "/links", None).await;
+    let fields = |r: &str| targets.as_array().unwrap().iter().find(|t| t["ref"] == r).unwrap()["fields"].as_array().unwrap().iter().map(|f| f["field"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    assert_eq!((fields(&id), fields(ad["id"].as_str().unwrap())), (vec!["username".to_string(), "password".into()], vec!["username".to_string(), "password".into(), "upn".into(), "account_name".into()]));
     let ad_link = |field: &str, mode: &str| json!({ "kind": "directory", "ref": ad["id"], "field": field, "mode": mode, "options": if mode == "dynamic" { json!({ "ttl_minutes": 15 }) } else { json!({}) } });
     let ops = |mode: &str| {
         let ops: Vec<Value> = ["username", "password", "upn", "account_name"].iter().map(|f| json!({ "op": "set", "key": format!("AD_{}_{}", mode.to_uppercase(), f.to_uppercase()), "link": ad_link(f, mode) })).collect();
