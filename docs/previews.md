@@ -527,7 +527,10 @@ A listed name is the tenant's choice and may point anywhere, so the proxy resolv
 connects only to a public address, the one it checked (roll-net's `private_ip`: loopback,
 private, link-local and the cloud's metadata address, CGNAT, IPv4 inside IPv6), never to the
 host, roll's own network or the cloud's metadata; a name that resolves only to private addresses
-is refused and said as such (before 2026-11-16 it was connected to: `169.254.169.254.nip.io`
+is refused and said as such (the benchmarking range 198.18.0.0/15, the 6to4 relays and Teredo too;
+an adversarial review, 2026-11-17). Clearing the list removes the proxy at the services' next
+start, so nothing listens on the network with an old list; the activity names at most 50 refused
+hosts per preview and counts the rest (before 2026-11-16 it was connected to: `169.254.169.254.nip.io`
 listed would have reached the metadata service).
 Each pass, what it refused is said in the preview's activity, each host once. Code that ignores
 the variables still can't get out, because the network has no route. A sidecar rather than a

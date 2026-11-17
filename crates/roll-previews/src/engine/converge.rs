@@ -1037,6 +1037,7 @@ impl Engine {
         }
         self.usage_read.lock().remove(&r.id);
         self.secrets_told.lock().remove(&r.id);
+        self.egress_told.lock().remove(&r.id);
         info!(preview = %r.id, "previews: deleted");
         Ok(())
     }
