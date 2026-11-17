@@ -577,7 +577,7 @@ async fn run() -> anyhow::Result<()> {
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }
-    router = router.merge(roll_secrets::router(secrets.clone()));
+    router = router.merge(roll_secrets::router(secrets.clone()).layer(axum::middleware::map_request(secrets::guard_header)));
     products_api.set(router.clone());
     // A product's own credential changes (a password reset, a restore) move live links' digests
     // at once. Layered after the copy above: roll secrets' own rotations say so themselves.
