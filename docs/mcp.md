@@ -152,6 +152,12 @@ claude mcp add --transport http roll https://api.roll.sh/v1/mcp
 
 Claude.ai: Settings → Connectors → Add custom connector → `https://api.roll.sh/v1/mcp`.
 
+One click for the clients that take a link: the connect panel's "Add to Cursor"
+(`cursor://anysphere.cursor-deeplink/mcp/install?name=roll&config=…`) and "Install in VS Code"
+(`vscode:mcp/install?…`) carry the server's URL with the panel's choices, never a token: a link
+lands in the browser's history, and with OAuth the person chooses what the client may do when it
+signs in.
+
 ### With a scoped token
 
 Create a token with the builder (`/dashboard/access/new`) or `roll token create`, then send it as a
@@ -259,6 +265,15 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     `ttlMs: 60000` and `cacheScope: "private"`: a token's tools are its own, and its rules can
     change.
   - Approvals are Multi Round-Trip Requests (see Approvals).
+  - **Asking for a missing id** (`roll_mcp::ask`): a call without an id it requires (a project, a
+    Postgres project, an apps service or environment), from a client that declared form
+    elicitation, answers `input_required` with a form whose choices are what the connection may
+    read (the same list tool completions use, through the gate, never asking a person). The
+    retry's `inputResponses` fills the id in, and the call runs as if the client had sent it, so
+    the gate decides it as usual and there's no `requestState` to trust. A declined form stops the
+    call; a value that isn't an id is refused. Other clients get the call's own answer. Checked
+    live with the official TypeScript SDK v2 (`live/sdk2/ask.mjs`: its elicitation handler picks
+    from the form, and it retries by itself).
   - **MCP Apps** (`roll_mcp::ui`, `io.modelcontextprotocol/ui`, SEP-1865): for a host that
     declares HTML views (`mimeTypes: ["text/html;profile=mcp-app"]`), the read-only tools that
     answer rows (lists, queries, logs, reads, usage) point at `ui://roll/table` (`_meta.ui`). The
@@ -266,7 +281,9 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     or dark as the host is: times as UTC, columns empty in every row dropped, and links roll
     answered (an approval's page, a preview) opened by the host (`ui/open-link`) where it can.
     `access_wait_approval` points at it too: while a call waits for a person, the view is a card
-    with roll's approval page to open.
+    with roll's approval page to open. A deploy or a job (`apps_get_deploy`, `apps_get_job` and their
+    `apps_wait_*` twins) shows too: an object's own fields (status, commit) above its list (the
+    steps).
     - **Declaring it:** a 2026-07-28 request on itself; in `initialize`, the session id carries it
       (`~ui.` after its prefix), as URL elicitation does.
     - **Safety:** the view has no network (its resource declares no domains), writes every value
@@ -287,7 +304,7 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
       or a status message. There's one input request per approval, keyed by the approval's id, so
       a client shows it once however often the task waits again. Once a person decides, it runs.
     - **Waiting tools:** a tool that waits for something up to a request's limit (`tasks_wait_run`'s
-      run, `access_wait_approval`'s decision) waits on as a task. Its answer is checked (a tool's
+      run, `access_wait_approval`'s decision, `apps_wait_deploy`'s deploy, `apps_wait_job`'s job) waits on as a task. Its answer is checked (a tool's
       `until`), and while it says the wait isn't over the task asks again every 2 s, so it waits
       as long as it takes. Such a call becomes a task as soon as its first answer isn't final.
     - **Polling:** `tasks/get` answers from any node, with the result inline once `completed` (a
@@ -387,6 +404,30 @@ is `-32602`.
 | `compare_branch_schemas` | `project`, `branch` | What a branch changed in the schema against main (Neon's schema compare), and the advisors' findings there; changes nothing. | `postgres_get_project`, `postgres_describe_schema`, `postgres_advisors` |
 | `tune_slow_query` | `project` | A slow query made faster on a branch first (Neon's query tuning): its plan, an index tried on a copy, both plans compared, main only when you say so. | `postgres_get_project`, `postgres_slow_queries`, `postgres_explain`, `postgres_create_branch`, `postgres_execute`, `postgres_delete_branch` |
 | `debug_failing_service` | `service`, `env` | Why an environment is failing (what roll already flags in its `attention`, the whole timeline, deploys, deploy logs, failing requests and routes, metrics), then a fix or a rollback it asks about first. | `apps_get_environment`, `apps_activity`, `apps_route_stats`, `apps_list_deploys`, `apps_deploy_logs`, `apps_logs`, `apps_metrics` |
+
+### As skills
+
+The same workflows, and the guide, are Agent Skills too (`io.modelcontextprotocol/skills`,
+SEP-2640; `crates/roll-mcp/src/skills.rs`), for hosts that load skills rather than offer slash
+commands:
+
+- **Declared:** `server/discover` (and `initialize`) list the extension as `{}`. roll serves no
+  directories.
+- **Listing and getting:** `skills/list` and `skills/get` answer each skill's entry: its frontmatter
+  (`name`, `description`) and its one file with its size and `sha256` digest. An unknown or
+  unoffered URI is `-32602`.
+- **Reading:** `resources/read` of `skill://roll/<name>/SKILL.md` answers the file. `resources/list`
+  lists them too.
+- **What's served:** `using-roll` (the guide) and `set-up-ci` (a repository's CI signing in with
+  its own identity: the one command the person runs, the workflow step the agent writes) for
+  everyone, plus one skill per workflow the connection's tools allow, its arguments written as
+  `<project>`. The listing is per connection
+  (`cacheScope: "private"`).
+- **Safety:** skills come only from roll's binary, never from tenant text. They name no
+  `allowed-tools` and nothing to run, and the gate decides every tool call they lead to.
+- **Checked by:** `skills_are_the_workflows_a_connection_has` (each file reads back with its listed
+  size and digest, and its frontmatter matches the entry) and
+  `skills::tests::every_skill_follows_the_agent_skills_rules`.
 
 ## Tools
 
@@ -642,6 +683,7 @@ previews are listed once those products are on.
 | `apps_job_logs` | A job's output. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}/logs` |
 | `apps_list_jobs` | An environment's one-off jobs, newest first. | `GET /v1/apps/services/{service}/environments/{env}/jobs` |
 | `apps_get_job` | One job: status, exit code, timing. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}` |
+| `apps_wait_job` | A job once it ends: a task that waits as long as it takes for a client that runs tasks, its status now for any other. | `GET /v1/apps/services/{service}/environments/{env}/jobs/{job}` |
 | `apps_cancel_job` | Stop a running job (production: deploy). | `POST /v1/apps/services/{service}/environments/{env}/jobs/{job}/cancel` |
 | `apps_events` | What happened to services, in order after a cursor. | `GET /v1/apps/events` |
 | `apps_list_variables` | An environment's variables, values masked. | `GET /v1/apps/services/{service}/environments/{env}/variables` |
@@ -661,6 +703,7 @@ previews are listed once those products are on.
 | `apps_restore_backup` | Put a volume back as a backup had it (delete: it replaces the files). | `POST /v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore` |
 | `apps_activity` | Who changed what on a service (never a value). | `GET /v1/apps/services/{service}/activity` |
 | `apps_get_deploy` | One deploy. | `GET …/environments/{env}/deploys/{deploy}` |
+| `apps_wait_deploy` | A deploy once it's live or failed: a task that waits as long as it takes for a client that runs tasks, its status now for any other. | `GET …/environments/{env}/deploys/{deploy}` |
 | `apps_list_links` | What a service is linked to. | `GET /v1/apps/services/{service}/links` |
 | `apps_list_cron_runs` | A cron service's runs. | `GET …/environments/{env}/runs` |
 | `apps_get_cron_run` | One cron run: status, exit code, times. | `GET /v1/apps/services/{id}/environments/{env}/runs/{run}` |
