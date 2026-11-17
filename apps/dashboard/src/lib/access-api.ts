@@ -638,6 +638,23 @@ export function ipProblems(list: string[]): string[] {
 // ── connecting clients ──
 
 export const CLIENTS = ["claude-code", "cursor", "vscode", "claude-ai", "codex", "other"] as const;
+
+/**
+ * A one-click install for clients that take one (Cursor's and VS Code's deep links), as Supabase's,
+ * Linear's and Stripe's MCP pages offer: the server's URL only, so the client signs in with OAuth
+ * and the person chooses what it may do. Never with a token in it: a link lands in the browser's
+ * history and the OS's handlers.
+ */
+export function installLink(client: McpClient, url: string): { href: string; label: string } | null {
+  if (client === "cursor") {
+    const config = btoa(JSON.stringify({ url }));
+    return { href: `cursor://anysphere.cursor-deeplink/mcp/install?name=roll&config=${encodeURIComponent(config)}`, label: "Add to Cursor" };
+  }
+  if (client === "vscode") {
+    return { href: `vscode:mcp/install?${encodeURIComponent(JSON.stringify({ name: "roll", type: "http", url }))}`, label: "Install in VS Code" };
+  }
+  return null;
+}
 export type McpClient = (typeof CLIENTS)[number];
 
 export const CLIENT_NAMES: Record<McpClient, string> = {

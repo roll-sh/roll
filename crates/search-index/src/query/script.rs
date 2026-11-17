@@ -28,6 +28,8 @@ pub trait FilterScript: Send + Sync {
     fn runtime_field(&self) -> bool {
         false
     }
+    /// Reports what a runtime field query matches ([`QueryVisitor::runtime_field`]).
+    fn visit(&self, _v: &mut dyn crate::search::QueryVisitor) {}
 }
 
 /// A filter script bound to a segment.
@@ -157,6 +159,10 @@ impl Query for ScriptQuery {
             return self.script.describe();
         }
         format!("ScriptQuery({})", self.script.describe())
+    }
+
+    fn visit(&self, v: &mut dyn crate::search::QueryVisitor) {
+        self.script.visit(v);
     }
 
     fn as_any(&self) -> &dyn Any {
