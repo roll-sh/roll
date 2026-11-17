@@ -219,6 +219,9 @@ pub struct SecretVar {
     /// to builds and instances, and no answer ever holds it, as a sealed variable (shown
     /// `sealed`, left out of `…/variables/values` for everyone, references to it sealed too).
     pub sensitive: bool,
+    /// A link field roll secrets says isn't a credential (`Values.plain`: a host, a port, a user,
+    /// a database): logs may show it. Every other value from roll secrets is a secret.
+    pub plain: bool,
 }
 
 /// Who asks for variables' values: what rolld's gate put on the request.
