@@ -357,13 +357,22 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
         <div className="space-y-3 px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-[13px] font-medium">{env.private ? "Private" : "Public"}</p>
+              <p className="text-[13px] font-medium">{env.signed_in ? "Signed in to roll" : env.private ? "Private" : "Public"}</p>
               <p className="mt-1 text-[12px] text-muted">
-                {env.private ? "Only visitors with its link get in; everyone else gets a 401 before anything wakes." : "Anyone with its URL can open it."}
+                {env.signed_in
+                  ? "Only people signed in to roll who can open this project get in: anyone else is sent to sign in first, before anything wakes."
+                  : env.private
+                    ? "Only visitors with its link get in; everyone else gets a 401 before anything wakes."
+                    : "Anyone with its URL can open it."}
               </p>
             </div>
             <div className="flex gap-2">
-              {env.private && (
+              {!env.signed_in && (
+                <button className={btn} disabled={busy} title="People signed in to roll who can open this project, instead of a link" onClick={() => runner.run("access", () => appsApi.putEnvironment(service.id, env.name, { access: { signed_in: true } })).then(() => setLink(null))}>
+                  Require sign-in
+                </button>
+              )}
+              {env.private && !env.signed_in && (
                 <button className={btn} disabled={busy} onClick={makePrivate} title="A new link; the old one stops working">
                   New link
                 </button>

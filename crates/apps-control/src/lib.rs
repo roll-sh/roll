@@ -48,6 +48,7 @@ pub mod shell;
 pub mod spend;
 pub mod store;
 pub mod traces;
+pub mod visit;
 pub mod traffic;
 
 use integrations::{DomainTls, Resolver, Resources, SecretSource, Sources};
@@ -134,6 +135,9 @@ pub struct AppsConfig {
     pub upload_max: usize,
     /// The dashboard (roll code's `web_url`): a private preview's 401 page links into it.
     pub web_url: Option<String>,
+    /// How long a sign-in-gated environment trusts a visitor's session before it asks again
+    /// whether they may still open the project ([`integrations::Visitors`]).
+    pub visitor_recheck: Duration,
     /// Where an instance sends its traces (OTLP/HTTP): the apps listener's base (public traffic's,
     /// never the API's: `http://127.0.0.1:7080`, made reachable from instances by the runtime), or
     /// the public apps address on a fleet. None: traces can't be turned on.
@@ -171,6 +175,7 @@ impl AppsConfig {
             prices: Prices::default(),
             upload_max: 512 << 20,
             web_url: None,
+            visitor_recheck: Duration::from_secs(300),
             otlp_base: None,
             allow_private: false,
             spend_every: Duration::from_secs(30),
@@ -228,6 +233,8 @@ pub struct Apps {
     github: std::sync::OnceLock<Arc<dyn integrations::GitHubApp>>,
     /// Email to projects' owners (`notify`), once rolld has accounts.
     mail: std::sync::OnceLock<Arc<dyn integrations::Mailbox>>,
+    /// Who may still open a project's environments ([`Apps::set_visitors`]).
+    pub(crate) visitors: std::sync::OnceLock<Arc<dyn integrations::Visitors>>,
     /// Log drains whose batch came back (the drainer sends the next).
     drain_done: Arc<Mutex<Vec<String>>>,
     /// Projects whose drains changed on this node: the drainer reads theirs again (only theirs).
@@ -237,6 +244,8 @@ pub struct Apps {
     /// Bumped by every change to the access cache: a cold read caches what it read only if
     /// nothing changed meanwhile (a token rotated while it read would otherwise come back).
     access_gen: std::sync::atomic::AtomicU64,
+    /// Signed-in visitors' sessions this node has looked up, by their hash.
+    visits: Mutex<HashMap<String, visit::Seen>>,
     /// Each environment's `needs_deploy` as last worked out (it decrypts every variable and asks
     /// each linked product for its own): when, the settings generation and active deployment it
     /// was for, and the answer. Good for a minute, or until either moves.
@@ -388,10 +397,12 @@ impl Apps {
             pushes: std::sync::OnceLock::new(),
             github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
+            visitors: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
+            visits: Mutex::new(HashMap::new()),
             needs: Mutex::new(HashMap::new()),
             settings_gen: std::sync::atomic::AtomicU64::new(0),
             changes: tokio::sync::broadcast::channel(256).0,
@@ -810,6 +821,7 @@ impl Apps {
     pub(crate) async fn run_github_events(self: &Arc<Self>) {
         // An hour unrun (a service that's gone, an owner that never came): dropped.
         let _ = self.db(|s| s.expire_github_events(code_sql::now_ms() - 3_600_000)).await;
+        let _ = self.db(|s| s.expire_visits(code_sql::now_ms())).await;
         // Each service this node owns, its own oldest first: one nobody owns yet (asleep; the
         // keeper gives it an owner) never holds up the rest.
         let Ok(waiting) = self.db(|s| s.github_event_services()).await else { return };
@@ -1248,7 +1260,8 @@ impl Apps {
             Some(a) => self.needs_deploy(&svc, &r, a).await?,
             None => false,
         };
-        let private = self.access(&r.service, &r.name).await?.is_some();
+        let gate = self.access(&r.service, &r.name).await?;
+        let (private, signed_in) = (gate.is_some(), gate.is_some_and(|a| a.signed_in));
         let (sid, e) = (r.service.clone(), r.name.clone());
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         Ok(Environment {
@@ -1262,6 +1275,7 @@ impl Apps {
             tcp: r.tcp_port.filter(|_| svc.run.tcp && svc.run.public && !private).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
             needs_deploy,
             private,
+            signed_in,
             next_run_at,
             schedules: self.schedule_states(&svc, &r).await,
             volume_used: match svc.run.volume {
@@ -1436,25 +1450,37 @@ impl Apps {
             Some(Value::Bool(b)) => Some(*b),
             Some(_) => return Err(Error::BadRequest("ephemeral is a boolean".into())),
         };
-        // A private environment (a preview): its hostname answers only visitors with the token.
+        // A private environment: its hostname answers only visitors with the token (a preview's
+        // link), people signed in to roll who may open the project (`signed_in`), or either.
         // `bypass_sha256`: an automation's secret (a CI run's end-to-end tests), only its SHA-256.
         let access: Option<Option<Access>> = match o.get("access") {
             None => None,
             Some(Value::Null) => Some(None),
             Some(Value::Object(a)) => {
-                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256"].contains(&k.as_str())) {
+                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in"].contains(&k.as_str())) {
                     return Err(Error::BadRequest(format!("access.{k} isn't a field")));
                 }
-                let token = a.get("token").and_then(Value::as_str).filter(|t| (20..=200).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)));
-                let Some(token) = token else { return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _".into())) };
+                let signed_in = match a.get("signed_in") {
+                    None | Some(Value::Null) => false,
+                    Some(Value::Bool(b)) => *b,
+                    Some(_) => return Err(Error::BadRequest("access.signed_in is a boolean".into())),
+                };
+                let token = match a.get("token") {
+                    None | Some(Value::Null) if signed_in => None,
+                    Some(Value::String(t)) if (20..=200).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) => Some(t.as_str()),
+                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true)".into())),
+                };
+                if signed_in && self.cfg.web_url.is_none() {
+                    return Err(Error::Conflict("signing in needs roll's dashboard address on this node (web_url)".into()));
+                }
                 let bypass = match a.get("bypass_sha256") {
                     None | Some(Value::Null) => None,
                     Some(Value::String(h)) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Some(h.to_ascii_lowercase()),
                     Some(_) => return Err(Error::BadRequest("access.bypass_sha256 is a SHA-256 in hex".into())),
                 };
-                Some(Some(Access { token_hash: crate::public::token_hash(token), bypass_hash: bypass }))
+                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in }))
             }
-            Some(_) => return Err(Error::BadRequest("access is {token, bypass_sha256?} or null".into())),
+            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, bypass_sha256?} or null".into())),
         };
         // A new environment may start with another's variables (cloning staging from production).
         let variables_from = match o.get("variables_from") {
@@ -2645,6 +2671,11 @@ impl Apps {
     /// Where a Git URL service's pushes to branches it doesn't follow go (roll previews). Set once.
     pub fn set_git_pushes(&self, pushes: Arc<dyn integrations::GitPushes>) {
         let _ = self.pushes.set(pushes);
+    }
+
+    /// Who may still open a project's environments (roll-accounts). Set once.
+    pub fn set_visitors(&self, v: Arc<dyn integrations::Visitors>) {
+        let _ = self.visitors.set(v);
     }
 
     /// How email reaches people (roll-accounts' mailer). Set once.

@@ -748,6 +748,16 @@ impl apps_control::integrations::Mailbox for AccountsMail {
     }
 }
 
+/// Who may still open a sign-in-gated environment: an account that still signs in and may use
+/// roll apps, which rolld's gate gives admins today (a disabled or deleted one is a no at once).
+pub struct AccountsVisitors(pub Arc<roll_accounts::Accounts>);
+
+impl apps_control::integrations::Visitors for AccountsVisitors {
+    fn may_open(&self, user: &str, _project: &str) -> bool {
+        matches!(self.0.user(user), Ok(u) if !u.disabled && u.admin)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

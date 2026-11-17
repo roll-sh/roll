@@ -102,6 +102,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/metrics"), get(metrics))
         .route(&format!("{env}/routes"), get(routes))
         .route(&format!("{env}/analytics"), get(analytics))
+        .route(&format!("{env}/visit"), post(visit))
         .route(&format!("{env}/traces"), get(traces))
         .route(&format!("{env}/traces/{{trace}}"), get(trace))
         .route(&format!("{env}/usage"), get(usage))
@@ -1105,6 +1106,20 @@ struct TraceQuery {
 
 async fn traces(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<TraceQuery>) -> R {
     ok(apps.traces(&id, &env, q.minutes.unwrap_or(60), q.min_ms.unwrap_or(0)).await?)
+}
+
+#[derive(Deserialize)]
+struct VisitBody {
+    to: String,
+}
+
+/// A signed-in person's one-use way into a sign-in-gated environment (roll's dashboard asks
+/// for it as them, then sends the browser there). A token isn't a person: only a session gets one.
+async fn visit(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, Json(b): Json<VisitBody>) -> R {
+    let Some(user) = ext.get::<roll_auth::SignedIn>() else {
+        return Err(Error::Forbidden("signing in to an environment is for a person signed in to roll, not a token".into()));
+    };
+    ok(json!({ "url": apps.visit_ticket(&id, &env, &user.user, &b.to).await? }))
 }
 
 async fn trace(State(apps): S, Path((id, env, trace)): Path<(String, String, String)>) -> R {

@@ -66,6 +66,22 @@ CREATE TABLE IF NOT EXISTS registry_auth (
     username TEXT NOT NULL,
     sealed TEXT NOT NULL
 ) WITHOUT ROWID;
+-- A signed-in visitor's one-use ticket to an environment (a minute), and the session it opens
+-- there (a host-only cookie), each kept by its token's SHA-256.
+CREATE TABLE IF NOT EXISTS visit_tickets (
+    hash TEXT PRIMARY KEY,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS visit_sessions (
+    hash TEXT PRIMARY KEY,
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS trace_ingest (
     service TEXT NOT NULL,
     env TEXT NOT NULL,
@@ -675,6 +691,7 @@ impl Store {
         db.add_column("domains", "tls_error", "TEXT")?;
         db.add_column("domains", "verified_at", "INTEGER")?;
         db.add_column("env_access", "bypass_hash", "TEXT")?;
+        db.add_column("env_access", "signed_in", "INTEGER NOT NULL DEFAULT 0")?;
         // Bytes answered a minute (what egress is billed by), for Metrics.
         db.add_column("metrics", "egress_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         // Requests past every instance's concurrency at max_instances a minute (saturation).
@@ -792,7 +809,7 @@ impl Store {
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -907,7 +924,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "domains", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest"] {
+            for t in ["variables", "domains", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             c.execute(
@@ -1914,18 +1931,66 @@ impl Store {
     pub fn access(&self, service: &str, env: &str) -> Result<Option<Access>> {
         Ok(self
             .db
-            .query_row("SELECT token_hash, bypass_hash FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| Ok(Access { token_hash: r.get(0)?, bypass_hash: r.get(1)? }))
+            .query_row("SELECT token_hash, bypass_hash, signed_in FROM env_access WHERE service = ? AND env = ?", params![service, env], |r| {
+                // No token: an empty one (the column was made required), which no digest matches.
+                let token: String = r.get(0)?;
+                Ok(Access { token_hash: Some(token).filter(|t| !t.is_empty()), bypass_hash: r.get(1)?, signed_in: r.get::<_, i64>(2)? != 0 })
+            })
             .optional()?)
     }
 
     pub fn set_access(&self, service: &str, env: &str, access: Option<&Access>) -> Result<()> {
         match access {
             Some(a) => self.db.execute(
-                "INSERT INTO env_access (service, env, token_hash, bypass_hash) VALUES (?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash, bypass_hash = excluded.bypass_hash",
-                params![service, env, a.token_hash, a.bypass_hash],
+                "INSERT INTO env_access (service, env, token_hash, bypass_hash, signed_in) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET token_hash = excluded.token_hash, bypass_hash = excluded.bypass_hash, signed_in = excluded.signed_in",
+                params![service, env, a.token_hash.as_deref().unwrap_or(""), a.bypass_hash, a.signed_in as i64],
             )?,
             None => self.db.execute("DELETE FROM env_access WHERE service = ? AND env = ?", params![service, env])?,
         };
+        // Whoever was let in under the old gate signs in again under the new one.
+        self.db.execute("DELETE FROM visit_sessions WHERE service = ? AND env = ?", params![service, env])?;
+        Ok(())
+    }
+
+    // ── signed-in visitors ──
+
+    pub fn put_visit_ticket(&self, hash: &str, service: &str, env: &str, user: &str, expires_at: i64) -> Result<()> {
+        self.db.execute("INSERT INTO visit_tickets (hash, service, env, user_id, expires_at) VALUES (?, ?, ?, ?, ?)", params![hash, service, env, user, expires_at])?;
+        Ok(())
+    }
+
+    /// A ticket used: its person, if it was this environment's and still good. It goes either way.
+    pub fn take_visit_ticket(&self, hash: &str, service: &str, env: &str, now: i64) -> Result<Option<String>> {
+        let h = hash.to_string();
+        let (s, e) = (service.to_string(), env.to_string());
+        self.db.write(move |c| {
+            let row: Option<(String, String, String, i64)> = c.query_row("SELECT service, env, user_id, expires_at FROM visit_tickets WHERE hash = ?", [&h], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+            c.execute("DELETE FROM visit_tickets WHERE hash = ? OR expires_at < ?", params![h, now])?;
+            Ok(row.filter(|(rs, re, _, exp)| *rs == s && *re == e && *exp >= now).map(|(_, _, u, _)| u))
+        })
+    }
+
+    pub fn put_visit_session(&self, hash: &str, service: &str, env: &str, user: &str, expires_at: i64) -> Result<()> {
+        self.db.execute("INSERT INTO visit_sessions (hash, service, env, user_id, expires_at) VALUES (?, ?, ?, ?, ?)", params![hash, service, env, user, expires_at])?;
+        Ok(())
+    }
+
+    /// A visitor's session there: its person and when it ends.
+    pub fn visit_session(&self, hash: &str, service: &str, env: &str) -> Result<Option<(String, i64)>> {
+        Ok(self
+            .db
+            .query_row("SELECT user_id, expires_at FROM visit_sessions WHERE hash = ? AND service = ? AND env = ?", params![hash, service, env], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?)
+    }
+
+    pub fn delete_visit_session(&self, hash: &str) -> Result<()> {
+        self.db.execute("DELETE FROM visit_sessions WHERE hash = ?", [hash])?;
+        Ok(())
+    }
+
+    pub fn expire_visits(&self, now: i64) -> Result<()> {
+        self.db.execute("DELETE FROM visit_sessions WHERE expires_at < ?", [now])?;
+        self.db.execute("DELETE FROM visit_tickets WHERE expires_at < ?", [now])?;
         Ok(())
     }
 
