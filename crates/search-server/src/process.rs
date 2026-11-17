@@ -74,33 +74,52 @@ const IDLE_TICKS: u32 = 10;
 /// A second collection, once tokio's blocking threads (10 s keep-alive) have exited.
 const LATE_IDLE_TICKS: u32 = 48;
 
-/// The governor thread, while it is parked (an idle process): [`note_activity`] wakes it.
-static PARKED_GOVERNOR: std::sync::Mutex<Option<std::thread::Thread>> = std::sync::Mutex::new(None);
-/// Whether [`PARKED_GOVERNOR`] holds a parked thread (one relaxed load per request otherwise).
-static GOVERNOR_PARKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// A thread that parks until another one wakes it: the purge governor, while the process is
+/// idle ([`GOVERNOR`]).
+struct Parking {
+    /// The thread that parks last: it stays here after a wake, so a wake that comes late
+    /// (after the thread parked again) still reaches it.
+    thread: std::sync::Mutex<Option<std::thread::Thread>>,
+    /// Whether the thread is parked (one relaxed load per [`Parking::wake`] otherwise).
+    parked: std::sync::atomic::AtomicBool,
+}
+
+impl Parking {
+    const fn new() -> Self {
+        Self { thread: std::sync::Mutex::new(None), parked: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    /// Wakes the thread if it is parked; costs one atomic load when it isn't.
+    fn wake(&self) {
+        use std::sync::atomic::Ordering;
+        if self.parked.load(Ordering::Relaxed)
+            && self.parked.swap(false, Ordering::AcqRel)
+            && let Some(t) = &*self.thread.lock().unwrap_or_else(|e| e.into_inner())
+        {
+            t.unpark();
+        }
+    }
+
+    /// Parks the calling thread until [`Parking::wake`].
+    fn park(&self) {
+        use std::sync::atomic::Ordering;
+        *self.thread.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current());
+        self.parked.store(true, Ordering::Release);
+        // `park` may return spuriously, and an unpark that came first leaves a token: either
+        // way the flag tells whether a wake came.
+        while self.parked.load(Ordering::Acquire) {
+            std::thread::park();
+        }
+    }
+}
+
+/// The governor parks here once the process has been idle long enough: [`note_activity`] wakes it.
+static GOVERNOR: Parking = Parking::new();
 
 /// Tells the purge governor the process has work again (a request arrived). Wakes it if it
 /// parked after a long idle stretch; costs one atomic load when it is running.
 pub fn note_activity() {
-    use std::sync::atomic::Ordering;
-    if GOVERNOR_PARKED.load(Ordering::Relaxed)
-        && GOVERNOR_PARKED.swap(false, Ordering::AcqRel)
-        && let Some(t) = PARKED_GOVERNOR.lock().unwrap_or_else(|e| e.into_inner()).take()
-    {
-        t.unpark();
-    }
-}
-
-/// Parks the calling governor until [`note_activity`].
-fn park_governor() {
-    use std::sync::atomic::Ordering;
-    *PARKED_GOVERNOR.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current());
-    GOVERNOR_PARKED.store(true, Ordering::Release);
-    // `park` may return spuriously, and an unpark that came first leaves a token: either way
-    // the flag tells whether activity was noted.
-    while GOVERNOR_PARKED.load(Ordering::Acquire) {
-        std::thread::park();
-    }
+    GOVERNOR.wake();
 }
 
 /// User plus system CPU of the whole process.
@@ -148,7 +167,7 @@ pub fn start_purge_governor(rt: tokio::runtime::Handle, workers: usize) {
             }
             if !busy && idle_ticks >= LATE_IDLE_TICKS {
                 // Idle and collected: nothing to do until a request comes.
-                park_governor();
+                GOVERNOR.park();
                 idle_ticks = 0;
                 last = process_cpu();
                 continue;
@@ -182,23 +201,29 @@ mod tests {
     #[test]
     fn a_parked_governor_wakes_on_activity() {
         use std::sync::atomic::Ordering;
-        let woke = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let w = woke.clone();
-        let t = std::thread::spawn(move || {
-            super::park_governor();
-            w.store(true, Ordering::Release);
-        });
-        while !super::GOVERNOR_PARKED.load(Ordering::Acquire) {
-            std::thread::yield_now();
+        use std::time::{Duration, Instant};
+        // Its own parking spot: other tests in this process serve requests, and every request
+        // wakes the process's governor.
+        let parking: &'static super::Parking = Box::leak(Box::new(super::Parking::new()));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        // Twice: the second park follows a wake, as the governor's does.
+        for round in 0..2 {
+            let (woke, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                parking.park();
+                let _ = woke.send(());
+            });
+            while !parking.parked.load(Ordering::Acquire) {
+                assert!(Instant::now() < deadline, "round {round}: the governor never parked");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            parking.wake();
+            rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|_| panic!("round {round}: a parked governor didn't wake on activity"));
+            // Without a parked governor, a wake does nothing.
+            parking.wake();
+            assert!(!parking.parked.load(Ordering::Acquire));
         }
-        // (Other tests in this process serve requests, which note activity too: whether it
-        // stays parked meanwhile isn't something this test can see.)
-        super::note_activity();
-        t.join().unwrap();
-        assert!(woke.load(Ordering::Acquire));
-        // Without a parked governor, noting activity does nothing.
-        super::note_activity();
-        assert!(!super::GOVERNOR_PARKED.load(Ordering::Acquire));
     }
 
     #[test]
