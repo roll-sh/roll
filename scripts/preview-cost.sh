@@ -148,6 +148,11 @@ NUM_MASK=$(curl -s -o /tmp/roll-previews-nummask.json -w '%{http_code}' -X PUT "
   -d "{\"masking\":{\"search:$SEARCH\":{\"products.name\":\"redact\",\"products.owner.email\":\"redact\",\"products.stock\":\"redact\"}}}")
 [ "$NUM_MASK" = 400 ] && grep -q "products.stock is a long field" /tmp/roll-previews-nummask.json || { echo "a string mask on a number field should be refused, not $NUM_MASK $(cat /tmp/roll-previews-nummask.json)"; exit 1; }
 
+# The preview's base (development) links to the Postgres parent's password under a name of its
+# own: roll secrets resolves nothing of the parent's for it (the preview branched it), and the
+# preview's service gets the branch's under that name.
+LINKED=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://$API/v1/secrets/projects/$PRJ/environments/development/secrets/STAGING_PGPASS" -H 'content-type: application/json' -d "{\"link\":{\"kind\":\"postgres\",\"ref\":\"$PG\",\"field\":\"password\",\"mode\":\"live\"}}")
+case "$LINKED" in 200|201) ;; *) echo "linking development's STAGING_PGPASS to $PG's password: HTTP $LINKED"; exit 1;; esac
 say "open a change"
 T0=$(now_ms)
 CHG=$(api POST /v1/code/repos/acme/web/changes '{"title":"New page","message":"New page","base":"main","files":{"index.html":{"content":"preview of change 1"},'"$OPENAPI_CHG"'}}' | jq_ "d['id']")
@@ -235,6 +240,13 @@ ROBOTS_LOCKED=$(curl -sS -o /dev/null -D - -H "Host: $HOST" "http://$API/" | tr 
 # The service's DATABASE_URL is the branch's own role, which can't read the WAL (where the pages
 # from before the mask are) and isn't a superuser.
 APP_DB=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
+# The names a roll secrets link to the parent would use are the branch's too (PGUSER, PGPASSWORD
+# from its app URI), so an inherited link can't hand out the parent's under them.
+APP_ENV=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt")
+PG_NAMES=$(python3 -c 'import sys,urllib.parse as u; e=dict(l.split("=",1) for l in sys.stdin.read().splitlines() if "=" in l); p=u.urlsplit(e.get("DATABASE_URL","")); print("ok" if e.get("PGUSER")==u.unquote(p.username or "") and e.get("PGPASSWORD")==u.unquote(p.password or "") and e.get("PGPASSWORD") else "PGUSER=%s, PGPASSWORD set: %s" % (e.get("PGUSER"), bool(e.get("PGPASSWORD"))))' <<<"$APP_ENV")
+[ "$PG_NAMES" = ok ] || { echo "the service's PGUSER/PGPASSWORD should be the branch's: $PG_NAMES"; exit 1; }
+FOLLOWED=$(python3 -c 'import sys,urllib.parse as u; e=dict(l.split("=",1) for l in sys.stdin.read().splitlines() if "=" in l); p=u.urlsplit(e.get("DATABASE_URL","")); s=e.get("STAGING_PGPASS"); print("ok" if s and s==u.unquote(p.password or "") else "STAGING_PGPASS is %s" % ("unset" if s is None else "not the branch'"'"'s password"))' <<<"$APP_ENV")
+[ "$FOLLOWED" = ok ] || { echo "a secrets link to the branched parent should give the branch's password: $FOLLOWED"; exit 1; }
 case "$APP_DB" in postgres://br_*) ;; *) echo "the service's DATABASE_URL should be the branch's own role, not ${APP_DB%%@*}…"; exit 1;; esac
 # Its mail goes to roll's catcher, signed in as the preview, never to the provider production
 # uses: the key is gone, and what it sends is caught and listed (sent here as its service would).
@@ -765,7 +777,9 @@ done
 [ "$SHOT_ROLL" != "$SHOT_BEFORE" ] && [ "$SHOT_ROLL" != None ] || { echo "with egress roll the screenshot should still be taken: $SHOT_BEFORE then $SHOT_ROLL"; api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d if 'screenshot' in a['message']][:5]"; exit 1; }
 # A host the project allows: reached through the preview's egress proxy, anything else refused
 # and said in the activity.
-api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"roll","egress_hosts":["github.com"]}' >/dev/null
+# 169.254.169.254.nip.io is listed too: a name the project chose that points at the cloud's
+# metadata address (a private one) is refused, never connected to.
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"roll","egress_hosts":["github.com","169.254.169.254.nip.io"]}' >/dev/null
 FETCH='import sys, urllib.request
 try:
     print(urllib.request.urlopen(sys.argv[1], timeout=15).status)
@@ -781,13 +795,15 @@ done
 [ "$ALLOWED" = 200 ] || { echo "an allowed host should be reached through the egress proxy: $ALLOWED"; exit 1; }
 REFUSED=$(docker exec "$CONT2" python -c "$FETCH" https://example.com/ 2>&1 || true); REFUSED=$(echo "$REFUSED" | tail -1)
 case "$REFUSED" in *403*|*Tunnel*) ;; *) echo "a host not in egress_hosts should be refused: $REFUSED"; exit 1;; esac
+METADATA=$(docker exec "$CONT2" python -c "$FETCH" http://169.254.169.254.nip.io/latest/meta-data/ 2>&1 || true); METADATA=$(echo "$METADATA" | tail -1)
+case "$METADATA" in *403*|*Forbidden*) ;; *) echo "a listed name that resolves to a private address should be refused: $METADATA"; exit 1;; esac
 TOLD=""
 for _ in $(seq 1 60); do
-  TOLD=$(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d if 'egress_hosts' in a.get('message','')][:1]")
-  case "$TOLD" in *example.com*) break;; esac
+  TOLD=$(api GET "/v1/previews/$PV/activity" | jq_ "[a['message'] for a in d if 'egress_hosts' in a.get('message','')][:2]")
+  case "$TOLD" in *example.com*private*|*private*example.com*) break;; esac
   sleep 1
 done
-case "$TOLD" in *example.com*) ;; *) echo "the activity should say what the proxy refused: $TOLD"; exit 1;; esac
+case "$TOLD" in *example.com*private*|*private*example.com*) ;; *) echo "the activity should say what the proxy refused, and the private address: $TOLD"; exit 1;; esac
 api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"open","egress_hosts":[]}' >/dev/null
 
 if [ -n "${STOP_BEFORE_LAND:-}" ]; then
@@ -816,7 +832,7 @@ cat <<EOF
 | What | Measured |
 | --- | --- |
 | egress: roll: the service's network / 1.1.1.1:443 from it before and after / its screenshot | ${NETS% } / $OUT_BEFORE, then: ${OUT_AFTER:0:60} / taken |
-| egress_hosts ["github.com"]: github.com / example.com, through the preview's egress proxy | $ALLOWED / ${REFUSED:0:60} |
+| egress_hosts ["github.com", "169.254.169.254.nip.io"]: github.com / example.com / the metadata name, through the preview's egress proxy | $ALLOWED / ${REFUSED:0:60} / ${METADATA:0:40} |
 | A note's element, cropped by the next head's screenshot run (a PNG) | $CROP_NOTE |
 | A visit to a service frozen after sleep_after (it read as sleeping), instead of a cold start | $((T7 - T6)) ms, the same container |
 | Change opened → preview ready ($(echo "$P" | jq_ "len(d['resources'])") branches made, the service deployed) | $((T1 - T0)) ms |

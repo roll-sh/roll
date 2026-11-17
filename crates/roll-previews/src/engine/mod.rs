@@ -487,7 +487,18 @@ impl Engine {
             let more = problems.len().saturating_sub(shown.len());
             let _ = self.store.log(&r.id, &format!("secrets that don't resolve: {}{}", shown.join("; "), if more > 0 { format!(" (and {more} more)") } else { String::new() }));
         }
-        Ok((got.values, got.leases))
+        // A followed key: the branch's value for that field, or blank (never the parent's).
+        let mut values = got.values;
+        if !got.followed.is_empty() {
+            let branches = self.branch_vars(&r.id).await?;
+            for (name, kind, parent, field) in got.followed {
+                let vars = branches.iter().find(|(k, p, _)| *k == kind && *p == parent).map(|(_, _, v)| v.clone()).unwrap_or_default();
+                let value = crate::names::follow(kind, &field, vars);
+                values.retain(|(k, _)| *k != name);
+                values.push((name, value));
+            }
+        }
+        Ok((values, got.leases))
     }
 
     /// A start of `service` runs on `leases` now: the previous start's are revoked (that
@@ -534,8 +545,14 @@ impl Engine {
                 let seen = told.entry(r.id.clone()).or_default();
                 refused.into_iter().filter(|h| seen.insert(h.clone())).collect()
             };
-            if !fresh.is_empty() {
-                let _ = self.store.log(&r.id, &format!("its code tried to reach {} (not in the project's egress_hosts): refused", fresh.join(", ")));
+            // `<host> private`: listed, but it resolves only to private addresses.
+            let (private, unlisted): (Vec<String>, Vec<String>) = fresh.into_iter().partition(|h| h.ends_with(" private"));
+            if !unlisted.is_empty() {
+                let _ = self.store.log(&r.id, &format!("its code tried to reach {} (not in the project's egress_hosts): refused", unlisted.join(", ")));
+            }
+            if !private.is_empty() {
+                let names: Vec<&str> = private.iter().map(|h| h.trim_end_matches(" private")).collect();
+                let _ = self.store.log(&r.id, &format!("its code tried to reach {}: in egress_hosts, but it resolves only to private addresses (roll's own, the host's or the cloud's): refused", names.join(", ")));
             }
         }
     }

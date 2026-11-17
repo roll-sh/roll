@@ -27,6 +27,13 @@ pub fn version(msg: &Value) -> Option<&str> {
     msg["params"]["_meta"][VERSION].as_str()
 }
 
+/// Whether the request's client fills in forms for elicitation (`elicitation.form`, or an empty
+/// `elicitation`, which is forms).
+pub fn form_elicitation(msg: &Value) -> bool {
+    let e = &msg["params"]["_meta"][CAPABILITIES]["elicitation"];
+    e.get("form").is_some() || e.as_object().is_some_and(|o| o.is_empty())
+}
+
 /// What the client declared on this request: whether it opens URLs for elicitation, and its name.
 pub fn client(msg: &Value) -> (bool, Option<String>) {
     let meta = &msg["params"]["_meta"];
