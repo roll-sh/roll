@@ -171,6 +171,9 @@ pub struct Runtime {
     browsers_failed: Mutex<Option<std::time::Instant>>,
     /// One build of [`BROWSERS_IMAGE`] at a time (screenshots may run side by side).
     browsers_building: tokio::sync::Mutex<()>,
+    /// Held while a preview's egress proxy is checked and (re)made: its services start at once,
+    /// and two makes under the one name would refuse each other (or one remove the other's).
+    egress_making: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 const BROWSERS_RETRY: Duration = Duration::from_secs(3600);
@@ -198,6 +201,7 @@ impl Runtime {
             live: Mutex::new(HashMap::new()),
             browsers_failed: Mutex::new(None),
             browsers_building: tokio::sync::Mutex::new(()),
+            egress_making: Mutex::new(HashMap::new()),
             client: Client::builder(TokioExecutor::new()).build_http(),
         })
     }
@@ -987,6 +991,7 @@ impl Apps for Runtime {
             let others = self.live.lock().keys().any(|(p, s)| p == preview && s != service);
             if !others {
                 code_preview::docker::remove(&egress_name(preview)).await;
+                self.egress_making.lock().remove(preview);
             }
             let _ = code_preview::docker::docker(&["network", "rm", &network_name(preview)]).await;
         }
@@ -1076,7 +1081,7 @@ impl Apps for Runtime {
         }
         let tail = code_preview::docker::logs_tail(&egress_name(preview), 200).await;
         let mut out: Vec<String> = Vec::new();
-        for h in tail.lines().filter_map(|l| l.strip_prefix("refused ")).map(|h| h.trim().chars().take(253).collect::<String>()) {
+        for h in tail.lines().filter_map(|l| l.strip_prefix("refused ")).map(|h| h.trim().chars().take(262).collect::<String>()) {
             if !h.is_empty() && !out.contains(&h) {
                 out.push(h);
             }
@@ -1375,6 +1380,8 @@ impl Runtime {
         let list = serde_json::to_string(&hosts)?;
         let digest = format!("{:016x}", list.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)));
         let name = egress_name(preview);
+        let turn = self.egress_making.lock().entry(preview.to_string()).or_default().clone();
+        let _turn = turn.lock().await;
         let running = code_preview::docker::docker(&["inspect", "-f", "{{.State.Running}} {{index .Config.Labels \"sh.roll.egress\"}}", &name]).await.ok();
         if running.as_deref() == Some(format!("true {digest}").as_str()) {
             return Ok(());

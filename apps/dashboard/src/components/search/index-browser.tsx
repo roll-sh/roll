@@ -4,6 +4,7 @@ import { formatBytes } from "@/lib/roll-api";
 import { esJson, esRaw, formatCount, indexPath, type SearchCluster, type SearchIndex } from "@/lib/search-api";
 import { mappingFields } from "@/lib/search-console";
 import {
+  idProblem,
   cellText,
   columnsOf,
   deleteRequest,
@@ -424,8 +425,17 @@ function MappingView({ cluster, path, onOpenConsole }: { cluster: SearchCluster;
 /** One line of a document's source, for the collapsed row. */
 function preview(source: string | undefined) {
   if (source === undefined) return "(no _source)";
-  const s = formatJson(source, 0);
+  const s = readableEscapes(formatJson(source, 0));
   return s.length > 240 ? `${s.slice(0, 240)}…` : s;
+}
+
+/** `\u00e9` as `é` in a one-line preview (the document itself is shown as stored): printable
+ * characters only; control characters, surrogates and an escaped backslash before a `u` stay. */
+function readableEscapes(s: string) {
+  return s.replace(/(?<!\\)((?:\\\\)*)\\u([0-9a-fA-F]{4})/g, (m, before: string, hex: string) => {
+    const c = parseInt(hex, 16);
+    return c < 0x20 || (c >= 0xd800 && c <= 0xdfff) || c === 0x22 || c === 0x5c ? m : before + String.fromCharCode(c);
+  });
 }
 
 type Layout = "rows" | "table";
@@ -766,10 +776,16 @@ function DocEditor({
       setErr(e instanceof Error ? e.message : String(e));
       return;
     }
+    const given = withId ? id.trim() || null : null;
+    const bad = given === null ? null : idProblem(given);
+    if (bad) {
+      setErr(bad);
+      return;
+    }
     setBusy(true);
     setErr(null);
     try {
-      await onSave(withId ? id.trim() || null : null, doc);
+      await onSave(given, doc);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -856,17 +872,22 @@ function SourceView({
     <div className="rise relative border-t border-line bg-bg/40">
       <div className="absolute top-2 right-4 flex items-center gap-1">
         <CopyButton id={`src-${hit._id}`} text={text} copied={copied} onCopy={copy} />
-        {hit.source !== undefined && (
+        {/* An id of . or .. can't be named in a path: such a document is only shown. */}
+        {hit.source !== undefined && !idProblem(hit._id) && (
           <button onClick={() => setMode("edit")} className="rounded-md p-1 text-subtle transition hover:text-fg" title="Edit document">
             <Pencil className="size-3.5" />
           </button>
         )}
-        <button onClick={() => setMode("delete")} className="rounded-md p-1 text-subtle transition hover:text-danger" title="Delete document">
-          <Trash2 className="size-3.5" />
-        </button>
-        <button onClick={() => onOpenConsole(`PUT ${docPath}\n${text}`)} className="rounded-md p-1 text-subtle transition hover:text-fg" title="Edit in console">
-          <SquareTerminal className="size-3.5" />
-        </button>
+        {!idProblem(hit._id) && (
+          <>
+            <button onClick={() => setMode("delete")} className="rounded-md p-1 text-subtle transition hover:text-danger" title="Delete document">
+              <Trash2 className="size-3.5" />
+            </button>
+            <button onClick={() => onOpenConsole(`PUT ${docPath}\n${text}`)} className="rounded-md p-1 text-subtle transition hover:text-fg" title="Edit in console">
+              <SquareTerminal className="size-3.5" />
+            </button>
+          </>
+        )}
       </div>
       {mode === "delete" && (
         <div className="rise flex flex-wrap items-center gap-2 border-b border-line px-5 py-2 text-[12px]">
