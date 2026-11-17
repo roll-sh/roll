@@ -4790,6 +4790,81 @@ fn protocol_cases() {
             query("select relation::regclass, mode from pg_locks where pid = pg_backend_pid() and locktype = 'relation' and relation::regclass::text like 'stc%' order by relation::regclass::text, mode"),
             query("rollback"),
         ])),
+        // Outputs of a view or sub-select nothing reads aren't planned (their PL/pgSQL calls
+        // don't run); a prepared statement is planned again only when an object its plan
+        // depends on changed (plancache).
+        c("plf_unread_outputs", |a| session(a, &["create or replace view pcv as select pc_fi(0) as x, a from pf3"], &[
+            query("select a from pcv"),
+            query("select count(*) from (select pc_fi(0) as x, a from pf3) s"),
+            query("select x from (select pc_fi(1) as x from pf3) s limit 1"),
+            query("drop view pcv"),
+        ])),
+        c("plf_invalidation", |a| session(a, &["create table if not exists pfi(a int)", "insert into pfi select 1 where not exists (select from pfi)"], &[
+            query("prepare pfi_p as select pc_fi(4), a from pfi"),
+            query("execute pfi_p"),
+            query("create table pfi_o(a int)"),
+            query("execute pfi_p"),
+            query("drop table pfi_o"),
+            query("alter table pfi add column z int"),
+            query("execute pfi_p"),
+            query("alter table pfi drop column z"),
+            query("prepare pfi_q(int) as select pc_fi(4), a from pfi where a = $1"),
+            query("execute pfi_q(1)"),
+            query("deallocate all"),
+        ])),
+        // RESET ALL resets (and reports) in the order the parameters left their defaults.
+        c("guc_reset_all_order", |a| session(a, &[], &[
+            query("set standard_conforming_strings = off"),
+            query("set search_path = a"),
+            query("set IntervalStyle = 'iso_8601'"),
+            query("set TimeZone = 'Asia/Tokyo'"),
+            query("set application_name = 'q'"),
+            query("reset all"),
+            query("set DateStyle = 'German'"),
+            query("set application_name = 'q'"),
+            query("set search_path = a"),
+            query("begin"),
+            query("reset all"),
+            query("rollback"),
+            query("discard all"),
+        ])),
+        // EXPLAIN's plan choices and estimates: an index read in a window's or a DISTINCT
+        // aggregate's order, grouping sets' rollups, a dummy relation's width, an aggregate's
+        // final cost, a function's default selectivity, bit(n)'s width, array containment
+        // by its most common elements.
+        c("explain_estimates", |a| session(a, &[
+            "drop table if exists xe_a, xe_b",
+            "create table xe_a(id int primary key, g int, t text, arr int[])",
+            "insert into xe_a select i, i % 10, 'r' || i, array[i % 10, i % 7] from generate_series(1, 2000) i",
+            "create index xe_a_g on xe_a(g)",
+            "analyze xe_a",
+            "create table xe_b(a int2, b bit(4))",
+        ], &[
+            query("explain select g, row_number() over (order by g) from xe_a"),
+            query("explain select count(distinct g) from xe_a"),
+            query("explain select g, count(*) from xe_a group by rollup (g)"),
+            query("explain select * from xe_a where false"),
+            query("explain select avg(id) from xe_a"),
+            query("explain select id from xe_a where booleq(false, g > 5)"),
+            query("explain select * from xe_b"),
+            query("explain select id from xe_a where arr @> '{3}'"),
+            query("explain select id from xe_a where arr && '{3, 4}'"),
+            query("drop table xe_a, xe_b"),
+        ])),
+        // Locations: LockRelease's two warnings, the large-object descriptor routines,
+        // Async_Notify, PREPARE TRANSACTION outside a block.
+        c("loc_lo_adv", |a| session(a, &[], &[
+            query("select pg_advisory_unlock(77)"),
+            query("begin"),
+            query("select pg_advisory_xact_lock(78)"),
+            query("select pg_advisory_unlock(78)"),
+            query("rollback"),
+            query("select lo_close(5)"),
+            query("select loread(5, 1)"),
+            query("select lo_unlink(5)"),
+            query("select pg_notify('', 'x')"),
+            query("prepare transaction 'x'"),
+        ])),
     ];
     let file = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/protocol_cases.out");
     if let Ok(addr) = std::env::var("PROTOCOL_RECORD") {
