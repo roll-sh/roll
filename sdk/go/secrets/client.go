@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -74,6 +75,27 @@ type Values struct {
 	Linked   []string          `json:"linked"`
 	Followed []Followed        `json:"followed,omitempty"`
 }
+
+// String names the keys only, never a value: a Values printed or logged with %v or %+v.
+func (v Values) String() string {
+	keys := make([]string, 0, len(v.Values))
+	for k := range v.Values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return fmt.Sprintf("Values{keys: %v, problems: %d, leases: %d}", keys, len(v.Problems), len(v.Leases))
+}
+
+// GoString is String, for %#v.
+func (v Values) GoString() string { return v.String() }
+
+// String never shows the token: a Client printed or logged with %v or %+v.
+func (c *Client) String() string {
+	return fmt.Sprintf("Client{API: %q, Project: %q}", c.API, c.Project)
+}
+
+// GoString is String, for %#v.
+func (c *Client) GoString() string { return c.String() }
 
 // Followed is a key left out because it links a resource the environment's preview branched.
 type Followed struct {

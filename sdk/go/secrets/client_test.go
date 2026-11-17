@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/ecdh"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -218,5 +220,19 @@ func TestTransitSendsBase64AndDecryptsBackToTheSameBytes(t *testing.T) {
 	ct, _ = cards.Encrypt(ctx, raw, "")
 	if got, _ := cards.Decrypt(ctx, ct, ""); string(got) != string(raw) || sent[2]["context"] != nil {
 		t.Fatalf("bytes: %v, context %v", got, sent[2]["context"])
+	}
+}
+
+// A Values or a Client printed or logged shows no value and no token.
+func TestPrintingNeverShowsAValueOrTheToken(t *testing.T) {
+	v := Values{Values: map[string]string{"DB_PASSWORD": "fake-pw-not-real"}}
+	c := &Client{API: "https://api.roll.example", Token: "rlt_fake_token_not_real", Project: "prj_1"}
+	for _, s := range []string{fmt.Sprintf("%v", v), fmt.Sprintf("%+v", v), fmt.Sprintf("%#v", v), fmt.Sprintf("%v", c), fmt.Sprintf("%+v", c), fmt.Sprintf("%#v", c)} {
+		if strings.Contains(s, "fake-pw-not-real") || strings.Contains(s, "rlt_fake_token_not_real") {
+			t.Fatalf("printed a secret: %s", s)
+		}
+	}
+	if !strings.Contains(fmt.Sprint(v), "DB_PASSWORD") {
+		t.Fatalf("keys should still show: %s", fmt.Sprint(v))
 	}
 }
