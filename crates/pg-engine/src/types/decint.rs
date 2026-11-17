@@ -267,6 +267,18 @@ fn digits_u32(x: u32) -> usize {
     POW10.iter().position(|&p| p > x).unwrap_or(10)
 }
 
+/// `v`'s two's complement bytes, least significant first, as `DecInt::to_signed_bytes_le`
+/// gives them: the first `n` of the array (no allocation).
+pub fn i128_signed_le(v: i128) -> ([u8; 16], usize) {
+    let b = v.to_le_bytes();
+    let mut n = 16;
+    let fill = if v < 0 { 0xFF } else { 0 };
+    while n > 1 && b[n - 1] == fill && (b[n - 2] & 0x80 == fill & 0x80) {
+        n -= 1;
+    }
+    (b, n)
+}
+
 impl DecInt {
     fn from_mag(neg: bool, mag: Mag) -> DecInt {
         DecInt { neg: neg && !mag.is_empty(), mag }
@@ -614,15 +626,7 @@ impl DecInt {
     /// Two's complement bytes, least significant first (num-bigint's to_signed_bytes_le).
     pub fn to_signed_bytes_le(&self) -> Vec<u8> {
         if let Some(v) = self.to_i128() {
-            let b = v.to_le_bytes();
-            let mut n = 16;
-            let fill = if v < 0 { 0xFF } else { 0 };
-            while n > 1 && b[n - 1] == fill && (b[n - 2] & 0x80 == fill & 0x80) {
-                n -= 1;
-            }
-            if v == 0 {
-                return vec![0];
-            }
+            let (b, n) = i128_signed_le(v);
             return b[..n].to_vec();
         }
         let mut mag = self.mag.clone();
