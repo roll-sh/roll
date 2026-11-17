@@ -511,6 +511,10 @@ export interface EnterpriseApp {
   name: string;
   rules: Rule[];
   signs_with_key: boolean;
+  /** Until when the secret before a rotation still works (Unix ms). */
+  old_until?: number | null;
+  /** Where its secret was found leaked: roll dropped it, and it signs in again once rotated. */
+  leaked?: string | null;
   created_at: number;
 }
 
@@ -566,6 +570,11 @@ export const accessApi = {
   /** A new app: with no key, its secret is in the answer this once. */
   addEnterpriseApp: (a: { name: string; rules: Rule[]; public_jwk?: Record<string, string> | null }) =>
     call<EnterpriseApp & { client_secret?: string }>("POST", "/v1/access/enterprise/apps", a),
+  /** A new name or rules: its people's connections take the rules at once. */
+  updateEnterpriseApp: (id: string, c: { name?: string; rules?: Rule[] }) => call<EnterpriseApp>("PATCH", `/v1/access/enterprise/apps/${encodeURIComponent(id)}`, c),
+  /** A new key, or a new secret in the answer this once; the old secret kept a while or stopped now. */
+  rotateEnterpriseApp: (id: string, r: { public_jwk?: Record<string, string> | null; keep_old_for_s?: number }) =>
+    call<EnterpriseApp & { client_secret?: string }>("POST", `/v1/access/enterprise/apps/${encodeURIComponent(id)}/rotate`, r),
   /** Removes an app and revokes every person's connection to it. */
   removeEnterpriseApp: (id: string) => call<{ revoked: number }>("DELETE", `/v1/access/enterprise/apps/${encodeURIComponent(id)}`),
   catalog: () => call<Catalog>("GET", "/v1/access/catalog"),

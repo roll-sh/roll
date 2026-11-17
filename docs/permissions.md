@@ -237,7 +237,18 @@ roll token acting as that person, with no consent screen and no roll sign-in.
   no key, a `client_secret` shown once. `rules` is the most the app may do for a person.
   `GET /v1/access/enterprise` lists both (never a secret) with roll's `audience` (what a provider
   puts in `aud`) and `token_endpoint`; `DELETE …/apps/{id}` removes an app and revokes every
-  person's connection to it. The access overview's "Enterprise sign-in" panel does all of this.
+  person's connection to it. `PATCH …/apps/{id} {name?, rules?}` changes an app; its people's
+  connections take new rules in the same write, so narrowing it narrows every live token at once.
+  `POST …/apps/{id}/rotate {public_jwk?, keep_old_for_s?}` gives it a new key, or a new secret
+  answered once, keeping its client id and its people's connections; the old secret works up to a
+  week longer while the provider moves over, or stops now with every token its people hold.
+- **A leaked app secret** (an `rlc_` with its checksum, found by roll code's push scan or reported
+  by GitHub's secret scanning) is revoked like any other: roll drops the secret, the one kept from
+  before a rotation, and every token the app's people hold, in one write, and audits it. The
+  connections stay; the app signs in again once the operator rotates it (`leaked` in the listing
+  says where it was found; a leaked secret is never kept through that rotation).
+- The access overview's "Enterprise sign-in" panel does all of this, and `roll token enterprise`
+  (`trust`, `untrust`, `app create|update|rotate|remove`).
 - **Signing in:** `POST /v1/access/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`,
   `assertion=<ID-JAG>` (header `typ: oauth-id-jag+jwt`) and the app's own authentication
   (`client_secret_basic`, `client_secret_post` or `private_key_jwt`); an assertion alone is
@@ -1044,6 +1055,8 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/enterprise` | operator | `{idps, apps}`: the trusted identity providers and apps (never a secret) |
 | `PUT /v1/access/enterprise/idps` | operator | `{idps: [{issuer, jwks?, matching?, name?}]}` |
 | `POST /v1/access/enterprise/apps` | operator | `{name, rules, public_jwk?}`: 201 `{client_id, client_secret?}` (the secret once) |
+| `PATCH /v1/access/enterprise/apps/{id}` | operator | `{name?, rules?}`: the app as changed; its people's connections take new rules in the same write |
+| `POST /v1/access/enterprise/apps/{id}/rotate` | operator | `{public_jwk?, keep_old_for_s?}`: a new key, or a new `client_secret` answered once; the old secret works that long (at most a week) or stops now with every token its people hold |
 | `DELETE /v1/access/enterprise/apps/{id}` | operator | remove an app, revoking its people's connections: `{revoked}` |
 | `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days}`: roll's rules for every grant |
 | `PUT /v1/access/policy` | operator | change them; a grant made, rotated, or whose rules, lifetime or addresses change, must fit (consent too) |

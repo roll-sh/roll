@@ -99,7 +99,24 @@ pub struct App {
     /// The public key it signs its `private_key_jwt` with (a JWK).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwk: Option<String>,
+    /// The secret it had before a rotation, still accepted until `old_until` (Unix ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_secret_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_until: Option<i64>,
+    /// Where its secret was found leaked: roll dropped the secret (and the tokens it got), and the
+    /// app signs in again only once the operator rotates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaked: Option<String>,
     pub created_at: i64,
+}
+
+impl App {
+    /// Whether `secret` is its secret now, or the one before a rotation still kept.
+    fn secret_is(&self, secret: &str, now: i64) -> bool {
+        let h = hash(secret);
+        self.secret_hash.as_deref().is_some_and(|s| same(&h, s)) || (self.old_until.is_some_and(|u| u > now) && self.old_secret_hash.as_deref().is_some_and(|s| same(&h, s)))
+    }
 }
 
 impl Access {
@@ -112,11 +129,9 @@ impl Access {
     /// undo each other). `change` may run again, so it only changes the value.
     fn update_enterprise<T>(&self, change: impl Fn(&mut Enterprise) -> Result<T, Error>) -> Result<T, Error> {
         self.store.db.write(|c| {
-            let raw: Option<String> = c.query_row("SELECT value FROM settings WHERE key = ?", [SETTING], |r| r.get(0)).optional()?;
-            let mut e: Enterprise = raw.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default();
+            let mut e = read_enterprise(c)?;
             let out = change(&mut e)?;
-            let v = json!(e).to_string();
-            c.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![SETTING, v])?;
+            write_enterprise(c, &e)?;
             Ok(out)
         })
     }
@@ -164,7 +179,17 @@ impl Access {
         crate::store::check_rules(&rules)?;
         let jwk = jwk.map(|j| crate::clients_api::check_jwk(&j)).transpose()?;
         let secret = jwk.is_none().then(|| new_secret("rlc_"));
-        let app = App { client_id: crate::new_id("ent"), name: name.to_string(), rules, secret_hash: secret.as_deref().map(hash), jwk, created_at: code_sql::now_ms() };
+        let app = App {
+            client_id: crate::new_id("ent"),
+            name: name.to_string(),
+            rules,
+            secret_hash: secret.as_deref().map(hash),
+            jwk,
+            old_secret_hash: None,
+            old_until: None,
+            leaked: None,
+            created_at: code_sql::now_ms(),
+        };
         self.update_enterprise(|e| {
             if e.apps.len() >= MAX_APPS {
                 return Err(Error::Conflict(format!("at most {MAX_APPS} apps: remove some first")));
@@ -175,12 +200,90 @@ impl Access {
         Ok((app, secret))
     }
 
+    /// Change an app's name or rules. Its people's connections take the new rules in the same
+    /// write, so a narrowed app is narrowed for every live token at once (a connection's rules are
+    /// the app's: the operator chose them, as at registration).
+    pub fn update_app(&self, client_id: &str, name: Option<&str>, rules: Option<Scope>) -> Result<App, Error> {
+        let name = name.map(str::trim);
+        if name.is_some_and(|n| n.is_empty() || n.len() > 100 || n.contains(char::is_control)) {
+            return Err(Error::BadRequest("name: 1 to 100 characters".into()));
+        }
+        if let Some(r) = &rules {
+            crate::store::check_rules(r)?;
+        }
+        let encoded = rules.as_ref().map(serde_json::to_string).transpose().map_err(|e| Error::Internal(e.to_string()))?;
+        self.store.db.write(|c| {
+            let mut e = read_enterprise(c)?;
+            let app = e.apps.iter_mut().find(|a| a.client_id == client_id).ok_or_else(|| Error::NotFound(format!("no app {client_id}")))?;
+            if let Some(n) = name {
+                app.name = n.to_string();
+            }
+            if let Some(r) = &rules {
+                app.rules = r.clone();
+            }
+            let out = app.clone();
+            write_enterprise(c, &e)?;
+            if let Some(r) = &encoded {
+                c.execute("UPDATE grants SET rules = ? WHERE client_id = ? AND kind = 'oauth' AND revoked_at IS NULL", params![r, client_id])?;
+            }
+            Ok::<_, Error>(out)
+        })
+    }
+
+    /// A new credential for an app, keeping its id and its people's connections: a key, or without
+    /// one a new secret (answered once). The old secret works `keep_old_ms` longer (at most a
+    /// week), or stops now with every token it got. A leaked app signs in again from here.
+    pub fn rotate_app(&self, client_id: &str, jwk: Option<Value>, keep_old_ms: Option<i64>) -> Result<(App, Option<String>), Error> {
+        let jwk = jwk.map(|j| crate::clients_api::check_jwk(&j)).transpose()?;
+        let secret = jwk.is_none().then(|| new_secret("rlc_"));
+        let new_hash = secret.as_deref().map(hash);
+        let now = code_sql::now_ms();
+        let keep = keep_old_ms.filter(|ms| *ms > 0).map(|ms| ms.min(crate::store::MAX_KEEP_OLD_MS));
+        let app = self.store.db.write(|c| {
+            let mut e = read_enterprise(c)?;
+            let app = e.apps.iter_mut().find(|a| a.client_id == client_id).ok_or_else(|| Error::NotFound(format!("no app {client_id}")))?;
+            // A leaked secret is never kept: it's what the rotation is for.
+            let kept = keep.filter(|_| app.leaked.is_none() && app.secret_hash.is_some());
+            (app.old_secret_hash, app.old_until) = match kept {
+                Some(ms) => (app.secret_hash.clone(), Some(now + ms)),
+                None => (None, None),
+            };
+            app.secret_hash = new_hash.clone();
+            app.jwk = jwk.clone();
+            app.leaked = None;
+            let out = app.clone();
+            write_enterprise(c, &e)?;
+            if kept.is_none() {
+                end_tokens(c, client_id)?;
+            }
+            Ok::<_, Error>(out)
+        })?;
+        Ok((app, secret))
+    }
+
+    /// A leaked secret that is an enterprise app's (now or kept from before a rotation): roll drops
+    /// it and every token its people's connections hold (anyone could have got them with it), in
+    /// one write. The connections stay: their people sign in again once the operator rotates it.
+    pub(crate) fn revoke_leaked_app(&self, secret: &str, why: &str) -> Result<Option<App>, Error> {
+        let now = code_sql::now_ms();
+        self.store.db.write(|c| {
+            let mut e = read_enterprise(c)?;
+            let Some(app) = e.apps.iter_mut().find(|a| a.secret_is(secret, now)) else { return Ok(None) };
+            app.secret_hash = None;
+            (app.old_secret_hash, app.old_until) = (None, None);
+            app.leaked = Some(why.chars().take(300).collect());
+            let out = app.clone();
+            write_enterprise(c, &e)?;
+            end_tokens(c, &out.client_id)?;
+            Ok::<_, Error>(Some(out))
+        })
+    }
+
     /// Remove an app: every person's connection to it is revoked with it, in the same write.
     pub fn remove_app(&self, client_id: &str) -> Result<usize, Error> {
         let now = code_sql::now_ms();
         self.store.db.write(|c| {
-            let raw: Option<String> = c.query_row("SELECT value FROM settings WHERE key = ?", [SETTING], |r| r.get(0)).optional()?;
-            let mut e: Enterprise = raw.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default();
+            let mut e = read_enterprise(c)?;
             let before = e.apps.len();
             e.apps.retain(|a| a.client_id != client_id);
             if e.apps.len() == before {
@@ -195,6 +298,22 @@ impl Access {
             Ok::<_, Error>(ids.len())
         })
     }
+}
+
+fn read_enterprise(c: &code_sql::Conn<'_>) -> Result<Enterprise, Error> {
+    let raw: Option<String> = c.query_row("SELECT value FROM settings WHERE key = ?", [SETTING], |r| r.get(0)).optional()?;
+    Ok(raw.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default())
+}
+
+fn write_enterprise(c: &code_sql::Conn<'_>, e: &Enterprise) -> Result<(), Error> {
+    c.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![SETTING, json!(e).to_string()])?;
+    Ok(())
+}
+
+/// End every access token an app's people's connections hold (the connections stay).
+fn end_tokens(c: &code_sql::Conn<'_>, client_id: &str) -> Result<(), Error> {
+    c.execute("DELETE FROM grant_secrets WHERE kind = 'access' AND grant_id IN (SELECT id FROM grants WHERE client_id = ? AND kind = 'oauth')", [client_id])?;
+    Ok(())
 }
 
 /// Whether a header `typ` is an identity assertion's (with or without `application/`).
@@ -231,7 +350,7 @@ pub async fn token(a: Arc<Access>, headers: &axum::http::HeaderMap, f: &HashMap<
         let app = e.apps.iter().find(|x| x.client_id == client_id).ok_or_else(unknown)?;
         match &credential {
             Err(secret) => {
-                if !app.secret_hash.as_deref().is_some_and(|h| same(&hash(secret), h)) {
+                if !app.secret_is(secret, code_sql::now_ms()) {
                     return Err(unknown());
                 }
             }
@@ -386,7 +505,15 @@ fn connect(a: &Access, app: &App, idp: &Idp, user: &str, read_only: bool) -> Res
 
 /// What the operator sees of an app: never its secret.
 fn view(app: &App) -> Value {
-    json!({ "client_id": app.client_id, "name": app.name, "rules": app.rules, "signs_with_key": app.jwk.is_some(), "created_at": app.created_at })
+    json!({
+        "client_id": app.client_id,
+        "name": app.name,
+        "rules": app.rules,
+        "signs_with_key": app.jwk.is_some(),
+        "old_until": app.old_until.filter(|u| *u > code_sql::now_ms()),
+        "leaked": app.leaked,
+        "created_at": app.created_at,
+    })
 }
 
 // ── /v1/access/enterprise (the operator's) ──
@@ -435,6 +562,47 @@ pub(crate) async fn add_app(axum::extract::State(a): S, ext: axum::http::Extensi
         out["client_secret"] = json!(s);
     }
     Ok((axum::http::StatusCode::CREATED, axum::Json(out)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AppChange {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    rules: Option<Scope>,
+}
+
+/// `PATCH /v1/access/enterprise/apps/{id}` `{name?, rules?}`: its people's connections take new rules at once.
+pub(crate) async fn update_app(axum::extract::State(a): S, ext: axum::http::Extensions, axum::extract::Path(id): axum::extract::Path<String>, axum::Json(b): axum::Json<AppChange>) -> crate::Result<axum::Json<Value>> {
+    crate::api::operator_only(&a, &ext, "change enterprise apps")?;
+    let app = tokio::task::spawn_blocking(move || a.update_app(&id, b.name.as_deref(), b.rules)).await.map_err(|e| Error::Internal(e.to_string()))??;
+    Ok(axum::Json(view(&app)))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AppRotate {
+    #[serde(default)]
+    public_jwk: Option<Value>,
+    #[serde(default)]
+    keep_old_for_s: Option<i64>,
+}
+
+/// `POST /v1/access/enterprise/apps/{id}/rotate` `{public_jwk?, keep_old_for_s?}`: a new key, or a
+/// new secret answered once; the old secret works that much longer (at most a week) or stops now.
+pub(crate) async fn rotate_app(axum::extract::State(a): S, ext: axum::http::Extensions, axum::extract::Path(id): axum::extract::Path<String>, body: axum::body::Bytes) -> crate::Result<axum::Json<Value>> {
+    crate::api::operator_only(&a, &ext, "rotate enterprise apps")?;
+    let b: AppRotate = if body.iter().all(u8::is_ascii_whitespace) { AppRotate::default() } else { serde_json::from_slice(&body).map_err(|e| Error::BadRequest(format!("invalid body: {e}")))? };
+    if b.keep_old_for_s.is_some_and(|s| !(0..=crate::store::MAX_KEEP_OLD_MS / 1000).contains(&s)) {
+        return Err(Error::BadRequest("keep_old_for_s is 0 to 604800 (a week)".into()));
+    }
+    let (app, secret) = tokio::task::spawn_blocking(move || a.rotate_app(&id, b.public_jwk, b.keep_old_for_s.map(|s| s * 1000))).await.map_err(|e| Error::Internal(e.to_string()))??;
+    let mut out = view(&app);
+    if let Some(s) = secret {
+        out["client_secret"] = json!(s);
+    }
+    Ok(axum::Json(out))
 }
 
 pub(crate) async fn remove_app(axum::extract::State(a): S, ext: axum::http::Extensions, axum::extract::Path(id): axum::extract::Path<String>) -> crate::Result<axum::Json<Value>> {

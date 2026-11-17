@@ -280,6 +280,7 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/enterprise/idps", "which identity providers roll trusts is the operator's"),
     ("/v1/access/enterprise/apps", "which apps an identity provider may sign people in to is the operator's"),
     ("/v1/access/enterprise/apps/{id}", "which apps an identity provider may sign people in to is the operator's"),
+    ("/v1/access/enterprise/apps/{id}/rotate", "an enterprise app's credential is the operator's"),
     ("/v1/access/clients", "a token makes no machine clients: the operator, or a person signed in, makes their own"),
     ("/v1/access/clients/{id}", "a token revokes no machine clients: the operator, or a person signed in, revokes their own"),
     ("/v1/access/clients/{id}/rotate", "a token rotates no machine client's credential: the operator, or a person signed in, rotates their own"),

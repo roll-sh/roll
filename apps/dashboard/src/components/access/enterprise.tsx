@@ -4,6 +4,7 @@ import {
   accessApi,
   catalogFor,
   idpFromForm,
+  KEEP_OLD,
   presetRules,
   publicJwk,
   type Catalog,
@@ -183,7 +184,10 @@ function NewIdp({ onAdd, onCancel }: { onAdd: (idp: EnterpriseIdp) => Promise<bo
 function Apps({ apps, tokenEndpoint, refresh, hasIdp }: { apps: EnterpriseApp[]; tokenEndpoint: string; refresh: () => Promise<void>; hasIdp: boolean }) {
   const [making, setMaking] = useState(false);
   const [made, setMade] = useState<(EnterpriseApp & { client_secret?: string }) | null>(null);
-  const [removing, setRemoving] = useState<string | null>(null);
+  // One app's action open at a time: its rules, a new credential, or removing it.
+  const [open, setOpen] = useState<{ id: string; what: "rules" | "rotate" | "remove" } | null>(null);
+  const removing = open?.what === "remove" ? open.id : null;
+  const setRemoving = (id: string | null) => setOpen(id ? { id, what: "remove" } : null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -239,13 +243,39 @@ function Apps({ apps, tokenEndpoint, refresh, hasIdp }: { apps: EnterpriseApp[];
                 <span className="text-muted">{a.signs_with_key ? "signs with a key" : "signs with a secret"}</span>
                 <span className="text-subtle">{rulesSummary(a.rules)}</span>
                 <span className="text-subtle">added {relative(a.created_at)}</span>
+                {a.old_until && <span className="text-subtle">old secret stops {relative(a.old_until)}</span>}
                 <span className="flex-1" />
-                {removing !== a.client_id && (
-                  <button onClick={() => setRemoving(a.client_id)} className="text-muted hover:text-danger">
-                    Remove
-                  </button>
+                {open?.id !== a.client_id && (
+                  <span className="flex items-center gap-3">
+                    <button onClick={() => setOpen({ id: a.client_id, what: "rules" })} className="text-muted hover:text-fg">
+                      Edit rules
+                    </button>
+                    <button onClick={() => setOpen({ id: a.client_id, what: "rotate" })} className={a.leaked ? "font-medium text-danger" : "text-muted hover:text-fg"}>
+                      Rotate
+                    </button>
+                    <button onClick={() => setRemoving(a.client_id)} className="text-muted hover:text-danger">
+                      Remove
+                    </button>
+                  </span>
                 )}
               </div>
+              {a.leaked && (
+                <p className="mt-1 text-danger">
+                  Its secret was {a.leaked}: roll dropped it and every token it got. People sign in through {a.name} again once you rotate it.
+                </p>
+              )}
+              {open?.id === a.client_id && open.what === "rules" && (
+                <EditRules
+                  app={a}
+                  onDone={async () => {
+                    setOpen(null);
+                    setNote(`${a.name}'s people have its new rules.`);
+                    await refresh();
+                  }}
+                  onCancel={() => setOpen(null)}
+                />
+              )}
+              {open?.id === a.client_id && open.what === "rotate" && <RotateApp app={a} refresh={refresh} onClose={() => setOpen(null)} />}
               {removing === a.client_id && (
                 <div className="pt-3">
                   <Confirm word={a.name} action="Remove the app" busy={busy} onConfirm={() => void remove(a.client_id)} onCancel={() => setRemoving(null)}>
@@ -263,6 +293,127 @@ function Apps({ apps, tokenEndpoint, refresh, hasIdp }: { apps: EnterpriseApp[];
         </div>
       )}
     </section>
+  );
+}
+
+/** The app's rules in the builder: saved, every person's connection to it has them at once. */
+function EditRules({ app, onDone, onCancel }: { app: EnterpriseApp; onDone: () => Promise<void>; onCancel: () => void }) {
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [rules, setRules] = useState<Rule[]>(app.rules);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    accessApi
+      .catalog()
+      .then(async (c) => setCatalog(catalogFor(c, await accessApi.me().catch(() => null))))
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, []);
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await accessApi.updateEnterpriseApp(app.client_id, { rules });
+      await onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!catalog) return error ? <div className="pt-3"><ErrorNote error={error} /></div> : null;
+  return (
+    <div className="rise space-y-4 pt-4">
+      <Builder catalog={catalog} rules={rules} onChange={setRules} />
+      <ErrorNote error={error} />
+      <div className="flex items-center gap-3">
+        <button onClick={save} disabled={busy || rules.length === 0} className={primary}>
+          {busy ? <span className="shimmer">Saving…</span> : "Save rules"}
+        </button>
+        <button onClick={onCancel} className={btn}>
+          Cancel
+        </button>
+        <span className="text-subtle">Every person&apos;s connection to {app.name} takes these at once, never past what their account reaches.</span>
+      </div>
+    </div>
+  );
+}
+
+/** A new credential, the same client id: a pasted key, or a new secret shown once. */
+function RotateApp({ app, refresh, onClose }: { app: EnterpriseApp; refresh: () => Promise<void>; onClose: () => void }) {
+  const [key, setKey] = useState("");
+  const [keep, setKeep] = useState(0);
+  const [secret, setSecret] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const { copied, copy } = useCopy();
+  const parsed = key.trim() ? publicJwk(key) : null;
+  const problem = parsed && "problem" in parsed ? parsed.problem : null;
+  // A leaked secret is never kept, and a key app has no secret to keep.
+  const canKeep = !app.leaked && !app.signs_with_key;
+  const rotate = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await accessApi.rotateEnterpriseApp(app.client_id, {
+        public_jwk: parsed && "jwk" in parsed ? parsed.jwk : null,
+        keep_old_for_s: canKeep ? KEEP_OLD[keep].s : 0,
+      });
+      await refresh();
+      if (r.client_secret) setSecret(r.client_secret);
+      else onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (secret)
+    return (
+      <div className="rise space-y-2 pt-3">
+        <span className="block text-subtle">New client secret: copy it now, it isn&apos;t shown again</span>
+        <div className="flex items-center gap-1 rounded-lg border border-line bg-bg px-3 py-2">
+          <code className="min-w-0 flex-1 truncate font-mono">{secret}</code>
+          <CopyButton id={`rotated-${app.client_id}`} text={secret} copied={copied} onCopy={copy} />
+        </div>
+        <button onClick={onClose} className={btn}>
+          Done
+        </button>
+      </div>
+    );
+  return (
+    <div className="rise space-y-3 pt-3">
+      <textarea
+        value={key}
+        onChange={(e) => setKey(e.target.value)}
+        rows={2}
+        spellCheck={false}
+        placeholder="A new public key (PEM or JWK), or leave empty for a new secret"
+        className={`${input} w-full resize-y font-mono text-[12px]`}
+      />
+      <div className="flex flex-wrap items-center gap-3">
+        {canKeep && (
+          <label className="flex items-center gap-1.5 text-muted">
+            The old secret
+            <select value={keep} onChange={(e) => setKeep(Number(e.target.value))} className={`${input} text-[12px]`}>
+              {KEEP_OLD.map((k, i) => (
+                <option key={k.label} value={i}>
+                  {k.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <button onClick={rotate} disabled={busy || !!problem} className={primary}>
+          {busy ? <span className="shimmer">Rotating…</span> : parsed && "jwk" in parsed ? "Rotate to this key" : "Rotate to a new secret"}
+        </button>
+        <button onClick={onClose} className={btn}>
+          Cancel
+        </button>
+        {problem && <span className="text-subtle">{problem}</span>}
+        {(!canKeep || keep === 0) && <span className="text-subtle">The tokens its people hold now stop; they sign in again through the provider.</span>}
+      </div>
+      <ErrorNote error={error} />
+    </div>
   );
 }
 

@@ -2142,6 +2142,35 @@ async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
     let token2 = again["access_token"].as_str().unwrap_or_else(|| panic!("{again}")).to_string();
     let (_, me2) = d.call(&token2, Method::GET, "/v1/access", None).await;
     assert_eq!(me2["grant"]["id"], me["grant"]["id"], "one connection per person and app");
+    // Narrowing the app narrows every live token at once (its people's connections take its rules).
+    let reads_only = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
+    let (s, changed) = d.call(OPERATOR, Method::PATCH, &format!("/v1/access/enterprise/apps/{client_id}"), Some(json!({ "rules": reads_only }))).await;
+    assert_eq!(s, StatusCode::OK, "{changed}");
+    assert_eq!(d.call(&token2, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "after-narrowing" }))).await.0, StatusCode::FORBIDDEN, "narrowed at once");
+    assert_eq!(d.call(&token2, Method::GET, "/v1/access", None).await.0, StatusCode::OK, "the connection stays");
+    // A rotation keeping the old secret a while: both sign in; the new one is answered once.
+    let (s, rotated) = d.call(OPERATOR, Method::POST, &format!("/v1/access/enterprise/apps/{client_id}/rotate"), Some(json!({ "keep_old_for_s": 3600 }))).await;
+    let secret2 = rotated["client_secret"].as_str().unwrap_or_else(|| panic!("{s} {rotated}")).to_string();
+    assert!(rotated["old_until"].as_i64().is_some(), "{rotated}");
+    assert_eq!(sign_in(idjag(claims("j20", "alice@acme.test", &api, &client_id)), secret.clone()).await.0, StatusCode::OK, "the old secret, kept");
+    let (_, fresh) = sign_in(idjag(claims("j21", "alice@acme.test", &api, &client_id)), secret2.clone()).await;
+    let token3 = fresh["access_token"].as_str().unwrap_or_else(|| panic!("{fresh}")).to_string();
+    // Leaked (found by a scan, or GitHub's): the secret, the kept one and every token go at once.
+    assert!(d.access.revoke_leaked(std::slice::from_ref(&secret2), "a public gist").unwrap().is_empty(), "no grant is revoked: the connections stay");
+    assert_eq!(d.call(&token3, Method::GET, "/v1/access", None).await.0, StatusCode::UNAUTHORIZED, "its tokens ended");
+    for (jti, s) in [("j22", &secret2), ("j23", &secret)] {
+        assert_eq!(sign_in(idjag(claims(jti, "alice@acme.test", &api, &client_id)), s.clone()).await.1["error"], "invalid_client", "after the leak");
+    }
+    let (_, listed) = d.call(OPERATOR, Method::GET, "/v1/access/enterprise", None).await;
+    assert_eq!(listed["apps"][0]["leaked"], "found in a public gist", "{listed}");
+    // The operator rotates it: a new secret, and the same people back on their connections.
+    let (_, again) = d.call(OPERATOR, Method::POST, &format!("/v1/access/enterprise/apps/{client_id}/rotate"), Some(json!({ "keep_old_for_s": 3600 }))).await;
+    assert!(again["old_until"].is_null() && again["leaked"].is_null(), "a leaked secret is never kept: {again}");
+    let secret3 = again["client_secret"].as_str().unwrap().to_string();
+    let (_, back) = sign_in(idjag(claims("j24", "alice@acme.test", &api, &client_id)), secret3).await;
+    let token4 = back["access_token"].as_str().unwrap_or_else(|| panic!("{back}")).to_string();
+    assert_eq!(d.call(&token4, Method::GET, "/v1/access", None).await.1["grant"]["id"], me["grant"]["id"], "the same connection");
+    let token2 = token4;
     // Removing the app ends its people's tokens (alice's and root's; bob's was revoked already).
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/enterprise/apps/{client_id}"), None).await.1["revoked"], 2);
     assert_eq!(d.call(&token2, Method::GET, "/v1/access", None).await.0, StatusCode::UNAUTHORIZED);

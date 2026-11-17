@@ -198,6 +198,27 @@ pub enum EnterpriseAppCmd {
         #[arg(long)]
         public_key: Option<std::path::PathBuf>,
     },
+    /// Change an app's name or rules: its people's connections take the new rules at once.
+    Update {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[command(flatten)]
+        rules: RuleArgs,
+    },
+    /// A new credential for an app, keeping its client id and its people's connections: with
+    /// --public-key a key, without a new secret (shown once). The old secret stops now with the
+    /// tokens it got, unless --keep-old keeps it working while the app moves over. A leaked app
+    /// signs in again from here.
+    Rotate {
+        id: String,
+        /// Its new public key: a PEM file (Ed25519 or P-256) or a JWK.
+        #[arg(long)]
+        public_key: Option<std::path::PathBuf>,
+        /// The old secret keeps working this long (1h, 2d; at most 7d).
+        #[arg(long)]
+        keep_old: Option<String>,
+    },
     /// Remove an app: every person's connection to it is revoked.
     Remove { id: String },
 }
@@ -723,6 +744,45 @@ async fn enterprise(api: &Api, json_out: bool, cmd: Option<EnterpriseCmd>) -> an
             }
             made
         }
+        Some(EnterpriseCmd::App(EnterpriseAppCmd::Update { id, name, rules: r })) => {
+            if name.is_none() && !r.given() {
+                bail!("nothing to change: --name, or the app's new rules (--preset, --product, --allow…)");
+            }
+            let mut body = json!({});
+            if let Some(n) = name {
+                body["name"] = json!(n);
+            }
+            if r.given() {
+                body["rules"] = rules(api, &r).await?;
+            }
+            let app = api.call(reqwest::Method::PATCH, &format!("/v1/access/enterprise/apps/{}", urlencoding::encode(&id)), Some(body)).await?;
+            if !json_out {
+                println!("{} changed: its people's connections have its rules now", s(&app["name"]));
+                return Ok(());
+            }
+            app
+        }
+        Some(EnterpriseCmd::App(EnterpriseAppCmd::Rotate { id, public_key, keep_old })) => {
+            let jwk = match &public_key {
+                Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
+                None => None,
+            };
+            let keep = keep_old.as_deref().map(|k| span(k, "--keep-old")).transpose()?.flatten().map(|ms| ms / 1000);
+            let app = api.post(&format!("/v1/access/enterprise/apps/{}/rotate", urlencoding::encode(&id)), json!({ "public_jwk": jwk, "keep_old_for_s": keep })).await?;
+            if !json_out {
+                // The secret alone on stdout (for a script to hand to the provider); words on stderr.
+                let old = if app["old_until"].is_i64() { "The old secret keeps working a while (old_until in --json)." } else { "The old secret and the tokens it got stopped." };
+                match app["client_secret"].as_str() {
+                    Some(secret) => {
+                        println!("{secret}");
+                        eprintln!("{old} Copy the new secret now: it isn't shown again.");
+                    }
+                    None => eprintln!("{} signs with its new key now. {old}", s(&app["name"])),
+                }
+                return Ok(());
+            }
+            app
+        }
         Some(EnterpriseCmd::App(EnterpriseAppCmd::Remove { id })) => api.call(reqwest::Method::DELETE, &format!("/v1/access/enterprise/apps/{}", urlencoding::encode(&id)), None).await?,
     };
     if json_out {
@@ -735,7 +795,8 @@ async fn enterprise(api: &Api, json_out: bool, cmd: Option<EnterpriseCmd>) -> an
             println!("trusts {} ({}; people by {}{}{})", s(&i["issuer"]), i["name"].as_str().unwrap_or("-"), s(&i["matching"]), if domains.is_empty() { String::new() } else { format!(" at {}", domains.join(", ")) }, if i["admins"] == true { "; admins too" } else { "" });
         }
         for app in out["apps"].as_array().into_iter().flatten() {
-            println!("app {}  {}  {}", s(&app["client_id"]), s(&app["name"]), if app["signs_with_key"] == true { "signs with a key" } else { "a secret" });
+            let leaked = app["leaked"].as_str().map(|w| format!("  its secret leaked ({w}): rotate it")).unwrap_or_default();
+            println!("app {}  {}  {}{leaked}", s(&app["client_id"]), s(&app["name"]), if app["signs_with_key"] == true { "signs with a key" } else { "a secret" });
         }
         if idps(&out).is_empty() && out["apps"].as_array().is_none_or(|a| a.is_empty()) {
             println!("no identity provider is trusted, and no app registered");
