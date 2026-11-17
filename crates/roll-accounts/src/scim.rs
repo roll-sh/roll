@@ -39,15 +39,19 @@ const MAX_TEXT: usize = 255;
 type S = State<Arc<Accounts>>;
 type Ip = Option<axum::Extension<roll_auth::ClientIp>>;
 
-/// A SCIM change in the audit log, as the connection that made it.
-fn event(a: &Accounts, conn: &crate::sso::Connection, action: &str, user: &str, detail: Value, who: &crate::audit::Who) {
+/// A SCIM change in the audit log, as the connection that made it (`failed`: why it didn't
+/// happen, or happened only in part, as a deactivation that couldn't finish).
+fn event(a: &Accounts, conn: &crate::sso::Connection, action: &str, user: Option<&str>, mut detail: Value, failed: Option<&Error>, who: &crate::audit::Who) {
+    if let Some(e) = failed {
+        detail["refused"] = json!(e.redirect_code());
+    }
     a.record(crate::audit::AccountEvent {
         actor: format!("scim:{}", conn.id),
         action: action.to_string(),
         method: "-".into(),
-        target: Some(user.to_string()),
-        ok: true,
-        status: 200,
+        target: user.map(crate::audit::clean_id),
+        ok: failed.is_none(),
+        status: failed.map(crate::audit::status_of).unwrap_or(200),
         ip: who.ip,
         user_agent: who.user_agent.clone(),
         detail,
@@ -461,8 +465,10 @@ async fn create_user(State(a): S, ip: Ip, headers: HeaderMap, Json(v): Json<Valu
             Some(x) => bool_of(x)?,
         };
         let external = v.get("externalId").and_then(Value::as_str);
-        let id = a.scim_create(&conn, &email, &user_name, name_of(&v).as_deref(), external, active)?;
-        event(a, &conn, "scim.create", &id, json!({ "active": active }), &who);
+        let id = a
+            .scim_create(&conn, &email, &user_name, name_of(&v).as_deref(), external, active)
+            .inspect_err(|e| event(a, &conn, "scim.create", None, json!({ "email": email }), Some(e), &who))?;
+        event(a, &conn, "scim.create", Some(&id), json!({ "active": active }), None, &who);
         Ok((id.clone(), user_json(a, &a.scim_person(&conn, &id)?)))
     })
     .await?;
@@ -492,9 +498,9 @@ async fn replace_user(State(a): S, ip: Ip, headers: HeaderMap, Path(id): Path<St
                 Some(x) => Some(bool_of(x)?),
             },
         };
-        let active = ch.active;
-        a.scim_update(&conn, &id, ch)?;
-        event(a, &conn, "scim.update", &id, json!({ "active": active }), &who);
+        let detail = json!({ "active": ch.active, "user_name": ch.user_name.is_some(), "external_id": ch.external_id.is_some() });
+        a.scim_update(&conn, &id, ch).inspect_err(|e| event(a, &conn, "scim.update", Some(&id), detail.clone(), Some(e), &who))?;
+        event(a, &conn, "scim.update", Some(&id), detail, None, &who);
         Ok(user_json(a, &a.scim_person(&conn, &id)?))
     })
     .await?;
@@ -544,9 +550,9 @@ async fn patch_user(State(a): S, ip: Ip, headers: HeaderMap, Path(id): Path<Stri
                 (other, _) => return Err(invalid(&format!("op {other:?}: add, replace or remove"))),
             }
         }
-        let active = ch.active;
-        a.scim_update(&conn, &id, ch)?;
-        event(a, &conn, "scim.update", &id, json!({ "active": active }), &who);
+        let detail = json!({ "active": ch.active, "user_name": ch.user_name.is_some(), "external_id": ch.external_id.is_some() });
+        a.scim_update(&conn, &id, ch).inspect_err(|e| event(a, &conn, "scim.update", Some(&id), detail.clone(), Some(e), &who))?;
+        event(a, &conn, "scim.update", Some(&id), detail, None, &who);
         Ok(user_json(a, &a.scim_person(&conn, &id)?))
     })
     .await?;
@@ -558,8 +564,8 @@ async fn delete_user(State(a): S, ip: Ip, headers: HeaderMap, Path(id): Path<Str
     let who = crate::audit::Who::of(ip, &headers);
     blocking(&a, move |a| {
         let conn = connection_of(a, &headers)?;
-        a.scim_update(&conn, &id, Change { active: Some(false), ..Change::default() })?;
-        event(a, &conn, "scim.update", &id, json!({ "active": false }), &who);
+        a.scim_update(&conn, &id, Change { active: Some(false), ..Change::default() }).inspect_err(|e| event(a, &conn, "scim.update", Some(&id), json!({ "active": false }), Some(e), &who))?;
+        event(a, &conn, "scim.update", Some(&id), json!({ "active": false }), None, &who);
         Ok(())
     })
     .await?;

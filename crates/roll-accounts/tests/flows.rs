@@ -728,14 +728,21 @@ async fn account_events_are_audited() {
 
     let got = events.0.lock().unwrap().clone();
     let find = |f: &dyn Fn(&roll_accounts::audit::AccountEvent) -> bool| got.iter().find(|e| f(e)).cloned().unwrap_or_else(|| panic!("{got:#?}"));
+    // The invite: who, from where, the address it's for and the invite it made.
     let made = find(&|e| e.action == "POST /v1/accounts/invites");
     assert_eq!((made.actor.as_str(), made.ok, made.ip.map(|i| i.to_string())), ("operator", true, Some("203.0.113.7".into())));
+    assert_eq!(made.detail["set"]["email"], "ada@example.com");
+    assert!(made.target.as_deref().is_some_and(|t| t.starts_with("inv_")), "{made:?}");
+    // Its use made an account, then signed her in.
+    let created = find(&|e| e.action == "user.create");
+    assert_eq!((created.target.as_deref(), created.detail["via"].as_str()), (Some(ada.as_str()), Some("invite")));
     let signed = find(&|e| e.action == "sign_in" && e.ok);
     assert_eq!((signed.actor.as_str(), signed.detail["method"].as_str()), (ada.as_str(), Some("email")));
     let refused = find(&|e| e.action == "sign_in" && !e.ok);
-    assert_eq!((refused.actor.as_str(), refused.detail["refused"].as_str()), ("anonymous", Some("bad_code")));
+    assert_eq!((refused.actor.as_str(), refused.detail["refused"].as_str(), refused.status), ("anonymous", Some("bad_code"), 400));
+    // The disable says what it set.
     let off = find(&|e| e.action == "PATCH /v1/accounts/users/{id}");
-    assert_eq!((off.actor.as_str(), off.target.as_deref()), ("operator", Some(ada.as_str())));
+    assert_eq!((off.actor.as_str(), off.target.as_deref(), off.detail["set"]["disabled"].as_bool()), ("operator", Some(ada.as_str()), Some(true)));
     let all = serde_json::to_string(&got).unwrap();
     assert!(!all.contains(&invite) && !all.contains(&newest_code(&env.outbox, "ada@example.com")), "never a token or a code");
 }

@@ -249,20 +249,14 @@ async fn email_verify(State(a): S, ip: Ip, headers: HeaderMap, b: Bytes) -> Resu
     let ua = user_agent(&headers);
     let who = Who::of(ip, &headers);
     blocking(&a, move |a| {
-        let done = a.email_verify(&challenge, &code).and_then(|user| {
-            let issued = a.issue(&user, &ua)?;
-            Ok((user, issued))
-        });
-        match done {
-            Ok((user, issued)) => {
-                a.record_sign_in(Some(&user), "email", None, &who);
-                signed_in_response(a, &user, issued)
-            }
-            Err(e) => {
-                a.record_sign_in(None, "email", Some(e.redirect_code()), &who);
-                Err(e)
-            }
+        let (user, made) = a.email_verify(&challenge, &code).inspect_err(|e| a.record_sign_in(None, "email", Some(e), false, &who))?;
+        if made {
+            a.record_new(&user, "invite", "email", &who);
         }
+        // Past the code, the person is known: a refusal now (disabled, SSO required) is theirs.
+        let issued = a.issue(&user, &ua).inspect_err(|e| a.record_sign_in(Some(&user), "email", Some(e), false, &who))?;
+        a.record_sign_in(Some(&user), "email", None, issued.second_factor, &who);
+        signed_in_response(a, &user, issued)
     })
     .await
 }
@@ -299,36 +293,44 @@ struct Callback {
     error: Option<String>,
 }
 
-async fn oauth_callback(State(a): S, ip: Ip, Path(p): Path<String>, Query(q): Query<Callback>, headers: HeaderMap) -> Response {
-    let Some(p) = Provider::parse(&p) else { return finish_redirect(&a, &headers, Err(Error::NotFound("no such provider".into())), "/signin".into(), false, "unknown", &Who::default()).await };
+async fn oauth_callback(State(a): S, me: Me, ip: Ip, Path(p): Path<String>, Query(q): Query<Callback>, headers: HeaderMap) -> Response {
+    let who = Who::of(ip, &headers).person(me);
+    // No provider, or no code (the person said no at the provider): no sign-in happened to record.
+    let Some(p) = Provider::parse(&p) else { return finish_redirect(&a, &headers, Err(Error::NotFound("no such provider".into())), "/signin".into(), false, "", &who).await };
     let (Some(code), Some(state)) = (q.code, q.state) else {
-        // The person said no at the provider, or the provider failed.
         let _ = q.error;
-        return finish_redirect(&a, &headers, Err(Error::BadRequest("the provider".into(), Some("provider"))), "/signin".into(), false, p.as_str(), &Who::of(ip, &headers)).await;
+        return finish_redirect(&a, &headers, Err(Error::BadRequest("the provider".into(), Some("provider"))), "/signin".into(), false, "", &who).await;
     };
     let browser = roll_auth::cookie(&headers, a.config.oauth_cookie()).map(str::to_string);
     let (done, back) = a.oauth_callback(p, &code, &state, browser).await;
-    let who = Who::of(ip, &headers);
     finish_redirect(&a, &headers, done, back, false, p.as_str(), &who).await
 }
 
 /// Where a provider's callback sends the browser: the session it signed in (and its cookie), or
 /// back with `?error=`. `sso`: a session for a person their SSO provider signed in.
 async fn finish_redirect(a: &Arc<Accounts>, headers: &HeaderMap, done: Result<Finished>, back: String, sso: bool, method: &str, who: &Who) -> Response {
-    // A sign-in that ended, in the audit log (a link is a write to one's own account: also there).
-    match &done {
-        Err(e) => a.record_sign_in(None, method, Some(e.redirect_code()), who),
-        Ok(Finished::Linked { .. }) => a.record(crate::audit::AccountEvent {
-            actor: "a signed-in person".into(),
+    // In the audit log: a link (the signed-in person's), or a sign-in's end. `method` empty: no
+    // sign-in happened (no code came back), nothing to record.
+    let link = |ok: bool, status: u16, refused: Option<&str>| {
+        a.record(crate::audit::AccountEvent {
+            actor: who.person.clone().unwrap_or_else(|| "anonymous".into()),
             action: "identity.link".into(),
             method: "-".into(),
-            target: None,
-            ok: true,
-            status: 200,
+            target: who.person.clone(),
+            ok,
+            status,
             ip: who.ip,
             user_agent: who.user_agent.clone(),
-            detail: serde_json::json!({ "method": method }),
-        }),
+            detail: serde_json::json!({ "method": crate::audit::clean_id(method), "refused": refused }),
+        })
+    };
+    match &done {
+        Err(_) if method.is_empty() => {}
+        // A signed-in person's flow that failed was a link of theirs.
+        Err(e) if who.person.is_some() => link(false, crate::audit::status_of(e), Some(e.redirect_code())),
+        Err(e) => a.record_sign_in(None, method, Some(e), false, who),
+        Ok(Finished::Linked { .. }) => link(true, 200, None),
+        Ok(Finished::SignIn { user, new: Some(new), .. }) => a.record_new(user, new, method, who),
         Ok(Finished::SignIn { .. }) => {}
     }
     let web = a.config.web_url.clone();
@@ -344,16 +346,16 @@ async fn finish_redirect(a: &Arc<Accounts>, headers: &HeaderMap, done: Result<Fi
     match done {
         Err(e) => fail(&back, e.redirect_code()),
         Ok(Finished::Linked { return_to }) => redirect(format!("{web}{return_to}"), Vec::new()),
-        Ok(Finished::SignIn { user, return_to }) => {
+        Ok(Finished::SignIn { user, return_to, .. }) => {
             let ua = user_agent(headers);
             let (u2, m2, w2) = (user.clone(), method.to_string(), who.clone());
             match blocking(a, move |a| if sso { a.issue_sso(&user, &ua) } else { a.issue(&user, &ua) }).await {
                 Err(e) => {
-                    a.record_sign_in(Some(&u2), &m2, Some(e.redirect_code()), &w2);
+                    a.record_sign_in(Some(&u2), &m2, Some(&e), false, &w2);
                     fail("/signin", e.redirect_code())
                 }
                 Ok(issued) => {
-                    a.record_sign_in(Some(&u2), &m2, None, &w2);
+                    a.record_sign_in(Some(&u2), &m2, None, issued.second_factor, &w2);
                     let ttl = if issued.second_factor { SECOND_FACTOR_TTL_MS } else { SESSION_TTL_MS };
                     let to = if issued.second_factor {
                         format!("{web}/signin?step=second_factor&return_to={}", url::form_urlencoded::byte_serialize(return_to.as_bytes()).collect::<String>())
@@ -394,11 +396,11 @@ async fn sso_start(State(a): S, me: Me, b: Bytes) -> Result<Response> {
     Ok(with_cookies(resp, [cookie(&a, a.config.oauth_cookie(), &started.browser, 10 * 60_000)]))
 }
 
-async fn sso_callback(State(a): S, ip: Ip, Path(id): Path<String>, Query(q): Query<Callback>, headers: HeaderMap) -> Response {
-    let who = Who::of(ip, &headers);
-    let method = format!("sso:{id}");
+async fn sso_callback(State(a): S, me: Me, ip: Ip, Path(id): Path<String>, Query(q): Query<Callback>, headers: HeaderMap) -> Response {
+    let who = Who::of(ip, &headers).person(me);
+    let method = format!("sso:{}", crate::audit::clean_id(&id));
     let (Some(code), Some(state)) = (q.code, q.state) else {
-        return finish_redirect(&a, &headers, Err(Error::BadRequest("the SSO provider".into(), Some("provider"))), "/signin".into(), true, &method, &who).await;
+        return finish_redirect(&a, &headers, Err(Error::BadRequest("the SSO provider".into(), Some("provider"))), "/signin".into(), true, "", &who).await;
     };
     let browser = roll_auth::cookie(&headers, a.config.oauth_cookie()).map(str::to_string);
     let done = a.sso_callback(&id, &code, &state, browser).await;
@@ -470,24 +472,14 @@ async fn second_step(a: Arc<Accounts>, owed: Owed, ip: Ip, headers: HeaderMap, b
             }
             a.complete(&owed, &ua)
         })();
+        // The person is known (they owe a second factor): a wrong code is theirs.
         match done {
             Ok(issued) => {
-                a.record_sign_in(Some(&owed.user), method, None, &who);
+                a.record_sign_in(Some(&owed.user), method, None, false, &who);
                 signed_in_response(a, &owed.user, issued)
             }
             Err(e) => {
-                // The person is known (they owe a second factor): a wrong code is theirs.
-                a.record(crate::audit::AccountEvent {
-                    actor: owed.user.clone(),
-                    action: "sign_in".into(),
-                    method: "-".into(),
-                    target: Some(owed.user.clone()),
-                    ok: false,
-                    status: 403,
-                    ip: who.ip,
-                    user_agent: who.user_agent.clone(),
-                    detail: serde_json::json!({ "method": method, "refused": e.redirect_code() }),
-                });
+                a.record_sign_in(Some(&owed.user), method, Some(&e), false, &who);
                 Err(e)
             }
         }

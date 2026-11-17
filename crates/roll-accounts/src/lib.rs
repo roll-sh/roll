@@ -911,7 +911,8 @@ impl Accounts {
     }
 
     /// Check a challenge's code: the user it signs in (made from the invite on first sign-in).
-    pub fn email_verify(&self, challenge: &str, code: &str) -> Result<String> {
+    /// The person an email code signs in, and whether their account was made now (an invite).
+    pub fn email_verify(&self, challenge: &str, code: &str) -> Result<(String, bool)> {
         let now = self.db.now_ms()?;
         // A try is used up before the code is checked, in one write: guesses sent in parallel
         // can't share one.
@@ -935,8 +936,8 @@ impl Accounts {
         }
         self.forget(&key)?;
         match (user, invite) {
-            (Some(u), _) => Ok(u),
-            (None, Some(inv)) => self.create_user(NewUser { invite_id: &inv, email: &email, hint: None, name: None, identity: None }),
+            (Some(u), _) => Ok((u, false)),
+            (None, Some(inv)) => self.create_user(NewUser { invite_id: &inv, email: &email, hint: None, name: None, identity: None }).map(|u| (u, true)),
             (None, None) => Err(Error::bad_code()),
         }
     }
