@@ -1681,7 +1681,35 @@ fn print_line(l: &Value) {
         Some("system") => "roll".to_string(),
         _ => l["instance"].as_str().map(|i| i.rsplit('-').next().unwrap_or(i).to_string()).unwrap_or_default(),
     };
+    // A stack trace's lines past its first: under it, with no time of their own.
+    if l["trace"] == "more" {
+        println!("{:8} {who:>5} ┆   {}", "", s(&l["text"]));
+        return;
+    }
     println!("{t} {who:>5} │ {}", s(&l["text"]));
+}
+
+/// A read log's lines with each stack trace's lines together, at its first line (another
+/// instance's lines that fell between come after it).
+fn traces_together(lines: &[Value]) -> Vec<&Value> {
+    let mut out: Vec<Vec<&Value>> = Vec::new();
+    let mut open: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+    for l in lines {
+        let k = (s(&l["instance"]), s(&l["stream"]));
+        if l["trace"] == "more"
+            && let Some(&i) = open.get(&k)
+        {
+            out[i].push(l);
+            continue;
+        }
+        if l["trace"] == "start" {
+            open.insert(k, out.len());
+        } else {
+            open.remove(&k);
+        }
+        out.push(vec![l]);
+    }
+    out.into_iter().flatten().collect()
 }
 
 /// Follow a deployment's build and rollout, then say how it ended.
@@ -2247,7 +2275,7 @@ pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&lines)?);
         return Ok(());
     }
-    for line in lines.as_array().into_iter().flatten() {
+    for line in traces_together(lines.as_array().map(Vec::as_slice).unwrap_or_default()) {
         print_line(line);
     }
     Ok(())

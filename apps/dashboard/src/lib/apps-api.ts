@@ -619,6 +619,8 @@ export interface LogLine {
   text: string;
   /** The level the app's line says (JSON's `level`/`severity`, logfmt's `level=`, a leading `ERROR`). */
   level?: LogLevel;
+  /** Part of a stack trace: `start` on its first line, `more` on the rest from its instance and stream. */
+  trace?: "start" | "more";
 }
 
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error" | "fatal";
