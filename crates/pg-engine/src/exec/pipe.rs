@@ -102,6 +102,38 @@ enum KeyMap {
     Vals(super::fasthash::HashMap<Box<[Value]>, Span>),
 }
 
+/// A hash join table's integer keys as bits (`Built::filter`): one bit per key in a table of
+/// at least 16 bits a key (a power of two, at most 2^23 bits: 1 MB), the key's bit its
+/// multiplicative hash's top bits. A clear bit: not a key (a set one: maybe).
+struct KeyFilter {
+    bits: Box<[u64]>,
+    shift: u32,
+}
+
+impl KeyFilter {
+    fn new(keys: impl Iterator<Item = i64>, n: usize) -> KeyFilter {
+        let nbits = (n.max(1) * 16).next_power_of_two().clamp(512, 1 << 23);
+        let mut f = KeyFilter { bits: vec![0u64; nbits / 64].into(), shift: 64 - nbits.trailing_zeros() };
+        for x in keys {
+            let b = f.bit(x);
+            f.bits[b >> 6] |= 1 << (b & 63);
+        }
+        f
+    }
+
+    #[inline]
+    fn bit(&self, x: i64) -> usize {
+        ((x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> self.shift) as usize
+    }
+
+    /// Whether `x` may be a key (false: it isn't).
+    #[inline]
+    fn maybe(&self, x: i64) -> bool {
+        let b = self.bit(x);
+        self.bits[b >> 6] >> (b & 63) & 1 != 0
+    }
+}
+
 /// A hash join's inner rows in their hash table: the bucket chains Postgres builds
 /// (`pghash::JoinTable`, for the order unmatched rows come out in) and, per key, the rows
 /// in their chain's order (the most recently inserted first; a merge join's: in their
@@ -109,6 +141,9 @@ enum KeyMap {
 pub struct Built {
     pub rows: Vec<Row>,
     map: KeyMap,
+    /// A filter of the integer keys (`KeyMap::Int`): a probe key whose bit is clear has no
+    /// candidates, found without a lookup (most of a selective join's probes).
+    filter: Option<KeyFilter>,
     cands: Vec<u32>,
     pub table: super::pghash::JoinTable,
     /// Each inner column's place in a compacted row (`compact`; `u32::MAX`: not kept).
@@ -181,7 +216,11 @@ impl Built {
             KeyMap::Int(m) => m.values_mut().for_each(span),
             KeyMap::Vals(m) => m.values_mut().for_each(span),
         }
-        Built { rows, map, cands, table, cols: None }
+        let filter = match &map {
+            KeyMap::Int(m) => Some(KeyFilter::new(m.keys().copied(), m.len())),
+            KeyMap::Vals(_) => None,
+        };
+        Built { rows, map, filter, cands, table, cols: None }
     }
 
     /// The candidates of a normalised probe key (none for a NULL in it).
@@ -192,7 +231,7 @@ impl Built {
         match &self.map {
             // (Every inner key is an int8: only an integer can equal one.)
             KeyMap::Int(m) => match key {
-                [v] => v.as_i64().and_then(|x| m.get(&x).copied()).unwrap_or((0, 0)),
+                [v] => v.as_i64().filter(|&x| self.filter.as_ref().is_none_or(|f| f.maybe(x))).and_then(|x| m.get(&x).copied()).unwrap_or((0, 0)),
                 _ => (0, 0),
             },
             KeyMap::Vals(m) => m.get(key).copied().unwrap_or((0, 0)),
@@ -204,6 +243,7 @@ impl Built {
     #[inline]
     pub fn int_span(&self, x: i64) -> Option<Span> {
         match &self.map {
+            KeyMap::Int(_) if self.filter.as_ref().is_some_and(|f| !f.maybe(x)) => Some((0, 0)),
             KeyMap::Int(m) => Some(m.get(&x).copied().unwrap_or((0, 0))),
             KeyMap::Vals(_) => None,
         }
@@ -649,5 +689,26 @@ mod tests {
         assert_eq!(b.lookup(&[Value::Int8(7)]).1, 0);
         assert_eq!(b.lookup(&[Value::Null]).1, 0);
         assert_eq!(b.lookup(&[num(1)]).1, 0);
+    }
+
+    /// The integer keys' filter never turns a key away: every key's candidates are found
+    /// (by `lookup` and `int_span`), and most others' none without a lookup.
+    #[test]
+    fn key_filter_keeps_every_key() {
+        let xs: Vec<i64> = (0..5000i64).map(|i| i * 7919 % 1_000_003 - 500_000).chain([i64::MIN, i64::MAX, 0, -1]).collect();
+        let rows: Vec<Row> = xs.iter().map(|&x| vec![Value::Int8(x)]).collect();
+        let keys: Vec<(Vec<Value>, usize)> = xs.iter().enumerate().map(|(i, &x)| (vec![Value::Int8(x)], i)).collect();
+        let table = super::super::pghash::JoinTable::build(8192, (0..xs.len()).map(|i| (i, i as u32, 0)).collect());
+        let b = Built::new(rows, keys, table, true);
+        for &x in &xs {
+            assert!(b.int_span(x).unwrap().1 >= 1, "{x}");
+            assert!(b.lookup(&[Value::Int8(x)]).1 >= 1, "{x}");
+        }
+        let set: std::collections::HashSet<i64> = xs.iter().copied().collect();
+        let f = b.filter.as_ref().unwrap();
+        let others: Vec<i64> = (0..100_000i64).map(|i| i * 13 + 7).filter(|x| !set.contains(x)).collect();
+        assert!(others.iter().all(|&x| b.int_span(x) == Some((0, 0))));
+        let maybe = others.iter().filter(|&&x| f.maybe(x)).count();
+        assert!(maybe * 5 < others.len(), "{maybe} of {} pass the filter", others.len());
     }
 }

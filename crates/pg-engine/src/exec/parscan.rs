@@ -540,7 +540,29 @@ impl<'a> Pre<'a> {
                     (false, Tri::T) => pass,
                 }));
             }
-            Some(_) => skip.extend((0..rows.len()).map(|r| self.fate(r))),
+            // (With a probe of an integer column: its misses a column at a time, the key's
+            // filter first, `Built::int_span`.)
+            Some(p) => {
+                use crate::storage::cols::ColData;
+                let pass = if self.plan.filter.is_some() { PASSED } else { ROW };
+                let key = self.plan.probe.and_then(|c| self.cols.cols.get(c)?.as_ref());
+                let miss = |x: i64| p.built.int_span(x).is_some_and(|s| s.1 == 0);
+                let fate = |odd: bool, t: Tri, null: bool, x: i64| match (odd, t) {
+                    (true, _) | (false, Tri::Out) => ROW,
+                    (false, Tri::F | Tri::N) => DROP,
+                    (false, Tri::T) if null || miss(x) => DROP,
+                    (false, Tri::T) => pass,
+                };
+                match key.map(|c| (&c.data, &c.nulls)) {
+                    Some((ColData::I32(v), nulls)) => {
+                        skip.extend((0..rows.len()).map(|r| fate(self.odd[r], self.tri[r], nulls[r], v[r] as i64)))
+                    }
+                    Some((ColData::I64(v), nulls)) => {
+                        skip.extend((0..rows.len()).map(|r| fate(self.odd[r], self.tri[r], nulls[r], v[r])))
+                    }
+                    _ => skip.extend((0..rows.len()).map(|r| self.fate(r))),
+                }
+            }
         }
         let n = skip.iter().filter(|s| **s == DROP).count();
         self.off = !self.worth(rows.len(), n as u64);
