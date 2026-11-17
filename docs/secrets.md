@@ -2813,6 +2813,9 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
 0c. **Azure DevOps** (building: `feature/roll-secrets-azure-devops`): a sync to variable groups
    as secret variables, and Azure Pipelines logging in with its own OIDC token (one service
    connection per identity), as Vault, Infisical and Doppler integrate.
+0e. **Four more syncs** (building: `feature/roll-secrets-more-syncs`): Supabase Edge Function
+   secrets, Cloudflare Pages variables, Azure App Configuration and HashiCorp Vault / OpenBao KV v2
+   (the gradual way off Vault), as Infisical syncs to each.
 0d. **A Ruby client** (#212), the same surface as the TypeScript, Go and Python ones, both sealed-box
    vectors opening in it, standard library only, with Rails notes. Writing it found that Python's
    and Go's `Values` printed every value and their `Client` the token (#213 fixes both).
@@ -2911,8 +2914,8 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
 11. *Waits on roll search:* #134 approved once its pin covers the endpoint's whole destination
    (`service_settings` but the key, rate limit and allocations; `task_settings` where they route).
 12. *Waits on roll apps:* their redeploys holding `wait_digest` once #79 lands; #191's log
-   redaction hiding every value that comes from roll secrets, not only `sensitive` ones (agreed;
-   #198 gives them `plain`, the link fields that aren't credentials, so a renamed one stays hidden).
+   redaction hiding every value that comes from roll secrets unless #198 marks it `plain`: done
+   (apps' #201, a41ac171c), a URL's password hidden even in a plain value.
    *Waits on roll previews:* masking secret values in a preview service's logs and its jobs' output
    (#200 and #203, approved here: logs, job output, screenshot text, health bodies, egress names;
    their egress proxy refuses before resolving, and a fork's preview now defaults to Roll-only
