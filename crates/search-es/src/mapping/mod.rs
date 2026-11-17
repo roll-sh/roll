@@ -53,6 +53,10 @@ pub struct MappingCtx {
     pub ignore_malformed: bool,
     pub ignore_above: i64,
     pub analyzers: HashSet<String>,
+    /// Custom analyzers that may only run at search time, with the filters that make them so
+    /// (an `updateable` synonym filter): Elasticsearch refuses them as a field's index-time
+    /// `analyzer`.
+    pub search_time_analyzers: BTreeMap<String, Vec<String>>,
     pub normalizers: HashSet<String>,
     pub similarities: HashSet<String>,
     pub total_fields_limit: i64,
@@ -101,6 +105,25 @@ pub struct MappingCtx {
     pub knn: bool,
 }
 
+/// `AnalysisMode.SEARCH_TIME` analyzers of the index's settings: those whose `filter` chain holds an
+/// `updateable` `synonym` or `synonym_graph` filter, with those filters, in chain order.
+fn search_time_analyzers(s: &Settings) -> BTreeMap<String, Vec<String>> {
+    let filters = s.by_prefix("index.analysis.filter.");
+    let updateable = |f: &str| {
+        matches!(filters.get(&format!("{f}.type")), Some("synonym" | "synonym_graph")) && filters.get(&format!("{f}.updateable")) == Some("true")
+    };
+    let analyzers = s.by_prefix("index.analysis.analyzer.");
+    let names: std::collections::BTreeSet<&str> = analyzers.keys().filter_map(|k| k.split('.').next()).collect();
+    names
+        .into_iter()
+        .filter_map(|a| {
+            let chain = analyzers.get_list(&format!("{a}.filter")).unwrap_or_default();
+            let offending: Vec<String> = chain.into_iter().filter(|f| updateable(f)).collect();
+            (!offending.is_empty()).then(|| (a.to_string(), offending))
+        })
+        .collect()
+}
+
 impl MappingCtx {
     pub fn from_settings(s: &Settings) -> MappingCtx {
         MappingCtx::from_settings_in(Dialect::Elasticsearch, s)
@@ -119,6 +142,7 @@ impl MappingCtx {
             ignore_malformed: b("index.mapping.ignore_malformed", logs),
             ignore_above: n("index.mapping.ignore_above", if logs { 8191 } else { i32::MAX as i64 }),
             analyzers: names("index.analysis.analyzer."),
+            search_time_analyzers: search_time_analyzers(s),
             normalizers: names("index.analysis.normalizer."),
             similarities: names("index.similarity."),
             total_fields_limit: n("index.mapping.total_fields.limit", 1000),
