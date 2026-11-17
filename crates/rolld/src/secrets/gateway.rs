@@ -381,7 +381,7 @@ impl Gateways {
         .await;
         match checked {
             Ok(Ok(_)) => None,
-            Ok(Err(roll_secrets::Error::Unauthorized(m))) => Some(m),
+            Ok(Err(roll_secrets::Error::Unauthorized(m) | roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m))) => Some(m),
             // A database hiccup isn't a revocation: the next check decides.
             Ok(Err(e)) => {
                 tracing::warn!(gateway = id, "checking a gateway's link failed: {e}");
@@ -425,7 +425,10 @@ async fn accept(hub: Arc<Gateways>, id: String, req: Request, guard: Guard) -> R
     let (s, i, u, g) = (secrets.clone(), id.clone(), user.clone(), grant.clone());
     match tokio::task::spawn_blocking(move || s.gateway_link(&i, operator, u.as_ref(), g.as_ref())).await {
         Ok(Ok(_)) => {}
-        Ok(Err(e)) => return refuse(StatusCode::UNAUTHORIZED, &e.to_string()),
+        Ok(Err(roll_secrets::Error::NotFound(m))) => return refuse(StatusCode::NOT_FOUND, &m),
+        Ok(Err(roll_secrets::Error::Forbidden(m))) => return refuse(StatusCode::FORBIDDEN, &m),
+        Ok(Err(roll_secrets::Error::Unauthorized(m))) => return refuse(StatusCode::UNAUTHORIZED, &m),
+        Ok(Err(_)) => return refuse(StatusCode::SERVICE_UNAVAILABLE, "try again"),
         Err(_) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, "try again"),
     }
     let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
@@ -508,6 +511,9 @@ mod tests {
         next.run(req).await
     }
 
+    /// A running gateway, and its log lines.
+    type Up = (tokio::task::JoinHandle<Result<(), String>>, Arc<Mutex<Vec<String>>>);
+
     struct Rolld {
         url: String,
         hub: Arc<Gateways>,
@@ -565,7 +571,7 @@ mod tests {
         }
 
         /// `roll gateway up`, in process, allowing `allow`; its log lines are kept.
-        fn up(&self, gw: &str, token: &str, allow: &[String]) -> (tokio::task::JoinHandle<Result<(), String>>, Arc<Mutex<Vec<String>>>) {
+        fn up(&self, gw: &str, token: &str, allow: &[String]) -> Up {
             let lines = Arc::new(Mutex::new(vec![]));
             let l = lines.clone();
             let agent = Agent { url: self.url.clone(), gateway: gw.into(), auth: Auth::Token(token.into()), allow: AllowList::parse(allow.iter().map(String::as_str)).unwrap(), version: "test".into(), log: Arc::new(move |s: &str| l.lock().unwrap().push(s.to_string())) };

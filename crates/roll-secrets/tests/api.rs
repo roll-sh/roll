@@ -2698,7 +2698,7 @@ async fn a_gateway_has_one_token_that_opens_only_its_link_and_reaches_its_projec
     assert_eq!(s, StatusCode::FORBIDDEN);
     let reader_grant = api.gate.tokens.lock().unwrap().get(&reader).cloned().unwrap();
     assert!(api.secrets.gateway_link(&gw, false, None, Some(&reader_grant)).is_err());
-    assert!(api.secrets.gateway_link(&ci["gateway"]["id"].as_str().unwrap().to_string(), false, None, Some(&grant)).is_err(), "nor another gateway's");
+    assert!(api.secrets.gateway_link(ci["gateway"]["id"].as_str().unwrap(), false, None, Some(&grant)).is_err(), "nor another gateway's");
 
     // Status as the link reports it; a replaced link's end leaves it online.
     let listed = api.ok(Method::GET, "/gateways", None).await;

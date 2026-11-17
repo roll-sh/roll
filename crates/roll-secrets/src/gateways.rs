@@ -243,17 +243,23 @@ impl Secrets {
     /// whose rules name the gateway (its token, an identity's login), the operator, or a person
     /// who administers its project. Whoever made it must still reach the project.
     pub fn gateway_link(&self, id: &str, operator: bool, user: Option<&roll_auth::SignedIn>, grant: Option<&roll_auth::Grant>) -> Result<LinkOf> {
-        let denied = || Error::Unauthorized(format!("this credential doesn't open gateway {id}"));
-        let found: Option<(String, String, String)> = self.db.read(|c| c.query_row("SELECT project_id, name, created_by FROM gateways WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?;
-        let (project, name, created_by) = found.ok_or_else(denied)?;
-        if let Some(g) = grant {
-            use roll_auth::scope;
-            let r = scope::Resource { product: "secrets".into(), id: Some(id.into()), ..Default::default() };
-            if g.allows(&r, scope::Action::Write) != scope::Outcome::Allow {
-                return Err(denied());
+        let denied = || Error::Forbidden(format!("this credential doesn't open gateway {id}"));
+        // Who's asking first (no credential: 401), and a grant that doesn't name the gateway learns
+        // nothing about it, not even whether it exists.
+        let caller = match grant {
+            Some(g) => {
+                use roll_auth::scope;
+                let r = scope::Resource { product: "secrets".into(), id: Some(id.into()), ..Default::default() };
+                if g.allows(&r, scope::Action::Write) != scope::Outcome::Allow {
+                    return Err(denied());
+                }
+                None
             }
-        } else {
-            let caller = self.caller_of(operator, user, None).map_err(|_| denied())?;
+            None => Some(self.caller_of(operator, user, None)?),
+        };
+        let found: Option<(String, String, String)> = self.db.read(|c| c.query_row("SELECT project_id, name, created_by FROM gateways WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?;
+        let (project, name, created_by) = found.ok_or_else(|| Error::NotFound(format!("no gateway {id}: it was deleted")))?;
+        if let Some(caller) = caller {
             caller.need(Action::Admin, &Scope::project(&project)).map_err(|_| denied())?;
         }
         if !self.maker_reaches(&created_by, &project)? {
