@@ -2568,6 +2568,10 @@ impl Cursor {
             return (0, 0);
         };
         let (mut n, mut last) = (0, 0);
+        // (Every entry of the block in range and no other source's entry before the block's
+        // end: the rows after one pushed go a run at a time, `Block::run_rows`. With another
+        // source's head (`bound`) the run takes a row or two, as interleaved sources do.)
+        let runs = (*whole || end.is_empty()) && bound.is_none();
         while n < max && pos.index() < b.len() {
             let k = pos.key();
             if (!*whole && !end.is_empty() && k >= end.as_slice()) || bound.is_some_and(|x| k >= x) || k.len() < 8 {
@@ -2588,9 +2592,17 @@ impl Cursor {
                 break;
             }
             b.push_value(pos, uk, batch);
-            b.step(pos);
             n += 1;
             last = kts;
+            if runs && n < max {
+                let (m, ver) = b.run_rows(pos, ts, max - n, resolve, batch);
+                if m > 0 {
+                    n += m;
+                    last = ver;
+                }
+            } else {
+                b.step(pos);
+            }
         }
         (n, last)
     }

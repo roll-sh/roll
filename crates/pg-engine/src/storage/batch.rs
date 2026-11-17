@@ -174,6 +174,26 @@ impl RowBatch {
         self.push_ent(key, self.bufs.len() as u32 - 1, off, len);
     }
 
+    /// The index rows pushed next refer to `buf` by (`push_shared`): the last row's when it
+    /// is the same buffer.
+    pub fn buf_index(&mut self, buf: &Bytes) -> u32 {
+        let same = self.bufs.last().is_some_and(|b| b.as_ptr() == buf.as_ptr() && b.len() == buf.len());
+        if !same {
+            self.bufs.push(buf.clone());
+        }
+        self.bufs.len() as u32 - 1
+    }
+
+    /// A row (not the first) whose key is the last row's first `shared` bytes and then
+    /// `suffix`, its value `bufs[buf][off..off + len]` (`buf_index`).
+    #[inline]
+    pub fn push_shared(&mut self, shared: usize, suffix: &[u8], buf: u32, off: usize, len: usize) {
+        let prev = self.key_start(self.ents.len() - 1);
+        self.keys.extend_from_within(prev..prev + shared);
+        self.keys.extend_from_slice(suffix);
+        self.ents.push(Ent { key_end: self.keys.len() as u32, buf, off: off as u32, len: len as u32 });
+    }
+
     /// A row whose value is `v`.
     pub fn push(&mut self, key: &[u8], v: Bytes) {
         let len = v.len();

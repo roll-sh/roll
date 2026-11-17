@@ -1157,6 +1157,80 @@ impl Block {
         }
     }
 
+    /// The version every `F_TS` entry has (the block's).
+    pub fn version(&self) -> u64 {
+        !u64::from_be_bytes(self.ts)
+    }
+
+    /// The entries after `pos` into `batch` while each is a row (its value stored: not
+    /// derived, not a deletion) of a version at or before `ts`, of another user key than the
+    /// row before, and (`resolve`) without out-of-line values; up to `max`. The caller pushed
+    /// `pos`'s entry as `batch`'s last row (under its user key) and knows every entry of the
+    /// block is in range. Each key is the last row's first `shared` bytes and the entry's own
+    /// (less its version, when stored), made in the batch: no `BlockPos` key per entry. `pos`
+    /// ends on the first entry not taken (or past the end). How many it took, and the last
+    /// one's version.
+    pub fn run_rows(&self, pos: &mut BlockPos, ts: u64, max: usize, resolve: bool, batch: &mut super::batch::RowBatch) -> (usize, u64) {
+        let b = &self.data[..];
+        let (mut p, mut v) = (pos.next as usize, pos.vnext as usize);
+        let mut i = pos.i + 1;
+        let Some(last) = batch.last_key() else {
+            self.step(pos);
+            return (0, 0);
+        };
+        let mut last_len = last.len();
+        let own = self.version() <= ts;
+        let mut ver = self.ts;
+        let buf = batch.buf_index(&self.data);
+        let mut n = 0;
+        while n < max && i < self.len {
+            let at = p;
+            let (shared, us, vf) = head(b, &mut p);
+            let unshared = us >> 2;
+            // (The last row's user key again, an older version: shared whole.)
+            if us & F_DERIVED != 0 || vf == 0 || shared >= last_len {
+                p = at;
+                break;
+            }
+            // (The entry's user key's own bytes: all it stores at the block's version, else
+            // all but its version's 8.)
+            let ukn = match us & F_TS {
+                0 if unshared >= 8 && !u64::from_be_bytes(b[p + unshared - 8..p + unshared].try_into().unwrap()) <= ts => unshared - 8,
+                0 => {
+                    p = at;
+                    break;
+                }
+                _ if own => unshared,
+                _ => {
+                    p = at;
+                    break;
+                }
+            };
+            let len = vf - 1;
+            // (At a restart, the key is stored whole: the last row's again is an older version.)
+            if (shared == 0 && batch.last_key() == Some(&b[p..p + ukn])) || (resolve && super::toast::has_external(&b[v..v + len])) {
+                p = at;
+                break;
+            }
+            batch.push_shared(shared, &b[p..p + ukn], buf, v, len);
+            ver = if ukn == unshared { self.ts } else { b[p + ukn..p + unshared].try_into().unwrap() };
+            p += unshared;
+            v += len;
+            last_len = shared + ukn;
+            n += 1;
+            i += 1;
+        }
+        if n > 0 {
+            // (On the entry stopped at: its key from the last row's and its version.)
+            pos.key.clear();
+            pos.key.extend_from_slice(batch.last_key().expect("a row"));
+            pos.key.extend_from_slice(&ver);
+            (pos.i, pos.next, pos.vnext) = (i - 1, p as u32, v as u32);
+        }
+        self.step(pos);
+        (n, !u64::from_be_bytes(ver))
+    }
+
     /// The bytes it holds (what the block cache counts).
     pub fn mem_bytes(&self) -> usize {
         self.data.len() + self.restarts.capacity() * 8 + self.rvals.capacity() * 4 + self.last_key.len() + std::mem::size_of::<Block>()
