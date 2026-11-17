@@ -24,7 +24,7 @@
 //! microseconds; Postgres on a runtime of its own).
 
 use code_sql::{Db, OptionalExtension, Row, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Clone, Debug, Serialize)]
@@ -69,6 +69,18 @@ pub struct SearchCluster {
     /// The signed-in person (`usr_…`) whose cluster it is; `None` for the operator's and admins'.
     /// Set on create, kept by branches, never changed.
     pub owner: Option<String>,
+    /// Who may reach its data plane (Elastic Cloud's traffic filters): canonical CIDRs, each with
+    /// an optional description; empty: anyone. Branches start with their parent's.
+    pub ip_allowlist: Vec<IpRule>,
+}
+
+/// One entry of a cluster's IP allowlist.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpRule {
+    /// Canonical: `203.0.113.7/32`, `10.0.0.0/8`, `2001:db8::/32`.
+    pub cidr: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// One metering interval of a loaded cluster.
@@ -153,10 +165,10 @@ CREATE INDEX IF NOT EXISTS search_storage_cluster ON search_storage (cluster_id,
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner";
+                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, ip_allowlist";
 
 fn row(r: &Row) -> code_sql::Result<SearchCluster> {
     Ok(SearchCluster {
@@ -180,7 +192,13 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         loaded_on: r.get(17)?,
         own_bytes: r.get(18)?,
         wake_at: r.get(19)?,
+        // Unreadable, the cluster can't be looked up (and so can't be reached), never opened up.
+        ip_allowlist: serde_json::from_str(&r.get::<_, String>(20)?).map_err(|e| code_sql::Error::Conversion(format!("ip_allowlist: {e}")))?,
     })
+}
+
+fn allowlist_json(rules: &[IpRule]) -> String {
+    serde_json::to_string(rules).expect("rules serialize")
 }
 
 /// Seconds in the 30-day month the GB-month figures use (AWS bills storage per 730-hour month;
@@ -216,6 +234,8 @@ impl Store {
         db.add_column("search_clusters", "wake_at", "INTEGER")?;
         // Clusters made before owners stay the operator's (none).
         db.add_column("search_clusters", "owner", "TEXT")?;
+        // Clusters made before allowlists are open, as they were.
+        db.add_column("search_clusters", "ip_allowlist", "TEXT NOT NULL DEFAULT '[]'")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_owner ON search_clusters (owner, created_at)")?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
@@ -240,7 +260,7 @@ impl Store {
                 }
             }
             x.execute(
-                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"),
+                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"),
                 params![
                     c.id,
                     c.name,
@@ -258,7 +278,8 @@ impl Store {
                     c.indices,
                     c.docs,
                     c.stored_bytes,
-                    c.owner
+                    c.owner,
+                    allowlist_json(&c.ip_allowlist)
                 ],
             )
             .map(|_| Inserted::Yes)
@@ -280,8 +301,18 @@ impl Store {
             }
             x.execute(
                 "UPDATE search_clusters SET flavor = ?2, password = ?3, idle_timeout_s = ?4, max_in_flight = ?5, max_body_mb = ?6,
-                 destructive_requires_name = ?7, password_rotated_at = ?8 WHERE id = ?1",
-                params![c.id, c.flavor, c.password, c.idle_timeout_s, c.max_in_flight, c.max_body_mb, c.destructive_requires_name, c.password_rotated_at],
+                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9 WHERE id = ?1",
+                params![
+                    c.id,
+                    c.flavor,
+                    c.password,
+                    c.idle_timeout_s,
+                    c.max_in_flight,
+                    c.max_body_mb,
+                    c.destructive_requires_name,
+                    c.password_rotated_at,
+                    allowlist_json(&c.ip_allowlist)
+                ],
             )?;
             Ok::<_, code_sql::Error>(Ok(()))
         })?)
@@ -508,6 +539,7 @@ mod tests {
             loaded_on: None,
             wake_at: None,
             owner: None,
+            ip_allowlist: Vec::new(),
         }
     }
 

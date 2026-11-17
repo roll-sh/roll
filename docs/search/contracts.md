@@ -15,6 +15,8 @@ Other `rolld` flags (`crates/rolld/src/search.rs`, `#[derive(clap::Args)] Search
 `--search-tls-cert/-key`, `--search-tls-self-signed` (a boot-time certificate; in a fleet the
 heartbeat publishes its pin), `--search-domain`, `--search-idle-unload` (300 s),
 `--search-cache-bytes`, `--search-sync-objects`, `--search-proxy-protocol` (PROXY protocol headers),
+`--search-client-ip-header` with `--search-trusted-proxies` (a trusted proxy's client address, for
+IP allowlists),
 `--search-history` (point-in-time window, 86400 s), `--search-gc-interval` (3600 s),
 `--search-test-features`, `--no-search`;
 `rolld --search-only` runs only search and its API (over TLS with the REST certificate when the
@@ -1467,7 +1469,10 @@ pub struct ClusterSpec { pub name, pub dialect, pub credentials: Vec<Credential>
                          pub max_in_flight: usize, pub max_body_bytes: Option<usize>, pub destructive_requires_name: bool,
                          pub max_requests_per_second: Option<f64> /* token bucket, burst max(1, rate); 429 */,
                          pub max_in_flight_bytes: Option<usize> /* body bytes in flight, default 2 × body limit; 429 like indexing pressure */,
-                         pub max_resident_bytes: Option<u64> /* over it the node commits the cluster's shards (buffers → files) */ }
+                         pub max_resident_bytes: Option<u64> /* over it the node commits the cluster's shards (buffers → files) */,
+                         pub ip_allowlist: allow::IpAllowlist /* checked against the request's Origin before credentials and wakes; empty: open */ }
+// allow::{IpAllowlist::{new, admits(Origin), contains}, Origin::{Client(IpAddr), Internal, Unknown}, parse_cidr (canonical; v4-mapped → v4),
+//         ClientAddresses::{new(header, trusted), client(peer, &HeaderMap)} (a header believed only from a trusted peer), REFUSED_BODY}
 pub struct Credential { pub user: Option<String>, pub api_key_id: Option<String>, pub secret: String, pub secret_sha256: Option<[u8; 32]> }
 // Credential::{password(s), hashed(sha256), for_user(u), for_api_key(id)}; search_server::secret_hash(s) -> [u8; 32]; compared in constant time
 pub struct NodeConfig { pub node_name, pub node_id: Option<String> /* lease identity, default node_name */, pub domain: Option<String>,
@@ -1497,7 +1502,9 @@ impl Node { fn new(catalog, stores, cfg) -> Arc<Node>; fn with_hooks(..); fn set
             async fn shutdown(timeout) /* refuse new requests (503 node_closed_exception, also for loaded clusters), let those in flight
                                          finish, unload all (flush, hand leases back; past `timeout` drop without flushing, lease revoked
                                          first so nothing more is acknowledged), close the WAL: SIGTERM */;
-            async fn admit(&EsRequest, sni) -> Result<Lease, Rejected>; async fn enter(..) /* auth + rate */; async fn handle(EsRequest) -> EsResponse;
+            async fn admit(&EsRequest, sni) -> Result<Lease, Rejected>; async fn enter(..) /* auth + rate; roll's own (Origin::Internal) */;
+            async fn enter_from(&EsRequest, sni, Origin) -> Result<Lease, Refused { Filtered, Rejected }> /* the data plane: allowlist first */;
+            async fn handle(EsRequest) -> EsResponse;
             fn loaded() -> Vec<String>; fn get_loaded(name) -> Option<Arc<Loaded>>;
             fn update_spec(ClusterSpec) /* live: credentials, rate, max_in_flight (permits added, or retired as they return), byte budget;
                                            also reaches a cluster whose load is in progress (applied as it is published); dialect and
@@ -1510,7 +1517,9 @@ impl Loaded { pub cluster: Arc<Cluster>; pub data: Option<Arc<persist::ClusterDa
               fn epoch() -> u64; fn bytes_in_flight(); pub wake_time: Duration; pub recovery: persist::RecoveryStats { shards, segments, fetching, records, orphans } }
 impl Lease { fn reserve_body(&mut self, &EsRequest, bytes) -> Result<(), Rejected>; fn reserve_more(..) /* grows the reservation (chunked frames,
               inflated output) */; fn over_budget(&EsRequest, used, bytes) -> Rejected; async fn acquire(&mut self, &EsRequest); async fn handle(&self, EsRequest) -> EsResponse /* + durability */ }
-pub async fn serve(listener, Arc<Node>, ListenOptions { tls: Option<TlsAcceptor>, proxy_protocol, body_timeouts, drain_timeout }) -> Result<()>; // also spawn(addr, ..)
+pub async fn serve(listener, Arc<Node>, ListenOptions { tls: Option<TlsAcceptor>, proxy_protocol, client: ClientAddresses, body_timeouts, drain_timeout }) -> Result<()>; // also spawn(addr, ..)
+pub async fn http::serve_request(node, Request<B>, Origin) -> Result<Response, DropConnection>;   // a request another server accepted
+pub fn http::filtered() -> Response;   // 403 {"ok":false,"message":"Forbidden due to traffic filtering"}
 pub async fn serve_until(listener, node, opts, Shutdown) -> Result<()>;  // Shutdown::new()/trigger(): stop accepting, finish in-flight requests
                                                                          // for DRAIN_TIMEOUT (10 s), then Node::cancel_tasks() and as long again
 // Node::cancel_tasks() -> usize: cancels every cancellable task of the loaded clusters (also at the start of Node::shutdown)
@@ -1722,13 +1731,16 @@ pub struct cluster::ClusterLeases;     // search_server::Leases over roll-cluste
 pub fn cluster::rest_router(Arc<Control>) -> axum::Router;   // the ES REST API on a fleet node: names the cluster without
                                        // checking credentials (search_server::auth::cluster_named), Cluster::dispatch to its owner,
                                        // bodies up to 4 MiB re-sent while the cluster moves (508 / unavailable)
-pub fn cluster::internal_router(Arc<Control>, Arc<Cluster>) -> axum::Router;   // /internal/search/rest/…, signed hops only
+pub fn cluster::internal_router(Arc<Control>, Arc<Cluster>) -> axum::Router;   // /internal/search/rest/…, signed hops only (require_signed: 401 otherwise)
+pub async fn cluster::serve_front(TcpListener, Arc<Control>, &ListenOptions, stop) -> io::Result<()>;   // a fleet node's REST port: PROXY header
+                                       // and trusted header decide ConnectInfo, which a forward carries signed (x-roll-code-client)
+pub fn cluster::origin_of(&Extensions) -> Origin;   // Forwarded.client (INTERNAL_CLIENT: roll's own), else ConnectInfo, else Unknown
 // /v1/search/clusters/{id}/… runs on the cluster's owner (cluster::on_owner); idle leases of unloaded clusters are given up.
 pub struct SqlCatalog;   // search_server::Catalog over SQLite: ClusterSpec { name, dialect from flavor, credentials: [password],
                          // idle_unload (0 = always loaded: such clusters load at create/update, node start and after a reload,
                          // and in a fleet every 3 lease periods wherever nobody holds them: Store::always_on(), a partial
                          // index on idle_timeout_s = 0), max_in_flight, max_body_bytes,
-                         // destructive_requires_name }
+                         // destructive_requires_name, ip_allowlist (the `ip_allowlist` column, JSON) }
 pub struct meter::MeterHooks(Arc<Meter>);   // metering half of the node's LifecycleHooks: exact loaded time; Meter::count_request(cluster)
 pub fn meter::engine_figures(&Cluster) -> EngineFigures;   // docs (Lucene-level, nested included, = _stats docs.count),
                                                           // deleted, segment and heap bytes over open shards; complete()

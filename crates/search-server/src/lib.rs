@@ -1,5 +1,7 @@
 //! roll search node: HTTP listener, tenants, auth, wake-on-request, idle unload, TLS.
 //!
+//! - [`allow`]: a cluster's IP allowlist, checked before authentication, and how a listener
+//!   decides a request's client address (PROXY protocol, a trusted proxy's header).
 //! - [`node::Node`] holds the loaded clusters: it authenticates and routes requests
 //!   ([`auth`]), wakes clusters from their [`catalog::StoreProvider`], enforces per-cluster
 //!   limits and unloads idle clusters.
@@ -17,6 +19,7 @@
 //!
 //! See `docs/search/architecture.md` and `docs/search/contracts.md`.
 
+pub mod allow;
 pub mod auth;
 pub mod catalog;
 pub mod http;
@@ -30,6 +33,7 @@ pub mod persist;
 pub mod process;
 pub mod store;
 
+pub use allow::{ClientAddresses, IpAllowlist, Origin};
 pub use catalog::{Catalog, ClusterSpec, Credential, MemoryStores, StaticCatalog, StoreProvider, secret_hash};
 pub use http::{ListenOptions, Shutdown, serve, serve_until, spawn};
 pub use lease::{Leases, MemoryLeases, Owner};

@@ -300,6 +300,7 @@ mod tests {
                     loaded_on: None,
                     wake_at: None,
                     owner: None,
+                    ip_allowlist: Vec::new(),
                 },
                 crate::store::Caps::NONE,
             )

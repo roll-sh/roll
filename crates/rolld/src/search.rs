@@ -72,6 +72,15 @@ pub struct SearchArgs {
     /// Expect PROXY protocol headers on the REST port (behind an AWS NLB or HAProxy).
     #[arg(long = "search-proxy-protocol", env = "ROLL_SEARCH_PROXY_PROTOCOL", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     pub search_proxy_protocol: bool,
+    /// The header a trusted proxy in front of the REST port puts the client's address in (e.g.
+    /// `CF-Connecting-IP`), for clusters' IP allowlists. Believed only from a peer in
+    /// --search-trusted-proxies; never `X-Forwarded-For`, which clients write themselves.
+    #[arg(long = "search-client-ip-header", env = "ROLL_SEARCH_CLIENT_IP_HEADER")]
+    pub search_client_ip_header: Option<String>,
+    /// Comma-separated CIDRs of the proxies whose --search-client-ip-header is believed (the
+    /// peer is the PROXY header's source with --search-proxy-protocol).
+    #[arg(long = "search-trusted-proxies", env = "ROLL_SEARCH_TRUSTED_PROXIES")]
+    pub search_trusted_proxies: Option<String>,
     /// Point-in-time branching window, in seconds (0 disables it).
     #[arg(long = "search-history", env = "ROLL_SEARCH_HISTORY", default_value_t = 86_400)]
     pub search_history_s: u64,
@@ -156,7 +165,8 @@ impl Search {
         if let Some(p) = public {
             p.search(&mut cfg);
         }
-        let mut opts = search_server::ListenOptions { proxy_protocol: args.search_proxy_protocol, ..Default::default() };
+        let client = search_server::ClientAddresses::new(args.search_client_ip_header.as_deref(), args.search_trusted_proxies.as_deref())?;
+        let mut opts = search_server::ListenOptions { proxy_protocol: args.search_proxy_protocol, client, ..Default::default() };
         if let (Some(c), Some(k)) = (&args.search_tls_cert, &args.search_tls_key) {
             anyhow::ensure!(fleet.is_none(), "--search-tls-cert is for a single node: in a cluster TLS ends at the edge");
             opts.tls = Some(search_server::net::tls_acceptor(&std::fs::read(c)?, &std::fs::read(k)?)?);
@@ -206,12 +216,12 @@ impl Search {
     /// Serves the REST listener until it fails or [`Search::shutdown`] stops it.
     pub async fn serve(&self) -> anyhow::Result<()> {
         let listener = self.listener.lock().await.take().ok_or_else(|| anyhow::anyhow!("search listener already serving"))?;
-        // On a cluster each request runs on its cluster's owner: the front names the cluster and
-        // dispatches it (`search_control::cluster`).
+        // On a cluster each request runs on its cluster's owner: the front names the cluster,
+        // decides the client's address (for IP allowlists) and dispatches it, the address
+        // signed (`search_control::cluster`).
         if self.cluster.is_some() {
-            let front = search_control::cluster::rest_router(self.control.clone());
             let stop = self.stop.clone();
-            axum::serve(listener, front).with_graceful_shutdown(async move { stop.wait().await }).await?;
+            search_control::cluster::serve_front(listener, self.control.clone(), &self.opts, async move { stop.wait().await }).await?;
             return Ok(());
         }
         search_server::serve_until(listener, self.control.node.clone(), self.opts.clone(), self.stop.clone()).await

@@ -773,10 +773,6 @@ fn mapping_lines(v: &Value) -> Vec<String> {
     out
 }
 
-fn percent_decode(s: &str) -> String {
-    urlencoding::decode(s).map(|c| c.into_owned()).unwrap_or_else(|_| s.to_string())
-}
-
 pub struct Search(pub Api);
 
 impl Search {
@@ -885,40 +881,46 @@ impl Brancher for Search {
 
     /// Rewrite the masked fields in the branch's documents (`_update_by_query`, Painless): the
     /// parent's segments are shared, so the branch's rewritten documents are its own and the
-    /// parent keeps its values. Run again it's harmless: masked values stay masked.
-    async fn mask(&self, _parent: &str, branch: &str, kept: Option<&str>, fields: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
-        let vars = self.connect("", branch, kept).await?;
-        let url = vars.iter().find(|(k, _)| k == "ELASTICSEARCH_URL").map(|(_, v)| v.clone()).ok_or_else(|| anyhow::anyhow!("the search branch {branch} has no URL"))?;
-        let mut u = reqwest::Url::parse(&url)?;
-        let (user, pass) = (percent_decode(u.username()), u.password().map(percent_decode));
-        let _ = u.set_username("");
-        let _ = u.set_password(None);
-        let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(300)).build()?;
-        let send = |req: reqwest::RequestBuilder| if user.is_empty() { req } else { req.basic_auth(&user, pass.as_deref()) };
+    /// parent keeps its values. Run again it's harmless: masked values stay masked. Through the
+    /// operator's console request, as `schema` reads: roll's own call, so no cluster password and
+    /// no IP allowlist (a branch keeps its parent's, which needn't admit this node).
+    async fn mask(&self, _parent: &str, branch: &str, _kept: Option<&str>, fields: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+        let console = format!("/v1/search/clusters/{}/request", seg(branch));
+        // `(status, body)` of one REST request on the branch.
+        let run = |method: &'static str, path: String, body: Option<Value>| {
+            let console = console.clone();
+            async move {
+                let mut req = json!({ "method": method, "path": path });
+                if let Some(b) = body {
+                    req["body"] = b;
+                }
+                let v = self.0.post(&console, req).await?;
+                let text = v["body"].as_str().unwrap_or("").to_string();
+                anyhow::Ok((v["status"].as_u64().unwrap_or(0), text))
+            }
+        };
         let mut masked: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         // The branch's indices, so an index whose name has dots is split off whole.
-        let listed = send(http.get(u.join("_cat/indices?h=index&format=json")?)).send().await?;
-        let indices: Vec<String> = listed.json::<Vec<Value>>().await.unwrap_or_default().iter().filter_map(|x| x["index"].as_str().map(str::to_string)).collect();
+        let (_, listed) = run("GET", "/_cat/indices?h=index&format=json".into(), None).await?;
+        let indices: Vec<String> = serde_json::from_str::<Vec<Value>>(&listed).unwrap_or_default().iter().filter_map(|x| x["index"].as_str().map(str::to_string)).collect();
         for (spec, rule) in fields {
             let Some((index, path)) = roll_previews::mask::split_mask(spec, &indices) else { anyhow::bail!("{spec:?} isn't index.field") };
-            let target = u.join(&format!("{}/_update_by_query?conflicts=proceed&refresh=true", seg(index)))?;
             // Every document, not those `exists` finds: a field that isn't indexed (or has no doc
             // values) is in `_source` all the same.
             let body = json!({
                 "query": { "match_all": {} },
                 "script": { "lang": "painless", "source": SEARCH_MASK_SCRIPT, "params": { "path": path.split('.').collect::<Vec<_>>(), "rule": rule } },
             });
-            let res = send(http.post(target).json(&body)).send().await?;
-            let status = res.status();
-            let v: Value = res.json().await.unwrap_or(Value::Null);
+            let (status, text) = run("POST", format!("/{}/_update_by_query?conflicts=proceed&refresh=true", seg(index)), Some(body)).await?;
             // An index the branch doesn't have holds nothing to mask.
-            if status.as_u16() == 404 {
+            if status == 404 {
                 continue;
             }
+            let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             // A document skipped on a version conflict kept its value: masking isn't done.
             let failures = v["failures"].as_array().map_or(0, Vec::len);
             let conflicts = v["version_conflicts"].as_u64().unwrap_or(0);
-            anyhow::ensure!(status.is_success() && failures == 0 && conflicts == 0, "masking {spec}: {status} {}", v.to_string().chars().take(300).collect::<String>());
+            anyhow::ensure!((200..300).contains(&status) && failures == 0 && conflicts == 0, "masking {spec}: {status} {}", text.chars().take(300).collect::<String>());
             masked.insert(index);
         }
         // The documents as they were stay in the segments the branch shares with its parent,
@@ -926,12 +928,10 @@ impl Brancher for Search {
         // (`_terms_enum`, suggesters): every segment that holds one is rewritten as the branch's
         // own without it (as Postgres masking's VACUUM FULL), the parent's untouched.
         for index in masked {
-            let settings = u.join(&format!("{}/_settings", seg(index)))?;
-            let res = send(http.put(settings).json(&json!({ "index.merge.policy.expunge_deletes_allowed": 0.0 }))).send().await?;
-            anyhow::ensure!(res.status().is_success(), "masking {index}: its merge policy: {}", res.status());
-            let merge = u.join(&format!("{}/_forcemerge?only_expunge_deletes=true", seg(index)))?;
-            let res = send(http.post(merge)).send().await?;
-            anyhow::ensure!(res.status().is_success(), "masking {index}: expunging what was masked: {} {}", res.status(), res.text().await.unwrap_or_default().chars().take(300).collect::<String>());
+            let (status, _) = run("PUT", format!("/{}/_settings", seg(index)), Some(json!({ "index.merge.policy.expunge_deletes_allowed": 0.0 }))).await?;
+            anyhow::ensure!((200..300).contains(&status), "masking {index}: its merge policy: {status}");
+            let (status, text) = run("POST", format!("/{}/_forcemerge?only_expunge_deletes=true", seg(index)), None).await?;
+            anyhow::ensure!((200..300).contains(&status), "masking {index}: expunging what was masked: {status} {}", text.chars().take(300).collect::<String>());
         }
         Ok(())
     }

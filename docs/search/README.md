@@ -29,6 +29,7 @@ pnpm dev                                # dashboard: /dashboard/search
 | `--search-cache-bytes`                             | 10 GiB            | local disk cache for segments |
 | `--search-sync-objects`                            | off               | acknowledge writes once the WAL is in object storage (ephemeral disks) |
 | `--search-proxy-protocol`                          | off               | PROXY protocol headers (behind an NLB or HAProxy) |
+| `--search-client-ip-header` (`ROLL_SEARCH_CLIENT_IP_HEADER`), `--search-trusted-proxies` (`ROLL_SEARCH_TRUSTED_PROXIES`) | | the header a trusted proxy writes the client's address in (`CF-Connecting-IP`), believed only from those CIDRs; for IP allowlists (architecture.md, "Client addresses and IP allowlists") |
 | `--search-history` (`ROLL_SEARCH_HISTORY`)         | `86400`           | point-in-time branching window, seconds (0: off) |
 | `--search-gc-interval`                             | `3600`            | garbage collection of unreferenced objects (0: off; one node per bucket) |
 | `--search-test-features`                           | off               | publish Elasticsearch's test features (YAML suites through `--cluster-hook`; test deployments only) |
@@ -60,6 +61,8 @@ roll search clusters branch app app-yesterday --at 1d    # as of a day ago
 roll search clusters indices app
 roll search clusters usage app                           # cost vs Elastic Cloud / Amazon OpenSearch
 roll search clusters password app | unload app | delete app | url app | show app | list
+roll search clusters update app --allow 203.0.113.0/24=office --allow 2001:db8::/32   # only these networks reach its endpoint
+roll search clusters update app --allow-any                                          # anyone again
 roll search index create app books '{"mappings":{"properties":{"title":{"type":"text"}}}}'
 roll search docs put app books 1 '{"title":"dune"}' --refresh
 roll search index bulk app books @books.ndjson --refresh
@@ -131,13 +134,29 @@ them (`api::Caller`):
 `crates/search-control/tests/control.rs` `people_see_only_their_own_clusters` and
 `people_are_held_to_their_cluster_caps` cover it.
 
+**IP allowlists** (Elastic Cloud's traffic filters, AWS OpenSearch Service's IP policies). A
+cluster's `ip_allowlist` lists the networks that may reach its endpoint: at most 64 entries,
+each a CIDR or address, IPv4 or IPv6, given as a string or `{cidr, description?}` (as roll
+apps' `allow_ips`), kept canonical (`10.1.2.3/8` is `10.0.0.0/8`). `[]`, the default, admits
+anyone. The cluster's owner sets it like any setting: `PATCH`, `roll search clusters update
+--allow`/`--allow-any`, or the dashboard's Settings. It is the `PATCH` route's `admin` action
+for roll-access. Every request to the endpoint is checked first, before its credentials and
+before a sleeping cluster wakes. A request from elsewhere gets 403
+`{"ok":false,"message":"Forbidden due to traffic filtering"}`, wrong credentials included. Only
+the data plane is filtered: `/v1/search`, the dashboard and its console stay behind roll's
+sign-in and work from anywhere. Branches start with their parent's list. How the client address
+is decided (PROXY protocol, a trusted proxy's header, the fleet's signed forwards), and what an
+owner must allow for roll apps and previews, is in architecture.md, "Client addresses and IP
+allowlists". `crates/search-control/tests/control.rs` `ip_allowlists_turn_addresses_away_before_credentials`
+and `tests/cluster.rs` `a_forward_carries_the_clients_address_to_the_owner` cover it.
+
 | method | path | |
 | ------ | ---- | - |
 | GET | `/v1/search` | version, endpoint, defaults, pricing; for a person their `caps`; for the operator and admins also `storage`, `loaded` clusters and the `cache` |
 | GET | `/v1/search/clusters` | list (a person: their own) |
 | POST | `/v1/search/clusters` | create `{name, flavor?, parent?, at?, idle_timeout_s?, max_in_flight?, max_body_mb?, destructive_requires_name?}`; answers with `url`, `username`, `password` (once) and `id` — the shape `search-yaml run --cluster-hook` expects; `owner` is the signed-in person who isn't an admin, and a branch's is its parent's |
 | GET | `/v1/search/clusters/{id or name}` | settings, `status` (`loaded` with live index count and requests in flight, and live `docs` once every index is open, or `asleep` with `wakes_at`, unix seconds, when a background job is due to wake it), last metered `indices`/`docs`/`stored_bytes` and `own_bytes` (what a branch references that its parent's latest commit points don't; all of `stored_bytes` for a cluster that isn't a branch), `url`, `branches` |
-| PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`; the idle timeout, body limit and `max_in_flight` apply at once (also to a cluster that is waking up); a new flavor or `destructive_requires_name` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
+| PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`, `ip_allowlist` (below); the idle timeout, body limit, `max_in_flight` and allowlist apply at once (also to a cluster that is waking up); a new flavor or `destructive_requires_name` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
 | DELETE | `/v1/search/clusters/{id}` | waits for running requests and for a wake in progress (which is locked out and unloaded, never left serving); branches keep working |
 | GET, POST | `/v1/search/clusters/{id}/branches` | list; branch `{name, at?}` (`at`: Unix seconds within `--search-history`) |
 | POST | `/v1/search/clusters/{id}/password` | rotate; the new password is in the answer, once. From the answer on, the old one fails, also on a cluster that was waking up |
@@ -206,7 +225,7 @@ them, so opening the console never wakes a sleeping cluster. The Relevance tab e
 (`_synonyms`: rules as rows or as text, ids kept, each save saying which indices' analyzers it
 reloaded, and the index settings that use a set) and query rules (`_query_rules`: each rule as a
 sentence, criteria and pin or hide actions edited in a form, reordered by `priority`, and a test that
-runs the `rule` retriever and marks the pinned hits; `lib/search-relevance.ts`). The dashboard reaches `/v1/search`
+runs the `rule` retriever and marks the pinned hits; `lib/search-relevance.ts`). Settings has the cluster's network access (its IP allowlist, one network a line). The dashboard reaches `/v1/search`
 through rolld's API like every product (`VITE_ROLL_API`, the session from sign-in), and search
 clusters appear in workspace projects (the `search` resource kind). A person who isn't an admin
 sees their own clusters, and the Search page leaves out the storage location and the cache, which
