@@ -112,7 +112,10 @@ export interface Run {
 export interface Scheduled {
   name: string;
   schedule: string;
-  command: string;
+  /** A command each due time, or (absent) `path`'s call. */
+  command?: string;
+  /** A web service's path GET'd each due time instead (Vercel's crons), with `Authorization: Bearer $CRON_SECRET`. */
+  path?: string;
   timezone?: string;
   timeout_s?: number;
 }
@@ -464,7 +467,7 @@ export interface Environment extends EnvironmentSummary {
   /** How full its volume was when last measured (hourly), when it has one. */
   volume_used?: { bytes: number; at: number };
   /** Its schedules as they stand: when each is next due, and the job it last started. */
-  schedules?: { name: string; next_run_at: number | null; last: { job: string; status: Job["status"]; started_at: number } | null }[];
+  schedules?: { name: string; next_run_at: number | null; last: { job: string; status: Job["status"]; started_at: number } | null; last_call?: { at: number; status?: number; ms: number; error?: string } }[];
   /** Its instances keep crashing: three or more in the last ten minutes. */
   crash_loop: { crashes: number; last_at: number; last_error: string } | null;
   /** A gradual rollout under way: the new deployment and the percent of requests it takes. */

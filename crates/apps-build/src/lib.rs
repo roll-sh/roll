@@ -121,6 +121,16 @@ pub struct Plan {
     /// service sets none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<String>,
+    /// vercel.json's `crons`: paths the service calls on a schedule ([`site_configs::vercel_crons`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crons: Vec<Cron>,
+}
+
+/// A path called on a schedule (vercel.json's `crons`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Cron {
+    pub path: String,
+    pub schedule: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -235,6 +245,13 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
     {
         p.release = Some(cmd.clone());
         p.notes.push(format!("pre-deploy: the Procfile's release: {cmd}"));
+    }
+    // Vercel's crons, whatever builds it (a Next.js app's usually).
+    if let Some(text) = tree.read("vercel.json").and_then(|b| String::from_utf8(b).ok()) {
+        for c in site_configs::vercel_crons(&text) {
+            p.notes.push(format!("vercel.json's cron: {} calls {}", c.schedule, c.path));
+            p.crons.push(c);
+        }
     }
     for (store, why) in uses(tree) {
         p.uses.push(store);
@@ -401,6 +418,7 @@ impl Draft {
             spa: false,
             uses: Vec::new(),
             release: None,
+            crons: Vec::new(),
         }
     }
 }

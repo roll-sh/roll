@@ -546,6 +546,21 @@ pub struct ScheduleState {
     pub next_run_at: Option<i64>,
     /// The job it last started, and how that went.
     pub last: Option<ScheduleRun>,
+    /// A path schedule's last call, and how it answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_call: Option<ScheduleCall>,
+}
+
+/// A path schedule's call: when, its status (none: it never answered, `error` says why) and how
+/// long it took.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScheduleCall {
+    pub at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    pub ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -572,7 +587,13 @@ pub struct Scheduled {
     pub name: String,
     /// Five fields or `@hourly`, `@daily` … ([`crate::cron::Schedule`]).
     pub schedule: String,
+    /// A command, each due time a job; or (empty) `path`'s.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
+    /// A web service's path each due time GETs instead (Vercel's crons): through its own proxy
+    /// on the owner, `Authorization: Bearer $CRON_SECRET` when the environment has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// The schedule's time zone (IANA; default UTC).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
@@ -768,8 +789,20 @@ impl Run {
                 return bad("schedules' names are unique: a-z, 0-9 and -, at most 32");
             }
             crate::cron::Schedule::parse(&sc.schedule, sc.timezone.as_deref()).map_err(|e| Error::BadRequest(format!("run.schedules.{}: {e}", sc.name)))?;
-            if sc.command.trim().is_empty() || sc.command.len() > 2000 || sc.command.contains('\0') {
-                return bad("schedules' commands are 1–2000 characters");
+            match &sc.path {
+                Some(p) => {
+                    if !sc.command.is_empty() {
+                        return bad("a schedule runs a command or calls a path, not both");
+                    }
+                    if self.kind != RunType::Web || self.tcp {
+                        return bad("a schedule's path is for a web service (it's called over HTTP)");
+                    }
+                    if !p.starts_with('/') || p.len() > 2000 || !p.bytes().all(|b| b.is_ascii_graphic()) {
+                        return bad("a schedule's path is an absolute path, like /api/cron");
+                    }
+                }
+                None if sc.command.trim().is_empty() || sc.command.len() > 2000 || sc.command.contains('\0') => return bad("schedules' commands are 1–2000 characters"),
+                None => {}
             }
             if sc.timeout_s.is_some_and(|t| !(1..=86_400).contains(&t)) {
                 return bad("schedules' timeout_s is 1–86400");

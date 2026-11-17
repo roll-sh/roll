@@ -536,14 +536,18 @@ pub enum AppsCmd {
         cancel: Option<String>,
         /// Run a command on a schedule (Heroku Scheduler): `--schedule NAME --at "0 3 * * *"
         /// --command "node cleanup.js"` adds or replaces it; each due time is a job.
-        #[arg(long, value_name = "NAME", requires_all = ["at", "command"], conflicts_with_all = ["logs", "cancel", "unschedule"])]
+        #[arg(long, value_name = "NAME", requires = "at", conflicts_with_all = ["logs", "cancel", "unschedule"])]
         schedule: Option<String>,
         /// With `--schedule`: five cron fields, or `@hourly`, `@daily` …
         #[arg(long, requires = "schedule")]
         at: Option<String>,
         /// With `--schedule`: the command.
-        #[arg(long, requires = "schedule")]
+        #[arg(long, requires = "schedule", required_unless_present_any = ["path", "logs", "cancel", "unschedule"])]
         command: Option<String>,
+        /// With `--schedule`: a path of a web service to GET instead (Vercel's crons), with
+        /// `Authorization: Bearer $CRON_SECRET` when it has one.
+        #[arg(long, requires = "schedule", conflicts_with = "command")]
+        path: Option<String>,
         /// With `--schedule`: its time zone (IANA; default UTC).
         #[arg(long, requires = "schedule")]
         tz: Option<String>,
@@ -2987,7 +2991,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Jobs { target, logs, follow, cancel, schedule, at, command, tz, unschedule } => {
+        AppsCmd::Jobs { target, logs, follow, cancel, schedule, at, command, path, tz, unschedule } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/jobs", env_path(&svc, &target.env));
             let mut schedules: Vec<Value> = svc["run"]["schedules"].as_array().cloned().unwrap_or_default();
@@ -2999,7 +3003,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 if let Some(name) = schedule {
                     schedules.retain(|x| x["name"] != name.as_str());
-                    let mut one = json!({ "name": name, "schedule": at, "command": command });
+                    let mut one = match &path {
+                        Some(p) => json!({ "name": name, "schedule": at, "path": p }),
+                        None => json!({ "name": name, "schedule": at, "command": command }),
+                    };
                     if let Some(z) = tz {
                         one["timezone"] = json!(z);
                     }
@@ -3008,7 +3015,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 let v = api.call(reqwest::Method::PATCH, &format!("/v1/apps/services/{}", enc(&s(&svc["id"]))), Some(json!({ "run": { "schedules": schedules } }))).await?;
                 if !json_out {
                     for x in v["run"]["schedules"].as_array().into_iter().flatten() {
-                        println!("{:<16} {:<16} {}", s(&x["name"]), s(&x["schedule"]), s(&x["command"]));
+                        let what = x["path"].as_str().map(|p| format!("GET {p}")).unwrap_or_else(|| s(&x["command"]));
+                        println!("{:<16} {:<16} {what}", s(&x["name"]), s(&x["schedule"]));
                     }
                     return Ok(());
                 }
