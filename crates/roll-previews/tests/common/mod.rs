@@ -207,6 +207,8 @@ pub struct FakeApps {
     /// The variables each service was last deployed with.
     pub vars: Mutex<HashMap<(String, String), Vars>>,
     pub removed: Mutex<Vec<(String, String)>>,
+    /// What every service's log holds.
+    pub log: Mutex<Vec<String>>,
     /// What each seed or release job was run able to reach.
     pub seed_egress: Mutex<Vec<roll_previews::settings::EgressRule>>,
     /// What each service was deployed able to reach.
