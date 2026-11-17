@@ -929,6 +929,14 @@ impl Apps {
         let r = &tpl.run.rollout;
         let every = Duration::from_millis((r.step_s as u64 * 250).min(5000));
         let sys = log.stream(Stream::System);
+        // Waiting for a person (`rollout.manual`) is undone however the rollout ends.
+        struct Unwait(Arc<Apps>, String);
+        impl Drop for Unwait {
+            fn drop(&mut self) {
+                self.0.rollout_waits.lock().remove(&self.1);
+            }
+        }
+        let _unwait = Unwait(self.clone(), id.to_string());
         for &share in &r.steps {
             live.set_share(share);
             live.take_served();
@@ -966,7 +974,64 @@ impl Apps {
                 }
             }
             sys.line(format!("canary: {share}% passed ({} requests, {:.1}% 5xx)", new.requests, new.error_pct()));
+            if !r.manual {
+                continue;
+            }
+            // Held at this split until a person says, still judged as it goes.
+            let gate = Arc::new((parking_lot::Mutex::new(None), tokio::sync::Notify::new()));
+            self.rollout_waits.lock().insert(id.to_string(), gate.clone());
+            self.changed(service);
+            sys.line(format!("canary: held at {share}% until someone advances it, puts it all live or rolls it back"));
+            let said = loop {
+                if let Some(a) = gate.0.lock().take() {
+                    break a;
+                }
+                tokio::select! {
+                    _ = gate.1.notified() => continue,
+                    _ = tokio::time::sleep(every) => {}
+                    _ = cancel.cancelled() => anyhow::bail!("canceled"),
+                }
+                anyhow::ensure!(self.owns(service), "this node no longer holds the service; the node that took it over deploys");
+                let active = live.template().map(|t| t.deployment.clone());
+                for (dep, s) in live.take_served() {
+                    let into = if dep == tpl.deployment {
+                        &mut new
+                    } else if active.as_deref() == Some(dep.as_str()) {
+                        &mut old
+                    } else {
+                        continue;
+                    };
+                    into.requests += s.requests;
+                    into.errors += s.errors;
+                    into.crashes += s.crashes;
+                }
+                if let Some(why) = judge(new, old, r.error_pct) {
+                    sys.line(format!("canary: rolled back at {share}% while held: {why}"));
+                    anyhow::bail!("rolled back at {share}% of requests: {why}");
+                }
+            };
+            self.rollout_waits.lock().remove(id);
+            match said {
+                crate::model::RolloutAction::Advance => sys.line("canary: advanced by a person"),
+                crate::model::RolloutAction::All => {
+                    sys.line("canary: put all live by a person");
+                    return Ok(());
+                }
+                crate::model::RolloutAction::Abort => {
+                    sys.line(format!("canary: rolled back at {share}% by a person"));
+                    anyhow::bail!("rolled back at {share}% of requests by a person");
+                }
+            }
         }
+        Ok(())
+    }
+
+    /// `POST …/deploys/{dep}/rollout {action}`: what a person says to a rollout held for them.
+    /// 409 when it isn't waiting (not a manual rollout, between steps, done).
+    pub fn rollout_action(&self, deployment: &str, action: crate::model::RolloutAction) -> Result<()> {
+        let gate = self.rollout_waits.lock().get(deployment).cloned().ok_or_else(|| Error::Conflict(format!("{deployment} isn't waiting for anyone (a manual rollout waits after each step passes)")))?;
+        *gate.0.lock() = Some(action);
+        gate.1.notify_one();
         Ok(())
     }
 
@@ -2461,6 +2526,9 @@ fn egress_vars(proxy: &str, services: &[String], vars: &[(String, String)]) -> V
     let proxies = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"].map(|k| (k.to_string(), proxy.to_string()));
     proxies.into_iter().chain(["NO_PROXY", "no_proxy"].map(|k| (k.to_string(), direct.clone()))).collect()
 }
+
+/// A manual rollout's wait: what a person said, and its wake.
+pub(crate) type RolloutGate = Arc<(parking_lot::Mutex<Option<crate::model::RolloutAction>>, tokio::sync::Notify)>;
 
 /// What a person's hold (`PUT … {held: true}`) is kept as, where a rollback keeps its own id.
 pub const MANUAL_HOLD: &str = "manual";

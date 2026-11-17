@@ -618,9 +618,30 @@ export function ServicePage({ id, env: envParam, tab: tabParam }: { id: string; 
             Rolling out
           </span>
           <span className="min-w-0 flex-1 text-muted">
-            {env.canary.deployment.slice(-6)} takes {env.canary.share}% of requests; it rolls back by itself if it answers more 5xx than allowed.
+            {env.canary.deployment.slice(-6)} takes {env.canary.share}% of requests;{" "}
+            {env.canary.waiting ? "its step passed, and it waits for you (it still rolls back by itself on 5xx)." : "it rolls back by itself if it answers more 5xx than allowed."}
           </span>
-          <button type="button" className={btn} disabled={busy} onClick={() => runner.run("cancel", () => appsApi.cancel(service.id, envName, env.canary!.deployment))}>
+          {env.canary.waiting && (
+            <>
+              <button type="button" className={btn} disabled={busy} onClick={() => runner.run("advance", () => appsApi.rollout(service.id, envName, env.canary!.deployment, "advance"))}>
+                Next step
+              </button>
+              <button type="button" className={btn} disabled={busy} onClick={() => runner.run("all", () => appsApi.rollout(service.id, envName, env.canary!.deployment, "all"))}>
+                Put it all live
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            className={btn}
+            disabled={busy}
+            onClick={() => runner.run("cancel", async () => {
+              const d = env.canary!.deployment;
+              // A rollout waiting for a person is stopped there; one in its timed step, cancelled.
+              if (env.canary!.waiting) await appsApi.rollout(service.id, envName, d, "abort");
+              else await appsApi.cancel(service.id, envName, d);
+            })}
+          >
             Roll back
           </button>
         </div>

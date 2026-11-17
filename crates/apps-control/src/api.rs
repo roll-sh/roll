@@ -82,6 +82,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
         .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
+        .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
         .route(&format!("{env}/redeploy"), post(redeploy))
@@ -1032,6 +1033,18 @@ async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, St
     let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
     let d = apps.rollback(&id, &env, &dep, actor(&ext), keep).await?;
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
+}
+
+#[derive(Deserialize)]
+struct RolloutBody {
+    action: crate::model::RolloutAction,
+}
+
+async fn rollout_action(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, Json(b): Json<RolloutBody>) -> R {
+    apps.deployment(&id, &env, &dep).await?;
+    apps.rollout_action(&dep, b.action)?;
+    apps.audit("rollout.decided", &id, &env, actor(&ext), json!({ "deployment": dep, "action": format!("{:?}", b.action).to_ascii_lowercase() })).await;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "deployment": dep }))).into_response())
 }
 
 async fn rollback_previous(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {

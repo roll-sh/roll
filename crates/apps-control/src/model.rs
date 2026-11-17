@@ -636,12 +636,29 @@ pub struct Rollout {
     pub steps: Vec<u8>,
     pub step_s: u32,
     pub error_pct: u8,
+    /// After each step passes, its split stays until a person says (Vercel's manual rolling
+    /// releases, Cloud Run's held traffic split): `POST …/deploys/{dep}/rollout`, still judged
+    /// for errors meanwhile.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub manual: bool,
 }
 
 impl Default for Rollout {
     fn default() -> Self {
-        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5 }
+        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false }
     }
+}
+
+/// What a person says to a rollout that waits for them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RolloutAction {
+    /// To the next step (or all requests after the last).
+    Advance,
+    /// To all requests now.
+    All,
+    /// Back to the deployment that was live.
+    Abort,
 }
 
 impl Rollout {
@@ -919,6 +936,9 @@ pub struct Scaling {
 pub struct Canary {
     pub deployment: String,
     pub share: u8,
+    /// Its step passed and it waits for a person (`rollout.manual`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub waiting: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

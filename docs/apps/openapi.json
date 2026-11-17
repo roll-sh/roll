@@ -1545,6 +1545,61 @@
         "x-roll-action": "deploy*"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollout": {
+      "post": {
+        "description": "Answers 202 `{deployment}`; 409 when it isn't waiting.",
+        "operationId": "postServicesIdEnvironmentsEnvDeploysDepRollout",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dep",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{action: \"advance\" | \"all\" | \"abort\"}`"
+        },
+        "responses": {
+          "202": {
+            "description": "202 `{deployment}`; 409 when it isn't waiting"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Rollout deploy",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "deploy*"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/domains": {
       "get": {
         "description": "Answers `Domain[]`.",
