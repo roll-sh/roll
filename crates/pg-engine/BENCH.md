@@ -473,6 +473,162 @@ A range read's 100 rows are a small part of its 345k instructions (the statement
 the wire); a point select's path (`point.rs`, `Block::seek`) didn't change. Lane A was shared
 with another agent's benchmarks all morning (a pair took 20-30 minutes of waiting): two pairs.
 
+## Short write transactions, round 7 (2026-11-17, agent 243)
+
+HANDOFF "Short write transactions, round 7" has what changed, what was dropped and the leads.
+Kept: an index scan's kill marks left while a writer holds the table's size model
+(`cand/a243`; measured as `c1` = `51b963219` on `61414bc58`, `base2` = `61414bc58`).
+
+Harness: agent 235's (`~/.cache/a243/bench`, copied from `~/.cache/a235/bench`), lane A (servers
+on CPUs 6,7,24,25, 8 GiB; clients on 8,9,26,27), `short_txn` of 100,000 accounts, fsync and
+synchronous_commit on, `CHECKPOINT` and 5 s of quiet before each 10 s run, plain `--profile
+dist` builds through `tools/dist.sh`; instructions and cycles per transaction counted over the
+whole run (generic counters, every server thread), CPU µs/txn the server's user+sys. A pair is
+redone (4 tries) when either run saw more than 1.0 core of other tenants' work on the server
+CPUs; flagged pairs are listed, left out of medians. New this round: arms `bin@K=V` (one binary,
+`ROLL_EXP_K=V` run-time switches, so a change and its absence are the same build) and
+`bench/adj.py`, which fits each pair's log tps (and log cycles) ratio against the pairs'
+foreign-core difference: the intercept is the change at equal foreign load, ± its standard
+error. The host was loaded all day (load averages 20-65); log tps fell 0.45-0.6 per core of
+foreign work in every series, so a pair's tps difference is mostly the load difference unless
+both runs saw the same; cycles per transaction moved 0.04-0.12 per core.
+
+### The kept change, its builds against the origin head
+
+**32 clients, first series**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 (flagged) | 5,096 → 2,902 | -43.1% | -4.61% | +3.6% | +1.8% | +65.1% | 1.41 / 2.65 |
+| 2 (flagged) | 6,364 → 3,779 | -40.6% | -10.70% | +1.9% | +1.4% | +49.2% | 0.88 / 2.28 |
+| 3 | 9,016 → 5,716 | -36.6% | -5.69% | +2.0% | +10.2% | +21.1% | 0.35 / 0.99 |
+| 4 | 6,628 → 8,072 | +21.8% | +8.87% | -6.5% | -14.8% | -23.1% | 0.87 / 0.55 |
+| 5 | 6,752 → 8,008 | +18.6% | +3.59% | -3.0% | -4.6% | -10.1% | 0.99 / 0.63 |
+
+At equal foreign load (`adj.py`): tps: 4 pairs, at equal foreign -0.3% (±8.1% s.e.), per foreign core -0.44 log; user cycles/txn: 4 pairs, at equal foreign -2.9% (±1.5% s.e.), slope +0.04.
+
+**32 clients, second series (load averages 22-34)**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 6,908 → 7,410 | +7.3% | -4.01% | -3.1% | -3.6% | -8.1% | 0.86 / 0.81 |
+| 2 | 7,381 → 8,315 | +12.7% | +2.15% | -6.4% | -8.3% | -12.1% | 0.64 / 0.52 |
+| 3 | 9,023 → 9,199 | +2.0% | +0.77% | -6.4% | -5.7% | -7.9% | 0.30 / 0.53 |
+| 4 | 7,105 → 9,193 | +29.4% | +4.61% | -6.1% | -14.5% | -21.4% | 0.64 / 0.35 |
+| 5 | 7,956 → 7,496 | -5.8% | -0.75% | +3.0% | +6.8% | +6.1% | 0.53 / 0.79 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign +8.7% (±1.9% s.e.), per foreign core -0.48 log; user cycles/txn: 5 pairs, at equal foreign -3.9% (±1.8% s.e.), slope +0.10.
+
+**8 clients, first series**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 9,512 → 7,032 | -26.1% | -2.35% | +8.1% | +21.3% | +31.8% | 0.52 / 0.96 |
+| 2 | 10,371 → 8,131 | -21.6% | -2.77% | +6.4% | +17.8% | +21.8% | 0.26 / 0.83 |
+| 3 | 10,733 → 11,456 | +6.7% | +1.30% | -2.1% | -6.6% | -7.7% | 0.15 / 0.16 |
+| 4 | 9,931 → 10,486 | +5.6% | -0.31% | -1.1% | -1.4% | -1.9% | 0.23 / 0.23 |
+| 5 | 7,754 → 8,033 | +3.6% | -0.96% | -0.3% | -3.9% | -6.2% | 0.82 / 0.53 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign -1.2% (±4.7% s.e.), per foreign core -0.45 log; user cycles/txn: 5 pairs, at equal foreign +0.5% (±1.3% s.e.), slope +0.11.
+
+**8 clients, second series**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 7,349 → 8,893 | +21.0% | +2.22% | -3.1% | -11.1% | -15.5% | 0.88 / 0.61 |
+| 2 | 9,637 → 8,728 | -9.4% | -0.73% | +5.1% | +12.4% | +9.1% | 0.40 / 0.46 |
+| 3 | 9,477 → 9,962 | +5.1% | -2.37% | -2.1% | -2.8% | -4.1% | 0.29 / 0.27 |
+| 4 | 9,878 → 9,598 | -2.8% | +0.21% | -0.0% | +2.3% | -0.6% | 0.24 / 0.31 |
+| 5 | 10,188 → 10,299 | +1.1% | -0.20% | +0.7% | +2.2% | -0.4% | 0.28 / 0.39 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign +1.9% (±2.7% s.e.), per foreign core -0.62 log; user cycles/txn: 5 pairs, at equal foreign +0.2% (±1.2% s.e.), slope +0.14.
+
+**Point selects, 8 clients (point_select, 100,000 rows)**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 72,057 → 55,132 | -23.5% | -0.16% | +5.4% | +15.9% | +26.0% | 0.29 / 0.72 |
+| 2 | 76,491 → 65,527 | -14.3% | -0.00% | +5.1% | +15.1% | +17.2% | 0.22 / 0.41 |
+| 3 | 78,812 → 75,350 | -4.4% | -0.04% | +3.9% | +5.2% | +6.7% | 0.18 / 0.19 |
+| 4 | 72,321 → 71,685 | -0.9% | +0.02% | -1.4% | -0.6% | +1.0% | 0.22 / 0.31 |
+| 5 | 71,642 → 70,119 | -2.1% | +0.02% | -0.1% | -0.2% | +2.0% | 0.28 / 0.44 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign +1.0% (±4.1% s.e.), per foreign core -0.63 log; user cycles/txn: 5 pairs, at equal foreign +0.9% (±2.2% s.e.), slope +0.09.
+
+### The same change and the dropped ones as run-time switches of one binary (`exp2`, on `0ade2f479`)
+
+**Kill marks left while the model is busy, 32 clients**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 8,782 → 8,670 | -1.3% | +0.17% | +0.4% | +4.0% | +1.0% | 0.42 / 0.34 |
+| 2 | 7,857 → 9,935 | +26.4% | +1.50% | -4.5% | -9.8% | -13.8% | 0.83 / 0.36 |
+| 3 | 6,524 → 8,026 | +23.0% | -3.30% | -6.4% | -8.5% | -16.9% | 0.89 / 0.41 |
+| 4 | 7,398 → 9,495 | +28.3% | +3.56% | -4.5% | -13.1% | -20.0% | 0.74 / 0.36 |
+| 5 | 7,029 → 7,892 | +12.3% | +1.76% | -3.6% | -3.6% | -7.5% | 0.75 / 0.66 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign +1.5% (±5.6% s.e.), per foreign core -0.48 log; user cycles/txn: 5 pairs, at equal foreign -0.7% (±1.6% s.e.), slope +0.10.
+
+**Kill marks left while the model is busy, 8 clients**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 (flagged) | 4,968 → 6,835 | +37.6% | +4.62% | -6.6% | -12.8% | -20.1% | 1.76 / 1.28 |
+| 2 | 8,974 → 7,732 | -13.8% | +1.32% | +1.8% | +6.1% | +9.6% | 0.57 / 0.95 |
+| 3 | 9,037 → 9,708 | +7.4% | +4.56% | +1.9% | +0.9% | -3.3% | 0.62 / 0.48 |
+| 4 | 7,652 → 10,512 | +37.4% | +1.10% | +2.3% | -3.7% | -4.3% | 0.34 / 0.30 |
+| 5 | 10,825 → 10,977 | +1.4% | +2.85% | +2.1% | +1.6% | +0.0% | 0.14 / 0.10 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign +8.5% (±6.5% s.e.), per foreign core -0.52 log; user cycles/txn: 5 pairs, at equal foreign +0.8% (±1.4% s.e.), slope +0.09.
+
+**nextval logged ahead without its fsync wait (dropped), 32 clients**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 10,111 → 8,819 | -12.8% | -2.06% | +11.2% | +12.8% | +15.3% | 0.19 / 0.47 |
+| 2 | 6,879 → 6,377 | -7.3% | +6.37% | +3.3% | +4.2% | +6.8% | 0.72 / 0.95 |
+| 3 | 7,744 → 7,020 | -9.3% | -0.19% | +3.6% | +7.3% | +13.5% | 0.49 / 0.69 |
+| 4 | 8,024 → 7,654 | -4.6% | -0.74% | +1.5% | +5.9% | +8.1% | 0.60 / 0.56 |
+| 5 | 9,276 → 9,632 | +3.8% | -2.90% | -3.7% | -5.6% | -6.0% | 0.25 / 0.21 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign -2.0% (±2.4% s.e.), per foreign core -0.36 log; user cycles/txn: 5 pairs, at equal foreign -0.3% (±2.0% s.e.), slope +0.28.
+
+**nextval logged ahead without its fsync wait (dropped), 8 clients**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 8,452 → 9,297 | +10.0% | +1.55% | -2.4% | -6.0% | -8.5% | 0.73 / 0.47 |
+| 2 | 7,972 → 8,490 | +6.5% | +0.34% | -1.4% | -6.7% | -5.2% | 0.77 / 0.79 |
+| 3 | 9,051 → 9,087 | +0.4% | -4.21% | -1.1% | +4.6% | +5.5% | 0.47 / 0.48 |
+| 4 (flagged) | 4,581 → 3,919 | -14.5% | -9.09% | -1.0% | -0.3% | +6.4% | 1.96 / 2.15 |
+| 5 (flagged) | 4,891 → 4,971 | +1.6% | -0.53% | -1.4% | -1.4% | -2.9% | 1.63 / 1.67 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign +0.4% (±2.8% s.e.), per foreign core -0.49 log; user cycles/txn: 5 pairs, at equal foreign -1.4% (±0.1% s.e.), slope +0.03.
+
+**Directed group-commit wakeups (dropped), 32 clients**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 (flagged) | 8,282 → 3,842 | -53.6% | -13.11% | +7.4% | +14.8% | +74.0% | 0.42 / 2.28 |
+| 2 | 9,967 → 6,944 | -30.3% | -0.82% | +15.7% | +28.9% | +36.8% | 0.28 / 0.64 |
+| 3 | 8,549 → 8,935 | +4.5% | -4.08% | -5.5% | -10.0% | -11.3% | 0.34 / 0.35 |
+| 4 | 7,080 → 7,770 | +9.7% | -1.20% | +4.3% | +7.9% | +3.9% | 0.70 / 0.54 |
+| 5 | 10,370 → 8,666 | -16.4% | -5.47% | +7.1% | +13.6% | +14.5% | 0.25 / 0.35 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign -5.7% (±6.8% s.e.), per foreign core -0.40 log; user cycles/txn: 5 pairs, at equal foreign +4.4% (±4.2% s.e.), slope +0.03.
+
+**Directed group-commit wakeups (dropped), 8 clients**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 10,727 → 9,337 | -13.0% | -1.95% | +2.6% | +7.0% | +4.4% | 0.13 / 0.26 |
+| 2 | 11,200 → 10,769 | -3.8% | -0.24% | +2.4% | +5.1% | +4.1% | 0.17 / 0.12 |
+| 3 | 9,255 → 7,968 | -13.9% | +2.55% | +2.2% | +4.7% | +3.6% | 0.58 / 0.70 |
+| 4 | 8,839 → 8,614 | -2.5% | -4.66% | -4.8% | -2.6% | -3.8% | 0.61 / 0.50 |
+| 5 | 7,324 → 8,474 | +15.7% | +4.77% | +5.7% | -4.7% | -5.8% | 0.89 / 0.77 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign -4.5% (±3.1% s.e.), per foreign core -0.83 log; user cycles/txn: 5 pairs, at equal foreign +1.6% (±1.9% s.e.), slope +0.06.
+
 ## Short write transactions, round 6 (2026-11-14/15, agent 235)
 
 HANDOFF "Short write transactions, round 6" has what changed, what was dropped and the leads.

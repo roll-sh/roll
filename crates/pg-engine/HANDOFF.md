@@ -11653,6 +11653,113 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Short write transactions, round 7 (agent 243)
+
+BENCH.md "Short write transactions, round 7" has the pairs. Kept, one commit (handed in as
+`cand/a243`):
+
+1. *An index scan's kill marks are left while a writer holds the table's size model or waits
+   for it.* `sizing::mark_passed` (`Kills::mark`, the marks of the entries a scan passed,
+   _bt_killitems) took the table's model lock (`db.relfiles.of(table)`) shared to look for
+   entries to kill; now, when the caller doesn't want the entries back, it tries the lock and
+   leaves the marks when a writer holds it or waits for it (parking_lot's writer bit). That is
+   PostgreSQL's own behaviour under concurrent writes: _bt_killitems marks nothing on a leaf
+   page that changed since the scan read it, and the marks are hints a later scan or VACUUM
+   makes again. Single-session runs (golden, isolation's steps) never find the lock busy; the
+   models' outcome changes only where a concurrent writer was in the way. Why it mattered: an
+   off-CPU profile of the connection threads at 32 clients (`perf record -e sched:sched_switch
+   --call-graph dwarf`, `~/.cache/a243/bench/offcpu.sh` + `offagg.py`) had 5.4 thread-seconds
+   of sleep per second in the size models: `sizing::updated` (the UPDATE's heap model write,
+   exclusive) 2.1 s/s, and `mark_passed` behind it 2.5 s/s, 730 µs a sleep. 32 threads on 4
+   CPUs: a writer preempted holding the lock stops every scan of the table until it runs
+   again. With the change the `mark_passed` sleeps are gone (the writers' own remain).
+
+Measured (plain dist, `base2` = origin `61414bc58` against `c1` = it plus the change, and the
+same change behind a run-time switch in one binary; alternating pairs, agent 235's counting):
+at 32 clients, 14 pairs, tps +3.9% (±2.2% s.e.) and user cycles per transaction -3.1% (±0.7%)
+at equal foreign load (below); the last five clean pairs of the two builds tps +7.3% (4 of 5
+up), cycles -6.1%, p50 -8.1%. At 8 clients neutral: 15 pairs, tps +3.4% (±2.5%), cycles +0.5%
+(±0.6%). Point reads (8 clients, 5 pairs): instructions per query equal (-0.00% median, every
+pair within 0.16%), tps +1.0% (±4.1%) adjusted. Verification: `tools/quick-check.sh` on
+`c74a5eb1d` (on `6d3b7e9e5`): 10 test binaries built, clippy no new warning, 117 tests in 7
+binaries, regress 51,148 / 51,150 (0 newly differing), isolation 1647/1648, pg_dump_tap 14,609;
+golden, models_kept, kept_plans, heap_order_scan and big_tables also under `--profile
+verify-checked` (all pass).
+
+**Measuring on a loaded host.** Other sessions' unpinned builds ran on the lane all day (load
+averages 20-65, 0.1-2.6 cores of foreign work on the server CPUs). tps follows that load
+almost linearly: over every series, log(tps) fell 0.45-0.6 per foreign core (a pair 0.5 cores
+apart differs by ~25%), more than any change measured here, and the pair medians of the first
+gates (+23% tps for this change at 32 clients) were mostly that. `bench/adj.py` fits each
+series' per-pair log tps (and log cycles) ratios against the pairs' foreign-core difference;
+the intercept is the change at equal load, with its standard error. Cycles per transaction
+barely depend on the load (slope +0.04 to +0.12 per core), so they are the reliable signal on
+this host; tps differences under ~4% can't be resolved.
+
+Dropped (patches in `~/.cache/a243/patches/`):
+
+- *An admission limit* (`admission-limit-and-exp-switches.patch`, lead 3): a connection thread
+  waited for one of K places before working on a client message, gave it up while waiting for
+  its client or in a long wait (WAL fsync, heavyweight lock, pg_sleep), waited at most 2 ms.
+  At 32 clients (single runs of one binary against its switch off) K=4 -19% tps, K=6 -3%, futex calls per commit 4.2 -> 13 and context switches
+  10.6 -> 15.3: the per-statement handoff (a sleep and a wake for most statements) costs more
+  than the preemptions it avoids. A limit would need a handoff without a sleep (the waiting
+  thread spinning while the holder finishes, or one thread running several sessions).
+- *nextval's logged-ahead value without its own fsync wait* (235's patch, rebased:
+  `nextval-unwaited-log-rebased.patch`): again a loss at 32 clients, 4 clean pairs tps -8.3%
+  median (every pair down), CPU per transaction +6.6%; at 8 clients +6.5% (3 pairs) but +0.4%
+  (±2.8%) adjusted for load. With the size-model change the stall it removes is the next
+  queue (`identity_nextval` sleeps 3.75 thread-s per s at 32 clients in a busy-disk run), but
+  removing it lets more threads work at once on 4 CPUs, and that costs more: a cycles:u+k
+  profile by symbol of the two arms has the same shape (no lock or spin symbol grows;
+  parking_lot and sched_yield 0.5% in both), the extra CPU spread over everything.
+- *235's directed group-commit wakeups* (`directed-wake.patch`, lead 2): instructions per
+  transaction -1.2% (every pair down at 32 clients), but tps -5.7% (±6.8%) at 32 and -4.5%
+  (±3.1%) at 8 clients adjusted for load, cycles +4.4% and +2.4%. The fsyncing commit unparks
+  every covered waiter itself, one futex wake each, before it returns to its own client;
+  `notify_all` woke one and requeued the rest on the mutex, so the wakes were spread over the
+  woken threads. Futex calls per commit at 32 clients 4.1 -> 3.9, context switches 10.3 ->
+  10.4: no saving to pay for the leader's longer path.
+
+**Group commit (lead 1)**: fdatasync per commit on this lane 0.50-0.52 at 32 clients and
+0.72-0.77 at 8 (as 235 found). An fdatasync of a few hundred bytes into the preallocated WAL
+takes 23 µs at the median on this disk (p99 47 µs, md RAID0 of two NVMe), so the fsync is a
+small part of a commit's ~160 µs cycle at 32 clients: groups are as big as the commits that
+arrive while the next leader is woken and scheduled. PostgreSQL's and pgrust's four commits
+an fsync come from their CPUs being saturated (3.75 of 4 cores against roll's 3.35): a woken
+waiter waits for a core, and more commits join meanwhile. Halving roll's fsyncs would save at
+most ~0.25 x (pwrite + fdatasync's CPU, ~10-15 µs) a commit, under 1.5% of a transaction's
+~300 µs of CPU; the idle core time at 32 clients was lock waits (above), not the WAL. Not
+pursued further.
+
+**Plain build against PGO (lead 4)**: `tools/dist-pgo.sh` of `61414bc58` against the plain
+build, 8 clients, three alternating runs each, counted on the server per transaction: user
+instructions -21.6%, cycles -38%, uops not delivered by the front end -55%, i-cache fetch
+stalls (`icache_16b.ifdata_stall`) -61%, iTLB walks -60%, DSB-to-MITE switch penalty -17%.
+PGO wins in both ways at once: fewer instructions (it inlines whole hot chains: the memtable
+skiplist's search and insert into `Txn::commit`, `Block::seek`, `SstReader::block_with` and
+`find_block` into `storage::point::newest` / `PointReader::first_raw`, `btsim` leaf reads into
+`Kills::mark`, `Lps::get` into the heap model's callers) and a hot path laid out together
+(the front-end stalls). By symbol, no single function holds more than ~2.4% of the plain
+build's cycles that PGO removes; a few `#[inline]` hints would take back a percent or two at
+most, under what this host can gate, and the layout part needs the profile (or a link order
+file from one). The lever is shipping the PGO build, not source changes.
+
+What is left, by size:
+
+- **The size models' one lock per table** is the 32-client limit now: `sizing::updated` holds
+  the table's model exclusively for every UPDATE (2.1-2.6 thread-s/s of sleep at 32 clients,
+  0.6-1.3 ms a sleep). The heap model (`heapsim::Heap`: pages, the key map, the pending lists)
+  would need finer locking (a lock per page range with the key map apart) for 32 clients to
+  scale like 8; PostgreSQL locks one buffer at a time.
+- **nextval's stall** (above): it can land only with something that keeps the runnable
+  threads near the core count without a sleep per statement.
+- PGO for the shipped build (the pipeline is in `tools/dist-pgo.sh`).
+- Harness: `~/.cache/a243/bench` (235's, with arms `bin@K=V,...` running one binary with
+  `ROLL_EXP_K=V` switches, `matrix.sh`, `offcpu.sh`/`offagg.py`, `fe.sh`, `symprof.sh` on lane
+  A, `adj.py`). The exploration binary's switches are in the admission patch
+  (`src/admission.rs`).
+
 ## Short write transactions, round 6 (agent 235)
 
 **Coordinator's note (2026-11-17):** only step 1 (the UPDATE's unique-key point probe) landed with this section. Step 2 (directed group-commit wakeups, `d68ca4019` on `cand/a235`) is held back: on the newest base it lowered instructions and cycles per transaction but throughput fell 2.3% at 8 clients and 5.1% at 32 on quiet pairs. It lands only after a quiet-host measurement shows a throughput win.
