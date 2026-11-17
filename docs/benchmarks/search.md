@@ -151,6 +151,368 @@ same binary with the scalar kernel (`random-10-percent:8` 1.63 against 1.61 ms C
 16.5M instructions in zstd, decompressing stored-field chunks to read 100 hits' `_id`;
 Elasticsearch's stored fields use LZ4.
 
+## Round 9: the fixed tracks rerun (2026-11-16, `c2b47b251`)
+
+PR #29 (`37bd17608`) fixed six of Round 8's losses, each measured by a script A/B (Round 8's
+"Rally rerun pending" notes). This round reruns their four tracks under Rally. `search-dev` is
+built in release (line tables) at `c2b47b251`, origin/main, which includes #29. The harness and
+its parameters are Round 8's: the same `bench-search-rerun.sh`, the same track parameters and
+subsets, lane b (server CPUs `10,11,28,29`, Rally on `12,13,30,31`, held under its lock), 4 GiB
+each, three rounds with the order rotating every round. noaa ran six rounds, two sets of three
+(see the load notes). Tables: Rally's p50 service time (ms), or the bulk task's median throughput,
+median (min-max) over the rounds, and roll against the best of the other two (below 1: roll is
+faster or indexes more; "tie" where the ranges overlap). Raw outputs: `~/.cache/rsearch/round9/`
+on the machine that ran them.
+
+**The six fixes under Rally** (Round 8 → Round 9, p50 ms unless noted):
+
+| track | task | Round 8 roll | Round 9 roll | Round 9 Elasticsearch | Round 9 OpenSearch | roll / best, Round 8 → 9 | verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| noaa | `range_field_conjunction_big_range_big_term_query` | 49.40 (48.82-51.28) | 6.80 (6.32-11.92) | 10.15 (8.61-13.31) | 13.21 (12.04-15.04) | 5.12 → 0.67 (tie) | holds: roll faster than Elasticsearch in all six round pairs |
+| noaa | `index` (docs/s) | 52,474 (50,723-54,088) | 63,974 (58,662-89,608) | 54,918 (35,218-82,107) | 36,892 (30,261-55,045) | 1.29 → 0.86 (tie) | holds: ahead in 5 of 6 round pairs; server CPU per race 441-479 s → 285-398 |
+| nested | `randomized-nested-queries-with-inner-hits_default_big_size` | 49.25 (47.64-52.08) | 13.08 (11.24-20.63) | 25.16 (20.59-31.28) | 35.91 (30.80-36.16) | 2.25 → 0.52 (tie) | holds: faster in every round; the ranges touch only at roll's worst (20.63, at load 91) against Elasticsearch's best (20.59) |
+| nested | `randomized-nested-queries-with-inner-hits_default` | 11.21 (11.02-12.98) | 7.58 (7.34-7.86) | 10.20 (8.85-12.73) | 14.48 (14.15-16.58) | 1.20 → 0.74 | holds |
+| nyc_taxis | `distance_amount_agg` | 103.2 (97.59-139.9) | 58.99 (55.17-65.93) | 118.2 (94.52-269.2) | 141.3 (118.7-183.3) | 1.27 → 0.50 | holds; 0.73 even against Elasticsearch's Round 8 81.07 (its concurrent segments lost more to this round's load) |
+| nyc_taxis | `date_histogram_agg` | 6.67 (5.60-7.03) | 2.41 (2.40-2.43) | 13.25 (6.94-14.96) | 6.15 (5.69-6.33) | 0.88 (tie) → 0.39 | holds: -64% |
+| nyc_taxis | `autohisto_agg` | 9.04 (8.47-10.54) | 6.58 (6.36-8.34) | 41.09 (33.70-75.38) | 7.58 (6.80-8.52) | 1.19 (tie) → 0.87 (tie) | partly: -27%, ahead of OpenSearch in 2 of 3 rounds, still a tie |
+| geonames | `desc_sort_population` | 5.59 (5.48-5.71) | 4.06 (3.27-5.62) | 6.30 (5.52-8.18) | 6.65 (6.16-7.52) | 1.07 (tie) → 0.64 (tie) | holds: faster than Elasticsearch in every round |
+| geonames | `asc_sort_population` | 4.25 (3.46-4.29) | 3.28 (2.91-4.60) | 3.94 (3.74-4.71) | 4.68 (3.93-4.68) | 1.11 (tie) → 0.83 (tie) | holds in 2 of 3 rounds (round 0: 4.60 against 3.74) |
+| geonames | `asc_sort_with_after_population` | 4.21 (3.74-4.86) | 4.72 (3.88-4.87) | 5.46 (5.15-5.81) | 4.87 (4.26-5.15) | 0.91 (tie) → 0.97 (tie) | a tie, as before |
+| nested | `randomized-sorted-term-queries` (not fixed) | 13.85 (12.91-14.42) | 12.57 (11.94-14.67) | 16.12 (14.54-18.34) | 10.21 (8.50-11.74) | 1.62 → 1.23 | still loses to OpenSearch, ranges apart |
+
+How the numbers were checked:
+
+- **The work happened.** After every race the harness logged the index's document count: every
+  engine indexed every document in every round (noaa 5,000,000; nested 5,608,974 Lucene documents
+  for 2M parents; nyc_taxis 2,000,000; geonames 1,160,000). Rally's error rate was 0 for every task
+  of every race on all three engines.
+- **The load was heavier than Round 8's.** The host's 1-minute load ran 18-121 during the run
+  (median 47; Round 8 17-53), from other sessions' unpinned builds and tests, which also landed on
+  the lane's CPUs. A sampler of the lane's server CPUs every 5 s, minus each race's own container
+  CPU, gives the share other processes took during the race ("foreign"), in %:
+
+  | track | roll | Elasticsearch | OpenSearch |
+  |---|---:|---:|---:|
+  | noaa (6 rounds) | 12-58 | 16-54 | 15-54 |
+  | nested | 28-39 | 29-38 | 42-51 |
+  | nyc_taxis | 53-69 | 50-75 | 44-67 |
+  | geonames | 39-41 | 41-45 | 26-40 |
+
+  In noaa's first set roll's rounds 0 and 2 drew 54% and 49% foreign load and the others 12-28%,
+  so noaa ran a second set of three. Across the six rounds every engine had rounds above and
+  below 50%. A difference whose ranges overlap is a tie.
+- **roll's range-field queries are slower than in Round 8's Rally run, and the code is not why.**
+  roll's noaa range-field p50s rose from Round 8's 4.4-9.3 ms to 6.8-11.6 here, more than
+  Elasticsearch's (7.0-9.6 → 8.5-11.0). A direct A/B of Round 8's binary (`83fac5982`) against
+  this one, each loading the 5M documents with its own parser, 5 alternating rounds of 30
+  requests on lane b (one client; 44-48 segments, because the loader's `_forcemerge` call was
+  refused for an unknown parameter on both), found this binary faster on all eight queries with
+  the same hit totals: `range_field_big_range` p50 7.27 → 4.69 ms (server CPU 14.6 → 8.2 ms per
+  request), `range_field_disjunction_big_range_small_term_query` 8.94 → 5.84,
+  `range_field_conjunction_big_range_big_term_query` 86.4 → 5.5. Under Rally's 8 clients, roll's
+  two rounds with the least foreign load (12% and 27%) have them at 5.6-8.5 ms.
+- **Server CPU.** roll's server CPU per race is lower than both others' on every track (below).
+  geonames costs every engine 3-5% more CPU than in Round 8 (roll +4%, Elasticsearch +5%,
+  OpenSearch +3%): the host's contention, not a change.
+
+**Server CPU per race** (the container's CPU over the whole race), median (min-max), seconds, Round 8
+→ Round 9; and **RSS at the end of a race**, MiB:
+
+| track | roll CPU | Elasticsearch CPU | OpenSearch CPU | roll RSS | Elasticsearch RSS | OpenSearch RSS |
+|---|---:|---:|---:|---:|---:|---:|
+| noaa (6 rounds) | 478 (441-479) → **367** (285-398) | 369 (355-386) → 397 (343-468) | 481 (434-538) → 505 (410-613) | **549-816** | 2,535-2,747 | 2,271-2,678 |
+| nested | 621 (615-633) → **497** (472-522) | 713 (581-762) → 620 (587-702) | 719 (707-845) → 724 (723-815) | **459-609** | 2,351-2,587 | 2,117-2,356 |
+| nyc_taxis | 167 (164-173) → **164** (163-184) | 192 (189-256) → 193 (185-217) | 224 (222-253) → 228 (207-245) | **263-384** | 2,443-2,511 | 2,447-2,504 |
+| geonames | 769 (746-802) → **799** (795-830) | 1,223 (1,131-1,252) → 1,287 (1,279-1,312) | 1,274 (1,230-1,356) → 1,313 (1,277-1,346) | **235-263** | 2,357-2,494 | 2,408-2,570 |
+
+noaa's roll RSS at the end of a race is 549-816 MiB against Round 8's 537-635.
+
+**Where roll loses** after Round 9 (roll / best of the other two above 1, ranked by how much; "tie"
+where the ranges overlap). Tracks this round didn't rerun keep Round 8's numbers:
+
+1. dense_vector `knn-search-100-1000_multiple_segments`: 2.09x Elasticsearch (Round 8, not rerun).
+2. so_vector: 25 of its 32 `knn` tasks 1.03-1.92x Elasticsearch (Round 8, not rerun; segments
+   are searched concurrently since `66d16fce6`).
+3. nested `randomized-sorted-term-queries`: 1.23x OpenSearch (12.57 against 10.21, ranges apart;
+   Elasticsearch 16.12). Round 8: 1.62x. Not one of #29's fixes.
+4. nested `nested-date-histo`: 1.17x Elasticsearch (305 against 260, tie; Round 8 1.17x
+   OpenSearch, tie).
+5. nested `index-append` p50: 1.16x Elasticsearch (tie), with roll's docs/s ahead (0.92, tie).
+6. http_logs `sort-size-desc-after-force-merge-1-seg`: 1.12x OpenSearch (Round 8, tie, not rerun).
+7. noaa `range_field_disjunction_big_range_small_term_query`: 1.06x Elasticsearch (11.59 against
+   10.96, tie; Round 8 roll led at 0.58). roll was slower in its rounds under 49-58% foreign load
+   and faster in the others. The A/B above has this binary at 5.84 ms against Round 8's 8.94.
+   `range_field_conjunction_big_range_small_term_query` is 0.99 (tie).
+8. nyc_taxis `range`: 1.05x OpenSearch (6.26 against 5.93, tie; Round 8 roll led at 0.72),
+   in nyc_taxis' 53-69% foreign load.
+9. http_logs `scroll` 1.03x OpenSearch, and the bulk p50s on pmc and so (Round 8, ties, not rerun).
+
+Everything else on these four tracks roll leads. Every geonames task is ahead in median (seven of
+them ties), and indexing leads Elasticsearch on all four tracks in median docs/s (geonames 1.53x;
+noaa, nested and nyc_taxis are ties).
+
+`noaa` (`RALLY_DOCS=5000000`, 1 shard; six rounds):
+
+| task | metric | roll | Elasticsearch | OpenSearch | roll / best |
+|---|---|---:|---:|---:|---:|
+| index | docs/s | 63974 (58662-89608) | 54918 (35218-82107) | 36892 (30261-55045) | 0.86 (tie) |
+| index | p50 ms | 555.4 (423.5-672.4) | 554.9 (416.2-697.8) | 887.4 (632.0-987.5) | 1.00 (tie) |
+| range_field_big_range | p50 ms | 8.07 (5.79-10.95) | 9.83 (8.60-15.46) | 12.93 (10.80-15.43) | 0.82 (tie) |
+| range_field_small_range | p50 ms | 7.80 (5.90-10.01) | 9.73 (7.96-11.70) | 9.56 (8.47-10.55) | 0.82 (tie) |
+| range_field_conjunction_big_range_small_term_query | p50 ms | 8.44 (5.58-11.63) | 8.52 (7.22-11.27) | 8.95 (8.32-9.73) | 0.99 (tie) |
+| range_field_conjunction_small_range_small_term_query | p50 ms | 7.72 (5.68-13.57) | 9.62 (8.31-11.99) | 11.24 (10.81-12.19) | 0.80 (tie) |
+| range_field_conjunction_small_range_big_term_query | p50 ms | 7.89 (6.27-13.18) | 10.75 (8.26-14.43) | 11.45 (10.49-11.74) | 0.73 (tie) |
+| range_field_conjunction_big_range_big_term_query | p50 ms | 6.80 (6.32-11.92) | 10.15 (8.61-13.31) | 13.21 (12.04-15.04) | 0.67 (tie) |
+| range_field_disjunction_small_range_small_term_query | p50 ms | 8.57 (5.97-13.44) | 10.97 (8.61-13.11) | 10.49 (9.38-11.71) | 0.82 (tie) |
+| range_field_disjunction_big_range_small_term_query | p50 ms | 11.59 (6.14-16.05) | 10.96 (8.97-13.86) | 13.42 (11.86-14.40) | 1.06 (tie) |
+
+`nested` (`RALLY_DOCS=2000000`):
+
+| task | metric | roll | Elasticsearch | OpenSearch | roll / best |
+|---|---|---:|---:|---:|---:|
+| index-append | docs/s | 42512 (36230-47008) | 39234 (34296-45214) | 25326 (19740-27987) | 0.92 (tie) |
+| index-append | p50 ms | 428.5 (372.7-503.6) | 370.5 (338.1-391.5) | 689.0 (558.9-701.7) | 1.16 (tie) |
+| randomized-nested-queries | p50 ms | 7.14 (6.97-8.29) | 8.55 (7.16-10.21) | 14.82 (14.22-16.67) | 0.84 (tie) |
+| randomized-term-queries | p50 ms | 2.18 (1.71-2.31) | 2.83 (2.73-3.65) | 3.92 (3.92-4.39) | 0.77 |
+| randomized-sorted-term-queries | p50 ms | 12.57 (11.94-14.67) | 16.12 (14.54-18.34) | 10.21 (8.50-11.74) | 1.23 |
+| match-all | p50 ms | 1.82 (1.59-2.07) | 3.22 (3.19-3.36) | 2.95 (2.47-3.04) | 0.62 |
+| nested-date-histo | p50 ms | 305.1 (247.2-307.2) | 259.9 (251.0-271.2) | 295.1 (280.8-365.4) | 1.17 (tie) |
+| randomized-nested-queries-with-inner-hits_default | p50 ms | 7.58 (7.34-7.86) | 10.20 (8.85-12.73) | 14.48 (14.15-16.58) | 0.74 |
+| randomized-nested-queries-with-inner-hits_default_big_size | p50 ms | 13.08 (11.24-20.63) | 25.16 (20.59-31.28) | 35.91 (30.80-36.16) | 0.52 (tie) |
+
+`nyc_taxis` (`RALLY_DOCS=2000000`: the first 2M trips, one shard):
+
+| task | metric | roll | Elasticsearch | OpenSearch | roll / best |
+|---|---|---:|---:|---:|---:|
+| index | docs/s | 51508 (48524-61698) | 48392 (38695-61992) | 38285 (29354-49307) | 0.94 (tie) |
+| index | p50 ms | 1329 (1141-1335) | 1460 (1157-1669) | 2086 (1704-2351) | 0.91 (tie) |
+| default_no_target | p50 ms | 1.40 (1.36-1.45) | 6.36 (5.85-6.65) | 4.81 (4.18-4.92) | 0.29 |
+| default_1k | p50 ms | 10.79 (9.25-12.50) | 15.42 (13.92-16.05) | 16.86 (15.61-17.19) | 0.70 |
+| range | p50 ms | 6.26 (5.70-7.31) | 7.93 (7.53-8.74) | 5.93 (4.92-6.27) | 1.05 (tie) |
+| distance_amount_agg | p50 ms | 58.99 (55.17-65.93) | 118.2 (94.52-269.2) | 141.3 (118.7-183.3) | 0.50 |
+| autohisto_agg | p50 ms | 6.58 (6.36-8.34) | 41.09 (33.70-75.38) | 7.58 (6.80-8.52) | 0.87 (tie) |
+| date_histogram_agg | p50 ms | 2.41 (2.40-2.43) | 13.25 (6.94-14.96) | 6.15 (5.69-6.33) | 0.39 |
+
+`geonames` (`ingest_percentage:10`: 1,160,000 documents, 5 shards):
+
+| task | metric | roll | Elasticsearch | OpenSearch | roll / best |
+|---|---|---:|---:|---:|---:|
+| index-append | docs/s | 57480 (49978-69228) | 37613 (34383-39952) | 37045 (33281-40546) | 0.65 |
+| index-append | p50 ms | 800.2 (742.4-943.8) | 878.1 (778.9-928.0) | 1071 (907.1-1090) | 0.91 (tie) |
+| index-stats | p50 ms | 1.69 (1.59-1.72) | 2.35 (2.28-2.41) | 2.55 (2.42-2.71) | 0.72 |
+| node-stats | p50 ms | 1.72 (1.68-1.72) | 5.70 (5.42-6.12) | 4.02 (3.92-4.30) | 0.43 |
+| default | p50 ms | 1.83 (1.59-2.02) | 3.34 (3.19-3.38) | 2.92 (2.76-2.94) | 0.63 |
+| term | p50 ms | 1.09 (0.63-1.11) | 2.26 (2.23-2.63) | 1.96 (1.79-2.09) | 0.56 |
+| phrase | p50 ms | 1.07 (0.83-1.50) | 2.13 (2.01-2.77) | 2.19 (2.11-2.29) | 0.50 |
+| country_agg_uncached | p50 ms | 22.78 (16.75-24.43) | 28.57 (27.76-40.12) | 47.20 (45.02-54.15) | 0.80 |
+| country_agg_cached | p50 ms | 1.24 (1.22-1.68) | 2.88 (2.84-3.75) | 2.75 (2.40-2.76) | 0.45 |
+| scroll | p50 ms | 470.8 (450.3-486.5) | 536.9 (504.8-554.0) | 528.9 (488.3-532.7) | 0.89 |
+| expression | p50 ms | 50.04 (49.92-57.24) | 93.78 (84.32-124.0) | 87.66 (82.32-92.09) | 0.57 |
+| painless_static | p50 ms | 48.10 (47.21-49.24) | 115.6 (102.1-117.9) | 97.82 (93.83-109.3) | 0.49 |
+| painless_dynamic | p50 ms | 49.31 (48.69-53.39) | 99.70 (84.37-103.9) | 106.9 (98.26-112.6) | 0.49 |
+| decay_geo_gauss_function_score | p50 ms | 45.84 (43.78-52.54) | 91.67 (75.86-105.8) | 79.24 (78.22-82.49) | 0.58 |
+| decay_geo_gauss_script_score | p50 ms | 67.16 (62.98-82.30) | 81.01 (79.78-105.6) | 94.09 (90.70-100.3) | 0.83 (tie) |
+| field_value_function_score | p50 ms | 11.04 (9.61-12.86) | 34.38 (33.15-46.29) | 37.46 (34.97-41.43) | 0.32 |
+| field_value_script_score | p50 ms | 29.94 (29.36-36.10) | 49.54 (44.87-93.88) | 58.16 (51.01-64.85) | 0.60 |
+| large_terms | p50 ms | 118.6 (109.5-120.6) | 201.0 (195.1-289.2) | 191.0 (175.3-216.8) | 0.62 |
+| large_filtered_terms | p50 ms | 141.6 (134.5-154.8) | 185.3 (167.1-232.9) | 178.2 (169.1-187.3) | 0.80 |
+| large_prohibited_terms | p50 ms | 129.8 (108.6-151.7) | 161.7 (154.1-225.6) | 180.5 (164.3-201.1) | 0.80 |
+| desc_sort_population | p50 ms | 4.06 (3.27-5.62) | 6.30 (5.52-8.18) | 6.65 (6.16-7.52) | 0.64 (tie) |
+| desc_sort_population_can_match_shortcut | p50 ms | 3.57 (2.90-3.80) | 6.83 (6.31-7.14) | 8.55 (8.05-9.82) | 0.52 |
+| desc_sort_population_no_can_match_shortcut | p50 ms | 3.71 (3.06-3.77) | 6.09 (5.66-6.64) | 8.66 (7.14-9.60) | 0.61 |
+| asc_sort_population | p50 ms | 3.28 (2.91-4.60) | 3.94 (3.74-4.71) | 4.68 (3.93-4.68) | 0.83 (tie) |
+| asc_sort_with_after_population | p50 ms | 4.72 (3.88-4.87) | 5.46 (5.15-5.81) | 4.87 (4.26-5.15) | 0.97 (tie) |
+| desc_sort_geonameid | p50 ms | 4.95 (4.28-5.30) | 7.21 (5.52-8.00) | 9.35 (7.35-9.56) | 0.69 |
+| desc_sort_with_after_geonameid | p50 ms | 2.29 (2.21-3.17) | 7.64 (6.92-10.11) | 7.51 (6.37-8.99) | 0.30 |
+| asc_sort_geonameid | p50 ms | 3.92 (3.51-5.33) | 4.98 (4.75-5.57) | 5.42 (5.38-7.94) | 0.79 (tie) |
+| asc_sort_with_after_geonameid | p50 ms | 2.05 (1.72-2.58) | 5.76 (5.73-6.07) | 5.21 (4.44-5.76) | 0.39 |
+| sort_country_code_can_match_shortcut | p50 ms | 5.50 (5.44-7.67) | 6.84 (6.23-8.04) | 9.11 (6.97-9.58) | 0.80 (tie) |
+| sort_country_code_no_can_match_shortcut | p50 ms | 5.44 (4.89-5.62) | 8.76 (5.84-10.68) | 8.80 (6.82-9.26) | 0.62 |
+
+## Round 9: vectors (2026-11-16, `807396e0b`)
+
+Round 9 (PR #119) reran the non-vector tracks. This round reruns the two vector tracks Round 8
+lost most on, `so_vector` and `dense_vector`, at origin/main `807396e0b`. Since Round 8
+(`83fac5982`) that adds `66d16fce6` (a knn query's segments searched concurrently, one thread
+per physical core) and `8b2276c07` (prefetching during int8 graph construction). `search-dev` is
+built in release (line tables). The harness, subsets and parameters are Round 8's:
+`bench-search-rerun.sh` with `RALLY_DOCS=200000` (so_vector) and `1000000` (dense_vector, which
+indexes 20% of it, then 5% more during the update phase) on the float corpora, lane b (server
+`10,11,28,29`, Rally `12,13,30,31`, under the lane's lock), 4 GiB each, three rounds alternating
+roll and Elasticsearch 9.5.5 with the order rotating. OpenSearch is left out, as in Round 8:
+the tracks use Elasticsearch's `dense_vector` API (this round also didn't start an idle
+OpenSearch container on the lane, `BENCH_OS=0`). The tracks' `knn-recall-*` and `script-score-*`
+tasks fail on both engines with the tracks' parameters (as in Rounds 6 and 8) and are left out;
+every other task ran with a 0% error rate on both engines in every race. Raw outputs:
+`~/.cache/rsearch/vectors-r9/` on the machine that ran them.
+
+Two races were rerun. so_vector's first roll race stopped at start-up (a Rally worker process
+exited before any request), and Elasticsearch's third race stopped halfway when the session
+running it restarted. Each was run again alone, so every engine has three complete races.
+
+`dense_vector`. roll's load again ended inside the track's 40 s bulk warm-up, so Rally kept no
+throughput sample; the first row is the whole load's rate from Rally's log for both:
+
+| task | metric | roll | Elasticsearch | roll / Elasticsearch |
+|---|---|---:|---:|---:|
+| index-append | docs/s, whole load (200,000 / task time) | 12.1k (10.4k-13.3k) | 3.9k (3.4k-4.9k) | 0.32 |
+| knn-search-10-100_multiple_segments | p50 ms | 4.76 (4.00-5.75) | 6.93 (4.34-12.72) | 0.69 (tie) |
+| knn-search-100-1000_multiple_segments | p50 ms | 14.00 (12.97-15.50) | 9.30 (6.54-16.56) | 1.51 (tie) |
+| knn-search-10-100 | p50 ms | 2.92 (2.59-2.97) | 3.55 (3.53-3.96) | 0.82 |
+| knn-search-100-1000 | p50 ms | 7.13 (6.88-7.37) | 6.11 (5.94-6.22) | 1.17 |
+
+`so_vector`:
+
+| task | metric | roll | Elasticsearch | roll / Elasticsearch |
+|---|---|---:|---:|---:|
+| index-append | docs/s | 1680 (1587-1890) | 914.4 (832.4-1397) | 0.54 |
+| index-append | p50 ms | 239.7 (206.5-241.6) | 532.3 (395.9-600.3) | 0.45 |
+| knn-search-default-match-all | p50 ms | 5.32 (4.85-5.66) | 14.39 (6.30-19.55) | 0.37 |
+| knn-search-default-match-all-multi-client | p50 ms | 7.69 (7.65-9.83) | 27.45 (9.51-31.00) | 0.28 (tie) |
+| knn-search-10-50-match-all | p50 ms | 6.59 (6.57-7.39) | 9.39 (6.48-10.85) | 0.70 (tie) |
+| knn-search-100-300-match-all | p50 ms | 16.10 (14.78-19.86) | 19.70 (15.36-24.87) | 0.82 (tie) |
+| knn-search-100-300-match-all-multi-client | p50 ms | 45.51 (32.90-51.41) | 54.40 (31.34-56.69) | 0.84 (tie) |
+| knn-search-10-50-acceptedAnswerId | p50 ms | 9.05 (9.00-9.60) | 11.10 (6.46-13.08) | 0.81 (tie) |
+| knn-search-10-50-java | p50 ms | 9.76 (8.72-10.49) | 11.12 (8.56-11.50) | 0.88 (tie) |
+| knn-search-10-50-css | p50 ms | 9.57 (7.93-9.87) | 8.43 (5.35-9.74) | 1.13 (tie) |
+| knn-search-10-50-concurrency | p50 ms | 7.06 (6.10-8.20) | 8.73 (5.40-9.44) | 0.81 (tie) |
+| knn-search-10-50-concurrency-multi-client | p50 ms | 15.66 (9.62-20.97) | 14.20 (7.23-21.30) | 1.10 (tie) |
+| knn-search-10-50-random-10-percent | p50 ms | 6.73 (6.64-9.26) | 9.15 (6.18-13.45) | 0.74 (tie) |
+| knn-search-10-50-random-10-percent-multi-client | p50 ms | 17.60 (13.20-19.32) | 22.90 (14.51-30.60) | 0.77 (tie) |
+| knn-search-default-random-20-percent | p50 ms | 5.17 (5.11-7.45) | 7.74 (5.98-8.88) | 0.67 (tie) |
+| knn-search-10-50-random-20-percent | p50 ms | 7.44 (6.74-8.92) | 8.15 (6.54-8.89) | 0.91 (tie) |
+| knn-search-100-300-random-10-percent | p50 ms | 17.34 (16.00-18.72) | 16.95 (15.23-17.90) | 1.02 (tie) |
+| knn-search-100-300-random-20-percent | p50 ms | 18.80 (14.92-19.53) | 14.54 (14.41-17.20) | 1.29 (tie) |
+| knn-search-default-match-all-force-merge | p50 ms | 3.68 (3.21-3.99) | 4.76 (4.59-7.99) | 0.77 |
+| knn-search-default-match-all-multi-client-force-merge | p50 ms | 8.02 (5.68-9.33) | 4.78 (4.02-13.23) | 1.68 (tie) |
+| knn-search-10-50-match-all-force-merge | p50 ms | 5.38 (4.56-6.08) | 4.81 (4.58-5.65) | 1.12 (tie) |
+| knn-search-100-300-match-all-force-merge | p50 ms | 11.30 (10.55-11.33) | 12.17 (11.52-14.04) | 0.93 |
+| knn-search-100-300-match-all-multi-client-force-merge | p50 ms | 22.02 (22.02-22.64) | 19.79 (19.52-31.51) | 1.11 (tie) |
+| knn-search-10-50-acceptedAnswerId-force-merge | p50 ms | 5.75 (5.03-5.95) | 5.08 (4.50-6.21) | 1.13 (tie) |
+| knn-search-10-50-java-force-merge | p50 ms | 5.84 (5.65-7.37) | 5.65 (5.24-6.73) | 1.03 (tie) |
+| knn-search-10-50-css-force-merge | p50 ms | 6.71 (6.51-9.21) | 5.58 (4.97-6.88) | 1.20 (tie) |
+| knn-search-10-50-concurrency-force-merge | p50 ms | 7.60 (6.86-7.83) | 5.23 (4.89-5.96) | 1.45 |
+| knn-search-10-50-concurrency-multi-client-force-merge | p50 ms | 17.07 (11.73-18.62) | 6.09 (6.09-9.69) | 2.80 |
+| knn-search-10-50-random-10-percent-force-merge | p50 ms | 5.17 (5.02-7.14) | 4.66 (4.32-4.75) | 1.11 |
+| knn-search-10-50-random-10-percent-multi-client-force-merge | p50 ms | 13.40 (11.55-15.13) | 5.79 (4.81-8.47) | 2.32 |
+| knn-search-default-random-20-percent-force-merge | p50 ms | 4.31 (4.09-5.29) | 4.63 (4.12-4.75) | 0.93 (tie) |
+| knn-search-10-50-random-20-percent-force-merge | p50 ms | 6.11 (4.88-6.17) | 4.90 (3.82-5.53) | 1.25 (tie) |
+| knn-search-100-300-random-10-percent-force-merge | p50 ms | 12.03 (12.03-12.04) | 11.10 (10.19-12.97) | 1.08 (tie) |
+| knn-search-100-300-random-20-percent-force-merge | p50 ms | 9.86 (9.83-12.38) | 11.97 (9.91-14.36) | 0.82 (tie) |
+
+**Server CPU per race** (container CPU over the whole race, seconds, median (min-max)): so_vector
+roll 583 (537-594) against Elasticsearch 741 (514-793); dense_vector roll 287 (283-289) against
+396 (347-536). RSS at the end of a race: so_vector roll 808-827 MiB against 2,741-3,274;
+dense_vector roll 184-231 against 1,748-2,520.
+
+**Load.** The host's 1-minute load was 19-83 (other sessions' unpinned builds and tests, which
+also run on the lane's CPUs). The lane's server CPUs sampled every 5 s, minus the race's own
+container CPU, give the share other processes took during each race ("foreign"), in %:
+
+| track | roll | Elasticsearch |
+|---|---:|---:|
+| so_vector | 31-54 | 33-70 |
+| dense_vector | 66-78 | 44-64 |
+
+dense_vector's roll races drew more foreign load than Elasticsearch's; its two `_multiple_segments`
+rows are ties whose ranges are wide on both sides (Elasticsearch 6.5-16.6 ms).
+
+**Ranked losses** (roll / Elasticsearch, ranges apart unless marked):
+
+1. so_vector `knn-search-10-50-concurrency-multi-client-force-merge`: 2.80x (17.07 against 6.09
+   ms).
+2. so_vector `knn-search-10-50-random-10-percent-multi-client-force-merge`: 2.32x (13.40 against
+   5.79).
+3. so_vector `knn-search-10-50-concurrency-force-merge`: 1.45x (7.60 against 5.23).
+4. dense_vector `knn-search-100-1000` (force-merged): 1.17x (7.13 against 6.11).
+5. so_vector `knn-search-10-50-random-10-percent-force-merge`: 1.11x (5.17 against 4.66).
+6. Ties (ranges overlap): so_vector `default-match-all-multi-client-force-merge` 1.68x,
+   dense_vector `knn-search-100-1000_multiple_segments` 1.51x (Round 8: 2.09x, apart),
+   so_vector `100-300-random-20-percent` 1.29x, `random-20-percent-force-merge` 1.25x,
+   `css-force-merge` 1.20x, `css` 1.13x (Round 8: 1.92x, apart), seven more at 1.02-1.13x.
+
+Round 8's so_vector `concurrency` (1.56x) and `random-10-percent` (1.42x) now lead (0.81x and
+0.74x, ties), and roll leads so_vector's unfiltered default tasks (0.37x, 0.28x) and
+`default-match-all-force-merge` (0.77x, apart). The losses left are mostly 8-client tasks on the
+force-merged index: with 8 clients on 2 cores the server is saturated, so latency follows CPU per
+query.
+
+### Where the CPU per query went (2026-11-17)
+
+Per-query work on Rally's own queries outside Rally: `vab.py` (in the raw outputs) loads each
+track as Rally does (same mappings, bulk sizes and clients, ids = row numbers), sends the track's
+`knn` bodies, and computes recall against exact top-k from numpy (a hit counts when its exact
+score reaches the k-th exact score). Instructions per query come from `perf stat` on a native
+server (exact to 0.1% even off-lane); timings from 3 alternating rounds on lane b in Docker
+(4 GiB, 300 requests per task after 100 of warm-up; `:8` = 8 clients), against the base build
+at the same commit.
+
+**Request parsing rescanned the body** (fixed, #156). Every field `XParser::object` read
+computed two source locations eagerly, each by scanning the raw body from its start; a body held
+as a parsed value was first written out as JSON (768 floats formatted with `grisu`). A knn
+section is parsed five times per two-shard request (the top level, and twice per shard), and its
+`query_vector` is most of the body, so so_vector spent 8-15M instructions per query (36% of `css`,
+half of `default-match-all`) locating fields no message used. The locations are now computed only
+for the errors and deprecation warnings that print them; responses and messages are unchanged
+(YAML suites: 0 regressions). Instructions per query, base → fix: so_vector `default-match-all`
+16.5M → 8.3M, `10-50-match-all` 25.1M → 13.6M, `10-50-css` 40.9M → 26.2M, `100-300-match-all`
+50.8M → 39.4M; dense_vector `10-100` 7.7M → 6.2M. Hits identical on every task of both tracks.
+Lane b (`100-300-match-all` and dense_vector `100-1000` are ties: their per-query cost is the
+graph search):
+
+| track | task | p50 ms, base | p50 ms, fix | server CPU ms per query, base | fix |
+|---|---|---:|---:|---:|---:|
+| so_vector | `default-match-all` | 5.27 (5.19-5.30) | 3.42 (2.85-3.61) | 6.67 (6.66-7.00) | 3.60 (3.40-4.29) |
+| so_vector | `10-50-match-all` | 6.32 (4.79-6.92) | 3.12 (2.72-4.74) | 8.46 (6.78-9.86) | 4.59 (3.67-5.92) |
+| so_vector | `100-300-match-all` | 6.47 (5.98-7.58) | 6.47 (6.29-7.06) | 10.83 (10.79-12.84) | 10.71 (10.19-11.53) |
+| so_vector | `10-50-acceptedAnswerId` | 8.04 (7.35-8.27) | 5.46 (5.17-5.75) | 11.48 (10.21-12.03) | 7.23 (6.79-7.85) |
+| so_vector | `10-50-java` | 7.28 (6.97-7.44) | 5.09 (4.39-7.14) | 10.05 (9.70-11.33) | 8.51 (7.01-10.54) |
+| so_vector | `10-50-css` | 6.89 (5.46-8.32) | 5.27 (4.50-5.77) | 10.56 (9.48-12.59) | 7.88 (7.08-8.39) |
+| so_vector | `10-50-concurrency` | 5.58 (5.51-6.67) | 4.24 (4.04-4.29) | 8.17 (7.55-8.99) | 5.03 (4.99-5.44) |
+| so_vector | `10-50-random-10-percent` | 6.97 (6.36-7.29) | 4.56 (2.92-4.67) | 9.61 (8.67-9.62) | 5.80 (4.78-5.92) |
+| so_vector | `100-300-random-10-percent` | 8.75 (7.68-9.54) | 7.63 (7.63-7.96) | 14.79 (13.70-15.63) | 12.90 (12.22-13.48) |
+| so_vector | `10-50-concurrency:8` | 11.97 (10.96-13.56) | 6.66 (6.08-6.93) | 5.77 (5.27-6.26) | 3.00 (2.99-3.22) |
+| so_vector, force-merged | `10-50-match-all` | 4.82 (4.29-5.05) | 2.49 (2.48-2.50) | 4.63 (4.63-4.71) | 2.12 (2.11-2.16) |
+| so_vector, force-merged | `10-50-css` | 6.97 (5.02-7.29) | 4.34 (4.33-4.38) | 6.71 (6.09-6.94) | 3.91 (3.88-3.93) |
+| so_vector, force-merged | `10-50-concurrency` | 7.41 (6.16-7.68) | 4.73 (4.71-4.89) | 7.40 (7.17-7.86) | 4.30 (4.26-4.33) |
+| so_vector, force-merged | `10-50-random-20-percent` | 4.67 (4.17-5.66) | 2.54 (2.54-2.57) | 5.09 (5.08-5.31) | 2.18 (2.16-2.22) |
+| so_vector, force-merged | `100-300-random-10-percent` | 7.53 (6.16-8.10) | 4.88 (4.86-5.04) | 7.17 (6.94-7.41) | 4.42 (4.36-4.44) |
+| so_vector, force-merged | `default-match-all:8` | 9.94 (6.09-11.23) | 5.67 (4.84-6.07) | 3.28 (2.93-3.38) | 1.49 (1.49-1.50) |
+| so_vector, force-merged | `10-50-concurrency:8` | 20.10 (15.59-25.99) | 14.26 (13.68-14.45) | 7.16 (6.67-7.21) | 4.04 (4.01-4.09) |
+| so_vector, force-merged | `10-50-random-10-percent:8` | 15.77 (10.30-19.80) | 7.62 (6.12-8.39) | 5.00 (4.65-5.09) | 1.94 (1.92-1.95) |
+| dense_vector | `10-100` | 3.00 (2.97-3.15) | 2.01 (1.77-2.74) | 4.31 (4.10-4.46) | 2.75 (2.42-3.82) |
+| dense_vector | `100-1000` | 8.24 (7.88-8.52) | 8.30 (7.42-8.68) | 15.30 (14.51-15.42) | 15.13 (13.86-15.72) |
+
+**Not adopted:**
+
+- **Lucene's per-segment beam** (`AbstractKnnVectorQuery`'s optimistic collection in Lucene
+  10.5.1, which Elasticsearch 9.5.5 ships: each segment searches `num_candidates × its share of
+  the shard + 16 standard deviations`, and a segment whose whole beam made the global top k is
+  searched again). Ported with the beam capped at `num_candidates`: dense_vector
+  `100-1000` on 4 segments per shard 44.0M → 26.0M instructions per query (-41%), so_vector
+  `100-300-match-all` -22%, hits identical on both tracks' unfiltered tasks, 3 of 2,000 hits
+  changed on two filtered ones. But on the vectors lane's 1M x 384 corpus (13 segments, k 10,
+  `num_candidates` 100, `bbq_hnsw`) recall dropped: knn 0.9935 → 0.9895, 10% filter 0.9975 →
+  0.994, 1% filter 0.856 → 0.833. Small segments get beams of 20-40, too narrow for one-bit
+  estimates rescored after the search. A margin of 64 standard deviations keeps that recall, but
+  then every segment of these layouts gets the whole `num_candidates`, which saves nothing.
+- **An exact search over a filter's ordinals, exact search for filters no larger than the beam,
+  and no sort of the unrescored beam** (Lucene searches exactly when the filter's cost is at most
+  its k, which Elasticsearch sets to `num_candidates`; roll used `k`). Hits identical everywhere
+  (both tracks and the 1M corpus), instructions down: so_vector `concurrency` -21%, dense_vector
+  `100-1000` -8.6%. On lane b it measured no faster: flat on the unmerged index and +8-15% server
+  CPU on force-merged unfiltered tasks whose code it doesn't change. Front-end counters show
+  why: the same instructions (16.31M against 16.33M per query) took 8-12% more cycles, with
+  10-17% more uops from the legacy decoder (the Cascade Lake jump-alignment erratum, "The bands'
+  cost" below). The change waits for a build where code placement is controlled.
+
+**Next for vectors:** rerun these two tracks once the parser fix is on main; the 8-client
+force-merged losses should shrink with it (lane b: 2.6x less CPU per query on
+`random-10-percent:8`). Then filtered search on the force-merged index (`concurrency` 1.45x, one
+segment per shard, so one thread per shard), with the knn exact-path change above once code
+placement can be controlled.
+
+||||||| cf37ad251
 ## Round 8: every Rally track again (2026-11-14, `83fac5982`)
 
 The branch head `83fac5982` (sort by bands, `auto_date_histogram` counted from the points tree,
@@ -228,7 +590,8 @@ How the numbers were checked:
   scorer. Server CPU per request against `4bb8289d9` (2M documents, lane b, 3 alternating
   rounds, identical aggregations and totals): one segment `date_histogram_agg` 6.5-7.2 → 1.1-1.25
   ms, `autohisto_agg` 6.5-7.1 → 2.2-2.3; two segments 2.2 → 1.05-1.3 and 3.1-3.4 → 2.05-2.8; as
-  loaded 2.1-2.25 → 1.15-1.3 and 3.6-3.9 → 2.75-4.65. Rally rerun pending.
+  loaded 2.1-2.25 → 1.15-1.3 and 3.6-3.9 → 2.75-4.65. Round 9 under Rally: `date_histogram_agg`
+  6.67 → 2.41 ms, `autohisto_agg` 9.04 → 6.58 (OpenSearch 7.58, still a tie).
   Roll still leads Elasticsearch on both (9.0 against 29.3 ms, 6.7 against 11.8); OpenSearch's
   rewrite holds at 7.6 ms on both.
 - `distance_amount_agg` (a 1-wide `histogram` with a `stats` sub-aggregation over 2M trips): Round
@@ -283,7 +646,8 @@ ranges overlap):
    2.5-2.7 ms against Elasticsearch 9.5.5's 13.3-14.5 on the same lane-b CPUs (was 50.4-57.5;
    server CPU 2.1 against 25.6-27.7 ms per request); noaa 5M merged to 8 segments (Elasticsearch
    13), 3 alternating rounds of 30 requests, `96c8d2fc5`'s code against its parent, identical
-   responses; Rally rerun pending.
+   responses. Round 9 under Rally: 6.80 ms (6.32-11.92) against Elasticsearch's 10.15, faster in
+   all six round pairs (0.67).
 2. nested `randomized-nested-queries-with-inner-hits_default_big_size`: 2.25x Elasticsearch (49.3
    against 21.9; Round 6: 2.3x); `..._default`: 1.20x (11.2 against 9.4). Leads since `7fe679918`
    (each hit's inner query runs over its own block, the block leading, so a range reads that
@@ -292,7 +656,8 @@ ranges overlap):
    against 25.2-34.2), was 95.6-131.2 ms; `_default` 7.7-8.0 against 10.3-11.7 (0.71x). Rally's 2M
    documents loaded by script and merged to 7 segments (Rally's roll runs had 6-9), Rally's
    param sources with their seed, 3 alternating rounds on lane b (2 cores), responses identical
-   before and after; Rally rerun pending.
+   before and after. Round 9 under Rally: `big_size` 13.08 ms (11.24-20.63) against
+   Elasticsearch's 25.16 (0.52, faster in every round), `_default` 7.58 against 10.20 (0.74).
 3. dense_vector `knn-search-100-1000_multiple_segments`: 2.09x Elasticsearch (13.7 against 6.5).
 4. so_vector: 25 of its 32 `knn` tasks, 1.03-1.92x Elasticsearch (15 with the ranges apart; the
    `css` filter 1.92x, `concurrency` 1.5-1.8x, the 10%-random filters 1.2-1.6x; Round 6: 4-9x).
@@ -314,7 +679,9 @@ ranges overlap):
 6. noaa indexing: Elasticsearch indexes 1.29x roll's docs/s (67.5k against 52.5k), on less CPU:
    the general document path for `double_range` and `dbe79f8f7`'s mapping walk (the noaa
    table's notes). Both fixed since: the walk by `6c2834a3e`, and the direct parser now takes
-   noaa's documents (34% less server CPU per document; the noaa notes). Not rerun in Rally yet.
+   noaa's documents (34% less server CPU per document; the noaa notes). Round 9 under Rally:
+   roll 64.0k docs/s against Elasticsearch's 54.9k over six rounds (0.86, a tie; ahead in 5 of 6
+   round pairs), roll's server CPU per race 441-479 s → 285-398 (Elasticsearch 343-468).
 7. nyc_taxis `distance_amount_agg`: 1.27x Elasticsearch (103.2 ms against 81.1; the ranges are
    apart). One thread per shard against Elasticsearch's concurrent segments (above). Roll leads
    since `0d1c0ece2`, still on one thread: the time was per-document overhead (a virtual `next`
@@ -323,16 +690,20 @@ ranges overlap):
    against `6e98b91bc`, the same 2M trips in Rally's two merged segments, lane b, one client,
    5 alternating rounds, identical aggregations: 962M → 417M instructions per request, server
    CPU 107.5 → 42.5 ms (41.3-45.0), p50 102.3 → 37.8 ms (36.3-46.7); Elasticsearch 9.5.5 on the
-   same CPUs 76.3-85.9 ms p50 at 213-243 ms of CPU. Rally rerun pending.
+   same CPUs 76.3-85.9 ms p50 at 213-243 ms of CPU. Round 9 under Rally (8 clients): 58.99 ms
+   (55.17-65.93) against Elasticsearch's 118.2 (0.50; 0.73 against its Round 8 81.07).
 8. nyc_taxis `autohisto_agg`: 1.19x OpenSearch (9.0 against 7.6, tie). The counted segments were
    still searched for the hit count (above); not since `7584df9f3` (server CPU at one segment
-   -69%, `date_histogram_agg` -83%), Rally rerun pending.
+   -69%, `date_histogram_agg` -83%). Round 9 under Rally: 6.58 ms against OpenSearch's 7.58 (0.87,
+   still a tie: ahead in 2 of 3 rounds); `date_histogram_agg` 2.41 against 6.15 (0.39).
 9. nested `nested-date-histo`: 1.17x OpenSearch (324 against 277, tie; Elasticsearch 302; Round
    6: 2.6x).
 10. http_logs `sort-size-desc-after-force-merge-1-seg`: 1.12x OpenSearch (6.37 against 5.69,
     tie).
 11. geonames `asc_sort_population`: 1.11x Elasticsearch (4.25 against 3.83, tie), and
-    `desc_sort_population`: 1.07x (5.59 against 5.25, tie). The bands' cost (above).
+    `desc_sort_population`: 1.07x (5.59 against 5.25, tie). The bands' cost (above). Round 9
+    under Rally, after the fix: `asc_sort_population` 3.28 ms against 3.94 (0.83, tie; ahead in 2
+    of 3 rounds), `desc_sort_population` 4.06 against 6.30 (0.64, tie; ahead in every round).
 12. The bulk tasks' p50 service time on nested (1.23x), pmc (1.06x), nyc_taxis and so (1.04x):
     ties, with roll's throughput ahead or tied.
 13. http_logs `scroll`: 1.03x OpenSearch (456.9 against 442.4, tie; Elasticsearch 455.9).
