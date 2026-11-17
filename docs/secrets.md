@@ -2844,8 +2844,9 @@ guard's scans audited as `secrets.guard`, for roll MCP).
    end to end; on a fleet its link and the calls through it run on one lease holder. Built: Postgres,
    MySQL, SQL Server, Redis, MongoDB and LDAP/AD through it, a real agent over a WebSocket in rolld's
    tests (allow-list, backpressure, revocation) and Postgres end to end; revocation takes effect at
-   once (every stream open looks the token and record up, ~0.11 ms). Building on it: a stream open's
-   ~45 ms on loopback (likely Nagle). Then ClickHouse, RabbitMQ and
+   once (every stream open looks the token and record up, ~0.11 ms); a stream opens in ~1 ms, not
+   44 (Nagle: `TCP_NODELAY` on every hop, rolld's API listener and roll-edge's included). Next:
+   ClickHouse, RabbitMQ and
    `mongodb+srv://` through it, ACME's pre-authorized names checked through it, and a fleet test.
 7. **Pulumi** (#145): roll's Terraform provider through Pulumi's any-Terraform-provider package
    from a local build (no registry release), with TypeScript, Python and Go SDKs generated and an
