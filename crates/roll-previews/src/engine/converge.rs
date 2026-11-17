@@ -558,11 +558,16 @@ impl Engine {
         // 4b. Health: a service with a `health` path counts once it answers 2xx/3xx there, asked
         // once per revision (Render's and Railway's checks). Anything else fails the preview, and
         // the retry asks again.
+        // Asked all at once (a probe wakes a sleeping service: a cold start each), answered in order.
+        let mut asked = Vec::new();
         for (name, rev, path) in checks {
-            if self.store.healthy(&r.id, &name)?.as_deref() == Some(rev.as_str()) {
-                continue;
+            if self.store.healthy(&r.id, &name)?.as_deref() != Some(rev.as_str()) {
+                asked.push((name, rev, path));
             }
-            let answer = match self.apps.probe(&r.id, &name, &path).await {
+        }
+        let answers = futures::future::join_all(asked.iter().map(|(name, _, path)| self.apps.probe(&r.id, name, path))).await;
+        for ((name, rev, path), answer) in asked.into_iter().zip(answers) {
+            let answer = match answer {
                 Ok(a) => a,
                 // Its start was overtaken (slept, redeployed, pushed): converge again soon.
                 Err(e) if e.downcast_ref::<crate::ports::StillDeploying>().is_some() => {
