@@ -1004,6 +1004,15 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             _ => turned_away,
         };
     }
+    // Its routes (Vercel's rewrites to another project): the first that takes the path sends the
+    // request to that service's environment of the same name, the path as it came, past the
+    // target's gates as a site's rewrite is (this environment's let it in). Never again from there.
+    if !req.headers().contains_key(VIA_SITE)
+        && let Some(r) = gate.routes.iter().find(|r| r.takes(req.uri().path()))
+    {
+        let pq = req.uri().path_and_query().map_or("/", |p| p.as_str()).to_string();
+        return rewrite_to(apps.clone(), service, env, (r.service.clone(), pq), req).await;
+    }
     // roll previews' feedback button: its script from the preview's own host, and a page load
     // (a browser's document, else a GET asking for HTML) gets the tag.
     let target = if via_link { apps.feedback_target(service, env).await } else { None };

@@ -1070,6 +1070,14 @@ pub enum AppsCmd {
         /// Its answers carry no headers of the environment's own again.
         #[arg(long)]
         no_headers: bool,
+        /// A path another service of the project answers, `/api/*=api` (a prefix ends in `*`;
+        /// that service's environment of the same name), repeatable; the list replaces the
+        /// environment's.
+        #[arg(long = "route", value_name = "PATH=SERVICE", conflicts_with = "no_routes")]
+        route: Vec<String>,
+        /// No routes to other services.
+        #[arg(long)]
+        no_routes: bool,
         /// Its own page (an HTML file, at most 64 KiB) for the 502, 503 and 504 visitors get
         /// while the app can't answer or wake (Heroku's error page).
         #[arg(long, value_name = "HTML_FILE")]
@@ -3837,7 +3845,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, error_page, maintenance_page, roll_pages } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -3905,6 +3913,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("headers".into(), header_rules(&header)?);
             } else if no_headers {
                 body.insert("headers".into(), Value::Null);
+            }
+            if !route.is_empty() {
+                let rs = route
+                    .iter()
+                    .map(|r| r.split_once('=').map(|(p, s)| json!({ "path": p.trim(), "service": s.trim() })).ok_or_else(|| anyhow::anyhow!("--route is PATH=SERVICE, like /api/*=api")))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                body.insert("routes".into(), Value::Array(rs));
+            } else if no_routes {
+                body.insert("routes".into(), Value::Null);
             }
             let mut pages = serde_json::Map::new();
             for (k, f) in [("error", &error_page), ("maintenance", &maintenance_page)] {

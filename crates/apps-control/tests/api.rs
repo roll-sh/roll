@@ -2928,6 +2928,29 @@ async fn a_sealed_value_never_reaches_the_log() {
     assert!(!log.contains("sk_live_51Habc") && !log.contains("hunter2pw"), "{log}");
 }
 
+/// An environment's route sends a path to another service of the project (its environment of
+/// the same name, the path as it came); other paths stay its own, and a route must name a
+/// service the project has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_route_sends_a_path_to_another_service() {
+    let w = world().await;
+    let (web, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let (api, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let base = format!("/v1/apps/services/{}/environments/production", web["id"].as_str().unwrap());
+    let (st, e) = call(&w.api, "PUT", &base, Some(json!({"routes": [{"path": "/api/*", "service": "api"}]}))).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    assert_eq!(e["routes"], json!([{"path": "/api/*", "service": "api"}]));
+    let h = host(&web["environments"][0]["url"]);
+    let (st, b) = visit(&w, &h, "/api/users?x=1").await;
+    let api_dep = call(&w.api, "GET", &format!("/v1/apps/services/{}/environments/production", api["id"].as_str().unwrap()), None).await.1["active"]["id"].clone();
+    assert_eq!((st, &b["deployment"], b["path"].as_str()), (StatusCode::OK, &api_dep, Some("/api/users")), "{b}");
+    let (_, b) = visit(&w, &h, "/about").await;
+    assert_ne!(b["deployment"], api_dep, "its own paths stay its own: {b}");
+    for bad in [json!([{"path": "/x/*", "service": "nope"}]), json!([{"path": "/x/*", "service": "web"}]), json!([{"path": "/a*b", "service": "api"}])] {
+        assert_eq!(call(&w.api, "PUT", &base, Some(json!({ "routes": bad }))).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+}
+
 /// A crowd at a sleeping service wakes one instance; those waiting on a start slower than the
 /// wake timeout get a 503 page that says when to try again, and the retry gets the app.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

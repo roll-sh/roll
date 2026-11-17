@@ -230,6 +230,8 @@ pub struct Gate {
     pub preview: bool,
     /// Headers its answers carry.
     pub headers: Vec<crate::model::HeaderRule>,
+    /// Paths another service answers, the first that takes a path deciding.
+    pub routes: Vec<crate::model::Route>,
     /// Traces are on: the proxy adds its own span to each request's trace.
     pub traces: bool,
     /// Its pages carry roll's Web Vitals tag.
