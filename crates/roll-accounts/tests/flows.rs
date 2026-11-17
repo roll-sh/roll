@@ -608,3 +608,68 @@ async fn sso_signs_people_in_by_their_domain() {
     let a = env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "ada@acme.test" }))).await;
     assert_eq!(a.status, StatusCode::ACCEPTED);
 }
+
+/// SCIM (docs/accounts.md, "SCIM"): a connection's token lets its provider create people in its
+/// verified domains (never admins, never elsewhere), find them by userName, and deactivate them,
+/// which ends their sessions at once; a new token or a removed connection stops the old one.
+#[tokio::test]
+async fn scim_provisions_and_deactivates_people() {
+    let env = Env::new().await;
+    let idp = fake_idp().await;
+    let issuer = idp.base.lock().unwrap().clone();
+    let txt = Arc::new(Txt::default());
+    env.accounts.set_txt_lookup(txt.clone());
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@acme.test", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let root = env.email_sign_in(&mut Browser::default(), "root@acme.test", Some(&root_invite)).await.json["user"]["id"].as_str().unwrap().to_string();
+    let conn = env.operator(Method::POST, "/v1/accounts/sso", json!({ "issuer": issuer, "client_id": "roll-sso", "client_secret": "s3cret", "domains": ["acme.test"] })).await.json;
+    let id = conn["id"].as_str().unwrap().to_string();
+    txt.0.lock().unwrap().insert("_roll-sso.acme.test".into(), vec![conn["dns"]["value"].as_str().unwrap().to_string()]);
+    env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/verify"), json!({})).await;
+    let made = env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/scim"), json!({})).await;
+    assert_eq!(made.status, StatusCode::CREATED, "{}", made.json);
+    let token = made.json["token"].as_str().unwrap().to_string();
+    assert!(made.json["base_url"].as_str().unwrap().ends_with("/v1/accounts/scim/v2"));
+
+    let scim = |method: Method, path: String, body: Option<Value>, token: String| {
+        let env = &env;
+        async move {
+            let req = Request::builder().method(method).uri(format!("/v1/accounts/scim/v2{path}")).header("authorization", format!("Bearer {token}")).header("content-type", "application/scim+json");
+            env.send(req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).unwrap()).await
+        }
+    };
+    assert_eq!(scim(Method::GET, "/ServiceProviderConfig".into(), None, token.clone()).await.status, StatusCode::OK);
+    assert_eq!(scim(Method::GET, "/Users".into(), None, "rlp_wrong".into()).await.status, StatusCode::UNAUTHORIZED);
+
+    // Carol, made by the provider: not an admin, active, found by her userName.
+    let carol = scim(Method::POST, "/Users".into(), Some(json!({ "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "carol@acme.test", "name": { "givenName": "Carol", "familyName": "Shaw" }, "externalId": "00u-carol", "active": true })), token.clone()).await;
+    assert_eq!(carol.status, StatusCode::CREATED, "{}", carol.json);
+    assert_eq!(carol.headers.get(header::CONTENT_TYPE).unwrap(), "application/scim+json");
+    let carol_id = carol.json["id"].as_str().unwrap().to_string();
+    assert_eq!((carol.json["active"].as_bool(), carol.json["displayName"].as_str(), carol.json["externalId"].as_str()), (Some(true), Some("Carol Shaw"), Some("00u-carol")));
+    assert_eq!(scim(Method::POST, "/Users".into(), Some(json!({ "userName": "carol@acme.test" })), token.clone()).await.json["scimType"], "uniqueness");
+    assert_eq!(scim(Method::POST, "/Users".into(), Some(json!({ "userName": "eve@elsewhere.test" })), token.clone()).await.status, StatusCode::BAD_REQUEST, "outside its domains");
+    let found = scim(Method::GET, "/Users?filter=userName%20eq%20%22carol@acme.test%22".into(), None, token.clone()).await;
+    assert_eq!((found.json["totalResults"].as_u64(), found.json["Resources"][0]["id"].as_str()), (Some(1), Some(carol_id.as_str())), "{}", found.json);
+    // The admin is roll's to manage: invisible to SCIM.
+    assert_eq!(scim(Method::GET, format!("/Users/{root}"), None, token.clone()).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(scim(Method::GET, "/Users".into(), None, token.clone()).await.json["totalResults"], 1);
+
+    // Carol signs in; deactivated by the provider (Entra's string), her session ends at once.
+    let mut b = Browser::default();
+    env.email_sign_in(&mut b, "carol@acme.test", None).await;
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
+    let off = scim(Method::PATCH, format!("/Users/{carol_id}"), Some(json!({ "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{ "op": "Replace", "path": "active", "value": "False" }] })), token.clone()).await;
+    assert_eq!((off.status, off.json["active"].as_bool()), (StatusCode::OK, Some(false)), "{}", off.json);
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED, "her session ended");
+    let on = scim(Method::PATCH, format!("/Users/{carol_id}"), Some(json!({ "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{ "op": "replace", "value": { "active": true } }] })), token.clone()).await;
+    assert_eq!(on.json["active"], true);
+    assert_eq!(scim(Method::DELETE, format!("/Users/{carol_id}"), None, token.clone()).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(scim(Method::GET, format!("/Users/{carol_id}"), None, token.clone()).await.json["active"], false, "DELETE deactivates");
+
+    // A new token stops the old one; removing the connection stops SCIM.
+    let token2 = env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/scim"), json!({})).await.json["token"].as_str().unwrap().to_string();
+    assert_eq!(scim(Method::GET, "/Users".into(), None, token.clone()).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(scim(Method::GET, "/Users".into(), None, token2.clone()).await.status, StatusCode::OK);
+    env.operator(Method::DELETE, &format!("/v1/accounts/sso/{id}"), json!({})).await;
+    assert_eq!(scim(Method::GET, "/Users".into(), None, token2).await.status, StatusCode::UNAUTHORIZED);
+}

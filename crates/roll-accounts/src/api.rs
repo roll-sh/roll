@@ -55,6 +55,8 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/sso/{id}", axum::routing::patch(update_sso).delete(remove_sso))
         .route("/v1/accounts/sso/{id}/callback", get(sso_callback))
         .route("/v1/accounts/sso/{id}/verify", post(verify_sso))
+        .route("/v1/accounts/sso/{id}/scim", post(scim_token).delete(remove_scim_token))
+        .merge(crate::scim::routes())
         .route_layer(axum::middleware::from_fn(json_only))
         .with_state(accounts)
 }
@@ -381,6 +383,20 @@ async fn update_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>, b: Byte
     admin(&a, &me, &op)?;
     let ch: crate::sso::ConnectionChange = body(&b)?;
     Ok(Json(blocking(&a, move |a| a.update_sso(&id, ch)).await?).into_response())
+}
+
+/// A SCIM token for the connection (replacing its old one): `{token, base_url}`, this once.
+async fn scim_token(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    let token = blocking(&a, move |a| a.scim_token(&id)).await?;
+    let base = format!("{}/v1/accounts/scim/v2", a.config.api_url);
+    Ok(with_cookies((StatusCode::CREATED, Json(json!({ "token": token, "base_url": base }))).into_response(), None))
+}
+
+async fn remove_scim_token(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    blocking(&a, move |a| a.remove_scim_token(&id)).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// Check the connection's domains' TXT records now; the ones that have it are verified.
