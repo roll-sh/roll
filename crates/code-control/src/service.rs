@@ -1078,7 +1078,8 @@ impl Code {
         {
             backend.delete(r, c).await?;
         }
-        self.report_environment(&c.id, None)?;
+        self.db.set_change_preview(&c.id, None)?;
+        self.emit(&r.id, "preview", json!({ "change": c.id, "preview": null }));
         let c = self.change_or_404(&c.id)?;
         self.emit_change(&c);
         Ok(c)
