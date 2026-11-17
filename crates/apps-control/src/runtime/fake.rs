@@ -85,6 +85,8 @@ pub struct Fake {
     oom: Mutex<std::collections::HashSet<String>>,
     /// Instances busy at this share of their CPU ([`Fake::set_busy`]), from when it was set.
     busy: Mutex<HashMap<String, (f64, std::time::Instant)>>,
+    /// Memory an instance says it uses ([`Fake::set_memory`]; else 64 MiB).
+    memory: Mutex<HashMap<String, u64>>,
     /// Volumes' contents (what a backup reads and a restore writes).
     volumes: Mutex<HashMap<String, Vec<u8>>>,
     /// What a tag points at in its registry ([`Fake::move_tag`]); zeros when unset.
@@ -102,6 +104,11 @@ impl Fake {
     /// `name` uses `share` of its CPU from now on (its usage's CPU time grows at that rate).
     pub fn set_busy(&self, name: &str, share: f64) {
         self.busy.lock().insert(name.to_string(), (share, std::time::Instant::now()));
+    }
+
+    /// Instance `name` uses this many bytes of memory from now on.
+    pub fn set_memory(&self, name: &str, bytes: u64) {
+        self.memory.lock().insert(name.to_string(), bytes);
     }
 
     /// Another service connects to `name`'s port while it sleeps (what Docker counts in its
@@ -556,7 +563,7 @@ impl Runtime for Fake {
             FakeState::Running => {
                 let cpu = self.instances.lock().get(name).map_or(0.0, |i| i.spec.cpu);
                 let grown = self.busy.lock().get(name).map_or(0.0, |(share, since)| share * cpu * since.elapsed().as_secs_f64() * 1e9);
-                Some(Usage { cpu_ns: 1_000_000 + grown as u64, memory_bytes: 64 << 20 })
+                Some(Usage { cpu_ns: 1_000_000 + grown as u64, memory_bytes: self.memory.lock().get(name).copied().unwrap_or(64 << 20) })
             }
             _ => None,
         }

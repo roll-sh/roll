@@ -386,6 +386,8 @@ pub struct EnvLive {
     /// CPU its awake instances used and could have used, per tick, for `cpu_window` (only what
     /// the runtime measures).
     cpu_samples: Mutex<std::collections::VecDeque<(Instant, f64, f64)>>,
+    /// The same for memory: bytes in use and the instances' limits, per tick.
+    mem_samples: Mutex<std::collections::VecDeque<(Instant, f64, f64)>>,
     /// The instances CPU last asked for: kept while the window fills again after a scale-out,
     /// so the new instance isn't taken straight back in.
     cpu_need: AtomicU32,
@@ -437,6 +439,7 @@ impl EnvLive {
             gate_gen: AtomicU64::new(0),
             buckets: Mutex::new(HashMap::new()),
             cpu_samples: Mutex::new(std::collections::VecDeque::new()),
+            mem_samples: Mutex::new(std::collections::VecDeque::new()),
             cpu_need: AtomicU32::new(0),
             last_tick: Mutex::new(None),
             last_health: Mutex::new(None),
@@ -1699,8 +1702,10 @@ impl EnvLive {
         };
         let insts = self.instances();
         let (mut cpu, mut mem, mut up) = (0.0, 0u64, 0usize);
-        // What was measured, and what those instances could have used (`run.cpu` each).
+        // What was measured, and what those instances could have used (`run.cpu` each), and
+        // their memory against its limits.
         let (mut used, mut capacity) = (0.0, 0.0);
+        let (mut mem_used, mut mem_cap) = (0.0, 0.0);
         for i in &insts {
             if !matches!(i.phase(), Phase::Running(_)) {
                 continue;
@@ -1719,6 +1724,10 @@ impl EnvLive {
                     }
                     *seen = Some(u.cpu_ns);
                     mem += u.memory_bytes;
+                    if let Some(tpl) = self.serving(&i.deployment) {
+                        mem_used += u.memory_bytes as f64;
+                        mem_cap += ((tpl.run.memory_mb as u64) << 20) as f64;
+                    }
                 }
                 // A runtime that can't say what an instance uses (Fargate, which bills by size ×
                 // time) meters what it was given: its CPU for the interval and its memory.
@@ -1733,12 +1742,14 @@ impl EnvLive {
         if up > 0 || elapsed > 0.0 {
             self.meter.lock().sample(now_ms(), cpu, mem, elapsed, up);
         }
-        let mut s = self.cpu_samples.lock();
-        if capacity > 0.0 {
-            s.push_back((now, used, capacity));
-        }
-        while s.front().is_some_and(|(at, ..)| now.duration_since(*at) > self.cfg.cpu_window) {
-            s.pop_front();
+        for (samples, used, cap) in [(&self.cpu_samples, used, capacity), (&self.mem_samples, mem_used, mem_cap)] {
+            let mut s = samples.lock();
+            if cap > 0.0 {
+                s.push_back((now, used, cap));
+            }
+            while s.front().is_some_and(|(at, ..)| now.duration_since(*at) > self.cfg.cpu_window) {
+                s.pop_front();
+            }
         }
         insts
     }
@@ -1746,7 +1757,16 @@ impl EnvLive {
     /// Its awake instances' CPU over the last `cpu_window`, in percent of what they could use;
     /// None until the window is nearly full of measurements.
     fn cpu_load(&self) -> Option<f64> {
-        let s = self.cpu_samples.lock();
+        self.load(&self.cpu_samples)
+    }
+
+    /// Its awake instances' memory over the same window, in percent of their limits.
+    fn mem_load(&self) -> Option<f64> {
+        self.load(&self.mem_samples)
+    }
+
+    fn load(&self, samples: &Mutex<std::collections::VecDeque<(Instant, f64, f64)>>) -> Option<f64> {
+        let s = samples.lock();
         let span = s.back()?.0.duration_since(s.front()?.0);
         if span < self.cfg.cpu_window.mul_f64(0.8) {
             return None;
@@ -1818,9 +1838,14 @@ impl EnvLive {
         // Fewer than needed by the requests in flight for a while → one goes.
         let in_flight: u32 = insts.iter().map(|i| i.in_flight()).sum();
         let mut needed = in_flight.div_ceil(run.concurrency).max(run.min_instances).max(1);
-        // On CPU too: as many as would bring the average under the target.
-        if let (Some(target), Some(load)) = (run.cpu_target, self.cpu_load().filter(|_| awake > 0)) {
-            let by_cpu = ((awake as f64 * load / target as f64).ceil() as u32).min(run.max_instances.max(1));
+        // On CPU and memory too: as many as would bring the average under the target (the one
+        // that asks for more decides).
+        let by = |target: Option<u32>, load: Option<f64>, what: &'static str| -> Option<(u32, f64, u32, &'static str)> {
+            let (target, load) = (target?, load.filter(|_| awake > 0)?);
+            Some((((awake as f64 * load / target as f64).ceil() as u32).min(run.max_instances.max(1)), load, target, what))
+        };
+        let wanted = [by(run.cpu_target, self.cpu_load(), "CPU"), by(run.memory_target, self.mem_load(), "memory")].into_iter().flatten().max_by_key(|(n, ..)| *n);
+        if let Some((by_cpu, load, target, what)) = wanted {
             self.cpu_need.store(by_cpu, Ordering::SeqCst);
             if by_cpu > awake && awake < run.max_instances {
                 // One more at a time, then a fresh window to judge it by.
@@ -1830,13 +1855,14 @@ impl EnvLive {
                     if self.start(&inst, run, None, deadline).await.is_ok() {
                         awake += 1;
                         self.cpu_samples.lock().clear();
+                        self.mem_samples.lock().clear();
                         self.cpu_need.store(awake, Ordering::SeqCst);
-                        self.log.stream(Stream::System).line(format!("scaled out: CPU at {load:.0}% of the {target}% target, {awake} instances"));
+                        self.log.stream(Stream::System).line(format!("scaled out: {what} at {load:.0}% of the {target}% target, {awake} instances"));
                     }
                 }
             }
             needed = needed.max(by_cpu);
-        } else if run.cpu_target.is_some() {
+        } else if run.cpu_target.is_some() || run.memory_target.is_some() {
             needed = needed.max(self.cpu_need.load(Ordering::SeqCst));
         }
         let over = awake > needed;

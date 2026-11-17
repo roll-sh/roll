@@ -50,6 +50,7 @@ interface Form {
   healthTimeout: string;
   drain: string;
   cpuTarget: string;
+  memoryTarget: string;
   alertMemory: string;
   alertErrors: string;
   alertP95: string;
@@ -110,6 +111,7 @@ export function formOf(s: Service): Form {
     healthTimeout: str(s.run.health_timeout_s),
     drain: str(s.run.drain_s),
     cpuTarget: str(s.run.cpu_target),
+    memoryTarget: str(s.run.memory_target),
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
     alertP95: str(s.run.alerts?.p95_ms),
@@ -186,6 +188,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.healthTimeout !== before.healthTimeout) run.health_timeout_s = num(f.healthTimeout);
   if (f.drain !== before.drain) run.drain_s = num(f.drain);
   if (f.cpuTarget !== before.cpuTarget) run.cpu_target = num(f.cpuTarget);
+  if (f.memoryTarget !== before.memoryTarget) run.memory_target = num(f.memoryTarget);
   if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount)
     run.alerts = {
       memory_pct: Number(f.alertMemory) || 0,
@@ -216,7 +219,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -477,6 +480,9 @@ export function SettingsTab({
                   </Field>
                   <Field label="CPU target (%)" hint="another instance while they average over it for a minute; empty: requests only">
                     {t("cpuTarget", "70")}
+                  </Field>
+                  <Field label="Memory target (%)" hint="of each instance's memory, the same way; empty: not on memory">
+                    {t("memoryTarget", "80")}
                   </Field>
                   <Field label="Suspend after (s)" hint="idle; 0 never suspends">
                     {t("suspendAfter", "30")}

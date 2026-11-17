@@ -492,6 +492,12 @@ pub struct Run {
     /// `max_instances`), and fewer stay once they'd be under it. 10–100; unset, requests only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_target: Option<u32>,
+    /// And on memory (Render's target memory): while its awake instances average over this
+    /// percent of their memory limit for a minute another starts, and fewer stay once they'd be
+    /// under it. 10–100; unset, not on memory. Where both are set, the one that asks for more
+    /// instances decides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_target: Option<u32>,
     /// A worker that stops (Railway's restart policy): started again `always`, only when it
     /// failed (`on_failure`, up to `restart_tries` in a row), or `never`. A deploy or a restart
     /// starts fresh ones whatever it says.
@@ -699,6 +705,7 @@ impl Default for Run {
             public: true,
             drain_s: None,
             cpu_target: None,
+            memory_target: None,
             restart: Restart::Always,
             restart_tries: None,
             affinity: false,
@@ -807,6 +814,14 @@ impl Run {
             }
             if self.kind != RunType::Web {
                 return bad("cpu_target is for a web service (a worker follows its work with scale)");
+            }
+        }
+        if let Some(t) = self.memory_target {
+            if !(10..=100).contains(&t) {
+                return bad("memory_target is 10–100 (percent of an instance's memory)");
+            }
+            if self.kind != RunType::Web {
+                return bad("memory_target is for a web service (a worker follows its work with scale)");
             }
         }
         if self.port == Some(0) {

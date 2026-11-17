@@ -46,9 +46,9 @@ pub const MAX_BYTES: u64 = 64 << 10;
 
 /// What `[app.run]` takes: a service's run settings (apps-control's `Run`, whose tests keep the
 /// two equal), but `volume`.
-pub const RUN_KEYS: [&str; 30] = [
+pub const RUN_KEYS: [&str; 31] = [
     "type", "port", "start", "pre_deploy", "schedule", "timezone", "timeout_s", "retries", "min_instances", "max_instances", "concurrency", "cpu", "memory_mb", "health_path",
-    "health_timeout_s", "suspend_after_s", "sleep_after_s", "alerts", "rollout", "h2c", "scale", "public", "drain_s", "cpu_target", "restart", "restart_tries", "affinity", "tcp",
+    "health_timeout_s", "suspend_after_s", "sleep_after_s", "alerts", "rollout", "h2c", "scale", "public", "drain_s", "cpu_target", "memory_target", "restart", "restart_tries", "affinity", "tcp",
     "rollback_on_crash", "schedules",
 ];
 

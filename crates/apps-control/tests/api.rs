@@ -542,20 +542,21 @@ async fn a_variable_kept_as_a_file_reaches_the_instance_there() {
     assert_eq!(st, StatusCode::OK, "{v}");
     let row = v["vars"].as_array().unwrap().iter().find(|x| x["name"] == "GCP_KEY").cloned().unwrap();
     assert_eq!((row["file"].as_str(), row["sealed"].as_bool()), (Some("/etc/secrets/gcp.json"), Some(true)), "{v}");
-    let live = |w: &World| {
-        let names: Vec<String> = w.fake.instances(&id).into_iter().filter(|(_, _, s)| *s == apps_control::runtime::fake::FakeState::Running).map(|(n, _, _)| n).collect();
-        w.fake.spec(names.last().expect("a running instance")).unwrap()
+    // The live deployment's running instance (the one before may still be draining).
+    let live = |w: &World, dep: &str| {
+        let name = w.fake.instances(&id).into_iter().find(|(_, d, s)| d == dep && *s == apps_control::runtime::fake::FakeState::Running).map(|(n, _, _)| n).expect("a running instance");
+        w.fake.spec(&name).unwrap()
     };
     let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
-    let spec = live(&w);
+    let spec = live(&w, r["id"].as_str().unwrap());
     assert_eq!(spec.files, vec![("/etc/secrets/gcp.json".to_string(), key.to_string())]);
     assert!(!spec.vars.iter().any(|(k, _)| k == "GCP_KEY") && spec.vars.iter().any(|(k, _)| k == "PLAIN"), "a file isn't in the environment too");
     // Back into the environment, then gone with its variable.
     call(&w.api, "PATCH", &vars, Some(json!({"files": {"GCP_KEY": null}}))).await;
     let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
-    let spec = live(&w);
+    let spec = live(&w, r["id"].as_str().unwrap());
     assert!(spec.files.is_empty() && spec.vars.iter().any(|(k, _)| k == "GCP_KEY"));
     call(&w.api, "PATCH", &vars, Some(json!({"files": {"PLAIN": "/run/plain"}}))).await;
     let (_, v) = call(&w.api, "PATCH", &vars, Some(json!({"unset": ["PLAIN"]}))).await;
@@ -578,13 +579,14 @@ async fn closed_egress_runs_on_its_own_network_with_a_proxy() {
     }
     let (st, e) = call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll", "hosts": ["API.Stripe.com", "*.sentry.io"]}}))).await;
     assert_eq!((st, &e["egress"]), (StatusCode::OK, &json!({"mode": "roll", "hosts": ["*.sentry.io", "api.stripe.com"]})), "{e}");
-    let live = |w: &World| {
-        let names: Vec<String> = w.fake.instances(&id).into_iter().filter(|(_, _, s)| *s == apps_control::runtime::fake::FakeState::Running).map(|(n, _, _)| n).collect();
-        w.fake.spec(names.last().expect("a running instance")).unwrap()
+    // The live deployment's running instance (the one before may still be draining).
+    let live = |w: &World, dep: &str| {
+        let name = w.fake.instances(&id).into_iter().find(|(_, d, s)| d == dep && *s == apps_control::runtime::fake::FakeState::Running).map(|(n, _, _)| n).expect("a running instance");
+        w.fake.spec(&name).unwrap()
     };
     let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
-    let spec = live(&w);
+    let spec = live(&w, r["id"].as_str().unwrap());
     let closed = apps_control::closed_network_name(&w.project, "production");
     assert_eq!((spec.closed, spec.network.as_deref()), (true, Some(closed.as_str())));
     assert!(w.fake.closed_networks().contains(&closed));
@@ -601,7 +603,7 @@ async fn closed_egress_runs_on_its_own_network_with_a_proxy() {
     assert_eq!(e["egress"], json!({"mode": "open", "hosts": []}), "{e}");
     let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
-    let spec = live(&w);
+    let spec = live(&w, r["id"].as_str().unwrap());
     assert_eq!((spec.closed, spec.network), (false, Some(apps_control::network_name(&w.project, "production"))));
     assert!(!spec.vars.iter().any(|(k, _)| k == "HTTPS_PROXY"));
 }
@@ -3186,8 +3188,8 @@ async fn an_allow_list_lets_only_its_networks_in() {
     assert_eq!(from(Some("198.51.100.1:5000")).await, StatusCode::OK);
 }
 
-/// `run.cpu_target`: a web service whose instances stay over the target for the window gets
-/// another (one at a time), and goes back down once they'd be under it.
+/// `run.cpu_target` and `run.memory_target`: a web service whose instances stay over the target
+/// for the window gets another (one at a time), and goes back down once they'd be under it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_web_service_scales_on_its_cpu() {
     let w = world_with(|c| {
@@ -3218,6 +3220,19 @@ async fn a_web_service_scales_on_its_cpu() {
     until(&w, &id, 2).await;
     for n in running(&w, &id) {
         w.fake.set_busy(&n, 0.05);
+    }
+    until(&w, &id, 1).await;
+    // On memory too (Render's target memory): over 70% of its 512 MB, another; under, back.
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"memory_target": 101}}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"cpu_target": null, "memory_target": 70}}))).await;
+    assert_eq!(st, StatusCode::OK, "{s}");
+    let (_, r) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/redeploy"), Some(json!({}))).await;
+    settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
+    until(&w, &id, 1).await;
+    w.fake.set_memory(&running(&w, &id)[0], 480 << 20);
+    until(&w, &id, 2).await;
+    for n in running(&w, &id) {
+        w.fake.set_memory(&n, 64 << 20);
     }
     until(&w, &id, 1).await;
 }
