@@ -3272,6 +3272,11 @@ async fn secret_values_are_revealed_only_as_roll_secrets_allows() {
     static ENSURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
     let w = world_full(|_| {}, false, |d| d.secrets = Arc::new(FakeSecrets)).await;
     let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    // A project secret is hidden in the log whatever its name or tag (GitHub Actions' rule).
+    let sid = svc["id"].as_str().unwrap();
+    w.apps.logs.sink(format!("env:{sid}/production"), apps_control::logs::Stream::Stdout).line("connecting with s3cret");
+    let log = call(&w.api, "GET", &format!("/v1/apps/services/{sid}/environments/production/logs"), None).await.1.to_string();
+    assert!(log.contains("connecting with ***") && !log.contains("s3cret"), "{log}");
     // A new environment's secrets have somewhere to go; a preview's are roll previews' to make.
     let envs = format!("/v1/apps/services/{}/environments", svc["id"].as_str().unwrap());
     call(&w.api, "PUT", &format!("{envs}/qa"), Some(json!({}))).await;
@@ -4283,6 +4288,8 @@ async fn files_go_to_and_from_an_instance() {
         let req = Request::builder().method(method).uri(uri).header("content-type", "application/x-tar").body(Body::from(body)).unwrap();
         w.api.clone().oneshot(req)
     };
+    // Its floor's instance is up first (it starts a moment after the deploy, later on a busy machine).
+    get_until(&w.api, &format!("/v1/apps/services/{id}/environments/production"), |e| e["state"] == "running").await;
     let tar = b"a tar's bytes".to_vec();
     let resp = raw("PUT", format!("{files}?path=/data"), tar.clone()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);

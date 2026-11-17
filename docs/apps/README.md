@@ -1175,8 +1175,9 @@ it). Both carry the exit code.
 
 A secret value never reaches a log (GitHub Actions' masking, Netlify's secret scanning): every
 line written to an environment's log, a build's and a job's (the app's output, a build step's,
-OTLP log records, roll's own lines) has the environment's sealed variables, roll secrets'
-sensitive values, its links' credentials (by name: `PASSWORD`, `SECRET`, `TOKEN`, `API_KEY` …)
+OTLP log records, roll's own lines) has the environment's sealed variables, every value roll
+secrets gives it (a secret is one whatever its name or tag, but for the linked fields it says
+are plain: a host, a port, a user, a database), its links' credentials (by name: `PASSWORD`, `SECRET`, `TOKEN`, `API_KEY` …)
 and the password in any URL variable taken out as `***` before it's kept, followed, stored or
 drained (`logs::Redact`, one Aho–Corasick pass a line, set as each deployment is made and kept for
 the eight before it). A value under six characters is left, and so is each line of a multi-line
