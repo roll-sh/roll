@@ -78,6 +78,7 @@ impl RowBatch {
         self.pos
     }
 
+    #[inline]
     fn key_start(&self, i: usize) -> usize {
         if i == 0 { 0 } else { self.ents[i - 1].key_end as usize }
     }
@@ -192,6 +193,16 @@ impl RowBatch {
         self.keys.extend_from_within(prev..prev + shared);
         self.keys.extend_from_slice(suffix);
         self.ents.push(Ent { key_end: self.keys.len() as u32, buf, off: off as u32, len: len as u32 });
+    }
+
+    /// A row whose key is `key`'s first `n` bytes, its value `bufs[buf][off..off + len]`
+    /// (`buf_index`): the key's bytes moved as one fixed-size copy, then cut back.
+    #[inline]
+    pub fn push_key<const K: usize>(&mut self, key: &[u8; K], n: usize, buf: u32, off: usize, len: usize) {
+        let start = self.keys.len();
+        self.keys.extend_from_slice(key);
+        self.keys.truncate(start + n);
+        self.ents.push(Ent { key_end: (start + n) as u32, buf, off: off as u32, len: len as u32 });
     }
 
     /// A row whose value is `v`.

@@ -77,6 +77,7 @@ pub fn may_hold_rows(start: &[u8], end: &[u8]) -> bool {
 }
 
 /// Whether the stored row `v` points at out-of-line values.
+#[inline]
 pub fn has_external(v: &[u8]) -> bool {
     matches!(v.first(), Some(&(ROW_HEADER_EXT | ROW_HEADER_TID_EXT)))
 }

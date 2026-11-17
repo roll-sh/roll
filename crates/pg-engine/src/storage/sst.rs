@@ -866,6 +866,10 @@ pub struct SstReader {
     dead_obsolete: AtomicBool,
 }
 
+/// The longest key `Block::run_rows` makes in a buffer of its own (a table's row keys are 12 to
+/// 24 bytes; an index entry's often more: those go the general way).
+const KEY: usize = 32;
+
 /// Entries between restarts in a cached block: every `RESTART`th entry stores its whole key
 /// (shared = 0), so a seek searches the restarts and decodes at most `RESTART - 1` entries.
 /// (Format 2 records its interval in each block, `Block::rlog`: this is what it writes.)
@@ -1367,7 +1371,15 @@ impl Block {
             self.step(pos);
             return (0, 0);
         };
-        let mut last_len = last.len();
+        // (The key being made, when it fits `KEY`: a key's bytes past those it shares with the
+        // row before go in as a 16-byte move, the key into the batch as a `KEY`-byte one, each
+        // cut back to its length: no copy call per row. Longer keys go the general way.)
+        let mut kb = [0u8; KEY + 16];
+        let mut klen = last.len();
+        let mut short = klen <= KEY;
+        if short {
+            kb[..klen].copy_from_slice(last);
+        }
         let own = self.version() <= ts;
         let mut ver = self.ts;
         let buf = batch.buf_index(&self.data);
@@ -1377,7 +1389,7 @@ impl Block {
             let (shared, us, vf) = head(b, &mut p);
             let unshared = us >> 2;
             // (The last row's user key again, an older version: shared whole.)
-            if us & F_DERIVED != 0 || vf == 0 || shared >= last_len {
+            if us & F_DERIVED != 0 || vf == 0 || shared >= klen {
                 p = at;
                 break;
             }
@@ -1396,16 +1408,35 @@ impl Block {
                 }
             };
             let len = vf - 1;
+            let suffix = &b[p..p + ukn];
             // (At a restart, the key is stored whole: the last row's again is an older version.)
-            if (shared == 0 && batch.last_key() == Some(&b[p..p + ukn])) || (resolve && super::toast::has_external(&b[v..v + len])) {
+            let again = shared == 0
+                && match short {
+                    true => kb[..klen] == *suffix,
+                    false => batch.last_key() == Some(suffix),
+                };
+            if again || (resolve && super::toast::has_external(&b[v..v + len])) {
                 p = at;
                 break;
             }
-            batch.push_shared(shared, &b[p..p + ukn], buf, v, len);
+            let nk = shared + ukn;
+            if short && nk <= KEY {
+                match b.get(p..p + 16) {
+                    Some(w) if ukn <= 16 => kb[shared..shared + 16].copy_from_slice(w),
+                    _ => kb[shared..nk].copy_from_slice(suffix),
+                }
+                batch.push_key::<KEY>(kb[..KEY].try_into().unwrap(), nk, buf, v, len);
+            } else {
+                batch.push_shared(shared, suffix, buf, v, len);
+                short = nk <= KEY;
+                if short {
+                    kb[..nk].copy_from_slice(batch.last_key().expect("a row"));
+                }
+            }
             ver = if ukn == unshared { self.ts } else { b[p + ukn..p + unshared].try_into().unwrap() };
             p += unshared;
             v += len;
-            last_len = shared + ukn;
+            klen = nk;
             n += 1;
             i += 1;
         }
