@@ -1635,11 +1635,13 @@ Ranked by what a person notices first. Done so far:
    print what it was given. Each is masked as checks' output is: values from roll secrets, the
    project's and the preview's own variables, and the branches' credentials. Its roll apps
    variables are sealed (apps' #191 hides those in apps' own logs). A picture can't be masked.
-4. **Deploy a preview's services at once** (performance): step 4 deploys them one after another,
-   and on roll apps each deploy waits up to 2 s for its rollout within a pass. Branching went
-   the same way (#196: change → ready 14 s, from 16.6–18.4 s). Measure first with a project of
-   three services (the live check has one), and land it only on a measured win.
-5. **In review:** #196 (a preview's data resources branched at once) and #197 (`became` on roll
+4. **In review:**
+   - **#204:** a preview's health checks asked at once. Each wakes its service, a cold start.
+     Change → ready went from 15.0–19.3 s to 11.2–12.6 s.
+   - **#206:** a fork's preview reaches roll only by default (`egress_forks`), and a Roll-only
+     preview's DNS forwards nowhere (a TEST-NET resolver: Docker before 26 forwarded from
+     internal networks).
+5. **Also in review:** #196 (a preview's data resources branched at once) and #197 (`became` on roll
    code's `preview` event: roll code's "post a preview to Slack when it's ready" template posts
    once a push).
 6. **Tests for rolld's `GitReport`** (after #138): a unit test of the connection's parsing, and the
@@ -1670,6 +1672,13 @@ Ranked by what a person notices first. Done so far:
 9. **Watch: pg-control's recovery to a time seconds old** (unowned).
 10. **Watch: a cold start on a Docker name conflict**: a preview's services each making its egress
    proxy under one name was fixed (#137); if it comes back, log both starts' container ids.
+
+Measured and not landed (2026-11-17): deploying a preview's roll apps services at once
+(branch `feature/roll-previews-deploy-at-once`). Each deploy waits up to 2 s for its rollout,
+so the second service's build starts about 2 s sooner. With two services, change → both
+deploys active took 19.0 and 23.5 s on the branch, against 21.0 and 20.7 s on main: within the
+noise. Two Docker builds of one repo at once share the CPU, so the head start is lost. Try again
+with a project whose builds are cached or images prebuilt, where the stagger is a larger share.
 
 Looked at and not planned: sharing the default branch's running services with a preview
 (Signadot's sandboxes route a request to the baseline unless its header names the sandbox's
