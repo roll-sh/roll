@@ -1044,14 +1044,18 @@ pub const NEED_COPY_ROWS: &str = "XXCPY";
 /// read and inserted.
 fn next_copied(
     c: &CopyLines,
+    taken: &mut std::collections::VecDeque<(crate::sql::plan::CopyRow, usize, String)>,
     ctx: &ExecCtx,
 ) -> Result<Option<(Row, (usize, String))>> {
     loop {
-        let mut feed = c.feed.lock().unwrap();
-        let next = feed.rows.pop_front();
-        let done = feed.done;
-        drop(feed);
-        match next {
+        // (The feed's rows taken a batch at a time: one lock each, not one a row.)
+        let mut done = false;
+        if taken.is_empty() {
+            let mut feed = c.feed.lock().unwrap();
+            std::mem::swap(&mut feed.rows, taken);
+            done = feed.done;
+        }
+        match taken.pop_front() {
             Some((crate::sql::plan::CopyRow::Values(row), line, raw)) => {
                 return Ok(Some((row, (line, raw))));
             }
@@ -3849,6 +3853,8 @@ pub struct InsertNode {
     last_table: u32,
     /// COPY: the line number and text of the row being inserted.
     copy_line: (usize, String),
+    /// COPY: the rows taken from its feed, not inserted yet (`next_copied`).
+    copy_taken: std::collections::VecDeque<(crate::sql::plan::CopyRow, usize, String)>,
     /// COPY's multi-insert buffer as PostgreSQL fills it (rows, line bytes since its last
     /// flush), and a unique or exclusion violation found in it: raised when the buffer would
     /// be flushed (CopyMultiInsertBufferFlush inserts the index entries then), after the rest
@@ -4078,6 +4084,7 @@ impl InsertNode {
             routed_after: Vec::new(),
             last_table,
             copy_line: (0, String::new()),
+            copy_taken: Default::default(),
             copy_buf: (0, 0),
             copy_err: None,
             copy_load,
@@ -4707,7 +4714,7 @@ impl Node for InsertNode {
                 return Err(e);
             }
             let next = match &self.plan.copy {
-                Some(c) => match next_copied(c, ctx).inspect_err(|e| {
+                Some(c) => match next_copied(c, &mut self.copy_taken, ctx).inspect_err(|e| {
                     if e.code != NEED_COPY_ROWS {
                         self.counts_on_error(ctx);
                     }
