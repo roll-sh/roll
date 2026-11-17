@@ -1442,8 +1442,9 @@ fn p_int_mod(x: &Value, y: &Value, r: &T) -> Result<Value> {
     if d == 0 {
         return Err(int_op_error(err!(DIVISION_BY_ZERO, "division by zero"), 4, x, y));
     }
-    // (int8 minimum % -1 is 0, as Postgres has it, not an overflow.)
-    int_result(i(x).wrapping_rem(d), r)
+    // (int8 minimum % -1 is 0, as Postgres has it, not an overflow. In 64 bits, which hold
+    // every integer operand: an i128 remainder is a library call.)
+    int_result(x.as_i64().unwrap_or(0).wrapping_rem(d as i64) as i128, r)
 }
 fn p_fl_add(x: &Value, y: &Value, r: &T) -> Result<Value> {
     let (x, y) = (f(x), f(y));
