@@ -223,6 +223,43 @@ impl Code {
     }
 
     /// A commit status on `owner/repo` at `sha` through `installation`.
+    /// What a commit's checks say on GitHub (its check runs and commit statuses, roll's own left
+    /// out: roll waits on others' checks, never on itself): `Ok(None)` when there are none,
+    /// `Some(Err(name))` when one failed, `Some(Ok(false))` while any is running, `Some(Ok(true))`
+    /// when all passed.
+    pub async fn github_ci(&self, installation: u64, owner: &str, repo: &str, sha: &str) -> Result<Option<std::result::Result<bool, String>>> {
+        let hub = self.github_hub().ok_or_else(|| Error::Invalid("roll's GitHub App isn't configured".into()))?;
+        let runs = hub.client.commit_check_runs(installation, owner, repo, sha).await.map_err(|e| Error::Internal(e.into()))?;
+        let status = hub.client.commit_status(installation, owner, repo, sha).await.map_err(|e| Error::Internal(e.into()))?;
+        let ours = hub.config.slug.clone();
+        let (mut any, mut running) = (false, false);
+        for r in runs["check_runs"].as_array().into_iter().flatten() {
+            if r["app"]["slug"].as_str().is_some_and(|s| !ours.is_empty() && s == ours) {
+                continue;
+            }
+            any = true;
+            let name = r["name"].as_str().unwrap_or("a check").to_string();
+            match (r["status"].as_str(), r["conclusion"].as_str()) {
+                (Some("completed"), Some("success" | "neutral" | "skipped")) => {}
+                (Some("completed"), _) => return Ok(Some(Err(name))),
+                _ => running = true,
+            }
+        }
+        for s in status["statuses"].as_array().into_iter().flatten() {
+            let context = s["context"].as_str().unwrap_or("a status");
+            if context.starts_with("roll/") {
+                continue;
+            }
+            any = true;
+            match s["state"].as_str() {
+                Some("success") => {}
+                Some("pending") => running = true,
+                _ => return Ok(Some(Err(context.to_string()))),
+            }
+        }
+        Ok(any.then_some(Ok(!running)))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn github_commit_status(&self, installation: u64, owner: &str, repo: &str, sha: &str, state: &str, context: &str, description: &str, target_url: Option<&str>) -> Result<()> {
         let hub = self.github_hub().ok_or_else(|| Error::Invalid("roll's GitHub App isn't configured".into()))?;

@@ -55,7 +55,7 @@ async fn a_change_gets_a_full_preview_that_follows_pushes_and_goes_when_it_lands
 
 #[tokio::test]
 async fn a_fork_waits_for_approval_and_a_failed_step_is_retried() {
-    let e = env(json!({ "enabled": true, "resources": { "redis:rdb_cache": "skip" } }));
+    let e = env(json!({ "enabled": true, "resources": { "redis:rdb_cache": "skip" }, "seed": { "image": "node:22", "run": "npm run seed" } }));
     e.code.open(ChangeInfo { trusted: false, ..change("chg_f", 3) });
     e.engine.pass().await.unwrap();
     let p = e.code.last_report("chg_f");
@@ -75,6 +75,13 @@ async fn a_fork_waits_for_approval_and_a_failed_step_is_retried() {
     let p = e.engine.store.preview(&p.id).unwrap();
     assert_eq!(p.state, State::Ready, "{p:?}");
     assert_eq!(p.resources.len(), 1, "redis is skipped by the project's rules");
+    // Approved to run, not read for what it sends out: roll only, though the project's own
+    // previews reach anything (`egress_forks`).
+    let egress = e.apps.egress.lock().clone();
+    assert!(!egress.is_empty() && egress.values().all(|x| *x == roll_previews::settings::EgressRule::Roll), "{egress:?}");
+    let jobs = e.apps.seed_egress.lock().clone();
+    assert!(!jobs.is_empty() && jobs.iter().all(|x| *x == roll_previews::settings::EgressRule::Roll), "its seed too: {jobs:?}");
+    assert_eq!(p.reaches, roll_previews::settings::EgressRule::Roll, "and it says so");
 
     // A new push un-approves it: its services stop and it waits again.
     e.code.edit("chg_f", |c| {
@@ -317,6 +324,48 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     e.engine.store.compare_with_base(&chg.id, &base.id, "main", None).unwrap();
     let b = e.engine.store.preview(&chg.id).unwrap().base_change.unwrap();
     assert!(b.api_unread && b.api.is_none(), "{b:?}");
+}
+
+/// A preview's output is read by anyone who can read the preview, and its code (a fork's too) can
+/// print what it was given: its services' logs, its jobs' output and what its page said in a
+/// screenshot run (the pull request's comment) show a secret's value as `***` (as checks'
+/// summaries do; a branch's credentials too, `masks.rs`).
+#[tokio::test]
+async fn a_previews_logs_and_job_output_hide_its_secrets() {
+    let e = env(json!({ "enabled": true, "seed": { "image": "node:22", "run": "node seed.js" }, "github": { "screenshot": true } }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9".into()));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    *e.apps.page_says.lock() = Some("Stripe rejected sk_test_51Hx9".into());
+    e.apps.seed_exit.store(3, Ordering::SeqCst);
+    e.code.open(change("chg_m", 9));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_m").unwrap().unwrap();
+    let error = p.error.clone().unwrap_or_default();
+    assert!(error.contains("seed output, STRIPE_KEY=***") && !error.contains("sk_test_51Hx9"), "{error}");
+    e.apps.seed_exit.store(0, Ordering::SeqCst);
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    *e.apps.log.lock() = vec!["listening on :3000".into(), "charging with sk_test_51Hx9".into()];
+    let (_, lines) = e.engine.logs(&p.id, None, 10).await.unwrap();
+    assert_eq!(lines, ["listening on :3000", "charging with ***"]);
+    // Followed too (the dashboard's live logs, `roll preview logs -f`).
+    let (_, mut rx) = e.engine.follow(&p.id, None, 10).await.unwrap();
+    let mut followed = Vec::new();
+    while followed.len() < 2 {
+        followed.push(tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap());
+    }
+    assert_eq!(followed, ["listening on :3000", "charging with ***"]);
+    let mut said = None;
+    for _ in 0..400 {
+        said = e.engine.store.page_health(&p.id).unwrap().and_then(|h| h.first_error);
+        if said.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(said.as_deref(), Some("Stripe rejected ***"));
 }
 
 #[tokio::test]
@@ -1069,7 +1118,9 @@ async fn a_git_url_services_branch_push_makes_its_preview() {
 /// the next push waits again, and closing the pull request deletes it.
 #[tokio::test]
 async fn a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head() {
-    let e = env(json!({ "enabled": true }));
+    // A fork's head on roll apps runs only where the project opened forks' egress (roll apps'
+    // build isn't held to Roll only).
+    let e = env(json!({ "enabled": true, "egress_forks": "open" }));
     e.ws.place(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Service, "svc_shop", 0.0, 0.0).unwrap();
     *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "shop".into(), repo: Some("git:svc_shop".into()), root: String::new(), memory_mb: 256 }]);
     let push = |sha: Option<&str>| roll_previews::ports::GitPush {
@@ -1086,6 +1137,10 @@ async fn a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head()
     let r = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.repo == "git:svc_shop").unwrap();
     assert_eq!((r.state, r.trusted, r.title.as_str(), deployed(&r.id)), (State::AwaitingApproval, false, "Faster cart", None), "nothing runs before an approval");
     assert!(matches!(e.engine.approve(&r.id, "f0", "ada"), Err(roll_previews::Error::Conflict(_))), "only the head it's at");
+    // Under Roll only, roll apps' build of it would still reach out: refused, until opened.
+    e.engine.store.put_settings(&e.project, &e.engine.store.settings(&e.project).unwrap().patched(&json!({ "egress": "roll" })).unwrap()).unwrap();
+    assert!(matches!(e.engine.approve(&r.id, "f1", "ada"), Err(roll_previews::Error::Conflict(_))), "not under Roll only");
+    e.engine.store.put_settings(&e.project, &e.engine.store.settings(&e.project).unwrap().patched(&json!({ "egress": "open" })).unwrap()).unwrap();
     e.engine.approve(&r.id, "f1", "ada").unwrap();
     e.engine.pass().await.unwrap();
     assert_eq!(deployed(&r.id).as_deref(), Some("f1"), "the approved head runs");

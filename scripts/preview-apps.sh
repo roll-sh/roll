@@ -63,7 +63,7 @@ api POST /v1/code/owners '{"name":"acme","kind":"org"}' >/dev/null
 api POST /v1/code/repos '{"owner":"acme","name":"web","source":"native"}' >/dev/null
 BODY_INIT=$(python3 - <<'PY'
 import json
-start = "#!/bin/sh\necho \"$REDIS_URL\" | sed -E 's#.*default:(rdb_[a-z0-9]+)_.*#\\1#' > where\nexec python -m http.server ${PORT:-8000}\n"
+start = "#!/bin/sh\necho \"$REDIS_URL\" | sed -E 's#.*default:(rdb_[a-z0-9]+)_.*#\\1#' > where\nprintf '%s' \"$KAFKA_USERNAME\" > kafka_user\nprintf '%s' \"$KAFKA_BROKERS\" > kafka_brokers\nexec python -m http.server ${PORT:-8000}\n"
 docker = 'FROM python:3.13-alpine\nWORKDIR /app\nCOPY . .\nCMD ["sh", "start.sh"]\n'
 # What previews' screenshots of the service take, in roll apps' own config ([app.previews.screenshots]).
 toml = '[app.previews.screenshots]\n[[app.previews.screenshots.states]]\nname = "apps-tab"\npage = "/"\nsteps = [{ press = "Tab" }]\n'
@@ -110,14 +110,9 @@ for _ in $(seq 1 600); do
 done
 T2=$(now_ms)
 VARS=$(api GET "/v1/apps/services/$SVC/environments/$ENV/variables" | jq_ "[v['name'] for v in d['vars']]")
-# The stream link's variables on the preview's environment are the branch's, under roll apps'
-# names: its brokers and its own SASL user, never production's link's.
+# What previews sets there is sealed: roll apps never returns it (its logs hide it too).
 PV_VALUES=$(api GET "/v1/apps/services/$SVC/environments/$ENV/variables/values")
-BRANCH_ENV=$(api GET "/v1/previews/$PV/connect" | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(next((b['vars'] for b in d['branches'] if b['kind'] == 'stream'), {})))")
-KAFKA_PV=$(echo "$PV_VALUES" | jq_ "d.get('KAFKA_USERNAME', '')")
-KAFKA_BRANCH=$(echo "$BRANCH_ENV" | jq_ "d.get('KAFKA_SASL_USERNAME', '')")
-[ -n "$KAFKA_PV" ] && [ "$KAFKA_PV" = "$KAFKA_BRANCH" ] || { echo "the stream link's KAFKA_USERNAME should be the branch's ($KAFKA_BRANCH), not '$KAFKA_PV'"; echo "$PV_VALUES" | jq_ "sorted(k for k in d if k.startswith('KAFKA'))"; echo "$BRANCH_ENV" | head -c 600; exit 1; }
-[ "$(echo "$PV_VALUES" | jq_ "d.get('KAFKA_BROKERS', '')")" = "$(echo "$BRANCH_ENV" | jq_ "d.get('KAFKA_BOOTSTRAP_SERVERS', '')")" ] || { echo "the stream link's KAFKA_BROKERS should be the branch's"; exit 1; }
+[ -z "$(echo "$PV_VALUES" | jq_ "d.get('KAFKA_USERNAME', '')")" ] || { echo "previews' variables in a pv- environment should be sealed"; exit 1; }
 # Its mail goes to roll's catcher, as on roll's own runtime (and providers' keys are replaced).
 case "$VARS" in *"'SMTP_URL'"*"'SMTP_USER'"*) ;; *) echo "a pv- environment should get roll's SMTP: $VARS"; exit 1;; esac
 case "$VARS" in *"'SENDGRID_API_KEY'"*) ;; *) echo "a pv- environment should get the providers' keys replaced: $VARS"; exit 1;; esac
@@ -127,9 +122,48 @@ BODY=$(curl -sS -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 
 WHERE=$(curl -sS -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/where" --max-time 30)
 T4=$(now_ms)
 [ "$BODY" = "preview of change 1" ] || { echo "the preview should serve the change's page: $BODY"; exit 1; }
+# The stream link's variables, as the instance got them, are the branch's under roll apps' names:
+# its brokers and its own SASL user, never production's link's.
+BRANCH_ENV=$(api GET "/v1/previews/$PV/connect" | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(next((b['vars'] for b in d['branches'] if b['kind'] == 'stream'), {})))")
+KAFKA_PV=$(curl -sS -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/kafka_user" --max-time 30)
+KAFKA_BRANCH=$(echo "$BRANCH_ENV" | jq_ "d.get('KAFKA_SASL_USERNAME', '')")
+[ -n "$KAFKA_PV" ] && [ "$KAFKA_PV" = "$KAFKA_BRANCH" ] || { echo "the stream link's KAFKA_USERNAME should be the branch's ($KAFKA_BRANCH), not '$KAFKA_PV'"; echo "$BRANCH_ENV" | head -c 600; exit 1; }
+[ "$(curl -sS -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/kafka_brokers" --max-time 30)" = "$(echo "$BRANCH_ENV" | jq_ "d.get('KAFKA_BOOTSTRAP_SERVERS', '')")" ] || { echo "the stream link's KAFKA_BROKERS should be the branch's"; exit 1; }
 # Kept out of search engines on roll apps too (roll apps 3b7cd1ac5, #26).
 APPS_ROBOTS=$(curl -sS -o /dev/null -D - -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 30 | tr -d '\r' | sed -n 's/^x-robots-tag: //Ip')
 [ "$APPS_ROBOTS" = noindex ] || { echo "a pv- environment's page should carry X-Robots-Tag: noindex, not '$APPS_ROBOTS'"; exit 1; }
+
+say "Roll only on roll apps (apps' #143): the pv- instance reaches nothing but its listed hosts"
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"roll","egress_hosts":["example.com"]}' >/dev/null
+api POST "/v1/previews/$PV/refresh" >/dev/null
+for _ in $(seq 1 600); do
+  E=$(api GET "/v1/apps/services/$SVC/environments/$ENV")
+  [ "$(echo "$E" | jq_ "(d.get('egress') or {}).get('mode')")" = roll ] && [ "$(echo "$E" | jq_ "(d.get('latest') or {}).get('status','')")" = active ] && break
+  sleep 1
+done
+[ "$(echo "$E" | jq_ "(d.get('egress') or {}).get('mode')")" = roll ] || { echo "the pv- environment should be closed: $(echo "$E" | jq_ "d.get('egress')")"; exit 1; }
+curl -sS -o /dev/null -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 120
+INST=""
+for _ in $(seq 1 60); do INST=$(docker ps --format '{{.Names}}' | grep "^roll-apps-${SVC#svc_}-$ENV-" | head -1); [ -n "$INST" ] && break; sleep 1; done
+EGRESS_APPS=$(docker exec "$INST" python3 -c '
+import socket, urllib.request
+r = []
+try:
+    socket.create_connection(("1.1.1.1", 443), 3); r.append("1.1.1.1 reached")
+except OSError:
+    r.append("1.1.1.1 unreachable")
+for host, want in (("example.com", "listed"), ("github.com", "unlisted")):
+    try:
+        urllib.request.urlopen("https://%s/" % host, timeout=20); r.append("%s %s through" % (want, host))
+    except Exception:
+        r.append("%s %s refused" % (want, host))
+print(", ".join(r))')
+[ "$EGRESS_APPS" = "1.1.1.1 unreachable, listed example.com through, unlisted github.com refused" ] || { echo "a closed pv- instance should reach only its listed hosts: $EGRESS_APPS"; exit 1; }
+# What its proxy refused reaches the preview's activity (roll apps' egress_refused).
+for _ in $(seq 1 120); do api GET "/v1/previews/$PV/activity" | grep -q "github.com" && break; sleep 1; done
+api GET "/v1/previews/$PV/activity" | grep -q "github.com" || { echo "the refused host should be in the preview's activity"; exit 1; }
+EGRESS_APPS="$EGRESS_APPS; said in its activity"
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"open","egress_hosts":[]}' >/dev/null
 
 say "a preview's own variable reaches its roll apps environment, and leaves it once removed"
 apps_vars() { api GET "/v1/apps/services/$SVC/environments/$ENV/variables" | jq_ "' '.join(sorted(v['name'] for v in d['vars']))"; }
@@ -377,6 +411,11 @@ for _ in $(seq 1 60); do gh_log | grep -q '"roll/preview"' && break; sleep 0.5; 
 [ "$(api GET "/v1/previews/$FORK_ID" | jq_ "any(s.get('deployed') for s in d['services'])")" = False ] || { echo "nothing of a fork's should be deployed before an approval: $(api GET "/v1/previews/$FORK_ID" | jq_ "[(s['name'], s.get('deployed')) for s in d['services']]")"; exit 1; }
 STALE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$FORK_ID/approve" -H 'content-type: application/json' -d '{"head":"0000000000000000000000000000000000000000"}')
 [ "$STALE" = 409 ] || { echo "approving another head should be refused: $STALE"; exit 1; }
+# A fork's preview reaches roll only by default (egress_forks), and roll apps' build of its head
+# isn't held to that: not approved until the project opens forks' egress.
+HELD=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$FORK_ID/approve" -H 'content-type: application/json' -d "{\"head\":\"$CART\"}")
+[ "$HELD" = 409 ] || { echo "a fork's head on roll apps should wait while forks reach roll only: $HELD"; exit 1; }
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress_forks":"open"}' >/dev/null
 api POST "/v1/previews/$FORK_ID/approve" "{\"head\":\"$CART\"}" >/dev/null
 for _ in $(seq 1 600); do
   [ "$(api GET "/v1/previews/$FORK_ID" | jq_ "d['state']")" = ready ] && break
@@ -406,6 +445,7 @@ cat <<EOF
 | … → its deploy active (a Docker build of the change's commit) | $((T2 - T0)) ms |
 | First request through roll apps (cold) | $((T4 - T3)) ms |
 | X-Robots-Tag on the pv- environment's page | $APPS_ROBOTS |
+| Roll only on the pv- instance (a direct connection / a listed host / an unlisted one) | $EGRESS_APPS |
 | Body / the Redis host the service saw / the preview's Redis branch | $BODY / $WHERE / $BRANCH |
 | Variables on the environment | $VARS |
 | A stream link's KAFKA_USERNAME on the pv- environment | the branch's SASL user ($KAFKA_PV), not production's link's |
