@@ -876,7 +876,7 @@ waits on a sibling PR reaching main is last.
    chat messages that reach an agent marked `outside` (an install's non-members can't drive
    roll, so mostly members' text).
 9. **`apps_purge_cache`** once apps' #139 is on main: a sibling of `apps_restart` for
-   `POST …/environments/{env}/cache/purge {paths?}` (deploy in production, write elsewhere, by
+   `POST …/environments/{env}/cache/purge {paths?, tags?}` (tags from apps' #183) (deploy in production, write elsewhere, by
    the environment's prefix row).
 10. **More tools that wait:** `apps_wait_deploy` is in #108. Rechecked on main (05:50): Postgres
    branch backups and restores answer once done (nothing to wait on); search's reindexes are
