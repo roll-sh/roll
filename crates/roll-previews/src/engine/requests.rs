@@ -283,7 +283,7 @@ impl Engine {
         // Roll only doesn't reach roll apps yet (its egress, the apps thread's): a fork's code
         // there would run with branched data and the open internet, so it isn't released.
         let row = self.store.row(id)?;
-        if row.repo.starts_with("git:") && self.store.settings(&row.project_id)?.egress == crate::settings::EgressRule::Roll {
+        if row.repo.starts_with("git:") && self.store.settings(&row.project_id)?.egress_for(row.trusted) == crate::settings::EgressRule::Roll {
             return Err(Error::Conflict("this project limits what previews may reach (Roll only), which doesn't cover services hosted on roll apps yet: a fork's code isn't approved to run there".into()));
         }
         self.store.approve_git_pull(id, head, by)?;
