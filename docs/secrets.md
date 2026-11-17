@@ -245,15 +245,22 @@ key. The values themselves aren't re-encrypted; only the data key is wrapped.
   in the audit log (`project.kms`).
 ## AWS
 Short-lived AWS credentials for each lease, as Vault's AWS engine and Infisical's dynamic secrets
-give: a project registers a role in its own account (`POST …/aws-roles {name, role_arn}`,
+give: a project registers a role in its own account (`POST …/aws-roles {name, role_arn, trust?}`,
 `roll secrets aws-roles add`, the Integrations tab; admin), and three keys link to it in `dynamic`
 mode (`access_key_id`, `secret_access_key`, `session_token`: one credential, so they share one
-session per resolve). Each resolve assumes the role (STS AssumeRole with roll's own credentials) for
-the lease's TTL plus five minutes (15 minutes to 12 hours, within the role's own maximum).
-- **The trust policy** lets roll's role assume it with the condition `sts:ExternalId =
-  roll-secrets:<project>`. Registering a role assumes it once, and first tries a made-up project's
-  ExternalId: a role that takes any (another customer's that trusts roll, say) is refused, so no
-  tenant can register and assume someone else's role.
+session per resolve). Each resolve assumes the role for the lease's TTL plus five minutes (15
+minutes to 12 hours, within the role's own maximum). The role trusts roll one of two ways:
+- **roll's issuer** (`trust: "oidc"`, the dashboard's default), as GCP and Azure work: an IAM OIDC
+  identity provider for roll's issuer (`/v1/secrets/oidc`, audience `sts.amazonaws.com`), and a
+  trust policy with the conditions `aud = sts.amazonaws.com` and `sub = roll-secrets:<project>`.
+  Each session is `AssumeRoleWithWebIdentity` with a token roll's issuer signs for the project:
+  roll holds no AWS credential at all. The issuer must be public over HTTPS
+  (`ROLL_CODE_PUBLIC_URL`).
+- **ExternalId** (`trust: "external_id"`, the API's default): roll's own AWS role assumes it (STS
+  AssumeRole with roll's credentials) with the condition `sts:ExternalId = roll-secrets:<project>`.
+- **Either way** registering a role assumes it once, and first tries a made-up project (its
+  ExternalId, or a token for it): a role that takes any (another customer's that trusts roll, say)
+  is refused, so no tenant can register and assume someone else's role.
 - **Ending a lease** doesn't end its session early (STS can't revoke one session): it stays valid at
   AWS until it expires, the TTL plus five minutes at most. To cut every session at once, revoke the
   role's older sessions in IAM. A session can't be renewed: resolve again for a new one.
@@ -262,8 +269,8 @@ the lease's TTL plus five minutes (15 minutes to 12 hours, within the role's own
 **IAM users' access keys**, rotated by roll as Infisical's AWS IAM rotation does, for what can't
 use a role's sessions (a vendor that takes only a key pair, an old CI). A project registers an IAM
 user next to one of its roles (`POST …/aws-users {name, role, user}`, `roll secrets aws-users add
-NAME USER --role ROLE`, the Integrations tab; admin): roll acts as that role (with the project's
-ExternalId), whose policy allows `iam:ListAccessKeys`, `iam:CreateAccessKey` and
+NAME USER --role ROLE`, the Integrations tab; admin): roll acts as that role (one that trusts roll
+by the project's ExternalId), whose policy allows `iam:ListAccessKeys`, `iam:CreateAccessKey` and
 `iam:DeleteAccessKey` on the user, and registering lists the user's keys to check. It's the link kind
 `aws_iam_user`, `managed` (`access_key_id` and `secret_access_key`, one credential `key`).
 
@@ -2466,9 +2473,11 @@ isn't in the workspace is 404.
 | `GET /aws-roles` | | `AwsRole[]` (`read` on the project) |
 | `POST /aws-roles` | `{name, role_arn}` | 201 `AwsRole` after assuming it (admin; 400 when its trust policy doesn't pin `sts:ExternalId`) |
 | `DELETE /aws-roles/{id}` | | 204 (admin; 409 `in_use` while a key links to it) |
+| `PATCH /aws-roles/{id}` | `{name?, role_arn?, trust?}` | `AwsRole` (admin; a new ARN or trust is proved as a new role's is, before anything changes; 409 `in_use` switching a role IAM users rotate through away from `external_id`; leases already issued run out) |
 | `GET /aws-users` | | `AwsUser[]` (`read` on the project) |
 | `POST /aws-users` | `{name, role, user}` | 201 `AwsUser` (`admin`; lists the user's keys as the role first: 400 with AWS's code) |
 | `DELETE /aws-users/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
+| `PATCH /aws-users/{id}` | `{name?, role?}` | `AwsUser` (admin; another ExternalId role of the project, proved by listing the user's keys through it; keys already issued keep working) |
 | `GET /rotations` | | `Rotation[]`: every managed credential the caller may read (environment, keys, resource, `rotate_days`, `issued_at`, `next_due`, `last_error`) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |

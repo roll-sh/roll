@@ -441,6 +441,8 @@ impl Secrets {
         // An audit sink's format and its SIEM's token, sealed (sinks.rs): absent is roll's own.
         db.add_column("audit_sinks", "format", "TEXT")?;
         db.add_column("audit_sinks", "token", "BLOB")?;
+        // How a role trusts roll (aws.rs): absent is the ExternalId, as before there were two.
+        db.add_column("aws_roles", "trust", "TEXT")?;
         db.ensure_schema(issuer::SCHEMA)?;
         db.ensure_schema(clouds::SCHEMA)?;
         db.ensure_schema(iam::SCHEMA)?;
@@ -448,7 +450,11 @@ impl Secrets {
         let mut links = opts.links;
         let unwrap = kms::Unwrapper::new(opts.kms.clone());
         if let Some(sts) = &opts.sts {
-            links.register(Arc::new(aws::Provider { db: db.clone(), sts: sts.clone() }));
+            let issuing = match (&opts.clouds, &opts.keyring) {
+                (Some(c), Ok(keys)) => Some(aws::Issuing { url: c.issuer.clone(), keys: keys.clone() }),
+                _ => None,
+            };
+            links.register(Arc::new(aws::Provider { db: db.clone(), sts: sts.clone(), issuing }));
             links.register(Arc::new(iam::Provider { db: db.clone(), sts: sts.clone() }));
         }
         if let (Some(c), Ok(keys)) = (&opts.clouds, &opts.keyring) {

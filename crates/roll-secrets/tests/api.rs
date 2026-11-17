@@ -296,6 +296,10 @@ impl roll_secrets::kms::ProjectKms for FakeKms {
 #[derive(Default)]
 struct FakeSts {
     pinned: Mutex<Option<String>>,
+    /// The `sub` a role trusting roll's issuer pins (or, unpinned, any of roll's projects).
+    web_pinned: Mutex<Option<String>>,
+    /// STS throttling every call (a failure to ask, not a refusal).
+    throttled: Mutex<bool>,
     sessions: Mutex<u32>,
     /// IAM user `legacy-ci`'s access key ids, and how many were ever made.
     keys: Mutex<(Vec<String>, u32)>,
@@ -303,6 +307,9 @@ struct FakeSts {
 
 impl roll_secrets::aws::Sts for FakeSts {
     fn assume(&self, role_arn: &str, external_id: &str, _session: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+        if *self.throttled.lock().unwrap() {
+            return Err("Throttling".into());
+        }
         if role_arn != "arn:aws:iam::123456789012:role/roll" || self.pinned.lock().unwrap().as_deref().is_some_and(|p| p != external_id) {
             return Err("AccessDenied".into());
         }
@@ -314,6 +321,19 @@ impl roll_secrets::aws::Sts for FakeSts {
             session_token: Secret::new(format!("token-{n}")),
             expires_at: i64::from(seconds) * 1000,
         })
+    }
+    /// As AWS checks a web identity: the token's audience, and the subject the trust pins.
+    fn assume_web_identity(&self, role_arn: &str, token: &str, _session: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+        use base64::Engine;
+        let payload = token.split('.').nth(1).ok_or("InvalidIdentityToken")?;
+        let claims: Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).map_err(|_| "InvalidIdentityToken")?).map_err(|_| "InvalidIdentityToken")?;
+        let sub_ok = self.web_pinned.lock().unwrap().as_deref().is_none_or(|p| claims["sub"] == p);
+        if role_arn != "arn:aws:iam::123456789012:role/roll-oidc" || claims["aud"] != "sts.amazonaws.com" || claims["iss"] != ISSUER_URL || !sub_ok {
+            return Err("AccessDenied".into());
+        }
+        let mut n = self.sessions.lock().unwrap();
+        *n += 1;
+        Ok(roll_secrets::aws::Session { access_key_id: Secret::new(format!("ASIA{n}")), secret_access_key: Secret::new(format!("secret-{n}")), session_token: Secret::new(format!("token-{n}")), expires_at: i64::from(seconds) * 1000 })
     }
     fn iam_keys(&self, role_arn: &str, external_id: &str, user: &str) -> Result<Vec<String>, String> {
         self.assume(role_arn, external_id, "iam", 900)?;
@@ -2281,6 +2301,11 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
 async fn an_aws_role_gives_each_lease_a_short_lived_session() {
     let api = Api::new().await;
     let role = json!({ "name": "deploy", "role_arn": "arn:aws:iam::123456789012:role/roll" });
+    // A probe STS fails to answer (throttled) proves nothing: nothing is registered.
+    *api.sts.throttled.lock().unwrap() = true;
+    let (s, e) = api.call(Method::POST, "/aws-roles", Some(role.clone())).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("couldn't check"), "{e}");
+    *api.sts.throttled.lock().unwrap() = false;
     // A role whose trust policy takes any ExternalId (another customer's that trusts roll, say)
     // is refused: it must pin this project's.
     let (s, e) = api.call(Method::POST, "/aws-roles", Some(role.clone())).await;
@@ -2307,6 +2332,25 @@ async fn an_aws_role_gives_each_lease_a_short_lived_session() {
     assert_eq!(s, StatusCode::BAD_REQUEST);
     // A role keys still link to stays.
     assert_eq!(api.call(Method::DELETE, &format!("/aws-roles/{id}"), None).await.0, StatusCode::CONFLICT);
+
+    // A role that trusts roll's issuer instead: no AWS credential of roll's, the same decoy check
+    // (its trust must pin this project's subject), and sessions through AssumeRoleWithWebIdentity.
+    let oidc = json!({ "name": "deploy-oidc", "role_arn": "arn:aws:iam::123456789012:role/roll-oidc", "trust": "oidc" });
+    let (s, e) = api.call(Method::POST, "/aws-roles", Some(oidc.clone())).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains(&format!("sub = roll-secrets:{}", api.project)), "{e}");
+    *api.sts.web_pinned.lock().unwrap() = Some(format!("roll-secrets:{}", api.project));
+    let made = api.ok(Method::POST, "/aws-roles", Some(oidc)).await;
+    assert_eq!(made["trust"], "oidc");
+    api.ok(Method::PUT, "/environments/staging/secrets/AWS_SESSION_TOKEN", Some(json!({ "link": { "kind": "aws", "ref": made["id"], "field": "session_token", "mode": "dynamic" } }))).await;
+    let before = *api.sts.sessions.lock().unwrap();
+    let v = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "app:web" }))).await;
+    assert!(v["values"]["AWS_SESSION_TOKEN"].as_str().unwrap().starts_with("token-") && *api.sts.sessions.lock().unwrap() == before + 1, "{v}");
+    // Edited in place: a new ARN is proved as a new role is, and nothing changes when it isn't.
+    let role_path = format!("/aws-roles/{}", made["id"].as_str().unwrap());
+    let (s, _) = api.call(Method::PATCH, &role_path, Some(json!({ "role_arn": "arn:aws:iam::123456789012:role/gone" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "an ARN roll can't assume");
+    let renamed = api.ok(Method::PATCH, &role_path, Some(json!({ "name": "deploy-web" }))).await;
+    assert_eq!((renamed["name"].as_str(), renamed["role_arn"].as_str()), (Some("deploy-web"), Some("arn:aws:iam::123456789012:role/roll-oidc")));
 }
 
 #[tokio::test]
@@ -2317,6 +2361,14 @@ async fn an_iam_users_access_keys_take_turns() {
     let (s, _) = api.call(Method::POST, "/aws-users", Some(json!({ "name": "ci", "role": role["id"], "user": "nobody" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "a user the role can't see is refused");
     let user = api.ok(Method::POST, "/aws-users", Some(json!({ "name": "ci", "role": role["id"], "user": "legacy-ci" }))).await;
+    // Its rotation moves to another ExternalId role, proved by listing its keys there; a role that
+    // trusts roll's issuer can't take IAM users, and one that has them can't switch to it.
+    let other = api.ok(Method::POST, "/aws-roles", Some(json!({ "name": "keys-2", "role_arn": "arn:aws:iam::123456789012:role/roll" }))).await;
+    let moved = api.ok(Method::PATCH, &format!("/aws-users/{}", user["id"].as_str().unwrap()), Some(json!({ "role": other["id"] }))).await;
+    assert_eq!(moved["role"], other["id"]);
+    let (s, _) = api.call(Method::PATCH, &format!("/aws-roles/{}", other["id"].as_str().unwrap()), Some(json!({ "trust": "oidc" }))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "its IAM user needs ExternalId trust");
+    api.ok(Method::PATCH, &format!("/aws-users/{}", user["id"].as_str().unwrap()), Some(json!({ "role": role["id"] }))).await;
     let link = |field: &str| json!({ "kind": "aws_iam_user", "ref": user["id"], "field": field, "mode": "managed" });
     api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "AWS_ACCESS_KEY_ID", "link": link("access_key_id") }, { "op": "set", "key": "AWS_SECRET_ACCESS_KEY", "link": link("secret_access_key") }] }))).await;
     let key = || async { api.values("production", "/").await["values"]["AWS_ACCESS_KEY_ID"].as_str().unwrap().to_string() };
