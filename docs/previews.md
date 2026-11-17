@@ -257,6 +257,14 @@ behind the `Apps` trait:
   - Each gets an ephemeral environment `pv-<preview id>`: `PUT …/environments/pv-…`
     `{branch: null, ephemeral: true}`.
   - The branches' URLs and the project's overrides are set as its variables.
+  - Every variable of a link to a branched resource comes from the branch, under roll apps'
+    names (a stream's `KAFKA_BROKERS`/`KAFKA_USERNAME`/`KAFKA_PASSWORD`, a bucket's
+    `AWS_ENDPOINT_URL`, a search cluster's `ELASTICSEARCH_API_KEY` or `OPENSEARCH_URL`/
+    `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD`, from the branch's login), or is set blank when
+    the branch has nothing for it (a Redis branch gives its `REDIS_REST_URL`/`REDIS_REST_TOKEN`
+    too). Never production's: until 2026-11-16 a name that differed
+    from the branch's kept production's value, so a stream's or an OpenSearch cluster's preview
+    reached production's data. `a_links_variables_come_from_the_branch_or_are_blank`.
   - It is deployed at the change's git commit (or its image, for an image service), with an
     `Idempotency-Key` of `pv-<id>@<sha>`, so a retry after a crash returns the same deployment.
     When the environment already runs that commit (a reset's new URLs), it's redeployed: the
@@ -332,6 +340,16 @@ A preview's secrets are an environment of the project's secrets (`feature/roll-s
 docs/secrets.md) called `pv-<preview id>` (an ephemeral environment, labelled `preview`), inheriting from `secrets.base` (`development` by
 default) with the project's `env` overrides and the branched resources' URLs on top.
 
+- **A link to a branched parent never hands out the parent's values.** A secrets environment
+  inherits its base's links, so a link there to Postgres project P (`PGPASSWORD`, `PGHOST`…), a
+  stream (`KAFKA_USERNAME`…), a bucket, Redis or a search cluster that the preview branched would
+  still give the parent's (a fork's code included). The branch's values go by those names too,
+  set after the secrets layer so they win (`names::with_standard`: `PG*` parsed from the branch's
+  app URI, the stream's SASL login, the search branch's key and login), and a credential the
+  branch has none for is blank (a NoSQL HTTP token, Kafka client properties). The roll secrets
+  thread follows with the exact fix: a link to a branched parent isn't resolved at all and comes
+  back as `followed`, its name filled from the branch even under a custom prefix.
+  `a_branchs_values_go_by_the_names_a_link_to_its_parent_would_use`.
 - **Protected values stay out of preview code.** A preview resolves its secrets as `untrusted`
   (roll secrets' flag): nothing of a protected environment resolves, whether directly, by
   reference, by import or through the base. The preview gets its own overrides and links. Only
@@ -434,7 +452,9 @@ no route out. Its service containers join that network instead of the default br
 publish no port. roll's proxy reaches each one at its address on that network, and a container
 reaches roll's products at that network's gateway (`host.docker.internal` points there, not at
 `docker0`). The screenshot run already joins the service's network, so the page's own code
-can't reach out either.
+can't reach out either; it finds the app's port on the container's `sh.roll.code.port` label,
+since nothing is published (screenshots failed under `"roll"` until 2026-11-16: the live check
+now takes one there).
 
 Why this way, rather than the alternatives:
 
@@ -454,8 +474,25 @@ Changing it restarts the services (it's part of what they're deployed with). Liv
 `scripts/preview-cost.sh`: the service reached 1.1.1.1 with `open`, then ran on
 `roll-previews-net-<id>`, was still served through roll, and got "network unreachable".
 
-Next: a list of allowed hosts (`egress: ["api.stripe.com"]`) through a forwarding proxy on the
-network's gateway, the only way out, with what it refused said in the activity.
+**Allowed hosts:** with `"roll"`, `egress_hosts` lists the hosts outside roll its code may still
+reach (`api.stripe.com`, `*.sentry.io` for its subdomains; at most 20, names only). The
+preview's services then get `HTTPS_PROXY`/`HTTP_PROXY` pointing at its egress proxy: a small
+container (`roll-previews-egress-<id>`, the screenshot image's Node running `egress.js`) on the
+preview's network as `roll-egress` and on Docker's default network. It passes on HTTPS tunnels
+and plain HTTP to a listed host on port 443 or 80 only, and refuses anything else with a 403.
+A listed name is the tenant's choice and may point anywhere, so the proxy resolves it itself and
+connects only to a public address, the one it checked (roll-net's `private_ip`: loopback,
+private, link-local and the cloud's metadata address, CGNAT, IPv4 inside IPv6), never to the
+host, roll's own network or the cloud's metadata; a name that resolves only to private addresses
+is refused and said as such (before 2026-11-16 it was connected to: `169.254.169.254.nip.io`
+listed would have reached the metadata service).
+Each pass, what it refused is said in the preview's activity, each host once. Code that ignores
+the variables still can't get out, because the network has no route. A sidecar rather than a
+listener on the host, because containers can't always reach the host (they can't on ai-server:
+its firewall), while container to container always works. Changing the list restarts the
+services, and the proxy goes with the preview's last service. Live: github.com reached through
+it, example.com refused and said in the activity, and a listed `169.254.169.254.nip.io` refused
+as a private address.
 
 ## Safety
 
@@ -946,6 +983,7 @@ type Settings = {
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
   egress: "open" | "roll";            // what its services' code may reach: anything ("open"), or only roll's products on a network with no route out (see "Egress")
+  egress_hosts?: string[];            // with "roll": hosts outside roll still reachable through its egress proxy (api.stripe.com, *.sentry.io; at most 20)
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
   env_for: Record<string, Record<string, string>>; // branch glob → variables, over env, under a preview's own ({})
   seed: Job | null;                   // once on fresh data
@@ -1353,7 +1391,9 @@ Ranked by what a person notices first. Done so far:
 - the other browsers' run alongside Chromium's (a screenshot run 12–14 s instead of about 21 s),
   each run's time in rolld's log and the activity, and a node's screenshot slots from its cores
   (one every 8, 1 to 4; `ROLL_PREVIEWS_SCREENSHOT_SLOTS` to set it), the browsers image built once
-  at a time whatever runs side by side;
+  at a time whatever runs side by side, and one screenshot task per preview at a time (two
+  refused each other's container name under load: main's baseline then never got one, and
+  changes weren't compared with it; fixed 2026-11-16);
 - dynamic credentials (roll secrets' leases) issued to each start of a service and each job,
   renewed while it runs, revoked when it stops (a sleeping preview holds none);
 - with roll apps' #26 on main: Promote (a trusted change's preview's build deployed to
@@ -1372,6 +1412,8 @@ Ranked by what a person notices first. Done so far:
   element for a public preview;
 - egress rules: `egress: "roll"` runs a preview's services on a Docker network of their own with
   no route out (roll's products and roll's proxy still reach them);
+- allowed outside hosts (`egress_hosts`) through a per-preview egress proxy, what it refused said
+  in the activity;
 - only the pages a push can change are taken again (Chromatic's TurboSnap): another service that
   runs what it ran at the push before (its revision, what it's deployed with, the same data)
   keeps its pages, checks and all, without a browser run;
@@ -1520,19 +1562,16 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Allowed hosts for previews' egress** (see "Egress"): `egress: "roll"` is built; next a list
-   (`egress: ["api.stripe.com"]`) through a forwarding proxy on the network's gateway, the only
-   way out, with what it refused said in the activity.
-2. **Postgres without a reflinking file system**: a branch that starts from the parent's base
+1. **Postgres without a reflinking file system**: a branch that starts from the parent's base
    backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
    its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
    idle preview's branch is evicted to object storage after an hour.
-3. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
+2. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
    It needs roll to remember which issue a change was made for (Linear's side only attaches it
    today): the agents thread's `linear.attach` could record the link.
-4. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node
+3. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node
    they're done (`Reach` = roll apps' `Apps::reachable`; `scripts/preview-apps.sh`: the apps
    service screenshotted in its instance's network, main's baseline on roll apps, the feedback
    button on its environment). On a fleet an instance runs on its service's holder, and Fargate
@@ -1542,15 +1581,18 @@ Ranked by what a person notices first. Done so far:
    access link, in the browser container. Ranked lower: the cloud fleet runs instances on
    Fargate, where neither `reachable` nor rolld's Docker screenshot works (a browser task of its
    own, with the cloud thread).
-5. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
+4. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
    Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
    minutes even with the parent's history reporting `end` past it, where pg-control's own test
    (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
    old; the live script will check it once this is understood.
-6. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
+5. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
-   name (fixed); if it comes back, log both starts' container ids.
+   name (fixed), and a preview's services starting at once each made its egress proxy under the
+   one name (fixed 2026-11-16: one make at a time per preview); if it comes back, log both
+   starts' container ids.
+
 
 Looked at and kept: previews' copy of a preview's variables in its roll apps environment, next
 to the `pv-` secrets environment roll apps reads itself (#31's `ForApps`). roll apps reads

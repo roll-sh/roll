@@ -137,11 +137,14 @@ impl Client {
 
     /// The remote's refs and `HEAD`.
     pub async fn ls_refs(&self, url: &str, auth: Option<&Credentials>) -> anyhow::Result<RefList> {
+        self.ls_refs_with(url, auth, &["HEAD", "refs/heads/", "refs/tags/"]).await
+    }
+
+    /// The refs under `prefixes` only (`refs/pull/7/head`: a pull request's head on GitHub).
+    pub async fn ls_refs_with(&self, url: &str, auth: Option<&Credentials>, prefixes: &[&str]) -> anyhow::Result<RefList> {
         self.v2_caps(url, auth).await?;
-        let args: Vec<String> = ["symrefs", "peel", "unborn", "ref-prefix HEAD", "ref-prefix refs/heads/", "ref-prefix refs/tags/"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let mut args: Vec<String> = ["symrefs", "peel", "unborn"].iter().map(|s| s.to_string()).collect();
+        args.extend(prefixes.iter().map(|p| format!("ref-prefix {p}")));
         let body = self.v2_command(url, auth, "ls-refs", &args, 64 << 20).await?;
         parse_ls_refs(&body)
     }

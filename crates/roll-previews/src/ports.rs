@@ -311,6 +311,9 @@ pub struct Target {
     /// What the service's code may reach (the project's `egress`): with `roll`, the runtime runs
     /// it on the preview's own network with no route out.
     pub egress: crate::settings::EgressRule,
+    /// With `egress` `roll`: the hosts outside roll it may still reach, through the preview's
+    /// egress proxy.
+    pub egress_hosts: Vec<String>,
 }
 
 /// A deploy the backend accepted that hasn't finished (a build, a rollout): the converge leaves
@@ -422,10 +425,12 @@ pub trait Apps: Send + Sync {
     /// What it's doing on this node (`None`: never started here).
     fn status(&self, preview: &str, service: &str) -> Option<ServiceState>;
     /// Asleep but frozen, not stopped (the runtime's warm window): its process, and whatever
-    /// credentials it holds, come back on the next request.
-    fn warm(&self, _preview: &str, _service: &str) -> bool {
-        false
-    }
+    /// credentials it holds, come back on the next request. No default: a backend that wraps
+    /// another must pass it on (a frozen service's leases were revoked when one didn't).
+    fn warm(&self, preview: &str, service: &str) -> bool;
+    /// The hosts the preview's egress proxy refused lately (its project's `egress_hosts` don't
+    /// list them), each once. No default, as `warm`.
+    async fn egress_refused(&self, preview: &str) -> Vec<String>;
 }
 
 /// A project's secrets, per environment (roll secrets; docs/secrets.md).

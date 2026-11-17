@@ -1579,13 +1579,15 @@ pub enum LinkKind {
     Stream,
     Queue,
     Nosql,
+    /// A roll search cluster: an API key of its own per link ([`crate::integrations::Resources::link`]).
+    Search,
     /// Another web service of the project: its private and public URLs (apps' own, not a
     /// [`crate::integrations::Resources`] kind).
     Service,
 }
 
 impl LinkKind {
-    pub const ALL: [LinkKind; 7] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Service];
+    pub const ALL: [LinkKind; 8] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Search, LinkKind::Service];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -1595,6 +1597,7 @@ impl LinkKind {
             LinkKind::Stream => "stream",
             LinkKind::Queue => "queue",
             LinkKind::Nosql => "nosql",
+            LinkKind::Search => "search",
             LinkKind::Service => "service",
         }
     }
