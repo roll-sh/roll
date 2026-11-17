@@ -2813,8 +2813,10 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
 0c. **Azure DevOps** (building: `feature/roll-secrets-azure-devops`): a sync to variable groups
    as secret variables, and Azure Pipelines logging in with its own OIDC token (one service
    connection per identity), as Vault, Infisical and Doppler integrate.
-0d. **A Ruby client** (building: `feature/roll-secrets-ruby`), the same surface as the TypeScript,
-   Go and Python ones, the sealed-box vector opening in it, standard library only, with Rails notes.
+0d. **A Ruby client** (#212), the same surface as the TypeScript, Go and Python ones, both sealed-box
+   vectors opening in it, standard library only, with Rails notes. Writing it found that Python's
+   and Go's `Values` printed every value and their `Client` the token (#213 fixes both).
+   Next: Java, .NET and Ruby kept in step as the others gain TOTP and transit.
 0b. **The polling path at scale** (building: `feature/roll-secrets-poll-path`): the Performance
    table's Postgres numbers are from 2026-11-13, before conditional reads, live digests and preview
    branches; `digest` was 143 ms at 9,900 keys, and every operator, CSI driver and ESO poll pays a
