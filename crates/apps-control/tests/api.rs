@@ -3737,6 +3737,12 @@ async fn a_compose_file_is_read_as_a_project_without_making_anything() {
     let (st, v) = call(&w.api, "POST", "/v1/apps/import", Some(json!({ "roll_toml": "[apps.web]\nimage = \"a\"\nrepo = \"b/c\"\n" }))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
     assert!(v["error"].as_str().unwrap().contains("app web"), "{v}");
+    // Another platform's file (Render's Blueprint): its services and database, as a project.
+    let render = "services:\n  - type: web\n    name: api\n    rootDir: server\n    startCommand: node index.js\n    envVars:\n      - key: DATABASE_URL\n        fromDatabase: { name: main, property: connectionString }\n      - key: SECRET\n        generateValue: true\ndatabases:\n  - name: main\n";
+    let (st, v) = call(&w.api, "POST", "/v1/apps/import", Some(json!({ "render": render }))).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!((&v["apps"]["api"]["links"], &v["databases"]["main"]["kind"], &v["apps"]["api"]["generate"]), (&json!([{ "kind": "postgres", "name": "main" }]), &json!("postgres"), &json!(["SECRET"])), "{v}");
+    assert_eq!(call(&w.api, "POST", "/v1/apps/import", Some(json!({ "render": render, "compose": "x" }))).await.0, StatusCode::BAD_REQUEST, "one file at a time");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
