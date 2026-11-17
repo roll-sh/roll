@@ -74,6 +74,47 @@ pub fn with_standard(kind: Kind, vars: Vec<(String, String)>) -> Vec<(String, St
     out
 }
 
+/// The branch's value for a roll secrets link's `field` to the parent the preview branched (a
+/// `followed` key: roll secrets resolved nothing of the parent's), from its own variables
+/// (`branch_vars`, unprefixed). Blank when the branch has nothing for that field: never the
+/// parent's.
+pub fn follow(kind: Kind, field: &str, branch_vars: Vec<(String, String)>) -> String {
+    let name = match (kind, field) {
+        (Kind::Postgres, "url" | "role_url") => "DATABASE_URL",
+        (Kind::Postgres, "host") => "PGHOST",
+        (Kind::Postgres, "port") => "PGPORT",
+        (Kind::Postgres, "user" | "role_user") => "PGUSER",
+        (Kind::Postgres, "password" | "role_password") => "PGPASSWORD",
+        (Kind::Postgres, "database") => "PGDATABASE",
+        (Kind::Redis, "url") => "REDIS_URL",
+        (Kind::Redis, "host") => "REDIS_HOST",
+        (Kind::Redis, "port") => "REDIS_PORT",
+        (Kind::Redis, "password") => "REDIS_PASSWORD",
+        (Kind::Redis, "rest_url") => "UPSTASH_REDIS_REST_URL",
+        (Kind::Redis, "rest_token") => "UPSTASH_REDIS_REST_TOKEN",
+        (Kind::Stream, "bootstrap") => "KAFKA_BROKERS",
+        (Kind::Stream, "username") => "KAFKA_USERNAME",
+        (Kind::Stream, "password") => "KAFKA_PASSWORD",
+        (Kind::Bucket, "bucket") => "S3_BUCKET",
+        (Kind::Bucket, "endpoint") => "AWS_ENDPOINT_URL",
+        (Kind::Bucket, "region") => "AWS_REGION",
+        (Kind::Bucket, "access_key_id") => "AWS_ACCESS_KEY_ID",
+        (Kind::Bucket, "secret_access_key") => "AWS_SECRET_ACCESS_KEY",
+        (Kind::Nosql, "cql") => "CASSANDRA_CONTACT_POINTS",
+        (Kind::Nosql, "username") => "CASSANDRA_USERNAME",
+        (Kind::Nosql, "password") => "CASSANDRA_PASSWORD",
+        (Kind::Search, "url") => "ELASTICSEARCH_URL",
+        (Kind::Search, "host") => "ELASTICSEARCH_HOST",
+        (Kind::Search, "port") => "ELASTICSEARCH_PORT",
+        (Kind::Search, "username") => "ELASTICSEARCH_USERNAME",
+        (Kind::Search, "api_key") => "ELASTICSEARCH_API_KEY",
+        (Kind::Search, "user") => "OPENSEARCH_USERNAME",
+        (Kind::Search, "password") => "OPENSEARCH_PASSWORD",
+        _ => return String::new(),
+    };
+    with_standard(kind, branch_vars).into_iter().find(|(n, _)| n == name).map(|(_, v)| v).unwrap_or_default()
+}
+
 /// The parts of a `scheme://user:password@host:port/path?query` URL, percent-decoded.
 struct Url {
     scheme: String,
@@ -149,6 +190,11 @@ mod tests {
         // The branch's own value under a name stays (a data key, say).
         let keyed = with_standard(Kind::Search, v(&[("ELASTICSEARCH_URL", "https://br-1:p@search.test"), ("ELASTICSEARCH_API_KEY", "data")]));
         assert_eq!(get(&keyed, "ELASTICSEARCH_API_KEY").as_deref(), Some("data"));
+        // A followed key (roll secrets resolved nothing of the parent's) by its field, renamed or not.
+        let branch = v(&[("DATABASE_URL", "postgres://app_pv:s%40cret@db.test:6543/main")]);
+        assert_eq!(super::follow(Kind::Postgres, "role_password", branch.clone()), "s@cret");
+        assert_eq!(super::follow(Kind::Postgres, "url", branch.clone()), "postgres://app_pv:s%40cret@db.test:6543/main");
+        assert_eq!(super::follow(Kind::Nosql, "http_token", v(&[("CASSANDRA_USERNAME", "pv")])), "", "nothing for it: blank");
         let nosql = with_standard(Kind::Nosql, v(&[("CASSANDRA_USERNAME", "pv")]));
         assert_eq!(get(&nosql, "NOSQL_TOKEN").as_deref(), Some(""), "blank: never the parent's token");
     }
