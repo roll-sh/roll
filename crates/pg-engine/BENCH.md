@@ -629,6 +629,40 @@ At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign -5.7% (±6.8% s
 
 At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign -4.5% (±3.1% s.e.), per foreign core -0.83 log; user cycles/txn: 5 pairs, at equal foreign +1.6% (±1.9% s.e.), slope +0.06.
 
+### Same-day three-server table (2026-11-17 evening, lane A)
+
+`tri.sh` (agent 235's) holding lane A for the whole table: `short_txn` at 1, 8 and 32 clients,
+three rounds (server order rotated), each server started once a round with both fixtures
+loaded; then one counting run per server at 8 and 32 clients. roll is `cand/a243`'s change on
+`61414bc58` (`c1`): the plain dist build (`tools/dist.sh`) and its profile-guided build
+(`tools/dist-pgo.sh`, same source); PostgreSQL 18.6 and pgrust (its published image, built with
+PGO) with the same settings (`shared_buffers=2GB`, fsync and synchronous_commit on). The host
+was loaded throughout (load averages 20-35, 0.1-3.3 cores of other tenants' work on the server
+CPUs), so a cell's three runs differ by up to 2x (in parentheses); the medians are as much the
+load as the servers, and 1-client cells are dominated by it (1.5-2.7 foreign cores).
+| clients | server | tps | p50 / p99 ms | CPU µs/txn (user+sys) | user instr / cycles per txn (server CPUs) | peak MiB | foreign cores | runs |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | roll (cand/a243), plain dist | 2,122 (2,122/2,422/1,566) | 0.402 / 1.842 | 387 (199+188) | 1,875k / 2,550k | 184 | 2.71 | 3 |
+| 1 | roll (cand/a243), PGO | 2,723 (1,835/2,818/2,723) | 0.324 / 1.228 | 321 (151+170) | 2,215k / 2,900k | 178 | 2.24 | 3 |
+| 1 | PostgreSQL 18.6 | 1,941 (2,141/1,854/1,941) | 0.426 / 1.353 | 301 (144+157) | 2,563k / 2,849k | 217 | 1.54 | 3 |
+| 1 | pgrust (published, PGO) | 1,993 (2,203/1,993/1,548) | 0.452 / 1.691 | 316 (174+142) | 2,691k / 3,699k | 450 | 2.24 | 3 |
+| 8 | roll (cand/a243), plain dist | 10,619 (10,619/12,295/5,014) | 0.644 / 2.801 | 297 (173+125) | 323k / 716k | 195 | 0.42 | 3 |
+| 8 | roll (cand/a243), PGO | 9,218 (9,218/14,484/6,627) | 0.674 / 4.235 | 279 (144+135) | 412k / 726k | 178 | 1.16 | 3 |
+| 8 | PostgreSQL 18.6 | 10,150 (10,150/12,204/9,500) | 0.665 / 2.071 | 285 (137+148) | 333k / 650k | 265 | 0.54 | 3 |
+| 8 | pgrust (published, PGO) | 9,352 (9,352/14,328/8,029) | 0.729 / 2.932 | 293 (152+140) | 394k / 756k | 508 | 0.92 | 3 |
+| 32 | roll (cand/a243), plain dist | 10,535 (10,535/8,931/11,840) | 2.559 / 10.732 | 345 (208+137) | 289k / 735k | 199 | 0.33 | 3 |
+| 32 | roll (cand/a243), PGO | 11,764 (11,764/15,787/11,202) | 2.208 / 10.504 | 291 (158+133) | 266k / 611k | 206 | 0.52 | 3 |
+| 32 | PostgreSQL 18.6 | 11,911 (11,911/13,158/9,480) | 2.484 / 6.137 | 319 (168+151) | 241k / 638k | 328 | 0.13 | 3 |
+| 32 | pgrust (published, PGO) | 9,700 (8,643/16,324/9,700) | 2.956 / 8.436 | 347 (207+140) | 367k / 797k | 591 | 0.56 | 3 |
+
+1 clients: c1 ÷ pg 1.09x, c1 ÷ pgrust 1.06x, pgo-c1 ÷ pg 1.40x, pgo-c1 ÷ pgrust 1.37x
+8 clients: c1 ÷ pg 1.05x, c1 ÷ pgrust 1.14x, pgo-c1 ÷ pg 0.91x, pgo-c1 ÷ pgrust 0.99x
+32 clients: c1 ÷ pg 0.88x, c1 ÷ pgrust 1.09x, pgo-c1 ÷ pg 0.99x, pgo-c1 ÷ pgrust 1.21x
+
+WAL fsyncs per commit (counting runs, 7 s): 32 clients roll 0.53 (plain) / 0.51 (PGO), PostgreSQL
+0.25, pgrust 0.24; 8 clients 0.75 / 0.72, 0.73, 0.71. Context switches per transaction at 32
+clients 8.3 / 8.1, 7.4, 6.7.
+
 ## Short write transactions, round 6 (2026-11-14/15, agent 235)
 
 HANDOFF "Short write transactions, round 6" has what changed, what was dropped and the leads.

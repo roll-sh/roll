@@ -11655,7 +11655,8 @@ note, still open).
 
 ## Short write transactions, round 7 (agent 243)
 
-BENCH.md "Short write transactions, round 7" has the pairs. Kept, one commit (handed in as
+BENCH.md "Short write transactions, round 7" has the pairs and a same-day three-server table
+(plain and PGO builds of the change; a loaded host, see there). Kept, one commit (handed in as
 `cand/a243`):
 
 1. *An index scan's kill marks are left while a writer holds the table's size model or waits
