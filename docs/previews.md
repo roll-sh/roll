@@ -1620,22 +1620,18 @@ Ranked by what a person notices first. Done so far:
   search data key (#153), a working day's freeze window (#174, measured: no database cost), a
   note's picture on the change page (#111), the Rules dialog's roll apps note (#135), a filter on the Previews list (#192).
 
-1. **A Git URL service's preview reported to its repository, rolld's side** (after apps' #138):
-   previews' side and rolld's `GitReport` are built (branch `feature/roll-previews-git-report2`,
-   compiled against #138); the PR follows #116 and #138 on main, with a live check against a fake
-   GitHub (roll code's test hub) posting `roll/preview` and the pull request comment.
-2. **Egress rules for previews hosted on roll apps** (apps' #143): previews' adapter is wired on
+1. **Egress rules for previews hosted on roll apps** (apps' #143): previews' adapter is wired on
    #143 (reviewed); after it merges, the live check in `scripts/preview-apps.sh` with
    `egress: "roll"`: 1.1.1.1 unreachable from the pv- instance, a listed host through the proxy,
    a refused one in the activity.
-3. **What a preview shows, masked** (#200, reviewed by the roll secrets thread; the page's words
+2. **What a preview shows, masked** (#200, reviewed by the roll secrets thread; the page's words
    stacked on it as `feature/roll-previews-mask-pages`). Anyone who can read a preview reads its
    logs, its jobs' output (a teardown's goes into the pull request's comment) and what its page
    said in a screenshot run (the comment's "What went wrong"). Its code, a fork's included, can
    print what it was given. Each is masked as checks' output is: values from roll secrets, the
    project's and the preview's own variables, and the branches' credentials. Its roll apps
    variables are sealed (apps' #191 hides those in apps' own logs). A picture can't be masked.
-4. **In review:**
+3. **In review:**
    - **#204:** a preview's health checks asked at once. Each wakes its service, a cold start.
      Change → ready went from 15.0–19.3 s to 11.2–12.6 s.
    - **#206:** a fork's preview reaches roll only by default (`egress_forks`), and a Roll-only
@@ -1644,19 +1640,19 @@ Ranked by what a person notices first. Done so far:
      explains why an outside call fails.
    - **#203 also:** roll secrets' `plain` values (#198: a linked host, port, database) stay
      readable in a preview's logs, with a URL's password in one still masked.
-5. **Also in review:** #196 (a preview's data resources branched at once) and #197 (`became` on roll
+4. **Also in review:** #196 (a preview's data resources branched at once) and #197 (`became` on roll
    code's `preview` event: roll code's "post a preview to Slack when it's ready" template posts
    once a push).
-6. **A Git URL preview reported on GitHub, in review once its live check runs** (branch
+5. **A Git URL preview reported on GitHub, in review once its live check runs** (branch
    `feature/roll-previews-git-report4`, rebuilt on main with apps' #138): clippy, tests and the
    build pass. `scripts/preview-apps.sh` now points roll's GitHub App at a fake GitHub
    (`scripts/lib/fake-github.py`) and expects the fork's `roll/preview` pending, then success
    with one comment. It runs in previews' lock turn, since Docker networks are scarce while roll
    apps' stack lands.
-7. **Screenshots of roll apps' services on a fleet, in review (#214):** the run goes to the
+6. **Screenshots of roll apps' services on a fleet, in review (#214):** the run goes to the
    service's holder as a signed hop to `/internal/previews/apps-shot` and the `Shot` comes back as
    JSON (tested with two nodes in one process). Fargate is left to the cloud thread.
-8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17 on ai-server's ext4): Docker's `local` volume driver mounts an overlay
    (`--opt type=overlay`, lower = a read-only base copy of the parent, upper = the branch's own),
    with no privileges beyond Docker's. A 1.4 GB pgbench parent (scale 50) branched this way was
@@ -1672,8 +1668,8 @@ Ranked by what a person notices first. Done so far:
      too long.
    - The cost: a full copy per parent (not per branch), and a replay at each branch.
    - Ranked below the fleet's needs: XFS volumes already share blocks.
-9. **Watch: pg-control's recovery to a time seconds old** (unowned).
-10. **Watch: a cold start on a Docker name conflict**: a preview's services each making its egress
+8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+9. **Watch: a cold start on a Docker name conflict**: a preview's services each making its egress
    proxy under one name was fixed (#137); if it comes back, log both starts' container ids.
 
 Measured and not landed (2026-11-17): deploying a preview's roll apps services at once
