@@ -16,6 +16,7 @@ pub use serverlog::truncate_param as serverlog_truncate;
 pub mod state;
 mod pgss;
 pub(crate) mod litplan;
+mod plandeps;
 mod prepared;
 pub mod sink;
 mod utility;
@@ -1881,6 +1882,28 @@ impl Session {
         {
             return Ok(b.clone());
         }
+        // (Planning ran PL/pgSQL calls and only objects its plan doesn't depend on changed
+        // since, the search path resolving to the same schemas (SearchPathMatcher): PostgreSQL's
+        // plan is still valid, its calls don't run again.)
+        let memo = if cursor {
+            None
+        } else {
+            p.bound
+                .lock()
+                .as_ref()
+                .filter(|(.., w, _)| *w == who)
+                .and_then(|(_, sp, _, b)| Some((sp.clone(), b.procs.calls.clone()?)))
+        };
+        let memo = memo.and_then(|(sp, c)| {
+            let holds = c.deps.get().and_then(|d| d.downcast_ref::<plandeps::Deps>()).is_some_and(|d| {
+                self.txn
+                    .as_ref()
+                    .unwrap()
+                    .borrow()
+                    .with_catalog(|cat| d.hold(cat) && (sp == path || cat.effective_path(&sp) == cat.effective_path(&path)))
+            });
+            holds.then_some(c)
+        });
         let types = p.param_types.clone();
         let no_params = !self.infer_params && params.is_empty() && types.is_empty();
         // (Parameters a Parse message declared as domains keep them: a bare `$n` of a
@@ -1900,6 +1923,7 @@ impl Session {
             let mut b = Binder::new(ctx, types);
             b.no_params = no_params;
             b.defer_procs = defer_procs;
+            b.proc_memo = memo.clone();
             b.param_domains = domains;
             // (The query's own level: 1.)
             if let Some(f) = fraction {
@@ -1913,6 +1937,12 @@ impl Session {
                 b.bind_statement(stmt).map(|bq| (bq, None))
             }
         })?;
+        // (An analysis only, its calls left for planning: the values still valid go with it
+        // to the planning that follows.)
+        let mut b = b;
+        if b.procs.deferred && b.procs.calls.is_none() {
+            b.procs.calls = memo;
+        }
         // (A Parse's binding: `litplan::ParamPlans` may plan its analysis again.)
         self.last_unplanned = unplanned;
         if let Some(fixed) = &p.plans.lock().fixed_result
@@ -1930,6 +1960,11 @@ impl Session {
         }
         if b.procs.folded || b.procs.deferred {
             p.plans.lock().procs = true;
+        }
+        if let Some(c) = &b.procs.calls {
+            c.deps.get_or_init(|| {
+                Arc::new(self.txn.as_ref().unwrap().borrow().with_catalog(|cat| plandeps::Deps::of(cat, &b)))
+            });
         }
         *p.bound.lock() = Some((version, path, who, b.clone()));
         Ok(b)
@@ -3634,10 +3669,12 @@ impl Session {
             }
             // Outside a block (EndTransactionBlock's warning; no PREPARE result tag).
             K::TransStmtPrepare => {
-                self.raise_notice(warning(
-                    code::NO_ACTIVE_SQL_TRANSACTION,
-                    "there is no transaction in progress",
-                ));
+                // (PrepareTransactionBlock's EndTransactionBlock, as COMMIT's.)
+                let line = if self.multi_stmt || self.pipelining { 4073 } else { 4152 };
+                self.raise_notice(
+                    warning(code::NO_ACTIVE_SQL_TRANSACTION, "there is no transaction in progress")
+                        .routine_at("EndTransactionBlock", line),
+                );
                 Ok(QueryResult::command("ROLLBACK"))
             }
             _ => Err(crate::error::unsupported("this transaction command")),
