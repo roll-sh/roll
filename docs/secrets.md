@@ -2810,9 +2810,14 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
    tree gated green on all 17 steps): round 1 #69, #70, #72, #76, #77 as they are, round 2 #71, #73,
    #75 after it (they merged #70's head, which the squash queue can't take in one round), within
    one lock turn; #147 after, if it merges clean. Then batch 2 the same way.
-0a. **A thirtieth independent security review** (running): tonight's PRs (#132, #136, #144,
-   #165, #166, #173, #194, #227, #229) read cold for leaks, SSRF, injection, authorization, ACME's
-   JWS and nonces, the gateway's revocation and bounds.
+0a. **The thirtieth independent security review** (2026-11-17, tonight's PRs #132, #136, #144,
+   #165, #166, #173, #194, #227, #229, read cold): no high finding; ACME's JWS, nonces, EAB and
+   tls-alpn-01 verifier, the gateway's allow-list, bounds and revocation, and every PR's network
+   guards held. One medium: a gateway's link could be opened with a person's session (a WebSocket
+   GET has no CSRF check, and the session was checked once) — now only the gateway's own token or
+   login opens it (#166). One low: an Atlas user named `.` or `..` turned the API path into the
+   collection's (#173, refused now). One to confirm: ScyllaDB's audit log with a password in a CQL
+   statement (Cassandra's obfuscates it; Snowflake's key pairs avoid it).
 0c. **Azure DevOps** (#227): a sync to variable groups as secret variables, and Azure Pipelines
    logging in with its own OIDC token (one pipeline or service connection per identity), as Vault,
    Infisical and Doppler integrate. Azure never returns a secret variable's value and its update
