@@ -2799,7 +2799,8 @@ service-account tokens), #105 (Java), #110 (.NET with `IConfiguration`), #113 (a
 extension that logs in with the function's role), #117 (an Ansible collection), #132 (LDAP and
 Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (Pulumi), #147
 (approvals in the audit, on #114), #165 (Elasticsearch, OpenSearch, Cassandra and ScyllaDB
-outside roll, on #132) and #166 (a gateway into private networks, on #132).
+outside roll, on #132), #166 (a gateway into private networks, on #132) and #169 (a credential
+guard's scans audited as `secrets.guard`, for roll MCP).
 
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
@@ -2862,7 +2863,9 @@ outside roll, on #132) and #166 (a gateway into private networks, on #132).
 9. *To check against the real services (accounts, the user's call):* #113's STS login
    (`GetWebIdentityToken`) in an AWS account, Entra's answer for removing a secret that's already
    gone (#92), and #136's statements on a Snowflake account.
-10. *Waits on roll MCP:* #114 (`roll-oidc`, approved here), the GitHub Action's `client-id` mode
+10. *With roll MCP:* their credential guard checks what an agent's tool call would write against
+   `POST …/leaks` (only values the token may reveal; `sensitive` keys never, so it can't be an
+   oracle), marked `X-Roll-Guard: 1` (#169 audits it apart). *Waits on roll MCP:* #114 (`roll-oidc`, approved here), the GitHub Action's `client-id` mode
    (their diff, reviewed here), and their `roll_machine_client` Terraform resource (their diff
    comes here first).
 11. *Waits on roll search:* #134 approved once its pin covers the endpoint's whole destination
