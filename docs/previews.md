@@ -1647,15 +1647,15 @@ Ranked by what a person notices first. Done so far:
 5. **Also in review:** #196 (a preview's data resources branched at once) and #197 (`became` on roll
    code's `preview` event: roll code's "post a preview to Slack when it's ready" template posts
    once a push).
-6. **Tests for rolld's `GitReport`** (after #138): a unit test of the connection's parsing, and the
-   live check against `~/.cache/rpv/fake-github.py`-style fake GitHub (installations, token,
-   statuses, comments and edits recorded) once roll code's App can be pointed at it.
-7. **Screenshots of roll apps' services on the fleet**: one node is done. A multi-node Docker
-   fleet needs previews' own internal screenshot route (operator-only, in `OPERATOR_ONLY`) run on
-   the service's holder through `cluster.dispatch(&apps_control::lease_key(service), …)`, with
-   `Shot` and `ShotOptions` serialised across (the PNGs as base64); it can't be checked here (one
-   Docker daemon serves every local node), and the cloud fleet runs Fargate, where it's a browser
-   task of its own, with the cloud thread. Low while the fleet is Fargate.
+6. **A Git URL preview reported on GitHub, in review once its live check runs** (branch
+   `feature/roll-previews-git-report4`, rebuilt on main with apps' #138): clippy, tests and the
+   build pass. `scripts/preview-apps.sh` now points roll's GitHub App at a fake GitHub
+   (`scripts/lib/fake-github.py`) and expects the fork's `roll/preview` pending, then success
+   with one comment. It runs in previews' lock turn, since Docker networks are scarce while roll
+   apps' stack lands.
+7. **Screenshots of roll apps' services on a fleet, in review (#214):** the run goes to the
+   service's holder as a signed hop to `/internal/previews/apps-shot` and the `Shot` comes back as
+   JSON (tested with two nodes in one process). Fargate is left to the cloud thread.
 8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17 on ai-server's ext4): Docker's `local` volume driver mounts an overlay
    (`--opt type=overlay`, lower = a read-only base copy of the parent, upper = the branch's own),
