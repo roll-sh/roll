@@ -1300,7 +1300,8 @@ impl Apps {
             vitals: r.vitals,
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             paused: r.paused,
-            held_after: r.held_by.clone(),
+            held_after: r.held_by.clone().filter(|h| h != crate::deploy::MANUAL_HOLD),
+            held: r.held_by.as_deref() == Some(crate::deploy::MANUAL_HOLD),
             pages: r.pages.clone(),
             allow_ips: r.allow_ips.clone(),
             rate_limit: r.rate_limit,
@@ -1351,11 +1352,12 @@ impl Apps {
             }
             Some(_) => return Err(Error::BadRequest("hostname is the environment's name on the roll domain".into())),
         };
-        // Resume deploys held after a rollback (`false`); a hold is only ever a rollback's.
-        let resume = match o.get("held") {
-            None => false,
-            Some(Value::Bool(false)) => true,
-            Some(_) => return Err(Error::BadRequest("held is false (deploys resume); a rollback holds them".into())),
+        // Hold deploys (`true`: pushes, hooks and tag moves build to `ready` for a person to put
+        // live) or resume them (`false`: a person's hold, or a rollback's).
+        let hold = match o.get("held") {
+            None => None,
+            Some(Value::Bool(b)) => Some(*b),
+            Some(_) => return Err(Error::BadRequest("held is true (deploys wait for a person) or false (they resume)".into())),
         };
         let paused = match o.get("paused") {
             None => None,
@@ -1566,9 +1568,9 @@ impl Apps {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.change_variables(&sid, &e, &vars, &[], &BTreeSet::new())).await?;
         }
-        if resume {
+        if let Some(on) = hold {
             let (sid, e) = (service.to_string(), env.to_string());
-            self.db(move |s| s.set_hold(&sid, &e, None)).await?;
+            self.db(move |s| s.set_hold(&sid, &e, on.then_some(crate::deploy::MANUAL_HOLD))).await?;
             self.changed(service);
         }
         if let Some(h) = hostname {

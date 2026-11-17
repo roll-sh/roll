@@ -1028,6 +1028,10 @@ pub struct Environment {
     /// person deploys, redeploys or promotes, or resumes them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub held_after: Option<String>,
+    /// A person holds its deploys (`PUT … {held: true}`): pushes, hooks and tag moves build to
+    /// `ready` (a web service without a volume) for them to put live, or wait.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
     /// Its own pages for what roll would otherwise answer (Heroku's error and maintenance pages).
     #[serde(skip_serializing_if = "Pages::is_empty")]
     pub pages: Pages,

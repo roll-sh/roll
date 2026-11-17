@@ -28,7 +28,8 @@ impl crate::Apps {
             let remote = self.git_remote(&svc.id, url).await;
             let sid = svc.id.clone();
             let Ok((envs, pending)) = self.db(move |s| Ok((s.environments(&sid)?, s.pending_deployments(&sid)?))).await else { continue };
-            for env in envs.into_iter().filter(|e| !e.ephemeral && !e.paused && e.held_by.is_none()) {
+            for env in envs.into_iter().filter(|e| !e.ephemeral && !e.paused && !matches!(crate::deploy::hold_of(&svc, e), crate::deploy::Held::Skip(_))) {
+                let hold = crate::deploy::hold_of(&svc, &env);
                 // One whose first deploy failed is followed too: the fix pushed next deploys.
                 let Some(branch) = env.branch.clone() else { continue };
                 if pending.iter().any(|d| d.environment == env.name) {
@@ -68,7 +69,7 @@ impl crate::Apps {
                     continue;
                 }
                 let subject = message.lines().next().unwrap_or("").chars().take(500).collect::<String>();
-                let body = serde_json::json!({ "revision": sha, "message": if subject.is_empty() { format!("new commit on {branch}: {}", &sha[..12]) } else { subject } });
+                let body = hold.body(serde_json::json!({ "revision": sha, "message": if subject.is_empty() { format!("new commit on {branch}: {}", &sha[..12]) } else { subject } }));
                 let by = crate::model::By { trigger: crate::model::Trigger::Push, actor: Some("git watch".into()) };
                 // Keyed by the commit: two nodes' watches (a takeover mid-pass) make one deploy.
                 match self.deploy(&svc.id, &env.name, body, by, None, Some(&format!("git:{}:{sha}", env.name))).await {

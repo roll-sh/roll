@@ -232,6 +232,16 @@ function Conditions({ service, env, runner, go }: { service: Service; env: Envir
         </button>
       ),
     });
+  if (env.held)
+    lines.push({
+      key: "held-by-you",
+      text: "Deploys are held: pushes, deploy hooks and tag moves build without going live. Put one live from Deployments when you're ready.",
+      action: (
+        <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => runner.run("resume-deploys", () => appsApi.putEnvironment(service.id, env.name, { held: false }))}>
+          Resume deploys
+        </button>
+      ),
+    });
   if (env.paused)
     lines.push({
       key: "paused",

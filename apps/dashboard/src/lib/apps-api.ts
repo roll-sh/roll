@@ -385,7 +385,7 @@ export interface EnvironmentPut {
   /** Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until false. */
   paused?: boolean;
   /** `false` resumes deploys held after a rollback. */
-  held?: false;
+  held?: boolean;
   /** Maintenance: its public names answer roll's page with the message; false ends it. */
   maintenance?: boolean | { message?: string | null };
   /** Its own HTML (at most 64 KiB) instead of roll's pages; null goes back to roll's, an absent field stays. */
@@ -489,6 +489,8 @@ export interface Environment extends EnvironmentSummary {
   paused?: boolean;
   /** Deploys are held after this rollback: pushes, hooks and tag moves aren't put live until a person deploys or resumes them. */
   held_after?: string;
+  /** A person holds its deploys: pushes, hooks and tag moves build to `ready` for them to put live. */
+  held?: boolean;
   /** In maintenance: what visitors read (null: roll's words). Null: serving. */
   maintenance?: { message: string | null } | null;
   /** Its own pages (Heroku's): `error` for the 502/503/504 while the app can't answer or wake, `maintenance` while in maintenance. Absent: roll's. */

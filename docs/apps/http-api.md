@@ -368,8 +368,12 @@ type EnvironmentPut = {
    *  503 "Paused" page), deploys (409), is scheduled (a cron run is skipped, not made up) or takes
    *  a job (409) until `false`. A push to its branch is logged, not deployed. */
   paused?: boolean;
-  /** `false`: deploys held after a rollback resume (only a rollback holds them). */
-  held?: false;
+  /** `true`: a person holds its deploys (Netlify's locked deploys): pushes, CI waits, deploy hooks
+   *  and tag moves build to `ready` (`no_traffic`; a web service without a volume) for them to
+   *  put live with `POST …/deploys/{dep}/rollback`, which keeps the hold; a service that can't
+   *  run beside the live one isn't deployed (a hook's is a 409). Deploying by hand works as
+   *  ever and doesn't end it. `false`: deploys resume, from this hold or a rollback's. */
+  held?: boolean;
   /** Its own HTML instead of roll's pages, each at most 64 KiB (400 past it or empty); null goes back
    *  to roll's, a field left out stays. */
   pages?: { error?: string | null; maintenance?: string | null };
@@ -421,6 +425,7 @@ type Environment = EnvironmentSummary & {
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
   maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
   paused?: true;              // paused (absent: not)
+  held?: true;                // a person holds its deploys (`PUT … {held: true}`): automation builds to ready, a person puts it live
   held_after?: string;        // deploys held after this rollback: pushes, CI waits, deploy hooks (409) and tag moves aren't put live until a person deploys, redeploys or promotes, or PUTs held: false; a secrets redeploy (the live image again) still runs
   pages?: { error?: string; maintenance?: string }; // its own pages (absent: roll's): error for the 502/503/504 while it can't answer or wake, maintenance while in maintenance
   allow_ips: { cidr: string; description?: string }[]; // only these networks get in through its public names ([]: anyone)

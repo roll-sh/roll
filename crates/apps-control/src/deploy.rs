@@ -372,17 +372,22 @@ impl Apps {
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
-        // Held from here: the next push mustn't put back what was just rolled away from.
+        // Held from here: the next push mustn't put back what was just rolled away from (a
+        // person's own hold stays theirs: putting a held build live is a rollback to it).
         let (sid, e, rid) = (service.to_string(), env.to_string(), dep.id.clone());
-        if self.db(move |s| s.set_hold(&sid, &e, Some(&rid))).await.unwrap_or(false) {
+        if self.held(service, env).await.as_deref() != Some(MANUAL_HOLD) && self.db(move |s| s.set_hold(&sid, &e, Some(&rid))).await.unwrap_or(false) {
             self.logs.sink(format!("env:{service}/{env}"), Stream::System).line("deploys held after the rollback: pushes, hooks and tag moves aren't put live until you deploy or resume them");
         }
         self.kick(service, env);
         Ok(dep)
     }
 
-    /// A person deployed (a deploy, a redeploy, a promotion): a hold after a rollback is lifted.
+    /// A person deployed (a deploy, a redeploy, a promotion): a hold after a rollback is lifted
+    /// (a person's own hold isn't: only `held: false` ends it).
     pub async fn lift_hold(self: &Arc<Self>, service: &str, env: &str) {
+        if self.held(service, env).await.as_deref() == Some(MANUAL_HOLD) {
+            return;
+        }
         let (sid, e) = (service.to_string(), env.to_string());
         if self.db(move |s| s.set_hold(&sid, &e, None)).await.unwrap_or(false) {
             self.logs.sink(format!("env:{service}/{env}"), Stream::System).line("deploys resumed");
@@ -394,6 +399,16 @@ impl Apps {
     pub(crate) async fn held(self: &Arc<Self>, service: &str, env: &str) -> Option<String> {
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.environment(&sid, &e)).await.ok().and_then(|r| r.held_by)
+    }
+
+    /// What automation's deploy (a push, a hook, a tag move, a CI wait) does in the
+    /// environment now ([`hold_of`]).
+    pub(crate) async fn hold_for(self: &Arc<Self>, service: &str, env: &str) -> Held {
+        let (sid, e) = (service.to_string(), env.to_string());
+        match self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await {
+            Ok((svc, row)) => hold_of(&svc, &row),
+            Err(_) => Held::No,
+        }
     }
 
     /// `POST …/rollback` with no deployment: back to the one live before what runs, walking back
@@ -1908,17 +1923,20 @@ impl Apps {
                     log.line(format!("push {sha} not deployed: its check {which} failed"));
                     true
                 }
-                Ok(_) if self.held(&w.service, &w.env).await.is_some() => {
-                    log.line(format!("push {sha} not deployed: its checks passed while deploys are held after a rollback"));
-                    true
-                }
                 Ok(_) if self.refuse_paused(&w.service, &w.env).await.is_err() => {
                     log.line(format!("push {sha} not deployed: its checks passed while the environment is paused"));
                     true
                 }
                 Ok(_) => {
-                    log.line(format!("push {sha}'s checks passed: deploying"));
-                    let body = serde_json::json!({ "revision": w.sha, "message": w.message });
+                    let hold = self.hold_for(&w.service, &w.env).await;
+                    if let Held::Skip(why) = &hold {
+                        log.line(format!("push {sha} not deployed: its checks passed, and {why}"));
+                        let (sid, e, l) = (w.service.clone(), w.env.clone(), w.landing);
+                        let _ = self.db(move |s| s.end_ci_wait(&sid, &e, l)).await;
+                        continue;
+                    }
+                    log.line(format!("push {sha}'s checks passed: {}", if matches!(hold, Held::Ready) { "built and held for a person to put live" } else { "deploying" }));
+                    let body = hold.body(serde_json::json!({ "revision": w.sha, "message": w.message }));
                     let by = By { trigger: Trigger::Push, actor: w.author.as_ref().map(|a| format!("git:{a}")) };
                     self.deploy(&w.service, &w.env, body, by, None, Some(&format!("landing:{}", w.landing))).await.is_ok()
                 }
@@ -2009,8 +2027,9 @@ impl Apps {
                     self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} not deployed: the environment is paused", &l.revision.sha[..l.revision.sha.len().min(12)]));
                     continue;
                 }
-                if let Some(r) = &e.held_by {
-                    self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} not deployed: deploys are held after the rollback {r}", &l.revision.sha[..l.revision.sha.len().min(12)]));
+                let hold = hold_of(svc, e);
+                if let Held::Skip(why) = &hold {
+                    self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} not deployed: {why}", &l.revision.sha[..l.revision.sha.len().min(12)]));
                     continue;
                 }
                 // `[skip deploy]` or `[skip ci]` in its message (Render's `[skip render]`): a push
@@ -2051,7 +2070,7 @@ impl Apps {
                         }
                     }
                 }
-                let body = serde_json::json!({ "revision": l.revision.sha, "message": l.revision.message.lines().next().unwrap_or("") });
+                let body = hold.body(serde_json::json!({ "revision": l.revision.sha, "message": l.revision.message.lines().next().unwrap_or("") }));
                 // The owner queues it (it may be another node: the queue is in the store).
                 let key = format!("landing:{}", l.seq);
                 match self.deploy(&svc.id, &e.name, body, By { trigger: Trigger::Push, actor: l.author.as_ref().map(|a| format!("git:{a}")) }, None, Some(&key)).await {
@@ -2383,6 +2402,37 @@ fn egress_vars(proxy: &str, services: &[String], vars: &[(String, String)]) -> V
     let direct = direct.join(",");
     let proxies = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"].map(|k| (k.to_string(), proxy.to_string()));
     proxies.into_iter().chain(["NO_PROXY", "no_proxy"].map(|k| (k.to_string(), direct.clone()))).collect()
+}
+
+/// What a person's hold (`PUT … {held: true}`) is kept as, where a rollback keeps its own id.
+pub const MANUAL_HOLD: &str = "manual";
+
+/// An environment's deploys as automation finds them: going live, built to `ready` for a person
+/// to put live (held by a person, a web service without a volume, which runs beside the live
+/// one), or not made (held after a rollback, or held where nothing can wait beside the live one).
+pub(crate) enum Held {
+    No,
+    Ready,
+    Skip(String),
+}
+
+pub(crate) fn hold_of(svc: &crate::store::ServiceRow, e: &crate::store::EnvRow) -> Held {
+    match e.held_by.as_deref() {
+        None => Held::No,
+        Some(MANUAL_HOLD) if svc.run.kind == RunType::Web && svc.run.volume.is_none() => Held::Ready,
+        Some(MANUAL_HOLD) => Held::Skip("deploys are held, and this service's can't wait beside the live one: deploy it by hand".into()),
+        Some(r) => Held::Skip(format!("deploys are held after the rollback {r}")),
+    }
+}
+
+impl Held {
+    /// The deploy's body as the hold has it: `no_traffic` when it waits for a person.
+    pub(crate) fn body(&self, mut body: serde_json::Value) -> serde_json::Value {
+        if matches!(self, Held::Ready) {
+            body["no_traffic"] = serde_json::json!(true);
+        }
+        body
+    }
 }
 
 #[cfg(test)]
