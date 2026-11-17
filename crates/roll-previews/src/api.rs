@@ -257,9 +257,11 @@ struct ApproveBody {
 async fn approve(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Json<Preview>> {
     check_id(&id)?;
     let ApproveBody { head } = body(&b)?;
+    // A person's call (or the operator's), never a token's: an automation reading the pull
+    // request's own text mustn't release a fork's code.
     let by = match (who, grant) {
+        (_, Some(_)) => return Err(Error::Forbidden("approving a fork's code to run is a person's call: sign in, not a token".into())),
         (Some(axum::Extension(u)), None) => u.handle,
-        (_, Some(axum::Extension(g))) => format!("token:{}", g.name),
         (None, None) => "operator".into(),
     };
     blocking(e, move |e| e.approve(&id, &head, &by)).await.map(Json)

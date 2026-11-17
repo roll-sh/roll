@@ -114,7 +114,7 @@ impl Engine {
             // no longer trusted, has its previews go rather than keep its secrets and data.
             // A Git URL service's preview stands while the service is on the canvas.
             let stands = match r.repo.strip_prefix("git:") {
-                Some(svc) => project.resources.iter().any(|x| x.kind == roll_workspace::Kind::Service && x.r#ref == svc),
+                Some(svc) => project.resources.iter().any(|x| x.kind == roll_workspace::Kind::Service && x.r#ref == svc) && self.workspace.trusts(&project, roll_workspace::Kind::Service, svc),
                 None => repos.contains(&r.repo),
             };
             if !stands {

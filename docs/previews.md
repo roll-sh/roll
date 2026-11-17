@@ -343,7 +343,9 @@ repository's own webhook: GitHub, GitLab, Bitbucket) hands previews each push to
 none of the service's environments follows, after checking the branch really is at that commit
 (`apps_control::integrations::GitPushes`; rolld wires it to `Engine::git_push`). Then:
 
-- In each project whose canvas holds the service, under its rules (previews on, the branch
+- In each project that stands for the service (on its canvas and `Workspace::trusts`: anyone may
+  put any service on their own canvas, and a project that doesn't own it gets none of its
+  branches, titles or commits), under its rules (previews on, the branch
   matching `branches`, no `[skip preview]` in the message, room under `max_previews`), the
   branch's preview is made, or moved to the pushed commit. A deletion deletes it. The same push
   twice changes nothing.
@@ -360,7 +362,10 @@ none of the service's environments follows, after checking the branch really is 
   (secrets resolve untrusted, as a roll code fork's do), and runs nothing until a writer approves
   that head (`POST …/approve {head}`, the sheet's "Approve and run"); the next push waits again,
   its services asleep meanwhile. One waiting holds a place under `max_previews` (anyone can open
-  them). A close deletes the preview. A later push never makes a row trusted again.
+  them). A close deletes the preview. A later push never makes a row trusted again. A fork's row
+  is found by its number (a writer's branch named `pull/7` is another preview). Approving is a
+  person's call (a token gets 403), and it's refused while the project says Roll only, which
+  doesn't cover roll apps yet. A title loses control and invisible formatting characters.
   `a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head`; live in
   `scripts/preview-apps.sh` with GitHub's `pull_request` events through roll apps' hook (#115:
   `GitPushes::takes_pulls`).

@@ -157,16 +157,34 @@ impl Engine {
         let repo = format!("git:{}", p.service);
         let fork = p.pull.as_ref().is_some_and(|pl| pl.fork);
         // The pull request's title as plain words: no control characters, at most 200 characters.
-        let pull_title = p.pull.as_ref().map(|pl| pl.title.chars().map(|c| if c.is_control() { ' ' } else { c }).take(200).collect::<String>().trim().to_string());
+        // Invisible formatting (bidi overrides, zero-width marks) too: the title sits by Approve.
+        let invisible = |c: char| c.is_control() || matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}');
+        let pull_title = p.pull.as_ref().map(|pl| pl.title.chars().map(|c| if invisible(c) { ' ' } else { c }).take(200).collect::<String>().trim().to_string());
         let projects: Vec<roll_workspace::Project> = self
             .workspace
             .list(roll_workspace::Scope::All)?
             .into_iter()
-            .filter(|pr| pr.resources.iter().any(|r| r.kind == roll_workspace::Kind::Service && r.r#ref == p.service))
+            // Anyone may put any service on their own canvas: only a project that stands for it
+            // (`Workspace::trusts`) gets its pushes (its branches, titles and commits).
+            .filter(|pr| pr.resources.iter().any(|r| r.kind == roll_workspace::Kind::Service && r.r#ref == p.service) && self.workspace.trusts(pr, roll_workspace::Kind::Service, &p.service))
             .collect();
         for project in projects {
             let rows = self.store.rows(Some(&project.id))?;
-            let existing = rows.iter().find(|r| r.change_id.is_none() && r.repo == repo && r.branch.as_deref() == Some(p.branch.as_str()) && r.desired == Desired::Active).cloned();
+            // A fork's pull request's preview is its number's (never a writer's branch that happens
+            // to be named `pull/7`); a branch's is the branch's that no fork's pull request holds.
+            let fork_of = |r: &Row| self.store.git_pull(&r.id).ok().flatten().filter(|g| g.fork).map(|g| g.number);
+            let existing = rows
+                .iter()
+                .find(|r| {
+                    r.change_id.is_none()
+                        && r.repo == repo
+                        && r.desired == Desired::Active
+                        && match p.pull.as_ref().filter(|pl| pl.fork) {
+                            Some(pl) => fork_of(r) == Some(pl.number as i64),
+                            None => r.branch.as_deref() == Some(p.branch.as_str()) && fork_of(r).is_none(),
+                        }
+                })
+                .cloned();
             match (&p.sha, existing) {
                 (None, Some(r)) => {
                     let why = match &p.pull {
@@ -262,6 +280,12 @@ impl Engine {
     /// code's `approve-run` for a Git URL service's preview). Only the head the preview is at; the
     /// next push waits again.
     pub fn approve(&self, id: &str, head: &str, by: &str) -> Result<Preview> {
+        // Roll only doesn't reach roll apps yet (its egress, the apps thread's): a fork's code
+        // there would run with branched data and the open internet, so it isn't released.
+        let row = self.store.row(id)?;
+        if row.repo.starts_with("git:") && self.store.settings(&row.project_id)?.egress == crate::settings::EgressRule::Roll {
+            return Err(Error::Conflict("this project limits what previews may reach (Roll only), which doesn't cover services hosted on roll apps yet: a fork's code isn't approved to run there".into()));
+        }
         self.store.approve_git_pull(id, head, by)?;
         self.store.log(id, &format!("{} approved by {by}", short(head)))?;
         let r = self.store.update(id, |row| {
