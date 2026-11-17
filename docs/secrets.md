@@ -2791,8 +2791,9 @@ On main: #20, #62, #63 (the CSI provider), #65 (conditional reads and client cac
 #67 (transit in the Go and Python clients, 2026-11-17 as 0fa832ddf), #151 (previews follow
 their branches, 2026-11-17 as 48868a1e2; with roll previews' #160, fdffd596f, a preview's every
 followed key, renamed or not, gets its branch's value or a blank: the hole the twenty-eighth review
-found is closed, checked live) and #68 (AWS through roll's issuer; roles and users edited in
-place, 2026-11-17 as 3f829ca42).
+found is closed, checked live), #68 (AWS through roll's issuer; roles and users edited in
+place, 2026-11-17 as 3f829ca42) and #198 (plain link fields, 2026-11-17 as bc805ae41: roll apps
+hides every value from roll secrets in its logs unless it's plain connection detail).
 In pull requests to main, each green: #69–#73, #75–#77, #79 with #95,
 #81 (read quotas across the fleet), #82 (metrics), #83 (scheduled backups), #86 (rotation
 windows), #87 (encryption keys by name), #88 (password policies), #92 (SaaS rotators, the
@@ -2803,7 +2804,7 @@ Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (
 (approvals in the audit, on #114), #165 (Elasticsearch, OpenSearch, Cassandra and ScyllaDB
 outside roll, on #132), #166 (a gateway into private networks, on #132), #169 (a credential
 guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on #136), #194
-(TOTP keys) and #198 (plain link fields, for apps' log redaction).
+(TOTP keys).
 
 0. **Land in batches**: the next turn takes a pre-gated batch (#69, #70–#73, #75–#77 in order:
    one combined tree, merged with main and gated once, each pull request then queued behind the
