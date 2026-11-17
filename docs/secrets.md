@@ -2799,8 +2799,8 @@ service-account tokens), #105 (Java), #110 (.NET with `IConfiguration`), #113 (a
 extension that logs in with the function's role), #117 (an Ansible collection), #132 (LDAP and
 Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (Pulumi), #147
 (approvals in the audit, on #114), #165 (Elasticsearch, OpenSearch, Cassandra and ScyllaDB
-outside roll, on #132), #166 (a gateway into private networks, on #132) and #169 (a credential
-guard's scans audited as `secrets.guard`, for roll MCP).
+outside roll, on #132), #166 (a gateway into private networks, on #132), #169 (a credential
+guard's scans audited as `secrets.guard`, for roll MCP) and #173 (MongoDB Atlas, on #136).
 
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
@@ -2827,11 +2827,11 @@ guard's scans audited as `secrets.guard`, for roll MCP).
    (Elasticsearch 9.5.5, OpenSearch 3.9.0, Cassandra 5.0.9, ScyllaDB 2026.3.3). Cassandra's
    credentials cache let a dropped role in for ~1.6 s, so a lease's end sets a password nobody knows
    first. Next: OpenSearch's narrower permission set, and Couchbase and Oracle (Vault has both).
-4c. **MongoDB Atlas through its Admin API** (building: `feature/roll-secrets-mongodb-atlas`, on
-   #136): Atlas refuses `createUser`/`updateUser` on dedicated clusters, so the MongoDB engine can't
-   rotate an Atlas login although "Databases outside roll" lists Atlas. An Atlas project registered
-   by an organization service account, users taking turns and a user per lease through the Admin
-   API (Vault's MongoDB Atlas plugin), and the docs corrected.
+4c. **MongoDB Atlas through its Admin API** (#173, on #136): Atlas refuses the user commands on
+   every tier and rolls back changes made another way, so the MongoDB engine never could rotate an
+   Atlas login (it now refuses Atlas hosts and points here). Users taking turns and a user per
+   lease (`deleteAfterDate` as a backstop) through an organization service account, as Vault's
+   Atlas plugin. Unconfirmed against a real account (the user's call).
 5. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
    backup schedules, rotation windows, directories, Snowflake accounts, ACME bindings): the
    resources once their routes are on main, the tools with roll MCP.
@@ -2863,7 +2863,8 @@ guard's scans audited as `secrets.guard`, for roll MCP).
    wait on projects having members.
 9. *To check against the real services (accounts, the user's call):* #113's STS login
    (`GetWebIdentityToken`) in an AWS account, Entra's answer for removing a secret that's already
-   gone (#92), and #136's statements on a Snowflake account.
+   gone (#92), #136's statements on a Snowflake account, and #173's Admin API calls on an Atlas
+   project.
 10. *With roll MCP:* their credential guard checks what an agent's tool call would write against
    `POST …/leaks` (only values the token may reveal; `sensitive` keys never, so it can't be an
    oracle), marked `X-Roll-Guard: 1` (#169 audits it apart). *Waits on roll MCP:* #114 (`roll-oidc`, approved here), the GitHub Action's `client-id` mode
