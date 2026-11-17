@@ -505,6 +505,19 @@ impl PageA11y {
     }
 }
 
+/// A request to a preview's service through roll (Vercel's request log): when, which service,
+/// the method and path (never the query: it can carry a token), the status, and how long until
+/// the answer's headers.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct RequestLine {
+    pub at: i64,
+    pub service: String,
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub ms: u64,
+}
+
 /// The page's speed at the latest screenshot's head, and at the one before (to compare).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PageSpeedView {

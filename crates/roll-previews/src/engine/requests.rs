@@ -520,6 +520,21 @@ impl Engine {
         self.store.preview(id)
     }
 
+    /// Its latest requests through roll, newest first (on its holder, which serves them).
+    /// Its paths masked as its logs are: a path is its code's to choose (`/x/<secret>`).
+    pub async fn requests(&self, id: &str) -> Result<Vec<crate::RequestLine>> {
+        self.store.row(id)?;
+        let mut lines = self.apps.requests(id);
+        if lines.is_empty() {
+            return Ok(lines);
+        }
+        let paths = self.masked(id, lines.iter().map(|l| l.path.clone()).collect()).await?;
+        for (l, p) in lines.iter_mut().zip(paths) {
+            l.path = p;
+        }
+        Ok(lines)
+    }
+
     pub async fn logs(&self, id: &str, service: Option<&str>, lines: usize) -> Result<(String, Vec<String>)> {
         let services = self.store.services(id)?;
         let svc = match service {

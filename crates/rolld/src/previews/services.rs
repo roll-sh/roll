@@ -508,6 +508,11 @@ impl roll_previews::ports::Apps for Services {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.logs(preview, service, lines).await } else { self.runtime.logs(preview, service, lines).await }
     }
 
+    /// The requests roll's runtime proxied (roll apps' instances are served by roll apps' own).
+    fn requests(&self, preview: &str) -> Vec<roll_previews::RequestLine> {
+        self.runtime.requests(preview)
+    }
+
     async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.follow(preview, service, lines).await }
     }

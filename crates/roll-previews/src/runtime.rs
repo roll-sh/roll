@@ -174,7 +174,13 @@ pub struct Runtime {
     /// Held while a preview's egress proxy is checked and (re)made: its services start at once,
     /// and two makes under the one name would refuse each other (or one remove the other's).
     egress_making: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The latest requests to each preview's services through this node (newest last), at most
+    /// [`REQUESTS_KEPT`] a preview, gone with its last service.
+    requests: Mutex<HashMap<String, std::collections::VecDeque<crate::RequestLine>>>,
 }
+
+/// How many of a preview's latest requests are kept.
+pub const REQUESTS_KEPT: usize = 200;
 
 const BROWSERS_RETRY: Duration = Duration::from_secs(3600);
 
@@ -202,6 +208,7 @@ impl Runtime {
             browsers_failed: Mutex::new(None),
             browsers_building: tokio::sync::Mutex::new(()),
             egress_making: Mutex::new(HashMap::new()),
+            requests: Mutex::new(HashMap::new()),
             client: Client::builder(TokioExecutor::new()).build_http(),
         })
     }
@@ -238,6 +245,8 @@ impl Runtime {
                     rt.stop(&p, &s, &live, None).await;
                     rt.forget(&(p, s), live);
                 }
+                // Its request log is the new holder's now.
+                rt.requests.lock().remove(preview);
             }
         });
     }
@@ -663,7 +672,26 @@ impl Runtime {
         Some(private_page(through.as_deref()))
     }
 
-    async fn proxy(self: &Arc<Self>, preview: &str, service: &str, mut req: Request, feedback: bool) -> Response {
+    /// [`Runtime::proxy_to`], kept in the preview's request log.
+    async fn proxy(self: &Arc<Self>, preview: &str, service: &str, req: Request, feedback: bool) -> Response {
+        let started = std::time::Instant::now();
+        let (method, path) = (req.method().to_string(), req.uri().path().chars().take(300).collect::<String>());
+        let resp = self.proxy_to(preview, service, req, feedback).await;
+        // Not after its services went (removed, or moved to another node meanwhile).
+        if !self.live.lock().keys().any(|(p, _)| p == preview) {
+            return resp;
+        }
+        let line = crate::RequestLine { at: self.store.now_ms().unwrap_or(0), service: service.into(), method, path, status: resp.status().as_u16(), ms: started.elapsed().as_millis() as u64 };
+        let mut all = self.requests.lock();
+        let kept = all.entry(preview.to_string()).or_default();
+        kept.push_back(line);
+        if kept.len() > REQUESTS_KEPT {
+            kept.pop_front();
+        }
+        resp
+    }
+
+    async fn proxy_to(self: &Arc<Self>, preview: &str, service: &str, mut req: Request, feedback: bool) -> Response {
         let mut retried = false;
         let addr = loop {
             let addr = match self.ready(preview, service, self.cfg.wait).await {
@@ -986,8 +1014,16 @@ impl Apps for Runtime {
         }
     }
 
+    fn requests(&self, preview: &str) -> Vec<crate::RequestLine> {
+        self.requests.lock().get(preview).map(|k| k.iter().rev().cloned().collect()).unwrap_or_default()
+    }
+
     async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()> {
         let key = (preview.to_string(), service.to_string());
+        // Its request log goes with its last service.
+        if !self.live.lock().keys().any(|(p, s)| p == preview && s != service) {
+            self.requests.lock().remove(preview);
+        }
         let live = self.live.lock().get(&key).cloned();
         if let Some(live) = live {
             self.stop(preview, service, &live, None).await;
