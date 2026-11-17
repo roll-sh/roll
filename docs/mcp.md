@@ -135,6 +135,10 @@ secret: by writing it somewhere it's read.
 - Reads are never refused. The refusal says where in the arguments and what kind
   (`{refused: "credential", at: "arguments.body", kind: "a GitHub token"}`), never the value, and
   points at roll secrets. The audit log keeps a `deny` row with the same, without the arguments.
+- Checked live against a real rolld and roll secrets (`live/guard-live.sh`): a GitHub token in a
+  project's description refused and never echoed; a production secret's value refused for a token
+  that may reveal it, named by key, through roll secrets' own scan and the gate; the same value
+  through for a token that can't reveal it; a plain description through.
 - One detector (`roll_auth::credentials`, beside the checksum of roll's own secrets) serves both
   MCP servers: roll code's own `/v1/code/mcp` refuses the same formats in its writes (`land`,
   changes, work items) before they're sent.
