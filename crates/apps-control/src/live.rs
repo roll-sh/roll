@@ -238,14 +238,32 @@ pub struct Gate {
     pub vitals: bool,
 }
 
+/// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's) and whose.
+type BucketKey = (u16, Option<std::net::IpAddr>);
+
+/// A firewall's answer: in, a 403, or in under a rule's own limit (its bucket, 1 + its index).
+#[derive(Debug, PartialEq)]
+pub enum Verdict {
+    Allow,
+    Deny,
+    Limit(u16, crate::model::RateLimit),
+}
+
 /// Clients a rate limit remembers at most (a full bucket is the same as none, so those go first).
 const MAX_BUCKETS: usize = 100_000;
 
 impl Gate {
     /// Whether its firewall lets the request in: the first rule that matches decides; none
     /// matching, it does.
-    pub fn firewall_allows(&self, method: &str, path: &str, user_agent: &str) -> bool {
-        self.firewall.iter().find(|r| r.matches(method, path, user_agent)).is_none_or(|r| r.action == crate::model::FirewallAction::Allow)
+    /// What its firewall says of the request: the first rule that matches decides; none lets it
+    /// in.
+    pub fn firewall_verdict(&self, method: &str, path: &str, user_agent: &str) -> Verdict {
+        match self.firewall.iter().enumerate().find(|(_, r)| r.matches(method, path, user_agent)) {
+            None => Verdict::Allow,
+            Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
+            Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(i as u16 + 1, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
+            Some(_) => Verdict::Deny,
+        }
     }
 
     /// Whether `client` (the address the fleet vouches for) gets in. None, with a list: no.
@@ -384,7 +402,8 @@ pub struct EnvLive {
     gate: Mutex<Option<Arc<Gate>>>,
     gate_gen: AtomicU64,
     /// Each client's tokens and when they were counted (its rate limit; None: no address).
-    buckets: Mutex<HashMap<Option<std::net::IpAddr>, (f64, Instant)>>,
+    /// Each client's tokens, by bucket: 0 the environment's rate limit, 1 + i firewall rule i's.
+    buckets: Mutex<HashMap<BucketKey, (f64, Instant)>>,
     /// CPU its awake instances used and could have used, per tick, for `cpu_window` (only what
     /// the runtime measures).
     cpu_samples: Mutex<std::collections::VecDeque<(Instant, f64, f64)>>,
@@ -945,6 +964,11 @@ impl EnvLive {
     /// One request from `client` under `limit`: let through (a token taken), or how long until
     /// the next token.
     pub fn take_token(&self, client: Option<std::net::IpAddr>, limit: &crate::model::RateLimit) -> Result<(), Duration> {
+        self.take_token_in(0, client, limit)
+    }
+
+    /// [`Self::take_token`] in one of its buckets (a firewall rule's own: 1 + its index).
+    pub fn take_token_in(&self, bucket: u16, client: Option<std::net::IpAddr>, limit: &crate::model::RateLimit) -> Result<(), Duration> {
         let (rate, burst) = (limit.per_minute as f64 / 60.0, limit.burst() as f64);
         // An IPv6 client counts by its /64: one host has the whole of it to rotate through.
         let client = client.map(|ip| match ip {
@@ -952,8 +976,9 @@ impl EnvLive {
             v4 => v4,
         });
         let now = Instant::now();
+        let key = (bucket, client);
         let mut b = self.buckets.lock();
-        if b.len() >= MAX_BUCKETS && !b.contains_key(&client) {
+        if b.len() >= MAX_BUCKETS && !b.contains_key(&key) {
             // Full ones first: they're the same as no entry. Then the longest unseen, never
             // everyone's (a flood of new addresses mustn't reset the limited ones).
             b.retain(|_, (tokens, at)| *tokens + now.duration_since(*at).as_secs_f64() * rate < burst);
@@ -966,7 +991,7 @@ impl EnvLive {
                 b.retain(|_, (_, at)| *at > nth);
             }
         }
-        let (tokens, at) = b.entry(client).or_insert((burst, now));
+        let (tokens, at) = b.entry(key).or_insert((burst, now));
         *tokens = (*tokens + now.duration_since(*at).as_secs_f64() * rate).min(burst);
         *at = now;
         if *tokens >= 1.0 {

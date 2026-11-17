@@ -4020,8 +4020,17 @@ pub(crate) fn new_token() -> String {
 /// A firewall rule as typed: `<allow|deny> [/path] [method=A,B] [ua=the rest of the line]`.
 fn firewall_rule(line: &str) -> anyhow::Result<Value> {
     let mut words = line.split_whitespace();
-    let action = words.next().filter(|a| *a == "allow" || *a == "deny").ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow or deny: {line:?}"))?;
+    let action = words.next().filter(|a| ["allow", "deny", "limit"].contains(a)).ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow, deny or limit: {line:?}"))?;
     let mut rule = json!({ "action": action });
+    // `limit N[:BURST] …`: N a minute a client through the rule.
+    if action == "limit" {
+        let rate = words.next().ok_or_else(|| anyhow::anyhow!("limit takes a rate, `limit 10[:20] /login`: {line:?}"))?;
+        let (n, b) = rate.split_once(':').map_or((rate, None), |(n, b)| (n, Some(b)));
+        rule["per_minute"] = json!(n.parse::<u32>().map_err(|_| anyhow::anyhow!("{rate:?} in {line:?}: requests a minute, `10` or `10:20`"))?);
+        if let Some(b) = b {
+            rule["burst"] = json!(b.parse::<u32>().map_err(|_| anyhow::anyhow!("{rate:?} in {line:?}: a burst is a number"))?);
+        }
+    }
     let rest: Vec<&str> = words.collect();
     for (i, w) in rest.iter().enumerate() {
         if let Some(ua) = w.strip_prefix("ua=") {

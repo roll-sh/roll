@@ -1184,6 +1184,12 @@ pub struct FirewallRule {
     /// Text the `User-Agent` contains (case aside).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// `limit`'s: each client's requests a minute through this rule, and how many at once
+    /// (default: a minute's worth).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_minute: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1191,6 +1197,8 @@ pub struct FirewallRule {
 pub enum FirewallAction {
     Allow,
     Deny,
+    /// Let in at `per_minute` a client (Vercel's rate-limit rules), a 429 past it.
+    Limit,
 }
 
 /// The most rules an environment has.
@@ -1240,6 +1248,12 @@ impl FirewallRule {
         }
         if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() {
             return bad("a rule matches on a path, methods or a user agent");
+        }
+        match (self.action, self.per_minute) {
+            (FirewallAction::Limit, Some(n)) => RateLimit { per_minute: n, burst: self.burst }.check().map_err(|_| Error::BadRequest("firewall: a limit is 1–100000 a minute, its burst 1–100000".into()))?,
+            (FirewallAction::Limit, None) => return bad("a limit rule says per_minute"),
+            _ if self.per_minute.is_some() || self.burst.is_some() => return bad("per_minute and burst are a limit rule's"),
+            _ => {}
         }
         Ok(self)
     }
