@@ -3,7 +3,7 @@ import { useState } from "react";
 import { ROLL_API } from "@/lib/roll-api";
 import { ACTIONS, type Action, type Identity, type NewIdentity } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
-import { ago, button, card, Chip, dangerButton, ErrorNote, errorText, field, ghost, label, primary, Section, useLoad } from "./ui";
+import { ago, button, card, Chip, dangerButton, ErrorNote, errorText, field, ghost, label, primary, Section, textareaField, useLoad } from "./ui";
 
 const GITHUB = "https://token.actions.githubusercontent.com";
 const GITLAB = "https://gitlab.com";
@@ -260,7 +260,7 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
               spellCheck={false}
               placeholder='{"keys":[{"kty":"RSA","kid":"…","n":"…","e":"AQAB"}]}'
               aria-invalid={!keysOk}
-              className={`${field} h-auto resize-y py-1.5 font-mono text-[11.5px]`}
+              className={`${textareaField} resize-y font-mono text-[11.5px]`}
             />
           </label>
         )}
