@@ -41,6 +41,7 @@ pub fn kinds(api: Api, allow_private: bool) -> Syncs {
     s.register(Arc::new(platforms::Heroku(http.clone())));
     s.register(Arc::new(platforms::GoogleSecrets(http.clone())));
     s.register(Arc::new(platforms::AzureKeyVault(http.clone())));
+    s.register(Arc::new(platforms::AzureDevOps(http.clone())));
     s.register(Arc::new(platforms::CircleCi(http.clone())));
     s.register(Arc::new(platforms::Bitbucket(http.clone())));
     s.register(Arc::new(platforms::TerraformCloud(http.clone())));
