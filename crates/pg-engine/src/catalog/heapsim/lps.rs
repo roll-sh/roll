@@ -54,7 +54,7 @@ impl Slot {
 
     /// The small form of `t` with xmin code `xmin` (its own xmin, or `OWN_XMIN`), if it has one.
     fn small(t: &Tup, xmin: u64) -> Option<Slot> {
-        if t.xmax != 0 || t.next != 0 || t.hot_updated {
+        if t.xmax != 0 || t.next != 0 || t.flags != 0 {
             return None;
         }
         if t.len >= 1 << 13 || t.prev_off >= 1 << 9 || t.cid >= 1 << 5 {
@@ -87,7 +87,7 @@ impl Slot {
             next: 0,
             len: bits(v, LEN_AT, 13) as u16,
             heap_only: bits(v, HOT_AT, 1) != 0,
-            hot_updated: false,
+            flags: 0,
         }
     }
 
@@ -426,7 +426,7 @@ mod tests {
     use super::*;
 
     fn tup(xmin: u64, xmax: u64, cid: u32, len: u16, prev_off: u16) -> Tup {
-        Tup { xmin, xmax, cid, row: 7, prev_off, next: 0, len, heap_only: prev_off != 0, hot_updated: false }
+        Tup { xmin, xmax, cid, row: 7, prev_off, next: 0, len, heap_only: prev_off != 0, flags: 0 }
     }
 
     #[test]

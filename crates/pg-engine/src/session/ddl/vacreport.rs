@@ -91,6 +91,7 @@ impl Ddl<'_, '_> {
         r: Option<&VacuumReport>,
         cutoff: u64,
         frozen: FrozenXid,
+        minmxid: FrozenXid,
         delay_ns: i64,
         began: &Began,
     ) {
@@ -139,6 +140,13 @@ impl Ddl<'_, '_> {
                 "new relfrozenxid: {}, which is {} XIDs ahead of previous value\n",
                 new as u32,
                 new.wrapping_sub(old) as i32
+            ));
+        }
+        if let Some((old, new)) = minmxid {
+            buf.push_str(&format!(
+                "new relminmxid: {}, which is {} MXIDs ahead of previous value\n",
+                new as u32,
+                (new as u32).wrapping_sub(old as u32) as i32
             ));
         }
         buf.push_str(&format!(

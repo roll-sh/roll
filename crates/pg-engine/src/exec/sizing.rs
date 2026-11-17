@@ -18,6 +18,7 @@ use crate::sql::expr::Expr;
 use crate::sql::plan::BoundIndex;
 use crate::storage::keys::{encode_value, index_prefix, prefix_end};
 use crate::txn::Database;
+use crate::txn::locks::RowLockMode;
 use crate::txn::xids::Xids;
 use crate::types::{DataType, Value};
 use crate::exec::fasthash::{HashMap as FastMap, HashSet as FastSet};
@@ -2057,6 +2058,9 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
             }
         }
     }
+    // The xmax kept for its versions (`multixact::XMAX_PREFIX`: a lock's, outliving its
+    // transaction), each for the version at a TID.
+    let xmaxes = if heap_missing { kept_xmaxes(db, t.oid)? } else { Vec::new() };
     let mut rf = db.relfiles.of(t.oid).write();
     let rf = &mut *rf;
     if heap_missing && exts.iter().any(|(_, e)| !e.is_empty()) {
@@ -2099,6 +2103,8 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
         {
             h.seed_all_visible(st.allvisible.max(0) as u32);
         }
+        // (After the shape: its versions as they were, then their kept xmax.)
+        apply_xmaxes(&mut h, xmaxes);
         rf.heaps.insert(t.oid, h);
         rebuild_toast(rf, t, exts);
     }
@@ -2227,12 +2233,13 @@ pub fn persist_estimates(db: &Database) {
 /// The pruning horizon for `table` (GlobalVisTestFor): a temporary table's (or its TOAST
 /// table's) is its session's own transaction, everything else's the running transactions'
 /// and held snapshots'.
-fn vis_for<'a>(xids: &'a Xids, table: u32, ctx: &ExecCtx) -> Vis<'a> {
-    if temp_rel(table, ctx) {
+fn vis_for<'a>(xids: &'a Xids, table: u32, ctx: &'a ExecCtx) -> Vis<'a> {
+    let v = if temp_rel(table, ctx) {
         Vis::temp(xids, ctx.txn.borrow().xid_if_assigned())
     } else {
         Vis::new(xids)
-    }
+    };
+    v.with_multis(&ctx.sess.db.multis)
 }
 
 /// Whether relation `table` is a temporary table (or a temporary table's TOAST table).
@@ -2244,12 +2251,13 @@ fn temp_rel(table: u32, ctx: &ExecCtx) -> bool {
 }
 
 /// `vis_for` of a table at hand: a temporary one's versions are its session's alone.
-fn vis_of<'a>(xids: &'a Xids, t: &Table, ctx: &ExecCtx) -> Vis<'a> {
-    if t.temporary {
+fn vis_of<'a>(xids: &'a Xids, t: &Table, ctx: &'a ExecCtx) -> Vis<'a> {
+    let v = if t.temporary {
         Vis::temp(xids, ctx.txn.borrow().xid_if_assigned())
     } else {
         Vis::new(xids)
-    }
+    };
+    v.with_multis(&ctx.sess.db.multis)
 }
 
 /// Add a btree entry for a new heap tuple at `tid`.
@@ -2809,6 +2817,10 @@ pub fn updated(
     };
     let mut known: Option<Vec<Ext>> = (t.toast == 0).then(Vec::new);
     let xids = db.xids();
+    // (The old version's TID, whether it had an xmax, and the one the new version carries.)
+    let mut kept: Option<(Tid, bool, crate::txn::multixact::Xmax)> = None;
+    // (Whether the UPDATE changes a key column, as its executor found: `note_update_keys`.)
+    let noted = UPDATE_KEYS.with(|k| k.take());
     let (tid, hot, v, big) = loop {
         let assumed = known.is_none();
         let old_exts: Vec<Ext> = known.take().unwrap_or_default();
@@ -2881,21 +2893,40 @@ pub fn updated(
                 return Ok(None);
             };
             let cid = ctx.txn.borrow_mut().output_cid();
-            // (The old version's command id as HeapTupleHeaderAdjustCmax sets it, within the update's lookup.)
-            let mut cmax = |o: &heapsim::Tup| match ctx.txn.try_borrow_mut() {
-                Ok(mut txn) => {
-                    let here = txn.is_current_xid(o.xmin);
-                    txn.adjust_cmax(o.cid, here)
-                }
-                Err(_) => o.cid,
+            // (The old version's command id as HeapTupleHeaderAdjustCmax sets it and its
+            // xmax, within the update's lookup; an update changing a key column holds the
+            // row FOR UPDATE.)
+            let key_changed = || match noted {
+                Some(k) => k,
+                None => old_key != new_key || ctx.with_catalog(|cat| super::scan::any_key_column(t, cat, |i| old.get(i) != new.get(i))),
             };
-            let r = heap.update_cid(old_key, new_key, len, (xid, cid), hot_ok, &v, &mut cmax);
+            let mut replace = |at: Tid, o: &heapsim::Tup| {
+                let mode = if key_changed() { RowLockMode::Update } else { RowLockMode::NoKeyUpdate };
+                let r = replaced(o, xid, mode, &v, ctx);
+                kept = Some((at, o.xmax != 0, r.carried));
+                r
+            };
+            let r = heap.update_cid(old_key, new_key, len, (xid, cid), hot_ok, &v, &mut replace);
             heap.settle_left(&v);
             big = heap.versions() > max_versions();
             r
         };
         break (tid, hot, v, big);
     };
+    // The kept xmax records (`multixact::XMAX_PREFIX`): the old version's goes, the new one's
+    // lockers stay.
+    if let Some((at, had, carried)) = kept
+        && (had || carried.raw != 0)
+    {
+        use crate::txn::multixact as mx;
+        let mut txn = ctx.txn.borrow_mut();
+        if had {
+            txn.put_state(mx::xmax_key(t.oid, old_key, at), None)?;
+        }
+        if carried.raw != 0 {
+            txn.put_state(mx::xmax_key(t.oid, new_key, tid), Some(mx::encode_xmax(carried)))?;
+        }
+    }
     if !hot {
         let mut ents = Vec::new();
         for bix in indexes {
@@ -2925,10 +2956,189 @@ pub fn updated(
 }
 
 
-/// The raw command id (cmin / cmax) of the tuple at `tid` of `table`, when modelled.
-pub fn raw_cid(table: u32, tid: Tid, db: &Database) -> Option<u32> {
+thread_local! {
+    /// Whether the row the next `updated` replaces had a key column changed, as the UPDATE's
+    /// executor found when it chose the row's lock (None: not known, `updated` finds out).
+    static UPDATE_KEYS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// The UPDATE about to replace a row changes a key column (`keys`): its lock is FOR UPDATE,
+/// and the old version's xmax gets HEAP_KEYS_UPDATED.
+pub fn note_update_keys(keys: bool) {
+    UPDATE_KEYS.with(|k| k.set(Some(keys)));
+}
+
+/// The xmax kept for table `oid`'s versions (`multixact::XMAX_PREFIX`: a lock's, outliving
+/// its transaction): (row key, TID, xmax) each.
+pub(super) fn kept_xmaxes(db: &Database, oid: u32) -> Result<Vec<(Vec<u8>, Tid, crate::txn::multixact::Xmax)>> {
+    use crate::txn::multixact as mx;
+    let (a, b) = mx::xmax_range(oid);
+    let mut out = Vec::new();
+    for r in db.store.scan(&a, &b, db.store.visible_ts()) {
+        let (k, v) = r?;
+        if let (Some((row, at)), Some(x)) = (mx::split_xmax_key(&k), mx::decode_xmax(&v)) {
+            out.push((row.to_vec(), at, x));
+        }
+    }
+    Ok(out)
+}
+
+/// A heap laid out afresh gets its versions' kept xmax back (a record of a version since
+/// replaced names a TID that isn't its row's any more: left alone).
+pub(super) fn apply_xmaxes(h: &mut Heap, xmaxes: Vec<(Vec<u8>, Tid, crate::txn::multixact::Xmax)>) {
+    for (row, at, x) in xmaxes {
+        if h.tid_of(&row) == Some(at) {
+            h.set_xmax_at(at, x);
+        }
+    }
+}
+
+/// The raw command id (cmin / cmax) and raw xmax of the tuple at `tid` of `table`, when
+/// modelled.
+pub fn raw_cid(table: u32, tid: Tid, db: &Database) -> Option<(u32, u64)> {
     let rf = db.relfiles.of(table).read();
-    rf.heaps.get(&table)?.tuple(tid).map(|t| t.cid)
+    rf.heaps.get(&table)?.tuple(tid).map(|t| (t.cid, t.xmax))
+}
+
+/// The raw xmax and its bits of the tuple at `tid` of `table`, when modelled.
+pub fn tuple_xmax(table: u32, tid: Tid, db: &Database) -> Option<crate::txn::multixact::Xmax> {
+    let rf = db.relfiles.of(table).read();
+    rf.heaps.get(&table)?.tuple(tid).map(|t| t.xmax_of())
+}
+
+/// The MultiXact rules' view of the running transaction (`multixact::Env`): transaction
+/// states as the model reads them, its own ids, the cluster's multis through its cache.
+struct MxEnv<'a, 'v> {
+    v: &'a Vis<'v>,
+    txn: &'a mut crate::txn::Txn,
+}
+
+impl crate::txn::multixact::Env for MxEnv<'_, '_> {
+    fn state(&mut self, xid: u64) -> crate::txn::multixact::XState {
+        self.v.xid_state(xid)
+    }
+    fn is_current(&mut self, xid: u64) -> bool {
+        self.txn.is_current_xid(xid)
+    }
+    fn members(&mut self, multi: u32) -> Arc<[crate::txn::multixact::Member]> {
+        let v = self.v;
+        self.txn.multi_members(multi, || v.multi_members(multi))
+    }
+    fn create(&mut self, members: &[crate::txn::multixact::Member]) -> u32 {
+        use crate::txn::multixact as mx;
+        let db = self.txn.db.clone();
+        let mark = self.v.xids().next();
+        let mut record = None;
+        let id = self.txn.multi_for(members, || {
+            let mut m = db.multis.lock();
+            let id = m.create_marked(members, mark);
+            record = Some(mx::encode_multi(mark, m.next_offset, members));
+            id
+        });
+        // (Kept with the transaction's writes: what a version's kept xmax names.)
+        if let Some(r) = record {
+            let _ = self.txn.put_state(mx::multi_key(id), Some(r));
+        }
+        id
+    }
+}
+
+/// What `xid`'s update (or delete) in `mode` leaves on version `o`: its command id
+/// (HeapTupleHeaderAdjustCmax), its xmax (compute_new_xmax_infomask) and the new version's
+/// (the old one's lockers still running).
+fn replaced(o: &heapsim::Tup, xid: u64, mode: RowLockMode, v: &Vis, ctx: &ExecCtx) -> heapsim::Replace {
+    use crate::txn::multixact as mx;
+    let Ok(mut txn) = ctx.txn.try_borrow_mut() else {
+        return heapsim::Replace::plain(o, xid, mode == RowLockMode::Update);
+    };
+    let here = txn.is_current_xid(o.xmin);
+    let cmax = txn.adjust_cmax(o.cid, here);
+    let old = o.xmax_of();
+    if old.raw == 0 {
+        let mut r = heapsim::Replace::plain(o, xid, mode == RowLockMode::Update);
+        r.cmax = cmax;
+        return r;
+    }
+    let mut env = MxEnv { v, txn: &mut txn };
+    let carried = mx::carried_xmax(old, &mut env);
+    let xmax = mx::new_xmax(old, xid, mode, true, &mut env);
+    heapsim::Replace { cmax, xmax, carried }
+}
+
+/// heap_lock_tuple's mark on the locked version: row `key` of `t`, just locked in `mode` by
+/// the running transaction, gets the xmax PostgreSQL's would (the locker alone, or a
+/// MultiXactId with the lockers and updater still of interest); a KEY SHARE lock past a
+/// running update that left the key alone marks the versions after it too
+/// (heap_lock_updated_tuple). Nothing when the table isn't modelled.
+pub fn row_locked(t: &Table, key: &[u8], mode: RowLockMode, ctx: &ExecCtx) -> Result<()> {
+    use crate::txn::multixact as mx;
+    if !ensure(t, &[], ctx)? {
+        return Ok(());
+    }
+    let db = &ctx.sess.db;
+    let xid = ctx.txn.borrow_mut().cur_xid();
+    let xids = db.xids();
+    let v = vis_of(xids, t, ctx);
+    let mut rf = db.relfiles.of(t.oid).write();
+    let Some(heap) = rf.heaps.get_mut(&t.oid) else { return Ok(()) };
+    let mine = |x: u64| ctx.txn.try_borrow().is_ok_and(|txn| txn.is_current_xid(x));
+    // (The update the last version marked had: the next version must be its.)
+    let mut prior = 0u64;
+    let mut lock_step = |i: usize, tup: &heapsim::Tup, txn: &mut crate::txn::Txn| -> (Option<mx::Xmax>, bool) {
+        let mut env = MxEnv { v: &v, txn };
+        let old = tup.xmax_of();
+        let updater = mx::updater(old, |m| Some(mx::Env::members(&mut env, m)));
+        if i == 0 {
+            if mx::already_locked(old, mode, &mut env) {
+                return (None, false);
+            }
+            let follow = mode == RowLockMode::KeyShare
+                && updater != 0
+                && old.bits & mx::KEYS_UPDATED == 0
+                && mx::Env::state(&mut env, updater) == mx::XState::Running;
+            prior = updater;
+            return (Some(mx::new_xmax(old, xid, mode, false, &mut env)), follow);
+        }
+        // heap_lock_updated_tuple_rec: a version the update made, not aborted.
+        if tup.xmin != prior || mx::Env::state(&mut env, tup.xmin) == mx::XState::Aborted {
+            return (None, false);
+        }
+        let members: Vec<mx::Member> = if old.raw == 0 {
+            Vec::new()
+        } else if old.is_multi() {
+            mx::Env::members(&mut env, old.raw as u32).to_vec()
+        } else {
+            vec![mx::Member { xid: old.raw, status: old.single_status() }]
+        };
+        // (test_lockmode_for_conflict: ours already, or a committed update of the key.)
+        let mut ours = false;
+        for m in &members {
+            if mx::Env::is_current(&mut env, m.xid) {
+                ours = true;
+            } else if m.status.is_update()
+                && mx::Env::state(&mut env, m.xid) == mx::XState::Committed
+                && m.status.mode().conflicts_with(mode)
+            {
+                return (None, false);
+            }
+        }
+        let set = (!ours).then(|| mx::new_xmax(old, xid, mode, false, &mut env));
+        prior = updater;
+        (set, updater != 0)
+    };
+    let mut lock = |i: usize, at: Tid, tup: &heapsim::Tup| -> (Option<mx::Xmax>, bool) {
+        let Ok(mut txn) = ctx.txn.try_borrow_mut() else { return (None, false) };
+        let (set, go_on) = lock_step(i, tup, &mut txn);
+        // (Kept: what the version's xmax is after a restart or a crash.)
+        if let Some(x) = set
+            && txn.put_state(mx::xmax_key(t.oid, key, at), Some(mx::encode_xmax(x))).is_err()
+        {
+            return (None, false);
+        }
+        (set, go_on)
+    };
+    heap.lock_tuple(key, &v, &mine, &mut lock);
+    Ok(())
 }
 
 /// A row is about to be deleted (heap_delete, and its out-of-line values).
@@ -2954,15 +3164,20 @@ pub fn deleted(t: &Table, indexes: &[BoundIndex], key: &[u8], old: &[Value], ctx
     let mut rf = db.relfiles.of(t.oid).write();
     let RelFiles { heaps, toast, .. } = &mut *rf;
     if let Some(heap) = heaps.get_mut(&t.oid) {
-        // (The deleting command's cmax (HeapTupleHeaderAdjustCmax), within the delete's lookup.)
-        let mut cmax = |o: &heapsim::Tup| match ctx.txn.try_borrow_mut() {
-            Ok(mut txn) => {
-                let here = txn.is_current_xid(o.xmin);
-                txn.adjust_cmax(o.cid, here)
+        // (The deleting command's cmax (HeapTupleHeaderAdjustCmax) and the version's xmax,
+        // within the delete's lookup.)
+        let mut had = None;
+        let mut replace = |at: Tid, o: &heapsim::Tup| {
+            if o.xmax != 0 {
+                had = Some(at);
             }
-            Err(_) => o.cid,
+            replaced(o, xid, RowLockMode::Update, &v, ctx)
         };
-        heap.delete_cid(key, xid, &v, &mut cmax);
+        heap.delete_cid(key, xid, &v, &mut replace);
+        // (Its kept xmax record goes.)
+        if let Some(at) = had {
+            ctx.txn.borrow_mut().put_state(crate::txn::multixact::xmax_key(t.oid, key, at), None)?;
+        }
     }
     if let Some(exts) = toast.get(&t.oid).and_then(|tt| tt.rows.get(key)) {
         delete_toast(heaps, t.toast, exts, xid, &v);
@@ -3043,7 +3258,7 @@ impl Fetcher {
     fn vis(&self) -> Vis<'_> {
         match self.temp {
             Some(own) => Vis::temp(self.db.xids(), own),
-            None => Vis::new(self.db.xids()),
+            None => Vis::new(self.db.xids()).with_multis(&self.db.multis),
         }
     }
 
@@ -3533,7 +3748,7 @@ impl Kills {
         let xids = self.db.xids();
         let v = match self.temp {
             Some(xid) => Vis::temp(xids, xid),
-            None => Vis::new(xids),
+            None => Vis::new(xids).with_multis(&self.db.multis),
         };
         mark_passed(&self.db, self.table, self.index, &v, &[(lo.as_deref(), hi.as_deref())], false);
     }
@@ -3580,7 +3795,7 @@ pub fn trigger_pin(table: u32, key: &[u8], old_too: bool, ctx: &ExecCtx) -> Vec<
     let Some(heap) = rf.heaps.get_mut(&table) else {
         return Vec::new();
     };
-    let Some((tid, prev)) = heap.locate_with_prev(key, &Vis::new(xids)) else {
+    let Some((tid, prev)) = heap.locate_with_prev(key, &Vis::new(xids).with_multis(&ctx.sess.db.multis)) else {
         return Vec::new();
     };
     let mut pins = vec![tid.0];
@@ -3988,7 +4203,7 @@ fn gin_model(
     let mut rows: Vec<((u32, u16), Vec<u8>, Vec<GinKey>)> = Vec::new();
     {
         let xids = ctx.sess.db.xids();
-        let v = Vis::new(xids);
+        let v = Vis::new(xids).with_multis(&ctx.sess.db.multis);
         let rf = ctx.sess.db.relfiles.of(t.oid).read();
         let Some(heap) = rf.heaps.get(&t.oid) else {
             return Ok(None);
@@ -4336,7 +4551,7 @@ fn gist_model(
     let mut rows: Vec<((u32, u16), Vec<u8>, Option<Key>, Tid)> = Vec::new();
     {
         let xids = ctx.sess.db.xids();
-        let v = Vis::new(xids);
+        let v = Vis::new(xids).with_multis(&ctx.sess.db.multis);
         let rf = ctx.sess.db.relfiles.of(t.oid).read();
         let Some(heap) = rf.heaps.get(&t.oid) else {
             return Ok(None);
@@ -4543,7 +4758,7 @@ pub fn loaded(
     let mut tids = Vec::with_capacity(rows.len());
     for ((k, _), (len, exts)) in rows.iter().zip(layouts) {
         if !exts.is_empty() {
-            let saved = save_toast(heaps, btrees, tt, &Vis::new(xids), t.toast, exts, xid, false);
+            let saved = save_toast(heaps, btrees, tt, &Vis::new(xids).with_multis(&ctx.sess.db.multis), t.toast, exts, xid, false);
             tt.rows.insert(k.clone(), saved);
         }
         tids.push(h.insert(k, len, xid, 0, &mut mode));
@@ -4556,7 +4771,7 @@ pub fn loaded(
 /// now (those it doesn't place after them, as they were), as a sequential scan reads them.
 pub fn in_heap_order<T>(t: &Table, rows: &mut Vec<(Vec<u8>, T)>, ctx: &ExecCtx) {
     let xids = ctx.sess.db.xids();
-    let v = Vis::new(xids);
+    let v = Vis::new(xids).with_multis(&ctx.sess.db.multis);
     let txn = ctx.txn.borrow();
     let mine = |x: u64| txn.is_current_xid(x);
     let locs: Vec<Option<Tid>> = {
@@ -4704,7 +4919,7 @@ pub fn rewritten(t: &Table, order: Option<&[Vec<u8>]>, ctx: &ExecCtx) -> Result<
     let Some(heap) = rf.heaps.get_mut(&t.oid) else {
         return Ok(());
     };
-    let v = Vis::new(xids);
+    let v = Vis::new(xids).with_multis(&ctx.sess.db.multis);
     let mut live = heap.live_rows(&v);
     if let Some(order) = order {
         let pos: HashMap<&[u8], usize> = order
@@ -4997,6 +5212,15 @@ pub fn set_vacuum_skip(freeze: bool, disable_page_skipping: bool) {
     VACUUM_SKIP.with(|c| c.set((s, freeze)));
 }
 
+/// `set_vacuum_skip` for a relation an aggressive VACUUM processes (one its table ages made
+/// aggressive: only all-frozen pages are skipped, nothing frozen as FREEZE would).
+pub fn set_vacuum_skip_aggressive(freeze: bool, disable_page_skipping: bool, aggressive: bool) {
+    set_vacuum_skip(freeze, disable_page_skipping);
+    if aggressive && !disable_page_skipping {
+        VACUUM_SKIP.with(|c| c.set((heapsim::Skip::AllFrozen, freeze)));
+    }
+}
+
 /// vac_estimate_reltuples: a VACUUM that read `scanned` of `total` pages and found
 /// `tuples` live tuples on them, given pg_class's relpages and reltuples before it.
 fn estimate_reltuples(old: Option<&crate::catalog::RelStats>, total: u32, scanned: u32, tuples: f64) -> f64 {
@@ -5075,6 +5299,29 @@ fn gin_cleanup_pages(t: &Table, ctx: &ExecCtx) -> Result<Vec<(u32, u32, u32)>> {
     Ok(out)
 }
 
+/// vacuum_get_cutoffs: OldestXmin (the horizon `v` gives), FreezeLimit, OldestMxact and
+/// MultiXactCutoff, the freeze ages 0 for VACUUM FREEZE.
+fn freeze_cutoffs(v: &Vis, freeze: bool, ctx: &ExecCtx) -> crate::txn::multixact::Cutoffs {
+    use crate::txn::multixact::FIRST_MULTI;
+    let s = ctx.sess.settings.borrow();
+    let age = |n: &str, max: &str| if freeze { 0 } else { s.int(n).min(s.int(max) / 2).max(0) as u64 };
+    let (xage, mage) = (age("vacuum_freeze_min_age", "autovacuum_freeze_max_age"), age("vacuum_multixact_freeze_min_age", "autovacuum_multixact_freeze_max_age"));
+    let oldest_xmin = v.horizon;
+    let xids = v.xids();
+    let running = xids.oldest_running();
+    let oldest_mxact = ctx.sess.db.multis.lock().oldest_needed((running < xids.next()).then_some(running));
+    let multi_cutoff = match oldest_mxact.wrapping_sub(mage as u32) {
+        c if c < FIRST_MULTI => FIRST_MULTI,
+        c => c,
+    };
+    crate::txn::multixact::Cutoffs {
+        oldest_xmin,
+        freeze_limit: oldest_xmin.saturating_sub(xage).max(crate::txn::xids::FIRST_NORMAL_XID),
+        oldest_mxact,
+        multi_cutoff,
+    }
+}
+
 /// Lazy VACUUM of a table (and of its TOAST table).
 pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
     let gin = gin_cleanup_pages(t, ctx)?;
@@ -5110,7 +5357,24 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
         cleanup_opt.or_else(|| option(&t.options, name).and_then(|v| crate::types::text::parse_bool(&v).ok()))
     };
     let main_cleanup = cleanup("vacuum_index_cleanup");
-    let mut res = heap.vacuum_with(&v, indexes.len(), main_cleanup, truncate("vacuum_truncate"), skip, freeze);
+    let cut = freeze_cutoffs(&v, freeze, ctx);
+    let mut frz = |x: crate::txn::multixact::Xmax| match ctx.txn.try_borrow_mut() {
+        Ok(mut txn) => crate::txn::multixact::freeze_xmax(x, &cut, &mut MxEnv { v: &v, txn: &mut txn }),
+        Err(_) => crate::txn::multixact::Frozen { xmax: x, required: false },
+    };
+    let mut res = heap.vacuum_frz(&v, indexes.len(), main_cleanup, truncate("vacuum_truncate"), skip, freeze, &mut frz);
+    // (The versions whose xmax freezing changed: their kept records follow.)
+    for &(at, x) in &res.xmax_changed {
+        if let Some(k) = heap.key_at(at) {
+            let rec = (x.raw != 0).then(|| crate::txn::multixact::encode_xmax(x));
+            ctx.txn.borrow_mut().put_state(crate::txn::multixact::xmax_key(t.oid, k, at), rec)?;
+        }
+    }
+    // NewRelminMxid: OldestMxact, held back by the multis left in an xmax.
+    res.min_multi = Some(match res.min_multi {
+        Some(m) if crate::txn::multixact::precedes(m, cut.oldest_mxact) => m,
+        _ => cut.oldest_mxact,
+    });
     let cat = ctx.catalog();
     let live = estimate_reltuples(cat.relstats.get(&t.oid), res.rel_pages, res.scanned, res.live);
     vacuum_kept.insert(t.oid, res.recently_dead as i64);
@@ -5170,6 +5434,8 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
     {
         let toast_cleanup = cleanup("toast.vacuum_index_cleanup");
         let mut r = th.vacuum_with(&v, 1, toast_cleanup, truncate("toast.vacuum_truncate"), skip, freeze);
+        // (No row of a TOAST table is locked: its NewRelminMxid is OldestMxact.)
+        r.min_multi = Some(cut.oldest_mxact);
         let mut report = VacuumReport::default();
         if let Some(bt) = btrees.get_mut(&(t.toast + 1))
             && toast_cleanup != Some(false)
@@ -5406,7 +5672,7 @@ pub fn row_locations(
 ) -> Option<Vec<Option<(Tid, bool)>>> {
     heap_blocks(t, ctx).ok().flatten()?;
     let xids = ctx.sess.db.xids();
-    let v = Vis::new(xids);
+    let v = Vis::new(xids).with_multis(&ctx.sess.db.multis);
     let txn = ctx.txn.borrow();
     let mine = |x: u64| txn.is_current_xid(x);
     let rf = ctx.sess.db.relfiles.of(t.oid).read();
@@ -5432,7 +5698,7 @@ pub fn row_tids(t: &Table, rows: &[(Vec<u8>, bytes::Bytes)], ctx: &ExecCtx) -> O
     let h = rf.heaps.get(&t.oid)?;
     if h.unstamped || out.iter().any(Option::is_none) {
         let xids = ctx.sess.db.xids();
-        let v = Vis::new(xids);
+        let v = Vis::new(xids).with_multis(&ctx.sess.db.multis);
         for (o, (k, _)) in out.iter_mut().zip(rows) {
             if o.is_none() || h.unstamped {
                 *o = h.locate(k, &v);
@@ -5472,7 +5738,7 @@ pub fn displaced_inserts(t: &Table, ctx: &ExecCtx) -> Option<Vec<(Vec<u8>, u64, 
 pub fn row_roots(t: &Table, keys: &[Vec<u8>], ctx: &ExecCtx) -> Option<Vec<Option<Tid>>> {
     heap_blocks(t, ctx).ok().flatten()?;
     let xids = ctx.sess.db.xids();
-    let v = Vis::new(xids);
+    let v = Vis::new(xids).with_multis(&ctx.sess.db.multis);
     let txn = ctx.txn.borrow();
     let mine = |x: u64| txn.is_current_xid(x);
     let rf = ctx.sess.db.relfiles.of(t.oid).read();
@@ -5830,7 +6096,7 @@ impl CopyLoad {
         let xids = self.db.xids();
         let table = self.key.0;
         for mut rows in batches {
-            let v = Vis::new(xids);
+            let v = Vis::new(xids).with_multis(&self.db.multis);
             let mut rf = self.db.relfiles.of(self.key.0).write();
             let RelFiles { heaps, btrees, bulk, toast, gist_logs, .. } = &mut *rf;
             let mut single = InsertMode::single();
@@ -6368,7 +6634,7 @@ pub fn heap_tuple_stats(oid: u32, ctx: &ExecCtx) -> Result<Option<(u64, u64, u64
         _ => return Ok(None),
     };
     let xids = ctx.sess.db.xids();
-    let v = heapsim::Vis::new(xids);
+    let v = heapsim::Vis::new(xids).with_multis(&ctx.sess.db.multis);
     let rf = ctx.sess.db.relfiles.of(owner).read();
     Ok(match rf.heaps.get(&heap) {
         Some(h) => Some(h.tuple_stats(&v)),
@@ -6382,7 +6648,7 @@ pub fn heap_tuple_stats(oid: u32, ctx: &ExecCtx) -> Result<Option<(u64, u64, u64
 pub fn dead_counts(t: &Table, ctx: &ExecCtx) -> Result<Option<(u64, u64)>> {
     fork_blocks(t.oid, Fork::Main, ctx)?;
     let xids = ctx.sess.db.xids();
-    let v = heapsim::Vis::new(xids);
+    let v = heapsim::Vis::new(xids).with_multis(&ctx.sess.db.multis);
     let rf = ctx.sess.db.relfiles.of(t.oid).read();
     Ok(rf.heaps.get(&t.oid).map(|h| h.dead_counts(&v)))
 }

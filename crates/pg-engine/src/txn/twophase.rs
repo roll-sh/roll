@@ -357,6 +357,8 @@ impl Txn {
                 }
             }
         }
+        // (What it left in versions' xmax, kept as its WAL records are at PREPARE.)
+        self.flush_state();
         Ok(())
     }
 

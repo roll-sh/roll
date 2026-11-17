@@ -2,7 +2,7 @@
 //! functions, and their txid_* forerunners (bigint and txid_snapshot).
 
 use super::{FnCtx, Registry, SrfIter, text};
-use crate::error::Result;
+use crate::error::{Error, Result, code};
 use crate::types::Value;
 use crate::types::snapshot::Snapshot;
 use std::sync::Arc;
@@ -144,13 +144,40 @@ fn xid_age(a: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(Value::Int4(now.wrapping_sub(x) as i32))
 }
 
-/// mxid_age(xid): no multixacts are made here, so the next one is still the first.
-fn mxid_age(a: &[Value], _: &FnCtx) -> Result<Value> {
+/// mxid_age(xid): how far before the next MultiXactId it is.
+fn mxid_age(a: &[Value], c: &FnCtx) -> Result<Value> {
     let x = xid_of(&a[0]) as u32;
     if x == 0 {
         return Ok(Value::Int4(i32::MAX));
     }
-    Ok(Value::Int4(1u32.wrapping_sub(x) as i32))
+    let next = c.exec.sess.db.multis.lock().next;
+    Ok(Value::Int4(next.wrapping_sub(x) as i32))
+}
+
+/// pg_get_multixact_members(multixid): its members' xids and modes, as GetMultiXactIdMembers
+/// reads them.
+fn multixact_members(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let m = xid_of(&a[0]) as u32;
+    if m < crate::txn::multixact::FIRST_MULTI {
+        return Err(Error::new(code::INVALID_PARAMETER_VALUE, format!("invalid MultiXactId: {m}")));
+    }
+    let members = {
+        let mut multis = c.exec.sess.db.multis.lock();
+        // (MultiXactIdPrecedes: wraparound order.)
+        if (m.wrapping_sub(multis.oldest) as i32) < 0 {
+            return Err(Error::new(code::INTERNAL_ERROR, format!("MultiXactId {m} does no longer exist -- apparent wraparound")));
+        }
+        if (m.wrapping_sub(multis.next) as i32) >= 0 {
+            return Err(Error::new(code::INTERNAL_ERROR, format!("MultiXactId {m} has not been created yet -- apparent wraparound")));
+        }
+        multis.members(m)
+    };
+    let members = c.exec.txn.borrow_mut().multi_members(m, || members);
+    let rows: Vec<Result<Vec<Value>>> = members
+        .iter()
+        .map(|x| Ok(vec![Value::Oid(x.xid as u32), Value::text(x.status.name())]))
+        .collect();
+    Ok(Box::new(rows.into_iter()))
 }
 
 /// pg_xact_commit_timestamp(xid): NULL when there is no data for it.
@@ -208,6 +235,7 @@ pub fn register(r: &mut Registry) {
     r.from_pg(5071, Some(xid8_to_xid), None);
     r.from_pg(1181, Some(xid_age), None);
     r.from_pg(3939, Some(mxid_age), None);
+    r.from_pg(3819, None, Some(multixact_members));
     r.from_pg(5097, Some(xid8_larger), None);
     r.from_pg(5098, Some(xid8_smaller), None);
     // (Their records' fields are known, so `(f(x)).roident` resolves as in PostgreSQL.)

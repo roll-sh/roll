@@ -4,6 +4,7 @@
 pub(crate) mod catmerge;
 mod bulklocks;
 pub mod locks;
+pub mod multixact;
 pub mod procs;
 pub(crate) mod spill;
 pub mod ssi;
@@ -31,6 +32,8 @@ use std::time::{Duration, Instant};
 /// Reserved keyspace (table oid 0): the catalog's header record (its objects' records are
 /// under `persist::RECORD_PREFIX`).
 pub const CATALOG_KEY: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 1];
+/// The WAL writer's delay for a commit of MultiXact state alone (wal_writer_delay's default).
+const STATE_ONLY_DELAY_MS: u64 = 200;
 const SEQ_PREFIX: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 2];
 
 /// Write buffers spilled to disk so far (`txn::spill`), for tests.
@@ -114,6 +117,9 @@ pub struct Database {
     pub watch: watch::Watch,
     /// Big tables' measures, for VACUUM to skip those nothing changed since (`unchanged`).
     pub unchanged: unchanged::Unchanged,
+    /// Its MultiXactIds (`multixact`): PostgreSQL's are the cluster's; a database's own here,
+    /// kept with the rows whose xmax names them.
+    pub multis: Mutex<multixact::MultiXacts>,
     seqs: Mutex<HashMap<u32, SeqState>>,
     /// (On a cache line of its own: every transaction takes an id, and what the statements
     /// read of the database sits next to it.)
@@ -257,6 +263,27 @@ impl Database {
                 || (catalog.tables.ix().rows.temporary > 0) == catalog.tables.values().any(|t| t.temporary)
         );
         let temp_leftovers = catalog.tables.ix().rows.temporary > 0;
+        // Its MultiXactIds: the last one made, and its members and the others' read as asked.
+        let multis = {
+            let ts = store.visible_ts();
+            let last = match store.scan_rev(multixact::MULTI_PREFIX, &multixact::MULTI_END, ts).next() {
+                Some(r) => {
+                    let (k, v) = r?;
+                    k.get(8..12)
+                        .and_then(|b| Some((u32::from_be_bytes(b.try_into().ok()?), multixact::decode_multi(&v)?.1)))
+                }
+                None => None,
+            };
+            let s = store.clone();
+            multixact::MultiXacts::restored(
+                last,
+                Box::new(move |m| {
+                    let v = s.get(&multixact::multi_key(m), s.visible_ts()).ok()??;
+                    let (mark, _, members) = multixact::decode_multi(&v)?;
+                    Some((mark, members))
+                }),
+            )
+        };
         static INSTANCES: AtomicU64 = AtomicU64::new(1);
         Ok(Arc::new(Database {
             name: name.to_string(),
@@ -269,6 +296,7 @@ impl Database {
             moved: Mutex::new(HashMap::new()),
             watch: Default::default(),
             unchanged: Default::default(),
+            multis: Mutex::new(multis),
             seqs: Mutex::new(HashMap::new()),
             next_txn: crate::counter::Padded(AtomicU64::new(1)),
             sessions: AtomicUsize::new(0),
@@ -483,6 +511,8 @@ impl Database {
         Txn {
             id,
             xid: 0,
+            mx_cache: Vec::new(),
+            state: Vec::new(),
             pin_slot,
             xmin_slot,
             db: self.clone(),
@@ -948,6 +978,13 @@ pub struct Txn {
     pub id: u64,
     /// The Postgres transaction id, once it has one (0: none yet).
     xid: u64,
+    /// The multis it made or read, least recently used first (its MultiXact cache,
+    /// mXactCache: a member set made again reuses its multi).
+    mx_cache: Vec<(u32, Arc<[multixact::Member]>)>,
+    /// Its MultiXact state records (`put_state`), in the order written: committed with its
+    /// writes, else on their own when it rolls back or prepares (no savepoint's rollback
+    /// takes one back).
+    state: Vec<(Vec<u8>, Option<Bytes>)>,
     /// Its session's slot for snapshot pins (`Database::begin_in`), if it has one.
     pin_slot: Option<Arc<crate::storage::PinSlot>>,
     /// Its session's slot for snapshot xmins, if it has one.
@@ -1947,6 +1984,46 @@ impl Txn {
                     .any(|sp| sp.xid == x || sp.committed.contains(&x)))
     }
 
+    /// MultiXactIdCreateFromMembers for this transaction: the multi of `members` (sorted) it
+    /// has in its cache, else the one `create` makes, cached.
+    pub fn multi_for(&mut self, members: &[multixact::Member], create: impl FnOnce() -> u32) -> u32 {
+        if let Some(i) = self.mx_cache.iter().rposition(|(_, m)| **m == *members) {
+            let e = self.mx_cache.remove(i);
+            let id = e.0;
+            self.mx_cache.push(e);
+            return id;
+        }
+        let id = create();
+        self.cache_multi(id, members.into());
+        id
+    }
+
+    /// GetMultiXactIdMembers for this transaction: from its cache, else as `fetch` reads
+    /// them, cached.
+    pub fn multi_members(&mut self, multi: u32, fetch: impl FnOnce() -> Option<Arc<[multixact::Member]>>) -> Arc<[multixact::Member]> {
+        if let Some(i) = self.mx_cache.iter().rposition(|(id, _)| *id == multi) {
+            let e = self.mx_cache.remove(i);
+            let m = e.1.clone();
+            self.mx_cache.push(e);
+            return m;
+        }
+        match fetch() {
+            Some(m) => {
+                self.cache_multi(multi, m.clone());
+                m
+            }
+            None => Arc::from([]),
+        }
+    }
+
+    fn cache_multi(&mut self, multi: u32, members: Arc<[multixact::Member]>) {
+        // (MAX_CACHE_ENTRIES.)
+        if self.mx_cache.len() >= 256 {
+            self.mx_cache.remove(0);
+        }
+        self.mx_cache.push((multi, members));
+    }
+
     /// The transaction id, if it has been given one.
     pub fn xid_if_assigned(&self) -> Option<u64> {
         (self.xid != 0).then_some(self.xid)
@@ -2021,6 +2098,26 @@ impl Txn {
         cat.tables
             .get(&oid)
             .is_some_and(|t| cat.schema_name(t.schema).starts_with("pg_temp"))
+    }
+
+    /// A MultiXact state record (`multixact::MULTI_PREFIX`, `XMAX_PREFIX`; None: deleted),
+    /// committed with the transaction's other writes, in a read-only transaction too; no
+    /// other transaction's write of it conflicts.
+    pub fn put_state(&mut self, key: Vec<u8>, value: Option<Vec<u8>>) -> Result<()> {
+        // (Not in the write buffer: a lock's xmax outlives a rollback, as PostgreSQL's WAL
+        // record of it does.)
+        self.state.push((key, value.map(Bytes::from)));
+        Ok(())
+    }
+
+    /// The MultiXact state records alone, in a commit of their own that doesn't wait for an
+    /// fsync (a rollback's, a PREPARE's): the last of each key.
+    pub(crate) fn flush_state(&mut self) {
+        if self.state.is_empty() {
+            return;
+        }
+        let last: BTreeMap<Vec<u8>, Option<Bytes>> = std::mem::take(&mut self.state).into_iter().collect();
+        let _ = self.db.store.commit_async(last.into_iter().collect(), |_, _| Ok(()), STATE_ONLY_DELAY_MS);
     }
 
     /// A change stream record (`repl::log`), in a read-only transaction too.
@@ -3826,6 +3923,10 @@ impl Txn {
     pub fn commit(mut self) -> Result<u64> {
         // (A statement's deferred index entry deletes go in at its end at the latest.)
         self.flush_entry_deletes()?;
+        // (Its MultiXact state records go in with its writes.)
+        for (k, v) in std::mem::take(&mut self.state) {
+            self.record(k, v, false);
+        }
         self.close_sink()?;
         if self.sxact
             && !self.prepared
@@ -3905,7 +4006,12 @@ impl Txn {
         let strict = self.isolation.txn_snapshot() && !self.prepared;
         let keys: Vec<Vec<u8>> = if strict {
             // (Range deletion markers aren't data: the store retires them on its own.)
-            writes.iter().filter(|(k, _)| !crate::storage::rdel::is_marker(k)).map(|(k, _)| k.clone()).collect()
+            // (Nor MultiXact state: two lockers' records of one version don't conflict.)
+            writes
+                .iter()
+                .filter(|(k, _)| !crate::storage::rdel::is_marker(k) && !multixact::is_state_key(k))
+                .map(|(k, _)| k.clone())
+                .collect()
         } else {
             Vec::new()
         };
@@ -4052,6 +4158,10 @@ impl Txn {
             // (RecordTransactionCommit: asynchronous unless it changed the catalog; COMMIT
             // PREPARED always waits.)
             self.db.store.commit_async(writes, check, delay)
+        } else if !self.prepared && !decoded && writes.iter().all(|(k, _)| multixact::is_state_key(k)) {
+            // A transaction that only locked rows: its locks are gone once it ends, and what
+            // it left in their versions' xmax (`multixact`) needn't wait for an fsync.
+            self.db.store.commit_async(writes, check, STATE_ONLY_DELAY_MS)
         } else {
             self.db.store.commit_grouped(writes, check, |_| {}, |_| {})
         };
@@ -4305,6 +4415,8 @@ fn catalog_name(class: u32) -> &'static str {
 
 impl Drop for Txn {
     fn drop(&mut self) {
+        // (Rolled back: what it left in versions' xmax stays.)
+        self.flush_state();
         self.ssi_finish(false, 0);
         self.finish_xid(false);
         self.release_locks();

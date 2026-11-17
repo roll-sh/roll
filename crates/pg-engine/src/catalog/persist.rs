@@ -511,6 +511,7 @@ stored_fields! {
         builtin_proc_owners = 49 by_value,
         comments = 50 by_ptr,
         sub_rels = 51 by_value,
+        min_mxids = 52 by_value,
     ],
     sets: [
         opmembers_removed = 100,
@@ -663,10 +664,11 @@ pub const CLASS_ORDER_TAG: u8 = 46;
 /// The record tag of `comments` (merged apart, `txn::catmerge`).
 pub const COMMENTS_TAG: u8 = 50;
 
-/// The tags of what VACUUM and ANALYZE write (`relstats`, `colstats`, `frozen_xids`): each
+/// The tags of what VACUUM and ANALYZE write (`relstats`, `colstats`, `frozen_xids`,
+/// `min_mxids`): each
 /// relation in a transaction of its own, so two of them racing over one relation keep the
 /// last commit's (`txn::catmerge`).
-pub const STATS_TAGS: [u8; 3] = [18, 38, 44];
+pub const STATS_TAGS: [u8; 4] = [18, 38, 44, 52];
 
 /// The writes that store `c` in a store holding no records yet.
 pub fn writes_new(c: &Catalog) -> Result<Writes> {

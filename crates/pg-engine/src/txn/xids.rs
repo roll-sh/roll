@@ -312,6 +312,11 @@ impl Xids {
         std::sync::Arc::new(XminSlot { xids: self.clone(), shared })
     }
 
+    /// Whether running id `x` is a subtransaction's.
+    pub fn is_sub(&self, x: u64) -> bool {
+        self.state.lock().subs.contains(&x)
+    }
+
     /// A number no other transaction id table of the process has (caches of ended
     /// transactions' outcomes are keyed by it).
     pub fn uid(&self) -> u64 {

@@ -1,0 +1,255 @@
+> CREATE EXTENSION pgrowlocks
+-- CREATE EXTENSION
+
+> CREATE TABLE mx (id int PRIMARY KEY, v int)
+-- CREATE TABLE
+
+> INSERT INTO mx SELECT g, g FROM generate_series(1, 5) g
+-- INSERT 0 5
+
+> BEGIN
+-- BEGIN
+
+> SELECT id FROM mx WHERE id = 1 FOR KEY SHARE
+id:int4
+1
+-- SELECT 1
+
+> SELECT id FROM mx WHERE id = 2 FOR SHARE
+id:int4
+2
+-- SELECT 1
+
+> SELECT id FROM mx WHERE id = 3 FOR NO KEY UPDATE
+id:int4
+3
+-- SELECT 1
+
+> SELECT id FROM mx WHERE id = 4 FOR UPDATE
+id:int4
+4
+-- SELECT 1
+
+> SELECT id, xmax = pg_current_xact_id()::xid AS mine, xmax = '0' AS none FROM mx ORDER BY id
+id:int4 | mine:bool | none:bool
+1 | t | f
+2 | t | f
+3 | t | f
+4 | t | f
+5 | f | t
+-- SELECT 5
+
+> SELECT locked_row, locker = pg_current_xact_id()::xid AS mine, multi, modes, pids[1] = pg_backend_pid() AS own_pid FROM pgrowlocks('mx') ORDER BY 1
+locked_row:27 | mine:bool | multi:bool | modes:text[] | own_pid:bool
+(0,1) | t | f | {"For Key Share"} | t
+(0,2) | t | f | {"For Share"} | t
+(0,3) | t | f | {"For No Key Update"} | t
+(0,4) | t | f | {"For Update"} | t
+-- SELECT 4
+
+> SELECT id FROM mx WHERE id = 4 FOR KEY SHARE
+id:int4
+4
+-- SELECT 1
+
+> SELECT id FROM mx WHERE id = 1 FOR UPDATE
+id:int4
+1
+-- SELECT 1
+
+> SELECT locked_row, multi, modes FROM pgrowlocks('mx') ORDER BY 1
+locked_row:27 | multi:bool | modes:text[]
+(0,1) | f | {"For Update"}
+(0,2) | f | {"For Share"}
+(0,3) | f | {"For No Key Update"}
+(0,4) | f | {"For Update"}
+-- SELECT 4
+
+> SAVEPOINT s1
+-- SAVEPOINT
+
+> SELECT id FROM mx WHERE id = 2 FOR UPDATE
+id:int4
+2
+-- SELECT 1
+
+> SELECT id FROM mx WHERE id = 4 FOR SHARE
+id:int4
+4
+-- SELECT 1
+
+> SELECT locked_row, multi, modes, xids[1] = pg_current_xact_id()::xid AS first_is_top FROM pgrowlocks('mx') ORDER BY 1
+locked_row:27 | multi:bool | modes:text[] | first_is_top:bool
+(0,1) | f | {"For Update"} | t
+(0,2) | t | {"For Share","For Update"} | t
+(0,3) | f | {"For No Key Update"} | t
+(0,4) | f | {"For Update"} | t
+-- SELECT 4
+
+> SELECT m.mode, m.xid = pg_current_xact_id()::xid AS top FROM mx, pg_get_multixact_members(mx.xmax) m WHERE mx.id = 2
+mode:text | top:bool
+forupd | f
+sh | t
+-- SELECT 2
+
+> CREATE TEMP TABLE before AS SELECT xmax AS x FROM mx WHERE id = 2
+-- SELECT 1
+
+> SELECT id FROM mx WHERE id = 2 FOR UPDATE
+id:int4
+2
+-- SELECT 1
+
+> SELECT mx.xmax = before.x AS same FROM mx, before WHERE id = 2
+same:bool
+t
+-- SELECT 1
+
+> ROLLBACK TO s1
+-- ROLLBACK
+
+> SELECT locked_row, multi, modes FROM pgrowlocks('mx') ORDER BY 1
+locked_row:27 | multi:bool | modes:text[]
+(0,1) | f | {"For Update"}
+(0,2) | t | {"For Share","For Update"}
+(0,3) | f | {"For No Key Update"}
+(0,4) | f | {"For Update"}
+-- SELECT 4
+
+> UPDATE mx SET v = v + 10 WHERE id = 3
+-- UPDATE 1
+
+> UPDATE mx SET v = v + 10 WHERE id = 5
+-- UPDATE 1
+
+> SELECT id, v, xmax = pg_current_xact_id()::xid AS mine, xmax = '0' AS none FROM mx ORDER BY id
+id:int4 | v:int4 | mine:bool | none:bool
+1 | 1 | t | f
+2 | 2 | f | f
+3 | 13 | t | f
+4 | 4 | t | f
+5 | 15 | f | t
+-- SELECT 5
+
+> SELECT locked_row, multi, modes FROM pgrowlocks('mx') ORDER BY 1
+locked_row:27 | multi:bool | modes:text[]
+(0,1) | f | {"For Update"}
+(0,2) | t | {"For Share","For Update"}
+(0,4) | f | {"For Update"}
+(0,6) | f | {"For Key Share"}
+-- SELECT 4
+
+> COMMIT
+-- COMMIT
+
+> SELECT id, xmax = '0' AS none FROM mx ORDER BY id
+id:int4 | none:bool
+1 | f
+2 | f
+3 | f
+4 | f
+5 | t
+-- SELECT 5
+
+> SELECT count(*) FROM pgrowlocks('mx')
+count:int8
+0
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> SELECT id FROM mx WHERE id = 2 FOR KEY SHARE
+id:int4
+2
+-- SELECT 1
+
+> SELECT id, xmax = pg_current_xact_id()::xid AS mine FROM mx WHERE id = 2
+id:int4 | mine:bool
+2 | t
+-- SELECT 1
+
+> SELECT locked_row, multi, modes FROM pgrowlocks('mx') ORDER BY 1
+locked_row:27 | multi:bool | modes:text[]
+(0,2) | f | {"For Key Share"}
+-- SELECT 1
+
+> PREPARE TRANSACTION 'a249'
+-- PREPARE TRANSACTION
+
+> SELECT locked_row, multi, modes, pids FROM pgrowlocks('mx') ORDER BY 1
+locked_row:27 | multi:bool | modes:text[] | pids:int4[]
+(0,2) | f | {"For Key Share"} | {0}
+-- SELECT 1
+
+> ROLLBACK PREPARED 'a249'
+-- ROLLBACK PREPARED
+
+> SELECT count(*) FROM pgrowlocks('mx')
+count:int8
+0
+-- SELECT 1
+
+> CREATE TABLE mxc (id int, p int REFERENCES mx)
+-- CREATE TABLE
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO mxc VALUES (1, 1)
+-- INSERT 0 1
+
+> SELECT locked_row, multi, modes FROM pgrowlocks('mx') ORDER BY 1
+locked_row:27 | multi:bool | modes:text[]
+(0,1) | f | {"For Key Share"}
+-- SELECT 1
+
+> SAVEPOINT s2
+-- SAVEPOINT
+
+> SELECT id FROM mx WHERE id = 1 FOR NO KEY UPDATE
+id:int4
+1
+-- SELECT 1
+
+> SELECT locked_row, multi, modes FROM pgrowlocks('mx') ORDER BY 1
+locked_row:27 | multi:bool | modes:text[]
+(0,1) | t | {"For Key Share","For No Key Update"}
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO mx VALUES (5, 0) ON CONFLICT (id) DO UPDATE SET v = excluded.v RETURNING id, v, xmax = pg_current_xact_id()::xid AS mine
+id:int4 | v:int4 | mine:bool
+5 | 0 | t
+-- INSERT 0 1
+
+> SELECT id, xmax = pg_current_xact_id()::xid AS mine FROM mx WHERE id = 5
+id:int4 | mine:bool
+5 | t
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT * FROM pg_get_multixact_members('0')
+ERROR 22023: invalid MultiXactId: 0
+
+> SELECT * FROM pg_get_multixact_members('4000000000')
+ERROR XX000: MultiXactId 4000000000 does no longer exist -- apparent wraparound
+
+> SELECT mxid_age('0')
+mxid_age:int4
+2147483647
+-- SELECT 1
+
+> DROP TABLE mxc
+-- DROP TABLE
+
+> DROP TABLE mx
+-- DROP TABLE
+

@@ -532,6 +532,9 @@ impl Ddl<'_, '_> {
                             progress.set(8, indexes as i64);
                             super::analyze::ProgressEnd(&progress)
                         });
+                        // (Old enough by its relfrozenxid or relminmxid: aggressive too.)
+                        let aggressive = aggressive || (vacuum && self.aged(&r));
+                        crate::exec::sizing::set_vacuum_skip_aggressive(freeze, skip_pages, aggressive);
                         let report = (verbose && vacuum).then(|| {
                             let schema = self.cat.schema_name(r.schema).to_string();
                             if process_main {
@@ -566,6 +569,7 @@ impl Ddl<'_, '_> {
                             let frozen_before = (frozen(self, r.oid), frozen(self, r.toast));
                             let cutoff = self.recent_xmin();
                             self.advance_frozen_xid(&r, freeze, process_main, process_toast)?;
+                            let minmxid = self.advance_min_mxid(&r, process_main, process_toast);
                             // (Given after the cutoffs it took at its start.)
                             if truncated {
                                 self.ctx.txn.borrow_mut().xid();
@@ -582,14 +586,14 @@ impl Ddl<'_, '_> {
                                 };
                                 if process_main {
                                     let f = advanced(self, r.oid, frozen_before.0);
-                                    self.vacuumed_info(r.oid, &schema, &r.name, main.as_ref(), cutoff, f, delay, &began);
+                                    self.vacuumed_info(r.oid, &schema, &r.name, main.as_ref(), cutoff, f, minmxid.0, delay, &began);
                                 }
                                 if process_toast && r.toast != 0 {
                                     let name = r.toast_relname(false);
                                     self.vacuuming_info("pg_toast", &name, aggressive);
                                     let f = advanced(self, r.toast, frozen_before.1);
                                     let began = super::vacreport::Began::now();
-                                    self.vacuumed_info(r.toast, "pg_toast", &name, toast.as_ref(), cutoff, f, 0, &began);
+                                    self.vacuumed_info(r.toast, "pg_toast", &name, toast.as_ref(), cutoff, f, minmxid.1, 0, &began);
                                 }
                             }
                             // pgstat_report_vacuum, of the table and of its TOAST table.
@@ -793,14 +797,19 @@ impl Ddl<'_, '_> {
         let toast = toast && t.toast != 0 && !skipped.1;
         let old_toast = self.cat.frozen_xids.get(&t.toast).copied().unwrap_or(first);
         let (mut new, mut new_toast) = (oldest, oldest);
-        let measured = self.measured_xmin.take().filter(|m| m.0 == t.oid && m.1 == old);
+        // (Pages a version's xmax made the VACUUM freeze: their rows' xmins are frozen.)
+        let frozen_blocks: std::collections::HashSet<u32> = (self.vacuumed.as_ref())
+            .filter(|v| v.0 == t.oid)
+            .map(|v| v.1.heap.frozen_blocks.iter().copied().collect())
+            .unwrap_or_default();
+        let measured = self.measured_xmin.take().filter(|m| m.0 == t.oid && m.1 == old && frozen_blocks.is_empty());
         let measured_toast = measured.and_then(|m| m.3).filter(|m| m.0 == old_toast).map(|m| m.1);
         // (The xmins kept of a table nothing changed in since: `txn::unchanged`.)
         let db = self.ctx.sess.db.clone();
         let kept = db
             .unchanged
             .valid(&db.store, t.oid)
-            .filter(|m| m.ts <= self.ctx.txn.borrow().snapshot_ts() && !(toast && m.may_toast))
+            .filter(|m| m.ts <= self.ctx.txn.borrow().snapshot_ts() && !(toast && m.may_toast) && frozen_blocks.is_empty())
             .and_then(|m| m.oldest_xmin(old));
         if !freeze && let Some((_, _, m, _)) = measured && (!toast || measured_toast.is_some()) {
             // (Seen by the measure's pass over the rows.)
@@ -825,7 +834,9 @@ impl Ddl<'_, '_> {
                 xmins = (xmins.0.min(x), xmins.1.max(x));
                 // (Values out of line, or a row big enough that its values could be.)
                 external |= crate::storage::toast::has_external(&v) || v.len() > crate::exec::sizing::TOAST_THRESHOLD;
-                if main && x >= old && x < new {
+                let frozen_page = !frozen_blocks.is_empty()
+                    && crate::exec::scan::stored_tid(&v).is_some_and(|(b, _)| frozen_blocks.contains(&b));
+                if main && x >= old && x < new && !frozen_page {
                     new = x;
                 }
                 if toast && x >= old_toast && x < new_toast {
@@ -847,6 +858,62 @@ impl Ddl<'_, '_> {
             self.cat.frozen_xids.insert(t.toast, new_toast.max(old_toast));
         }
         Ok(())
+    }
+
+    /// vacuum_get_cutoffs' table ages: a relfrozenxid at or before the next xid less
+    /// vacuum_freeze_table_age, or a relminmxid at or before the next multi less
+    /// vacuum_multixact_freeze_table_age (each at most 0.95 of its autovacuum max age), makes
+    /// the VACUUM aggressive.
+    fn aged(&self, t: &Table) -> bool {
+        use crate::txn::multixact::FIRST_MULTI;
+        let first = crate::txn::xids::FIRST_NORMAL_XID as u32;
+        let (xage, mage) = {
+            let s = self.ctx.sess.settings.borrow();
+            let age = |n: &str, max: &str| s.int(n).min((s.int(max) as f64 * 0.95) as i64).max(0) as u32;
+            (age("vacuum_freeze_table_age", "autovacuum_freeze_max_age"), age("vacuum_multixact_freeze_table_age", "autovacuum_multixact_freeze_max_age"))
+        };
+        // (TransactionIdPrecedesOrEquals / MultiXactIdPrecedesOrEquals: wraparound order.)
+        let at_or_before = |a: u32, b: u32| (a.wrapping_sub(b) as i32) <= 0;
+        let db = &self.ctx.sess.db;
+        let xlimit = match (db.xids().next() as u32).wrapping_sub(xage) {
+            l if l < first => first,
+            l => l,
+        };
+        let frozen = self.cat.frozen_xids.get(&t.oid).map_or(first, |x| *x as u32);
+        let mlimit = match db.multis.lock().next.wrapping_sub(mage) {
+            l if l < FIRST_MULTI => FIRST_MULTI,
+            l => l,
+        };
+        let minmxid = self.cat.min_mxids.get(&t.oid).map_or(FIRST_MULTI, |m| *m as u32);
+        at_or_before(frozen, xlimit) || at_or_before(minmxid, mlimit)
+    }
+
+    /// vac_update_relstats' relminmxid: the oldest MultiXactId the VACUUM left in a version's
+    /// xmax, else OldestMxact (`heapsim::VacuumResult::min_multi`), when it read every page
+    /// it couldn't know all frozen; it never goes back. The (old, new) values of the heap's
+    /// and the TOAST table's, where they advanced.
+    fn advance_min_mxid(&mut self, t: &Table, main: bool, toast: bool) -> (super::vacreport::FrozenXid, super::vacreport::FrozenXid) {
+        use crate::txn::multixact::{FIRST_MULTI, precedes};
+        let toast = toast && t.toast != 0;
+        let found = |r: &crate::catalog::heapsim::VacuumResult| (!r.skipped_all_visible).then_some(r.min_multi).flatten();
+        let (heap, toasted) = match self.vacuumed.as_ref().filter(|v| v.0 == t.oid) {
+            Some((_, m, tv)) => (main.then(|| found(&m.heap)).flatten(), toast.then(|| tv.as_ref().and_then(|v| found(&v.heap))).flatten()),
+            // (A table not modelled: no version's xmax is known to name a multi.)
+            None => {
+                let o = self.oldest_mxact();
+                (main.then_some(o), toast.then_some(o))
+            }
+        };
+        let mut set = |rel: u32, new: Option<u32>| {
+            let new = new?;
+            let old = self.cat.min_mxids.get(&rel).map_or(FIRST_MULTI, |m| *m as u32);
+            if !precedes(old, new) {
+                return None;
+            }
+            self.cat.min_mxids.insert(rel, new as u64);
+            Some((old as u64, new as u64))
+        };
+        (set(t.oid, heap), set(t.toast, toasted))
     }
 
     /// TRUNCATE (and a matview's refill) leave a table and its indexes unmeasured.
