@@ -287,6 +287,35 @@ async fn a_static_sites_files_answer_without_a_container() {
     w.apps.shutdown().await;
 }
 
+/// A site moved from Vercel or Netlify keeps its rules: `vercel.json`'s redirect and headers and
+/// `netlify.toml`'s rewrite answer from its files, and neither config is served (one holds a
+/// build setting).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sites_vercel_json_and_netlify_toml_rules_answer() {
+    let Some(w) = docker_world().await else { return };
+    let vercel = r#"{ "redirects": [{ "source": "/old/:slug", "destination": "/new/:slug" }], "headers": [{ "source": "/(.*)", "headers": [{ "key": "X-Moved-From", "value": "vercel" }] }] }"#;
+    let netlify = "[build.environment]\nAPI_SECRET = \"s3cr3t\"\n\n[[redirects]]\nfrom = \"/app/*\"\nto = \"/index.html\"\nstatus = 200\n";
+    let (id, host) = deploy_tree(&w, "moved", &[("index.html", "<!doctype html><h1>moved</h1>"), ("vercel.json", vercel), ("netlify.toml", netlify)]).await;
+    let get = |path: &'static str| {
+        let (public, host) = (w.public.clone(), host.clone());
+        async move {
+            let resp = public.oneshot(Request::get(path).header("host", host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
+            let (st, h) = (resp.status(), resp.headers().clone());
+            (st, h, String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string())
+        }
+    };
+    let (st, h, _) = get("/old/hello").await;
+    assert_eq!((st, h.get("location").and_then(|v| v.to_str().ok())), (StatusCode::PERMANENT_REDIRECT, Some("/new/hello")));
+    let (st, h, body) = get("/app/settings").await;
+    assert_eq!((st, body.as_str()), (StatusCode::OK, "<!doctype html><h1>moved</h1>"), "netlify.toml's rewrite");
+    assert_eq!(h.get("x-moved-from").and_then(|v| v.to_str().ok()), Some("vercel"));
+    for config in ["/netlify.toml", "/vercel.json"] {
+        let (st, _, body) = get(config).await;
+        assert!(st != StatusCode::OK && !body.contains("s3cr3t"), "{config} isn't served: {st} {body}");
+    }
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+}
+
 /// A service from an upload of `files`, built from its generated Dockerfile and live: its id and host.
 async fn deploy_tree(w: &World, name: &str, files: &[(&str, &str)]) -> (String, String) {
     let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "upload"}, "run": {"memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
