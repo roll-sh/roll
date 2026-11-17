@@ -849,6 +849,21 @@ impl roll_auth::Sessions for Resolver {
         self.0.person(user).map_err(|e| e.to_string())
     }
 
+    fn person_by_email<'a>(&'a self, email: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SignedIn>, String>> {
+        let (accounts, email) = (self.0.clone(), email.trim().to_lowercase());
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let id: Option<String> = accounts.db.read(|c| c.query_row("SELECT id FROM users WHERE lower(email) = ?", [email.as_str()], |r| r.get(0)).optional()).map_err(|e| e.to_string())?;
+                match id {
+                    Some(id) => accounts.person(&id).map_err(|e| e.to_string()),
+                    None => Ok(None),
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        })
+    }
+
     fn tell<'a>(&'a self, user: &'a str, subject: &'a str, text: &'a str) -> roll_auth::BoxFuture<'a, Result<(), String>> {
         let (accounts, id) = (self.0.clone(), user.to_string());
         Box::pin(async move {

@@ -812,8 +812,15 @@ waits on a sibling PR reaching main is last.
    ChatGPT need a public HTTPS rolld and the user's account (the review pack's decisions);
    MCPJam's inspector (3.18) asks for an MCPJam account first.
 
-6. **Enterprise-managed authorization** (SEP-990): a company IdP's ID-JAG traded for a roll
-   token. It needs accounts' SSO first.
+6. **Enterprise-managed authorization (SEP-990): built** on `feature/roll-mcp-enterprise` (on #114).
+   A company's identity provider vouches for a person to an app (the IETF's ID-JAG, Okta's Cross
+   App Access): the operator trusts providers (`/v1/access/enterprise/idps`: issuer, keys fetched
+   or pinned, matching by verified email or `aud_sub`) and registers apps (`…/apps`: a secret or
+   key, rules); the app's `jwt-bearer` sign-in with an `oauth-id-jag+jwt` assertion (signature,
+   `aud`, `client_id`, `exp`, `jti`, `resource`) gets an hour's token on the person's own
+   connection (acting as them within the app's rules; no refresh token). Test:
+   `an_enterprise_idp_signs_a_person_in_to_an_app`. Next on it: a security review, the dashboard
+   panel and `roll token enterprise …`, and a live check against an ID-JAG from a real provider.
 7. **Everyday routes with no tool:** tasks, streams, storage, queues, postgres, Redis and NoSQL have
    theirs (`tool-gaps.py origin/main <product>` lists what's left). What's left is mostly what only
    an operator does by hand: keys, passwords, accounts, IAM, roles, CDN, migrations, evict and

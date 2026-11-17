@@ -19,6 +19,7 @@ pub mod oauth;
 pub mod rate;
 pub mod sinks;
 pub mod client_credentials;
+pub mod enterprise;
 mod clients_api;
 pub mod redact;
 pub mod store;

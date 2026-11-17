@@ -216,6 +216,39 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
   (the right repository and branch sign in, within the rules; another repository, branch, audience,
   key or an expired token is `invalid_grant`; a shared issuer's wildcard tenant is refused); `roll-cli/tests/token.rs::a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules`.
 
+### Enterprise identity providers
+
+A company's identity provider can decide which of its people may use an app with roll, as MCP's
+enterprise-managed authorization (SEP-990) and the IETF's Identity Assertion JWT Authorization
+Grant ("ID-JAG", Okta's Cross App Access) describe: the app trades the provider's assertion for a
+roll token acting as that person, with no consent screen and no roll sign-in.
+
+- **Trusting a provider** (the operator): `PUT /v1/access/enterprise/idps {idps: [{issuer, jwks?,
+  matching?, name?}]}`. `issuer` is an `https` URL; its keys are fetched from its metadata through
+  the guarded client, or pinned (`jwks`). `matching` says how a person is found: `email` (the
+  default: the assertion's `email`, unless `email_verified` is `false`, is their roll account's) or
+  `aud_sub` (the assertion names the roll account, `usr_…`).
+- **Registering an app** (the operator): `POST /v1/access/enterprise/apps {name, rules,
+  public_jwk?}` answers its `client_id` (`ent_…`, what the provider puts in an assertion) and, with
+  no key, a `client_secret` shown once. `rules` is the most the app may do for a person.
+  `GET /v1/access/enterprise` lists both (never a secret); `DELETE …/apps/{id}` removes an app and
+  revokes every person's connection to it.
+- **Signing in:** `POST /v1/access/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`,
+  `assertion=<ID-JAG>` (header `typ: oauth-id-jag+jwt`) and the app's own authentication
+  (`client_secret_basic`, `client_secret_post` or `private_key_jwt`); an assertion alone is
+  `invalid_client`. roll checks it was signed by a trusted issuer, `aud` is roll (its API URL),
+  `client_id` is the app that authenticated, it hasn't expired, its `jti` is new, and its
+  `resource` (if any) is roll's API or MCP server; anything else is `invalid_grant`. A person with
+  no live roll account is `access_denied`.
+- **What it gets:** the person's own connection to the app (an OAuth grant, made the first time:
+  the app's rules, acting as the person, so never past what their account reaches; waiting for an
+  admin when roll's people policy says so, `access_denied` until then) and an hour's access token
+  on it. No refresh token: the app asks the provider again. `scope: read-only` in the assertion
+  narrows the token to reads. Each sign-in is a `sign_in` row in the audit log with the provider
+  and the person's subject there.
+- Revoking the person's connection ends its tokens now (the provider decides whether a new one is
+  made); removing the app ends all of them; un-trusting the provider stops new ones.
+
 ### When a token is refused
 
 A refused request's answer says what it needed (`needs: {product, action, resource}`) and where a
@@ -1001,6 +1034,10 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `POST /v1/access/audit/sinks` | operator | `{url, from_start?}` → 201 `{sink, secret}`; the secret is shown this once |
 | `POST /v1/access/audit/sinks/{id}/retry` | operator | a failed sink's batch at the next sweep → 204 |
 | `DELETE /v1/access/audit/sinks/{id}` | operator | stop streaming → 204 |
+| `GET /v1/access/enterprise` | operator | `{idps, apps}`: the trusted identity providers and apps (never a secret) |
+| `PUT /v1/access/enterprise/idps` | operator | `{idps: [{issuer, jwks?, matching?, name?}]}` |
+| `POST /v1/access/enterprise/apps` | operator | `{name, rules, public_jwk?}`: 201 `{client_id, client_secret?}` (the secret once) |
+| `DELETE /v1/access/enterprise/apps/{id}` | operator | remove an app, revoking its people's connections: `{revoked}` |
 | `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days}`: roll's rules for every grant |
 | `PUT /v1/access/policy` | operator | change them; a grant made, rotated, or whose rules, lifetime or addresses change, must fit (consent too) |
 | `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel, approvers} \| null}` |

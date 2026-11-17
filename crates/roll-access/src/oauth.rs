@@ -408,6 +408,17 @@ async fn token(State(a): S, req: axum::extract::Request) -> Response {
     let grant = get("grant_type");
     if matches!(grant.as_deref(), Some(crate::client_credentials::GRANT | crate::client_credentials::JWT_GRANT)) {
         let scope = if crate::client_credentials::read_only_scope(&f).unwrap_or(false) { "read-only" } else { "granted" };
+        // A person's identity assertion from an enterprise identity provider (SEP-990, ID-JAG).
+        if grant.as_deref() == Some(crate::client_credentials::JWT_GRANT) && get("assertion").as_deref().is_some_and(crate::enterprise::is_id_jag) {
+            return match crate::enterprise::token(a, &headers, &f, ip).await {
+                Ok((_, access, read_only)) => (
+                    [(header::CACHE_CONTROL, "no-store"), (header::PRAGMA, "no-cache")],
+                    Json(json!({ "access_token": access, "token_type": "Bearer", "expires_in": ACCESS_TTL_MS / 1000, "scope": if read_only { "read-only" } else { "granted" } })),
+                )
+                    .into_response(),
+                Err(e) => e.into_response(),
+            };
+        }
         let made = if grant.as_deref() == Some(crate::client_credentials::JWT_GRANT) {
             crate::client_credentials::federated(a, &f, ip).await
         } else {

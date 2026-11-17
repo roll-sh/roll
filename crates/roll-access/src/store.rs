@@ -781,7 +781,7 @@ fn check_rate(rate: Option<u32>) -> Result<()> {
     }
 }
 
-fn check_rules(rules: &Scope) -> Result<()> {
+pub(crate) fn check_rules(rules: &Scope) -> Result<()> {
     let problems = rules.problems();
     if problems.is_empty() { Ok(()) } else { Err(Error::BadRequest(problems.join("; "))) }
 }
