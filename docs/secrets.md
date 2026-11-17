@@ -2809,9 +2809,9 @@ Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (
    Caddy and lego get certificates from a project's CA with no roll client (lego and certbot checked
    against a local rolld). Accounts always bind an EAB key (looked up on every request, ended with
    its maker's reach); `dns-01` through public DNS, `http-01` through the guarded client, and
-   pre-authorized names for clusters roll can't reach (off by default). Building on it:
-   `tls-alpn-01` and reusing valid authorizations across orders; then checking pre-authorized names
-   through a gateway (item 6) once that's built.
+   pre-authorized names for clusters roll can't reach (off by default); `tls-alpn-01` and reused
+   authorizations too (Let's Encrypt's behaviour cert-manager expects), and finalize re-checks the
+   binding. Next on it: checking pre-authorized names through a gateway (item 6) once that's built.
 4. **Active Directory, done against Samba AD** (#132): every step run against a real domain
    controller with a delegated bind account. It found AD's hour-long acceptance of a reset account's
    previous password, now closed by a throwaway reset first; logins also hand out the UPN and
