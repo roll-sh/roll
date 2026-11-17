@@ -826,7 +826,11 @@ waits on a sibling PR reaching main is last.
    against a real rolld with accounts (`live/enterprise-live.sh`: a person signed up by email code,
    a stand-in provider's ID-JAG traded for a token that acts as them over MCP, a replay, another
    domain and an unverified email refused, a revoked connection ending the token and staying
-   out). Next on it: a live check with a real provider's ID-JAG (Okta's Cross App Access sandbox needs an account:
+   out). Reviewed against Okta's and Entra's app management: apps now rotate (a new key or
+   secret, the old secret kept up to a week), change rules (their people's connections take them at
+   once), and a leaked app secret is revoked like any other `rlc_` (it lived outside the tables
+   `revoke_leaked` searched: found in this review; the secret, a kept one and every token dropped,
+   the app back once rotated). Next on it: a live check with a real provider's ID-JAG (Okta's Cross App Access sandbox needs an account:
    the user's call).
 7. **Everyday routes with no tool:** tasks, streams, storage, queues, postgres, Redis and NoSQL have
    theirs (`tool-gaps.py origin/main <product>` lists what's left). What's left is mostly what only
