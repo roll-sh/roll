@@ -928,18 +928,30 @@ fn power_cut_keeps_commits_in_a_new_wal() {
 #[test]
 fn power_cut_at_every_point() {
     use pg_engine::storage::{Store, StoreOptions};
-    let opts = || StoreOptions { memtable_bytes: 16 << 10, background: false, ..Default::default() };
+    let opts = || StoreOptions { memtable_bytes: 16 << 10, background: false, target_file_bytes: 4 << 10, ..Default::default() };
     // Commit `i`'s keys: two small ones, or ten (an SST of its own) when i % 25 == 24.
     let keys = |i: u64| -> Vec<Vec<u8>> { (0..if i % 25 == 24 { 10 } else { 2 }).map(|k| format!("{i:04}-{k}").into_bytes()).collect() };
+    // (Commit 50 also deletes the first key of each of commits 0..20: the compaction after it
+    // marks them dead in their L1 files, `Store::mark_dead`, instead of writing them again.)
+    let deletes = 50u64;
     if let Ok(dir) = std::env::var("POWER_EVERY_CHILD") {
         let s = Store::open(&Path::new(&dir).join("db"), opts()).unwrap();
         for i in 0..60u64 {
-            let w = keys(i).into_iter().map(|k| (k, Some(vec![i as u8; 1000].into()))).collect();
+            let mut w: Vec<(Vec<u8>, Option<bytes::Bytes>)> = keys(i).into_iter().map(|k| (k, Some(vec![i as u8; 1000].into()))).collect();
+            if i == deletes {
+                w.extend((0..20).map(|i| (keys(i).swap_remove(0), None)));
+            }
             s.commit(w, |_| Ok(())).unwrap();
             println!("acked {i}");
             match i {
                 20 | 45 => s.flush_memtables().unwrap(),
                 30 => s.compact().unwrap(),
+                51 => {
+                    s.flush_memtables().unwrap();
+                    s.compact().unwrap();
+                    let sets = std::fs::read_dir(Path::new(&dir).join("db")).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "dv")).count();
+                    println!("marked {sets}");
+                }
                 _ => {}
             }
         }
@@ -969,10 +981,15 @@ fn power_cut_at_every_point() {
         let s = Store::open(&data.join("db"), opts()).unwrap_or_else(|e| panic!("{what}: the store doesn't open: {e:?}"));
         let ts = s.visible_ts();
         let flight = acked.map_or(0, |a| a + 1);
+        let deleted = keys(deletes).iter().all(|k| s.get(k, ts).unwrap().is_some());
         for i in 0..60u64 {
             let have: Vec<bool> = keys(i).iter().map(|k| s.get(k, ts).unwrap().is_some()).collect();
             let all = have.iter().all(|&h| h);
             let none = have.iter().all(|&h| !h);
+            if i < 20 && deleted {
+                assert!(!have[0] && have[1..].iter().all(|&h| h), "{what}: commit {i}'s keys there: {have:?}, commit {deletes} there");
+                continue;
+            }
             assert!(all || none, "{what}: commit {i} is partly there: {have:?}");
             if i < flight {
                 assert!(all, "{what}: acknowledged commit {i} is lost");
@@ -984,6 +1001,8 @@ fn power_cut_at_every_point() {
     };
     let (out, code) = run(None, None);
     assert_eq!(code, Some(0), "{out}");
+    let marked: u64 = out.lines().find_map(|l| l.strip_prefix("marked ")?.parse().ok()).unwrap();
+    assert!(marked > 0, "no file marked: {out}");
     let ops: u64 = out.lines().find_map(|l| l.strip_prefix("ops ")?.parse().ok()).unwrap();
     assert!(ops > 100, "only {ops} operations recorded");
     for at in 1..=ops {

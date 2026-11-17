@@ -2512,12 +2512,12 @@ impl Txn {
         // (A journal place of their own, as the sink's runs have: no snapshot taken before
         // sees them, a cursor declared just before the statement included, and every one
         // after does.)
-        let (cid, ts) = (Some(self.write_cid), self.position() as u64 + 1);
+        let (cid, ts) = (self.write_cid, self.position() as u64 + 1);
         self.journal.push((Vec::new(), None));
         self.derived.clear();
         let dir = self.db.store.spill_dir().join(self.id.to_string());
         let runs = Self::runs_in(&mut self.runs, dir, &self.rdels, self.db.store.compress());
-        runs.write(&mut keys.into_iter().map(|k| (k, Ent { v: None, cid, ts })), true)?;
+        runs.write_deletes(&mut keys.into_iter(), cid, ts)?;
         DELETE_RUNS.fetch_add(1, Ordering::Relaxed);
         self.wrote = true;
         self.cur_xid();

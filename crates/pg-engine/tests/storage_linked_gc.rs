@@ -17,7 +17,7 @@ fn linked_tombstones_preserve_snapshots_and_conflicts_until_gc() {
         let pin = s.pin(old);
         let spill = s.spill_dir();
         std::fs::create_dir_all(&spill).unwrap();
-        let mut w = SstWriter::create_run(&spill, 1000, true).unwrap();
+        let mut w = SstWriter::create_run_v1(&spill, 1000, true).unwrap();
         w.add(&mvcc_key(b"b5", 1), Some(&[0])).unwrap();
         w.add(&mvcc_key(b"b6", 1), Some(&[1, b'n', b'e', b'w'])).unwrap();
         let run = Arc::new(SstReader::open(&spill, w.finish().unwrap(), opts().cache).unwrap());
@@ -79,7 +79,7 @@ fn manifest(dir: &std::path::Path) -> serde_json::Value {
 fn direct_run(s: &Store, compress: bool) -> Arc<SstReader> {
     let spill = s.spill_dir();
     std::fs::create_dir_all(&spill).unwrap();
-    let mut w = SstWriter::create_run(&spill, 1000, compress).unwrap();
+    let mut w = SstWriter::create_run_v1(&spill, 1000, compress).unwrap();
     for i in 0..2000 {
         let value = if i == 4 || i == 6 { vec![0] } else { [&[1][..], &[b'v'; 80]].concat() };
         w.add(&mvcc_key(format!("b{i:04}").as_bytes(), 1), Some(&value)).unwrap();

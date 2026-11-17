@@ -127,15 +127,14 @@ impl Runs {
         crate::storage::durable::create_dir_all(&self.dir)?;
         let id = self.next_id;
         self.next_id += 1;
-        // (The store's compression policy: a linked run may go straight to L1.)
+        // (The store's compression policy: a linked run may go straight to L1. Format 2, the
+        // values plain: the run's reads here put its tag back, `SstReader::retagged`.)
         let mut w = SstWriter::create_run(&self.dir, id, self.compress)?;
         let mut val = Vec::new();
         let mut segs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         let mut seg: Option<(&[u8], &[u8])> = None;
         for (k, [v1, v2]) in items {
             val.clear();
-            val.push(3);
-            val.extend_from_slice(&cid.to_be_bytes());
             val.extend_from_slice(v1);
             val.extend_from_slice(v2);
             if let Err(err) = w.add(&mvcc_key(k, ts), Some(&val)) {
@@ -160,7 +159,39 @@ impl Runs {
             return Ok(());
         }
         let meta = w.finish()?;
-        let r = SstReader::open(&self.dir, meta, self.cache.clone())?;
+        let r = SstReader::open(&self.dir, meta, self.cache.clone())?.retagged(cid);
+        r.mark_obsolete();
+        self.segs.insert(r.meta.id, segs);
+        self.add_file(Arc::new(r), true)
+    }
+
+    /// `write_fresh` of deletions: `keys` in order, each once, all of command `cid` at
+    /// journal place `ts` (a statement's deferred index entry and row deletes, `Txn::
+    /// put_entry_deletes`): a linkable run of tombstones (format 2, not compressed: a
+    /// compaction drops them soon), read here as deletions of `cid` (`SstReader::retagged`).
+    pub fn write_deletes(&mut self, keys: &mut dyn Iterator<Item = Vec<u8>>, cid: u32, ts: u64) -> Result<()> {
+        crate::storage::durable::create_dir_all(&self.dir)?;
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut w = SstWriter::create_run(&self.dir, id, false)?;
+        let mut segs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for k in keys {
+            if let Err(err) = w.add(&mvcc_key(&k, ts), None) {
+                w.abandon();
+                return Err(err);
+            }
+            // (The table's and index's ids: 8 bytes.)
+            match segs.last_mut() {
+                Some(g) if g.0.get(..8) == k.get(..8) => g.1 = k,
+                _ => segs.push((k.clone(), k)),
+            }
+        }
+        if w.entries() == 0 {
+            w.abandon();
+            return Ok(());
+        }
+        let meta = w.finish()?;
+        let r = SstReader::open(&self.dir, meta, self.cache.clone())?.retagged(cid);
         r.mark_obsolete();
         self.segs.insert(r.meta.id, segs);
         self.add_file(Arc::new(r), true)

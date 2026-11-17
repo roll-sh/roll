@@ -193,6 +193,130 @@ pub struct SstMeta {
     /// a file of an earlier session). What `Store::maybe_compact` weighs L0 by.
     #[serde(skip)]
     pub deletes: u64,
+    /// The generation of its dead-entry set (`DeadSet`, in `dead_path(id, generation)`): the
+    /// entries a compaction found no snapshot can read, left in the file instead of
+    /// rewriting it (none: every entry is live).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dv: Option<u64>,
+    /// How many entries that set holds.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dead: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// Where file `id`'s dead-entry set of generation `generation` is (`SstMeta::dv`).
+pub fn dead_path(dir: &Path, id: u64, generation: u64) -> PathBuf {
+    dir.join(format!("{id:016x}-{generation:x}.dv"))
+}
+
+/// The entries of a store file that a compaction found dead (a version no snapshot reads: a
+/// deleted row's or index entry's, an older version of a key), by block and their place in
+/// it (the file's blocks as written). A block read from the file is used without them
+/// (`Block::without`), so every reader sees the file as a rewrite without them would have
+/// been, while the compaction wrote this set instead of the file again (HANDOFF "Storage:
+/// dead-entry sets"). In a file of its own:
+///
+/// ```text
+/// "rolldead" | blocks (u32) | per block: block (u32), words (u32), words (u64 each) | crc32
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeadSet {
+    /// By block, ascending: bit i of the words is entry i.
+    blocks: Vec<(u32, Box<[u64]>)>,
+    count: u64,
+}
+
+const DEAD_MAGIC: &[u8; 8] = b"rolldead";
+
+impl DeadSet {
+    /// Block `b`'s dead entries (None: none).
+    pub fn block(&self, b: usize) -> Option<&[u64]> {
+        let i = self.blocks.binary_search_by_key(&(b as u32), |e| e.0).ok()?;
+        Some(&self.blocks[i].1)
+    }
+
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    pub fn is_dead(&self, b: usize, i: usize) -> bool {
+        self.block(b).is_some_and(|w| w.get(i / 64).is_some_and(|x| x >> (i % 64) & 1 != 0))
+    }
+
+    /// This set with entry `i` of block `b` dead too (blocks added in ascending order, or
+    /// to the last one).
+    pub fn add(&mut self, b: usize, i: usize) {
+        let b = b as u32;
+        let at = match self.blocks.binary_search_by_key(&b, |e| e.0) {
+            Ok(at) => at,
+            Err(at) => {
+                self.blocks.insert(at, (b, Box::default()));
+                at
+            }
+        };
+        let w = &mut self.blocks[at].1;
+        if w.len() <= i / 64 {
+            let mut v = std::mem::take(w).into_vec();
+            v.resize(i / 64 + 1, 0);
+            *w = v.into_boxed_slice();
+        }
+        if w[i / 64] >> (i % 64) & 1 == 0 {
+            w[i / 64] |= 1 << (i % 64);
+            self.count += 1;
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let words: usize = self.blocks.iter().map(|b| b.1.len()).sum();
+        let mut out = Vec::with_capacity(16 + self.blocks.len() * 8 + words * 8);
+        out.extend_from_slice(DEAD_MAGIC);
+        out.extend_from_slice(&(self.blocks.len() as u32).to_le_bytes());
+        for (b, w) in &self.blocks {
+            out.extend_from_slice(&b.to_le_bytes());
+            out.extend_from_slice(&(w.len() as u32).to_le_bytes());
+            for x in w.iter() {
+                out.extend_from_slice(&x.to_le_bytes());
+            }
+        }
+        let crc = crc32fast::hash(&out);
+        out.extend_from_slice(&crc.to_le_bytes());
+        out
+    }
+
+    pub fn decode(b: &[u8]) -> Result<DeadSet> {
+        let bad = || internal("bad dead-entry set");
+        let n = b.len().checked_sub(4).ok_or_else(bad)?;
+        if crc32fast::hash(&b[..n]) != u32::from_le_bytes(b[n..].try_into().unwrap()) || b.get(..8) != Some(DEAD_MAGIC) {
+            return Err(bad());
+        }
+        let mut p = 8;
+        let u32_at = |p: &mut usize| -> Result<u32> {
+            let v = b.get(*p..*p + 4).ok_or_else(bad)?;
+            *p += 4;
+            Ok(u32::from_le_bytes(v.try_into().unwrap()))
+        };
+        let nb = u32_at(&mut p)? as usize;
+        let mut set = DeadSet::default();
+        for _ in 0..nb {
+            let blk = u32_at(&mut p)?;
+            let nw = u32_at(&mut p)? as usize;
+            let w = b.get(p..p + nw * 8).ok_or_else(bad)?;
+            p += nw * 8;
+            let w: Box<[u64]> = w.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect();
+            set.count += w.iter().map(|x| x.count_ones() as u64).sum::<u64>();
+            if set.blocks.last().is_some_and(|l| l.0 >= blk) {
+                return Err(bad());
+            }
+            set.blocks.push((blk, w));
+        }
+        if p != n {
+            return Err(bad());
+        }
+        Ok(set)
+    }
 }
 
 mod hex_bytes {
@@ -372,9 +496,22 @@ impl SstWriter {
 
     /// A linkable run (`Store::commit_sorted`'s `linked`): compressed as the store's files
     /// are, not fsynced (linking does). One that no other source holds keys of goes to L1
-    /// as it is when its commit links it, so its entries are written once. (Format 1: its
-    /// values carry the run's tags, which `Block::decode_linked` takes off as it reads it.)
+    /// as it is when its commit links it, so its entries are written once. Format 2, its
+    /// values plain: every entry is of one command at one journal place, which its
+    /// transaction's reads put back in front of each value (`SstReader::retagged`), and every
+    /// key of one version, which reads after linking take for the commit's (`SstMeta::
+    /// commit_ts`). (Builds before this wrote format 1, each value tagged: still read.)
     pub fn create_run(dir: &Path, id: u64, compress: bool) -> Result<Self> {
+        let codec = if compress { Codec::Zstd } else { Codec::None };
+        let mut w = Self::create_with(dir, id, codec, true)?;
+        w.sync = false;
+        Ok(w)
+    }
+
+    /// `create_run` as builds before format 2 runs wrote it: format 1, each value tagged
+    /// (the tests' pinned old encoder; runs of deletions are still format 1, `create_temp`).
+    #[doc(hidden)]
+    pub fn create_run_v1(dir: &Path, id: u64, compress: bool) -> Result<Self> {
         let codec = if compress { Codec::Zstd } else { Codec::None };
         let mut w = Self::create_with(dir, id, codec, false)?;
         w.sync = false;
@@ -696,6 +833,8 @@ impl SstWriter {
             max_ts: self.max_ts,
             commit_ts: None,
             deletes: self.deletes,
+            dv: None,
+            dead: 0,
         })
     }
 
@@ -717,6 +856,14 @@ pub struct SstReader {
     cache: Arc<BlockCache>,
     cache_id: u64,
     obsolete: AtomicBool,
+    /// Its dead entries (`SstMeta::dv`), left out of every block read.
+    dead: Option<Arc<DeadSet>>,
+    /// A run of format 2 read by its transaction (`retagged`): the run's tag put in front of
+    /// every value, as format 1's runs store it.
+    retag: Option<Box<[u8]>>,
+    /// A newer reader of the file has another dead-entry set: this one's file goes when it
+    /// does (the sst file stays).
+    dead_obsolete: AtomicBool,
 }
 
 /// Entries between restarts in a cached block: every `RESTART`th entry stores its whole key
@@ -1157,6 +1304,48 @@ impl Block {
         }
     }
 
+    /// The block without the entries `dead` names (bit i: entry i), in the form a writer
+    /// would have made of the others (`decode_with` of them: its last key the last one left,
+    /// as readers holding a block take its last key for one of its entries).
+    pub fn without(&self, dead: &[u64]) -> Block {
+        let mut raw = Vec::with_capacity(self.data.len() + self.len * 4);
+        let mut pos = BlockPos::default();
+        self.at(0, &mut pos);
+        while pos.i < self.len {
+            if dead.get(pos.i / 64).is_none_or(|w| w >> (pos.i % 64) & 1 == 0) {
+                let v = self.value_ref(&pos);
+                put_varint(&mut raw, 0);
+                put_varint(&mut raw, pos.key.len() as u64);
+                put_varint(&mut raw, v.map_or(0, |v| v.len() as u64 + 1));
+                raw.extend_from_slice(&pos.key);
+                raw.extend_from_slice(v.unwrap_or_default());
+            }
+            self.step(&mut pos);
+        }
+        Block::decode_with(&raw, None, self.rlog).expect("entries of a checked block")
+    }
+
+    /// The block as a format 1 run of command `cid` stores it: each value tagged 3 and `cid`
+    /// in front, each deletion a value of tag 2 and `cid` (a run of format 2 read by its
+    /// transaction: `SstReader::retagged`).
+    fn tagged(&self, cid: &[u8]) -> Block {
+        let mut raw = Vec::with_capacity(self.data.len() + self.len * (cid.len() + 5));
+        let mut pos = BlockPos::default();
+        self.at(0, &mut pos);
+        while pos.i < self.len {
+            let v = self.value_ref(&pos);
+            put_varint(&mut raw, 0);
+            put_varint(&mut raw, pos.key.len() as u64);
+            put_varint(&mut raw, (1 + cid.len() + v.map_or(0, <[u8]>::len)) as u64 + 1);
+            raw.extend_from_slice(&pos.key);
+            raw.push(if v.is_some() { 3 } else { 2 });
+            raw.extend_from_slice(cid);
+            raw.extend_from_slice(v.unwrap_or_default());
+            self.step(&mut pos);
+        }
+        Block::decode_with(&raw, None, self.rlog).expect("entries of a checked block")
+    }
+
     /// The version every `F_TS` entry has (the block's).
     pub fn version(&self) -> u64 {
         !u64::from_be_bytes(self.ts)
@@ -1571,9 +1760,6 @@ impl SstReader {
                         path.display()
                     )));
                 }
-                if meta.commit_ts.is_some() {
-                    return Err(internal(format!("sst {}: a linked run of format 2", path.display())));
-                }
                 true
             }
             _ => return Err(internal(format!("sst {} has a bad footer", path.display()))),
@@ -1613,6 +1799,19 @@ impl SstReader {
         }
         index.keys.shrink_to_fit();
         index.index_words();
+        // (Its places are a block's entries as the file holds them, which every form a block
+        // is read in keeps: format 1's, a linked run's, format 2's.)
+        let dead = match meta.dv {
+            None => None,
+            Some(g) => {
+                let set = DeadSet::decode(&std::fs::read(dead_path(dir, meta.id, g))?)
+                    .map_err(|e| internal(format!("sst {}: {e}", path.display())))?;
+                if set.count() != meta.dead {
+                    return Err(internal(format!("sst {}: its dead-entry set holds {} entries, not {}", path.display(), set.count(), meta.dead)));
+                }
+                Some(Arc::new(set))
+            }
+        };
         let cache_id = cache.next_file_id();
         Ok(SstReader {
             meta,
@@ -1625,7 +1824,51 @@ impl SstReader {
             cache,
             cache_id,
             obsolete: AtomicBool::new(false),
+            dead,
+            dead_obsolete: AtomicBool::new(false),
+            retag: None,
         })
+    }
+
+    /// A run of format 2 (`SstWriter::create_run`), every entry of command `cid`, read as
+    /// its transaction reads its runs (`txn::spill`'s values): a value as tag 3 (present, a
+    /// command id follows), `cid`, the value; a deletion as tag 2 and `cid`. A run of format
+    /// 1 stores them, and is read as it is.
+    pub fn retagged(mut self, cid: u32) -> SstReader {
+        if self.v2 {
+            self.retag = Some(cid.to_be_bytes().into());
+        }
+        self
+    }
+
+    /// The file read again with `dead` as its dead-entry set, written to its file of
+    /// generation `generation` (made durable before a manifest names it): its blocks are read
+    /// afresh, under a cache id of its own, so none of this reader's cached ones is read.
+    pub fn with_dead(&self, dir: &Path, dead: &DeadSet, generation: u64) -> Result<SstReader> {
+        let path = dead_path(dir, self.meta.id, generation);
+        super::fileio::sync(|| super::durable::replace(&path, &dead.encode(), true))?;
+        let mut meta = self.meta.clone();
+        meta.dv = Some(generation);
+        meta.dead = dead.count();
+        SstReader::open(dir, meta, self.cache.clone()).inspect_err(|_| {
+            let _ = super::durable::remove_file(&path);
+        })
+    }
+
+    /// Its dead entries (None: none).
+    pub fn dead(&self) -> Option<&DeadSet> {
+        self.dead.as_deref()
+    }
+
+    /// Entries a reader sees: those written less the dead ones.
+    pub fn live_entries(&self) -> u64 {
+        self.meta.entries - self.meta.dead
+    }
+
+    /// A newer reader of the file has another dead-entry set (`with_dead`): this one's set
+    /// file is deleted when the reader goes.
+    pub fn mark_dead_obsolete(&self) {
+        self.dead_obsolete.store(true, Ordering::Release);
     }
 
     pub fn path(&self) -> &Path {
@@ -1727,6 +1970,26 @@ impl SstReader {
         if let Some(b) = self.cache.get(self.cache_id, i as u32) {
             return Ok(b);
         }
+        let block = self.raw_block(i)?;
+        let block = Arc::new(match self.dead.as_ref().and_then(|d| d.block(i)) {
+            Some(dead) => block.without(dead),
+            None => block,
+        });
+        if fill && !super::in_read_once() {
+            let size = block.mem_bytes();
+            // (A bulk read's block takes only room the cache has free: it evicts nothing.)
+            if super::in_bulk_read() {
+                self.cache.insert_if_room(self.cache_id, i as u32, block.clone(), size);
+            } else {
+                self.cache.insert(self.cache_id, i as u32, block.clone(), size);
+            }
+        }
+        Ok(block)
+    }
+
+    /// Block `i` as the file holds it, its dead entries too (they are in their places: what
+    /// `DeadSet` counts), read from the file without the cache.
+    pub fn raw_block(&self, i: usize) -> Result<Block> {
         let (off, len) = &self.index.at[i];
         let mut buf = vec![0u8; *len as usize];
         self.file.read_exact_at(&mut buf, *off)?;
@@ -1749,21 +2012,22 @@ impl SstReader {
             2 if self.v2 => Bytes::from(lz4_flex::block::decompress(&buf[5..crc_pos], n).map_err(|e| internal(format!("lz4: {e}")))?),
             _ => return Err(internal("unknown block compression")),
         };
-        let block = Arc::new(match self.meta.commit_ts {
-            _ if self.v2 => Block::load(raw, self.index.key(i))?,
-            Some(ts) => Block::decode_linked(&raw, ts)?,
-            None => Block::decode(raw)?,
-        });
-        if fill && !super::in_read_once() {
-            let size = block.mem_bytes();
-            // (A bulk read's block takes only room the cache has free: it evicts nothing.)
-            if super::in_bulk_read() {
-                self.cache.insert_if_room(self.cache_id, i as u32, block.clone(), size);
-            } else {
-                self.cache.insert(self.cache_id, i as u32, block.clone(), size);
+        match self.meta.commit_ts {
+            _ if self.v2 => {
+                let mut b = Block::load(raw, self.index.key(i))?;
+                // (A linked run of format 2: one version for every key, the block's, which
+                // is the commit's.)
+                if let Some(ts) = self.meta.commit_ts {
+                    b.ts = (!ts).to_be_bytes();
+                }
+                Ok(match &self.retag {
+                    Some(cid) => b.tagged(cid),
+                    None => b,
+                })
             }
+            Some(ts) => Block::decode_linked(&raw, ts),
+            None => Block::decode(raw),
         }
-        Ok(block)
     }
 }
 
@@ -1872,8 +2136,16 @@ impl BlockIndex {
 impl Drop for SstReader {
     fn drop(&mut self) {
         self.cache.forget_file(self.cache_id);
+        let dead = || self.meta.dv.map(|g| dead_path(self.path.parent().unwrap_or(Path::new(".")), self.meta.id, g));
         if self.obsolete.load(Ordering::Acquire) {
             let _ = super::durable::remove_file(&self.path);
+            if let Some(p) = dead() {
+                let _ = super::durable::remove_file(&p);
+            }
+        } else if self.dead_obsolete.load(Ordering::Acquire)
+            && let Some(p) = dead()
+        {
+            let _ = super::durable::remove_file(&p);
         }
     }
 }
@@ -2186,11 +2458,10 @@ mod tests {
         out
     }
 
-    /// The same entries written in format 1 and format 2 (each codec) read the same, block by
-    /// block: keys, values (derived index values, tombstones, versions not the block's, keys
-    /// too short for one), positions, seeks, and the blocks' cache form byte for byte.
-    #[test]
-    fn format2_reads_as_format1() {
+    /// Sorted entries of every kind a file holds: a table's rows, an index's entries (derived
+    /// values, other values, tombstones), the store's own keys (some too short for a version),
+    /// versions not the block's.
+    fn mixed_entries() -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
         let mut seed = 11u64;
         let mut rnd = |n: u64| {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -2227,6 +2498,15 @@ mod tests {
         }
         ents.sort_by(|a, b| a.0.cmp(&b.0));
         ents.dedup_by(|a, b| a.0 == b.0);
+        ents
+    }
+
+    /// The same entries written in format 1 and format 2 (each codec) read the same, block by
+    /// block: keys, values (derived index values, tombstones, versions not the block's, keys
+    /// too short for one), positions, seeks, and the blocks' cache form byte for byte.
+    #[test]
+    fn format2_reads_as_format1() {
+        let ents = mixed_entries();
         let dir = tempfile::tempdir().unwrap();
         let cache = BlockCache::new(64 << 20);
         let write = |id: u64, codec: Codec, v2: bool| {
@@ -2299,6 +2579,108 @@ mod tests {
                     assert_eq!((pos.key(), b.value_ref(&pos)), (k.as_slice(), v.as_deref()));
                 }
             }
+        }
+    }
+
+    /// A file read with a dead-entry set reads as one written without those entries: blocks
+    /// with every entry dead, none, some; a seek of each key finds the first live entry at or
+    /// past it; the set read back from its file (a damaged one refused) and deleted with the
+    /// reader marked so, the file kept.
+    #[test]
+    fn dead_entries_read_as_a_rewrite_without_them() {
+        // (Format 1 too: its blocks' entries keep their places as `Block::decode` reads them.)
+        for (id, v2) in [(1, true), (2, false)] {
+            dead_entries_of(id, v2);
+        }
+    }
+
+    fn dead_entries_of(id: u64, v2: bool) {
+        let ents = mixed_entries();
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BlockCache::new(64 << 20);
+        let mut w = SstWriter::create_with(dir.path(), id, Codec::Zstd, v2).unwrap();
+        for (k, v) in &ents {
+            w.add(k, v.as_deref()).unwrap();
+        }
+        let f = SstReader::open(dir.path(), w.finish().unwrap(), cache.clone()).unwrap();
+        assert_eq!(f.format() == FORMAT, v2);
+        let (mut dead, mut live, mut seed) = (DeadSet::default(), Vec::new(), 5u64);
+        for b in 0..f.block_count() {
+            for (i, e) in entries_of(&f.raw_block(b).unwrap()).into_iter().enumerate() {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                if match b % 4 { 0 => false, 1 => true, _ => (seed >> 33) % 3 == 0 } {
+                    dead.add(b, i);
+                } else {
+                    live.push(e);
+                }
+            }
+        }
+        let g = f.with_dead(dir.path(), &dead, 1).unwrap();
+        assert_eq!((g.live_entries() as usize, g.meta.dead), (live.len(), dead.count()));
+        let read = |r: &SstReader| (0..r.block_count()).flat_map(|b| entries_of(&r.block(b).unwrap())).collect::<Vec<_>>();
+        assert_eq!(read(&g), live);
+        for (k, _) in ents.iter().step_by(3) {
+            let mut got = None;
+            for b in g.find_block(k)..g.block_count() {
+                let (blk, mut pos) = (g.block(b).unwrap(), BlockPos::default());
+                blk.seek(k, &mut pos);
+                if pos.index() < blk.len() {
+                    got = Some((pos.key().to_vec(), blk.value_ref(&pos).map(<[u8]>::to_vec)));
+                    break;
+                }
+            }
+            assert_eq!(got.as_ref(), live.iter().find(|(l, _)| l >= k));
+        }
+        assert_eq!(read(&f), ents);
+        assert_eq!(DeadSet::decode(&dead.encode()).unwrap(), dead);
+        let mut bad = dead.encode();
+        bad[13] ^= 1;
+        assert!(DeadSet::decode(&bad).is_err());
+        let h = SstReader::open(dir.path(), g.meta.clone(), cache.clone()).unwrap();
+        assert_eq!(read(&h), live);
+        drop(h);
+        let p = dead_path(dir.path(), id, 1);
+        assert!(p.exists());
+        g.mark_dead_obsolete();
+        drop(g);
+        assert!(!p.exists() && f.path().exists());
+    }
+
+    /// A linkable run of format 2 (`create_run`: plain values, every key one version) read
+    /// by its transaction gets each value's tag back (`retagged`), and once linked reads as
+    /// versions at the commit's ts, as format 1's tagged runs do.
+    #[test]
+    fn format2_runs_read_retagged_and_relinked() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BlockCache::new(8 << 20);
+        let mut w = SstWriter::create_run(dir.path(), 7, true).unwrap();
+        // (A deletion every 7th: a statement's deletions are a run of them alone.)
+        let rows: Vec<(Vec<u8>, Option<Vec<u8>>)> =
+            (0..3000u32).map(|i| (format!("k{i:05}").into_bytes(), (i % 7 != 3).then(|| format!("value {i}").into_bytes()))).collect();
+        for (k, v) in &rows {
+            w.add(&mvcc(k, 9), v.as_deref()).unwrap();
+        }
+        let meta = w.finish().unwrap();
+        assert_eq!(meta.deletes, rows.iter().filter(|r| r.1.is_none()).count() as u64);
+        let read = |r: &SstReader| (0..r.block_count()).flat_map(|b| entries_of(&r.block(b).unwrap())).collect::<Vec<_>>();
+        let own = SstReader::open(dir.path(), meta.clone(), cache.clone()).unwrap().retagged(5);
+        assert_eq!(own.format(), FORMAT);
+        let want: Vec<_> = rows
+            .iter()
+            .map(|(k, v)| (mvcc(k, 9), Some(match v { Some(v) => [&[3, 0, 0, 0, 5][..], v].concat(), None => vec![2, 0, 0, 0, 5] })))
+            .collect();
+        assert_eq!(read(&own), want);
+        let mut linked = meta;
+        linked.commit_ts = Some(41);
+        set_ts(&mut linked.first_key, 41);
+        set_ts(&mut linked.last_key, 41);
+        let l = SstReader::open(dir.path(), linked, cache.clone()).unwrap();
+        let want: Vec<_> = rows.iter().map(|(k, v)| (mvcc(k, 41), v.clone())).collect();
+        assert_eq!(read(&l), want);
+        for (k, v) in rows.iter().step_by(97) {
+            let (b, mut pos) = (l.block(l.find_block(&mvcc(k, 41))).unwrap(), BlockPos::default());
+            b.seek(&mvcc(k, 41), &mut pos);
+            assert_eq!((pos.key(), b.value_ref(&pos)), (&mvcc(k, 41)[..], v.as_deref()));
         }
     }
 

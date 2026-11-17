@@ -98,8 +98,18 @@ fn deletions_due(l0: &[Arc<SstReader>], l1: &[Arc<SstReader>]) -> bool {
                 && user_key(&s.meta.first_key) <= user_key(&f.meta.last_key)
         })
     };
-    let under: u64 = l1.iter().filter(|s| meets(s)).map(|s| s.meta.entries).sum();
+    let under: u64 = l1.iter().filter(|s| meets(s)).map(|s| s.live_entries()).sum();
     deletes * 8 >= under
+}
+
+/// What a compaction does with an L1 file it merges (`Store::mark_dead`).
+enum Marked {
+    /// Written again with L0's entries in its range.
+    Rewrite,
+    /// Left as it is: what L0 holds in its range is dropped and changes none of its entries.
+    Same,
+    /// Read with more of its entries dead: this reader.
+    Dead(Arc<SstReader>),
 }
 
 /// Whether a compaction's output `w`, whose last key began with `part` (a key's first 8
@@ -485,11 +495,23 @@ impl PinSlot {
     }
 }
 
+/// The newest store format this build reads: its files' (`sst::FORMAT`), and 3 for a
+/// manifest naming dead-entry sets (`SstMeta::dv`), which builds before them would read
+/// past (their files' dead entries as live). A manifest says 3 while it names one.
+pub const STORE_FORMAT: u32 = 3;
+
 /// Replace the manifest durably. The directory is fsynced first: the SSTs it names were
 /// renamed into it, and a power cut may otherwise keep the manifest's rename without theirs
 /// (renames are only ordered by a directory fsync between them; PostgreSQL's durable_rename).
 fn write_manifest(dir: &Path, m: &Manifest) -> Result<()> {
-    let data = serde_json::to_vec(m).map_err(|e| internal(e.to_string()))?;
+    let dead = m.l1.iter().chain(&m.l0).any(|s| s.dv.is_some());
+    let format = if dead { STORE_FORMAT } else { m.format.min(sst::FORMAT) };
+    let data = if format == m.format {
+        serde_json::to_vec(m)
+    } else {
+        serde_json::to_vec(&Manifest { format, ..m.clone() })
+    }
+    .map_err(|e| internal(e.to_string()))?;
     fileio::sync(|| durable::sync_dir(dir))?;
     fileio::sync(|| durable::replace(&dir.join("MANIFEST"), &data, true))?;
     Ok(())
@@ -510,12 +532,12 @@ impl Store {
             },
             Err(e) => return Err(e.into()),
         };
-        if manifest.format > sst::FORMAT {
+        if manifest.format > STORE_FORMAT {
             return Err(internal(format!(
                 "the store in {} is of storage format {}, newer than this build reads ({})",
                 dir.display(),
                 manifest.format,
-                sst::FORMAT
+                STORE_FORMAT
             )));
         }
         // Leftovers from an interrupted flush or compaction, and spilled writes of
@@ -533,6 +555,12 @@ impl Store {
             .chain(manifest.l1.iter())
             .map(|m| m.id)
             .collect();
+        let live_dead: std::collections::HashSet<std::ffi::OsString> = manifest
+            .l1
+            .iter()
+            .chain(manifest.l0.iter())
+            .filter_map(|m| m.dv.map(|g| sst::dead_path(dir, m.id, g).into_os_string()))
+            .collect();
         for e in std::fs::read_dir(dir)? {
             let p = e?.path();
             if p.extension().is_some_and(|x| x == "sst")
@@ -541,6 +569,10 @@ impl Store {
                     .and_then(|s| u64::from_str_radix(&s.to_string_lossy(), 16).ok())
                 && !live.contains(&id)
             {
+                let _ = durable::remove_file(&p);
+            }
+            // (Dead-entry sets of a compaction a crash cut short, or of files gone.)
+            if p.extension().is_some_and(|x| x == "dv") && !live_dead.contains(p.as_os_str()) {
                 let _ = durable::remove_file(&p);
             }
         }
@@ -600,8 +632,10 @@ impl Store {
             .map(|g| Frozen::Mem(Arc::new(g)))
             .collect();
         let wal = WalWriter::create(dir, replay_seq, opts.sync)?;
-        // (From its next write on: the files this build writes are of its format.)
-        let format = manifest.format.max(opts.format);
+        // (From its next write on: the files this build writes are of its format. A manifest
+        // of format 3 has format 2's files: `write_manifest` says 3 while it names a
+        // dead-entry set.)
+        let format = manifest.format.min(sst::FORMAT).max(opts.format);
         let store = Arc::new(Store {
             dir: dir.to_path_buf(),
             opts,
@@ -2074,10 +2108,55 @@ impl Store {
         if max_l1.is_some_and(|m| inputs_l1.iter().map(|s| s.meta.size).sum::<u64>() > m) {
             return Ok(());
         }
+        let horizon = self.gc_horizon();
+        // L1 files whose keys L0 only deletes get their dead entries marked instead of being
+        // written again (`mark_dead`): they stay in place, as the files kept do.
+        let mut marked: Vec<(Arc<SstReader>, Arc<SstReader>)> = Vec::new();
+        if self.opts.format >= 2 {
+            let mut rewrite = Vec::with_capacity(inputs_l1.len());
+            let n = kept.len();
+            for f in inputs_l1 {
+                match self.mark_dead(&view, &f, &inputs_l0, horizon)? {
+                    Marked::Rewrite => rewrite.push(f),
+                    Marked::Same => kept.push(f),
+                    Marked::Dead(r) => {
+                        kept.push(r.clone());
+                        marked.push((f, r));
+                    }
+                }
+            }
+            inputs_l1 = rewrite;
+            if kept.len() > n {
+                kept.sort_by(|a, b| a.meta.first_key.cmp(&b.meta.first_key));
+            }
+        }
+        // (An L0 file of deletions alone, each one no snapshot reads past, that has no key in a
+        // file written again nor shares one with an L0 file that isn't such: nothing of it is
+        // written, and what it deletes is in files marked. Not read again.)
+        let only_deletions = |l: &SstReader| l.meta.entries > 0 && l.meta.deletes == l.meta.entries && l.meta.max_ts <= horizon;
+        let mut merged_l0 = Vec::with_capacity(inputs_l0.len());
+        for l in &inputs_l0 {
+            let mut gone = only_deletions(l);
+            let (lo, hi) = (user_key(&l.meta.first_key), user_key(&l.meta.last_key));
+            for f in &inputs_l1 {
+                if !gone {
+                    break;
+                }
+                gone = !l.has_user_key_in(user_key(&f.meta.first_key), user_key(&f.meta.last_key))?;
+            }
+            for o in &inputs_l0 {
+                if !gone {
+                    break;
+                }
+                gone = only_deletions(o) || !o.has_user_key_in(lo, hi)?;
+            }
+            if !gone {
+                merged_l0.push(l.clone());
+            }
+        }
         // (The next L1 file left in place that the outputs reach: one ends before it.)
         let mut next_kept = 0;
-        let horizon = self.gc_horizon();
-        let mut sources: Vec<Cursor> = inputs_l0
+        let mut sources: Vec<Cursor> = merged_l0
             .iter()
             .map(|s| Cursor::level_uncached(vec![s.clone()]))
             .collect();
@@ -2197,8 +2276,121 @@ impl Store {
         for s in inputs_l0.iter().chain(inputs_l1.iter()) {
             s.mark_obsolete();
         }
-        info!(dir = %self.dir.display(), files = outputs.len(), "compacted");
+        for (old, _) in &marked {
+            old.mark_dead_obsolete();
+        }
+        info!(dir = %self.dir.display(), files = outputs.len(), marked = marked.len(), "compacted");
         Ok(())
+    }
+
+    /// L1 file `f` read with its entries that L0's deletions (`l0`) and versions they make
+    /// unreadable marked dead (`sst::DeadSet`), when every entry of `l0` in its range is a
+    /// deletion at or before `horizon` (which a compaction drops), no range deletion or
+    /// discarded range meets it, and its dead entries stay under half of it; else it is
+    /// written again as before. An entry is marked dead as the compaction would drop
+    /// it: a key's versions newest first, the first at or before `horizon` kept (unless a
+    /// deletion), every older one dropped. Only the blocks holding a deleted key are read.
+    fn mark_dead(&self, view: &View, f: &Arc<SstReader>, l0: &[Arc<SstReader>], horizon: u64) -> Result<Marked> {
+        let (lo, hi) = (user_key(&f.meta.first_key), user_key(&f.meta.last_key));
+        // (A small file is written again: its blocks are read whole by every scan anyway. A
+        // file of format 1 or a linked run is marked as one of format 2: a set names a block's
+        // entries as the file holds them.)
+        if f.meta.size < self.opts.target_file_bytes / 256 {
+            return Ok(Marked::Rewrite);
+        }
+        let mut end = hi.to_vec();
+        end.extend_from_slice(&[0xFF; 9]);
+        if view.rdels.iter().any(|r| r.overlaps(lo, &end))
+            || self.discard.ranges().iter().any(|(s, e)| s.as_slice() < end.as_slice() && (e.is_empty() || lo < e.as_slice()))
+        {
+            return Ok(Marked::Rewrite);
+        }
+        let sources: Vec<Cursor> = l0
+            .iter()
+            .filter(|l| l.overlaps(lo, &end))
+            .map(|l| {
+                let mut c = Cursor::level(vec![l.clone()], lo, &end);
+                if let Cursor::Level { fill, .. } = &mut c {
+                    *fill = false;
+                }
+                c
+            })
+            .collect();
+        let mut merge = Merge::new(sources, end.clone());
+        let mut dead = f.dead().cloned().unwrap_or_default();
+        let before = dead.count();
+        // (The block of `f` read last, and the place in it.)
+        let mut cur: Option<(usize, sst::Block)> = None;
+        let mut pos = sst::BlockPos::default();
+        let mut uk: Vec<u8> = Vec::new();
+        while let Some(i) = merge.min()? {
+            let (k, v) = merge.sources[i].head().expect("a head entry");
+            let deletion_ts = key_ts(k);
+            if v.is_some() || deletion_ts > horizon {
+                return Ok(Marked::Rewrite);
+            }
+            if user_key(k) == uk.as_slice() {
+                // (An older deletion of the key marked already.)
+                merge.sources[i].advance();
+                continue;
+            }
+            uk.clear();
+            uk.extend_from_slice(user_key(k));
+            merge.sources[i].advance();
+            // The key's versions in `f`, from its first.
+            let mut b = f.find_block(&uk);
+            if b >= f.block_count() {
+                continue;
+            }
+            match &cur {
+                Some((cb, blk)) if *cb == b => blk.seek_on(&uk, &mut pos),
+                _ => {
+                    let blk = f.raw_block(b)?;
+                    blk.seek(&uk, &mut pos);
+                    cur = Some((b, blk));
+                }
+            }
+            let (mut kept_old, mut deletion_seen) = (false, false);
+            loop {
+                let blk = &cur.as_ref().expect("a block").1;
+                if pos.index() >= blk.len() {
+                    b += 1;
+                    if b >= f.block_count() {
+                        break;
+                    }
+                    let blk = f.raw_block(b)?;
+                    blk.at(0, &mut pos);
+                    cur = Some((b, blk));
+                    continue;
+                }
+                if user_key(pos.key()) != uk.as_slice() {
+                    break;
+                }
+                let (vts, tomb) = (key_ts(pos.key()), blk.value_ref(&pos).is_none());
+                if !dead.is_dead(b, pos.index()) {
+                    // (The deletion, at or before `horizon`, sorts before the versions it
+                    // isn't newer than: from it on, a version below `horizon` is dropped.)
+                    if !deletion_seen && deletion_ts >= vts {
+                        deletion_seen = true;
+                        kept_old = true;
+                    }
+                    if vts <= horizon {
+                        if kept_old || tomb {
+                            dead.add(b, pos.index());
+                        }
+                        kept_old = true;
+                    }
+                }
+                blk.step(&mut pos);
+            }
+        }
+        if dead.count() == before {
+            return Ok(Marked::Same);
+        }
+        if dead.count() * 2 > f.meta.entries {
+            return Ok(Marked::Rewrite);
+        }
+        Ok(Marked::Dead(Arc::new(f.with_dead(&self.dir, &dead, f.meta.dv.map_or(1, |g| g + 1))?)))
     }
 
     /// Rewrite linked L1 files individually on clean close. Each replacement is
@@ -3775,7 +3967,7 @@ mod tests {
         std::fs::create_dir_all(&spill).unwrap();
         let mut runs = Vec::new();
         for (id, prefix) in [(1000, "a"), (1001, "z")] {
-            let mut w = SstWriter::create_run(&spill, id, true).unwrap();
+            let mut w = SstWriter::create_run_v1(&spill, id, true).unwrap();
             for i in 0..256 {
                 w.add(&mvcc_key(format!("{prefix}{i:04}").as_bytes(), 1), Some(&[1; 80])).unwrap();
             }
@@ -3921,17 +4113,29 @@ mod tests {
         std::fs::create_dir_all(&spill).unwrap();
         let val = |p: &str, i: u32| format!("{p}{i}-{}", "v".repeat(30));
         let mut id = 1000;
+        // (Format 2, plain values, a bulk load's or index build's: `p` "b". Else format 1, as
+        // builds before wrote every run and a merge of runs still does: a value's tag 1,
+        // present; every 9th a deletion, tag 0.)
+        let deleted = |p: &str, i: u32| p != "b" && i % 9 == 4;
         let mut run = |p: &str, n: u32, compress: bool| -> Arc<SstReader> {
             id += 1;
-            let mut w = if compress { SstWriter::create_run(&spill, id, true) } else { SstWriter::create_temp(&spill, id) }.unwrap();
+            let mut w = match (p, compress) {
+                ("b", _) => SstWriter::create_run(&spill, id, true),
+                (_, true) => SstWriter::create_run_v1(&spill, id, true),
+                (_, false) => SstWriter::create_temp(&spill, id),
+            }
+            .unwrap();
             for i in 0..n {
-                // (A run's value: tag 1, present; every 9th a deletion, tag 0.)
-                let v: Vec<u8> = if i % 9 == 4 { vec![0] } else { [&[1u8][..], val(p, i).as_bytes()].concat() };
+                let v: Vec<u8> = match p {
+                    "b" => val(p, i).into_bytes(),
+                    _ if deleted(p, i) => vec![0],
+                    _ => [&[1u8][..], val(p, i).as_bytes()].concat(),
+                };
                 w.add(&mvcc_key(format!("{p}{i:04}").as_bytes(), 3), Some(&v)).unwrap();
             }
             Arc::new(SstReader::open(&spill, w.finish().unwrap(), s.opts.cache.clone()).unwrap())
         };
-        // b: alone; a: overlaps a file; d: overlaps the memtable; e: not compressed.
+        // b: alone (format 2); a: overlaps a file; d: overlaps the memtable; e: not compressed.
         let linked = vec![run("b", 3000, true), run("a", 50, true), run("d", 50, true), run("e", 50, false)];
         let ts = s
             .commit_sorted(0, &mut std::iter::empty::<Result<(Vec<u8>, Option<Bytes>)>>(), |_, _| Ok(()), &|_, _| Ok(()), |_| {}, linked)
@@ -3941,7 +4145,7 @@ mod tests {
             for (p, n) in [("b", 3000u32), ("a", 50), ("d", 50), ("e", 50)] {
                 for i in (0..n).filter(|i| i % 7 == 0 || *i < 6) {
                     let k = format!("{p}{i:04}");
-                    let want = (i % 9 != 4).then(|| val(p, i));
+                    let want = (!deleted(p, i)).then(|| val(p, i));
                     let got = s.get(k.as_bytes(), ts).unwrap().map(|v| String::from_utf8(v.to_vec()).unwrap());
                     assert_eq!(got, want, "{k}");
                     let version = s.get_version(k.as_bytes(), ts).unwrap().map(|v| v.0);
@@ -3954,7 +4158,7 @@ mod tests {
             }
             assert_eq!(s.get(b"c0001", ts).unwrap().as_deref(), Some(&b"old"[..]));
             let bs = scan_all(s, ts).iter().filter(|(k, _)| k.starts_with('b')).count();
-            assert_eq!(bs, (0..3000).filter(|i| i % 9 != 4).count());
+            assert_eq!(bs, 3000);
         };
         check(&s, false);
         assert!(s.view().l1.iter().any(|f| f.meta.commit_ts == Some(ts) && f.meta.first_key.starts_with(b"b")));
@@ -4112,13 +4316,97 @@ mod tests {
         let ts = s.visible_ts();
         let want = (0..200_000u32).filter(|i| i % 3 != 1 && (i % 7 != 0 || i / 7 >= 1_000)).count();
         assert_eq!(s.scan(b"", b"", ts).count(), want);
-        assert_eq!(s.view().l1.iter().map(|f| f.meta.entries).sum::<u64>(), want as u64);
+        assert_eq!(s.view().l1.iter().map(|f| f.live_entries()).sum::<u64>(), want as u64);
         // (A small write alone, its keys in a small L1 file of their own: to L1 at once.)
         put(&s, "a0001", Some("x"));
         s.flush_memtables().unwrap();
         s.maybe_compact().unwrap();
         assert!(s.view().l0.is_empty());
         assert_eq!(s.get(b"a0001", s.visible_ts()).unwrap().as_deref(), Some(&b"x"[..]));
+    }
+
+    /// A compaction of L0 deletions alone over a big L1 file marks the entries they delete
+    /// (and the versions under them) dead instead of writing the file again: the same file,
+    /// read as before at every snapshot, after a reopen too; a snapshot older than a deletion
+    /// gets the file written again; a later write in its range writes it again without them,
+    /// as do deletions past half of it; the manifest says format 3 while it names a set.
+    #[test]
+    fn deletions_mark_dead_entries_instead_of_rewriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = || StoreOptions { memtable_bytes: 1 << 20, sync: false, background: false, ..Default::default() };
+        let mut s = Store::open(dir.path(), o()).unwrap();
+        let key = |i: u32| format!("table001{i:07}").into_bytes();
+        let h = |i: u32| (i as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(29);
+        let val = |i: u32, n: u32| Bytes::from(format!("{:016x}{:016x}{n}", h(i), h(i ^ 0x55)));
+        s.commit((0..100_000).map(|i| (key(i), Some(val(i, 0)))).collect(), |_| Ok(())).unwrap();
+        let t0 = s.visible_ts();
+        let pin = s.pin(t0);
+        // (Every eighth row updated under a snapshot from before: both versions kept.)
+        s.commit((0..100_000).step_by(8).map(|i| (key(i), Some(val(i, 1)))).collect(), |_| Ok(())).unwrap();
+        s.flush_memtables().unwrap();
+        s.compact().unwrap();
+        let ids = |s: &Store| s.view().l1.iter().map(|f| f.meta.id).collect::<Vec<_>>();
+        let format = |d: &Path| serde_json::from_slice::<serde_json::Value>(&std::fs::read(d.join("MANIFEST")).unwrap()).unwrap()["format"].clone();
+        let rows = |s: &Store, ts: u64| s.scan(b"", b"", ts).map(|r| r.unwrap()).collect::<Vec<_>>();
+        let model = |deleted: &dyn Fn(u32) -> bool| {
+            (0..100_000u32).filter(|&i| !deleted(i)).map(|i| (key(i), val(i, (i % 8 == 0) as u32))).collect::<Vec<_>>()
+        };
+        // A deletion while a snapshot from before it is held: written again, as before.
+        s.commit((0..100_000).step_by(1000).map(|i| (key(i + 999), None)).collect(), |_| Ok(())).unwrap();
+        s.flush_memtables().unwrap();
+        s.compact().unwrap();
+        assert!(s.view().l1.iter().all(|f| f.meta.dv.is_none()));
+        assert_eq!(rows(&s, t0), (0..100_000u32).map(|i| (key(i), val(i, 0))).collect::<Vec<_>>());
+        drop(pin);
+        let gone1 = |i: u32| i % 1000 == 999;
+        // A quarter deleted (the updated rows' both versions among them): the files stay,
+        // their entries marked.
+        let before = ids(&s);
+        s.commit((0..100_000).filter(|i| i % 4 == 0).map(|i| (key(i), None)).collect(), |_| Ok(())).unwrap();
+        let t1 = s.visible_ts();
+        s.flush_memtables().unwrap();
+        s.compact().unwrap();
+        assert!(s.view().l0.is_empty());
+        assert_eq!(ids(&s), before);
+        assert!(s.view().l1.iter().any(|f| f.meta.dv == Some(1)));
+        let want = model(&|i| gone1(i) || i % 4 == 0);
+        assert_eq!(rows(&s, t1), want);
+        // (The deleted rows and the older versions of the updated ones among them; the pinned
+        // deletion's 100 tombstones and versions stay, as no L0 deletion names them.)
+        assert_eq!(s.view().l1.iter().map(|f| f.meta.dead).sum::<u64>(), 25_000 + 12_500);
+        let rev: Vec<_> = s.scan_rev(b"", b"", t1).map(|r| r.unwrap()).collect();
+        assert_eq!(rev.len(), want.len());
+        for i in [1u32, 2, 5, 8, 999, 4000, 4001, 99_997] {
+            let got = s.get(&key(i), t1).unwrap();
+            assert_eq!(got.is_some(), !(gone1(i) || i % 4 == 0), "{i}");
+        }
+        assert_eq!(format(dir.path()), 3);
+        // Reopened: the sets read from their files.
+        s.close().unwrap();
+        drop(s);
+        s = Store::open(dir.path(), o()).unwrap();
+        assert_eq!(ids(&s), before);
+        assert_eq!(rows(&s, s.visible_ts()), want);
+        // More deleted: a second set replaces the first (its file gone).
+        s.commit((0..100_000).filter(|i| i % 8 == 2).map(|i| (key(i), None)).collect(), |_| Ok(())).unwrap();
+        s.flush_memtables().unwrap();
+        s.compact().unwrap();
+        assert_eq!(ids(&s), before);
+        let want = model(&|i| gone1(i) || i % 4 == 0 || i % 8 == 2);
+        assert_eq!(rows(&s, s.visible_ts()), want);
+        let sets = || std::fs::read_dir(dir.path()).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "dv")).count();
+        assert_eq!(sets(), s.view().l1.iter().filter(|f| f.meta.dv == Some(2)).count());
+        // A write in its range: written again, without its dead entries.
+        s.commit(vec![(key(3), Some(val(3, 7)))], |_| Ok(())).unwrap();
+        s.flush_memtables().unwrap();
+        s.compact().unwrap();
+        assert!(s.view().l1.iter().all(|f| f.meta.dv.is_none() && f.meta.dead == 0), "{:?}", s.view().l1.iter().map(|f| (f.meta.id, f.meta.dv, f.meta.entries, f.meta.dead)).collect::<Vec<_>>());
+        assert_eq!(sets(), 0);
+        assert_eq!(format(dir.path()), 2);
+        let mut want = want;
+        want.iter_mut().find(|(k, _)| *k == key(3)).unwrap().1 = val(3, 7);
+        assert_eq!(rows(&s, s.visible_ts()), want);
+        assert_eq!(s.view().l1.iter().map(|f| f.meta.entries).sum::<u64>(), want.len() as u64);
     }
 
     #[test]
@@ -4441,10 +4729,10 @@ mod tests {
         let m = dir.path().join("MANIFEST");
         let mut j: serde_json::Value = serde_json::from_slice(&std::fs::read(&m).unwrap()).unwrap();
         assert_eq!(j["format"], sst::FORMAT);
-        j["format"] = (sst::FORMAT + 1).into();
+        j["format"] = (STORE_FORMAT + 1).into();
         std::fs::write(&m, serde_json::to_vec(&j).unwrap()).unwrap();
         let e = Store::open(dir.path(), opts()).err().unwrap();
-        assert!(e.message.contains(&format!("of storage format {}, newer than this build reads ({})", sst::FORMAT + 1, sst::FORMAT)), "{}", e.message);
+        assert!(e.message.contains(&format!("of storage format {}, newer than this build reads ({})", STORE_FORMAT + 1, STORE_FORMAT)), "{}", e.message);
     }
 
     #[test]
