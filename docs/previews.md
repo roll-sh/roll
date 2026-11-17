@@ -1681,12 +1681,11 @@ Ranked by what a person notices first. Done so far:
    the pull request comment through roll's GitHub App (apps' #138). The live check against a fake
    GitHub (`scripts/lib/fake-github.py`) saw the fork's `roll/preview` go pending, then success,
    with one comment edited in place.
-3. **Masking's leftovers** (an independent review's findings 6 and 8): the browser's own cuts (a
-   console error's first 200 characters, page text lines, an a11y snippet) happen before
-   masking, so a value straddling one can show its start. Mask in the parsers with the masks the
-   engine passes in. And a preview's own variables and the project's `env` are masked whole,
-   which hides plain values (a region, `production`); only names that look like credentials
-   should be masked whole there, as for branches.
+3. **Masking's leftovers, in review (#233):** a page's own words are parsed 2,000 characters wide,
+   masked whole and only then cut to what's shown, so a value the cut splits isn't left half
+   shown. Looked at and kept as it is: a preview's own variables and the project's `env` stay
+   masked whole even when a value is plain (a region). They're revealed only by `reveal` routes
+   and can be named anything, and under-masking is worse than an unreadable host.
 4. **Deploy a preview's roll apps services at once** (measured and not landed, 2026-11-17: within
    the noise, two Docker builds of one repo share the CPU; branch
    `feature/roll-previews-deploy-at-once`). Try it again with cached builds or prebuilt images.
