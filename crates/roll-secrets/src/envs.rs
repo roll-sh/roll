@@ -84,9 +84,10 @@ fn branches(mut list: Vec<Branch>) -> Result<Vec<Branch>> {
     Ok(list)
 }
 
-/// Whether `caller` may add to an environment's branches: roll previews (the operator, as its
-/// adapter calls the API, or its in-process consumer). An entry changes what previews must fill,
-/// so nobody else adds one; anyone who may ensure the environment may remove one.
+/// Whether `caller` may change an environment's branches: roll previews (the operator, as its
+/// adapter calls the API, or its in-process consumer). Adding an entry changes what previews must
+/// fill, and removing one would hand the preview's code the parent's values, so nobody else does
+/// either.
 fn sets_branches(caller: &Caller) -> bool {
     caller.principal == "operator" || (caller.runtime && caller.principal == crate::access::PREVIEWS)
 }
@@ -389,8 +390,8 @@ impl Secrets {
                 if old == *list {
                     return Ok(());
                 }
-                if list.iter().any(|b| !old.contains(b)) && !sets_branches(caller) {
-                    return Err(Error::Forbidden("only roll previews adds an environment's branches (removing one is anyone's who may ensure it)".into()));
+                if !sets_branches(caller) {
+                    return Err(Error::Forbidden("only roll previews changes an environment's branches".into()));
                 }
                 c.execute("UPDATE environments SET branches = ? WHERE id = ?", params![json(list), env.id])?;
                 audit::record(c, project, caller, "environment.ensure", Some(slug), None, &[], &format!("{slug} leaves links to {} to roll previews", crate::write::plural(list.len(), "branched resource")), now)
@@ -502,7 +503,7 @@ impl Secrets {
             return Err(Error::BadRequest("branches are an ephemeral environment's (a preview's branched resources)".into()));
         }
         if !branched.is_empty() && !sets_branches(caller) {
-            return Err(Error::Forbidden("only roll previews adds an environment's branches".into()));
+            return Err(Error::Forbidden("only roll previews changes an environment's branches".into()));
         }
         let items = crate::write::items(&path, &new.secrets, caller)?;
         self.check_items(project, &new.slug, &items, caller)?;

@@ -755,7 +755,8 @@ async fn a_preview_never_gets_a_value_of_a_resource_it_branched() {
     assert_eq!(api.ok(Method::GET, "/environments/pv-1", None).await["branches"], assets);
     let (s, _) = api.call(Method::PUT, "/environments/staging", Some(json!({ "branches": [] }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
-    // Anyone else who may ensure it may only remove an entry: adding changes what previews fills.
+    // Nobody else changes the list: adding changes what previews fills, removing would hand the
+    // preview's code the parent's values. The same list, or none, is fine.
     let t = api.token(json!({ "name": "ci", "actions": ["read", "reveal", "write"] }));
     let both = json!([{ "kind": "bucket", "parent": "assets" }, { "kind": "bucket", "parent": "logs" }]);
     let (s, _) = api.req(Method::PUT, "/environments/pv-1", Some(ensure(Some(both.clone()))), Some(&t)).await;
@@ -763,8 +764,10 @@ async fn a_preview_never_gets_a_value_of_a_resource_it_branched() {
     let (s, _) = api.req(Method::PUT, "/environments/pv-2", Some(ensure(Some(both))), Some(&t)).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
     let (s, _) = api.req(Method::PUT, "/environments/pv-1", Some(ensure(Some(json!([])))), Some(&t)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = api.req(Method::PUT, "/environments/pv-1", Some(ensure(Some(assets.clone()))), Some(&t)).await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(api.values("pv-1", "/").await["values"]["BUCKET_URL"], "s3://assets?pw=0");
+    assert!(api.values("pv-1", "/").await["values"].get("BUCKET_URL").is_none(), "still followed");
 }
 
 #[tokio::test]

@@ -385,10 +385,10 @@ environment is a first-class kind, built to be cheap:
   External Secrets Operator, the operator and the CSI provider that read through these): a
   followed key's part of the digest is fixed, so its parent rotating moves nothing and isn't
   asked. Ensure sets the list with `branches`: given, it replaces the list; absent, it keeps it. A
-  standard environment refuses it (400). Only roll previews adds an entry (the operator, as its
-  adapter calls the API, or its in-process consumer `roll:previews`): an entry only narrows what
-  the preview gets, but it changes what previews must fill. Anyone who may ensure the environment
-  may remove one (403 `forbidden` for an addition otherwise). A backup keeps the list, and a
+  standard environment refuses it (400). Only roll previews changes it (the operator, as its
+  adapter calls the API, or its in-process consumer `roll:previews`; 403 `forbidden` otherwise):
+  an added entry changes what previews must fill, and a removed one would hand the preview's code
+  the parent's values. An ensure that gives the same list, or none, needs nothing more. A backup keeps the list, and a
   restore that can't set it doesn't restore the environment.
 - It is hidden from the overview grid's columns (the grid shows a "Previews" count instead), is
   never a promotion target, and can't be protected. Its slug is any free slug (`pr-117`).
