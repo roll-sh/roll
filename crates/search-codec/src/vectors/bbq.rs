@@ -220,6 +220,10 @@ impl BinaryQuantizer {
 fn plane_dots(planes: &[u64], code: &[u8], words: usize) -> u32 {
     #[cfg(target_arch = "x86_64")]
     {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 was detected; loads stay within `planes` and `code`.
+            return unsafe { plane_dots_avx2(planes, code, words) };
+        }
         if std::arch::is_x86_feature_detected!("popcnt") {
             // SAFETY: POPCNT was detected.
             return unsafe { plane_dots_popcnt(planes, code, words) };
@@ -274,6 +278,48 @@ unsafe fn plane_dots_neon(planes: &[u64], code: &[u8], words: usize) -> u32 {
 
 /// The same loop compiled with the `popcnt` instruction (baseline x86-64 lacks it, and
 /// `count_ones` would otherwise expand to a dozen bit operations).
+/// AVX2 [`plane_dots`]: four words per step. Each plane ∧ code is counted per byte with the
+/// nibble table (`pshufb`), the four planes' counts are weighted in place (`((c₃·2 + c₂)·2 + c₁)·2
+/// + c₀ ≤ 120` fits a byte), and `psadbw` sums the bytes. One step replaces 16 scalar
+/// AND+POPCNT pairs with about 30 vector instructions.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn plane_dots_avx2(planes: &[u64], code: &[u8], words: usize) -> u32 {
+    use std::arch::x86_64::*;
+    let n = if planes.len() >= 4 * words { words.min(code.len() / 8) } else { 0 };
+    let lut = _mm256_setr_epi8(0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
+    let low = _mm256_set1_epi8(0x0f);
+    let mut total = _mm256_setzero_si256();
+    let mut w = 0;
+    // SAFETY: 32-byte loads at word w + 4 <= n, within `code` (8 bytes a word) and each plane
+    // (`k * words + w + 4 <= 4 * words <= planes.len()`).
+    unsafe {
+        while w + 4 <= n {
+            let c = _mm256_loadu_si256(code.as_ptr().add(w * 8) as *const __m256i);
+            let mut acc = _mm256_setzero_si256();
+            for k in (0..4).rev() {
+                let x = _mm256_and_si256(_mm256_loadu_si256(planes.as_ptr().add(k * words + w) as *const __m256i), c);
+                let lo = _mm256_shuffle_epi8(lut, _mm256_and_si256(x, low));
+                let hi = _mm256_shuffle_epi8(lut, _mm256_and_si256(_mm256_srli_epi16::<4>(x), low));
+                acc = _mm256_add_epi8(_mm256_add_epi8(acc, acc), _mm256_add_epi8(lo, hi));
+            }
+            total = _mm256_add_epi64(total, _mm256_sad_epu8(acc, _mm256_setzero_si256()));
+            w += 4;
+        }
+    }
+    let mut lanes = [0u64; 4];
+    // SAFETY: `lanes` holds 32 bytes.
+    unsafe { _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, total) };
+    let mut dots = [0u32; 4];
+    for (wi, c) in code.as_chunks::<8>().0.iter().enumerate().take(words).skip(w) {
+        let b = u64::from_le_bytes(*c);
+        for (k, d) in dots.iter_mut().enumerate() {
+            *d += (planes[k * words + wi] & b).count_ones();
+        }
+    }
+    lanes.iter().sum::<u64>() as u32 + dots[0] + 2 * dots[1] + 4 * dots[2] + 8 * dots[3]
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "popcnt")]
 unsafe fn plane_dots_popcnt(planes: &[u64], code: &[u8], words: usize) -> u32 {
