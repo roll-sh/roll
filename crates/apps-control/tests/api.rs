@@ -4477,6 +4477,8 @@ struct FakeGitHub {
     /// Deployments made (id, environment, production), then each state posted (id, state, url).
     deployments: Mutex<Vec<(u64, String, bool)>>,
     deployment_states: Mutex<Vec<(u64, String, Option<String>)>>,
+    /// What every commit's checks say: `none`, `pending`, `passed` or a failed check's name.
+    ci: Mutex<String>,
 }
 
 #[async_trait]
@@ -4505,6 +4507,16 @@ impl apps_control::integrations::GitHubApp for FakeGitHub {
         self.deployment_states.lock().push((deployment, state.to_string(), url.map(str::to_string)));
         Ok(())
     }
+    async fn ci(&self, installation: u64, _owner: &str, _repo: &str, _sha: &str) -> anyhow::Result<apps_control::integrations::Ci> {
+        use apps_control::integrations::Ci;
+        anyhow::ensure!(installation == 42, "not the installation");
+        Ok(match self.ci.lock().as_str() {
+            "none" => Ci::None,
+            "pending" => Ci::Pending,
+            "passed" => Ci::Passed,
+            failed => Ci::Failed(failed.to_string()),
+        })
+    }
 }
 
 /// A private repository on roll's GitHub App's host: made without its first deploy, connected to
@@ -4529,7 +4541,7 @@ async fn a_git_url_service_connects_to_rolls_github_app() {
         }
     });
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let gh = Arc::new(FakeGitHub { host: host.clone(), statuses: Mutex::new(Vec::new()), deployments: Mutex::new(Vec::new()), deployment_states: Mutex::new(Vec::new()) });
+    let gh = Arc::new(FakeGitHub { host: host.clone(), statuses: Mutex::new(Vec::new()), deployments: Mutex::new(Vec::new()), deployment_states: Mutex::new(Vec::new()), ci: Mutex::new("none".into()) });
     w.apps.set_github_app(gh.clone());
     let make = |name: &str, repo: &str| json!({ "project": w.project, "name": name, "source": {"kind": "git", "url": format!("http://{host}/acme/{repo}")} });
     let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(make("site", "site"))).await;
@@ -4580,6 +4592,46 @@ async fn a_git_url_service_connects_to_rolls_github_app() {
     settled(&w, &id, "production", via["id"].as_str().unwrap()).await;
     let (_, list) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys"), None).await;
     assert_eq!(list.as_array().unwrap().iter().filter(|d| d["revision"] == second.as_str()).count(), 1, "one deploy: {list}");
+    // Wait for CI, on the App (Railway's): a push waits while GitHub's checks run, deploys once
+    // they pass; one whose check fails isn't deployed.
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"wait_for_ci": true}))).await;
+    assert_eq!((st, &e["wait_for_ci"]), (StatusCode::OK, &json!(true)), "{e}");
+    *gh.ci.lock() = "pending".into();
+    let third = git.commit_saying(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v3")], "tested");
+    let push3 = json!({ "ref": "refs/heads/main", "after": third, "head_commit": { "message": "tested" }, "repository": { "full_name": "acme/site" }, "installation": { "id": 42 } }).to_string();
+    w.apps.github_event("push", push3.as_bytes());
+    let deployed = |rev: String| {
+        let (api, env) = (w.api.clone(), env.clone());
+        async move { call(&api, "GET", &format!("{env}/deploys"), None).await.1.as_array().unwrap().iter().find(|d| d["revision"] == rev.as_str()).cloned() }
+    };
+    let mut waiting = false;
+    for _ in 0..200 {
+        if call(&w.api, "GET", &env, None).await.1["waiting_for_ci"] == third.as_str() {
+            waiting = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(waiting, "the push waits for its checks");
+    w.apps.settle_ci_waits().await;
+    assert!(deployed(third.clone()).await.is_none(), "still running");
+    *gh.ci.lock() = "passed".into();
+    w.apps.settle_ci_waits().await;
+    let d = deployed(third.clone()).await.expect("deployed once they passed");
+    settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    *gh.ci.lock() = "test (node 22)".into();
+    let fourth = git.commit_saying(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v4")], "broken");
+    w.apps.github_event("push", push3.replace(&third, &fourth).replace("tested", "broken").as_bytes());
+    for _ in 0..200 {
+        if call(&w.api, "GET", &env, None).await.1["waiting_for_ci"] == fourth.as_str() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    w.apps.settle_ci_waits().await;
+    assert!(deployed(fourth.clone()).await.is_none() && call(&w.api, "GET", &env, None).await.1["waiting_for_ci"].is_null(), "its check failed: dropped");
+    call(&w.api, "PUT", &env, Some(json!({"wait_for_ci": false}))).await;
     // Disconnected: no token, so the private repository can't be read.
     call(&w.api, "DELETE", &format!("/v1/apps/services/{id}/github"), None).await;
     let (st, v) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), Some(json!({}))).await;

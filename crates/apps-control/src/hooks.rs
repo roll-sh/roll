@@ -170,7 +170,16 @@ impl Apps {
                             continue;
                         }
                         let first = message.lines().next().unwrap_or("").chars().take(500).collect::<String>();
-                        let body = hold.body(json!({ "revision": sha, "message": if first.is_empty() { format!("push to {}", p.branch) } else { first } }));
+                        let first = if first.is_empty() { format!("push to {}", p.branch) } else { first };
+                        // Its checks first, where the environment waits for them.
+                        if e.wait_for_ci {
+                            match self.wait_for_git_ci(svc, &e.name, &sha, &first, actor).await {
+                                Ok(()) => said.push(format!("{} waits for its checks", e.name)),
+                                Err(err) => said.push(format!("{}: {err}", e.name)),
+                            }
+                            continue;
+                        }
+                        let body = hold.body(json!({ "revision": sha, "message": first }));
                         let by = By { trigger: Trigger::Push, actor: Some(actor.into()) };
                         match self.deploy(service, &e.name, body, by, None, Some(&format!("git:{}:{sha}", e.name))).await {
                             Ok(d) => deployed.push(d),

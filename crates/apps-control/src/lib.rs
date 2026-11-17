@@ -1557,8 +1557,14 @@ impl Apps {
             return Err(Error::BadRequest("follow_tag is for an image service whose image has a tag (not a digest)".into()));
         }
         // Only a roll code repo's pushes wait for their commit's checks (its statuses are roll's).
-        if o.get("wait_for_ci") == Some(&Value::Bool(true)) && !matches!(&svc.source, Source::Repo { .. }) {
-            return Err(Error::BadRequest("wait_for_ci is for a roll code repo's service: a Git URL's checks aren't roll's to read (deploy from the workflow after its tests instead: sdk/apps-github-action, with the environment's branch unset)".into()));
+        // A roll code repo's checks are roll's; a Git URL's are GitHub's, read through roll's
+        // GitHub App once the service is connected to it.
+        let on_app = match &svc.source {
+            Source::Git { url, .. } => self.github_for(&svc.id, url).await.is_some(),
+            _ => false,
+        };
+        if o.get("wait_for_ci") == Some(&Value::Bool(true)) && !matches!(&svc.source, Source::Repo { .. }) && !on_app {
+            return Err(Error::BadRequest("wait_for_ci is for a roll code repo's service, or a Git URL service on roll's GitHub App (PUT …/github): another Git host's checks aren't roll's to read (deploy from the workflow after its tests instead: sdk/apps-github-action, with the environment's branch unset)".into()));
         }
         // A name another environment has is refused before anything is made or changed.
         if let Some(h) = hostname.clone() {
