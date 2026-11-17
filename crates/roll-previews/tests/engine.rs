@@ -1137,6 +1137,10 @@ async fn a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head()
     let r = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.repo == "git:svc_shop").unwrap();
     assert_eq!((r.state, r.trusted, r.title.as_str(), deployed(&r.id)), (State::AwaitingApproval, false, "Faster cart", None), "nothing runs before an approval");
     assert!(matches!(e.engine.approve(&r.id, "f0", "ada"), Err(roll_previews::Error::Conflict(_))), "only the head it's at");
+    // Under Roll only, roll apps' build of it would still reach out: refused, until opened.
+    e.engine.store.put_settings(&e.project, &e.engine.store.settings(&e.project).unwrap().patched(&json!({ "egress": "roll" })).unwrap()).unwrap();
+    assert!(matches!(e.engine.approve(&r.id, "f1", "ada"), Err(roll_previews::Error::Conflict(_))), "not under Roll only");
+    e.engine.store.put_settings(&e.project, &e.engine.store.settings(&e.project).unwrap().patched(&json!({ "egress": "open" })).unwrap()).unwrap();
     e.engine.approve(&r.id, "f1", "ada").unwrap();
     e.engine.pass().await.unwrap();
     assert_eq!(deployed(&r.id).as_deref(), Some("f1"), "the approved head runs");

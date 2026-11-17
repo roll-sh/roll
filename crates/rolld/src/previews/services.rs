@@ -550,8 +550,16 @@ impl roll_previews::ports::Apps for Services {
         self.runtime.warm(preview, service)
     }
 
+    /// What roll's runtime's proxy refused and what roll apps' did (its `pv-` environments):
+    /// a preview's services can be on either.
     async fn egress_refused(&self, preview: &str) -> Vec<String> {
-        self.runtime.egress_refused(preview).await
+        let mut out = self.runtime.egress_refused(preview).await;
+        for h in self.apps.egress_refused(preview).await {
+            if !out.contains(&h) {
+                out.push(h);
+            }
+        }
+        out
     }
 }
 
