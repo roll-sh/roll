@@ -728,6 +728,16 @@ pub struct Bistate {
     extended: usize,
 }
 
+impl Bistate {
+    /// RelationAddBlocks's extension for a bulk insert needing a page: as far as it has
+    /// extended so far (at least one page, at most MAX_EXTEND_BY), counted.
+    pub fn extend(&mut self) -> usize {
+        let by = self.extended.clamp(1, MAX_EXTEND_BY);
+        self.extended += by;
+        by
+    }
+}
+
 /// How rows are being inserted.
 #[derive(Debug)]
 pub struct InsertMode {
@@ -1044,9 +1054,15 @@ impl Heap {
         self.fsm.recorded(blk) as usize * 32
     }
 
-    /// The free space of the last page (PageGetHeapFreeSpace; 0 without pages).
-    pub fn last_page_free(&self) -> usize {
-        self.pages.last().map_or(0, Page::heap_free)
+
+    /// Page `blk`'s free space (PageGetHeapFreeSpace) and line pointers.
+    pub fn page_room(&self, blk: u32) -> (usize, u16) {
+        self.pages.get(blk as usize).map_or((0, 0), |p| (p.heap_free(), p.lps.len() as u16))
+    }
+
+    /// The pages at the end a bulk extension added and nothing used yet (all zeroes).
+    pub fn trailing_fresh(&self) -> u32 {
+        self.pages.iter().rev().take_while(|p| p.new && p.lps.is_empty()).count() as u32
     }
 
     pub fn vm_blocks(&self) -> u32 {
@@ -1623,10 +1639,10 @@ impl Heap {
 
     /// `insert` of a row only its page needs (a model dropped next, whose pages are
     /// estimated from it: `sizing::past_model`): no key kept.
-    pub fn insert_unkeyed(&mut self, len: usize, xmin: u64, mode: &mut InsertMode) {
+    pub fn insert_unkeyed(&mut self, len: usize, xmin: u64, mode: &mut InsertMode) -> Tid {
         let blk = self.get_buffer(len, None, mode.use_fsm, mode.bistate.as_mut(), 1);
         let xmin = if mode.frozen { 0 } else { xmin };
-        self.put(blk, Self::new_tup(len, xmin), mode.frozen);
+        self.put(blk, Self::new_tup(len, xmin), mode.frozen)
     }
 
     /// `multi_insert` of rows of these lengths onto their pages, without their keys (as

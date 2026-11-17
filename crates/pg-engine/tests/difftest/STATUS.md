@@ -462,6 +462,50 @@ all of it (round 9's seeds too with `GUARD_SEEDS`).
 
 ## Verification train (agent 162, since 2026-11-07)
 
+**Since 2026-11-16 (agent 242): three tiers.** Agents don't run the full train any more.
+
+1. `tools/quick-check.sh`, by the agent before it offers a change (header: steps, environment).
+   On the agent's own incremental `--profile verify` build: clippy (`--all-targets`, so the
+   examples too; a warning new in a changed file fails), the test binaries that cover the diff
+   (a path map in the script) plus golden, wire and wire_waits (what the train's crate tests
+   caught: wire's protocol_cases twice, wire_waits' safe snapshots once; golden is where
+   behaviour lands) and the lib's unit tests when a changed source file has some, a short crash
+   stage when storage, WAL or commit paths changed (crash_random seeds 1-3 x 2,
+   `power_cut_at_every_point`), and the full regress (0 newly differing), isolation (1,647 /
+   1,648) and pg_dump_tap (14,609 passed) on its own reference containers
+   (`tools/ref-containers.sh`), alongside the crate tests. The reference suites caught most of
+   what trains caught (transactions.sql's chain units, privileges.sql's `sro_ifun` units, 17 and
+   73 newly differing units in two trains). One line per step; the first failure stops it.
+2. `tools/batch-train.sh cand/aNNN ...`, by the coordinator: one train for every candidate
+   (each rebased by its agent and green on quick-check), detached (systemd user unit, under
+   `sg docker`), one at a time (mkdir lock in `~/.cache/pg-engine-train`). It cherry-picks the
+   candidates onto origin's head (a conflicting one is left out), runs the full train once,
+   pushes the combination with `tools/push.sh` when green, and keeps its clippy warnings for
+   quick-check. Red, it re-runs the failing stages (and test binaries) on the same combination
+   (passing then: a flake, everything lands), else on halving prefixes to name the candidate at
+   fault, leaves it out, re-runs the failing stages on the rest and lands them. Result in
+   `<run>/result`.
+3. `tools/verification-train.sh`, the full suite, now built once per profile and run in three
+   lanes: `--profile verify` (release without LTO) builds every test binary once; lane 1 runs
+   them, then crash_random 1-30 x 4 and the power stage (`--features powerloss`, built once);
+   lane 2 runs every test binary built `--profile verify-checked` (debug assertions and
+   overflow checks at release speed), in place of the debug build; lane 3 runs regress,
+   isolation and pg_dump_tap. `TRAIN_STAGES` and `TRAIN_TESTS` run a part (the batch train's
+   re-runs).
+
+What each tier leaves out: quick-check runs no test binary the path map doesn't name, no
+debug-assertion build, no crash or power stage unless storage, WAL or commit paths changed (and
+then 6 crash runs of the train's 360), and no difftest guard. The train has no plain debug
+(opt-level 0) build: a stack overflow that only debug frames reach (crash_bulk's
+`kill_during_compactions_after_deletes`, agent 229) goes unseen, as it would in a shipped
+binary. The debug assertions it kept have caught real bugs: ddl/mod.rs's relation check
+(REINDEX SCHEMA taking another session's DROP, isolation `reindex-schema`, agent 146),
+`btsim::Key::wrap`'s u16 length (a release build mis-sized the key), the custom-plan replanning
+check (wire's PL/pgSQL protocol cases, bf895067c) and the planner's cost cross-check
+(logical_apply's flake).
+
+Before 2026-11-16:
+
 After each wave of pushes (every 3-4 hours, or 4+ code commits) the full suite runs on origin's
 head in one heavy job (HANDOFF, machine rules): the guard above, debug and release crate tests,
 `crash_random` seeds 1-30 x 4 rounds (release) and, since 710c9d3e1, the power stage (`--features powerloss`: the
@@ -477,6 +521,7 @@ checkout detached there); its header names the containers and ports it needs.
 | 1, 2026-11-07 | `fe7b0023c` (as `c59b15238`: + docs, tools) | 0 new (above) | release and debug pass; goldens and clippy (18 warnings, as before) also on this head, which settles a39990c5's skipped post-rebase check | 1-30 x 4 clean | 51,148 / 51,150, 0 changed | 121 / 122 specs, 1,647 / 1,648 | 14,817 / 14,817 |
 | 2, 2026-11-07 | `bf887b455`: agent 163's index builds (639a9be65, 25c0056b), push.sh (dcba895cc), agent 170's fast hasher and kept records (f75a60696, de1d7b3f6), agent 168's crash harness, 171's custom-plan costs, 165's OLTP round 6, 149's scan cost batches 3-4, catalog round 10 | rounds 6-9 against `fe7b0023c`: 0 new, 50 gone (engine_error 41 -> 3) | release and debug pass; clippy 18 warnings (as before) | 1-30 x 4 clean (agent 168's harness; `CRASH_POWER` not on the branch yet) | 51,148 / 51,150, 0 changed (run again after the idle timer had stopped the reference) | 121 / 122, 1,647 / 1,648 | 14,817 / 14,817 |
 | 3, 2026-11-07/08 (agent 184) | `2192a1010`: agent 175's bulk writes batch 2 (126464e98), 172's postgres_fdw round 8 (8500c0bb9), 176's index access round 7 (3dcafdf8e, e5f0da9ac) | rounds 6-10 against `bf887b455`: 0 new, 0 gone (117,080 statements) | release pass; debug: logical_apply `two_phase` panicked once at the debug-only cost check in `explain.rs` `total_and_gathers` ("serial bound": `SELECT * FROM t ORDER BY id` while the apply worker commits a 2,991-row prepared transaction), then passed 6 runs of 6: a flake of the debug cost checks' family (as `prepared_stream_without_two_phase_cleans_up`'s), routed to the planner; clippy 18 warnings | 1-30 x 4 clean (the power stage arrived after: 710c9d3e1) | 51,148 / 51,150, 0 changed (release: 6 minutes) | 121 / 122, 1,647 / 1,648 | 14,817 / 14,817 (run again: the first run's src-repo copy had no src/bin/pg_dump) |
+| batch 1, 2026-11-16 (agent 242; tools/batch-train.sh, the new layout) | `3240a1157`: `c4c0db709` + cand/a242 (the verify profiles, quick-check, batch train, golden across threads, the two load-sensitive wire tests) | not run (separate) | verify 881 s and verify-checked 942 s, all pass; clippy 16 warnings | 1-30 x 4 clean; power-cut 4 passed; with `CRASH_POWER=1`, with and without `CRASH_ASYNC=1`, clean | 51,148 / 51,150, 0 newly differing | 1,647 / 1,648 | 14,609 / 14,609 |
 
 Round 10's seeds on `bf887b455`: wrong_rows 309, plan_variance 2, missing_error 4, wrong_error 1,
 eval_error 25, error_detail 13: nothing new against `c59b15238`, 56 lines gone (the 49

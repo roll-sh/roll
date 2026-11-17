@@ -64,8 +64,6 @@ struct Bufs {
     seek: Vec<u8>,
     /// `first_raw`'s candidate key.
     cand: Vec<u8>,
-    /// `get_sorted`'s keys.
-    sorted: Vec<Step>,
 }
 
 thread_local! {
@@ -185,13 +183,14 @@ impl PointReader {
         let ts = self.ts;
         let mut out = vec![None; keys.len()];
         let PointReader { view, bufs, .. } = self;
-        let Bufs { held, pos, seek, sorted, .. } = bufs;
+        let Bufs { held, pos, seek, .. } = bufs;
         let l1 = view.l1.as_slice();
         let slot = view.imm.len() + view.l0.len();
         let newer = !view.mem.is_empty() || !view.imm.is_empty() || !view.l0.is_empty();
         // Each key: its seek key (in `seek`), a newer source's version, or where in L1 it is.
         seek.clear();
-        sorted.clear();
+        // (Its own, not in the buffers every point read moves and drops.)
+        let mut sorted: Vec<Step> = Vec::with_capacity(keys.len());
         let mut f = 0;
         // (The block the last key searched for went to.)
         let mut last: Option<(usize, usize)> = None;
@@ -263,6 +262,9 @@ impl PointReader {
         let (mut pi, mut pos_in) = (0, None);
         // (The last block read and the seek key its search found it by: the reader holds it.)
         let mut keep: Option<(usize, std::ops::Range<usize>)> = None;
+        // (Rows found in the batch's blocks, their values asked for and read after every seek:
+        // a row's first byte was a miss of its own, one row after another.)
+        let mut found: Vec<(usize, usize, (u32, u32))> = Vec::with_capacity(sorted.len());
         for st in sorted.iter() {
             let key = keys[st.i].as_ref();
             let sk = &seek[st.seek.clone()];
@@ -311,6 +313,12 @@ impl PointReader {
             if !view.rdels.is_empty() && view.rdels.covering(key, vts, ts).is_some() {
                 continue;
             }
+            if let L1::Block(..) = st.l1
+                && let Some(span) = block.value_span(bpos)
+            {
+                found.push((st.i, plan[pi - 1].0, span));
+                continue;
+            }
             match block.value_ref(bpos) {
                 None => {}
                 Some(v) if resolve && super::toast::has_external(v) => {
@@ -319,6 +327,13 @@ impl PointReader {
                 }
                 Some(_) => out[st.i] = block.value(bpos),
             }
+        }
+        for (i, b, span) in found {
+            let block = &*blocks[b].2;
+            out[i] = Some(match resolve && super::toast::has_external(block.span_ref(span)) {
+                true => super::toast::resolve(view, keys[i].as_ref(), block.span(span), ts)?,
+                false => block.span(span),
+            });
         }
         // (Held for the reader's next reads: a nested loop's next outer row's keys are often
         // in it.)

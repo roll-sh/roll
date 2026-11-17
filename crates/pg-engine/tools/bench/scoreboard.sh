@@ -19,7 +19,7 @@
 #
 # Needs the engine built with the dist profile (fat LTO: what users run; a release engine
 # understates it) and the bench client in release, through tools/heavy.sh:
-#   tools/heavy.sh cargo build --profile dist -p pg-engine --bin roll-engine
+#   tools/dist.sh        (the dist profile with the shipped build flags, HANDOFF "Build flags")
 #   tools/heavy.sh cargo build --release -p pg-engine --example bench
 # (BENCH_BIN, default <target>/dist, has roll-engine; BENCH_CLIENT, default
 # <target>/release/examples/bench, is the client; <target> is CARGO_TARGET_DIR or <repo>/target.)

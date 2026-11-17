@@ -464,7 +464,10 @@ impl Ddl<'_, '_> {
         let live = relsize::heap_pages(parts.into_iter().flat_map(|p| p.1.sizes).map(|s| s as usize));
         let tuples = keys.iter().map(Vec::len).sum::<usize>();
         progress.scanned_all(tuples as u64);
-        let pages = super::vacuum::btree_pages_sorted(bix, &plan.ix_types, merge_sorted(keys), tuples);
+        let (pages, est) = super::vacuum::btree_pages_sorted(bix, &plan.ix_types, merge_sorted(keys), tuples);
+        if ix.method == "btree" {
+            crate::exec::sizing::btree_estimated(t.oid, ix.oid, est, &self.ctx.sess.db);
+        }
         self.put_runs(&start, sorted)?;
         progress.loaded(tuples as u64);
         Ok(Some(ParBuilt::Measured(RowMeasure::new(rows, live, vec![(ix.oid, pages, tuples as f64)]))))
