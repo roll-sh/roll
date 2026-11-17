@@ -28,8 +28,14 @@ export type Environment = {
   notify: string | null;
   /** An ephemeral environment that may read a protected base (else it never does). */
   trusted: boolean;
+  /** An ephemeral environment's branched resources (absent: none); keys linked to them come back in `followed`. */
+  branches?: Branch[];
 };
-/** `PUT …/environments/{env}`: what it should be; `replace` also deletes its other own keys at `path`. */
+/** A resource a preview branched: a key linked to `kind` `parent` never resolves in its environment. */
+export type Branch = { kind: string; parent: string };
+/** A key left out because it links a branched resource: roll previews sets `name` from its branch's `field`. */
+export type Followed = { name: string; kind: string; parent: string; field: string };
+/** `PUT …/environments/{env}`: what it should be; `replace` also deletes its other own keys at `path`; `branches` replaces the list (absent keeps it). */
 export type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean };
 export type Ensured = { environment: Environment; created: boolean; change: Change | null };
 export type NewEnvironment = {
@@ -43,6 +49,8 @@ export type NewEnvironment = {
   expires_at?: number;
   ttl_minutes?: number;
   secrets?: Op[];
+  /** Ephemeral only, and only roll previews (or the operator) adds one: the resources its preview branched. */
+  branches?: Branch[];
 };
 /** `history_days`: how long old values are kept (null: for good). */
 export type Overview = { project: string; environments: Environment[]; previews: number; history_days: number | null };
@@ -101,7 +109,8 @@ export type Problem = { key: string; problem: string };
 /** `dynamic`: keys holding a dynamic link's short-lived credential; `linked`: keys whose value comes from any link. */
 /** `withheld`: sensitive keys left out (only roll's runtimes and syncs read them); `sensitive`: those included (a runtime's read), never to be shown. */
 /** `digest` (with `?digest=1`): the folder's `…/digest`, taken just before this read (a watch compares from it). */
-export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; withheld?: string[]; sensitive?: string[]; digest?: string };
+/** `followed`: keys linked to a resource the ephemeral environment's preview branched, left out of `values`. */
+export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; withheld?: string[]; sensitive?: string[]; followed?: Followed[]; digest?: string };
 export type CellSource = "own" | "import" | "base";
 /** `misfit`: the typed-key rule the stored value breaks (shown only to whoever may reveal it). */
 export type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: CellSource; comment: boolean; personal: boolean; misfit?: string; expires_at?: number };
@@ -297,4 +306,4 @@ export type WhoAmI = { principal: string; project?: string | null; scopes?: unkn
 /** A `roll-seal-v1` box (base64url fields): X25519 to the recipient, HKDF-SHA256, AES-256-GCM. */
 export type Sealed = { v: number; epk: string; nonce: string; ct: string };
 /** A resolve sealed to the caller's key: `sealed` opens to the JSON of `Values.values`, with `context` as the associated data. */
-export type SealedValues = { sealed: Sealed; context: string; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[] };
+export type SealedValues = { sealed: Sealed; context: string; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; followed?: Followed[] };

@@ -21,6 +21,8 @@ struct Fake {
     live_keys: Mutex<Vec<String>>,
     /// The product doesn't answer.
     down: std::sync::atomic::AtomicBool,
+    /// Every resource it was asked to read or issue for, in order.
+    asked: Mutex<Vec<String>>,
 }
 
 impl LinkProvider for Fake {
@@ -39,12 +41,14 @@ impl LinkProvider for Fake {
         &[("url", Mode::Live), ("access_key_id", Mode::Managed), ("secret_access_key", Mode::Managed)]
     }
     fn read(&self, r#ref: &str, _: &str, _: &Link) -> roll_secrets::Result<Secret> {
+        self.asked.lock().unwrap().push(r#ref.to_string());
         if self.down.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(roll_secrets::Error::Link("bucket: timed out".into()));
         }
         Ok(Secret::new(format!("s3://{ref}?pw={}", self.password.lock().unwrap())))
     }
-    fn issue(&self, _: &str, _: &str, _: &Link, _: &str, _: Option<u64>) -> roll_secrets::Result<Issued> {
+    fn issue(&self, r#ref: &str, _: &str, _: &Link, _: &str, _: Option<u64>) -> roll_secrets::Result<Issued> {
+        self.asked.lock().unwrap().push(r#ref.to_string());
         let mut n = self.issued.lock().unwrap();
         *n += 1;
         let id = format!("AK{n}");
@@ -711,6 +715,79 @@ async fn ephemeral_environments_inherit_their_base_and_go_by_label_or_expiry() {
     assert_eq!(api.values("pv-1", "/").await["values"], json!({ "API": "https://staging-2", "DATABASE_URL": "postgres://pv-1b" }));
     let (s, e) = api.call(Method::PUT, "/environments/pv-1", Some(json!({ "base": "production" }))).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("mismatch")));
+}
+
+#[tokio::test]
+async fn a_preview_never_gets_a_value_of_a_resource_it_branched() {
+    let api = Api::new().await;
+    for r in ["assets", "logs"] {
+        api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/{r}", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    }
+    let link = |r: &str, field: &str, mode: &str| json!({ "kind": "bucket", "ref": r, "field": field, "mode": mode });
+    api.ok(
+        Method::POST,
+        "/environments/staging/changes",
+        Some(json!({ "ops": [
+            { "op": "set", "key": "BUCKET_URL", "link": link("assets", "url", "live") },
+            { "op": "set", "key": "AWS_SECRET_ACCESS_KEY", "link": link("assets", "secret_access_key", "managed") },
+            { "op": "set", "key": "TEMP_KEY", "link": link("assets", "access_key_id", "dynamic") },
+            { "op": "set", "key": "LOGS_URL", "link": link("logs", "url", "live") },
+        ] })),
+    )
+    .await;
+    api.fake.asked.lock().unwrap().clear();
+    // roll previews ensures pv-1 over staging, naming what it branched; a key of its own reaching
+    // a followed one by reference doesn't resolve either.
+    let ensure = |branches: Option<Value>| {
+        let mut b = json!({ "base": "staging", "labels": { "preview": "pv-1" }, "secrets": [{ "op": "set", "key": "MIRROR", "value": "${BUCKET_URL}" }], "replace": true });
+        if let Some(l) = branches {
+            b["branches"] = l;
+        }
+        b
+    };
+    let assets = json!([{ "kind": "bucket", "parent": "assets" }]);
+    let made = api.ok(Method::PUT, "/environments/pv-1", Some(ensure(Some(assets.clone())))).await;
+    assert_eq!(made["environment"]["branches"], assets);
+    let followed = json!([
+        { "name": "AWS_SECRET_ACCESS_KEY", "kind": "bucket", "parent": "assets", "field": "secret_access_key" },
+        { "name": "BUCKET_URL", "kind": "bucket", "parent": "assets", "field": "url" },
+        { "name": "TEMP_KEY", "kind": "bucket", "parent": "assets", "field": "access_key_id" },
+    ]);
+    let v = api.values("pv-1", "/").await;
+    assert_eq!((v["values"]["LOGS_URL"].as_str(), v["values"].as_object().unwrap().len()), (Some("s3://logs?pw=0"), 2), "LOGS_URL and MIRROR: {v}");
+    assert_eq!((v["followed"].clone(), v["problems"][0]["key"].as_str()), (followed.clone(), Some("MIRROR")));
+    let r = api.ok(Method::POST, "/environments/pv-1/resolve", Some(json!({ "consumer": "preview:pv-1/web", "untrusted": true }))).await;
+    assert_eq!((r["followed"].clone(), r["values"].get("BUCKET_URL"), r["leases"].clone()), (followed.clone(), None, json!([])));
+    let sk = [7u8; 32];
+    let sealed = api.ok(Method::POST, "/environments/pv-1/resolve", Some(json!({ "consumer": "preview:pv-1/web", "seal_to": roll_secrets::crypto::public_key(&sk) }))).await;
+    assert_eq!((sealed["followed"].clone(), sealed["leases"].clone()), (followed, json!([])), "named in the clear, nothing issued");
+    let (_, text) = api.call(Method::GET, "/environments/pv-1/values?format=dotenv", None).await;
+    assert!(text.as_str().unwrap().contains("LOGS_URL=") && !text.as_str().unwrap().contains("BUCKET_URL=") && !text.as_str().unwrap().contains("s3://assets"), "{text}");
+    let digest = api.ok(Method::GET, "/environments/pv-1/digest", None).await["digest"].clone();
+    api.secrets.forget_live_fingerprints();
+    assert_eq!(api.ok(Method::GET, "/environments/pv-1/digest", None).await["digest"], digest);
+    let (s, e) = api.call(Method::GET, "/environments/pv-1/secrets/BUCKET_URL/value", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("followed")));
+    assert!(api.fake.asked.lock().unwrap().iter().all(|r| r == "logs"), "the parent was never asked: {:?}", api.fake.asked.lock().unwrap());
+
+    // An ensure without the field keeps the list; a standard environment has none.
+    api.ok(Method::PUT, "/environments/pv-1", Some(ensure(None))).await;
+    assert_eq!(api.ok(Method::GET, "/environments/pv-1", None).await["branches"], assets);
+    let (s, _) = api.call(Method::PUT, "/environments/staging", Some(json!({ "branches": [] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    // Nobody else changes the list: adding changes what previews fills, removing would hand the
+    // preview's code the parent's values. The same list, or none, is fine.
+    let t = api.token(json!({ "name": "ci", "actions": ["read", "reveal", "write"] }));
+    let both = json!([{ "kind": "bucket", "parent": "assets" }, { "kind": "bucket", "parent": "logs" }]);
+    let (s, _) = api.req(Method::PUT, "/environments/pv-1", Some(ensure(Some(both.clone()))), Some(&t)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = api.req(Method::PUT, "/environments/pv-2", Some(ensure(Some(both))), Some(&t)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = api.req(Method::PUT, "/environments/pv-1", Some(ensure(Some(json!([])))), Some(&t)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = api.req(Method::PUT, "/environments/pv-1", Some(ensure(Some(assets.clone()))), Some(&t)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(api.values("pv-1", "/").await["values"].get("BUCKET_URL").is_none(), "still followed");
 }
 
 #[tokio::test]

@@ -1014,6 +1014,29 @@ async fn a_notes_element_is_cropped_by_the_next_screenshot() {
     assert_eq!(*e.apps.crops_asked.lock(), ["rv_h1", "rv_gone", "rv_gone"]);
 }
 
+/// A preview's secrets environment is told what the preview branched; a link there (or in its
+/// base) to one of those parents comes back followed, never the parent's value, and the
+/// service gets the branch's value under the link's own name (renamed or not), or blank when the
+/// branch has none for that field.
+#[tokio::test]
+async fn a_secrets_link_to_a_branched_parent_gives_the_branch() {
+    use roll_previews::ports::EnvSource;
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_f", 9));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_f").unwrap().unwrap();
+    let pg = e.engine.store.resources(&p.id).unwrap().into_iter().find(|r| r.kind == Kind::Postgres).unwrap();
+    assert!(e.secrets.branched.lock().contains(&(Kind::Postgres, pg.parent.clone())), "ensure names what it branched");
+    *e.secrets.followed.lock() = vec![
+        ("STAGING_DB".into(), Kind::Postgres, pg.parent.clone(), "url".into()),
+        ("STAGING_TOKEN".into(), Kind::Postgres, pg.parent.clone(), "http_token".into()),
+    ];
+    let (_, vars) = e.engine.env(&p.id, "web").await.unwrap();
+    let get = |k: &str| vars.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    assert_eq!(get("STAGING_DB"), Some(format!("fake://{}", pg.r#ref.clone().unwrap())), "the branch's, under the link's name");
+    assert_eq!(get("STAGING_TOKEN").as_deref(), Some(""), "nothing for that field: blank");
+}
+
 #[tokio::test]
 async fn a_pages_notes_by_its_environment_name() {
     let e = env(json!({ "enabled": true }));
