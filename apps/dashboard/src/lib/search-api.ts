@@ -48,12 +48,13 @@ export interface SearchInfo {
   http: string;
   tls: boolean;
   domain: string | null;
-  storage: string;
   history_retention_s: number;
   defaults: SearchDefaults;
   pricing: SearchPricing;
-  loaded: number;
-  cache: { used_bytes: number; budget_bytes: number };
+  /** The operator's (and admins') only: where the node keeps its data, and its node-wide figures. */
+  storage?: string;
+  loaded?: number;
+  cache?: { used_bytes: number; budget_bytes: number };
 }
 
 /** Loaded in memory, or asleep (scaled to zero; wakes on the next request). */
@@ -98,6 +99,8 @@ export interface SearchCluster extends SearchSettings {
   stored_bytes: number;
   /** Of `stored_bytes`, what a branch references that its parent's latest commit points don't. */
   own_bytes: number;
+  /** The signed-in person (`usr_…`) whose cluster it is; null for the operator's and admins'. */
+  owner?: string | null;
   url: string;
   host: string;
   port: number;
