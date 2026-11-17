@@ -2792,7 +2792,7 @@ rotating a database's admin password and editing registrations in place (#75), s
 9. **.NET client, a Pulumi provider, a Lambda extension and an Ansible lookup** (`IConfiguration`;
    AWS's Parameters and Secrets extension; Vault's and 1Password's Ansible). Java is built
    (`sdk/java/secrets`, `feature/roll-secrets-java`: values, sealed resolves, long-polled watches,
-   the cache); its Spring `PropertySource` adapter is next.
+   the cache, transit); its Spring `PropertySource` adapter is next.
 10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
    CAs**.
 11. *The user's call:* land the stack (#62, then #63–#73; roll search before #62).

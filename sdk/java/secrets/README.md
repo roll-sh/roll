@@ -2,8 +2,8 @@
 
 A client for roll secrets (docs/secrets.md, "Consumption"), with the same surface as
 `@roll/secrets` and `sdk/go/secrets`: an environment's values, the runtime resolve (sealed to a
-key only this process holds, if asked), the digest that moves when the values would, and a watch
-that follows it and renews dynamic leases. Java 17 and the JDK only (`java.net.http`,
+key only this process holds, if asked), the digest that moves when the values would, a watch
+that follows it and renews dynamic leases, and the project's encryption keys (transit). Java 17 and the JDK only (`java.net.http`,
 `javax.crypto`); Maven coordinates `sh.roll:roll-secrets`.
 
 ```java
@@ -28,10 +28,19 @@ Watch w = c.watch("production", WatchOptions.of(vals -> reload(vals.values())).o
 
 // Read per request? Keep answers 30 s, then revalidate (a 304 while unchanged).
 RollSecrets cached = RollSecrets.builder().cacheTtl(Duration.ofSeconds(30)).build();
+
+// An encryption key (docs/secrets.md, "Encryption keys"): the key stays in roll.
+Transit cards = c.transit("cards");
+String ct = cards.encrypt(cardNumber, "order:42");          // roll:v<n>:…; the context is bound in
+byte[] plain = cards.decrypt(ct, "order:42");               // audited, as a reveal
+String sig = cards.sign(body);                              // Ed25519; cards.verify(body, sig)
+String index = cards.hmac(email);                           // HMAC-SHA256: a blind index
+List<TransitPublicKey> pub = cards.publicKeys();            // each version's base64, PEM and JWK
 ```
 
 Errors are `RollSecretsException` (`status()`, `code()`: `forbidden`, `unresolved`…); neither
-they nor `Values.toString()` hold a value.
+they nor `Values.toString()` hold a value, and a transit call's errors hold none of its
+plaintext, ciphertext or input. Strings given to transit are sent as UTF-8; `byte[]` as is.
 
 `digest(env, path)` reads the digest; `digestSince(env, path, since, wait)` long-polls it
 (`…/digest?since=&wait=`, at most 25 s) and answers as soon as it moves. A server without long
