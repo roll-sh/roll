@@ -155,6 +155,8 @@ pub struct Engine {
     counters: Counters,
     /// The hosts each preview's egress proxy refused that its activity already says.
     egress_told: Mutex<HashMap<String, std::collections::HashSet<String>>>,
+    /// What each preview's output mustn't show (`masks.rs`).
+    log_masks: Mutex<HashMap<String, masks::Masks>>,
     /// Screenshots taken at once on this node ([`screenshot_slots`]).
     shooting: Arc<tokio::sync::Semaphore>,
     /// Services a converge just deployed at a change's new head, woken after the pass (`warm`).
@@ -222,6 +224,7 @@ impl Engine {
             counters: Counters::default(),
             shooting: Arc::new(tokio::sync::Semaphore::new(screenshot_slots())),
             egress_told: Mutex::new(HashMap::new()),
+            log_masks: Mutex::new(HashMap::new()),
             warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
@@ -478,9 +481,9 @@ impl Engine {
     /// without them, saying which). The leases of the dynamic credentials among them come back
     /// too: the caller keeps them while what it starts runs ([`Engine::keep_leases`]) or revokes
     /// them when it's done.
-    pub(super) async fn resolve_secrets(&self, r: &Row, untrusted: bool, consumer: &str) -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
+    pub(super) async fn resolve_secrets(&self, r: &Row, untrusted: bool, dynamic: bool, consumer: &str) -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
         let consumer = format!("preview:{}/{consumer}", env_name(&r.id));
-        let got = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted, &consumer).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        let got = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted, dynamic, &consumer).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
         let mut problems = got.problems.clone();
         problems.sort();
         let new = self.secrets_told.lock().insert(r.id.clone(), problems.clone()).is_none_or(|before| before != problems);
@@ -760,6 +763,7 @@ fn short(rev: &str) -> &str {
 mod converge;
 mod discover;
 mod env;
+mod masks;
 mod requests;
 
 #[cfg(test)]
