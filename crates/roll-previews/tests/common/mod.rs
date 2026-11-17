@@ -233,6 +233,8 @@ pub struct FakeApps {
     pub slept: Mutex<Vec<(String, String)>>,
     /// The PNG every screenshot is (unset: the backend can't take one), and the previews taken.
     pub shot: Mutex<Option<Vec<u8>>>,
+    /// What the screenshot's page logs as its first error.
+    pub page_says: Mutex<Option<String>>,
     /// The API operations a screenshot reads when it's asked to (`github.openapi`), by a
     /// revision the preview runs.
     pub api: Mutex<HashMap<String, Vec<String>>>,
@@ -293,7 +295,7 @@ impl Apps for FakeApps {
         Ok(())
     }
     async fn logs(&self, _: &str, _: &str, _: usize) -> Vec<String> {
-        Vec::new()
+        self.log.lock().clone()
     }
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
         let db = job.env.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap_or_default();
@@ -301,7 +303,9 @@ impl Apps for FakeApps {
         self.seed_egress.lock().push(job.egress);
         let at_rev = self.deployed.lock().values().filter(|r| **r == job.revision).count();
         self.runs.lock().push((job.seed.run.clone(), job.revision.clone(), at_rev));
-        Ok((self.seed_exit.load(Ordering::SeqCst), "seed output".into()))
+        // A job that prints what it was given.
+        let printed: Vec<String> = job.env.iter().filter(|(k, _)| k == "STRIPE_KEY").map(|(k, v)| format!(", {k}={v}")).collect();
+        Ok((self.seed_exit.load(Ordering::SeqCst), format!("seed output{}", printed.concat())))
     }
     async fn screenshot(&self, preview: &str, service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
         let Some(png) = self.shot.lock().clone() else { return Ok(None) };
@@ -320,7 +324,8 @@ impl Apps for FakeApps {
             .collect();
         self.crops_asked.lock().extend(opts.crops.iter().map(|c| c.note.clone()));
         let crops = opts.crops.iter().filter(|c| c.selector != "#missing").map(|c| (c.note.clone(), png.clone())).collect();
-        Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None, api, crops }))
+        let health = self.page_says.lock().clone().map(|said| roll_previews::PageHealth { errors: 1, first_error: Some(said), failed: 0, first_failed: None, unstable: false });
+        Ok(Some(roll_previews::ports::Shot { png, speed: None, health, a11y: None, phone: None, pages, text: None, links: None, api, crops }))
     }
     fn status(&self, p: &str, s: &str) -> Option<ServiceState> {
         self.running.lock().contains(&(p.to_string(), s.to_string())).then_some(ServiceState::Running)
@@ -351,6 +356,8 @@ pub struct FakeSecrets {
     /// The base's links (`links`), and what each ensure set as the environment's own keys.
     pub links: Mutex<Vec<(String, Kind, String, String)>>,
     pub own: Mutex<Vec<(String, String)>>,
+    /// Values every resolve answers (static secrets).
+    pub values: Mutex<Vec<(String, String)>>,
 }
 
 #[async_trait]
@@ -361,13 +368,15 @@ impl roll_previews::ports::Secrets for FakeSecrets {
         *self.own.lock() = vars.to_vec();
         Ok(())
     }
-    async fn resolve(&self, _: &str, _: &str, _: bool, _: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
+    async fn resolve(&self, _: &str, _: &str, _: bool, dynamic: bool, _: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
         let followed = self.followed.lock().clone();
-        if !self.dynamic.load(Ordering::SeqCst) {
-            return Ok(roll_previews::ports::Resolved { followed, ..Default::default() });
+        let values = self.values.lock().clone();
+        if !dynamic || !self.dynamic.load(Ordering::SeqCst) {
+            return Ok(roll_previews::ports::Resolved { followed, values, ..Default::default() });
         }
         let n = self.issued.fetch_add(1, Ordering::SeqCst) + 1;
-        Ok(roll_previews::ports::Resolved { values: vec![("DB_PASSWORD".into(), format!("pw-{n}"))], problems: Vec::new(), leases: vec![format!("lease-{n}")], followed })
+        let values = values.into_iter().chain([("DB_PASSWORD".into(), format!("pw-{n}"))]).collect();
+        Ok(roll_previews::ports::Resolved { values, problems: Vec::new(), leases: vec![format!("lease-{n}")], followed, plain: Vec::new() })
     }
     async fn links(&self, _: &str, _: &str) -> anyhow::Result<Vec<(String, Kind, String, String)>> {
         Ok(self.links.lock().clone())

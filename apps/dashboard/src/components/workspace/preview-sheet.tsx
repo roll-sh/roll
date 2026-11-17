@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { appsApi } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
-import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare } from "@/lib/previews-api";
+import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare, type RequestLine } from "@/lib/previews-api";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
@@ -69,7 +69,7 @@ export function PreviewSheet({
   /** It was posted (the link that brought it is spent). */
   onFeedbackPosted?: () => void;
 }) {
-  const [tab, setTab] = useState<"Overview" | "Activity" | "Logs">("Overview");
+  const [tab, setTab] = useState<"Overview" | "Activity" | "Logs" | "Requests">("Overview");
   const [busy, setBusy] = useState<string | null>(null);
   // The service whose link is shown as a QR code, to open on a phone.
   const [phoneFor, setPhoneFor] = useState<string | null>(null);
@@ -121,7 +121,7 @@ export function PreviewSheet({
         }
         onClose={onClose}
       />
-      <Tabs tabs={["Overview", "Activity", "Logs"] as const} value={tab} onChange={setTab} />
+      <Tabs tabs={["Overview", "Activity", "Logs", "Requests"] as const} value={tab} onChange={setTab} />
       <div key={tab} className="rise flex-1 overflow-y-auto p-3 [scrollbar-width:none]">
         {tab === "Overview" ? (
           <>
@@ -475,8 +475,10 @@ export function PreviewSheet({
           </>
         ) : tab === "Activity" ? (
           <ActivityList id={p.id} updated={p.updated_at} />
-        ) : (
+        ) : tab === "Logs" ? (
           <Logs preview={p} />
+        ) : (
+          <Requests preview={p} />
         )}
       </div>
       <div className="border-t border-line px-3 py-2">
@@ -1294,6 +1296,62 @@ export function PhoneCode({ id, service }: { id: string; service: string }) {
 
 /** Lines a followed log keeps. */
 const LOG_KEEP = 2000;
+
+/** Its latest requests through roll (Vercel's request log): newest first, errors at a glance. */
+function Requests({ preview: p }: { preview: Preview }) {
+  const [list, setList] = useState<RequestLine[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [errorsOnly, setErrorsOnly] = useState(false);
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    let live = true;
+    setError(null);
+    previewsApi.requests(p.id).then(
+      (r) => live && setList(r.requests),
+      (e) => live && setError(errorText(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [p.id, n]);
+  const shown = (list ?? []).filter((r) => !errorsOnly || r.status >= 400);
+  const several = p.services.length > 1;
+  return (
+    <>
+      <div className="mb-2 flex items-center gap-2">
+        <label className="flex flex-1 items-center gap-1.5 text-[11.5px] text-muted">
+          <input type="checkbox" checked={errorsOnly} onChange={(e) => setErrorsOnly(e.target.checked)} className="accent-accent" />
+          Errors only (4xx, 5xx)
+        </label>
+        <button onClick={() => setN((x) => x + 1)} aria-label="Read the requests again" className="grid size-7 place-items-center rounded-md text-muted hover:bg-white/[0.06] hover:text-fg">
+          <RefreshCw className="size-3.5" />
+        </button>
+      </div>
+      {error ? (
+        <p className="text-[11.5px] text-danger">{error}</p>
+      ) : !list ? (
+        <p className="text-[11.5px] text-subtle">Loading…</p>
+      ) : !shown.length ? (
+        <p className="text-[11.5px] text-subtle">{list.length ? "No errors among its latest requests." : "No requests through roll yet (services on roll apps keep their own)."}</p>
+      ) : (
+        <div className="max-h-[60vh] overflow-auto rounded-lg border border-line-2 bg-canvas [scrollbar-width:thin]">
+          {shown.map((r, i) => (
+            <div key={`${r.at}-${i}`} className="flex items-baseline gap-2 border-b border-line px-2.5 py-1 font-mono text-[10.5px] last:border-b-0">
+              <span className="text-subtle">{new Date(r.at).toLocaleTimeString()}</span>
+              <span className={r.status >= 500 ? "text-danger" : r.status >= 400 ? "text-fg" : "text-muted"}>{r.status}</span>
+              <span className="text-muted">{r.method}</span>
+              <span className="min-w-0 flex-1 truncate text-soft" title={r.path}>
+                {r.path}
+              </span>
+              {several && <span className="text-subtle">{r.service}</span>}
+              <span className="text-subtle">{r.ms} ms</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
 
 function Logs({ preview: p }: { preview: Preview }) {
   const [service, setService] = useState(p.services[0]?.name ?? "");

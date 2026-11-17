@@ -8,7 +8,9 @@
 //! `Authorization` neither reads nor fills it. Keyed by host, path and query (an environment's
 //! custom domains are apart). Bounded (32 MiB and 2,000 answers an environment, 256 MiB a node,
 //! headers counted; the least recently used going first) and emptied whenever the environment's
-//! live deployment changes or the service leaves this node.
+//! live deployment changes or the service leaves this node. An answer's tags (`Cache-Tag`,
+//! `Netlify-Cache-Tag` and `Vercel-Cache-Tag`, comma-separated; Fastly's `Surrogate-Key`,
+//! space-separated) are kept with it for purges by tag, and never sent on.
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use bytes::Bytes;
@@ -20,6 +22,29 @@ const PER_ENV: usize = 32 << 20;
 const PER_NODE: usize = 256 << 20;
 pub const PER_BODY: usize = 1 << 20;
 const MAX_ENTRIES: usize = 2_000;
+/// The most tags an answer keeps, and the longest one (Cloudflare's 1,024).
+const MAX_TAGS: usize = 128;
+pub const MAX_TAG: usize = 1024;
+
+/// The headers an app tags an answer with, for the cache alone: never sent to a visitor.
+pub const TAG_HEADERS: [&str; 4] = ["cache-tag", "netlify-cache-tag", "vercel-cache-tag", "surrogate-key"];
+
+/// An answer's tags, lowercased (tags match whatever their case), each once.
+pub fn tags(h: &HeaderMap) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in TAG_HEADERS {
+        let space = name == "surrogate-key";
+        for v in h.get_all(name).iter().filter_map(|v| v.to_str().ok()) {
+            for t in v.split(|c: char| c == ',' || (space && c.is_ascii_whitespace())) {
+                let t = t.trim().to_ascii_lowercase();
+                if !t.is_empty() && t.len() <= MAX_TAG && out.len() < MAX_TAGS && !out.contains(&t) {
+                    out.push(t);
+                }
+            }
+        }
+    }
+    out
+}
 
 /// How long a shared cache may keep an answer: fresh for `fresh`, then answered stale for
 /// `stale` more while it's fetched again.
@@ -77,6 +102,8 @@ struct Entry {
     vary: Vec<(HeaderName, Option<HeaderValue>)>,
     used: u64,
     refreshing: bool,
+    /// What its app tagged it with (`tags`).
+    tags: Vec<String>,
     /// What it costs: its body, key, headers and vary values.
     size: usize,
 }
@@ -217,12 +244,16 @@ impl ResponseCache {
                 (n, v)
             })
             .collect();
+        let tags = tags(headers);
         let mut kept = headers.clone();
         for h in [header::SET_COOKIE, header::AGE, header::CONNECTION, header::TRANSFER_ENCODING] {
             kept.remove(h);
         }
+        for h in TAG_HEADERS {
+            kept.remove(h);
+        }
         let k = key(host, path_and_query);
-        let size = body.len() + k.len() + headers_size(&kept) + vary.iter().map(|(n, v)| n.as_str().len() + v.as_ref().map_or(0, |v| v.len())).sum::<usize>() + 64;
+        let size = body.len() + k.len() + headers_size(&kept) + vary.iter().map(|(n, v)| n.as_str().len() + v.as_ref().map_or(0, |v| v.len())).sum::<usize>() + tags.iter().map(|t| t.len() + 24).sum::<usize>() + 64;
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.tick += 1;
         let tick = inner.tick;
@@ -235,7 +266,7 @@ impl ResponseCache {
             e.count -= 1;
             freed = old.size;
         }
-        list.push(Entry { status, headers: kept, body, stored: Instant::now(), policy, vary, used: tick, refreshing: false, size });
+        list.push(Entry { status, headers: kept, body, stored: Instant::now(), policy, vary, used: tick, refreshing: false, tags, size });
         e.bytes += size;
         e.count += 1;
         let over = e.bytes > PER_ENV || e.count > MAX_ENTRIES;
@@ -258,34 +289,34 @@ impl ResponseCache {
     }
 
     /// Purge kept answers (on-demand revalidation): those of `paths` (a path with any query; one
-    /// ending in `*` is a prefix), or everything. How many went.
-    pub fn purge(&self, env: &str, paths: Option<&[String]>) -> usize {
+    /// ending in `*` is a prefix) and those tagged with any of `tags` (lowercase), or everything
+    /// when neither is given. How many went.
+    pub fn purge(&self, env: &str, paths: Option<&[String]>, tags: Option<&[String]>) -> usize {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let inner = &mut *inner;
         let Some(e) = inner.envs.get_mut(env) else { return 0 };
-        let doomed: Vec<String> = e
-            .entries
-            .keys()
-            .filter(|k| {
-                let path = path_of(k);
-                paths.is_none_or(|ps| ps.iter().any(|p| match p.strip_suffix('*') {
+        let all = paths.is_none() && tags.is_none();
+        let (mut n, mut freed) = (0, 0);
+        e.entries.retain(|k, list| {
+            let path = path_of(k);
+            let by_path = all
+                || paths.is_some_and(|ps| ps.iter().any(|p| match p.strip_suffix('*') {
                     Some(prefix) => path.starts_with(prefix),
                     None => path == p,
-                }))
-            })
-            .cloned()
-            .collect();
-        let mut n = 0;
-        for k in doomed {
-            if let Some(list) = e.entries.remove(&k) {
-                for x in &list {
-                    e.bytes -= x.size;
-                    inner.bytes -= x.size;
+                }));
+            list.retain(|x| {
+                let gone = by_path || tags.is_some_and(|ts| x.tags.iter().any(|t| ts.contains(t)));
+                if gone {
+                    n += 1;
+                    freed += x.size;
                 }
-                e.count -= list.len();
-                n += list.len();
-            }
-        }
+                !gone
+            });
+            !list.is_empty()
+        });
+        e.bytes -= freed;
+        e.count -= n;
+        inner.bytes -= freed;
         n
     }
 
@@ -337,10 +368,27 @@ mod tests {
         assert!(c.get("s/production", "b.example", "/a?x=1", &h(&[("accept-language", "en")]), false).is_none(), "another domain's");
         assert!(c.get("s/production", "a.example", "/a?x=1", &h(&[("accept-language", "de")]), false).is_none());
         assert!(c.get("s/production", "a.example", "/a?x=2", &h(&[("accept-language", "en")]), false).is_none());
-        assert_eq!(c.purge("s/production", Some(&["/a".to_string()])), 1);
+        assert_eq!(c.purge("s/production", Some(&["/a".to_string()]), None), 1);
         c.put("s/production", ("a.example", "/a"), &h(&[]), &resp, Bytes::from_static(b"x"), pol);
         c.clear_service("s");
         assert!(c.get("s/production", "a.example", "/a", &h(&[]), false).is_none());
+        assert_eq!(c.inner.lock().unwrap().bytes, 0, "every byte accounted for");
+    }
+
+    #[test]
+    fn answers_are_purged_by_their_tags() {
+        let tagged = h(&[("cache-tag", "Product-1, list"), ("surrogate-key", "product-1 home"), ("netlify-cache-tag", "")]);
+        assert_eq!(tags(&tagged), ["product-1", "list", "home"], "each once, whatever its case or header");
+        let c = ResponseCache::default();
+        let pol = Policy { fresh: Duration::from_secs(60), stale: Duration::ZERO };
+        c.put("s/production", ("a.example", "/p/1"), &h(&[]), &tagged, Bytes::from_static(b"1"), pol);
+        c.put("s/production", ("a.example", "/p/2"), &h(&[]), &h(&[("vercel-cache-tag", "list,product-2")]), Bytes::from_static(b"2"), pol);
+        let Some(Hit::Fresh(r)) = c.get("s/production", "a.example", "/p/1", &h(&[]), false) else { panic!("kept") };
+        assert!(TAG_HEADERS.iter().all(|t| !r.headers().contains_key(*t)), "tags are the cache's alone");
+        assert_eq!(c.purge("s/production", None, Some(&["product-2".to_string()])), 1);
+        assert!(c.get("s/production", "a.example", "/p/1", &h(&[]), false).is_some());
+        c.put("s/production", ("a.example", "/p/2"), &h(&[]), &h(&[("vercel-cache-tag", "list,product-2")]), Bytes::from_static(b"2"), pol);
+        assert_eq!(c.purge("s/production", None, Some(&["list".to_string()])), 2);
         assert_eq!(c.inner.lock().unwrap().bytes, 0, "every byte accounted for");
     }
 }

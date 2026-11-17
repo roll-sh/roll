@@ -1025,6 +1025,7 @@ mod preview_tests {
             speed_budget: None,
             visual_review: None,
             notes: Vec::new(),
+            issues: Vec::new(),
         };
         let p = Preview { state: PreviewState::Running, url: Some(env.services[0].url.clone()), postgres: None, redis: None, error: None, created_at: 1, environment: Some(env) };
         let (status, deploy, _) = preview_states(Some(&p));

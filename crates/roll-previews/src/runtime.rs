@@ -149,7 +149,7 @@ impl Default for RuntimeConfig {
             dashboard: None,
             screenshot_image: SCREENSHOT_IMAGE.into(),
             screenshot_command: SCREENSHOT_COMMAND.into(),
-            warm_for: Duration::from_secs(30 * 60),
+            warm_for: Duration::from_secs(8 * 3600),
             warm_max: 32,
         }
     }
@@ -175,7 +175,13 @@ pub struct Runtime {
     /// Held while a preview's egress proxy is checked and (re)made: its services start at once,
     /// and two makes under the one name would refuse each other (or one remove the other's).
     egress_making: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The latest requests to each preview's services through this node (newest last), at most
+    /// [`REQUESTS_KEPT`] a preview, gone with its last service.
+    requests: Mutex<HashMap<String, std::collections::VecDeque<crate::RequestLine>>>,
 }
+
+/// How many of a preview's latest requests are kept.
+pub const REQUESTS_KEPT: usize = 200;
 
 const BROWSERS_RETRY: Duration = Duration::from_secs(3600);
 
@@ -203,6 +209,7 @@ impl Runtime {
             browsers_failed: Mutex::new(None),
             browsers_building: tokio::sync::Mutex::new(()),
             egress_making: Mutex::new(HashMap::new()),
+            requests: Mutex::new(HashMap::new()),
             client: Client::builder(TokioExecutor::new()).build_http(),
         })
     }
@@ -239,6 +246,8 @@ impl Runtime {
                     rt.stop(&p, &s, &live, None).await;
                     rt.forget(&(p, s), live);
                 }
+                // Its request log is the new holder's now.
+                rt.requests.lock().remove(preview);
             }
         });
     }
@@ -468,7 +477,14 @@ impl Runtime {
                     self.iso.release(&name).await;
                 }
                 live.started.lock().take();
-                let error = if tail.trim().is_empty() { e } else { format!("{e}\n\n{}", tail.trim_end()) };
+                let error = if tail.trim().is_empty() { e.clone() } else { format!("{e}\n\n{}", tail.trim_end()) };
+                // Its output's tail is its code's words: masked as its logs are before it's kept
+                // (the preview's view, the pull request's comment), or left out when the masks
+                // can't be read.
+                let error = match self.engine() {
+                    Ok(en) => en.mask_text(preview, &error).await.unwrap_or(e),
+                    Err(_) => e,
+                };
                 warn!(%preview, %service, error = %error.lines().next().unwrap_or(""), "preview service failed to start");
                 live.phase.send_replace(Phase::Failed(error.clone()));
                 if let Ok(en) = self.engine() {
@@ -657,7 +673,26 @@ impl Runtime {
         Some(private_page(through.as_deref()))
     }
 
-    async fn proxy(self: &Arc<Self>, preview: &str, service: &str, mut req: Request, feedback: bool) -> Response {
+    /// [`Runtime::proxy_to`], kept in the preview's request log.
+    async fn proxy(self: &Arc<Self>, preview: &str, service: &str, req: Request, feedback: bool) -> Response {
+        let started = std::time::Instant::now();
+        let (method, path) = (req.method().to_string(), req.uri().path().chars().take(300).collect::<String>());
+        let resp = self.proxy_to(preview, service, req, feedback).await;
+        // Not after its services went (removed, or moved to another node meanwhile).
+        if !self.live.lock().keys().any(|(p, _)| p == preview) {
+            return resp;
+        }
+        let line = crate::RequestLine { at: self.store.now_ms().unwrap_or(0), service: service.into(), method, path, status: resp.status().as_u16(), ms: started.elapsed().as_millis() as u64 };
+        let mut all = self.requests.lock();
+        let kept = all.entry(preview.to_string()).or_default();
+        kept.push_back(line);
+        if kept.len() > REQUESTS_KEPT {
+            kept.pop_front();
+        }
+        resp
+    }
+
+    async fn proxy_to(self: &Arc<Self>, preview: &str, service: &str, mut req: Request, feedback: bool) -> Response {
         let mut retried = false;
         let addr = loop {
             let addr = match self.ready(preview, service, self.cfg.wait).await {
@@ -944,7 +979,8 @@ impl IntoResponse for Unavailable {
                 r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
                 r
             }
-            Unavailable::Failed(e) => page(StatusCode::BAD_GATEWAY, "The preview didn't start", &e, false),
+            // A visitor sees why, never its output (that's in its logs, for who can read them).
+            Unavailable::Failed(e) => page(StatusCode::BAD_GATEWAY, "The preview didn't start", e.lines().next().unwrap_or(""), false),
         }
     }
 }
@@ -979,8 +1015,16 @@ impl Apps for Runtime {
         }
     }
 
+    fn requests(&self, preview: &str) -> Vec<crate::RequestLine> {
+        self.requests.lock().get(preview).map(|k| k.iter().rev().cloned().collect()).unwrap_or_default()
+    }
+
     async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()> {
         let key = (preview.to_string(), service.to_string());
+        // Its request log goes with its last service.
+        if !self.live.lock().keys().any(|(p, s)| p == preview && s != service) {
+            self.requests.lock().remove(preview);
+        }
         let live = self.live.lock().get(&key).cloned();
         if let Some(live) = live {
             self.stop(preview, service, &live, None).await;
@@ -1048,7 +1092,8 @@ impl Apps for Runtime {
             }
         })
         .await;
-        let first = String::from_utf8_lossy(&said[..said.len().min(4096)]).lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().filter(|c| !c.is_control()).take(200).collect();
+        // Cut wide here: the engine masks it whole and then cuts it to 200 (a value isn't left half shown).
+        let first = String::from_utf8_lossy(&said[..said.len().min(4096)]).lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().filter(|c| !c.is_control()).take(2000).collect();
         Ok(Some((status, first)))
     }
 
