@@ -1069,6 +1069,12 @@ impl Engine {
     /// tried at the next report.
     pub(super) async fn report_on_git(&self, p: &Preview, s: &crate::Settings, deleted: Option<Option<&str>>) {
         let (Some(gr), Some(service)) = (self.git_report.get(), p.repo.strip_prefix("git:")) else { return };
+        // Only a project that stands for the service speaks for it on its repository (anyone may
+        // put any service on their own canvas: `Workspace::trusts`).
+        let stands = self.workspace.get(roll_workspace::Scope::All, &p.project).is_ok_and(|project| self.workspace.trusts(&project, roll_workspace::Kind::Service, service));
+        if !stands {
+            return;
+        }
         let Some(mut body) = self.source.git_report_body(p, s, deleted) else { return };
         // A fork's pull request waits for a writer in roll's sheet (not roll code's
         // `approve-run`), and nothing of it is linked: it hasn't run.
