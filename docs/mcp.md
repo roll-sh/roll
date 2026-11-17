@@ -729,13 +729,21 @@ waits on a sibling PR reaching main is last.
      exhaust the 40 conflict re-runs), and code-control's Linear e2e (30 s for the elicitation).
      They fail other threads' gates too; a test-side deadline, not more retries in production, is
      the likely fix.
-2. **Two-person approvals: built** on `feature/roll-mcp-approval-quorum` (on #114; a PR on main once
-   #114 merges). The policy's `approval_rules` (`{product, actions, environments, approvals,
-   approvers}`, named as roll secrets' protected environments) are gates: each approver counts once,
-   never the token's own person, pending until every gate is met, never remembered; the approvals
-   page, chat cards and `Approved.by` say who approved. Tests: `two_people_approve_what_the_policy_names`,
-   vitest, the CLI's parser; screenshots 40–41. Next on it: a person's own `usr_` id on the
-   approvals page (an admin's view reads as the operator's today), so the card knows who's looking.
+2. **Two-person approvals and access requests: built** on `feature/roll-mcp-approval-quorum` (on
+   #114; a PR on main once #114 merges; body in `pr-quorum-body.md`).
+   - The policy's `approval_rules` (`{product, actions, environments, approvals, approvers}`, named
+     as roll secrets' protected environments) are gates: each approver counts once, never the
+     token's own person; with no approvers named only signed-in people count (the operator's
+     token and chat ids only where a rule names them); named approvers who aren't admins see and
+     decide; pending until every gate is met; never remembered; a remembered rule or an approval
+     from before a gate asks again. A security review (agent) found two highs (self-approval from
+     chat, one person counting twice under two names) and smaller ones: all fixed and tested.
+   - Access requests: a token asks for one rule for a while with a reason (`POST
+     /v1/access/requests`, `access_request_access`; Teleport's and Entra PIM's model); approved,
+     it's a temporary rule. A refused MCP call tells the agent it can ask, arguments filled in.
+   - Next on it: chat approvers mapped to accounts (so a chat press can count for a gate as that
+     person), a screenshot of an access request's card, and the dashboard's own "Request access"
+     for a person's token.
 3. **`roll_machine_client` in the Terraform provider:** built on `feature/roll-mcp-terraform-clients`
    (6bc1979b9, on #114; with the secrets thread for review). `TF_ACC=1 go test` is green against the fake
    rolld, and so is a run against a real rolld (`live/tf-machine-client.sh`: create with GitHub's
