@@ -2802,8 +2802,8 @@ extension that logs in with the function's role), #117 (an Ansible collection), 
 Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (Pulumi), #147
 (approvals in the audit, on #114), #165 (Elasticsearch, OpenSearch, Cassandra and ScyllaDB
 outside roll, on #132), #166 (a gateway into private networks, on #132), #169 (a credential
-guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on #136) and #194
-(TOTP keys).
+guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on #136), #194
+(TOTP keys) and #198 (plain link fields, for apps' log redaction).
 
 0. **Land in batches**: the next turn takes a pre-gated batch (#69, #70–#73, #75–#77 in order:
    one combined tree, merged with main and gated once, each pull request then queued behind the
@@ -2898,8 +2898,10 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
 11. *Waits on roll search:* #134 approved once its pin covers the endpoint's whole destination
    (`service_settings` but the key, rate limit and allocations; `task_settings` where they route).
 12. *Waits on roll apps:* their redeploys holding `wait_digest` once #79 lands; #191's log
-   redaction hiding every value that comes from roll secrets, not only `sensitive` ones (asked).
-   *Waits on roll previews:* masking secret values in a preview service's logs (asked).
+   redaction hiding every value that comes from roll secrets, not only `sensitive` ones (agreed;
+   #198 gives them `plain`, the link fields that aren't credentials, so a renamed one stays hidden).
+   *Waits on roll previews:* masking secret values in a preview service's logs and its jobs' output
+   (building, on `feature/roll-previews-mask-logs`; apps' `seal` for what previews sets there).
 13. *Waits on other threads:* a live check of OpenSearch links, roll redis and nosql keeping a
    rotated password a while, splitting the CLI's `secrets.rs` once the queue has landed.
 14. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
