@@ -6839,6 +6839,7 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-net",
+ "roll-oidc",
  "roll-workspace",
  "serde",
  "serde_json",
@@ -7056,6 +7057,7 @@ dependencies = [
  "roll-auth",
  "roll-workspace",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tower",
@@ -7069,6 +7071,16 @@ dependencies = [
  "reqwest",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "roll-oidc"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ring",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -7127,6 +7139,7 @@ dependencies = [
  "regex",
  "ring",
  "roll-auth",
+ "roll-oidc",
  "roll-workspace",
  "rsa",
  "serde",
@@ -7241,6 +7254,7 @@ dependencies = [
  "roll-edge",
  "roll-mcp",
  "roll-net",
+ "roll-oidc",
  "roll-previews",
  "roll-secrets",
  "roll-workspace",
@@ -7948,6 +7962,7 @@ dependencies = [
  "http-body-util",
  "parking_lot",
  "reqwest",
+ "roll-auth",
  "roll-cluster",
  "rusqlite",
  "search-es",
