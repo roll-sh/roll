@@ -408,6 +408,7 @@ impl Build {
             spa: self.spa,
             packages: self.packages.clone().unwrap_or_default(),
             build_env: Vec::new(),
+            build_files: Vec::new(),
             process: None,
         }
     }

@@ -1235,6 +1235,9 @@ impl Apps {
         };
         let mut overrides = build_cfg.overrides();
         overrides.build_env = build_env.iter().map(|(k, _)| k.clone()).collect();
+        // Variables kept as files are files in the build's steps too, at the same paths.
+        let (sid, e) = (svc.id.clone(), d.environment.clone());
+        overrides.build_files = self.db(move |s| s.variable_files(&sid, &e)).await?.into_iter().filter(|(k, _)| overrides.build_env.contains(k)).collect();
         // A Procfile's command for what this service runs (a cron's command is its own).
         overrides.process = match run.kind {
             _ if from_root => None,
