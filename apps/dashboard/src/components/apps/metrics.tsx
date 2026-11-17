@@ -12,11 +12,11 @@
 
 import { Table2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary, type Vital, type VitalName, type Vitals, type AppMetrics, type AppSeries } from "@/lib/apps-api";
+import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary, type Vital, type VitalName, type Vitals, type AppMetrics, type AppSeries, type ErrorGroup, type SplitStat } from "@/lib/apps-api";
 import { formatBytes } from "@/lib/roll-api";
 import { btn, CopyButton, panel, useCopy } from "../ui";
 import { usePageVisible } from "./live";
-import { clock, message } from "./shared";
+import { clock, message, since } from "./shared";
 
 const W = 300;
 const H = 84;
@@ -312,6 +312,36 @@ function shown(s: AppSeries) {
   return `${n}${s.unit && s.unit !== "1" ? ` ${s.unit}` : ""}${s.shows === "per_second" ? "/s" : ""}`;
 }
 
+/** Its errors, grouped from its log (Cloud Run's Error Reporting): the newest of each opens whole. */
+function Errors({ groups }: { groups: ErrorGroup[] }) {
+  return (
+    <section className={`${panel} overflow-hidden`} aria-label="Errors">
+      <div className="border-b border-line px-4 py-2.5">
+        <p className="text-[12px] text-muted">
+          Errors <span className="text-subtle">· from its log, stack traces joined and grouped</span>
+        </p>
+      </div>
+      <ul className="divide-y divide-line">
+        {groups.slice(0, 15).map((g) => (
+          <li key={g.fingerprint} className="px-4 py-2">
+            <details>
+              <summary className="flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 text-[12px] [&::-webkit-details-marker]:hidden">
+                <span className="w-12 text-right font-mono text-danger">{count(g.count)}×</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-[11.5px]">{g.title}</span>
+                <span className="text-[11px] text-subtle">
+                  {g.kind === "line" ? "line" : `${g.kind} trace`} · {since(g.last_seen)}
+                  {g.instances > 1 ? ` · ${g.instances} instances` : ""}
+                </span>
+              </summary>
+              <pre className="mt-2 max-h-72 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] leading-relaxed text-muted">{g.sample}</pre>
+            </details>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 /** The app's own metrics, from its OpenTelemetry SDK (traces on). */
 function AppMetricsPanel({ m }: { m: AppMetrics }) {
   return (
@@ -472,6 +502,48 @@ function Routes({ stats }: { stats: RouteStats }) {
   );
 }
 
+/** The last hour's requests by the deployment, and the instance, that answered (shown when more than one did). */
+function Splits({ stats }: { stats: RouteStats }) {
+  const parts = [
+    { title: "By deployment", rows: stats.deployments ?? [], name: (s: SplitStat) => (s.deployment ?? "").replace(/^dep_/, "").slice(0, 8) },
+    { title: "By instance", rows: stats.instances ?? [], name: (s: SplitStat) => (s.instance ?? "").split("-").slice(-2).join("-") },
+  ].filter((p) => p.rows.length > 1);
+  if (!parts.length) return null;
+  return (
+    <section className={`${panel} grid gap-0 overflow-hidden md:grid-cols-2`} aria-label="By deployment and instance">
+      {parts.map((p) => (
+        <div key={p.title} className="min-w-0 border-line md:[&:not(:first-child)]:border-l">
+          <p className="border-b border-line px-4 py-2.5 text-[12px] text-muted">{p.title}, the last hour</p>
+          <table className="w-full font-mono text-[11.5px] tabular-nums">
+            <thead className="text-left text-subtle">
+              <tr>
+                {["", "req", "5xx", "p50", "p95"].map((h, i) => (
+                  <th key={h || "name"} className={`px-4 py-1.5 font-normal ${i ? "text-right" : ""}`}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {p.rows.slice(0, 8).map((r) => (
+                <tr key={r.deployment ?? r.instance} className="border-t border-line">
+                  <td className="truncate px-4 py-1" title={r.deployment ?? r.instance}>
+                    {p.name(r)}
+                  </td>
+                  <td className="px-4 py-1 text-right">{count(r.requests)}</td>
+                  <td className={`px-4 py-1 text-right ${r.errors ? "text-danger" : "text-subtle"}`}>{r.errors ? count(r.errors) : "—"}</td>
+                  <td className="px-4 py-1 text-right text-muted">{formatMs(r.p50_ms)}</td>
+                  <td className="px-4 py-1 text-right">{formatMs(r.p95_ms)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </section>
+  );
+}
+
 /** Requests, errors, latency, CPU, memory, instances and cold starts over the last hour, day or week. */
 export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: string; env: string; /** Its memory limit, MB. */ memoryMb?: number; /** The most instances it scales to. */ maxInstances?: number }) {
   const [range, setRange] = useState<Range>(RANGES[0]);
@@ -481,6 +553,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
   const [visitors, setVisitors] = useState<Analytics | null>(null);
   const [speed, setSpeed] = useState<Vitals | null>(null);
   const [appMetrics, setAppMetrics] = useState<AppMetrics | null>(null);
+  const [errorGroups, setErrorGroups] = useState<ErrorGroup[]>([]);
   const [traces, setTraces] = useState<TraceSummary[] | null>(null);
   const size = raw ? Math.max(1, Math.ceil(raw.minutes.length / MAX_POINTS)) : 1;
   const m = useMemo(() => (raw ? bucketed(raw, size) : null), [raw, size]);
@@ -505,7 +578,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
     const load = async () => {
       try {
         // The deploys only mark the charts: metrics still show without them.
-        const [next, deps, byRoute, seen, traced, measured, own] = await Promise.all([
+        const [next, deps, byRoute, seen, traced, measured, own, errs] = await Promise.all([
           appsApi.metrics(service, env, range.minutes),
           appsApi.deploys(service, env).catch(() => null),
           appsApi.routes(service, env).catch(() => null),
@@ -513,6 +586,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
           appsApi.traces(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
           appsApi.vitals(service, env, Math.min(Math.max(range.minutes, 60), 10_080)).catch(() => null),
           appsApi.appMetrics(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
+          appsApi.errors(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
         ]);
         if (alive) {
           setM(next);
@@ -522,6 +596,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
           if (traced) setTraces(traced.traces);
           if (measured) setSpeed(measured);
           if (own) setAppMetrics(own);
+          if (errs) setErrorGroups(errs.groups);
           setError(null);
         }
       } catch (e) {
@@ -658,6 +733,8 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
         </div>
       )}
       {routes && <Routes stats={routes} />}
+      {routes && <Splits stats={routes} />}
+      {errorGroups.length > 0 && <Errors groups={errorGroups} />}
       {speed && speed.samples > 0 && <Speed v={speed} />}
       {appMetrics && appMetrics.series.length > 0 && <AppMetricsPanel m={appMetrics} />}
       {visitors && visitors.page_views > 0 && <Visitors a={visitors} />}

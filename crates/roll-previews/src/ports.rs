@@ -486,7 +486,9 @@ pub trait Secrets: Send + Sync {
     /// which the caller renews while it runs and revokes when it stops.
     /// `untrusted`: nothing of a protected environment resolves (directly, by reference, by
     /// import or through the base): what the preview's code reads is its own overrides and links.
-    async fn resolve(&self, project: &str, env: &str, untrusted: bool, consumer: &str) -> anyhow::Result<Resolved>;
+    /// `dynamic: false`: no dynamic credential is issued at all (those keys are left out), for a
+    /// read that starts nothing (masking a preview's logs).
+    async fn resolve(&self, project: &str, env: &str, untrusted: bool, dynamic: bool, consumer: &str) -> anyhow::Result<Resolved>;
     /// The links of environment `env` (its own and what it inherits or imports): `(key, kind,
     /// resource, field)`, with no values (nothing resolved, no lease).
     async fn links(&self, _project: &str, _env: &str) -> anyhow::Result<Vec<(String, Kind, String, String)>> {
@@ -516,6 +518,9 @@ pub struct Resolved {
     /// Keys of links to a parent the preview branched, which roll secrets resolved nothing for:
     /// `(name, kind, parent, field)`. The engine sets each from the branch ([`crate::names::follow`]).
     pub followed: Vec<(String, Kind, String, String)>,
+    /// Keys of `values` linked to a field that isn't a credential (a host, a port, a database's
+    /// name): roll secrets' `plain`. A preview's logs show them; every other value is masked.
+    pub plain: Vec<String>,
 }
 
 /// Until roll secrets lands: no environments, so services get the project's overrides and the
@@ -528,7 +533,7 @@ impl Secrets for NoSecrets {
         Ok(())
     }
 
-    async fn resolve(&self, _: &str, _: &str, _: bool, _: &str) -> anyhow::Result<Resolved> {
+    async fn resolve(&self, _: &str, _: &str, _: bool, _: bool, _: &str) -> anyhow::Result<Resolved> {
         Ok(Resolved::default())
     }
 

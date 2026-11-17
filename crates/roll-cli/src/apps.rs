@@ -298,6 +298,16 @@ pub enum AppsCmd {
         /// How long a new instance has to pass its health check at a deploy.
         #[arg(long, value_name = "SECONDS")]
         health_timeout: Option<u32>,
+        /// Seconds between two health checks while running (2–300; 0: the default, 10).
+        #[arg(long, value_name = "SECONDS")]
+        health_every: Option<u32>,
+        /// Failed health checks in a row that replace an instance (1–10; 0: the default, 3).
+        #[arg(long, value_name = "N")]
+        health_failures: Option<u32>,
+        /// A worker's health check: a shell command in its instance, healthy on exit 0; `none`
+        /// removes it.
+        #[arg(long, value_name = "COMMAND")]
+        health_command: Option<String>,
         /// Alert when an instance's memory stays at this share of its limit for five minutes (0
         /// off).
         #[arg(long, value_name = "PERCENT")]
@@ -359,6 +369,10 @@ pub enum AppsCmd {
         /// A step whose 5xx share reaches this (and beats the old deployment's) rolls back.
         #[arg(long, value_name = "PERCENT")]
         rollout_errors: Option<u8>,
+        /// Each rollout step waits for a person once it passes (`true`), or advances by itself;
+        /// `roll apps rollout advance|all|abort` decides.
+        #[arg(long)]
+        rollout_manual: Option<bool>,
         /// The app speaks HTTP/2 without TLS (a gRPC server): `true` or `false`.
         #[arg(long)]
         h2c: Option<bool>,
@@ -376,6 +390,10 @@ pub enum AppsCmd {
         /// percent for a minute (10–100); `0` turns it off.
         #[arg(long, value_name = "PERCENT")]
         cpu_target: Option<u32>,
+        /// And on memory: another instance while they average over this percent of their
+        /// memory for a minute (10–100); `0` turns it off.
+        #[arg(long, value_name = "PERCENT")]
+        memory_target: Option<u32>,
         /// A worker that stops: `always` started again, `on_failure`, or `never`.
         #[arg(long, value_parser = ["always", "on_failure", "never"])]
         restart: Option<String>,
@@ -518,14 +536,18 @@ pub enum AppsCmd {
         cancel: Option<String>,
         /// Run a command on a schedule (Heroku Scheduler): `--schedule NAME --at "0 3 * * *"
         /// --command "node cleanup.js"` adds or replaces it; each due time is a job.
-        #[arg(long, value_name = "NAME", requires_all = ["at", "command"], conflicts_with_all = ["logs", "cancel", "unschedule"])]
+        #[arg(long, value_name = "NAME", requires = "at", conflicts_with_all = ["logs", "cancel", "unschedule"])]
         schedule: Option<String>,
         /// With `--schedule`: five cron fields, or `@hourly`, `@daily` …
         #[arg(long, requires = "schedule")]
         at: Option<String>,
         /// With `--schedule`: the command.
-        #[arg(long, requires = "schedule")]
+        #[arg(long, requires = "schedule", required_unless_present_any = ["path", "logs", "cancel", "unschedule"])]
         command: Option<String>,
+        /// With `--schedule`: a path of a web service to GET instead (Vercel's crons), with
+        /// `Authorization: Bearer $CRON_SECRET` when it has one.
+        #[arg(long, requires = "schedule", conflicts_with = "command")]
+        path: Option<String>,
         /// With `--schedule`: its time zone (IANA; default UTC).
         #[arg(long, requires = "schedule")]
         tz: Option<String>,
@@ -622,6 +644,13 @@ pub enum AppsCmd {
         /// shell's).
         #[arg(long, value_name = "PATH")]
         from_file: Option<PathBuf>,
+        /// Keep a variable as a file in its instances instead of their environment,
+        /// `NAME=/etc/secrets/key.json` (Render's secret files); repeatable.
+        #[arg(long = "as-file", value_name = "NAME=PATH")]
+        as_file: Vec<String>,
+        /// Put a variable kept as a file back in the environment; repeatable.
+        #[arg(long = "not-file", value_name = "NAME")]
+        not_file: Vec<String>,
         /// Put them live now: a redeploy of the live image with the new values (Heroku's
         /// `config:set`), followed until it's live.
         #[arg(long, conflicts_with = "reveal")]
@@ -693,12 +722,15 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
-    /// Drop roll's cached answers (on-demand revalidation): these paths (`/blog/*` for a prefix),
-    /// or everything.
+    /// Drop roll's cached answers (on-demand revalidation): these paths (`/blog/*` for a prefix)
+    /// and those tagged `--tag` (the app's `Cache-Tag` or `Surrogate-Key`), or everything.
     Purge {
         #[command(flatten)]
         target: Target,
         paths: Vec<String>,
+        /// A tag the app's answers carry (repeat for more).
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
     },
     /// Visitors and page views from the access log (no script, no cookie): totals, top pages,
     /// referring sites and countries.
@@ -709,6 +741,16 @@ pub enum AppsCmd {
         #[arg(long, default_value_t = 1440)]
         minutes: i64,
     },
+    /// Its errors, grouped from its log (stack traces joined, the same error at another line one
+    /// group): how many, when last seen, and (`--sample`) the newest one whole.
+    Errors {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, default_value_t = 1440)]
+        minutes: i64,
+        #[arg(long)]
+        sample: bool,
+    },
     /// The app's own metrics its OpenTelemetry SDK sent (its environment's Traces switch on):
     /// each series' latest point (a gauge's value, a counter's rate a second, a histogram's mean).
     AppMetrics {
@@ -716,6 +758,14 @@ pub enum AppsCmd {
         target: Target,
         #[arg(long, default_value_t = 60)]
         minutes: i64,
+    },
+    /// A manual rollout waiting after its step: `advance` to the next step, `all` to every
+    /// request, or `abort` back to what was live.
+    Rollout {
+        #[command(flatten)]
+        target: Target,
+        #[arg(value_parser = ["advance", "all", "abort"])]
+        action: String,
     },
     /// How fast its pages are for real visitors (its environment's Web Vitals on, `roll apps env
     /// --vitals true`): each metric's p75 and rating, and the busiest routes'.
@@ -984,9 +1034,14 @@ pub enum AppsCmd {
         pause: bool,
         #[arg(long)]
         resume: bool,
-        /// Resume deploys held after a rollback (pushes, hooks and tag moves put live again).
-        #[arg(long)]
+        /// Resume deploys held by a person or after a rollback (pushes, hooks and tag moves put
+        /// live again).
+        #[arg(long, conflicts_with = "hold")]
         resume_deploys: bool,
+        /// Hold deploys: pushes, hooks and tag moves build to `ready` (a web service) and wait
+        /// for a person to put one live (`roll apps rollback <deployment> --keep-variables`).
+        #[arg(long)]
+        hold: bool,
         /// Only this network gets in through its public URLs (`a.b.c.d/n`, an IPv6 `/n`, an
         /// address). Repeatable; the list replaces the one it has.
         #[arg(long = "allow-ip", value_name = "CIDR", conflicts_with = "allow_any")]
@@ -1015,6 +1070,14 @@ pub enum AppsCmd {
         /// Its answers carry no headers of the environment's own again.
         #[arg(long)]
         no_headers: bool,
+        /// A path another service of the project answers, `/api/*=api` (a prefix ends in `*`;
+        /// that service's environment of the same name), repeatable; the list replaces the
+        /// environment's.
+        #[arg(long = "route", value_name = "PATH=SERVICE", conflicts_with = "no_routes")]
+        route: Vec<String>,
+        /// No routes to other services.
+        #[arg(long)]
+        no_routes: bool,
         /// Its own page (an HTML file, at most 64 KiB) for the 502, 503 and 504 visitors get
         /// while the app can't answer or wake (Heroku's error page).
         #[arg(long, value_name = "HTML_FILE")]
@@ -1630,7 +1693,35 @@ fn print_line(l: &Value) {
         Some("system") => "roll".to_string(),
         _ => l["instance"].as_str().map(|i| i.rsplit('-').next().unwrap_or(i).to_string()).unwrap_or_default(),
     };
+    // A stack trace's lines past its first: under it, with no time of their own.
+    if l["trace"] == "more" {
+        println!("{:8} {who:>5} ┆   {}", "", s(&l["text"]));
+        return;
+    }
     println!("{t} {who:>5} │ {}", s(&l["text"]));
+}
+
+/// A read log's lines with each stack trace's lines together, at its first line (another
+/// instance's lines that fell between come after it).
+fn traces_together(lines: &[Value]) -> Vec<&Value> {
+    let mut out: Vec<Vec<&Value>> = Vec::new();
+    let mut open: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+    for l in lines {
+        let k = (s(&l["instance"]), s(&l["stream"]));
+        if l["trace"] == "more"
+            && let Some(&i) = open.get(&k)
+        {
+            out[i].push(l);
+            continue;
+        }
+        if l["trace"] == "start" {
+            open.insert(k, out.len());
+        } else {
+            open.remove(&k);
+        }
+        out.push(vec![l]);
+    }
+    out.into_iter().flatten().collect()
 }
 
 /// Follow a deployment's build and rollout, then say how it ended.
@@ -2196,7 +2287,7 @@ pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&lines)?);
         return Ok(());
     }
-    for line in lines.as_array().into_iter().flatten() {
+    for line in traces_together(lines.as_array().map(Vec::as_slice).unwrap_or_default()) {
         print_line(line);
     }
     Ok(())
@@ -2391,10 +2482,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, rollout, rollout_step, rollout_errors, rollout_manual, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
-            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() {
+            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() {
                 let mut r = svc["run"]["rollout"].as_object().cloned().unwrap_or_default();
                 match rollout.as_deref() {
                     None => {}
@@ -2411,6 +2502,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 if let Some(n) = rollout_errors {
                     r.insert("error_pct".into(), json!(n));
+                }
+                if let Some(m) = rollout_manual {
+                    r.insert("manual".into(), json!(m));
                 }
                 Some(Value::Object(r))
             } else {
@@ -2502,6 +2596,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("pre_deploy", text(pre_deploy)),
                 ("health_path", text(health)),
                 ("health_timeout_s", health_timeout.map(Value::from)),
+                ("health_every_s", health_every.map(|n| if n == 0 { Value::Null } else { Value::from(n) })),
+                ("health_failures", health_failures.map(|n| if n == 0 { Value::Null } else { Value::from(n) })),
+                ("health_command", text(health_command)),
                 ("alerts", alerts),
                 ("schedule", schedule.map(Value::from)),
                 ("timezone", timezone.map(Value::from)),
@@ -2517,6 +2614,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("public", public.map(Value::from)),
                 ("drain_s", drain.map(|d| if d == 0 { Value::Null } else { Value::from(d) })),
                 ("cpu_target", cpu_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
+                ("memory_target", memory_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
                 ("restart", restart.map(Value::from)),
                 ("restart_tries", restart_tries.map(Value::from)),
                 ("affinity", affinity.map(Value::from)),
@@ -2901,7 +2999,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Jobs { target, logs, follow, cancel, schedule, at, command, tz, unschedule } => {
+        AppsCmd::Jobs { target, logs, follow, cancel, schedule, at, command, path, tz, unschedule } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/jobs", env_path(&svc, &target.env));
             let mut schedules: Vec<Value> = svc["run"]["schedules"].as_array().cloned().unwrap_or_default();
@@ -2913,7 +3011,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 if let Some(name) = schedule {
                     schedules.retain(|x| x["name"] != name.as_str());
-                    let mut one = json!({ "name": name, "schedule": at, "command": command });
+                    let mut one = match &path {
+                        Some(p) => json!({ "name": name, "schedule": at, "path": p }),
+                        None => json!({ "name": name, "schedule": at, "command": command }),
+                    };
                     if let Some(z) = tz {
                         one["timezone"] = json!(z);
                     }
@@ -2922,7 +3023,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 let v = api.call(reqwest::Method::PATCH, &format!("/v1/apps/services/{}", enc(&s(&svc["id"]))), Some(json!({ "run": { "schedules": schedules } }))).await?;
                 if !json_out {
                     for x in v["run"]["schedules"].as_array().into_iter().flatten() {
-                        println!("{:<16} {:<16} {}", s(&x["name"]), s(&x["schedule"]), s(&x["command"]));
+                        let what = x["path"].as_str().map(|p| format!("GET {p}")).unwrap_or_else(|| s(&x["command"]));
+                        println!("{:<16} {:<16} {what}", s(&x["name"]), s(&x["schedule"]));
                     }
                     return Ok(());
                 }
@@ -3110,7 +3212,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Vars { target, set, unset, mut seal, reveal, from_file, deploy, plain } => {
+        AppsCmd::Vars { target, set, unset, mut seal, reveal, from_file, deploy, plain, as_file, not_file } => {
+            let mut files = serde_json::Map::new();
+            for f in &as_file {
+                let (n, p) = f.split_once('=').ok_or_else(|| anyhow::anyhow!("--as-file is NAME=/path"))?;
+                files.insert(n.to_string(), json!(p));
+            }
+            for n in &not_file {
+                files.insert(n.clone(), Value::Null);
+            }
             let svc = service(api, &target).await?;
             let base = format!("{}/variables", env_path(&svc, &target.env));
             let mut m = serde_json::Map::new();
@@ -3122,7 +3232,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 m.extend(vars.into_iter().map(|(k, v)| (k, Value::String(v))));
             }
-            if !set.is_empty() || !unset.is_empty() || !m.is_empty() || !seal.is_empty() {
+            if !set.is_empty() || !unset.is_empty() || !m.is_empty() || !seal.is_empty() || !files.is_empty() {
                 for kv in set {
                     let (k, v) = kv.split_once('=').ok_or_else(|| anyhow::anyhow!("{kv}: set variables as KEY=value"))?;
                     m.insert(k.to_string(), v.into());
@@ -3135,7 +3245,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     eprintln!("sealed as secrets (--plain NAME keeps one revealable): {}", auto.join(", "));
                 }
                 seal.extend(auto);
-                api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset, "seal": seal }))).await?;
+                api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset, "seal": seal, "files": files }))).await?;
                 if deploy {
                     let dep = api.post(&format!("{}/redeploy", env_path(&svc, &target.env)), json!({})).await?;
                     if !json_out {
@@ -3211,6 +3321,27 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             a
         }
+        AppsCmd::Errors { target, minutes, sample } => {
+            let svc = service(api, &target).await?;
+            let v = api.get(&format!("{}/errors?minutes={minutes}", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                let groups = v["groups"].as_array().cloned().unwrap_or_default();
+                if groups.is_empty() {
+                    println!("no errors in the last {minutes} minutes ({} lines read)", v["scanned"]);
+                }
+                for g in &groups {
+                    let last = g["last_seen"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
+                    println!("{:>6}×  {}  [{}] {}", g["count"], last, s(&g["kind"]), s(&g["title"]));
+                    if sample {
+                        for l in s(&g["sample"]).lines() {
+                            println!("          {l}");
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            v
+        }
         AppsCmd::AppMetrics { target, minutes } => {
             let svc = service(api, &target).await?;
             let v = api.get(&format!("{}/app-metrics?minutes={minutes}", env_path(&svc, &target.env))).await?;
@@ -3230,6 +3361,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             v
+        }
+        AppsCmd::Rollout { target, action } => {
+            let svc = service(api, &target).await?;
+            let path = env_path(&svc, &target.env);
+            let env = api.get(&path).await?;
+            let Some(dep) = env["canary"]["deployment"].as_str().filter(|_| env["canary"]["waiting"] == true) else {
+                anyhow::bail!("{} has no rollout waiting for anyone", target.env);
+            };
+            api.call(reqwest::Method::POST, &format!("{path}/deploys/{}/rollout", enc(dep)), Some(json!({ "action": action }))).await?
         }
         AppsCmd::Vitals { target, minutes } => {
             let svc = service(api, &target).await?;
@@ -3279,9 +3419,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Purge { target, paths } => {
+        AppsCmd::Purge { target, paths, tags } => {
             let svc = service(api, &target).await?;
-            let body = if paths.is_empty() { serde_json::json!({}) } else { serde_json::json!({ "paths": paths }) };
+            let mut body = serde_json::json!({});
+            if !paths.is_empty() {
+                body["paths"] = serde_json::json!(paths);
+            }
+            if !tags.is_empty() {
+                body["tags"] = serde_json::json!(tags);
+            }
             api.post(&format!("{}/cache/purge", env_path(&svc, &target.env)), body).await?
         }
         AppsCmd::Github { target, remove } => {
@@ -3699,7 +3845,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, error_page, maintenance_page, roll_pages } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -3734,6 +3880,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             if resume_deploys {
                 body.insert("held".into(), json!(false));
+            } else if hold {
+                body.insert("held".into(), json!(true));
             }
             if let Some(note) = maintenance {
                 body.insert("maintenance".into(), json!({ "message": Some(note).filter(|n| !n.is_empty()) }));
@@ -3765,6 +3913,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("headers".into(), header_rules(&header)?);
             } else if no_headers {
                 body.insert("headers".into(), Value::Null);
+            }
+            if !route.is_empty() {
+                let rs = route
+                    .iter()
+                    .map(|r| r.split_once('=').map(|(p, s)| json!({ "path": p.trim(), "service": s.trim() })).ok_or_else(|| anyhow::anyhow!("--route is PATH=SERVICE, like /api/*=api")))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                body.insert("routes".into(), Value::Array(rs));
+            } else if no_routes {
+                body.insert("routes".into(), Value::Null);
             }
             let mut pages = serde_json::Map::new();
             for (k, f) in [("error", &error_page), ("maintenance", &maintenance_page)] {
@@ -3863,8 +4020,17 @@ pub(crate) fn new_token() -> String {
 /// A firewall rule as typed: `<allow|deny> [/path] [method=A,B] [ua=the rest of the line]`.
 fn firewall_rule(line: &str) -> anyhow::Result<Value> {
     let mut words = line.split_whitespace();
-    let action = words.next().filter(|a| *a == "allow" || *a == "deny").ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow or deny: {line:?}"))?;
+    let action = words.next().filter(|a| ["allow", "deny", "limit"].contains(a)).ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow, deny or limit: {line:?}"))?;
     let mut rule = json!({ "action": action });
+    // `limit N[:BURST] …`: N a minute a client through the rule.
+    if action == "limit" {
+        let rate = words.next().ok_or_else(|| anyhow::anyhow!("limit takes a rate, `limit 10[:20] /login`: {line:?}"))?;
+        let (n, b) = rate.split_once(':').map_or((rate, None), |(n, b)| (n, Some(b)));
+        rule["per_minute"] = json!(n.parse::<u32>().map_err(|_| anyhow::anyhow!("{rate:?} in {line:?}: requests a minute, `10` or `10:20`"))?);
+        if let Some(b) = b {
+            rule["burst"] = json!(b.parse::<u32>().map_err(|_| anyhow::anyhow!("{rate:?} in {line:?}: a burst is a number"))?);
+        }
+    }
     let rest: Vec<&str> = words.collect();
     for (i, w) in rest.iter().enumerate() {
         if let Some(ua) = w.strip_prefix("ua=") {

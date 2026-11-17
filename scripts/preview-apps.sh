@@ -53,7 +53,7 @@ api POST /v1/code/owners '{"name":"acme","kind":"org"}' >/dev/null
 api POST /v1/code/repos '{"owner":"acme","name":"web","source":"native"}' >/dev/null
 BODY_INIT=$(python3 - <<'PY'
 import json
-start = "#!/bin/sh\necho \"$REDIS_URL\" | sed -E 's#.*default:(rdb_[a-z0-9]+)_.*#\\1#' > where\nexec python -m http.server ${PORT:-8000}\n"
+start = "#!/bin/sh\necho \"$REDIS_URL\" | sed -E 's#.*default:(rdb_[a-z0-9]+)_.*#\\1#' > where\nprintf '%s' \"$KAFKA_USERNAME\" > kafka_user\nprintf '%s' \"$KAFKA_BROKERS\" > kafka_brokers\nexec python -m http.server ${PORT:-8000}\n"
 docker = 'FROM python:3.13-alpine\nWORKDIR /app\nCOPY . .\nCMD ["sh", "start.sh"]\n'
 # What previews' screenshots of the service take, in roll apps' own config ([app.previews.screenshots]).
 toml = '[app.previews.screenshots]\n[[app.previews.screenshots.states]]\nname = "apps-tab"\npage = "/"\nsteps = [{ press = "Tab" }]\n'
@@ -100,14 +100,9 @@ for _ in $(seq 1 600); do
 done
 T2=$(now_ms)
 VARS=$(api GET "/v1/apps/services/$SVC/environments/$ENV/variables" | jq_ "[v['name'] for v in d['vars']]")
-# The stream link's variables on the preview's environment are the branch's, under roll apps'
-# names: its brokers and its own SASL user, never production's link's.
+# What previews sets there is sealed: roll apps never returns it (its logs hide it too).
 PV_VALUES=$(api GET "/v1/apps/services/$SVC/environments/$ENV/variables/values")
-BRANCH_ENV=$(api GET "/v1/previews/$PV/connect" | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(next((b['vars'] for b in d['branches'] if b['kind'] == 'stream'), {})))")
-KAFKA_PV=$(echo "$PV_VALUES" | jq_ "d.get('KAFKA_USERNAME', '')")
-KAFKA_BRANCH=$(echo "$BRANCH_ENV" | jq_ "d.get('KAFKA_SASL_USERNAME', '')")
-[ -n "$KAFKA_PV" ] && [ "$KAFKA_PV" = "$KAFKA_BRANCH" ] || { echo "the stream link's KAFKA_USERNAME should be the branch's ($KAFKA_BRANCH), not '$KAFKA_PV'"; echo "$PV_VALUES" | jq_ "sorted(k for k in d if k.startswith('KAFKA'))"; echo "$BRANCH_ENV" | head -c 600; exit 1; }
-[ "$(echo "$PV_VALUES" | jq_ "d.get('KAFKA_BROKERS', '')")" = "$(echo "$BRANCH_ENV" | jq_ "d.get('KAFKA_BOOTSTRAP_SERVERS', '')")" ] || { echo "the stream link's KAFKA_BROKERS should be the branch's"; exit 1; }
+[ -z "$(echo "$PV_VALUES" | jq_ "d.get('KAFKA_USERNAME', '')")" ] || { echo "previews' variables in a pv- environment should be sealed"; exit 1; }
 # Its mail goes to roll's catcher, as on roll's own runtime (and providers' keys are replaced).
 case "$VARS" in *"'SMTP_URL'"*"'SMTP_USER'"*) ;; *) echo "a pv- environment should get roll's SMTP: $VARS"; exit 1;; esac
 case "$VARS" in *"'SENDGRID_API_KEY'"*) ;; *) echo "a pv- environment should get the providers' keys replaced: $VARS"; exit 1;; esac
@@ -117,6 +112,13 @@ BODY=$(curl -sS -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 
 WHERE=$(curl -sS -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/where" --max-time 30)
 T4=$(now_ms)
 [ "$BODY" = "preview of change 1" ] || { echo "the preview should serve the change's page: $BODY"; exit 1; }
+# The stream link's variables, as the instance got them, are the branch's under roll apps' names:
+# its brokers and its own SASL user, never production's link's.
+BRANCH_ENV=$(api GET "/v1/previews/$PV/connect" | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(next((b['vars'] for b in d['branches'] if b['kind'] == 'stream'), {})))")
+KAFKA_PV=$(curl -sS -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/kafka_user" --max-time 30)
+KAFKA_BRANCH=$(echo "$BRANCH_ENV" | jq_ "d.get('KAFKA_SASL_USERNAME', '')")
+[ -n "$KAFKA_PV" ] && [ "$KAFKA_PV" = "$KAFKA_BRANCH" ] || { echo "the stream link's KAFKA_USERNAME should be the branch's ($KAFKA_BRANCH), not '$KAFKA_PV'"; echo "$BRANCH_ENV" | head -c 600; exit 1; }
+[ "$(curl -sS -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/kafka_brokers" --max-time 30)" = "$(echo "$BRANCH_ENV" | jq_ "d.get('KAFKA_BOOTSTRAP_SERVERS', '')")" ] || { echo "the stream link's KAFKA_BROKERS should be the branch's"; exit 1; }
 # Kept out of search engines on roll apps too (roll apps 3b7cd1ac5, #26).
 APPS_ROBOTS=$(curl -sS -o /dev/null -D - -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 30 | tr -d '\r' | sed -n 's/^x-robots-tag: //Ip')
 [ "$APPS_ROBOTS" = noindex ] || { echo "a pv- environment's page should carry X-Robots-Tag: noindex, not '$APPS_ROBOTS'"; exit 1; }

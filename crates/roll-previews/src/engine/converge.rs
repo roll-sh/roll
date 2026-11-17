@@ -342,6 +342,11 @@ impl Engine {
         // What it branched: roll secrets resolves nothing of those parents' (`followed`).
         let branched: Vec<(Kind, String)> = self.store.resources(&r.id)?.into_iter().map(|x| (x.kind, x.parent)).collect();
         self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, trusted, expires_at, &branched).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // Its logs' masks follow what it's given now: these values at once (roll apps' instances
+        // get them without a start here), roll secrets' read again at the next logs read.
+        let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
+        self.add_masks(&r.id, super::masks::secret_values(&[], &[], &own, &vars));
+        self.stale_masks(&r.id);
 
         // 3b. The project's seed, once on fresh data, before anything serves it.
         if let Some(seed) = &s.seed
@@ -530,11 +535,16 @@ impl Engine {
         // 4b. Health: a service with a `health` path counts once it answers 2xx/3xx there, asked
         // once per revision (Render's and Railway's checks). Anything else fails the preview, and
         // the retry asks again.
+        // Asked all at once (a probe wakes a sleeping service: a cold start each), answered in order.
+        let mut asked = Vec::new();
         for (name, rev, path) in checks {
-            if self.store.healthy(&r.id, &name)?.as_deref() == Some(rev.as_str()) {
-                continue;
+            if self.store.healthy(&r.id, &name)?.as_deref() != Some(rev.as_str()) {
+                asked.push((name, rev, path));
             }
-            let answer = match self.apps.probe(&r.id, &name, &path).await {
+        }
+        let answers = futures::future::join_all(asked.iter().map(|(name, _, path)| self.apps.probe(&r.id, name, path))).await;
+        for ((name, rev, path), answer) in asked.into_iter().zip(answers) {
+            let answer = match answer {
                 Ok(a) => a,
                 // Its start was overtaken (slept, redeployed, pushed): converge again soon.
                 Err(e) if e.downcast_ref::<crate::ports::StillDeploying>().is_some() => {
@@ -557,7 +567,13 @@ impl Engine {
                     self.store.set_healthy(&r.id, &name, &rev)?;
                     self.store.log(&r.id, &format!("{name} is healthy ({path}: {status})"))?;
                 }
-                Some((status, said)) => anyhow::bail!("{name} answered {status} on {path}: {}", said.chars().take(200).collect::<String>()),
+                // Its answer is its code's words, and becomes the preview's error (the pull
+                // request's comment): masked as its logs are.
+                Some((status, said)) => {
+                    // Masked whole, then cut: a value the cut splits isn't left half shown.
+                    let said: String = code_preview::runner::mask(&said, &self.masks(&r.id).await?).chars().take(200).collect();
+                    anyhow::bail!("{name} answered {status} on {path}: {said}")
+                }
                 None => {}
             }
         }
@@ -657,7 +673,13 @@ impl Engine {
         let crops = self.crops_wanted(r).await;
         let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops };
         let started = std::time::Instant::now();
-        match self.apps.screenshot(&r.id, &first.name, &opts).await {
+        // The page's words are its code's: what it was given is masked before they're kept (and
+        // reach the pull request's comment); a run whose masks can't be read fails as a run.
+        let taken = match self.apps.screenshot(&r.id, &first.name, &opts).await {
+            Ok(Some(mut shot)) => self.mask_shot(&r.id, &mut shot).await.map(|()| Some(shot)).map_err(|e| anyhow::anyhow!("reading what its page mustn't show: {e}")),
+            other => other,
+        };
+        match taken {
             Ok(Some(shot)) => {
                 // Kept under the entry that asked for each (`/pricing`, or `web:/pricing`).
                 let mut pages: Vec<crate::ports::PageShot> = shot
@@ -782,7 +804,11 @@ impl Engine {
             }
             let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), ..Default::default() };
             match self.apps.screenshot(&r.id, svc, &opts).await {
-                Ok(Some(shot)) => {
+                Ok(Some(mut shot)) => {
+                    if let Err(e) = self.mask_shot(&r.id, &mut shot).await {
+                        let _ = self.store.log(&r.id, &format!("{svc}'s pages weren't kept: {e}"));
+                        continue;
+                    }
                     if let Some(key) = &key {
                         let _ = self.store.set_service_shot_key(&r.id, svc, key);
                     }
@@ -871,7 +897,12 @@ impl Engine {
     async fn run_job(&self, r: &Row, s: &Settings, vars: &[(String, String)], what: &str, job: &crate::settings::Seed) -> anyhow::Result<()> {
         let untrusted = !(s.secrets.allow_production && r.trusted);
         // Its dynamic credentials last as long as the job does.
-        let (mut env, leases) = self.resolve_secrets(r, untrusted, what).await?;
+        let (mut env, leases, plain) = self.resolve_secrets(r, untrusted, true, what).await?;
+        // Its output becomes the preview's error (a teardown's, the pull request's comment): what
+        // it was given is masked there, as checks' output is.
+        let own: Vec<(String, String)> = project_env(s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
+        let hide = super::masks::secret_values(&env, &plain, &own, vars);
+        self.add_masks(&r.id, hide.clone());
         for (k, v) in vars {
             set(&mut env, k, v.clone());
         }
@@ -894,9 +925,9 @@ impl Engine {
                 warn!(preview = %r.id, lease = %l, error = %e, "previews: revoking a job's dynamic credential (it expires by itself)");
             }
         }
-        let (code, tail) = ran.map_err(|e| anyhow::anyhow!("{what}: {e:#}"))?;
+        let (code, tail) = ran.map_err(|e| anyhow::anyhow!("{what}: {}", code_preview::runner::mask(&format!("{e:#}"), &hide)))?;
         if code != 0 {
-            anyhow::bail!("the {what} command failed with exit code {code}\n\n{}", tail.trim_end());
+            anyhow::bail!("the {what} command failed with exit code {code}\n\n{}", code_preview::runner::mask(tail.trim_end(), &hide));
         }
         Ok(())
     }
@@ -1061,6 +1092,7 @@ impl Engine {
         self.usage_read.lock().remove(&r.id);
         self.secrets_told.lock().remove(&r.id);
         self.egress_told.lock().remove(&r.id);
+        self.forget_masks(&r.id);
         info!(preview = %r.id, "previews: deleted");
         Ok(())
     }

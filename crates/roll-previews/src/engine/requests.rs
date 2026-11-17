@@ -443,6 +443,9 @@ impl Engine {
                 return Err(Error::BadRequest(format!("{k}: at most {MAX_VAR_BYTES} bytes")));
             }
         }
+        // Masked from now on, before its services (or roll apps) are given it.
+        self.add_masks(id, masks::secret_values(&[], &[], &changes.values().flatten().map(|v| (String::new(), v.clone())).collect::<Vec<_>>(), &[]));
+        self.stale_masks(id);
         let vars = self.store.update_vars(id, |vars| {
             for (k, v) in &changes {
                 match v {
@@ -526,7 +529,8 @@ impl Engine {
             Some(name) => services.into_iter().find(|s| s.name == name).ok_or_else(|| Error::NotFound(format!("the preview has no service {name}")))?,
             None => services.into_iter().next().ok_or_else(|| Error::NotFound("the preview has no services".into()))?,
         };
-        Ok((svc.name.clone(), self.apps.logs(id, &svc.name, lines).await))
+        let got = self.apps.logs(id, &svc.name, lines).await;
+        Ok((svc.name.clone(), self.masked(id, got).await?))
     }
 
     /// A service's last `lines` and then its output as it comes. Where the product can't follow,
@@ -534,11 +538,20 @@ impl Engine {
     /// dropped (or the service's output does).
     pub async fn follow(self: &Arc<Self>, id: &str, service: Option<&str>, lines: usize) -> Result<(String, tokio::sync::mpsc::Receiver<String>)> {
         let (name, _) = self.logs(id, service, 1).await?;
-        if let Some(rx) = self.apps.follow(id, &name, lines).await {
-            return Ok((name, rx));
-        }
         let (tx, rx) = tokio::sync::mpsc::channel(256);
         let (me, id, svc) = (self.clone(), id.to_string(), name.clone());
+        // Every line masked on its way out (`masks.rs`), with the masks read again as they age.
+        if let Some(mut from) = self.apps.follow(&id, &name, lines).await {
+            tokio::spawn(async move {
+                while let Some(l) = from.recv().await {
+                    let Ok(l) = me.masked(&id, vec![l]).await else { return };
+                    if tx.send(l.into_iter().next().unwrap_or_default()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            return Ok((name, rx));
+        }
         tokio::spawn(async move {
             // The first read is what was asked for; later ones read wide, so a burst between two
             // reads isn't lost.
@@ -552,8 +565,9 @@ impl Engine {
                         0
                     }
                 };
-                for l in &now[from..] {
-                    if tx.send(l.clone()).await.is_err() {
+                let Ok(shown) = me.masked(&id, now[from..].to_vec()).await else { return };
+                for l in shown {
+                    if tx.send(l).await.is_err() {
                         return;
                     }
                 }
