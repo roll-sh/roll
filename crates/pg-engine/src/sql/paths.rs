@@ -3352,6 +3352,44 @@ fn order_by_ops(ii: &IndexInfo, w: &Want) -> (Vec<PathKey>, Vec<Expr>) {
     (keys, exprs)
 }
 
+/// The sort keys an aggregation's DISTINCT and ORDER BY aggregates all want of its input
+/// (make_pathkeys_for_groupagg's, when one set covers them all), None when there are none or
+/// they differ.
+fn presort_agg_keys(aggs: &[crate::sql::plan::AggCall]) -> Option<Vec<SortKey>> {
+    let mut want: Option<Vec<SortKey>> = None;
+    for a in aggs {
+        if !(a.distinct || !a.order_by.is_empty()) {
+            continue;
+        }
+        if !matches!(a.def.kind, crate::exec::agg::AggKind::Normal) || a.filter.is_some() {
+            return None;
+        }
+        let keys: Vec<SortKey> = if a.distinct {
+            a.args
+                .iter()
+                .map(|e| SortKey {
+                    expr: e.clone(),
+                    desc: false,
+                    nulls_first: false,
+                    using: None,
+                })
+                .collect()
+        } else {
+            a.order_by.clone()
+        };
+        if keys.iter().any(|k| k.expr.is_volatile() || k.using.is_some() || k.expr.columns().is_empty()) {
+            return None;
+        }
+        match &want {
+            None => want = Some(keys),
+            Some(w) if w.len() == keys.len()
+                && w.iter().zip(&keys).all(|(a, b)| a.expr.same_as(&b.expr) && a.desc == b.desc && a.nulls_first == b.nulls_first) => {}
+            Some(_) => return None,
+        }
+    }
+    want
+}
+
 /// The rows sorted by `keys` that are presorted by `have`: (all, count of leading ones).
 fn presorted(want: &[PathKey], have: &[PathKey]) -> (bool, usize) {
     let n = want.iter().zip(have).take_while(|(a, b)| a.same(b)).count();
@@ -5492,6 +5530,43 @@ impl Planner<'_, '_> {
         if self.reorder_distinct_on(p, needed, lim) || self.ordered_distinct(p, needed, lim) {
             return;
         }
+        // An aggregate without groups whose DISTINCT or ORDER BY aggregates sort their input
+        // alike, over a scan: an index read in that order competes with sorting the
+        // cheapest path (enable_presorted_aggregate: the aggregates' pathkeys are the
+        // query's).
+        if let Plan::Agg { groups, sets: None, aggs, input, .. } = &*p
+            && groups.is_empty()
+            && let Some(keys) = presort_agg_keys(aggs)
+            && {
+                let mut q: &Plan = input;
+                while let Plan::Project { input, .. } = q {
+                    q = input;
+                }
+                matches!(q, Plan::Scan(s) if plannable(s))
+            }
+            && self
+                .ctx
+                .sess
+                .settings
+                .borrow()
+                .get_raw("enable_presorted_aggregate")
+                .is_none_or(|v| v != "off" && v != "false")
+        {
+            let n = child_needs(p, needed).pop().unwrap_or_default();
+            let Plan::Agg { input, .. } = p else { unreachable!() };
+            let mut tmp = Plan::Sort {
+                input: input.clone(),
+                keys,
+            };
+            if self.ordered_scan(&mut tmp, &n, None) {
+                // (The aggregates sort for themselves unless the rows come in order.)
+                *input = match tmp {
+                    Plan::Sort { input, .. } => input,
+                    other => Arc::new(other),
+                };
+                return;
+            }
+        }
         // A grouping or DISTINCT over a scan: index orders on its keys are useful
         // (pathkeys_useful_for_grouping / _distinct), though not required.
         let keys: Option<Vec<Expr>> = match &*p {
@@ -5660,6 +5735,67 @@ impl Planner<'_, '_> {
                 keys,
             };
             if self.ordered_join(&mut tmp, &n, if all_rows { None } else { lim }) {
+                // (The window sorts its input unless it comes in order.)
+                *input = match tmp {
+                    Plan::Sort { input, .. } => input,
+                    other => Arc::new(other),
+                };
+                return;
+            }
+        }
+        // A window over a table: an index read in the window's order competes with sorting
+        // the cheapest path (create_window_paths over the presorted paths, the window's
+        // pathkeys being the query's).
+        if let Plan::Window { input, calls } = p
+            && let Some(first) = calls.first()
+            && calls.iter().all(|c| {
+                c.partition_by.len() == first.partition_by.len()
+                    && c.order_by.len() == first.order_by.len()
+                    && c.partition_by.iter().zip(&first.partition_by).all(|(a, b)| a.same_as(b))
+                    && c.order_by.iter().zip(&first.order_by).all(|(a, b)| {
+                        a.expr.same_as(&b.expr) && a.desc == b.desc && a.nulls_first == b.nulls_first
+                    })
+            })
+            && !(first.partition_by.is_empty() && first.order_by.is_empty())
+            && first.order_by.iter().all(|k| k.using.is_none())
+            && {
+                let mut q: &Plan = input;
+                while let Plan::Project { input, .. } = q {
+                    q = input;
+                }
+                matches!(q, Plan::Scan(s) if plannable(s))
+            }
+        {
+            let all_rows = calls.iter().any(|c| {
+                matches!(
+                    c.frame.end,
+                    crate::sql::plan::FrameBound::UnboundedFollowing | crate::sql::plan::FrameBound::Following(_)
+                )
+            });
+            let keys: Vec<SortKey> = first
+                .partition_by
+                .iter()
+                .map(|e| SortKey {
+                    expr: e.clone(),
+                    desc: false,
+                    nulls_first: false,
+                    using: None,
+                })
+                .chain(first.order_by.iter().cloned())
+                .fold(Vec::new(), |mut v: Vec<SortKey>, k| {
+                    // (A key already sorted on: redundant, as a pathkey.)
+                    if !v.iter().any(|x| x.expr.same_as(&k.expr)) {
+                        v.push(k);
+                    }
+                    v
+                });
+            let n = child_needs(p, needed).pop().unwrap_or_default();
+            let Plan::Window { input, .. } = p else { unreachable!() };
+            let mut tmp = Plan::Sort {
+                input: input.clone(),
+                keys,
+            };
+            if self.ordered_scan(&mut tmp, &n, if all_rows { None } else { lim }) {
                 // (The window sorts its input unless it comes in order.)
                 *input = match tmp {
                     Plan::Sort { input, .. } => input,
