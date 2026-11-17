@@ -286,10 +286,19 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    2.25x → 0.52 and `_default` 1.20x → 0.74, nyc_taxis `distance_amount_agg` 1.27x → 0.50 (59
    against 118 ms, still on one thread), `date_histogram_agg` → 0.39, geonames
    `desc_sort_population` → 0.64 and `asc_sort_population` → 0.83 (ties); `autohisto_agg` is still
-   a tie with OpenSearch (0.87). Where roll still loses, ranked: dense_vector
-   `knn-search-100-1000_multiple_segments` 2.09x Elasticsearch (Round 8); so_vector, 25 of 32
-   `knn` tasks 1.03-1.92x (Round 8; filtered and `concurrency` worst; segments are searched
-   concurrently since, `66d16fce6`); nested `randomized-sorted-term-queries` 1.23x OpenSearch
+   a tie with OpenSearch (0.87). Round 9's vector rerun (`807396e0b`, against Elasticsearch
+   only): Round 8's so_vector `css` 1.92x and dense_vector `_multiple_segments` 2.09x are ties now
+   (1.13x, 1.51x), so_vector `concurrency` and `random-10-percent` lead (0.81, 0.74, ties), and
+   roll indexes dense_vector at 3x Elasticsearch's docs/s on less server CPU. Where roll still
+   loses, ranked: so_vector's 8-client tasks on the force-merged index, `concurrency` 2.80x and
+   `random-10-percent` 2.32x, then `concurrency-force-merge` 1.45x, dense_vector
+   `knn-search-100-1000` (merged) 1.17x and `random-10-percent-force-merge` 1.11x (8 clients on 2
+   cores: latency follows CPU per query). Request parsing rescanned the body for field locations
+   no message used, 8-15M instructions per so_vector query; #156 computes them only for a
+   message (-25 to -61% server CPU per query on 16 of 20 lane-b tasks, hits identical; Rally
+   rerun pending). Measured, not adopted: Lucene's per-segment beam (-41% work, but recall on the
+   1M corpus fell 0.9935 → 0.9895) and an exact path for small filters (fewer instructions, lost
+   8-15% to code placement; kept for a retry with placement controlled); nested `randomized-sorted-term-queries` 1.23x OpenSearch
    (12.6 against 10.2 ms, ranges apart; Round 8 1.62x; fixed in #125, which skips the parents no
    child of which can beat the queue: 3.5-4.3 against OpenSearch's 8.5-9.7 ms on the same CPUs,
    a third of its server CPU, identical hits; Rally rerun pending); nested `nested-date-histo` 1.17x
@@ -298,7 +307,7 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    `range_field_disjunction_big_range_small_term_query` 1.06x Elasticsearch (tie, lost in roll's
    rounds under heavy foreign load; a direct A/B has this binary 35% faster than Round 8's);
    nyc_taxis `range` 1.05x OpenSearch (tie); http_logs `scroll` 1.03x OpenSearch and the pmc and so
-   bulk p50s (Round 8, ties). Rerun next: the vector tracks, http_logs (its indexing regression
+   bulk p50s (Round 8, ties). Rerun next: so_vector with #156, http_logs (its indexing regression
    since `dbe79f8f7` is fixed by `6c2834a3e`, not yet measured under Rally), so, pmc and
    percolator at the current head. Not a loss: `terms_enum` (OpenSearch has no such API; its
    "0.57 ms" was an error). Still open from before: one-client indexing CPU (51.8 against 34.6
