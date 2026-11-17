@@ -285,6 +285,115 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Storage round 2, part 2: dead-entry sets, linkable runs in format 2 (2026-11-17, agent 245)
+
+HANDOFF "Storage round 2, part 2" has what changed. **c1** is `cand/a245` (`d262652cb`, the
+part 1 builds' code), **c4** the three commits on it (`cand/a245-2`; built from the same tree
+before they were reworded into three commits). Plain dist builds of separate source snapshots,
+harnesses and lanes as in part 1, the same day.
+
+### Bulk (1M rows, settled, bg_ steps counted; G user instructions, 5 alternating pairs, lane C)
+
+| step | c1 | c4 | % per pair | median |
+|---|---|---|---|---|
+| COPY in | 10.486 | 10.495 | +0.1 x5 | +0.1 |
+| CREATE INDEX | 6.114 | 5.362 | -12.3 / -12.3 / -12.4 / -12.3 / -12.3 | -12.3 |
+| CREATE UNIQUE INDEX | 4.397 | 4.111 | -6.5 / -6.4 / -7.2 / -6.6 / -6.5 | -6.5 |
+| COPY out | 3.120 | 3.086 | -1.1 x5 | -1.1 |
+| INSERT … SELECT | 7.060 | 7.031 | -0.4 x5 | -0.4 |
+| UPDATE half | 12.896 | 12.808 | -0.7 / -0.5 / -0.4 / -0.5 / -0.8 | -0.5 |
+| DELETE a quarter | 5.977 | 6.212 | +5.6 / +4.5 / +3.5 / +6.1 / +0.5 | +4.5 |
+| **bg after it (compaction)** | 7.078 | 3.798 | -49.0 / -51.1 / -42.7 / -46.3 / -42.9 | -46.3 |
+| VACUUM | 1.820 | 1.795 | -1.4 x5 | -1.4 |
+| ANALYZE | 0.494 | 0.469 | -5.1 x5 | -5.1 |
+| `count(*), sum(c)` | 0.460 | 0.436 | -5.2 x5 | -5.2 |
+| count(*) (Seq Scan, extra step) | 0.203 | 0.179 | -11.8 x5 | -11.8 |
+| sum(a) (Seq Scan, extra step) | 0.409 | 0.385 | -5.9 x5 | -5.9 |
+| **all steps** | 59.943 | 55.695 | -7.4 / -7.8 / -6.7 / -6.9 / -7.1 | -7.1 |
+| MB written | 205.000 | 192.200 | -16.2 / -18.1 / -2.7 / -15.0 / +6.1 | -15.0 |
+
+Rows equal in every run (count and sums of every column of both tables). In every c4 run the
+compaction after DELETE marks the two index files (250,000 dead entries each) and rewrites the
+table (L0 holds the UPDATE's versions over it). Foreign load 2.6-4.6 cores in every run's
+busiest step. Peak memory (cgroup) c1 311-403 MB (median 331), c4 324-392 (337); VmHWM 271-286
+(275) and 277-282 (280).
+
+### Same day, same lane and settings (medians; PostgreSQL and pgrust 2 runs each, plain dist builds)
+
+| | PostgreSQL 18.6 | pgrust | b246 | c1 | c4 |
+|---|---|---|---|---|---|
+| all steps, G | 52.33 | 44.61 | 60.23 | 59.94 | 55.70 |
+| x PostgreSQL | 1 | 0.85 | 1.15 | 1.15 | **1.06** |
+| x pgrust | 1.17 | 1 | 1.35 | 1.34 | **1.25** |
+| DELETE + its compaction | 1.76 | 1.54 | 12.77 | 13.06 | 10.01 |
+| CREATE INDEX | 3.14 | 2.78 | 6.20 | 6.11 | 5.36 |
+| count(*) by Seq Scan | 0.284 | 0.058 | 0.261 | 0.203 | 0.179 |
+| sum(a) by Seq Scan | 0.394 | 0.099 | 0.467 | 0.409 | 0.385 |
+
+### The store on disk
+
+| | c1 (rewrite) | c4 (marked) |
+|---|---|---|
+| bench database's store files after the DELETE's compaction (`ls` step) | 38.9 MB | 42.0 MB (+7.8%) |
+| of them `bulk_a`, `bulk_id` | 3.88 + 2.21 MB (750,000 entries each, format 2) | 5.15 + 3.38 MB (1,000,000, 250,000 dead) + 0.30 MB of sets |
+| TPC-H SF1 data directory after its load and a clean close (each arm's own load) | 563 MB, 78 files (b245) | 563 MB, 78 files, no set |
+
+An earlier build that marked CREATE INDEX's format 1 runs (n002) kept those index files at 8.84 +
+4.64 MB: the store 7.4 MB larger than the rewrite's. MB written by the whole script -15%.
+
+### TPC-H q01 and q06 (SF1, 2 GB cache, lane C; a fresh engine on b245's load, a warm-up, 5 runs in one perf window; 3 alternating pairs)
+
+| | q01 G ins / run | q06 G ins / run |
+|---|---|---|
+| c1 | 11.363 / 11.363 / 11.363 | 8.208 / 8.208 / 8.206 |
+| c4 | 11.187 / 11.187 / 11.188 | 8.057 / 8.060 / 8.060 |
+
+-1.5% and -1.8% in every pair (the keys in a fixed buffer); hashes equal. Against b245, b246:
+q01 -6.0%, q06 -6.7%.
+
+### TPC-H SF1, all 22 queries (one pass each, the same day: a warm-up pass, then 3 runs a query in one perf window; G user instructions a run / median s; 2 GB cache, `max_parallel_workers_per_gather=2`, `max_parallel_workers=8` on all three)
+
+| query | PostgreSQL 18.6 | pgrust | b246 | c4 | c4 / b246 | c4 / PostgreSQL |
+|---|---|---|---|---|---|---|
+| q01 | 45.15 / 3.195 | 6.72 / 0.680 | 11.90 / 0.504 | 11.19 / 0.620 | -6.0% | 0.25x |
+| q02 | 1.15 / 0.296 | 0.86 / 0.308 | 3.00 / 0.554 | 2.93 / 0.690 | -2.3% | 2.54x |
+| q03 | 4.00 / 0.602 | 3.38 / 0.470 | 6.52 / 0.851 | 6.31 / 0.827 | -3.2% | 1.58x |
+| q04 | 1.00 / 0.218 | 1.39 / 0.183 | 4.18 / 0.492 | 4.01 / 0.442 | -4.1% | 4.00x |
+| q05 | 1.97 / 0.492 | 1.54 / 0.252 | 4.47 / 0.720 | 4.35 / 0.741 | -2.6% | 2.21x |
+| q06 | 4.76 / 0.685 | 5.52 / 0.524 | 8.64 / 0.624 | 8.06 / 0.647 | -6.7% | 1.69x |
+| q07 | 2.56 / 0.508 | 3.13 / 0.532 | 5.24 / 0.965 | 5.23 / 0.921 | -0.2% | 2.04x |
+| q08 | 0.92 / 0.240 | 1.06 / 0.184 | 2.09 / 0.541 | 2.06 / 0.472 | -1.2% | 2.25x |
+| q09 | 13.20 / 1.970 | 14.00 / 1.886 | 11.98 / 2.362 | 11.98 / 1.874 | -0.0% | 0.91x |
+| q10 | 6.49 / 0.815 | 4.18 / 1.022 | 10.51 / 1.194 | 9.60 / 1.001 | -8.6% | 1.48x |
+| q11 | 0.37 / 0.108 | 0.32 / 0.071 | 0.87 / 0.311 | 0.87 / 0.282 | +0.1% | 2.34x |
+| q12 | 8.65 / 0.903 | 8.94 / 0.774 | 9.50 / 0.683 | 8.60 / 0.600 | -9.5% | 0.99x |
+| q13 | 6.76 / 1.015 | 3.68 / 0.652 | 8.03 / 1.603 | 7.87 / 1.342 | -2.0% | 1.16x |
+| q14 | 1.05 / 0.225 | 0.58 / 0.103 | 1.74 / 0.447 | 1.73 / 0.242 | -0.8% | 1.65x |
+| q15 | 3.09 / 0.517 | 2.92 / 0.386 | 7.62 / 0.721 | 6.94 / 0.404 | -8.9% | 2.25x |
+| q16 | 3.55 / 0.320 | 1.84 / 0.390 | 4.99 / 0.635 | 4.99 / 0.405 | -0.2% | 1.41x |
+| q17 | 4.54 / 1.089 | 2.22 / 0.841 | 6.95 / 1.430 | 6.17 / 1.190 | -11.3% | 1.36x |
+| q18 | 40.89 / 3.726 | 16.28 / 2.858 | 30.91 / 2.865 | 30.18 / 2.379 | -2.3% | 0.74x |
+| q19 | 0.39 / 0.073 | 0.40 / 0.037 | 0.98 / 0.141 | 0.96 / 0.089 | -2.3% | 2.46x |
+| q20 | 0.43 / 0.172 | 0.52 / 0.169 | 1.57 / 0.395 | 1.50 / 0.523 | -4.4% | 3.49x |
+| q21 | 7.31 / 0.890 | 4.66 / 0.540 | 11.12 / 0.885 | 10.39 / 1.017 | -6.5% | 1.42x |
+| q22 | 1.12 / 0.147 | 0.57 / 0.065 | 1.72 / 0.163 | 1.68 / 0.312 | -2.2% | 1.50x |
+| **all 22** | 159.3 / 18.20 | 84.7 / 12.93 | 154.5 / 19.09 | 147.6 / 17.02 | -4.5% | 0.93x |
+
+Every result hash equal across the four. One pass each, not alternating pairs: only q01 and q06
+above are gated. The engine passes ran on c4's own load (b246's too); foreign load 1.8 (c4) and
+2.2 (b246) cores; VmHWM c4 1,745 MB, b246 1,732 MB.
+
+### Point and range reads (alternating pairs, fresh server and 100,000-row fixture each)
+
+| cell | pairs | instr/op | cycles/op | ops/s | foreign |
+|---|---|---|---|---|---|
+| point select, 8 clients, lane A, c1 / c4 | 3 | -5.6 (0.67) / +0.0 (0.59) / -4.9% (2.88, flagged) | -12.8 / +0.7 / -7.8% | +31.6 / -7.3 / +276% | as given |
+| range read (100 rows), 8 clients, lane B, c1 / c4 | 5 | +0.5 (2.38, flagged) / -0.8 / -10.8 (2.14, flagged) / -0.7 / +2.6% (2.58, flagged) | median +1.2% | median -1.8% | 0.02-0.09 in the clean pairs |
+
+Level: the pairs with little foreign load are -0.8, -0.7 (range) and +0.0% (point); in the others
+the run that shared its CPUs reads more instructions (a session's waits count). Lane A was
+shared with another agent's benchmarks: three pairs.
+
 ## Storage round 2: scan runs (2026-11-17, agent 245)
 
 HANDOFF "Storage round 2" has what changed. **b246** is origin's `61414bc58`, **c1** the

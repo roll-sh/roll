@@ -10497,11 +10497,108 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Storage round 2, part 2: dead-entry sets, linkable runs in format 2 (agent 245)
+
+BENCH.md "Storage round 2, part 2" has the measurements: on the 1M-row bulk script, settled
+and with the background work counted, all steps 59.94 -> 55.70 G user instructions (every pair
+-6.7 to -7.8%; 1.06x PostgreSQL's 52.33 against 1.15x, 1.25x pgrust's), the compaction after
+DELETE 7.08 -> 3.80 G (-46%), CREATE INDEX -12.3%, CREATE UNIQUE INDEX -6.5%, count(*) by Seq
+Scan another -11.8%, MB written -15%. Three commits on `cand/a245` (`cand/a245-2`). **A storage
+format change, one-way for older builds** (below).
+
+- **Dead-entry sets** (`sst::DeadSet`, `Store::mark_dead`). The compaction after a bulk DELETE
+  rewrote the table and both its indexes for a quarter of their entries
+  deleted (7.1 G, more than the DELETE itself). When every L0 entry in an L1 file's range is a
+  deletion at or before the GC horizon (which a compaction drops), the file stays and the
+  entries those deletions make unreadable are marked dead instead: a bitmap per block in
+  `<id>-<generation>.dv` (crc32-checked), written durably (`durable::replace`) before the
+  manifest names it (`SstMeta::dv`, `dead`; the manifest's write fsyncs the directory first).
+  A reader of the file (`SstReader::block_with`) loads a block and, when the set names entries
+  of it, makes the block a writer would have made of the others (`Block::without`, through
+  `decode_with`), cached as any block; a reader with a new set has a cache id of its own. The
+  decision per version is the compaction's (a key's versions newest first: the first at or
+  before the horizon kept unless a deletion, every older one dropped), only for keys an L0
+  deletion names, so only their blocks are read (`raw_block`, uncached). Written again as
+  before: a file a range deletion or a discarded range meets, a file under
+  `target_file_bytes / 256`, a file more than half of which would be dead, and a file with any
+  other L0 entry in its range (the bulk UPDATE's versions over the table: the table is still
+  rewritten after the DELETE, its two indexes are marked). A file whose entries L0 doesn't
+  change stays (`Marked::Same`). An L0 file of deletions alone that no file written again and
+  no other L0 file shares a key with isn't read again. Old sets' files go with their readers
+  (`mark_dead_obsolete`); sets no manifest names are deleted at open. `deletions_due` weighs L1
+  by live entries.
+- **Linkable runs in format 2** (`SstWriter::create_run`, `Runs::write_fresh`, the new
+  `Runs::write_deletes`): a bulk load's sink runs, a parallel index build's run and a
+  statement's deferred deletions were format 1, every value tagged (present / deleted, command
+  id), linked into the store as they are and format 1 until a compaction or a clean close
+  rewrote them: an index build's file took 1.4-1.7x the bytes (8.84 against 5.15 MB for the 1M
+  entries of `bulk_a`: its values, the rows' keys, aren't derived through a tag) and every read of one
+  decoded its blocks (`decode_linked`, a tenth of the compaction after the bulk DELETE). They
+  are format 2 now, values plain: the transaction's own reads get the run's tag back as a block
+  loads (`SstReader::retagged`: tag 3 and the command id before a value, tag 2 and the id for a
+  deletion, what format 1 stores), and once linked a block's version is the commit's
+  (`raw_block` sets the block's `ts`: a run's entries have one version, so all are `F_TS`).
+  Runs of a transaction's other writes and merged runs (`add_file`'s fan) stay format 1; a
+  clean close rewrites linked runs as before. Without this, marking the bulk script's index
+  files (CREATE INDEX's linked runs) kept them in format 1: the store 7.4 MB larger after the
+  DELETE than with the rewrite (an earlier build, n002).
+- **Keys in a fixed buffer** (`Block::run_rows`): the key being made is kept in a 32-byte
+  buffer, its own bytes moved in as one 16-byte copy and the key into the batch as one 32-byte
+  copy (`RowBatch::push_key`), each cut back to its length; no copy call per row (the store's
+  scan alone 234 -> 207 instructions a row in process; count(*) -11.8%, TPC-H q01 -1.5%, q06
+  -1.8%).
+- `tools/quick-check.sh`: a test binary the diff maps to and the crash step builds too
+  (`crash_random`, when `tests/crash_random.rs` changed) was listed twice, and `bin` ran both
+  paths joined ("not found"): the first is run.
+
+**Format.** A manifest naming a dead-entry set says format 3 (`STORE_FORMAT`), and 2 again once
+none is named; builds before this refuse format 3 ("newer than this build reads") because they
+would read dead entries as live. They refuse a linked format 2 run at open too ("a linked run of
+format 2"). So a data directory this build wrote is one-way for older binaries until a clean
+close (which rewrites linked runs) and a rewrite of every marked file; formats 1 and 2 are read
+as before. Nothing is misread either way: every refusal is at open, before WAL replay.
+
+**Disk and memory.** Marked files keep their dead entries until a later compaction writes them
+(more deletions past half, a write in their range, a clean close for a linked run): after the
+bulk DELETE's compaction the database's store is 42.0 MB against 38.9 MB with the rewrite
+(+7.8%: the two index files' quarter of dead entries and 0.3 MB of sets), the same once the
+table is dropped. The TPC-H SF1 data directory after its load and a clean close: 563 MB, 78
+files, as before. Peak memory of the bulk script: VmHWM median 275 -> 280 MB (ranges 271-286,
+277-282).
+
+Tests: `sst::tests::dead_entries_read_as_a_rewrite_without_them` (blocks with every entry dead,
+none, some; formats 1 and 2; seeks; the set's file read back, a damaged one refused, deleted
+with the reader marked so), `format2_runs_read_retagged_and_relinked`,
+`storage::tests::deletions_mark_dead_entries_instead_of_rewriting` (marked at every snapshot,
+reopened, a second generation, a pinned snapshot's deletion written again, a later write
+rewriting, the manifest's format 3 and 2), `lone_linked_runs_go_to_l1` (a format 2 run linked
+alone beside format 1 ones); `crash_random::power_cut_at_every_point` now deletes the first key
+of twenty commits and compacts them into marked files (every cut point: the store opens, those
+keys gone exactly when the deleting commit is); `crash_bulk`'s kill -9 tests run through marking
+(their files qualify).
+
+Measured and not kept: the DELETE step itself is +4.5% (5.98 -> 6.21 G, pairs +0.5 to +6.1%):
+its deletion runs are written in half the bytes (16.3 against 33.8 MB) and their writing costs
+the same or less in the profiles (`SstWriter::add` 5.3 against 5.2%, the bloom filter 1.2
+against 2.7%, the allocator 2.8 against 4.4%); the rest is spread over the merging scan's
+functions, each a few tenths of a percent higher. Not resolved.
+
+Left (largest first):
+1. The bulk script is 1.06x PostgreSQL (3.4 G): DELETE (6.2 against 1.7 G: its scan merges the
+   UPDATE's versions in L0 with the table, 50%; its deletion runs 20%), the table's rewrite after
+   it (it holds the UPDATE's versions: 3.8 G of compaction left), COPY in (10.5 against 6.5),
+   CREATE INDEX (5.4 against 3.1), INSERT ... SELECT (7.0 against 4.3).
+2. A compaction that marks files could also reclaim them later at a quiet moment (half the
+   dead entries' bytes, the -7.8%), or VACUUM could, as PostgreSQL's reclaims its pages.
+3. Small caches (target 3, not started): a zstd dictionary per file (its prebuilt entropy tables,
+   12% of q07's and q09's zstd time at 256 MB, and better ratios for 16 kB blocks), or smaller
+   blocks for the files point probes read; both a format change of their own.
+
 ## Storage round 2: scan runs, the vector caches' lifetime (agent 245)
 
 BENCH.md "Storage round 2" has the measurements. Two commits (`cand/a245`); the round's
 format change (dead-entry sets, format 2 runs) is the next candidate, on these
-(`cand/a245-2`, its own section below once landed).
+(`cand/a245-2`: "Storage round 2, part 2" above).
 
 - **A scan's rows a block at a time** (`Block::run_rows`, from `Cursor::run_into`). A
   sequential scan's rows went through `Block::read` (the entry decoded into a `BlockPos`, its
