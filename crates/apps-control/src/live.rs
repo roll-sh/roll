@@ -2150,6 +2150,7 @@ mod tests {
                 volume: None,
                 idle_stop_s: None,
                 registry: None,
+                files: vec![],
             },
             run,
             spa: false,

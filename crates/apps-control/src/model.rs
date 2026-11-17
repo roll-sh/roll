@@ -1727,6 +1727,9 @@ pub struct VarView {
     /// Set and run with, never shown again: not by `…/variables/values`, nor its length here.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub sealed: bool,
+    /// Kept as a file at this path in its instances (not in their environment).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 /// An environment's own HTML for roll's pages (Heroku's `ERROR_PAGE_URL` and

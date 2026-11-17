@@ -599,7 +599,7 @@ export interface Variables {
    * reference: a reference variable's template (names, never a value). sealed: run with, never
    * shown again (not by `reveal` either); a reference that reads a sealed value is sealed too.
    */
-  vars: { name: string; masked: string; source: VariableSource; reference?: string; sealed?: boolean }[];
+  vars: { name: string; masked: string; source: VariableSource; reference?: string; sealed?: boolean; /** Kept as a file at this path in its instances (not in their environment). */ file?: string }[];
 }
 
 export interface LogLine {
@@ -984,7 +984,7 @@ export const appsApi = {
   /** The values in the clear (the `reveal` action). */
   reveal: (id: string, e: string) => call<Record<string, string>>("GET", `${env(id, e)}/variables/values`),
   /** `seal`: names set here or already set, sealed for good (a new value keeps them sealed). */
-  setVariables: (id: string, e: string, change: { set?: Record<string, string>; unset?: string[]; seal?: string[] }) =>
+  setVariables: (id: string, e: string, change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null> }) =>
     call<Variables>("PATCH", `${env(id, e)}/variables`, change),
 
   logs: (id: string, e: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${env(id, e)}/logs${qs({ tail: q.tail, since: q.since })}`),

@@ -231,6 +231,14 @@ CREATE TABLE IF NOT EXISTS variables (
     sealed TEXT NOT NULL,
     PRIMARY KEY (service, env, name)
 ) WITHOUT ROWID;
+-- An environment's variables kept as files in its instances (their absolute paths).
+CREATE TABLE IF NOT EXISTS variable_files (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    PRIMARY KEY (service, env, name)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS links (
     service TEXT NOT NULL,
     kind TEXT NOT NULL,
@@ -817,7 +825,7 @@ impl Store {
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -932,7 +940,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "domains", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions"] {
+            for t in ["variables", "variable_files", "domains", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             c.execute(
@@ -1853,6 +1861,23 @@ impl Store {
     pub fn ensure_trace_token(&self, service: &str, env: &str) -> Result<()> {
         let sealed = self.sealer.seal(&format!("trace:{service}:{env}"), &format!("rlx_{}", random(32)));
         self.db.execute("INSERT INTO trace_ingest (service, env, sealed) VALUES (?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed])?;
+        Ok(())
+    }
+
+    /// The environment's variables kept as files: name → path.
+    pub fn variable_files(&self, service: &str, env: &str) -> Result<BTreeMap<String, String>> {
+        Ok(self.db.query("SELECT name, path FROM variable_files WHERE service = ? AND env = ?", params![service, env], |r| Ok((r.get(0)?, r.get(1)?)))?.into_iter().collect())
+    }
+
+    /// Kept as a file at `path`, or (none) in the environment again.
+    pub fn set_variable_file(&self, service: &str, env: &str, name: &str, path: Option<&str>) -> Result<()> {
+        match path {
+            Some(p) => self.db.execute(
+                "INSERT INTO variable_files (service, env, name, path) VALUES (?, ?, ?, ?) ON CONFLICT (service, env, name) DO UPDATE SET path = excluded.path",
+                params![service, env, name, p],
+            )?,
+            None => self.db.execute("DELETE FROM variable_files WHERE service = ? AND env = ? AND name = ?", params![service, env, name])?,
+        };
         Ok(())
     }
 

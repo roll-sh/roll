@@ -1099,6 +1099,20 @@ timed-out cron run is a `cron.failed` event,
 notified by default; a failed one-off job is `job.failed`, off by default (someone ran it and saw
 it). Both carry the exit code.
 
+## Variables as files
+
+A variable can be kept as a file in its instances instead of in their environment (Render's
+Secret Files, Fly's `[[files]]`, Cloud Run's secret volumes): `files: {NAME: "/etc/secrets/key.json"}`
+on `PATCH …/variables` (the Variables tab's file button, `roll apps vars --as-file
+NAME=/etc/secrets/key.json`). From the next deploy the Docker runtime writes it there (0444, so the
+app reads it whatever user it runs as; its folders made) before the instance first starts, and it
+isn't in the environment. It's how a credentials JSON, a client certificate or an `.npmrc` gets
+in, and a value may hold newlines, which the environment's own file can't. A sealed variable stays
+sealed as a file. Fargate refuses them for now; builds don't see them yet (a BuildKit secret
+mount would). `api.rs::a_variable_kept_as_a_file_reaches_the_instance_there` (the paths checked,
+out of the environment, back, dropped with the variable) and
+`docker.rs::a_variable_kept_as_a_file_is_in_the_container` (the app serves the file it reads).
+
 ## Holding deploys
 
 `held: true` on an environment (the environment panel's "Hold deploys", `roll apps env --hold`)
@@ -2476,28 +2490,28 @@ put items 1–11 first. A second review that day (after #78, against the same si
    doesn't follow and every pull request (`GitPush`, `GitPull`), each checked against the
    repository's refs; previews builds the environments, comments and gates forks behind a
    writer's approval (its side is the previews thread's, stacked on this).
-2. **Secret files** (Render's Secret Files, Fly's `[[files]]`, Cloud Run's secret volumes): a sealed
-   variable with a path, written into the container (0400) before it starts and mounted into
-   builds as a BuildKit secret; for credentials JSON, `.npmrc`, client certificates.
-3. **`vercel.json` and `netlify.toml` rules for static sites**: their redirects, rewrites, headers,
+2. **`vercel.json` and `netlify.toml` rules for static sites**: their redirects, rewrites, headers,
    `cleanUrls` and `trailingSlash` mapped onto `SiteRules` (today only `_redirects`/`_headers`), and
    the deploy log saying which were skipped.
-4. **Scaling on memory** (Render's): `run.memory_target` beside `cpu_target`, read the same way.
-5. **Stack traces as one entry, grouped** (Cloud Run's Error Reporting): continuation lines joined to
+3. **Scaling on memory** (Render's): `run.memory_target` beside `cpu_target`, read the same way.
+4. **Stack traces as one entry, grouped** (Cloud Run's Error Reporting): continuation lines joined to
    their error per instance and stream, fingerprinted and counted (`…/errors`, first and last seen),
    an `error.new` event for notifications.
-6. **Wait for CI and statuses on Git URL services**: check runs read through the GitHub App, GitLab
+5. **Wait for CI and statuses on Git URL services**: check runs read through the GitHub App, GitLab
    and Bitbucket statuses through the Git login (through `PublicOnly`), so `wait_for_ci` and commit
    statuses work beyond roll code repos.
-7. **Imports from other platforms** (Render's Heroku migration, Railway's and Koyeb's): `render.yaml`,
+6. **Imports from other platforms** (Render's Heroku migration, Railway's and Koyeb's): `render.yaml`,
    `fly.toml`, `railway.json`/`.toml` and `app.json`+Procfile converted to roll.toml beside the
    Compose converter.
-8. **Rollouts that wait for a person** (Vercel's manual Rolling Releases, Cloud Run's held split):
+7. **Rollouts that wait for a person** (Vercel's manual Rolling Releases, Cloud Run's held split):
    `rollout.manual`, a route to advance or abort, the Deployments tab.
-9. **Cache purges by tag** (`Vercel-Cache-Tag`, `Netlify-Cache-Tag`, surrogate keys): a tag index in
+8. **Cache purges by tag** (`Vercel-Cache-Tag`, `Netlify-Cache-Tag`, surrogate keys): a tag index in
    the response cache and `{tags}` on `…/cache/purge`.
-10. **Health check settings, and workers' health** (Fly's `[checks]`): interval and failures per
+9. **Health check settings, and workers' health** (Fly's `[checks]`): interval and failures per
    service, and a worker's `health_command` run in its instance, so a hung consumer is replaced.
+10. **Variables as files in builds**: a file variable mounted into the build as a BuildKit
+   secret (`--mount=type=secret,target=…`) for an `.npmrc` or a private registry's login, never in
+   a layer.
 11. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
    on main, `watch_secrets` holds one `SecretSource::wait_digest` long poll per watched
    environment instead of polling every minute. Each watched environment needs a task of its

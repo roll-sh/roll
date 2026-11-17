@@ -1285,6 +1285,18 @@ impl Apps {
         if run.kind != RunType::Web {
             vars.retain(|(k, _)| k != "PORT");
         }
+        // Variables kept as files (Render's secret files): out of the environment, into the
+        // instance at their paths.
+        let (sid, e) = (svc.id.clone(), env.name.clone());
+        let file_of = self.db(move |s| s.variable_files(&sid, &e)).await?;
+        let mut files = Vec::new();
+        vars.retain(|(k, v)| match file_of.get(k) {
+            Some(path) => {
+                files.push((path.clone(), v.clone()));
+                false
+            }
+            None => true,
+        });
         // With `egress` `roll`: a network with no route out, and the listed hosts through its
         // proxy (the variables every HTTP client reads; the app's own win). Nothing outside roll
         // is reached any other way, so a runtime that can't close it never runs it open.
@@ -1335,6 +1347,7 @@ impl Apps {
             // past that (its node gone) may end itself.
             idle_stop_s: (run.kind == RunType::Web && run.min_instances == 0).then(|| run.sleep_after_s.max(60) + 300),
             registry,
+            files,
         };
         let spa = dep.plan.as_ref().is_some_and(|p| p["spa"] == true);
         // A static plan whose files were exported answers from them, with no instance.
