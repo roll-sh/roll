@@ -67,6 +67,40 @@ impl Engine {
     pub(super) fn forget_masks(&self, id: &str) {
         self.log_masks.lock().remove(id);
     }
+
+    /// A screenshot run's words as anyone who reads the preview (and the pull request's comment)
+    /// may see them: what went wrong on the page, its links, text, markup and API operations are
+    /// the page's own, which its code wrote. (A picture can't be masked: a page that renders a
+    /// secret shows it.)
+    pub(super) async fn mask_shot(&self, id: &str, shot: &mut crate::ports::Shot) -> Result<()> {
+        let values = self.masks(id).await?;
+        mask_strings(&mut shot.health, &values);
+        mask_strings(&mut shot.a11y, &values);
+        mask_strings(&mut shot.links, &values);
+        mask_strings(&mut shot.text, &values);
+        mask_strings(&mut shot.api, &values);
+        for p in &mut shot.pages {
+            mask_strings(&mut p.report, &values);
+        }
+        Ok(())
+    }
+}
+
+/// Every string in `v` masked (through its JSON: every field, nested ones too).
+fn mask_strings<T: serde::Serialize + serde::de::DeserializeOwned>(v: &mut T, values: &[String]) {
+    fn walk(j: &mut serde_json::Value, values: &[String]) {
+        match j {
+            serde_json::Value::String(s) => *s = code_preview::runner::mask(s, values),
+            serde_json::Value::Array(a) => a.iter_mut().for_each(|x| walk(x, values)),
+            serde_json::Value::Object(o) => o.values_mut().for_each(|x| walk(x, values)),
+            _ => {}
+        }
+    }
+    let Ok(mut j) = serde_json::to_value(&*v) else { return };
+    walk(&mut j, values);
+    if let Ok(back) = serde_json::from_value(j) {
+        *v = back;
+    }
 }
 
 fn add(have: &mut Vec<String>, values: Vec<String>) {
@@ -129,6 +163,14 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pages_own_words_are_masked_wherever_they_sit() {
+        let mut health = Some(crate::PageHealth { errors: 1, first_error: Some("TypeError: key sk_test_51Hx9 rejected".into()), failed: 1, first_failed: Some("GET /api?token=sk_test_51Hx9 → 401".into()), unstable: false });
+        mask_strings(&mut health, &["sk_test_51Hx9".to_string()]);
+        let h = health.unwrap();
+        assert_eq!((h.first_error.as_deref(), h.first_failed.as_deref(), h.errors), (Some("TypeError: key *** rejected"), Some("GET /api?token=*** → 401"), 1));
+    }
 
     #[test]
     fn secrets_whole_and_branches_credentials_only() {

@@ -560,6 +560,15 @@ impl Engine {
                 }
                 fresh
             };
+            if fresh.is_empty() {
+                continue;
+            }
+            // A name is its code's to choose (`<secret>.example.com`): masked as its logs are.
+            let Ok(values) = self.masks(&r.id).await else {
+                let _ = self.store.log(&r.id, &format!("its code tried to reach {} hosts outside roll (refused)", fresh.len()));
+                continue;
+            };
+            let fresh: Vec<String> = fresh.iter().map(|h| code_preview::runner::mask(h, &values)).collect();
             // `<host> private`: listed, but it resolves only to private addresses.
             let (private, unlisted): (Vec<String>, Vec<String>) = fresh.into_iter().partition(|h| h.ends_with(" private"));
             if !unlisted.is_empty() {

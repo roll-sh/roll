@@ -657,7 +657,13 @@ impl Engine {
         let crops = self.crops_wanted(r).await;
         let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops };
         let started = std::time::Instant::now();
-        match self.apps.screenshot(&r.id, &first.name, &opts).await {
+        // The page's words are its code's: what it was given is masked before they're kept (and
+        // reach the pull request's comment); a run whose masks can't be read fails as a run.
+        let taken = match self.apps.screenshot(&r.id, &first.name, &opts).await {
+            Ok(Some(mut shot)) => self.mask_shot(&r.id, &mut shot).await.map(|()| Some(shot)).map_err(|e| anyhow::anyhow!("reading what its page mustn't show: {e}")),
+            other => other,
+        };
+        match taken {
             Ok(Some(shot)) => {
                 // Kept under the entry that asked for each (`/pricing`, or `web:/pricing`).
                 let mut pages: Vec<crate::ports::PageShot> = shot
@@ -782,7 +788,11 @@ impl Engine {
             }
             let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), ..Default::default() };
             match self.apps.screenshot(&r.id, svc, &opts).await {
-                Ok(Some(shot)) => {
+                Ok(Some(mut shot)) => {
+                    if let Err(e) = self.mask_shot(&r.id, &mut shot).await {
+                        let _ = self.store.log(&r.id, &format!("{svc}'s pages weren't kept: {e}"));
+                        continue;
+                    }
                     if let Some(key) = &key {
                         let _ = self.store.set_service_shot_key(&r.id, svc, key);
                     }
