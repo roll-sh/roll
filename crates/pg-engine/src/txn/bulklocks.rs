@@ -126,6 +126,12 @@ fn hash(key: &[u8]) -> u64 {
     FastState::default().hash_one(key)
 }
 
+/// The first slot a key of hash `h` (or the slot of one, `slot_of`) may be in: by the hash's
+/// top 32 bits, the ones its slot keeps, so growing places the slots without their keys.
+fn home(h: u64, mask: usize) -> usize {
+    (h >> 32) as usize & mask
+}
+
 fn slot_of(h: u64, off: usize) -> u64 {
     (h >> 32) << 32 | (off as u64 + 1)
 }
@@ -167,7 +173,7 @@ impl KeySet {
     /// The slot holding `key` (and its entry's offset), or the empty slot it would go in.
     fn find(&self, key: &[u8], h: u64) -> (usize, Option<usize>) {
         let mask = self.slots.len() - 1;
-        let mut i = h as usize & mask;
+        let mut i = home(h, mask);
         loop {
             let s = self.slots[i];
             if s == 0 {
@@ -312,19 +318,16 @@ impl KeySet {
             }
             return;
         }
+        // (A slot's own hash bits give its place: no key is read or hashed again.)
         let n = (self.slots.len() * 2).max(16);
         let mut slots = vec![0u64; n];
         let mask = n - 1;
-        let mut off = 0;
-        while off < self.arena.len() {
-            let (k, _) = self.key_at(off);
-            let h = hash(k);
-            let mut i = h as usize & mask;
+        for &s in self.slots.iter().filter(|&&s| s != 0) {
+            let mut i = home(s, mask);
             while slots[i] != 0 {
                 i = (i + 1) & mask;
             }
-            slots[i] = slot_of(h, off);
-            off += self.entry_len(off);
+            slots[i] = s;
         }
         self.slots = slots;
     }
