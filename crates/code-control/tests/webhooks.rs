@@ -883,7 +883,7 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
             "environment": { "id": "pv_1", "slug": "s", "state": state, "services": [], "resources": [], "sleeping_usd_month": 0.0, "active_usd_hour": 0.0, "head": head } }))
         .unwrap()
     };
-    for (state, head, became) in [("creating", "cs_1", None), ("ready", "cs_1", Some(json!(["ready"]))), ("sleeping", "cs_1", None), ("ready", "cs_1", None), ("updating", "cs_2", None), ("ready", "cs_2", Some(json!(["ready"])))] {
+    for (state, head, became) in [("creating", "cs_1", None), ("ready", "cs_1", Some(json!(["ready"]))), ("sleeping", "cs_1", None), ("ready", "cs_1", None), ("updating", "cs_2", None), ("ready", "cs_2", Some(json!(["ready"]))), ("failed", "cs_3", Some(json!(["failed"])))] {
         a.code.report_environment(&id, Some(&at(state, head))).unwrap();
         assert_eq!(ev.next("preview").await.get("became").cloned(), became, "{state} at {head}");
     }

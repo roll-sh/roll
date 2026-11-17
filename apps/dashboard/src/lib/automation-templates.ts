@@ -394,6 +394,31 @@ export const TEMPLATES: AutomationTemplate[] = [
     },
   },
   {
+    id: "preview-failed",
+    title: "Tell me when a change's preview fails",
+    description: "A notice once a push when a change's preview fails (a build, its seed or release, a health check), with what went wrong and a link to the preview.",
+    trigger: "code",
+    steps: ["notify"],
+    build: (ctx) => {
+      const p = ctx.projects.find((x) => x.repo) ?? ctx.projects[0];
+      return spec(
+        "Failed previews",
+        "A notice once a push when a change's preview fails.",
+        { type: "code", events: ["preview"], repos: p?.repo ? [p.repo] : [] },
+        [
+          step("tell", "notify", {
+            title: "The preview of {{ event.data.change }} failed",
+            body: '{{ event.data.preview.error | default:"See its activity." | truncate:200 }}',
+            level: "error",
+            link: "{{ event.data.preview.environment.dashboard_url }}",
+          }),
+        ],
+        // `became` names what an update reached that the preview wasn't already at: once a push.
+        { filters: [{ field: "event.data.became", op: "contains", value: "failed" }] },
+      );
+    },
+  },
+  {
     id: "tell-on-failure",
     title: "Tell me when an agent fails",
     description: "A notice the moment any thread fails, with its error and a link straight to it.",

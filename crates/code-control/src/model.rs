@@ -276,6 +276,16 @@ impl Preview {
         up.then(|| self.environment.as_ref().and_then(|e| e.head.as_deref()).unwrap_or(""))
     }
 
+    /// The head it failed at: a preview environment `failed` (its retries stay failed), else roll
+    /// code's own preview failing.
+    pub fn failed_at(&self) -> Option<&str> {
+        let failed = match &self.environment {
+            Some(e) => e.state == "failed",
+            None => self.state == PreviewState::Failed,
+        };
+        failed.then(|| self.environment.as_ref().and_then(|e| e.head.as_deref()).unwrap_or(""))
+    }
+
     /// The head whose visual change waits for someone to accept it.
     pub fn visual_change_at(&self) -> Option<&str> {
         let v = self.environment.as_ref()?.visual_review.as_ref().filter(|v| v.state == "changed")?;
