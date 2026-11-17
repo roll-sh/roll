@@ -668,6 +668,65 @@ Dropped (patches in `~/.cache/a235/patches/`):
 | the memtable's skiplist under one epoch pin | 8 | +3.4% | -1.19% | -1.3% (every pair) | -4.7% | 3 |
 | | 32 | -1.9% | about 0 (-1.7, +2.6, -1.7, +1.3) | +0.6% | +2.3% | 4 |
 
+## Executor, round 19 (2026-11-17, agent 244)
+
+HANDOFF "Executor, round 19" has what changed: a parallel worker's nested-loop lookups (inner and
+left joins) a batch of 64 outer rows at a time (entries in key order, every row by one sorted
+multi-get), and a numeric's encoding without allocating. **base** is `61414bc58` (origin's head,
+with agent 238's values prefetch), **head** `eae0f8e2a`; `o000` / `o005` their plain dist builds
+(`tools/dist.sh`: fat LTO, the JCC padding, line tables), `p000` / `p005` their PGO builds
+(`tools/dist-pgo.sh` in a worktree of their own, training on CPUs 0,1,18,19). Harness: agent 238's
+(`~/.cache/a244/tpch/scripts`: `gpass.sh`, `ppass.sh`, `three.sh`, `abw.sh`), lane C, each server
+in its own container on CPUs 14,15,32,33 (`--memory 8g`, host network), the client on 16,17,34,35,
+every pass under `~/.cache/lane-c.lock`; all three servers at `max_parallel_workers_per_gather =
+2`, `max_parallel_workers = 8` and a 2 GB cache (pgrust's set with ALTER SYSTEM, a restart and
+SHOW). TPC-H SF1 from `bench tpch-load --sf 1`, the engine's data directory restored before every
+start. The host ran at load 25-65 all day (other sessions' builds and benchmarks); lane C's CPUs
+had 0.5-2.6 cores of foreign load in nearly every pass, so cycles and walls swing by +-20% (up to
++-50% on queries whose code didn't change) and no gate pass is under the 1.0 foreign-core bar.
+User instructions are exact; cycles are reported for the queries the change runs.
+
+### The lookups and the numeric encoding, gated (plain dist, user instructions and cycles a run, % against base, per round)
+
+| query | instructions % | cycles % |
+|---|---|---|
+| q09 (lineitem, orders, partsupp lookups) | -3.8 / -4.6 / -3.8 | -21 / -23 / -10 |
+| q05 | -2.8 / -2.8 / -3.3 | -19 / +4 / -10 |
+| q08 | -2.4 / -2.7 / -2.5 | -21 / -14 / -11 |
+| q07 (orders by o_custkey, lineitem by l_orderkey) | -1.6 / -1.9 / -1.9 | -31 / -16 / -9 |
+| q03 | +0.1 / +0.4 / -0.4 | -16 / -1 / -10 |
+| q04, q21, q22 (semi / anti: unchanged path) | within +-0.4 (round 1's q22 a broken window) | noise |
+| every other query | within +-1% (round 1's q02 / q11 / q14 / q17 / q22 broken windows) | noise, both ways |
+
+Foreign load per pass: base 2.57 / 1.63 / 1.05, head 1.84 / 2.23 / 1.49 cores. All 22 result hashes
+PostgreSQL's in every pass.
+
+Own-run walls (`abw.sh`: a fresh engine, a warm-up run, 5 runs a pass; 3 alternating pairs a query,
+median of each pass's runs; the host at load 25-50):
+
+| query | base s (3 pairs) | head s | head faster | medians |
+|---|---|---|---|---|
+| q03 | 0.520 / 0.521 / 0.523 | 0.423 / 0.398 / 0.415 | 3 of 3 | 0.521 -> 0.415 |
+| q09 | 1.264 / 1.372 / 1.373 | 1.153 / 1.225 / 1.225 | 3 of 3 | 1.372 -> 1.225 |
+| q07 | 0.600 / 0.788 / 0.918 | 0.477 / 0.709 / 0.715 | 3 of 3 | 0.788 -> 0.709 |
+| q08 | 0.294 / 0.278 / 0.268 | 0.272 / 0.254 / 0.248 | 3 of 3 | 0.278 -> 0.254 |
+| q05 | 0.481 / 0.722 / 0.530 | 0.541 / 0.581 / 0.406 | 2 of 3 | 0.530 -> 0.541 |
+| q04 (path unchanged) | 0.277 / 0.451 / 0.285 | 0.340 / 0.287 / 0.266 | 2 of 3 | 0.285 -> 0.287 |
+
+The numeric encoding alone (`n003` against `n002`, the lookups of an earlier version below it,
+three rounds, 0.5-1.7 foreign cores): user instructions q17 -5.4 / -5.6 / -1.2%, q02 -0.9 / -1.0%
+(its second round a broken window), every other query within +-1%.
+
+Dropped (patches in `~/.cache/a244/patches/`; user instructions, the median of three rounds, % against `0ade2f479`):
+
+| variant | q04 | q21 | q22 | q05 / q07 / q08 / q09 |
+|---|---|---|---|---|
+| `n001`: semi / anti joins and cached tables through the batch, every entry's row fetched | +3.5 | +6.6 | +36.4 | -3.1 / -1.6 / -2.5 / -3.2 |
+| `n002`: semi / anti by the first entry's row, the rest the old way; cached tables row by row | +7.7 | +11.6 | -0.7 | -2.9 / -1.1 / -2.3 / -3.3 |
+| `n004`: first entries, then one multi-get for the outer rows they don't decide | +4.4 | +7.1 | -0.9 | -2.9 / -0.8 / -2.2 / -3.5 |
+
+The same-day three-server tables (plain dist and PGO): a later commit of this round.
+
 ## Executor, round 18 (2026-11-15, agent 238)
 
 HANDOFF "Executor, round 18" has what changed: an index scan's sorted row fetches read as one

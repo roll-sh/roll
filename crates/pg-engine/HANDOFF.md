@@ -3361,6 +3361,104 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - Item 2's batches past the scan (joined rows from batches, the probe hits aggregated from
       columns), item 4 (streaming merge joins) and item 5 (work_mem for hash tables and sorts)
       are not started.
+- **Executor, round 19: the workers' lookups a batch of outer rows at a time, numerics encoded
+  without allocating** (agent 244; BENCH.md "Executor, round 19"). Base `61414bc58` (origin's
+  head with agent 238's values prefetch, `065d6e6b7`), head `eae0f8e2a` (rebased since, without changes, on agent 245's storage round 2).
+  - **A lookup stage takes 64 outer rows at a time** (`pipe::run_stages` holds them per stage,
+    `pipe::lookup_batch`, `Lookup::batch`, `entry_spans`, `Lookup::multi_get`): a parallel
+    worker's nested-loop inner index scans (inner and left joins: q07's orders by o_custkey
+    and lineitem by l_orderkey, q05 / q08 / q09 / q03 / q10's) made the index key of each outer
+    row, read its entries and fetched its rows one key at a time (`get_with`, the reader's held
+    block), so each outer row's rows missed the CPU's cache on their own. Now the stage holds
+    its outer rows until it has 64 (or the chunk ends, or a row has to go to the executor's
+    thread: `drain` runs the held rows first, so the rows come out in the same order), makes
+    their keys, reads the entries in key order (the entries' scan sought on from one key to the
+    next), then fetches every entry's row of the batch by one sorted multi-get
+    (`PointReader::get_sorted`, agent 238's: the misses of different outer rows overlap), and
+    joins each outer row with its rows, filtered and counted as `rows` does. A unique key's
+    probed entry is taken without its row's visibility checked (the multi-get checks it; one
+    the snapshot doesn't see goes the old way, `rows`). Unchanged: a small table's cached
+    lookups (`LookupScratch::cache`), semi and anti joins (see dropped), a NULL key, a key a
+    kernel leaves to `eval` (the row to the executor's thread, as before), and a batch whose
+    read failed (each row through `rows`). Aggregating scans (`partial_row`) and plain ones
+    (`run_rows`) drain the stages before a row that skips them and at the chunk's end;
+    `Scratch::forget` drops what a given-up run left. Against `61414bc58` (plain dist, three
+    rounds of 22 queries; every pass between 1.05 and 2.57 foreign cores, the host at load
+    25-50: other sessions' unpinned builds on lane C): user instructions q09 -3.8 / -4.6 /
+    -3.8%, q05 -2.8 / -2.8 / -3.3, q08 -2.4 / -2.7 / -2.5, q07 -1.6 / -1.9 / -1.9, every other
+    query within +-1% (round 1's q02 / q11 / q14 / q17 / q22 counts are broken windows: queries
+    the change doesn't run); cycles q07 -31.2 / -16.3 / -9.0, q08 -21.1 / -13.5 / -10.8, q09
+    -20.8 / -22.9 / -9.8, q05 -19.2 / +4.5 / -10.4, q03 -16.2 / -0.8 / -9.9. Own-run walls (a
+    fresh engine, 5 runs a pass, 3 alternating pairs): q03 0.521 -> 0.415 s, q09 1.372 -> 1.225,
+    q07 0.788 -> 0.709, q08 0.278 -> 0.254 (each 3 pairs of 3 faster), q05 0.530 -> 0.541 (2 of
+    3), q04 (path unchanged) 0.285 -> 0.287.
+    All 22 result hashes PostgreSQL's in every pass.
+  - **A numeric's encoding without a second conversion or a byte vector**
+    (`decint::i128_signed_le`): `storage::row::encode_value` of a numeric that fits an i128
+    converted it twice (`to_i128`, then `to_signed_bytes_le`'s own) and allocated the two's
+    complement bytes; q02's hash join spills 7/8 of its 158,720 inner rows (8 batches, as
+    PostgreSQL's), each with its ps_supplycost. Same bytes (the decint test against num-bigint).
+    Against the lookup commit (three rounds; 0.5-1.7 foreign cores): user instructions q17 -5.4
+    / -5.6 / -1.2%, q02 -0.9 / -1.0%, every other query within +-1%. Small; kept because nothing
+    is worse and the code is simpler.
+  - Dropped (patches in `~/.cache/a244/patches/`):
+    - Semi and anti joins through the batch: fetching every entry's row (`n001`) cost q22 +36%
+      user instructions (a customer's ~10 orders, each in its own block, where the old path
+      stops at the first), q21 +6.6, q04 +3.5; the first entry's row only, the others by the
+      old path (`n002`) q21 +11.5, q04 +7.7; first entries, then one more multi-get for the
+      outer rows they don't decide (`n004`) q21 +7.1, q04 +4.4. A semi join's first match is
+      mostly in its first entry's block, which the reader holds from the lookup before: a
+      batch's sorts and searches cost more than the misses it overlaps. `Lookup::batches` is
+      false for them.
+    - A small table's cached lookups through the batch (`n001`): every outer row made its key
+      twice (the batch's, then `rows`'). Cached stages run row by row as before.
+  - Measured, not changed (whole-run profiles of one 22-query pass on lane C, cycles, the
+    server's own samples; `~/.cache/a244/perf/whole-*.data`, `classes.py`):
+    - By function class, roll (`0ade2f479`, plain dist) against PostgreSQL
+      18.6: storage reads (blocks, block cache, merging scans, point reads) 28.7% against 25.3%,
+      column decode 22.8 against 6.5 (plus PostgreSQL's JIT deform, in its 29.9% "other"),
+      allocation and copies (mimalloc, `Value` drops and clones) 16.4 against 6.5, aggregation
+      10.0 against 1.3, joins and hashing 8.4 against 7.1, expressions 7.7 against 17.5,
+      visibility 5.2 in PostgreSQL. Roll's pass took 340k samples, PostgreSQL's 439k. pgrust's
+      binary is stripped and its plans JIT-compiled (30% of its samples in the binary, 9% in
+      JIT code): its classes can't be told apart.
+    - Decode's cost is the walk to the columns read (`Pre::decode`'s hottest instructions are
+      `skip`'s tag dispatch, a jump table per value): q15's dense bitmap heap scan (241k of 6M
+      lineitem rows, `dense_bitmap_scan`, run as a sequential scan because the bitmap holds over
+      1/32 of the table) decodes every row up to l_shipdate (column 10): `Pre::decode` is 51% of
+      q15's instructions. Decoding the filter's columns first and the rest only for rows that
+      pass saves only the three other columns' values, not the walk; not tried. The row format
+      (offsets to the values) is the store's.
+    - q15's EXPLAIN ANALYZE differs from PostgreSQL's (for agent 240's area): the engine shows
+      the Bitmap Index Scan "never executed" with `Index Searches: 0` and no "Rows Removed by
+      Index Recheck" / "Heap Blocks" lines where PostgreSQL shows `actual rows=241281`, one
+      search, `Rows Removed by Index Recheck: 551132` and `Heap Blocks: exact=12198
+      lossy=11210` (its 4 MB work_mem bitmap goes lossy).
+    - q20 (0.24 s against PostgreSQL's 0.10, same plan): 60% of its cycles are the SubPlan's
+      8,332 runs, 37% `fetch_entries` (the multi-get of ~7 random lineitem rows a run:
+      `get_sorted_snap` 11.4% self, `find_block` + `block_with` 11.6%: the block cache lookups'
+      misses, the store's read path), `_mi_page_malloc` 10% of cycles on 2% of instructions
+      (allocations on cold pages in the runs' scans).
+    - q02: the spill's encoding was ~8% of its instructions (`encode_value`, numerics' bytes,
+      `new_batch`); the nested loop's joined rows are made twice (`concat_rows`, then the Hash
+      node's `Narrow::shrink`), an allocation and a pass per row a protocol between the two
+      nodes could save.
+    - q13: per order row `partial_row` (lazy read, the probe, `Joined`, `row_words`,
+      `add_words`); the probe's matches aren't used by the column batch (`Pre` only drops
+      misses), so a fused probe-and-aggregate kernel over the batch is the next step there.
+  - Tests: quick-check on `eae0f8e2a` green (verify profile, Clippy 16 warnings, none new in a
+    changed file; 409 tests in 25 binaries with golden, wire, wire_waits and parallel_scan;
+    crash_random seeds 1-3 x 2 and power_cut_at_every_point; regression suite 51,148 / 51,150
+    with none newly differing; isolation 1,647 / 1,648; pg_dump TAP 14,609 passed).
+    golden (3) and parallel_scan (13) also pass with `--profile verify-checked` (debug
+    assertions: the multi-get's keys strictly ascending). No new test: the results and their order are the old path's (parallel_scan
+    compares the workers' lookups with the serial plan; every TPC-H hash is PostgreSQL's).
+  - Left (largest first): q13's probe and partial aggregation as one batch kernel; q02's joined
+    rows made once (the nested loop building the Hash's narrowed row); the allocation class
+    (16% of roll's samples against PostgreSQL's 6.5: rows as `Vec<Value>` per row in the row
+    path); the store's block lookups per key (q20, q07: agent 245's area); q04 / q21's semi
+    joins (their per-key path is cheap; what's left is the misses of the outer rows' first
+    blocks).
 - **Executor, round 18: index scans' row fetches as one sorted multi-get, nested loops and
   Aggregates rescanned, cheaper hash-join tuple sizes** (agent 238; BENCH.md "Executor, round
   18"). Lane C, all three servers at max_parallel_workers_per_gather 2, max_parallel_workers 8
