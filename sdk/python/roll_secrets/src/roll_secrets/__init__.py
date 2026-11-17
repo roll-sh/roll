@@ -43,15 +43,28 @@ class Problem:
 
 
 @dataclass
+class Followed:
+    """A key left out because it links a resource the environment's preview branched: roll
+    previews sets ``name`` from its branch's ``field``."""
+
+    name: str
+    kind: str
+    parent: str
+    field: str
+
+
+@dataclass
 class Values:
     """An environment's values. ``dynamic`` keys hold a credential that ends with its lease
-    (``leases``; ``renew`` keeps it); ``linked`` keys come from a link to a resource."""
+    (``leases``; ``renew`` keeps it); ``linked`` keys come from a link to a resource; ``followed``
+    keys link a resource a preview branched, and aren't in ``values``."""
 
     values: Dict[str, str]
     problems: List[Problem] = field(default_factory=list)
     leases: List[str] = field(default_factory=list)
     dynamic: List[str] = field(default_factory=list)
     linked: List[str] = field(default_factory=list)
+    followed: List[Followed] = field(default_factory=list)
 
     @staticmethod
     def _of(d: Dict[str, Any], values: Optional[Dict[str, str]] = None) -> "Values":
@@ -61,6 +74,7 @@ class Values:
             leases=list(d.get("leases") or []),
             dynamic=list(d.get("dynamic") or []),
             linked=list(d.get("linked") or []),
+            followed=[Followed(f["name"], f["kind"], f["parent"], f["field"]) for f in d.get("followed") or []],
         )
 
 

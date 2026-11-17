@@ -46,11 +46,54 @@ pub(crate) struct EnvRow {
     pub notify: Option<String>,
     /// An ephemeral environment whose readers may see a protected base (its code was vetted).
     pub trusted: bool,
+    /// The resources its preview branched: links to them aren't followed ([`Branch`]).
+    pub branches: Vec<Branch>,
+}
+
+/// A resource an ephemeral environment's preview branched (docs/secrets.md, "Ephemeral
+/// environments (previews)"): a key linked to `(kind, parent)` doesn't resolve there, so no value
+/// of the parent's ever leaves roll secrets; the answer names it in `followed` and roll previews
+/// sets it from its branch.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Branch {
+    /// The link kind (`postgres`, `redis`, `bucket`, `stream`, `search`…).
+    pub kind: String,
+    /// The branched resource's id, as links name it (`Link::ref`).
+    pub parent: String,
+}
+
+/// The most branches one environment lists.
+const MAX_BRANCHES: usize = 64;
+
+/// `list` checked, sorted and without repeats.
+fn branches(mut list: Vec<Branch>) -> Result<Vec<Branch>> {
+    for b in &list {
+        if b.kind.is_empty() || b.kind.len() > 32 || !b.kind.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-') {
+            return Err(Error::BadRequest("a branch's kind is 1–32 characters of [a-z0-9_-] (postgres, redis, bucket…)".into()));
+        }
+        if b.parent.is_empty() || b.parent.len() > 200 || b.parent.chars().any(char::is_control) {
+            return Err(Error::BadRequest("a branch's parent is the branched resource's id (1–200 characters)".into()));
+        }
+    }
+    list.sort();
+    list.dedup();
+    if list.len() > MAX_BRANCHES {
+        return Err(Error::BadRequest(format!("at most {MAX_BRANCHES} branches")));
+    }
+    Ok(list)
+}
+
+/// Whether `caller` may add to an environment's branches: roll previews (the operator, as its
+/// adapter calls the API, or its in-process consumer). An entry changes what previews must fill,
+/// so nobody else adds one; anyone who may ensure the environment may remove one.
+fn sets_branches(caller: &Caller) -> bool {
+    caller.principal == "operator" || (caller.runtime && caller.principal == crate::access::PREVIEWS)
 }
 
 const ENV_COLUMNS: &str = "id, project_id, slug, name, position, kind, base_id, labels, expires_at, protected, approvals, approvers, created_at";
 /// What reads select: the columns above, and the ones added since.
-const ENV_SELECT: &str = "id, project_id, slug, name, position, kind, base_id, labels, expires_at, protected, approvals, approvers, created_at, max_age_days, notify_host, COALESCE(trusted, 0)";
+const ENV_SELECT: &str = "id, project_id, slug, name, position, kind, base_id, labels, expires_at, protected, approvals, approvers, created_at, max_age_days, notify_host, COALESCE(trusted, 0), branches";
 
 fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
     let kind: String = r.get(5)?;
@@ -71,6 +114,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         max_age_days: r.get(13)?,
         notify: r.get(14)?,
         trusted: r.get::<_, i64>(15)? != 0,
+        branches: r.get::<_, Option<String>>(16)?.map(|s| from_json(&s)).unwrap_or_default(),
     })
 }
 
@@ -98,6 +142,9 @@ pub struct Environment {
     /// An ephemeral environment that may read a protected base (else it reads it as an untrusted
     /// consumer would: not at all).
     pub trusted: bool,
+    /// An ephemeral environment's branched resources: keys linked to them are `followed`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<Branch>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -120,6 +167,9 @@ pub struct NewEnvironment {
     /// base. Needs `admin` on that base. Default: untrusted.
     #[serde(default)]
     pub trusted: bool,
+    /// An ephemeral environment's branched resources (roll previews only).
+    #[serde(default)]
+    pub branches: Vec<Branch>,
 }
 
 /// `PUT …/environments/{env}`: what an environment should be (docs/secrets.md, "Ensuring an
@@ -142,6 +192,8 @@ pub struct Ensure {
     /// Also delete the folder's own keys `secrets` doesn't name (never a linked or personal one).
     #[serde(default)]
     pub replace: bool,
+    /// An ephemeral environment's branched resources: replaces the list; absent keeps it.
+    pub branches: Option<Vec<Branch>>,
 }
 
 /// What ensuring did.
@@ -238,6 +290,7 @@ pub(crate) fn insert(
         max_age_days: None,
         notify: None,
         trusted: false,
+        branches: vec![],
     })
 }
 
@@ -283,6 +336,7 @@ fn view(c: &Conn<'_>, rows: Vec<EnvRow>) -> Result<Vec<Environment>> {
             max_age_days: e.max_age_days,
             notify: e.notify,
             trusted: e.trusted,
+            branches: e.branches,
         })
         .collect())
 }
@@ -308,7 +362,7 @@ impl Secrets {
     pub fn ensure_environment(&self, project: &str, slug: &str, e: Ensure, caller: &Caller) -> Result<Ensured> {
         let found = self.db.read(|c| Ok::<_, Error>(by_slug(c, project, slug).ok()))?;
         let Some(env) = found else {
-            let new = NewEnvironment { slug: slug.to_string(), name: e.name, kind: e.kind, base: e.base, labels: e.labels.unwrap_or_default(), expires_at: e.expires_at, ttl_minutes: e.ttl_minutes, secrets: e.secrets, path: e.path, trusted: e.trusted };
+            let new = NewEnvironment { slug: slug.to_string(), name: e.name, kind: e.kind, base: e.base, labels: e.labels.unwrap_or_default(), expires_at: e.expires_at, ttl_minutes: e.ttl_minutes, secrets: e.secrets, path: e.path, trusted: e.trusted, branches: e.branches.unwrap_or_default() };
             let environment = self.create_environment(project, new, caller)?;
             return Ok(Ensured { environment, created: true, change: None });
         };
@@ -321,8 +375,27 @@ impl Secrets {
         if let Some(l) = &e.labels {
             names::labels(l)?;
         }
+        if e.branches.is_some() && env.kind != Kind::Ephemeral {
+            return Err(Error::BadRequest("branches are an ephemeral environment's (a preview's branched resources)".into()));
+        }
+        let branched = e.branches.map(branches).transpose()?;
         let path = names::path(e.path.as_deref().unwrap_or("/"))?;
         let now = self.db.now_ms()?;
+        // First, so a refused addition changes nothing else. Read and replaced in one write: two
+        // ensures racing can't each pass the check against a list the other changed.
+        if let Some(list) = &branched {
+            self.db.write(|c| {
+                let old: Vec<Branch> = c.query_row("SELECT branches FROM environments WHERE id = ?", [&env.id], |r| r.get::<_, Option<String>>(0))?.map(|s| from_json(&s)).unwrap_or_default();
+                if old == *list {
+                    return Ok(());
+                }
+                if list.iter().any(|b| !old.contains(b)) && !sets_branches(caller) {
+                    return Err(Error::Forbidden("only roll previews adds an environment's branches (removing one is anyone's who may ensure it)".into()));
+                }
+                c.execute("UPDATE environments SET branches = ? WHERE id = ?", params![json(list), env.id])?;
+                audit::record(c, project, caller, "environment.ensure", Some(slug), None, &[], &format!("{slug} leaves links to {} to roll previews", crate::write::plural(list.len(), "branched resource")), now)
+            })?;
+        }
         let expires_at = match (e.expires_at, e.ttl_minutes) {
             (Some(at), _) => Some(at),
             (None, Some(m)) if m > 0 => Some(now + m * 60_000),
@@ -424,6 +497,13 @@ impl Secrets {
         if new.trusted && kind != Kind::Ephemeral {
             return Err(Error::BadRequest("trusted is for ephemeral environments (a standard one reads what its readers may)".into()));
         }
+        let branched = branches(new.branches)?;
+        if !branched.is_empty() && kind != Kind::Ephemeral {
+            return Err(Error::BadRequest("branches are an ephemeral environment's (a preview's branched resources)".into()));
+        }
+        if !branched.is_empty() && !sets_branches(caller) {
+            return Err(Error::Forbidden("only roll previews adds an environment's branches".into()));
+        }
         let items = crate::write::items(&path, &new.secrets, caller)?;
         self.check_items(project, &new.slug, &items, caller)?;
         self.check_types(project, &items)?;
@@ -450,6 +530,10 @@ impl Secrets {
             if new.trusted {
                 c.execute("UPDATE environments SET trusted = 1 WHERE id = ?", [&env.id])?;
                 env.trusted = true;
+            }
+            if !branched.is_empty() {
+                c.execute("UPDATE environments SET branches = ? WHERE id = ?", params![json(&branched), env.id])?;
+                env.branches = branched.clone();
             }
             audit::record(c, project, caller, "environment.create", Some(&env.slug), None, &[], &format!("created {} environment {}", kind.as_str(), env.slug), now)?;
             if !items.is_empty() {
