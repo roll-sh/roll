@@ -269,5 +269,27 @@ async fn an_inference_endpoint_keyed_by_a_secret_follows_its_rotation() {
     assert_eq!((b["bindings"][0]["key"].as_str(), b["bindings"][0]["status"].as_str()), (Some("OPENAI_API_KEY"), Some("ok")), "{b}");
     let (_, b) = send(Method::POST, &format!("/v1/search/clusters/{cluster}/request"), json!({ "method": "GET", "path": "/_inference/emb" })).await;
     assert!(!b.to_string().contains("sk-"), "{b}");
-    assert!(!rolld.stdout.lock().unwrap().iter().any(|l| l.contains("sk-first") || l.contains("sk-second")), "a value in rolld's log");
+
+    // Recreated by someone who may change the cluster but not reveal the key: same id, service and
+    // URL, one header more. The next rotation isn't sent there.
+    let es = |method: &str, path: &str, body: Value| json!({ "method": method, "path": path, "body": body });
+    let (_, b) = send(Method::POST, &format!("/v1/search/clusters/{cluster}/request"), es("DELETE", "/_inference/text_embedding/emb", Value::Null)).await;
+    assert_eq!(b["status"].as_u64(), Some(200), "{b}");
+    let again = json!({ "service": "openai", "service_settings": { "api_key": "sk-their-own", "model_id": "m", "url": format!("{mock}/v1/embeddings") }, "task_settings": { "headers": { "X-Route": "theirs" } } });
+    let (_, b) = send(Method::POST, &format!("/v1/search/clusters/{cluster}/request"), es("PUT", "/_inference/text_embedding/emb", again)).await;
+    assert_eq!(b["status"].as_u64(), Some(200), "{b}");
+    let (s, b) = send(Method::PUT, &key, json!({ "value": "sk-third-value" })).await;
+    assert!(s < 300, "{b}");
+    let started = Instant::now();
+    loop {
+        let (_, b) = send(Method::GET, &format!("/v1/search/clusters/{cluster}/inference/secrets"), Value::Null).await;
+        if b["bindings"][0]["status"] == "error" {
+            assert!(b["bindings"][0]["error"].as_str().is_some_and(|e| e.contains("settings changed")), "{b}");
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(30), "the push never refused: {b}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(!seen.lock().unwrap().iter().any(|a| a.contains("sk-third")), "the rotated key reached a recreated endpoint");
+    assert!(!rolld.stdout.lock().unwrap().iter().any(|l| l.contains("sk-first") || l.contains("sk-second") || l.contains("sk-third")), "a value in rolld's log");
 }

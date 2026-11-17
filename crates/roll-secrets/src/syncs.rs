@@ -116,7 +116,8 @@ pub trait SyncTarget: Send + Sync {
     /// A kind a product's own route makes (`Secrets::create_product_sync`), never `POST …/syncs`:
     /// the product checked its side (roll search: who may change the cluster). It isn't offered
     /// in `GET …/syncs`, and `reveal` on the folder is enough to make, run or delete one, as
-    /// reading the value and pasting it into the product would be.
+    /// reading the value and pasting it into the product would be (`admin` may delete one too:
+    /// it doesn't include `reveal`, and stopping a sync sends nothing).
     fn internal(&self) -> bool {
         false
     }
@@ -347,8 +348,9 @@ impl Secrets {
         self.make_sync(project, n, caller, true)
     }
 
-    /// What making, running or deleting a sync of `kind` needs: `admin` (it sends values out of
-    /// roll), `reveal` for a product's own kind.
+    /// What making or running a sync of `kind` needs: `admin` (it sends values out of roll),
+    /// `reveal` for a product's own kind. Deleting one needs the same, or `admin` for a product's
+    /// own kind too (`admin` doesn't include `reveal`, and stopping a sync sends nothing).
     fn sync_needs(&self, kind: &str) -> Action {
         match self.syncs.get(kind) {
             Ok(t) if t.internal() => Action::Reveal,
@@ -441,7 +443,10 @@ impl Secrets {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let r = self.sync_row(project, id)?;
-        caller.need(self.sync_needs(&r.info.kind), &Scope::at(project, &r.info.environment, &r.info.path))?;
+        let scope = Scope::at(project, &r.info.environment, &r.info.path);
+        if !caller.allows(Action::Admin, &scope) {
+            caller.need(self.sync_needs(&r.info.kind), &scope)?;
+        }
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             c.execute("DELETE FROM syncs WHERE id = ?", [id])?;

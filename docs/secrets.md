@@ -1372,9 +1372,13 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   (`Workspace::trusts`). `GET` on the same route lists the endpoints that follow a secret and the
   projects whose secrets may key one.
 - The sync pushes the key whenever its value changes (the sweeper; `POST …/syncs/{id}/run` pushes
-  it now, the tab's refresh), as its maker. It pins the endpoint's service and URL: when either
-  changed since the key was bound, the push refuses, so someone who may change the cluster but not
-  reveal the key can't point the endpoint elsewhere and wait for the next rotation. Its errors name
+  it now, the tab's refresh), as its maker. It pins where the endpoint sends the key: a SHA-256 of
+  canonical JSON of its service, task type, service settings (all but `api_key`, `rate_limit`,
+  `num_allocations` and `adaptive_allocations`: a URL, an Azure resource and deployment, a target,
+  a host) and all of its task settings (they can carry headers, and `custom`'s request). On any
+  difference the push refuses, so someone who may change the cluster but not reveal the key can't
+  recreate or repoint the endpoint and wait for the next rotation; creating it again from the
+  Inference tab binds it anew. Its errors name
   the endpoint and Elasticsearch's error type, never the provider's message (it can quote part of
   a key).
 - Deleting the endpoint from the tab deletes its sync; one deleted another way leaves the sync,
@@ -1753,7 +1757,8 @@ last_synced_at, error}`:
   product's route (`Secrets::create_product_sync`), never `POST …/syncs` (400), and aren't offered
   in `GET …/syncs`'s `kinds`; they're listed, run and deleted like any sync. The product checks its
   own side (roll search: who may change the cluster), and `reveal` on the folder is enough to make,
-  run or delete one, as reading the value and pasting it there would be.
+  run or delete one, as reading the value and pasting it there would be; `admin` may delete one
+  too (it doesn't include `reveal`, and stopping a sync sends nothing).
 - **Who.** Creating, deleting and running a sync need `admin` on its environment: it sends values
   out of roll. Listing needs `read` and shows the syncs of environments the caller can read.
 
@@ -1768,7 +1773,7 @@ last_synced_at, error}`:
 | `google-secret-manager` | `{project, prefix?, service_account_key}` | one Secret Manager secret per key, `<prefix><KEY>`, each change a new version |
 | `azure-key-vault` | `{vault, tenant_id, client_id, client_secret_key}` | one Key Vault secret per key (`_` becomes `-`) |
 | `aws-secrets-manager` | `{region, secret_name: "shop/production", access_key_id_key, secret_access_key_key, kms_key_id?}` | one Secrets Manager secret: the environment's values as a JSON object |
-| `search-inference` | `{cluster, endpoint, service, url?}` (made by roll search, see "roll search's inference endpoints") | one key: a roll search inference endpoint's `api_key` (`PUT _inference/{task}/{endpoint}/_update`) |
+| `search-inference` | `{cluster, endpoint, service, pin}` (made by roll search, see "roll search's inference endpoints") | one key: a roll search inference endpoint's `api_key` (`PUT _inference/{task}/{endpoint}/_update`) |
 
 ### `github`
 

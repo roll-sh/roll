@@ -10,10 +10,13 @@
 //! updates every endpoint keyed by it. The Elasticsearch `_inference` API is unchanged (clients
 //! send keys).
 //!
-//! The sync pins the endpoint's service and URL: someone who may change the cluster but not
-//! reveal the key can't point the endpoint elsewhere and wait for the next rotation (the push
-//! refuses). Push errors name the endpoint and Elasticsearch's error type, never its reason (a
-//! provider's message can quote part of a key).
+//! The sync pins where the endpoint sends its key ([`pin`]): a digest of its service, task type,
+//! service settings (all but those that don't pick the destination) and task settings. Someone
+//! who may change the cluster but not reveal the key can't point the endpoint elsewhere (another
+//! URL, an Azure resource, a header) and wait for the next rotation: the push refuses on any
+//! difference, and creating the endpoint again from the Inference tab binds it anew. Push errors
+//! name the endpoint and Elasticsearch's error type, never its reason (a provider's message can
+//! quote part of a key).
 
 use super::super::Api;
 use axum::Json as Answer;
@@ -37,19 +40,18 @@ fn seg(s: &str) -> String {
     urlencoding::encode(s).into_owned()
 }
 
-/// What a `search-inference` sync pushes to: the cluster (its id), the endpoint, and the
-/// service and URL the endpoint had when its key was bound.
+/// What a `search-inference` sync pushes to: the cluster (its id), the endpoint, its service
+/// (shown), and the [`pin`] of the endpoint when its key was bound.
 struct Target {
     cluster: String,
     endpoint: String,
-    service: String,
-    url: Option<String>,
+    pin: String,
 }
 
 impl Target {
     fn parse(t: &Json) -> Result<Target> {
-        let [cluster, endpoint, service, url] = super::target(KIND, t, [("cluster", true), ("endpoint", true), ("service", true), ("url", false)])?;
-        Ok(Target { cluster: cluster.unwrap_or_default(), endpoint: endpoint.unwrap_or_default(), service: service.unwrap_or_default(), url })
+        let [cluster, endpoint, _service, pin] = super::target(KIND, t, [("cluster", true), ("endpoint", true), ("service", true), ("pin", true)])?;
+        Ok(Target { cluster: cluster.unwrap_or_default(), endpoint: endpoint.unwrap_or_default(), pin: pin.unwrap_or_default() })
     }
 
     fn fail(&self, what: impl std::fmt::Display) -> Error {
@@ -68,6 +70,59 @@ fn es(api: &Api, cluster: &str, method: &str, path: &str, body: Option<Json>) ->
     let status = v["status"].as_u64().unwrap_or(0) as u16;
     let body = v["body"].as_str().and_then(|b| serde_json::from_str(b).ok()).unwrap_or(Json::Null);
     Ok((status, body))
+}
+
+/// Service settings that don't pick where a request goes: the key itself and how much is sent.
+const UNPINNED: [&str; 4] = ["api_key", "rate_limit", "num_allocations", "adaptive_allocations"];
+
+/// Where an endpoint (as `_inference` prints it) sends its key: a SHA-256 of canonical JSON (keys
+/// sorted) of its service, task type, service settings but [`UNPINNED`] (a URL, an Azure
+/// resource and deployment, a target, a host…) and all of its task settings (they can carry
+/// headers, and `custom`'s request). Strict on purpose: binding again costs a click.
+fn pin(endpoint: &Json) -> String {
+    use sha2::{Digest, Sha256};
+    fn canonical(v: &Json, out: &mut String) {
+        match v {
+            Json::Object(m) => {
+                let mut keys: Vec<&String> = m.keys().collect();
+                keys.sort();
+                out.push('{');
+                for (i, k) in keys.into_iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&Json::String(k.clone()).to_string());
+                    out.push(':');
+                    canonical(&m[k], out);
+                }
+                out.push('}');
+            }
+            Json::Array(a) => {
+                out.push('[');
+                for (i, x) in a.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    canonical(x, out);
+                }
+                out.push(']');
+            }
+            other => out.push_str(&other.to_string()),
+        }
+    }
+    let mut settings = endpoint["service_settings"].as_object().cloned().unwrap_or_default();
+    for k in UNPINNED {
+        settings.remove(k);
+    }
+    let what = json!({
+        "service": endpoint["service"],
+        "task_type": endpoint["task_type"],
+        "service_settings": settings,
+        "task_settings": endpoint.get("task_settings").cloned().unwrap_or_else(|| json!({})),
+    });
+    let mut text = String::new();
+    canonical(&what, &mut text);
+    Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Elasticsearch's error type: never its reason, which can quote a provider's message.
@@ -116,8 +171,8 @@ impl SyncTarget for InferenceKeys {
             return Err(t.fail(es_error(status, &v)));
         }
         let e = &v["endpoints"][0];
-        if e["service"].as_str() != Some(t.service.as_str()) || e["service_settings"]["url"].as_str() != t.url.as_deref() {
-            return Err(t.fail("its service or URL changed since its key was bound to the secret, so the new key isn't sent: create the endpoint again from the cluster's Inference tab"));
+        if pin(e) != t.pin {
+            return Err(t.fail("its settings changed since its key was bound to the secret (where it sends the key may differ), so the new key isn't sent: create the endpoint again from the cluster's Inference tab"));
         }
         // An update names the task type (the path's, or the body's).
         let task = e["task_type"].as_str().ok_or_else(|| t.fail("roll search answered no task type"))?;
@@ -284,7 +339,7 @@ async fn create(State(x): State<Ctx>, Path(id): Path<String>, parts: Parts, body
             "cluster": cluster,
             "endpoint": n.inference_id,
             "service": made["service"],
-            "url": made["service_settings"]["url"],
+            "pin": pin(&made),
         });
         let sync = NewSync { environment: s.environment.clone(), path: Some(path), kind: KIND.into(), target, keys: Some(vec![s.key.clone()]), prefix: None };
         let made_sync = match x.secrets.create_product_sync(&project, sync, &caller) {
