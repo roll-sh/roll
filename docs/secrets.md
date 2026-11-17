@@ -2798,7 +2798,8 @@ credential checked at registration), #97 (search keys say `access: data`), #102 
 service-account tokens), #105 (Java), #110 (.NET with `IConfiguration`), #113 (an AWS Lambda
 extension that logs in with the function's role), #117 (an Ansible collection), #132 (LDAP and
 Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (Pulumi), #147
-(approvals in the audit, on #114).
+(approvals in the audit, on #114) and #165 (Elasticsearch, OpenSearch, Cassandra and ScyllaDB
+outside roll, on #132).
 
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
@@ -2817,9 +2818,11 @@ Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (
    previous password, now closed by a throwaway reset first; logins also hand out the UPN and
    `sAMAccountName`. Left for a Windows Server: its password policies, AD CS certificates, LDAP
    signing and channel binding, replication between domain controllers (an account of the user's).
-4b. **Elasticsearch/OpenSearch and Cassandra/ScyllaDB outside roll** (building:
-   `feature/roll-secrets-outside-search-cql`, on #132): Vault's database engine has both; two
-   roles taking turns and a login per lease, as the other outside engines, each checked live.
+4b. **Elasticsearch, OpenSearch, Cassandra and ScyllaDB outside roll** (#165, on #132): Vault's
+   database engine has them; two roles taking turns and a login per lease, each checked live
+   (Elasticsearch 9.5.5, OpenSearch 3.9.0, Cassandra 5.0.9, ScyllaDB 2026.3.3). Cassandra's
+   credentials cache let a dropped role in for ~1.6 s, so a lease's end sets a password nobody knows
+   first. Next: OpenSearch's narrower permission set, and Couchbase and Oracle (Vault has both).
 5. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
    backup schedules, rotation windows, directories, Snowflake accounts, ACME bindings): the
    resources once their routes are on main, the tools with roll MCP.
