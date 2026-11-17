@@ -1,6 +1,6 @@
 import { Building2, Check, Copy, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { accountsApi, refreshSession, useSession, type Invite, type Provider, type Session, type User } from "@/lib/accounts-api";
+import { accountsApi, activityText, refreshSession, useSession, type Activity, type Invite, type Provider, type Session, type User } from "@/lib/accounts-api";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { SsoSection } from "./account-sso";
 import { AppShell } from "./app-shell";
@@ -41,6 +41,7 @@ export function AccountPage() {
           <Methods user={user} />
           <TwoFactor user={user} onChange={reload} />
           <Sessions />
+          <RecentActivity me={user.id} />
           {user.admin && <Invites />}
           {user.admin && <Users me={user.id} />}
           {user.admin && <SsoSection />}
@@ -322,6 +323,47 @@ const browser = (ua: string) => {
   const os = /Mac OS X/.test(ua) ? "macOS" : /Windows/.test(ua) ? "Windows" : /Android/.test(ua) ? "Android" : /iPhone|iPad/.test(ua) ? "iOS" : /Linux/.test(ua) ? "Linux" : "";
   return os ? `${name} on ${os}` : name;
 };
+
+/** Your security log (GitHub's): sign-ins, refused ones too, and changes to your account. */
+function RecentActivity({ me }: { me: string }) {
+  const [list, setList] = useState<Activity[] | null>(null);
+  const [more, setMore] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(
+    (before?: number) =>
+      accountsApi.activity(before).then(
+        ({ events }) => {
+          setList((l) => (before && l ? [...l, ...events] : events));
+          setMore(events.length >= 50);
+        },
+        (e) => setError(errorText(e)),
+      ),
+    [],
+  );
+  useEffect(() => void load(), [load]);
+  return (
+    <Section id="activity" title="Recent activity" lead="Sign-ins to your account, refused ones too, and every change to it. Something you don't recognise? End your other sessions and tell an admin.">
+      {error && <p className="text-[12px] text-danger">{error}</p>}
+      {list && list.length === 0 && <p className="text-[12.5px] text-subtle">Nothing yet.</p>}
+      {list && list.length > 0 && (
+        <div className={card}>
+          {list.map((e, i) => (
+            <div key={`${e.at}-${i}`} className="flex items-baseline gap-3 border-t border-line px-4 py-2.5 first:border-t-0 text-[12.5px]">
+              <span className={`min-w-0 flex-1 ${e.ok ? "" : "text-danger"}`}>{activityText(e, me)}</span>
+              <span className="hidden truncate font-mono text-[11px] text-subtle sm:inline">{[e.ip, e.user_agent?.split(" ")[0]].filter(Boolean).join(" · ")}</span>
+              <span className="shrink-0 text-[11px] text-subtle">{when(e.at)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {more && list && (
+        <button onClick={() => void load(list[list.length - 1].at)} className={`${btn} mt-2`}>
+          Older
+        </button>
+      )}
+    </Section>
+  );
+}
 
 function Invites() {
   const [list, setList] = useState<Invite[] | null>(null);

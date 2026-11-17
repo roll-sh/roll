@@ -394,6 +394,7 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | `GET /v1/accounts/me` | | `User` |
 | `PATCH /v1/accounts/me` | `{name}` | `User` (1–100 characters) |
 | `GET /v1/accounts/me/sessions` | | `Session[]`, newest first |
+| `GET /v1/accounts/me/activity` | query `before?` (Unix ms), `limit?` (1–200, 50) | `{events: [{at, action, actor, ok, status, ip, user_agent, detail}]}`: your security log, newest first |
 | `DELETE /v1/accounts/me/sessions/{id}` | | 204; 404 if it isn't yours |
 | `DELETE /v1/accounts/me/identities/{provider}` | | 204; 404 if not linked |
 | `POST /v1/accounts/me/totp` | | `{secret, otpauth_url, qr_png}` (`qr_png` a `data:image/png;base64,…` URL): a new seed, not on until confirmed; 409 if on; 503 `{code: "secret_key"}` without `ROLL_SECRET_KEY` |
@@ -441,6 +442,12 @@ and the SIEM sinks), as Okta's System Log and GitHub's audit log keep them:
 
 Never a body: no code, token, secret or password is in an event. Starting a sign-in isn't
 recorded (its end is).
+
+Each person reads their own (`GET /v1/accounts/me/activity`, "Recent activity" on the account
+page, as GitHub's security log): their sign-ins, refused ones too, with the method, address and
+device, and every change to their account, whoever made it (them, an admin, SCIM). An event is
+theirs when it's about them: its resource is their id (a person's own routes, `/v1/accounts/me…`,
+are about them).
 
 ## Mail
 
