@@ -60,6 +60,15 @@ pub struct Outcome {
     pub exception: Option<Value>,
 }
 
+impl Outcome {
+    /// A failed execution that ran nothing: the user or API key the watch runs as can no longer
+    /// act ([`crate::xpack::internal::principal_refusal`]).
+    pub fn refused(mut status: Map, e: &EsError) -> Outcome {
+        status.insert("execution_state".into(), "failed".into());
+        Outcome { state: "failed", status, input: Value::object(), condition: None, transform: None, actions: Vec::new(), messages: Vec::new(), exception: Some(e.to_value(false)) }
+    }
+}
+
 /// A step's result: its type, outcome and type-specific fields.
 struct StepResult {
     ty: String,

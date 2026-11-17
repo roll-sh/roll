@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { accessApi, auditWho, describeRule, productName, RISKY, statusOf, type AgentSees, type Approval, type AuditEvent, type Grant, type Tightened } from "@/lib/access-api";
+import { accessApi, auditWho, describeRule, productName, proposedRule, RISKY, statusOf, type AgentSees, type Approval, type AuditEvent, type Grant, type Tightened } from "@/lib/access-api";
 import { loadInventory, resourcesByProduct } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { Link } from "../link";
@@ -32,7 +32,7 @@ function Token({ id }: { id: string }) {
       .catch(() => {});
   }, []);
   const projectName = (p: string) => ws.projects.find((x) => x.id === p)?.name ?? p;
-  const resourceName = (product: string, r: string) => inventory[product]?.find((x) => x.id === r)?.name ?? r;
+  const resourceName = (product: string, r: string) => inventory[product]?.find((x) => x.id === r)?.name ?? (product === "workspace" ? projectName(r) : r);
 
   return (
     <AccessShell tab="overview">
@@ -65,6 +65,7 @@ function Token({ id }: { id: string }) {
                 <p className="text-[12px] text-subtle">{g.ask_otherwise ? "Anything else waits for your approval." : "Anything else is refused."}</p>
               </div>
             </Panel>
+            {statusOf(g) === "active" && <Proposed g={g} refresh={refresh} projectName={projectName} resourceName={resourceName} />}
             {statusOf(g) === "active" && <Temporary g={g} refresh={refresh} projectName={projectName} resourceName={resourceName} />}
             {statusOf(g) === "active" && <Tighten g={g} refresh={refresh} projectName={projectName} resourceName={resourceName} />}
             {sees && <AgentSeesPanel sees={sees} />}
@@ -350,6 +351,66 @@ function Requests({ id, events }: { id: string; events: AuditEvent[] | null }) {
           </li>
         </ul>
       )}
+    </Panel>
+  );
+}
+
+/**
+ * What a refused request proposed (roll's `widen` link: `?add=product:action&id=…`): the person
+ * allows it, has it ask each time, or lets it be. Nothing changes until they choose.
+ */
+function Proposed({
+  g,
+  refresh,
+  projectName,
+  resourceName,
+}: {
+  g: Grant;
+  refresh: () => Promise<void>;
+  projectName: (p: string) => string;
+  resourceName: (product: string, r: string) => string;
+}) {
+  const [search, setSearch] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => setSearch(window.location.search), []);
+  const allow = proposedRule(search, "allow");
+  if (!allow) return null;
+  const dismiss = () => {
+    window.history.replaceState(null, "", window.location.pathname);
+    setSearch("");
+  };
+  const add = async (effect: "allow" | "ask") => {
+    setBusy(true);
+    setError(null);
+    try {
+      await accessApi.update(g.id, { rules: [...g.rules, proposedRule(search, effect)!] });
+      dismiss();
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Panel title="Asked for">
+      <div className="space-y-3 p-5 text-[13px]">
+        <p className="text-muted">A request with this token was refused. Let it do this too?</p>
+        <p>{describeRule(allow, projectName, resourceName)}</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <button onClick={() => void add("allow")} disabled={busy} className={primary}>
+            Allow
+          </button>
+          <button onClick={() => void add("ask")} disabled={busy} className={btn}>
+            Ask me each time
+          </button>
+          <button onClick={dismiss} disabled={busy} className="text-[12px] text-muted hover:text-fg">
+            Not now
+          </button>
+        </div>
+        <ErrorNote error={error} />
+      </div>
     </Panel>
   );
 }
