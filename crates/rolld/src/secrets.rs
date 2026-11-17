@@ -39,9 +39,17 @@ impl Api {
     /// Call a product's route as the operator: its status and JSON answer, whatever the status.
     /// Runs on the store's blocking threads.
     fn call_status(&self, method: Method, path: &str, body: Option<Json>) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
+        self.call_status_as(method, path, body, |e| {
+            e.insert(roll_auth::Operator);
+        })
+    }
+
+    /// [`Api::call_status`] as whoever `who` puts on the request (`Operator`, `SignedIn`), so the
+    /// product scopes the answer to them (roll search: a person's own clusters).
+    fn call_status_as(&self, method: Method, path: &str, body: Option<Json>, who: impl FnOnce(&mut axum::http::Extensions)) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
         let router = self.0.get().ok_or_else(|| Error::Link("the product APIs aren't up yet".into()))?.clone();
         let mut req = Request::builder().method(method).uri(path).header("content-type", "application/json");
-        req.extensions_mut().map(|e| e.insert(roll_auth::Operator));
+        req.extensions_mut().map(who);
         let req = req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).map_err(|e| Error::Internal(e.to_string()))?;
         tokio::runtime::Handle::current().block_on(async move {
             let resp = router.oneshot(req).await.map_err(|e| Error::Link(e.to_string()))?;

@@ -207,9 +207,18 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'sta
 }
 
 impl Ctx {
-    /// The cluster's id, from its id or name.
-    fn cluster(&self, id: &str) -> Result<String> {
-        match self.api.call_status(Method::GET, &format!("/v1/search/clusters/{}", seg(id)), None)? {
+    /// The cluster's id, from its id or name, looked up as the caller: someone else's cluster is
+    /// a 404, as everywhere in roll search (a signed-in person sees their own).
+    fn cluster(&self, id: &str, parts: &Parts) -> Result<String> {
+        let who = |e: &mut axum::http::Extensions| {
+            if let Some(o) = parts.extensions.get::<roll_auth::Operator>() {
+                e.insert(*o);
+            }
+            if let Some(s) = parts.extensions.get::<roll_auth::SignedIn>() {
+                e.insert(s.clone());
+            }
+        };
+        match self.api.call_status_as(Method::GET, &format!("/v1/search/clusters/{}", seg(id)), None, who)? {
             (s, v) if s.is_success() => v["id"].as_str().map(str::to_string).ok_or_else(|| Error::Internal("roll search answered no cluster id".into())),
             (StatusCode::NOT_FOUND, _) => Err(Error::NotFound(format!("no search cluster {id}"))),
             (s, _) => Err(Error::Link(format!("roll search: {}", s.as_u16()))),
@@ -245,7 +254,7 @@ fn binding(project: &str, s: &roll_secrets::SecretSync) -> Json {
 async fn list(State(x): State<Ctx>, Path(id): Path<String>, parts: Parts) -> Result<Response> {
     let v = blocking(move || {
         let caller = x.secrets.caller(&parts)?;
-        let cluster = x.cluster(&id)?;
+        let cluster = x.cluster(&id, &parts)?;
         let projects = x.projects(&cluster, &caller)?;
         let mut bindings = vec![];
         for (p, _) in &projects {
@@ -293,7 +302,7 @@ async fn create(State(x): State<Ctx>, Path(id): Path<String>, parts: Parts, body
     let n: NewEndpoint = serde_json::from_slice(&body).map_err(|e| bad(format!("invalid body: {e}")))?;
     blocking(move || {
         let caller = x.secrets.caller(&parts)?;
-        let cluster = x.cluster(&id)?;
+        let cluster = x.cluster(&id, &parts)?;
         let projects = x.projects(&cluster, &caller)?;
         let s = &n.secret;
         let project = match (&s.project, projects.as_slice()) {
