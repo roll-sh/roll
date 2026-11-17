@@ -853,10 +853,41 @@ pub fn compose_mappings(sources: &[Map], ctx: &MappingCtx) -> Result<Mapping, Es
     let mut acc = Mapping::empty();
     for src in sources {
         let m = Mapping::parse(src, ctx).map_err(|e| ctx.wrap_parse_error(e))?;
+        // Strict columnar mappings flatten objects into dotted leaves at the root, but a
+        // template's object still replaces an earlier field of its name (an object `@timestamp`
+        // drops the default `@timestamp` date), as the merge of unflattened mappers does.
+        if ctx.columnar.is_some()
+            && let Some(Value::Obj(props)) = src.get("properties")
+        {
+            let mut objects = Vec::new();
+            object_paths(props, "", &mut objects);
+            for p in objects {
+                if matches!(acc.root.children.get(&p), Some(crate::mapping::Mapper::Field(_))) {
+                    acc.root.children.remove(&p);
+                }
+            }
+        }
         acc = acc.merge(&m, ctx, MergeReason::IndexTemplate)?;
     }
     acc.validate(ctx)?;
     Ok(acc)
+}
+
+/// The full paths of the object definitions (`properties` without a leaf `type`) in a
+/// mapping's `properties`.
+fn object_paths(props: &Map, prefix: &str, out: &mut Vec<String>) {
+    for (k, v) in props {
+        let Value::Obj(m) = v else { continue };
+        let leaf = m.get("type").and_then(Value::as_str).is_some_and(|t| t != "object");
+        if leaf || !m.contains_key("properties") {
+            continue;
+        }
+        let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+        if let Some(Value::Obj(inner)) = m.get("properties") {
+            object_paths(inner, &path, out);
+        }
+        out.push(path);
+    }
 }
 
 /// The composable template that applies to a new index, if any.

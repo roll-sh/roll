@@ -133,6 +133,12 @@ fn apps_patch_lends(b: &Value) -> Vec<Lent> {
     out
 }
 
+/// A search cluster made as a branch of `parent` (a body field, unlike `…/{id}/branches`): it
+/// copies the parent's indices, so it needs what branching there does, `write` on the parent.
+fn search_parent(b: &Value) -> Vec<Lent> {
+    b.get("parent").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Write }).into_iter().collect()
+}
+
 /// What an apps link's kind is, as a rule names it: its product and the resource kind its ids are.
 pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
     Some(match kind {
@@ -1087,7 +1093,7 @@ static ROWS: &[Row] = &[
     // ── search (feature/roll-search) ──
     row("GET", "/v1/search", "search", R, Tgt::AnyGrant),
     row("GET", "/v1/search/clusters", "search", R, list("id")).reveals(SEARCH_SECRETS),
-    row("POST", "/v1/search/clusters", "search", W, create("search", "id")).reveals(SEARCH_SECRETS),
+    row("POST", "/v1/search/clusters", "search", W, create("search", "id")).reveals(SEARCH_SECRETS).lends(Lend::Each(search_parent)),
     row("GET", "/v1/search/clusters/{id}", "search", R, one(PG, "cluster")).reveals(SEARCH_SECRETS),
     row("PATCH", "/v1/search/clusters/{id}", "search", ADMIN, one(PG, "cluster")).reveals(SEARCH_SECRETS),
     row("DELETE", "/v1/search/clusters/{id}", "search", D, one(PG, "cluster")),
@@ -1155,9 +1161,11 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/aws-roles", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/aws-roles", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/aws-roles/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/aws-roles/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/aws-users", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/aws-users", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/aws-users/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/aws-users/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/rotators", "secrets", R, one(&["project"], "project")),
     // A signing secret signs calls that mint vendor keys: shown only to who may also reveal.
     row("POST", "/v1/secrets/projects/{project}/rotators", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
@@ -1370,6 +1378,9 @@ static ROWS: &[Row] = &[
     // Accepting a visual change is a person's call (with `visual_review = "required"` previews
     // refuses tokens anyway): admin, so a write token can't wave its own diff through.
     row("POST", "/v1/previews/{id}/visual/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Letting a fork's pull request run with the project's data (a Git URL service's preview,
+    // roll code's `approve-run`): a person's call, as accepting a visual change is.
+    row("POST", "/v1/previews/{id}/approve", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // ── roll code ──
     row("GET", "/v1/code", "code", R, Tgt::AnyGrant),
     row("GET", "/v1/code/health", "code", R, Tgt::AnyGrant),

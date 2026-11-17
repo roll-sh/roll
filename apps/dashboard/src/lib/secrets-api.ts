@@ -252,7 +252,7 @@ export function secretsApi(project: string) {
     deleteCloudAccount: (id: string) => req<null>("DELETE", `${P}/cloud-accounts/${enc(id)}`),
     /** AWS roles for dynamic credentials: registering one assumes it (its trust policy must pin the ExternalId). */
     awsRoles: () => req<AwsRole[]>("GET", `${P}/aws-roles`),
-    addAwsRole: (r: { name: string; role_arn: string }) => req<AwsRole>("POST", `${P}/aws-roles`, r),
+    addAwsRole: (r: { name: string; role_arn: string; trust?: "external_id" | "oidc" }) => req<AwsRole>("POST", `${P}/aws-roles`, r),
     deleteAwsRole: (id: string) => req<null>("DELETE", `${P}/aws-roles/${enc(id)}`),
     /** IAM users whose keys roll rotates as a role: registering one lists its keys as the role. */
     awsUsers: () => req<AwsUser[]>("GET", `${P}/aws-users`),
