@@ -2296,7 +2296,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["deploy.failed", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
+    assert_eq!(hook["events"], json!(["deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");
@@ -2470,6 +2470,8 @@ async fn a_gradual_rollout_shares_requests_and_rolls_back_a_deployment_that_erro
     let d4 = d4["id"].as_str().unwrap().to_string();
     let held = get_until(&w.api, &base, |e| e["canary"]["waiting"] == true).await;
     assert_eq!((held["canary"]["deployment"].as_str(), held["active"]["id"].as_str()), (Some(d4.as_str()), d2["id"].as_str()), "held at 50%, the old one still live: {held}");
+    let events = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    assert!(events["events"].as_array().unwrap().iter().any(|e| e["kind"] == "rollout.waiting" && e["deployment"] == d4.as_str() && e["data"]["share"] == 50), "someone is told: {events}");
     let act = |dep: String, action: &'static str| {
         let (api, base) = (w.api.clone(), base.clone());
         async move { call(&api, "POST", &format!("{base}/deploys/{dep}/rollout"), Some(json!({ "action": action }))).await.0 }
@@ -2583,6 +2585,8 @@ async fn a_deployment_without_traffic_answers_on_its_own_url_until_put_live() {
     assert_eq!(st, StatusCode::ACCEPTED, "{d2}");
     let d2 = settled(&w, &id, "production", d2["id"].as_str().unwrap()).await;
     assert_eq!(d2["status"], "ready", "{d2}");
+    let events = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    assert!(events["events"].as_array().unwrap().iter().any(|e| e["kind"] == "deploy.ready" && e["deployment"] == d2["id"]), "someone is told it waits: {events}");
     assert_eq!(call(&w.api, "GET", &base, None).await.1["active"]["id"], d1["id"], "nothing switched");
     assert_eq!(visit(&w, &h, "/").await.1["deployment"], d1["id"]);
     let (st, v) = visit(&w, &own(&d2["id"]), "/").await;

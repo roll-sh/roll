@@ -851,10 +851,13 @@ impl Apps {
             for i in &made {
                 self.deps.runtime.remove(&i.name).await;
             }
-            let did = d.id.clone();
-            self.db(move |s| s.set_status(&did, &[DeployStatus::Deploying], DeployStatus::Ready, None)).await?;
             let short = d.id.strip_prefix("dep_").unwrap_or(&d.id);
-            log.stream(Stream::System).line(format!("ready, not live: its own URL is {}; roll back to it to put it live", self.url(&format!("{short}--{}", env.slug))));
+            let url = self.url(&format!("{short}--{}", env.slug));
+            // Ready, and someone told to put it live (`deploy.ready`), in one write: whoever sees
+            // it ready sees the event too.
+            let (sid, en, did, data) = (svc.id.clone(), env.name.clone(), d.id.clone(), serde_json::json!({ "revision": d.revision, "url": url }));
+            self.db(move |s| s.set_ready(&did, &sid, &en, &data)).await?;
+            log.stream(Stream::System).line(format!("ready, not live: its own URL is {url}; roll back to it to put it live"));
             return Ok(());
         }
         // A gradual rollout needs something to split: the old deployment running and taking
@@ -982,6 +985,10 @@ impl Apps {
             self.rollout_waits.lock().insert(id.to_string(), gate.clone());
             self.changed(service);
             sys.line(format!("canary: held at {share}% until someone advances it, puts it all live or rolls it back"));
+            // Someone has to say: they're told (`rollout.waiting`), once a step.
+            let (sid, en, did) = (service.to_string(), tpl.spec.env.clone(), id.to_string());
+            let data = serde_json::json!({ "share": share });
+            let _ = self.db(move |s| s.add_event("rollout.waiting", &sid, &en, Some(&did), &data)).await;
             let said = loop {
                 if let Some(a) = gate.0.lock().take() {
                     break a;
