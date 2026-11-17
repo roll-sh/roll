@@ -262,6 +262,41 @@ are kept as hashes, never sealed.
   `http.max_content_length` (charged to the breakers as its write was), listings by pages and
   objects, and a restore checks names and global state as the APIs that set them do. Taking a snapshot reads the open shards' searchers (a closed index's last commit,
   pinned only while it is read), so nothing stays in roll's storage.
+- **Objects and parts** (`api/snapshots/transfer.rs`). A segment's records are one gzip stream
+  cut into objects of `chunk_size` (default and most 5tb, least 5mb, never more than
+  `buffer_size` × `max_multipart_parts`); an object larger than `buffer_size` (5mb to 5gb;
+  default 100mb or 5% of the node's heap, whichever is less) goes up as a multipart upload of
+  `buffer_size` parts, the settings validated with Elasticsearch's messages. One part at a time is
+  held, charged to the `request` breaker, and a restore inflates and indexes records as the
+  bytes arrive, so neither side holds a whole file. An upload that fails is aborted; one a crash
+  left is aborted by `_cleanup` and after snapshot deletions (as Elasticsearch does then), listed
+  by `ListMultipartUploads` under the repository's prefix, at most
+  `max_multipart_upload_cleanup_size` (1,000) at a time, never one running on this node. MinIO
+  lists uploads by exact key only, so it gets none listed and relies on its own 24 h stale-upload
+  expiry. Snapshots written before `chunk_size` (a gzip member per ~8 MiB chunk) read the same.
+- **Throttling.** `max_snapshot_bytes_per_sec` (default 40mb) paces uploads and
+  `max_restore_bytes_per_sec` (default unlimited) a restore's reads, each through one limiter
+  per repository on the node that every transfer shares (as Lucene's `SimpleRateLimiter`, which
+  Elasticsearch uses: bytes pay as they are produced, each payment due one byte-time after the
+  previous one, so producing them overlaps the wait and a burst is at most one payment). A
+  restore also pays the cluster's `indices.recovery.max_bytes_per_sec` (default 40mb), as
+  Elasticsearch's restores do: roll has no peer recovery, so this is the setting's only effect.
+  Repository analysis pays the same limits. `_nodes/stats/repositories` reports
+  Elasticsearch's counters: throttled read and write time, shard snapshots started, completed and
+  in progress, blobs and bytes uploaded, upload and read time. Elasticsearch has no throttle time
+  in `_snapshot/_status` and none from repositories in `_recovery`, and neither has roll.
+- **Analysis** (`POST _snapshot/<repo>/_analyze`, `api/snapshots/analyze.rs`). On an `s3`
+  repository it exercises the bucket under `roll/temp-analysis-<id>/`: a contended register
+  (`register_operation_count` compare-and-exchange increments by `If-Match`, all of which must
+  land) and an uncontended one, overwrite protection (of concurrent `If-None-Match: *` writers
+  exactly one wins), then Elasticsearch's blob sizes (`getBlobSizes`, ported), each blob written
+  (in parts past `buffer_size`), sometimes read early, overwritten or written and aborted
+  (`rare_action_probability`), and read back whole or as a range against a regenerated
+  checksum; then listed with their sizes and deleted. A failed check answers
+  Elasticsearch's `repository_verification_exception` chain after removing what it wrote. It
+  writes no more than `max_total_data_size`, runs at most 16 blobs at once, holds a part per
+  blob in flight (breaker-charged), pays the repository's throttles and stops at `timeout`. On
+  roll's own repositories it plans and answers without storage, as before.
 - **Credentials.** Elasticsearch takes an `s3` client's keys from its keystore; a roll tenant
   has none, so `access_key`, `secret_key` and `session_token` come with the repository's
   settings and are moved out of them at once into the repository's sealed secrets (`seal.rs`,

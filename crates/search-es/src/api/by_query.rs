@@ -657,7 +657,7 @@ fn background(cluster: Arc<crate::Cluster>, req: crate::rest::EsRequest, id: u64
 }
 
 /// Polls futures to completion together (the slices of a request), in order.
-async fn join_all<F: std::future::Future>(futs: Vec<F>) -> Vec<F::Output> {
+pub(crate) async fn join_all<F: std::future::Future>(futs: Vec<F>) -> Vec<F::Output> {
     let mut futs: Vec<std::pin::Pin<Box<F>>> = futs.into_iter().map(Box::pin).collect();
     let mut out: Vec<Option<F::Output>> = futs.iter().map(|_| None).collect();
     std::future::poll_fn(|cx| {
