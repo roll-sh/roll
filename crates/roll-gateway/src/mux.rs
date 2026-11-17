@@ -8,9 +8,9 @@
 //! channel to the link's writer, bounded in practice by the credit (data) and by the streams
 //! (control).
 
-use crate::proto::{self, Hello, Kind, MAX_DATA, MAX_STREAMS, OPEN_WAIT, Open, STREAM_LIFETIME, WINDOW, Welcome};
+use crate::proto::{self, Hello, Kind, MAX_DATA, MAX_STREAMS, MAX_TARGETS, OPEN_WAIT, Open, Resolve, Resolved, STREAM_LIFETIME, WINDOW, Welcome};
 use bytes::{Buf, Bytes, BytesMut};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
@@ -25,12 +25,14 @@ pub enum Role {
 }
 
 /// What the application handles itself: the hello, the welcome, and (the gateway) a stream to
-/// dial, which it then [`Mux::accept`]s or [`Mux::refuse`]s.
+/// dial, which it then [`Mux::accept`]s or [`Mux::refuse`]s, or an SRV name to look up, which it
+/// answers with [`Mux::resolved`] or [`Mux::refuse`].
 #[derive(Debug)]
 pub enum Event {
     Hello(Hello),
     Welcome(Welcome),
     Open { id: u32, open: Open },
+    Resolve { id: u32, srv: String },
 }
 
 /// One link's streams.
@@ -50,6 +52,10 @@ struct MuxState {
     streams: HashMap<u32, Arc<Shared>>,
     /// The opener's streams waiting for `opened` or `refused`.
     pending: HashMap<u32, oneshot::Sender<Result<(), String>>>,
+    /// The opener's SRV lookups waiting for `resolved` or `refused`.
+    resolving: HashMap<u32, oneshot::Sender<Result<Vec<String>, String>>>,
+    /// The acceptor's SRV lookups not answered yet (they count against [`MAX_STREAMS`]).
+    asked: HashSet<u32>,
     /// The opener's last id; the acceptor's highest id seen (ids only grow).
     last: u32,
     closed: Option<String>,
@@ -142,9 +148,44 @@ impl Mux {
                 st.streams.insert(f.stream, Shared::new(f.stream));
                 Ok(Some(Event::Open { id: f.stream, open }))
             }
-            Kind::Opened | Kind::Refused if !opener => Err("only the gateway answers an open".into()),
+            Kind::Resolve if opener => Err("only roll asks for a lookup".into()),
+            Kind::Resolve => {
+                let ask: Resolve = serde_json::from_slice(f.payload).map_err(|e| format!("a bad resolve: {e}"))?;
+                let mut st = inner.st.lock().unwrap();
+                if st.closed.is_some() {
+                    return Ok(None);
+                }
+                if f.stream <= st.last {
+                    return Err("stream ids only grow".into());
+                }
+                st.last = f.stream;
+                if st.streams.len() + st.asked.len() >= MAX_STREAMS {
+                    drop(st);
+                    let _ = inner.out.send(proto::encode(Kind::Refused, f.stream, format!("the gateway has {MAX_STREAMS} streams and lookups open").as_bytes()));
+                    return Ok(None);
+                }
+                st.asked.insert(f.stream);
+                Ok(Some(Event::Resolve { id: f.stream, srv: ask.srv }))
+            }
+            Kind::Opened | Kind::Refused | Kind::Resolved if !opener => Err("only the gateway answers an open or a lookup".into()),
+            Kind::Resolved => {
+                let answer: Resolved = serde_json::from_slice(f.payload).map_err(|e| format!("a bad resolved: {e}"))?;
+                if answer.targets.len() > MAX_TARGETS {
+                    return Err(format!("a lookup answered {} targets", answer.targets.len()));
+                }
+                if let Some(tx) = inner.st.lock().unwrap().resolving.remove(&f.stream) {
+                    let _ = tx.send(Ok(answer.targets));
+                }
+                Ok(None)
+            }
             Kind::Opened | Kind::Refused => {
                 let mut st = inner.st.lock().unwrap();
+                if f.kind == Kind::Refused
+                    && let Some(tx) = st.resolving.remove(&f.stream)
+                {
+                    let _ = tx.send(Err(String::from_utf8_lossy(f.payload).into_owned()));
+                    return Ok(None);
+                }
                 match st.pending.remove(&f.stream) {
                     Some(tx) => {
                         let answer = if f.kind == Kind::Opened { Ok(()) } else { Err(String::from_utf8_lossy(f.payload).into_owned()) };
@@ -246,6 +287,44 @@ impl Mux {
         Ok(self.handle(shared))
     }
 
+    /// Ask the gateway for `srv`'s SRV record (rolld): its targets as `host:port`, at most
+    /// [`MAX_TARGETS`], or the gateway's reason.
+    pub async fn resolve(&self, srv: &str) -> Result<Vec<String>, String> {
+        let inner = &self.inner;
+        let (tx, rx) = oneshot::channel();
+        let id = {
+            let mut st = inner.st.lock().unwrap();
+            if let Some(why) = &st.closed {
+                return Err(format!("the gateway's link is closed ({why})"));
+            }
+            if st.streams.len() + st.resolving.len() >= MAX_STREAMS {
+                return Err(format!("the gateway has {MAX_STREAMS} streams open: try again"));
+            }
+            st.last = st.last.checked_add(1).ok_or("the link has used every stream id: it reconnects")?;
+            let id = st.last;
+            st.resolving.insert(id, tx);
+            id
+        };
+        let body = serde_json::to_vec(&Resolve { srv: srv.to_string() }).unwrap_or_default();
+        let _ = inner.out.send(proto::encode(Kind::Resolve, id, &body));
+        let answer = match tokio::time::timeout(OPEN_WAIT, rx).await {
+            Ok(Ok(a)) => a,
+            Ok(Err(_)) => Err("the gateway's link closed".into()),
+            Err(_) => Err("the gateway didn't answer in 10 s".into()),
+        };
+        inner.st.lock().unwrap().resolving.remove(&id);
+        answer
+    }
+
+    /// Answer a lookup (the gateway): the targets it may reach, at most [`MAX_TARGETS`].
+    pub fn resolved(&self, id: u32, targets: Vec<String>) {
+        if !self.inner.st.lock().unwrap().asked.remove(&id) {
+            return;
+        }
+        let body = serde_json::to_vec(&Resolved { targets: targets.into_iter().take(MAX_TARGETS).collect() }).unwrap_or_default();
+        let _ = self.inner.out.send(proto::encode(Kind::Resolved, id, &body));
+    }
+
     /// Say a stream the gateway dialed is connected, and take it.
     pub fn accept(&self, id: u32) -> Option<Stream> {
         let s = self.stream(id)?;
@@ -255,7 +334,11 @@ impl Mux {
 
     /// Refuse a stream the gateway won't dial, saying why.
     pub fn refuse(&self, id: u32, why: &str) {
-        self.inner.st.lock().unwrap().streams.remove(&id);
+        {
+            let mut st = self.inner.st.lock().unwrap();
+            st.streams.remove(&id);
+            st.asked.remove(&id);
+        }
         let why: String = why.chars().take(400).collect();
         let _ = self.inner.out.send(proto::encode(Kind::Refused, id, why.as_bytes()));
     }
@@ -279,6 +362,8 @@ impl Mux {
             if st.closed.is_none() {
                 st.closed = Some(why.to_string());
             }
+            st.resolving.clear();
+            st.asked.clear();
             (std::mem::take(&mut st.streams), std::mem::take(&mut st.pending))
         };
         for (_, s) in streams {
@@ -528,6 +613,26 @@ mod tests {
         drop(g);
         drop(s);
         assert_eq!(a.live(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_is_answered_or_refused_and_its_answer_is_bounded() {
+        let (a, b, mut events) = pair();
+        let b2 = b.clone();
+        tokio::spawn(async move {
+            while let Some(ev) = events.recv().await {
+                if let Event::Resolve { id, srv } = ev {
+                    if srv.contains("nope") { b2.refuse(id, "not in the allow-list") } else { b2.resolved(id, vec!["db.corp:27017".into()]) }
+                }
+            }
+        });
+        assert_eq!(a.resolve("_mongodb._tcp.c.corp").await.unwrap(), ["db.corp:27017"]);
+        assert_eq!(a.resolve("_mongodb._tcp.nope.corp").await.unwrap_err(), "not in the allow-list");
+        // An answer past MAX_TARGETS ends the link; only roll asks.
+        let (o, _out) = Mux::new(Role::Opener);
+        let body = serde_json::to_vec(&Resolved { targets: vec!["h:1".into(); MAX_TARGETS + 1] }).unwrap();
+        assert!(o.receive(&proto::encode(Kind::Resolved, 1, &body)).unwrap_err().contains("targets"));
+        assert!(o.receive(&proto::encode(Kind::Resolve, 1, br#"{"srv":"x"}"#)).is_err());
     }
 
     #[tokio::test]

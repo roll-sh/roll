@@ -140,24 +140,44 @@ impl Link {
     /// the link.
     pub(crate) async fn open(self: &Arc<Self>, host: &str, port: u16) -> Result<Audited, String> {
         let target = format!("{host}:{port}");
-        if *self.replaced.borrow() {
-            return Err(format!("gateway {}'s link is being replaced: try again", self.gateway));
-        }
-        match self.gone().await {
-            Ok(None) => {}
-            Ok(Some(why)) => {
-                self.audit(&target, format!("not opened: {why}"));
-                self.revoke(why.clone());
-                return Err(format!("gateway {}'s link was closed: {why}", self.gateway));
-            }
-            Err(e) => return Err(format!("gateway {}: checking its credential failed ({e}): try again", self.gateway)),
-        }
+        self.ready(&target).await?;
         match self.mux.open(host, port).await {
             Ok(s) => Ok(Audited { s, target, link: self.clone() }),
             Err(why) => {
                 self.audit(&target, format!("not opened: {why}"));
                 Err(format!("gateway {}: {why}", self.gateway))
             }
+        }
+    }
+
+    /// `srv`'s SRV record, looked up by the gateway with the network's DNS: its targets, each in
+    /// the gateway's allow-list (the gateway checks), at most [`proto::MAX_TARGETS`], every one a
+    /// host name and a port. Checked first and audited, as a stream is.
+    pub(crate) async fn resolve_srv(self: &Arc<Self>, srv: &str) -> Result<Vec<(String, u16)>, String> {
+        let target = format!("SRV {srv}");
+        self.ready(&target).await?;
+        let answer = self.mux.resolve(srv).await.and_then(|targets| targets.iter().map(|t| host_port(t).ok_or_else(|| "the gateway answered a target roll doesn't read".to_string())).collect::<Result<Vec<_>, _>>());
+        match &answer {
+            Ok(t) => self.audit(&target, format!("{} targets", t.len())),
+            Err(why) => self.audit(&target, format!("not answered: {why}")),
+        }
+        answer.map_err(|why| format!("gateway {}: {why}", self.gateway))
+    }
+
+    /// Whether the link may carry `target` now: not being replaced, and what opened it still
+    /// there (looked up now; a revocation closes the link).
+    async fn ready(&self, target: &str) -> Result<(), String> {
+        if *self.replaced.borrow() {
+            return Err(format!("gateway {}'s link is being replaced: try again", self.gateway));
+        }
+        match self.gone().await {
+            Ok(None) => Ok(()),
+            Ok(Some(why)) => {
+                self.audit(target, format!("not opened: {why}"));
+                self.revoke(why.clone());
+                Err(format!("gateway {}'s link was closed: {why}", self.gateway))
+            }
+            Err(e) => Err(format!("gateway {}: checking its credential failed ({e}): try again", self.gateway)),
         }
     }
 
@@ -195,6 +215,15 @@ impl Link {
             rt.spawn_blocking(move || s.gateway_stream(&g, &t, &outcome));
         }
     }
+}
+
+/// `host:port` from a gateway's SRV answer: a DNS name (letters, digits, `-`, `_`, dots; 253 at
+/// most) and a port other than 0.
+fn host_port(t: &str) -> Option<(String, u16)> {
+    let (host, port) = t.rsplit_once(':')?;
+    let port = port.parse::<u16>().ok().filter(|p| *p != 0)?;
+    let ok = !host.is_empty() && host.len() <= 253 && host.split('.').all(|l| !l.is_empty() && l.len() <= 63 && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
+    ok.then(|| (host.to_ascii_lowercase(), port))
 }
 
 /// A gateway stream that writes its audit row when it ends: the target and the bytes each way.
@@ -582,18 +611,40 @@ mod tests {
         _dir: tempfile::TempDir,
     }
 
-    impl Rolld {
-        /// roll secrets and gateways on one node (the in-memory cluster), served on loopback.
-        async fn start() -> Rolld {
+    /// One rolld node: roll secrets and gateways over a store, on a cluster backend.
+    struct Node {
+        url: String,
+        hub: Arc<Gateways>,
+        cluster: Arc<Cluster>,
+        secrets: Arc<Secrets>,
+    }
+
+    /// The stores every node shares, and roll-access's tokens.
+    struct Stores {
+        ws: Arc<roll_workspace::Workspace>,
+        db: code_sql::Db,
+        tokens: Arc<Tokens>,
+        dir: tempfile::TempDir,
+    }
+
+    impl Stores {
+        fn new() -> Stores {
             let dir = tempfile::tempdir().unwrap();
             let ws = Arc::new(roll_workspace::Workspace::new(code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap()).unwrap());
             let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
-            let tokens = Arc::new(Tokens::default());
-            let cfg = roll_cluster::ClusterConfig::new("node-a", "http://127.0.0.1:1", roll_cluster::ClusterConfig::random_node_id().into_bytes());
-            let cluster = Cluster::join(Box::new(roll_cluster::Memory::solo()), cfg).unwrap();
+            Stores { ws, db, tokens: Arc::new(Tokens::default()), dir }
+        }
+
+        /// A node served on loopback as rolld serves these routes: the gate, and requests other
+        /// nodes signed accepted (`accept_forwarded`). `cfg` makes its cluster config from its URL.
+        async fn node(&self, backend: Box<dyn roll_cluster::Backend>, cfg: impl FnOnce(&str) -> roll_cluster::ClusterConfig) -> Node {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let cluster = Cluster::join(backend, cfg(&url)).unwrap();
+            let tokens = self.tokens.clone();
             // Links check every 30 s, as in production: anything faster here is the per-stream check
             // or the re-check a delete sends.
-            let hub = Gateways::new(cluster, tokens.clone(), true);
+            let hub = Gateways::new(cluster.clone(), tokens.clone(), true);
             let opts = roll_secrets::Options {
                 keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
                 key_source: roll_secrets::KeySource::Env,
@@ -613,33 +664,57 @@ mod tests {
                 workloads: Some(tokens.clone()),
                 gateways: Some(hub.clone()),
             };
-            let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::new(db, ws.clone(), opts)).unwrap());
+            let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::new(self.db.clone(), self.ws.clone(), opts)).unwrap());
             hub.set_secrets(secrets.clone());
-            let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets.clone())).merge(hub.router()).layer(axum::middleware::from_fn_with_state(tokens.clone(), gate));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let url = format!("http://{}", listener.local_addr().unwrap());
+            let router = roll_workspace::router(self.ws.clone())
+                .merge(roll_secrets::router(secrets.clone()))
+                .merge(hub.router())
+                .layer(axum::middleware::from_fn_with_state(tokens, gate))
+                .layer(axum::middleware::from_fn_with_state(cluster.clone(), roll_cluster::accept_forwarded));
             // As rolld's API listener: no Nagle.
             let listener = axum::serve::ListenerExt::tap_io(listener, |tcp| {
                 let _ = tcp.set_nodelay(true);
             });
             tokio::spawn(async move { axum::serve(listener, router).await });
+            Node { url, hub, cluster, secrets }
+        }
+    }
+
+    async fn project(http: &reqwest::Client, url: &str) -> String {
+        let p: Json = http.post(format!("{url}/v1/workspace/projects")).json(&json!({ "name": "shop" })).send().await.unwrap().json().await.unwrap();
+        p["id"].as_str().unwrap().into()
+    }
+
+    async fn make_gateway(http: &reqwest::Client, url: &str, project: &str, name: &str) -> (String, String) {
+        let made: Json = http.post(format!("{url}/v1/secrets/projects/{project}/gateways")).json(&json!({ "name": name })).send().await.unwrap().json().await.unwrap();
+        (made["gateway"]["id"].as_str().unwrap().into(), made["token"].as_str().unwrap().into())
+    }
+
+    /// `roll gateway up`, in process, dialing `url` and allowing `allow`; its log lines are kept.
+    fn gateway_up(url: &str, gw: &str, token: &str, allow: &[String]) -> Up {
+        let lines = Arc::new(Mutex::new(vec![]));
+        let l = lines.clone();
+        let agent = Agent { url: url.into(), gateway: gw.into(), auth: Auth::Token(token.into()), allow: AllowList::parse(allow.iter().map(String::as_str)).unwrap(), version: "test".into(), log: Arc::new(move |s: &str| l.lock().unwrap().push(s.to_string())) };
+        (tokio::spawn(roll_gateway::agent::run(agent)), lines)
+    }
+
+    impl Rolld {
+        /// roll secrets and gateways on one node (the in-memory cluster), served on loopback.
+        async fn start() -> Rolld {
+            let stores = Stores::new();
+            let n = stores.node(Box::new(roll_cluster::Memory::solo()), |_| roll_cluster::ClusterConfig::new("node-a", "http://127.0.0.1:1", roll_cluster::ClusterConfig::random_node_id().into_bytes())).await;
             let http = reqwest::Client::new();
-            let p: Json = http.post(format!("{url}/v1/workspace/projects")).json(&json!({ "name": "shop" })).send().await.unwrap().json().await.unwrap();
-            Rolld { url, hub, tokens, secrets, project: p["id"].as_str().unwrap().into(), http, _dir: dir }
+            let project = project(&http, &n.url).await;
+            Rolld { url: n.url, hub: n.hub, tokens: stores.tokens.clone(), secrets: n.secrets, project, http, _dir: stores.dir }
         }
 
         /// A gateway and its token, as `POST …/gateways` makes them.
         async fn gateway(&self, name: &str) -> (String, String) {
-            let made: Json = self.http.post(format!("{}/v1/secrets/projects/{}/gateways", self.url, self.project)).json(&json!({ "name": name })).send().await.unwrap().json().await.unwrap();
-            (made["gateway"]["id"].as_str().unwrap().into(), made["token"].as_str().unwrap().into())
+            make_gateway(&self.http, &self.url, &self.project, name).await
         }
 
-        /// `roll gateway up`, in process, allowing `allow`; its log lines are kept.
         fn up(&self, gw: &str, token: &str, allow: &[String]) -> Up {
-            let lines = Arc::new(Mutex::new(vec![]));
-            let l = lines.clone();
-            let agent = Agent { url: self.url.clone(), gateway: gw.into(), auth: Auth::Token(token.into()), allow: AllowList::parse(allow.iter().map(String::as_str)).unwrap(), version: "test".into(), log: Arc::new(move |s: &str| l.lock().unwrap().push(s.to_string())) };
-            (tokio::spawn(roll_gateway::agent::run(agent)), lines)
+            gateway_up(&self.url, gw, token, allow)
         }
 
         async fn linked(&self, gw: &str) -> Arc<Link> {
@@ -747,6 +822,129 @@ mod tests {
         assert!(stopped.unwrap_err().contains("refused"), "a deleted gateway's link closes with 4401");
         assert!(r.hub.link(&gw).is_none());
         let _ = &r.secrets;
+    }
+
+    /// A ClickHouse HTTPS interface on loopback with a certificate for `localhost` (its CA PEM
+    /// returned): answers `1` to every statement, keeping the user and the statement it got.
+    async fn clickhouse_server(seen: Arc<Mutex<Vec<String>>>) -> (u16, String) {
+        use tokio_rustls::rustls;
+        let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let ca = ck.cert.pem();
+        let key = rustls::pki_types::PrivateKeyDer::try_from(ck.signing_key.serialize_der()).unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider())).with_safe_default_protocol_versions().unwrap().with_no_client_auth().with_single_cert(vec![ck.cert.der().clone()], key).unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = l.accept().await {
+                let (acceptor, seen) = (acceptor.clone(), seen.clone());
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(tcp).await else { return };
+                    let serve = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                        let seen = seen.clone();
+                        async move {
+                            use http_body_util::BodyExt;
+                            let user = req.headers().get("x-clickhouse-user").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+                            let sql = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+                            seen.lock().unwrap().push(format!("{user}: {}", String::from_utf8_lossy(&sql)));
+                            Ok::<_, std::convert::Infallible>(hyper::Response::new(http_body_util::Full::new(bytes::Bytes::from_static(b"1\n"))))
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new().serve_connection(hyper_util::rt::TokioIo::new(tls), serve).await;
+                });
+            }
+        });
+        (port, ca)
+    }
+
+    /// A load balancer in front of a fleet: each connection goes to the node `to` names now.
+    async fn balancer(nodes: Vec<String>) -> (String, Arc<AtomicUsize>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let to = Arc::new(AtomicUsize::new(0));
+        let t = to.clone();
+        tokio::spawn(async move {
+            while let Ok((mut c, _)) = l.accept().await {
+                let addr = nodes[t.load(Ordering::SeqCst)].trim_start_matches("http://").to_string();
+                tokio::spawn(async move {
+                    if let Ok(mut up) = tokio::net::TcpStream::connect(addr).await {
+                        let _ = up.set_nodelay(true);
+                        let _ = c.set_nodelay(true);
+                        let _ = tokio::io::copy_bidirectional(&mut c, &mut up).await;
+                    }
+                });
+            }
+        });
+        (url, to)
+    }
+
+    /// Two nodes sharing one store and one cluster backend (the in-memory one), behind a load
+    /// balancer: the gateway's link lands on its lease's holder, a provider call on the other node
+    /// is dispatched there (sealed) and reaches ClickHouse through the gateway over TLS checked
+    /// with the database's CA, the internal route takes only signed requests, and when the holder
+    /// drains the link closes with 1012 and the gateway comes back on the other node.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_gateways_link_follows_its_lease_across_two_nodes() {
+        let stores = Stores::new();
+        let mem = roll_cluster::MemoryStore::new();
+        let mut nodes = vec![];
+        for name in ["node-a", "node-b"] {
+            nodes.push(stores.node(Box::new(roll_cluster::Memory::new(mem.clone())), |url| roll_cluster::ClusterConfig::for_tests(name, url, b"test cluster secret, 32 bytes!!".to_vec())).await);
+        }
+        let http = reqwest::Client::new();
+        let project = project(&http, &nodes[0].url).await;
+        let (gw, token) = make_gateway(&http, &nodes[0].url, &project, "vpc").await;
+        let seen = Arc::new(Mutex::new(vec![]));
+        let (ch, ca) = clickhouse_server(seen.clone()).await;
+        let (lb, to) = balancer(nodes.iter().map(|n| n.url.clone()).collect()).await;
+        let (agent, lines) = gateway_up(&lb, &gw, &token, &[format!("localhost:{ch}")]);
+
+        // The link lands on the holder of secrets:gateway:<id>, and only there.
+        let on_holder = async |nodes: &[Node]| -> usize {
+            for _ in 0..300 {
+                let holder = nodes[0].cluster.lease_record(&key(&gw)).unwrap().map(|(n, _)| n);
+                let linked: Vec<usize> = (0..nodes.len()).filter(|i| nodes[*i].hub.link(&gw).is_some()).collect();
+                if let ([i], Some(h)) = (linked.as_slice(), holder)
+                    && nodes[*i].cluster.node_id() == h
+                {
+                    return *i;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            panic!("the link never settled on the lease's holder");
+        };
+        let h = on_holder(&nodes).await;
+        let o = 1 - h;
+
+        // A call made on the other node runs on the holder, through the gateway.
+        let url = format!("clickhouse://admin:pw@localhost:{ch}/");
+        let (hub, g, u, c) = (nodes[o].hub.clone(), gw.clone(), url.clone(), ca.clone());
+        tokio::task::spawn_blocking(move || hub.call(&g, Call::DbSetPassword { url: u, ca: Some(c), role: "app".into(), password: "Fake0password0for0test".into() })).await.unwrap().unwrap();
+        let hash: String = <sha2::Sha256 as sha2::Digest>::digest(b"Fake0password0for0test").iter().map(|b| format!("{b:02x}")).collect();
+        let got = seen.lock().unwrap().join("\n");
+        assert!(got.contains(&format!("admin: ALTER USER `app` IDENTIFIED WITH sha256_hash BY '{hash}'")) && !got.contains("Fake0password"), "{got}");
+        assert!(lines.lock().unwrap().iter().any(|l| l.contains(&format!("open localhost:{ch}"))), "the gateway dialed ClickHouse");
+        // Without a CA the server's certificate isn't trusted: TLS runs from roll, not the gateway.
+        let (hub, g, u) = (nodes[o].hub.clone(), gw.clone(), url.clone());
+        let untrusted = tokio::task::spawn_blocking(move || hub.call(&g, Call::DbCheck { url: u, ca: None, roles: vec![], group: None })).await.unwrap().unwrap_err();
+        assert!(untrusted.contains("certificate"), "{untrusted}");
+
+        // The internal route takes only what a node signed.
+        let internal = format!("{}/internal/secrets/gateways/{gw}/call", nodes[h].url);
+        assert_eq!(http.post(&internal).body(vec![1, 2, 3]).send().await.unwrap().status(), StatusCode::FORBIDDEN);
+        let forged = http.post(&internal).header(roll_cluster::sign::NODE_HEADER, nodes[o].cluster.node_id()).header(roll_cluster::sign::SIG_HEADER, "00").body(vec![1, 2, 3]).send().await.unwrap();
+        assert_eq!(forged.status(), StatusCode::UNAUTHORIZED);
+
+        // The holder drains: its link closes with 1012 and the gateway reconnects, to the other node.
+        to.store(o, Ordering::SeqCst);
+        nodes[h].cluster.drain(Duration::from_secs(5)).await;
+        let now = on_holder(&nodes).await;
+        assert_eq!(now, o);
+        assert!(lines.lock().unwrap().iter().any(|l| l.contains("moved the gateway to another node")), "{:?}", lines.lock().unwrap());
+        let (hub, g, u, c) = (nodes[o].hub.clone(), gw.clone(), url.clone(), ca.clone());
+        tokio::task::spawn_blocking(move || hub.call(&g, Call::DbCheck { url: u, ca: Some(c), roles: vec![], group: None })).await.unwrap().unwrap();
+        agent.abort();
+        let _ = &nodes[h].secrets;
     }
 
     /// Through the real Postgres (`roll-secrets-pg` on 127.0.0.1:18432, as the store's tests use;

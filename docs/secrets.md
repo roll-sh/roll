@@ -1080,7 +1080,11 @@ or dialing: a name must match a name entry, or resolve (on the gateway, with the
 to addresses inside a CIDR entry for that port; an IP literal must be inside a CIDR entry. Without
 an entry it refuses everything. So a compromised or buggy roll can't use it to scan or reach the
 rest of the network: it reaches what the team listed and nothing more. The gateway reports its list
-in its hello (shown in the Gateways panel), but roll never widens or edits it.
+in its hello (shown in the Gateways panel), but roll never widens or edits it. An SRV lookup
+(`mongodb+srv://`) follows the same list: the gateway looks a record up only when the list could
+allow a target of it (a CIDR entry, or a name or suffix entry under the record's parent domain), and
+answers only when every target passes the check above; otherwise it refuses without naming the
+target to roll, and logs the target itself.
 
 **roll's own check stays.** A database or directory registered with `"gateway": "gw_…"` (a gateway
 of the same project) may name a private address or a name only the network resolves: rolld doesn't
@@ -1094,8 +1098,12 @@ sides set it as the WebSocket's message limit). The gateway's first message is `
 version, its allow-list, its limits) and roll answers `welcome` (the node). Then roll sends `open`
 (JSON `{host, port}`, 1 KiB at most) with a new stream id; the gateway answers `opened` or
 `refused` (a reason: "not in the allow-list", "connection refused"), and both sides send `data`
-(up to 16 KiB), `window` (credit), `fin` (end of that direction) and `reset`. Pings both ways
-every 20 s; 60 s of silence ends the link.
+(up to 16 KiB), `window` (credit), `fin` (end of that direction) and `reset`. roll may also send
+`resolve` (JSON `{srv}`, an SRV name such as `_mongodb._tcp.cluster0.corp.internal`) with a new
+stream id that never becomes a stream; the gateway looks it up with the network's DNS and answers
+`resolved` (JSON `{targets}`, `host:port` each, 16 at most: more ends the link, and roll reads only
+DNS names and ports from it) or `refused`. Lookups waiting count against a link's 32 streams. Pings
+both ways every 20 s; 60 s of silence ends the link.
 
 **Bounds.** Every stream has a 256 KiB window each way: a side sends only as many bytes as the other
 granted, and grants more only as its reader takes them, so a slow reader holds at most a window,
@@ -1123,6 +1131,12 @@ the deployment key every node shares (the admin URL and the new password are in 
 stream between nodes and roll-cluster's 4 MiB forward limit holds. On one node all of this is a
 no-op: the link and the call are local.
 The internal route takes only a request another node signed (`roll_cluster::Forwarded`).
+`secrets::gateway`'s `a_gateways_link_follows_its_lease_across_two_nodes` runs two nodes in one
+process on one store and one in-memory roll-cluster backend, behind a load balancer: the link lands on
+the lease's holder, a call made on the other node is dispatched there and rotates a password on an
+HTTPS ClickHouse through the gateway, an unsigned or forged request to the internal route is
+refused (403, 401), and when the holder drains the link closes with 1012 and the gateway comes back
+on the other node, where calls work again.
 
 **Status.** Each link writes its status to the gateway's row (shared by every node): `connected`,
 the `node`, `version`, the allow-list it reported, `connected_at`, `last_seen_at` (every 30 s while
@@ -1138,13 +1152,18 @@ also re-check the link on the lease's holder right away, through the same dispat
 fail the delete: the next stream's check covers it. An idle link still re-checks every 30 s, as a
 backstop.
 
-**Where it plugs in.** Databases outside roll (`gateway` on `POST …/outside-databases`: Postgres,
-MySQL, SQL Server, Redis and MongoDB with `mongodb://` hosts; ClickHouse and RabbitMQ speak HTTPS
-through roll's HTTP client and `mongodb+srv://` needs roll's DNS, so those are refused with a
-gateway) and directories (`gateway` on `POST …/directories`). Postgres, SQL Server, Redis and MongoDB
-take the gateway's stream directly; MySQL and LDAP clients take a socket, so rolld hands them a
-loopback socket whose other end it relays to the stream, accepting only the connection its own
-process made (directories pin their checked address the same way). `roll secrets
+**Where it plugs in.** Databases outside roll (`gateway` on `POST …/outside-databases`: every
+engine, Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis and MongoDB, `mongodb+srv://`
+included) and directories (`gateway` on `POST …/directories`). Postgres, SQL Server, Redis and
+MongoDB take the gateway's stream directly. ClickHouse and RabbitMQ speak HTTPS through one small
+client (hyper's, `outside/https.rs`) whose only connector is the conversation's way to the server:
+a gateway's stream, or the address rolld resolved and checked, with TLS run in rolld against the
+URL's host (SNI and verification, the engine's `ca`), no redirects, no proxy, answers read up to a
+bound. For `mongodb+srv://` the gateway looks the SRV record up (a private cluster's name usually
+resolves only inside the network); rolld still keeps only targets inside the record's parent
+domain, then opens a stream to each host it needs. MySQL and LDAP clients take a socket, so rolld
+hands them a loopback socket whose other end it relays to the stream, accepting only the connection
+its own process made (directories pin their checked address the same way). `roll secrets
 outside-databases add … --gateway gw_…`, `roll secrets directories add … --gateway gw_…`, and the
 dashboard's forms offer the project's gateways.
 

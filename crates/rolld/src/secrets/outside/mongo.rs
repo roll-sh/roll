@@ -87,21 +87,14 @@ pub(super) fn parse(url: &str, allow_private: bool) -> Result<Url, String> {
     Ok(Url { srv: srv.then(|| seeds[0].0.clone()), seeds, user, password, db, tls })
 }
 
-/// The SRV record's targets, each inside the record's own domain (the spec's rule: a hostile DNS
-/// answer can't point roll at someone else's servers).
-async fn srv_seeds(name: &str) -> Result<Vec<(String, u16)>, String> {
+/// The SRV record's targets (from roll's DNS, or the gateway's), each inside the record's own
+/// domain (the spec's rule: a hostile DNS answer can't point roll at someone else's servers).
+async fn srv_seeds(name: &str, via: &Via) -> Result<Vec<(String, u16)>, String> {
     let parent = name.split_once('.').map(|(_, p)| p).filter(|p| p.contains('.')).ok_or_else(|| format!("{name} needs at least three labels for mongodb+srv://"))?;
-    let resolver = hickory_resolver::TokioResolver::builder_tokio().map_err(|e| e.to_string())?.build().map_err(|e| e.to_string())?;
-    let found = resolver.srv_lookup(format!("_mongodb._tcp.{name}.")).await.map_err(|_| format!("{name} has no _mongodb._tcp SRV record"))?;
-    let mut out = Vec::new();
-    for r in found.answers() {
-        if let hickory_resolver::proto::rr::RData::SRV(s) = &r.data {
-            let target = s.target.to_ascii().trim_end_matches('.').to_ascii_lowercase();
-            if !target.ends_with(&format!(".{}", parent.to_ascii_lowercase())) {
-                return Err(format!("{name}'s SRV record names {target}, outside {parent}"));
-            }
-            out.push((target, s.port));
-        }
+    let mut out = via.srv(&format!("_mongodb._tcp.{name}")).await?;
+    let under = format!(".{}", parent.to_ascii_lowercase());
+    if let Some((target, _)) = out.iter().find(|(t, _)| !t.ends_with(&under)) {
+        return Err(format!("{name}'s SRV record names {target}, outside {parent}"));
     }
     out.truncate(SEEDS_MAX);
     if out.is_empty() { Err(format!("{name} has no _mongodb._tcp SRV record")) } else { Ok(out) }
@@ -431,7 +424,7 @@ async fn login(c: &mut Conn, user: &str, password: &str, db: &str) -> Result<(),
 pub(super) async fn run<T>(u: Url, ca: Option<String>, via: Via, work: impl AsyncFnOnce(&mut Conn) -> Result<T, String>) -> Result<T, String> {
     tokio::time::timeout(TIMEOUT, async move {
         let seeds = match &u.srv {
-            Some(name) => srv_seeds(name).await?,
+            Some(name) => srv_seeds(name, &via).await?,
             None => u.seeds.clone(),
         };
         let mut c = primary(&seeds, u.tls, ca.as_deref(), &via).await?;

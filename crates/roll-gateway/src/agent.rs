@@ -192,6 +192,9 @@ async fn connect_once(a: Agent, token: String) -> End {
                         Ok(Some(Event::Open { id, open })) => {
                             tokio::spawn(dial(mux.clone(), id, open, allow.clone(), a.log.clone()));
                         }
+                        Ok(Some(Event::Resolve { id, srv })) => {
+                            tokio::spawn(lookup(mux.clone(), id, srv, allow.clone(), a.log.clone()));
+                        }
                         Ok(_) => {}
                         Err(e) => {
                             let _ = sink.send(Message::Close(Some(close_frame(proto::CLOSE_PROTOCOL, &e)))).await;
@@ -234,6 +237,41 @@ async fn connect_once(a: Agent, token: String) -> End {
 
 fn close_frame(code: u16, reason: &str) -> tokio_tungstenite::tungstenite::protocol::CloseFrame {
     tokio_tungstenite::tungstenite::protocol::CloseFrame { code: code.into(), reason: reason.chars().take(100).collect::<String>().into() }
+}
+
+/// One SRV lookup, with the network's DNS: answered only when every target is in the allow-list.
+async fn lookup(mux: Mux, id: u32, srv: String, allow: Arc<AllowList>, log: Log) {
+    let answer = tokio::time::timeout(
+        DIAL_WAIT,
+        allow.check_srv(&srv, srv_records, |h, p| async move { tokio::net::lookup_host((h, p)).await.map(|i| i.collect()) }, |why| log(&format!("lookup {id} of {srv}: {why}"))),
+    )
+    .await
+    .unwrap_or_else(|_| Err(format!("looking {srv} up timed out")));
+    match answer {
+        Ok(targets) => {
+            log(&format!("lookup {id} of {srv}: {}", targets.join(", ")));
+            mux.resolved(id, targets);
+        }
+        Err(why) => {
+            log(&format!("lookup {id} refused: {why}"));
+            mux.refuse(id, &why);
+        }
+    }
+}
+
+/// A name's SRV records, from the system's resolver configuration (the network's DNS).
+async fn srv_records(name: String) -> std::io::Result<Vec<(String, u16)>> {
+    let resolver = hickory_resolver::TokioResolver::builder_tokio().map_err(std::io::Error::other)?.build().map_err(std::io::Error::other)?;
+    let found = resolver.srv_lookup(format!("{name}.")).await.map_err(std::io::Error::other)?;
+    Ok(found
+        .answers()
+        .iter()
+        .filter_map(|r| match &r.data {
+            hickory_resolver::proto::rr::RData::SRV(s) => Some((s.target.to_ascii(), s.port)),
+            _ => None,
+        })
+        .take(crate::proto::MAX_TARGETS)
+        .collect())
 }
 
 /// One stream: checked against the allow-list, dialed, relayed for at most its lifetime.

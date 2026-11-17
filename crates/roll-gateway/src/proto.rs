@@ -26,6 +26,8 @@ pub const SILENCE: Duration = Duration::from_secs(60);
 pub const MAX_CONTROL: usize = 8 * 1024;
 /// Entries a gateway's allow-list may have.
 pub const MAX_ALLOW: usize = 256;
+/// Targets one SRV answer may carry (the gateway sends at most this many; more is a protocol error).
+pub const MAX_TARGETS: usize = 16;
 
 /// Close codes. 4401: the credential no longer works, or the gateway was deleted (an identity
 /// logs in again; a token stops). 4409: a newer link replaced this one. 4400: a protocol error.
@@ -55,6 +57,12 @@ pub enum Kind {
     Fin = 8,
     /// Both ways: the stream is over (a reason, text).
     Reset = 9,
+    /// roll → gateway, JSON [`Resolve`]: look a name's SRV record up on the gateway, with the
+    /// network's own DNS. The id is a stream id, used once: no stream opens.
+    Resolve = 10,
+    /// gateway → roll, JSON [`Resolved`]: the record's targets, each in the gateway's allow-list
+    /// (`refused` says why not).
+    Resolved = 11,
 }
 
 impl Kind {
@@ -69,6 +77,8 @@ impl Kind {
             7 => Kind::Window,
             8 => Kind::Fin,
             9 => Kind::Reset,
+            10 => Kind::Resolve,
+            11 => Kind::Resolved,
             _ => return None,
         })
     }
@@ -137,6 +147,20 @@ pub struct Welcome {
 pub struct Open {
     pub host: String,
     pub port: u16,
+}
+
+/// An SRV name to look up: `_mongodb._tcp.cluster0.corp.internal`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Resolve {
+    pub srv: String,
+}
+
+/// An SRV record's targets as `host:port`, in the record's order, at most [`MAX_TARGETS`].
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Resolved {
+    pub targets: Vec<String>,
 }
 
 #[cfg(test)]

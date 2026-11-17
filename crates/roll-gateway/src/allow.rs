@@ -4,6 +4,9 @@
 //! or CIDR in brackets: `[fd00::/8]:5432`). A name is allowed by a name entry, or when every
 //! address it resolves to (on the gateway) is in a CIDR entry for the port; an IP literal only by
 //! a CIDR entry. An empty list allows nothing.
+//!
+//! An SRV lookup (`mongodb+srv://`) is answered only when every target the record names passes
+//! that same check, and is looked up at all only when the list could allow a target of it.
 
 use ipnet::IpNet;
 use std::net::{IpAddr, SocketAddr};
@@ -149,11 +152,64 @@ impl AllowList {
         }
         Ok(addrs)
     }
+
+    /// Whether the list could allow a target of an SRV record on `domain` (the record's own name
+    /// without its `_service._proto` labels): a CIDR entry may, once the targets resolve; a name
+    /// or suffix entry may when it shares the domain's parent, where the targets of a MongoDB
+    /// record sit.
+    fn could_hold(&self, domain: &str) -> bool {
+        let domain = domain.to_ascii_lowercase();
+        let parent = domain.split_once('.').map_or(domain.as_str(), |(_, p)| p);
+        let under = format!(".{parent}");
+        self.0.iter().any(|e| match &e.host {
+            Host::Net(_) => true,
+            Host::Name(n) => n.ends_with(&under) || *n == domain,
+            Host::Suffix(s) => s.ends_with(&under) || under.ends_with(s.as_str()),
+        })
+    }
+
+    /// The targets of `srv`'s SRV record (`_mongodb._tcp.cluster0.corp.internal`), each `host:port`,
+    /// if every one is allowed; at most [`crate::proto::MAX_TARGETS`] are looked at. `lookup` asks
+    /// the network's DNS for the record; `resolve` resolves a target as [`AllowList::check`]
+    /// does. The error says why without naming a target (roll sees it; the gateway logs the
+    /// target itself, through `refused`).
+    pub async fn check_srv<L, LFut, R, RFut>(&self, srv: &str, lookup: L, resolve: R, refused: impl Fn(&str)) -> Result<Vec<String>, String>
+    where
+        L: FnOnce(String) -> LFut,
+        LFut: std::future::Future<Output = std::io::Result<Vec<(String, u16)>>>,
+        R: Fn(String, u16) -> RFut,
+        RFut: std::future::Future<Output = std::io::Result<Vec<SocketAddr>>>,
+    {
+        let srv = srv.trim_end_matches('.');
+        if !name(srv) {
+            return Err(format!("{srv} isn't a host name"));
+        }
+        let domain = srv.split('.').skip_while(|l| l.starts_with('_')).collect::<Vec<_>>().join(".");
+        if domain.is_empty() || domain.len() == srv.len() || !self.could_hold(&domain) {
+            return Err(format!("{srv} isn't in the gateway's allow-list"));
+        }
+        let mut found = lookup(srv.to_string()).await.map_err(|_| format!("{srv} has no SRV record on the gateway"))?;
+        found.truncate(crate::proto::MAX_TARGETS);
+        if found.is_empty() {
+            return Err(format!("{srv} has no SRV record on the gateway"));
+        }
+        let mut out = Vec::with_capacity(found.len());
+        for (host, port) in found {
+            let host = host.trim_end_matches('.').to_ascii_lowercase();
+            if let Err(why) = self.check(&host, port, &resolve).await {
+                refused(&format!("{host}:{port}: {why}"));
+                return Err(format!("a target of {srv} isn't in the gateway's allow-list"));
+            }
+            out.push(format!("{host}:{port}"));
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     async fn to(addrs: &'static [&'static str]) -> std::io::Result<Vec<SocketAddr>> {
         Ok(addrs.iter().map(|a| a.parse().unwrap()).collect())
@@ -183,5 +239,28 @@ mod tests {
         for bad in ["10.0.0.0/8", "host:0", "host:99999", "*.:5432", "a/b:1", "[fd00::1:5432"] {
             assert!(AllowList::parse([bad]).is_err(), "{bad}");
         }
+    }
+
+    #[tokio::test]
+    async fn an_srv_record_is_answered_only_when_every_target_is_allowed() {
+        let srv = |targets: &'static [(&'static str, u16)]| move |_: String| async move { Ok(targets.iter().map(|(h, p)| (h.to_string(), *p)).collect::<Vec<_>>()) };
+        let resolve = |_: String, p: u16| async move { Ok(vec![SocketAddr::from(([10, 0, 0, 7], p))]) };
+        let quiet = |_: &str| {};
+        let l = AllowList::parse(["*.abcde.corp.internal:27017"]).unwrap();
+        let got = l.check_srv("_mongodb._tcp.cluster0.abcde.corp.internal", srv(&[("Shard-0.abcde.corp.internal.", 27017), ("shard-1.abcde.corp.internal", 27017)]), resolve, quiet).await.unwrap();
+        assert_eq!(got, ["shard-0.abcde.corp.internal:27017", "shard-1.abcde.corp.internal:27017"]);
+        // One target outside the list refuses the whole answer, without naming it to roll.
+        let logged = Mutex::new(vec![]);
+        let err = l.check_srv("_mongodb._tcp.cluster0.abcde.corp.internal", srv(&[("shard-0.abcde.corp.internal", 27017), ("db.elsewhere.example", 27017)]), resolve, |s: &str| logged.lock().unwrap().push(s.to_string())).await.unwrap_err();
+        assert!(!err.contains("elsewhere") && logged.lock().unwrap()[0].contains("db.elsewhere.example:27017"), "{err}");
+        assert!(l.check_srv("_mongodb._tcp.cluster0.abcde.corp.internal", srv(&[("shard-0.abcde.corp.internal", 22)]), resolve, quiet).await.is_err(), "the port counts");
+        // A name the list can't hold isn't looked up at all, nor is one without a domain.
+        let never = |_: String| async { panic!("looked up a name the list can't allow") };
+        assert!(l.check_srv("_mongodb._tcp.cluster0.other.example", never, resolve, quiet).await.is_err());
+        assert!(l.check_srv("_mongodb._tcp", never, resolve, quiet).await.is_err());
+        // A CIDR entry holds any name, once its targets resolve inside it; at most 16 are looked at.
+        let nets = AllowList::parse(["10.0.0.0/8:27017"]).unwrap();
+        let many: &'static [(&'static str, u16)] = Box::leak(vec![("db.corp.internal", 27017u16); 40].into_boxed_slice());
+        assert_eq!(nets.check_srv("_mongodb._tcp.c.corp.internal", srv(many), resolve, quiet).await.unwrap().len(), crate::proto::MAX_TARGETS);
     }
 }

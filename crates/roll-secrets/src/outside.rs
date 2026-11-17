@@ -322,11 +322,6 @@ impl Secrets {
             return Err(Error::BadRequest("ca is the server's CA certificates, PEM (64 KiB at most)".into()));
         }
         let gateway = self.check_gateway(project, n.gateway)?;
-        // A gateway relays bytes: the engines whose client speaks over a stream go through one.
-        // ClickHouse and RabbitMQ go through roll's HTTP client, and an SRV record through its DNS.
-        if gateway.is_some() && ["clickhouse://", "rabbitmq://", "mongodb+srv://"].iter().any(|p| n.url.starts_with(p)) {
-            return Err(Error::BadRequest("ClickHouse, RabbitMQ and mongodb+srv:// aren't reached through a gateway yet: give the server's host and port (mongodb://)".into()));
-        }
         outside.check(&Target { url: &n.url, ca: ca.as_deref(), gateway: gateway.as_deref() }, &n.roles, group.as_deref()).map_err(|why| Error::BadRequest(format!("roll couldn't use the database: {why}")))?;
         let dek = self.project(project)?;
         let id = names::new_id("odb", 16);

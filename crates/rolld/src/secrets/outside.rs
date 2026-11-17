@@ -7,6 +7,7 @@
 //! SQL Server: mssql.rs; ClickHouse: clickhouse.rs; RabbitMQ: rabbitmq.rs; Redis: redis.rs; MongoDB: mongo.rs).
 
 mod clickhouse;
+mod https;
 mod mongo;
 mod mssql;
 mod mysql;
@@ -54,11 +55,25 @@ impl Via {
         }
     }
 
-    /// The checked address, for a client that dials itself (ClickHouse's and RabbitMQ's HTTPS).
-    pub(super) async fn address(&self, host: &str, port: u16) -> Result<SocketAddr, String> {
+    /// The targets of `srv`'s SRV record (`mongodb+srv://`): from roll's DNS, or looked up by the
+    /// gateway with the network's (a private cluster's name usually resolves only inside it).
+    /// Each target is still dialed through [`Via::dial`], so its address is checked there.
+    pub(super) async fn srv(&self, srv: &str) -> Result<Vec<(String, u16)>, String> {
         match self {
-            Via::Direct { allow_private } => resolve(host, port, *allow_private).await,
-            Via::Gateway(_) => Err("this server isn't reached through a gateway".into()),
+            Via::Direct { .. } => {
+                let resolver = hickory_resolver::TokioResolver::builder_tokio().map_err(|e| e.to_string())?.build().map_err(|e| e.to_string())?;
+                let found = resolver.srv_lookup(format!("{srv}.")).await.map_err(|_| format!("{srv} has no SRV record"))?;
+                Ok(found
+                    .answers()
+                    .iter()
+                    .filter_map(|r| match &r.data {
+                        hickory_resolver::proto::rr::RData::SRV(s) => Some((s.target.to_ascii().trim_end_matches('.').to_ascii_lowercase(), s.port)),
+                        _ => None,
+                    })
+                    .take(roll_gateway::proto::MAX_TARGETS)
+                    .collect())
+            }
+            Via::Gateway(link) => link.resolve_srv(srv).await,
         }
     }
 }

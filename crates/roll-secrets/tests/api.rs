@@ -2717,8 +2717,6 @@ async fn a_gateway_has_one_token_that_opens_only_its_link_and_reaches_its_projec
     let db = json!({ "name": "billing", "url": "postgres://admin:hunter2@db.example:5432/app", "roles": ["app_blue", "app_green"], "gateway": gw });
     let d = api.ok(Method::POST, "/outside-databases", Some(db)).await;
     assert_eq!((d["gateway"].as_str(), api.outside.3.lock().unwrap().last().cloned().flatten()), (Some(gw.as_str()), Some(gw.clone())));
-    let (s, _) = api.call(Method::POST, "/outside-databases", Some(json!({ "name": "x", "url": "clickhouse://a:b@db.example:8443/x", "roles": ["app_a", "app_b"], "gateway": gw }))).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "ClickHouse speaks HTTPS through roll's client");
     let (s, _) = api.call(Method::POST, "/outside-databases", Some(json!({ "name": "y", "url": "postgres://a:b@db.example/x", "roles": ["app_c", "app_d"], "gateway": "gw_nottheirs" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "only the project's own gateways");
     // An identity that logs the gateway in: no scope of its own.
