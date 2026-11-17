@@ -205,7 +205,8 @@ for _ in $(seq 1 60); do
 done
 case "$CHG_RELEASE" in [0-9]*) ;; *) echo "the change should carry the release's time: $CHG_RELEASE"; exit 1;; esac
 # Its link with access as a QR code, for a phone (a PNG, never cached: it carries the token).
-QR=$(curl -sS -D "$HOME_DIR/qr.h" "http://$API/v1/previews/$PV/qr.png" | head -c 8 | od -An -c | tr -d ' \n')
+curl -sS -D "$HOME_DIR/qr.h" -o "$HOME_DIR/qr.png" "http://$API/v1/previews/$PV/qr.png"
+QR=$(head -c 8 "$HOME_DIR/qr.png" | od -An -c | tr -d ' \n')
 grep -qi '^cache-control: no-store' "$HOME_DIR/qr.h" && [ "$QR" = '211PNG\r\n032\n' ] || { echo "the preview's link should come as a QR code PNG, never cached: $QR"; exit 1; }
 # The preview's NoSQL branch reads masked; the parent's policy is untouched.
 BRANCH_NOSQL=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='nosql'][0]")
@@ -713,7 +714,9 @@ for _ in $(seq 1 240); do
   sleep 0.5
 done
 [ -n "$CROP_NOTE" ] || { echo "the open note should get a picture of its element: $(api GET "/v1/previews/$PV/notes")"; exit 1; }
-CROP=$(curl -sS "http://$API/v1/previews/$PV/notes/$CROP_NOTE/crop" | head -c 8 | od -An -tx1 | tr -d ' \n')
+# Saved, then read (piped into head, curl can fail writing the rest: exit 23 under pipefail).
+curl -sS -o "$HOME_DIR/crop.png" "http://$API/v1/previews/$PV/notes/$CROP_NOTE/crop"
+CROP=$(head -c 8 "$HOME_DIR/crop.png" | od -An -tx1 | tr -d ' \n')
 [ "$CROP" = 89504e470d0a1a0a ] || { echo "the note's crop should be a PNG: $CROP"; exit 1; }
 
 say "[skip preview] in the title removes the preview; without it, a new one comes"

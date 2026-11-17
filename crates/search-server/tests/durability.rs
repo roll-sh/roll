@@ -941,12 +941,14 @@ async fn concurrent_snapshot_deletes_keep_the_copies_of_snapshots_in_progress() 
         };
         let mut refused = 0;
         if round == 2 {
+            let deadline = Instant::now() + Duration::from_secs(60);
             loop {
                 let (s, b) = call(&n, "c1", "DELETE", &format!("/_snapshot/r/{name}"), "").await;
                 if s == 200 {
                     break;
                 }
                 assert_eq!((s, b["error"]["type"].as_str()), (503, Some("concurrent_snapshot_execution_exception")), "{b}");
+                assert!(Instant::now() < deadline, "the snapshot is still refused 60 s into its restore ({refused} refusals): {b}");
                 refused += 1;
                 tokio::time::sleep(Duration::from_millis(2)).await;
             }

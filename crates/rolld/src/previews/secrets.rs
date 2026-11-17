@@ -31,9 +31,11 @@ impl roll_previews::ports::Secrets for Secrets {
         let mut body = json!({ "base": base, "labels": { "preview": env }, "ttl_minutes": ttl_minutes, "trusted": trusted, "secrets": set_ops(vars), "replace": true,
             "branches": branches.iter().map(|(k, p)| json!({ "kind": k.as_str(), "parent": p })).collect::<Vec<_>>() });
         // A roll secrets from before `branches` refuses it (unknown fields are a 400): sent again
-        // without, and the branches' values under the providers' names still win (`names`).
+        // without only when the preview branched nothing. With branches, failing is the safe
+        // side: a link to a parent under a name of its own would resolve the parent's value
+        // (a node mid-upgrade, say), so the preview waits rather than deploys with it.
         let answer = match self.0.call(Method::PUT, &path, Some(body.clone())).await {
-            Err(e) if e.downcast_ref::<Refused>().is_some_and(|r| r.status == StatusCode::BAD_REQUEST && r.error.contains("unknown field `branches`")) => {
+            Err(e) if branches.is_empty() && e.downcast_ref::<Refused>().is_some_and(|r| r.status == StatusCode::BAD_REQUEST && r.error.contains("unknown field `branches`")) => {
                 body.as_object_mut().map(|o| o.remove("branches"));
                 self.0.call(Method::PUT, &path, Some(body.clone())).await
             }
@@ -112,6 +114,23 @@ impl roll_previews::ports::Secrets for Secrets {
                 })
                 .collect(),
         })
+    }
+
+    async fn links(&self, project: &str, env: &str) -> anyhow::Result<Vec<(String, roll_previews::Kind, String, String)>> {
+        let v = match self.0.get(&format!("/v1/secrets/projects/{}/environments/{}/secrets?path=/", seg(project), seg(env))).await {
+            Ok(v) => v,
+            Err(e) if is_404(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        Ok(v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| {
+                let l = &s["link"];
+                let kind = roll_previews::Kind::parse(l["kind"].as_str()?).ok()?;
+                Some((s["key"].as_str()?.to_string(), kind, l["ref"].as_str()?.to_string(), l["field"].as_str()?.to_string()))
+            })
+            .collect())
     }
 
     async fn renew(&self, project: &str, lease: &str) -> anyhow::Result<Option<i64>> {
