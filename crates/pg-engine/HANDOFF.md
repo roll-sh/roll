@@ -10604,6 +10604,60 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 15, part 1: DELETE's +4.5% explained, the bulk harness's background, the per-row micro set (agent 246)
+
+BENCH.md "Bulk writes, round 15, part 1" has the measurements (plain dist builds, lane C, the bulk
+harness, alternating rounds). Four commits on `cand/a246`; part 2 (`cand/a246-2`, on these) is the
+integer filter kernel and the rest.
+
+**DELETE's +4.5% ("Storage round 2, part 2") is not the DELETE.** Against `89c209552` (c1, before part 2)
+on `6d3b7e9e5` (b0): the scan, filter, rows and row locks cost the same (`count(*)` after the UPDATE
+1.427 / 1.427 G, `count(*) WHERE id % 4 = 1` 2.692 / 2.693, `SELECT … FOR UPDATE` of the deleted
+quarter 3.864 / 3.856); the DELETE rolled back (`BEGIN; DELETE …; ROLLBACK`) is 1% cheaper on b0
+(5.70 against 5.76 G: its tombstone runs format 2, uncompressed); both commits link the same runs
+(debug log, `runs at commit linked=2 merged=0`). The extra was the compaction the commit starts
+(`deletions_due`) running on `roll-flush` inside the step's counting window: after the scan's last
+sample, 585 compaction samples on b0 (the dead-entry marking pass: `raw_block`, zstd decompression)
+against 272 on c1; under load b0's DELETE read 6.9-7.1 G, c1's didn't move.
+
+**The harness lost most background work.** `bulk3.sh`'s `settle` window started about a second after
+the step's ended (perf stopped and started, `sleep 0.5`); the compaction after DELETE takes ~0.8 s, so
+most of it fell between the two windows and counted nowhere, and the cgroup counter of a near-idle
+`bg_` window sometimes came back scaled (27.1 and 39.6 G against 1.3 and 0.5 G cycles, 0.015 and 0.008 s
+of CPU). So "compaction after DELETE 7.08 -> 3.80 G" in part 2 is partly where the windows fell.
+`~/.cache/a246/bench/bulkx.sh` with `JOIN=1` (`roundsj.sh`) runs a step's window on through its settle
+loop, so each step counts its own background work, and prints the share of the window the counter ran
+(`ins 10.629@100.00`). DELETE with its compaction reads 10.63 G on b0 run after run (10.629, 10.631, 10.633,
+10.633), where the split windows gave 6.1-6.5 G plus 2.9-5.7 G. Use it for anything with background work.
+
+**Kept: the per-row micro set** (four commits): a compact lock set grows from its slots' own hash bits,
+no key read or hashed again (agent 208's `keyset-grow-no-rehash.patch`); `int % int` in 64 bits, no
+`u128_div_rem` (208's `int-mod-64.patch`); a load's per-row lookups by the fast hasher (the heap
+estimates' map, the sequences) and a table's fillfactor read without copying its option (from 208's
+`load-fast-hasher.patch`); COPY's insert takes its feed's rows a batch at a time, one lock of the feed a
+batch (208's `copy-feed-batch.patch`). Agents 208 and 228 dropped them for missing a 3% bar each. Against
+b0, joined windows, four pairs: COPY in -2.0% in every pair (10.495 -> 10.284 G), INSERT … SELECT
+-2.2 to -2.6%, UPDATE -1.5 to -1.6%, DELETE with its compaction -0.8 to -1.0%, every other step level;
+all steps 56.24 -> 55.57 G (-1.2% in every pair). (Five more pairs with split windows: COPY -2.0% x5,
+INSERT … SELECT -2.5 to -2.8%, UPDATE -1.3 to -1.6%.) That more than wins back agent 241's COPY +1.5%
+and INSERT … SELECT +0.5-1.2%. Peak memory the same (VmHWM 263-289 MB in both).
+
+**Measured and dropped:**
+- **Agent 217's fold** (an L0 file of 2^16 entries or more, a quarter of the live entries of the L1
+  files its range meets and not mostly deletions, compacts at once: the bulk UPDATE's versions folded
+  into the table), ported onto dead-entry sets, which now let the compaction after DELETE only mark
+  files once L0 holds nothing but deletions (`marked=3`, the table too). Joined windows: UPDATE with its
+  background 12.84 -> 16.31 G, DELETE with its compaction 10.63 -> 7.85 G, all steps +0.7 G: the table is
+  rewritten after the UPDATE (1M rows and 500k versions) instead of after the DELETE (750k rows), and the
+  DELETE's unmerged scan saves less than that. `~/.cache/a246/patches/fold1.patch`.
+
+Verification: `tools/quick-check.sh` on the four commits (before the rebase onto `974184c44`, which
+was clean): Clippy 16 warnings, none new in a changed file; 429 tests in 27 binaries; crash_random seeds
+1-3 x 2, power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing; isolation 1647 / 1648;
+pg_dump_tap 14,609 passed. Again on the rebased head (`79047fd52`, one rerun after the pg_dump step's
+engine found its ephemeral-range port taken): 432 tests in 27 binaries, the same crash, regress, isolation
+and pg_dump results. No format change.
+
 ## Storage round 2, part 2: dead-entry sets, linkable runs in format 2 (agent 245)
 
 BENCH.md "Storage round 2, part 2" has the measurements: on the 1M-row bulk script, settled

@@ -285,6 +285,59 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Bulk writes, round 15, part 1: the per-row micro set (2026-11-17, agent 246)
+
+HANDOFF "Bulk writes, round 15, part 1" has what changed. **b0** is origin's `6d3b7e9e5`, **n1** the four
+commits of `cand/a246` on it. Plain dist builds (`tools/dist.sh`) of separate source snapshots. Lane C:
+servers in containers on CPUs 14,15,32,33 (8 GiB), psql and perf in containers on 16,17,34,35, the 1M-row
+bulk script (`bulk1m.tsv`), autovacuum off. **Joined windows** (`~/.cache/a246/bench/bulkx.sh`,
+`JOIN=1`): each step's window runs on until the server has used under 20 ms of CPU a second for 3 s, so a
+step counts the flush and compaction it left (the old `bg_` windows started ~1 s late and missed most
+of the compaction after DELETE: HANDOFF). G user instructions of the server's cgroup; every counter ran
+100% of its window. Foreign load 1.1-4.0 cores in the busiest step of most runs (other agents on lane C);
+the counts repeat within 0.3% run to run regardless.
+
+### Bulk, joined windows (G user instructions, 4 alternating pairs)
+
+| step | b0 | n1 | % per pair |
+|---|---|---|---|
+| COPY in | 10.495 | 10.284 | -2.0 x4 |
+| CREATE INDEX | 5.364 | 5.365 | -0.1 / +0.2 / -0.0 / +0.0 |
+| CREATE UNIQUE INDEX | 4.111 | 4.111 | +0.0 x4 |
+| COPY out | 3.086 | 3.086 | +0.0 x4 |
+| INSERT … SELECT | 7.032 | 6.857 | -2.5 / -2.6 / -2.2 / -2.5 |
+| UPDATE half | 12.811 | 12.619 | -1.5 / -1.5 / -1.6 / -1.6 |
+| DELETE a quarter, with its compaction | 10.633 | 10.534 | -0.9 / -0.9 / -1.0 / -0.8 |
+| VACUUM | 1.795 | 1.795 | +0.0 x4 |
+| ANALYZE | 0.469 | 0.469 | +0.0 x4 |
+| `count(*), sum(c)` | 0.436 | 0.436 | +0.0 x4 |
+| count(*) (Seq Scan, extra step) | 0.179 | 0.179 | +0.0 x4 |
+| sum(a) (Seq Scan, extra step) | 0.385 | 0.385 | +0.0 x4 |
+| **all steps** | 56.240 | 55.567 | -1.2 x4 |
+| MB written | 204.5 | 204.5 | +0.0 |
+
+Rows equal in every run (count and sums of every column of both tables). VmHWM 275-284 MB (b0) and
+263-289 MB (n1); cgroup peak 340-389 and 330-398 MB. Five earlier pairs with the old split windows:
+COPY in -2.0% x5, INSERT … SELECT -2.5 to -2.8%, UPDATE -1.3 to -1.6%; DELETE and its `bg_` window
+moved -9 to +660% (the window problem).
+
+### The DELETE's +4.5% of part 2 (b0 against c1 = `89c209552`, split windows, G)
+
+| | c1 | b0 |
+|---|---|---|
+| `count(*)` after the UPDATE | 1.426 / 1.403 | 1.427 / 1.404 |
+| `count(*) WHERE id % 4 = 1` | 2.692 | 2.693 |
+| `SELECT … FOR UPDATE` of the quarter | 3.864 | 3.856 |
+| DELETE rolled back | 5.765 / 5.750 | 5.699 / 5.695 |
+| DELETE committed (step window) | 6.022 / 5.958 / 6.140 / 5.995 | 6.287 / 6.289 / 6.341 / 6.246 |
+
+### Fold after UPDATE (dropped; joined windows, one round, G)
+
+| | b0 | f1 (fold) |
+|---|---|---|
+| UPDATE half, with its background | 12.844 | 16.313 |
+| DELETE a quarter, with its compaction | 10.629 | 7.853 |
+
 ## Analytic CPU, round 4 (2026-11-17, agent 251)
 
 HANDOFF "Analytic CPU, round 4" has what changed. Lane C (servers in containers on CPUs
