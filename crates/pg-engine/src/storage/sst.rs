@@ -1055,18 +1055,24 @@ const RESTART: usize = 1 << RLOG;
 /// version after the suffix, `F_DERIVED` makes the value field the length of the key's tail
 /// the value ends with.
 pub struct Block {
-    data: Bytes,
-    /// Every `RESTART`th entry: its key as a number in the high 32 bits (as
+    /// The entries, their values, then (from `rs`) the restart words and the restarts' value
+    /// offsets, then (from `lk`) the block's last key: one allocation a block. (Each in an
+    /// allocation of its own took about 150 bytes a block more, which the cache didn't count:
+    /// with blocks half the size, TPC-H at 2 GB peaked 25 MB higher.)
+    ///
+    /// The restart words: every `RESTART`th entry's key as a number in the high 32 bits (as
     /// `BlockIndex::words`, of 4 bytes: those after the `common` bytes all restarts' keys
-    /// start with), its offset in the low ones. A seek searches the numbers, not the
-    /// entries: a point read's block is seldom in the CPU's cache, and every restart it
-    /// compared was a miss (three quarters of `seek`).
-    restarts: Vec<u64>,
-    /// Where each restart's entry's value is (each value follows the one before's).
-    rvals: Vec<u32>,
+    /// start with), its offset in the low ones (u64 little-endian, `restart`). A seek
+    /// searches the numbers, not the entries: a point read's block is seldom in the CPU's
+    /// cache, and every restart it compared was a miss (three quarters of `seek`). The value
+    /// offsets: where each restart's entry's value is (u32, `rval`; each value follows the
+    /// one before's).
+    data: Bytes,
+    rs: u32,
+    nr: u32,
+    lk: u32,
     common: usize,
     len: usize,
-    last_key: Box<[u8]>,
     /// The version (a key's last 8 bytes) entries flagged `F_TS` end with.
     ts: [u8; 8],
     /// Whether some entry's value is derived (`expand` then copies the values).
@@ -1201,6 +1207,58 @@ fn derived_tail(key: &[u8], v: &[u8]) -> Option<usize> {
 }
 
 impl Block {
+    /// Its restarts.
+    #[inline(always)]
+    fn nres(&self) -> usize {
+        self.nr as usize
+    }
+
+    /// Restart `r`'s word (`data`).
+    #[inline(always)]
+    fn restart(&self, r: usize) -> u64 {
+        let i = self.rs as usize + 8 * r;
+        u64::from_le_bytes(self.data[i..i + 8].try_into().unwrap())
+    }
+
+    /// Where restart `r`'s entry's value is (`data`).
+    #[inline(always)]
+    fn rval(&self, r: usize) -> u32 {
+        let i = self.rs as usize + 8 * self.nr as usize + 4 * r;
+        u32::from_le_bytes(self.data[i..i + 4].try_into().unwrap())
+    }
+
+    /// The restart words and value offsets of entries and values `data`, then `last_key`:
+    /// a block's `data` (`rs`, `lk` where they start).
+    fn assemble(mut data: Vec<u8>, restarts: &[u64], rvals: &[u32], last_key: &[u8]) -> (Bytes, u32, u32) {
+        let rs = data.len();
+        data.reserve_exact(restarts.len() * 12 + last_key.len());
+        for r in restarts {
+            data.extend_from_slice(&r.to_le_bytes());
+        }
+        for v in rvals {
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        let lk = data.len();
+        data.extend_from_slice(last_key);
+        (Bytes::from(data), rs as u32, lk as u32)
+    }
+
+    #[cfg(test)]
+    fn restarts_vec(&self) -> Vec<u64> {
+        (0..self.nres()).map(|r| self.restart(r)).collect()
+    }
+
+    #[cfg(test)]
+    fn rvals_vec(&self) -> Vec<u32> {
+        (0..self.nres()).map(|r| self.rval(r)).collect()
+    }
+
+    /// The entries' and values' bytes (`data` before the restart words).
+    #[cfg(test)]
+    fn body(&self) -> &[u8] {
+        &self.data[..self.rs as usize]
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
@@ -1210,7 +1268,7 @@ impl Block {
     }
 
     pub fn last_key(&self) -> Option<&[u8]> {
-        (self.len > 0).then_some(&*self.last_key)
+        (self.len > 0).then_some(&self.data[self.lk as usize..])
     }
 
     /// Decode the entry at `pos.next` into `pos` (entry `pos.i`).
@@ -1251,8 +1309,8 @@ impl Block {
             return;
         }
         let r = i >> self.rlog;
-        pos.next = self.restarts[r] as u32;
-        pos.vnext = self.rvals[r];
+        pos.next = self.restart(r) as u32;
+        pos.vnext = self.rval(r);
         pos.key.clear();
         pos.i = r << self.rlog;
         self.read(pos);
@@ -1273,7 +1331,7 @@ impl Block {
     /// The whole key of restart `r` compared with `key` (inlined, as `first_restart`).
     #[inline(always)]
     fn restart_cmp(&self, r: usize, key: &[u8]) -> std::cmp::Ordering {
-        let mut p = self.restarts[r] as u32 as usize;
+        let mut p = self.restart(r) as u32 as usize;
         let (_, us, _) = head(&self.data, &mut p);
         let stored = &self.data[p..p + (us >> 2)];
         cmp_split(stored, if us & F_TS != 0 { &self.ts } else { &[] }, key)
@@ -1283,14 +1341,14 @@ impl Block {
     /// point read's, keeps it in its body now that the multi-get calls it too.)
     #[inline(always)]
     fn first_restart(&self, key: &[u8]) -> usize {
-        let n = self.restarts.len();
+        let n = self.nres();
         if n == 0 {
             return 0;
         }
         let c = self.common;
         let m = c.min(key.len());
         // (Restart 0 stores its key's first `common` bytes whole.)
-        let mut p = self.restarts[0] as u32 as usize;
+        let mut p = self.restart(0) as u32 as usize;
         head(&self.data, &mut p);
         match key[..m].cmp(&self.data[p..p + m]) {
             std::cmp::Ordering::Less => return 0,
@@ -1300,8 +1358,16 @@ impl Block {
         }
         let w = (word(&key[c..]) >> 32) as u32;
         let word_of = |r: u64| (r >> 32) as u32;
-        let mut lo = self.restarts.partition_point(|&x| word_of(x) < w);
-        while lo < n && word_of(self.restarts[lo]) == w && self.restart_cmp(lo, key).is_lt() {
+        let (mut lo, mut hi) = (0, n);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if word_of(self.restart(mid)) < w {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        while lo < n && word_of(self.restart(lo)) == w && self.restart_cmp(lo, key).is_lt() {
             lo += 1;
         }
         lo
@@ -1310,11 +1376,9 @@ impl Block {
     /// Ask for the cache lines a `seek` here reads first, its restarts' numbers and restart
     /// 0's key, ahead of it (a hint: `PointReader::get_sorted`).
     pub fn prefetch_restarts(&self) {
-        // SAFETY: `restarts` is a live vector of u64s; the bytes are read only as a prefetch.
-        let words = unsafe { std::slice::from_raw_parts(self.restarts.as_ptr().cast::<u8>(), self.restarts.len() * 8) };
-        prefetch(words, 2);
-        if let Some(&r) = self.restarts.first() {
-            prefetch(self.data.get(r as u32 as usize..).unwrap_or_default(), 1);
+        prefetch(&self.data[self.rs as usize..self.rs as usize + 8 * self.nres()], 2);
+        if self.nres() > 0 {
+            prefetch(self.data.get(self.restart(0) as u32 as usize..).unwrap_or_default(), 1);
         }
     }
 
@@ -1330,9 +1394,9 @@ impl Block {
     /// Ask for restart `r`'s entries and the first of their values, which a `seek_from` it
     /// decodes (a hint).
     pub fn prefetch_restart(&self, r: usize) {
-        if let (Some(&e), Some(&v)) = (self.restarts.get(r), self.rvals.get(r)) {
-            prefetch(self.data.get(e as u32 as usize..).unwrap_or_default(), 2);
-            prefetch(self.data.get(v as usize..).unwrap_or_default(), 2);
+        if r < self.nres() {
+            prefetch(self.data.get(self.restart(r) as u32 as usize..).unwrap_or_default(), 2);
+            prefetch(self.data.get(self.rval(r) as usize..).unwrap_or_default(), 2);
         }
     }
 
@@ -1344,14 +1408,14 @@ impl Block {
     /// `seek` of `key` from restart `r`, `restart_for(key)`.
     #[inline(always)]
     pub fn seek_from(&self, r: usize, key: &[u8], pos: &mut BlockPos) {
-        if r >= self.restarts.len() {
+        if r >= self.nres() {
             pos.i = self.len;
             return;
         }
         // The keys from the restart's on, the entries' values left alone until the one
         // found.
-        pos.next = self.restarts[r] as u32;
-        pos.vnext = self.rvals[r];
+        pos.next = self.restart(r) as u32;
+        pos.vnext = self.rval(r);
         pos.key.clear();
         pos.i = r << self.rlog;
         self.read(pos);
@@ -1615,7 +1679,7 @@ impl Block {
 
     /// The bytes it holds (what the block cache counts).
     pub fn mem_bytes(&self) -> usize {
-        self.data.len() + self.restarts.capacity() * 8 + self.rvals.capacity() * 4 + self.last_key.len() + std::mem::size_of::<Block>()
+        self.data.len() + std::mem::size_of::<Block>()
     }
 
     /// Every entry with its key whole, for readers that go backwards or read a block once.
@@ -1667,21 +1731,24 @@ impl Block {
             return Err(bad());
         }
         let r = &raw[data_len..];
-        let restarts: Vec<u64> = r[..nr * 8].as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect();
-        let rvals: Vec<u32> = r[nr * 8..nr * 12].as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
-        if restarts.iter().any(|&x| x as u32 as usize >= data_len) || rvals.iter().any(|&v| v as usize > data_len) {
+        if r[..nr * 8].as_chunks::<8>().0.iter().any(|c| u64::from_le_bytes(*c) as u32 as usize >= data_len)
+            || r[nr * 8..nr * 12].as_chunks::<4>().0.iter().any(|c| u32::from_le_bytes(*c) as usize > data_len)
+        {
             return Err(bad());
         }
+        // (The body as the file holds it up to its trailer, then the last key, in an allocation
+        // of its own size: the entries, values and restart arrays are where `data` has them.)
+        let mut data = Vec::with_capacity(data_len + nr * 12 + last_key.len());
+        data.extend_from_slice(&raw[..data_len + nr * 12]);
+        let lk = data.len() as u32;
+        data.extend_from_slice(last_key);
         Ok(Block {
-            // (Copied into an allocation of its own size, as `decode_with`'s is: a slice would
-            // keep the restart arrays, copied above, and the file buffer's frame with it, a few
-            // hundred bytes a block: TPC-H's peak +12 to +20 MB.)
-            data: Bytes::copy_from_slice(&raw[..data_len]),
-            restarts,
-            rvals,
+            data: Bytes::from(data),
+            rs: data_len as u32,
+            nr: nr as u32,
+            lk,
             common,
             len,
-            last_key: last_key.into(),
             ts,
             derived,
             rlog,
@@ -1790,12 +1857,10 @@ impl Block {
         // (Copied into an allocation of its own size: shrinking the one sized for the raw
         // block keeps the raw block's bytes when it shrinks by less than half, as mimalloc's
         // realloc does, and a cache of blocks would hold them all.)
-        let mut data = Vec::with_capacity(out.len() + vals.len());
+        let mut data = Vec::with_capacity(out.len() + vals.len() + restarts.len() * 12 + key.len());
         data.extend_from_slice(&out);
         data.extend_from_slice(&vals);
-        restarts.shrink_to_fit();
         rvals.iter_mut().for_each(|v| *v += vbase);
-        rvals.shrink_to_fit();
         let rkey_at = |i: usize| &rkeys[if i == 0 { 0 } else { rends[i - 1] }..rends[i]];
         let common = match rends.len() {
             0 => 0,
@@ -1807,13 +1872,14 @@ impl Block {
         for (i, r) in restarts.iter_mut().enumerate() {
             *r |= word(&rkey_at(i)[common..]) >> 32 << 32;
         }
+        let (data, rs, lk) = Block::assemble(data, &restarts, &rvals, &key);
         Ok(Block {
-            data: Bytes::from(data),
-            restarts,
-            rvals,
+            data,
+            rs,
+            nr: restarts.len() as u32,
+            lk,
             common,
             len: n,
-            last_key: key.as_slice().into(),
             ts: ts.unwrap_or([0xFF; 8]),
             derived,
             rlog,
@@ -2898,7 +2964,7 @@ mod tests {
             assert_eq!(two.block_count(), one.block_count());
             for i in 0..two.block_count() {
                 let (a, b) = (one.block_with(i, false).unwrap(), two.block_with(i, false).unwrap());
-                assert_eq!((&a.data[..], &a.restarts, &a.rvals, a.mem_bytes()), (&b.data[..], &b.restarts, &b.rvals, b.mem_bytes()), "block {i}");
+                assert_eq!((&a.data[..], a.restarts_vec(), a.rvals_vec(), a.mem_bytes()), (&b.data[..], b.restarts_vec(), b.rvals_vec(), b.mem_bytes()), "block {i}");
             }
             // Each block of format 2 is the cache form `Block::decode` makes of the same
             // entries in format 1's block form.
@@ -2909,7 +2975,7 @@ mod tests {
                 at += b.len();
                 let d = Block::decode(Bytes::from(block_bytes(mine, RESTART))).unwrap();
                 assert_eq!(&b.data[..], &d.data[..], "block {i}");
-                assert_eq!((&b.restarts, &b.rvals, b.common, b.len, &b.last_key, b.ts, b.derived), (&d.restarts, &d.rvals, d.common, d.len, &d.last_key, d.ts, d.derived));
+                assert_eq!((b.restarts_vec(), b.rvals_vec(), b.common, b.len, b.last_key(), b.ts, b.derived), (d.restarts_vec(), d.rvals_vec(), d.common, d.len, d.last_key(), d.ts, d.derived));
                 let mut pos = BlockPos::default();
                 for (j, (k, v)) in mine.iter().enumerate() {
                     b.seek(k, &mut pos);
@@ -2927,7 +2993,7 @@ mod tests {
             let mut all = Vec::new();
             for i in 0..four.block_count() {
                 let b = four.block_with(i, false).unwrap();
-                assert_eq!(b.restarts.len(), b.len().div_ceil(4));
+                assert_eq!(b.nres(), b.len().div_ceil(4));
                 let mine = entries_of(&b);
                 let mut pos = BlockPos::default();
                 for (j, (k, v)) in mine.iter().enumerate() {
@@ -2977,7 +3043,7 @@ mod tests {
             assert_eq!(d.block_count(), plain.block_count());
             for i in 0..d.block_count() {
                 let (a, b) = (plain.block_with(i, false).unwrap(), d.block_with(i, false).unwrap());
-                assert_eq!((&a.data[..], &a.restarts, &a.rvals, &a.last_key), (&b.data[..], &b.restarts, &b.rvals, &b.last_key), "block {i}");
+                assert_eq!((&a.data[..], a.restarts_vec(), a.rvals_vec(), a.last_key()), (&b.data[..], b.restarts_vec(), b.rvals_vec(), b.last_key()), "block {i}");
             }
             for (k, v) in ents.iter().step_by(7) {
                 let b = d.block_with(d.find_block(k), false).unwrap();

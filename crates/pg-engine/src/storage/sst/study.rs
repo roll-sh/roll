@@ -415,9 +415,9 @@ fn codecs(readers: &[Arc<SstReader>]) {
             let t0 = Instant::now();
             let b = Block::decode(Bytes::from(raw.clone())).unwrap();
             g.decode_ns += t0.elapsed().as_nanos() as u64;
-            let compact = b.data.len() + b.restarts.len() * 4 + b.rvals.len() * 4 + 16;
+            let compact = b.body().len() + b.nres() * 8 + 16;
             g.compact += compact as u64;
-            g.compact_data += b.data.len() as u64;
+            g.compact_data += b.body().len() as u64;
             if i % sample != 0 {
                 continue;
             }
@@ -429,7 +429,7 @@ fn codecs(readers: &[Arc<SstReader>]) {
                 let (n, c, d) = coders.run(ci, &raw);
                 let e = &mut g.file_c[ci];
                 *e = (e.0 + n as u64, e.1 + c, e.2 + d);
-                let (n, c, d) = coders.run(ci, &b.data);
+                let (n, c, d) = coders.run(ci, b.body());
                 let e = &mut g.compact_c[ci];
                 *e = (e.0 + n as u64, e.1 + c, e.2 + d);
             }
