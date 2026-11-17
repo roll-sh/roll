@@ -718,9 +718,16 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **The merge queue, in turn:** #108 holds the lock (main with previews #123/#137 and secrets #67
-   merged as adf32d147, full gate running); then search's #125/#129/#119 and secrets' #68 (agreed);
-   then #114 (the secrets thread reruns roll-secrets' tests on its head first).
+1. **The merge queue, in turn:** previews #150 (security fix) holds the lock, then secrets #151,
+   then search's #125/#129/#119, then #108 (search agreed; asked secrets about their #68), then
+   #114. #108 released the lock unmerged at 01:35: every part of its gate passed on adf32d147, but
+   each `test:code --docker` rerun hit a Postgres load flake in a crate it doesn't touch (load 64–80;
+   one run lost to the full disk), and a security fix shouldn't wait on that.
+   - **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
+     and `killed_connections_never_lose_or_repeat_acknowledged_writes` (16 threads on one row
+     exhaust the 40 conflict re-runs), and code-control's Linear e2e (30 s for the elicitation).
+     They fail other threads' gates too; a test-side deadline, not more retries in production, is
+     the likely fix.
 2. **Two-person approvals: built** on `feature/roll-mcp-approval-quorum` (on #114; a PR on main once
    #114 merges). The policy's `approval_rules` (`{product, actions, environments, approvals,
    approvers}`, named as roll secrets' protected environments) are gates: each approver counts once,
