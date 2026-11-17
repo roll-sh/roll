@@ -7950,6 +7950,7 @@ dependencies = [
  "http-body-util",
  "parking_lot",
  "reqwest",
+ "roll-auth",
  "roll-cluster",
  "rusqlite",
  "search-es",

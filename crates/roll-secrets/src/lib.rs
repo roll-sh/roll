@@ -56,14 +56,14 @@ mod caller;
 pub mod kms;
 mod write;
 
-pub use access::{Action, Caller, Minted, People, Person, Scope, Workloads};
+pub use access::{Action, Caller, Minted, People, Person, Scope, Workloads, PREVIEWS};
 pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter};
-pub use envs::{EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
+pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
 pub use links::{Link, LinkProvider, Links, Mode};
-pub use read::{Grid, Problem, Secret, Source, Values, Version};
+pub use read::{Followed, Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
 pub use exports::Export;
 pub use identities::{Identity, Login, NewIdentity};
@@ -412,6 +412,8 @@ impl Secrets {
         db.add_column("environments", "reminded_at", "INTEGER")?;
         // An ephemeral environment running vetted code may read a protected base (envs.rs).
         db.add_column("environments", "trusted", "INTEGER")?;
+        // The resources an ephemeral environment's preview branched: links to them aren't followed.
+        db.add_column("environments", "branches", "TEXT")?;
         // Client addresses identities log in from (identities.rs).
         db.add_column("identities", "allowed_ips", "TEXT")?;
         // When a value stops working outside roll (a vendor's key, a certificate): ms, or null.
