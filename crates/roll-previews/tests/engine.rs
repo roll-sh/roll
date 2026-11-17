@@ -338,6 +338,13 @@ async fn a_previews_logs_and_job_output_hide_its_secrets() {
     *e.apps.log.lock() = vec!["listening on :3000".into(), "charging with sk_test_51Hx9".into()];
     let (_, lines) = e.engine.logs(&p.id, None, 10).await.unwrap();
     assert_eq!(lines, ["listening on :3000", "charging with ***"]);
+    // Followed too (the dashboard's live logs, `roll preview logs -f`).
+    let (_, mut rx) = e.engine.follow(&p.id, None, 10).await.unwrap();
+    let mut followed = Vec::new();
+    while followed.len() < 2 {
+        followed.push(tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap());
+    }
+    assert_eq!(followed, ["listening on :3000", "charging with ***"]);
 }
 
 #[tokio::test]
