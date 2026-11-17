@@ -122,9 +122,10 @@ fn check_client_id(c: &str) -> bool {
     !c.is_empty() && c.len() <= 128 && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-/// A database user's name roll accepts: letters, digits and `._@+-`, 128 at most.
+/// A database user's name roll accepts: letters, digits and `._@+-`, 128 at most, and never only
+/// dots (`.` or `..` as the path's last segment would name the collection, not the user).
 fn check_user(u: &str) -> bool {
-    !u.is_empty() && u.len() <= 128 && u.bytes().all(|b| b.is_ascii_alphanumeric() || b"._@+-".contains(&b))
+    !u.is_empty() && u.len() <= 128 && u.bytes().all(|b| b.is_ascii_alphanumeric() || b"._@+-".contains(&b)) && !u.bytes().all(|b| b == b'.')
 }
 
 /// A cluster's name, as Atlas allows it.
@@ -721,7 +722,7 @@ mod tests {
         for bad in ["read", "@shop", "read@", "read@sh op", "read@shop/x", "re\"ad@shop"] {
             assert!(parse_role(bad).is_none(), "{bad}");
         }
-        assert!(check_user("app-a@corp.example") && !check_user("a/b") && !check_user("a b"));
+        assert!(check_user("app-a@corp.example") && !check_user("a/b") && !check_user("a b") && !check_user(".") && !check_user("..") && check_user("a.b"));
         assert_eq!(enc("a@b+c"), "a%40b%2Bc");
         assert!(check_srv("mongodb+srv://cluster0.abcde.mongodb.net") && !check_srv("mongodb+srv://u:p@evil.example") && !check_srv("mongodb://cluster0.abcde.mongodb.net"));
         assert_eq!(code(&json!({ "errorCode": "USER_ALREADY_EXISTS", "detail": "secret stuff" })), "USER_ALREADY_EXISTS");
