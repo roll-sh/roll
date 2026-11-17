@@ -85,6 +85,9 @@ struct Part {
     /// The heap's tuples' sizes, in order (`relsize::heap_pages` packs them; 4 bytes each, as
     /// a big build holds a million).
     sizes: Vec<u32>,
+    /// A row may have values out of line (one not sized from its stored bytes, or past
+    /// TOAST_TUPLE_THRESHOLD): no measure is kept for later (`txn::unchanged`).
+    may_toast: bool,
 }
 
 /// What a participant gathered over its chunks.
@@ -117,6 +120,9 @@ struct Plan<'a> {
     need: Vec<bool>,
     fmt: crate::types::text::FormatCtx,
     check_nulls: bool,
+    /// Each row's heap tuple is sized (else the heap's measure kept while nothing changed in
+    /// the table is taken: `Ddl::kept_live`).
+    sized: bool,
     /// The table is modelled: each row's key in the index's model is taken (`sizing::
     /// btree_from_build` lays the model out from them) in place of the measure.
     model: bool,
@@ -148,11 +154,18 @@ impl Plan<'_> {
             g.model.push((key, dkey.to_vec()));
             return Ok(());
         }
-        let stored = crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(bytes)?, &self.types, &self.virt_mask);
-        let mut row = match stored {
-            Some(_) => crate::exec::scan::decode_table_row_need(self.t, bytes, &self.need)?,
-            None => crate::exec::scan::decode_table_row(self.t, bytes)?,
+        // (Some(None): a row its stored bytes don't size; None: not sized, the kept measure.)
+        let stored = match self.sized {
+            true => Some(crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(bytes)?, &self.types, &self.virt_mask)),
+            false => None,
         };
+        let mut row = match stored {
+            Some(None) => crate::exec::scan::decode_table_row(self.t, bytes)?,
+            _ => crate::exec::scan::decode_table_row_need(self.t, bytes, &self.need)?,
+        };
+        if let Some(len) = stored {
+            part.may_toast |= len.is_none_or(|len| len > crate::exec::sizing::TOAST_THRESHOLD);
+        }
         let mut vals = std::mem::take(&mut g.vals);
         vals.clear();
         vals.extend(self.cols.iter().map(|&i| row[i].clone()));
@@ -173,8 +186,9 @@ impl Plan<'_> {
         g.keys.push(super::vacuum::measure_key(&g.sort, size));
         g.vals = vals;
         match stored {
-            Some(len) => part.sizes.push(relsize::heap_tuple_of_len(len) as u32),
-            None => {
+            None => {}
+            Some(Some(len)) => part.sizes.push(relsize::heap_tuple_of_len(len) as u32),
+            Some(None) => {
                 for &i in &self.virt {
                     if i < row.len() {
                         row[i] = Value::Null;
@@ -384,18 +398,26 @@ impl Ddl<'_, '_> {
         crate::exec::sizing::index_columns(bix, &mut needed);
         let mut ix_types: Vec<DataType> = bix.keys.iter().map(|k| k.ty()).collect();
         ix_types.extend(ix.include.iter().map(|&i| t.columns[i].ty.clone()));
+        // (The heap's measure kept while nothing changed in the table: its rows aren't sized.
+        // A CREATE UNIQUE INDEX after a CREATE INDEX of the same table sized none again.)
+        let types: Vec<DataType> = t.columns.iter().map(|c| c.ty.clone()).collect();
+        let virt_mask: Vec<bool> = (0..t.columns.len()).map(|i| virt.contains(&i)).collect();
+        let layout = crate::txn::unchanged::layout_of(&types, &virt_mask);
+        let snap = self.ctx.txn.borrow().snapshot_ts();
+        let kept = (!model).then(|| self.kept_live(t, layout, snap)).flatten();
         let plan = Plan {
             t,
             ix,
             cols,
             colls: &bix.colls,
-            types: t.columns.iter().map(|c| c.ty.clone()).collect(),
+            types,
             ix_types,
-            virt_mask: (0..t.columns.len()).map(|i| virt.contains(&i)).collect(),
+            virt_mask,
             virt,
             need: (0..t.columns.len()).map(|i| needed.contains(&i)).collect(),
             fmt: self.ctx.fmt().clone(),
             check_nulls: ix.unique && !ix.nulls_not_distinct,
+            sized: kept.is_none(),
             model,
         };
         let chunks = Mutex::new(chunks);
@@ -461,7 +483,24 @@ impl Ddl<'_, '_> {
             progress.loaded(tuples as u64);
             return Ok(Some(ParBuilt::Modelled { rows, tuples, keys: model_keys }));
         }
-        let live = relsize::heap_pages(parts.into_iter().flat_map(|p| p.1.sizes).map(|s| s as usize));
+        let live = match kept {
+            Some((live, _)) => live,
+            None => {
+                let may_toast = parts.iter().any(|p| p.1.may_toast);
+                let live = relsize::heap_pages(parts.into_iter().flat_map(|p| p.1.sizes).map(|s| s as usize));
+                // (Kept for the next index's measure while nothing changes in the table: every
+                // row sized from its stored bytes, none past the TOAST threshold, none of this
+                // transaction's own. Its xmins aren't read: `XMINS_UNKNOWN`, which VACUUM
+                // doesn't take, measuring the rows itself as before.)
+                if !may_toast && self.ctx.txn.borrow().writes_in(&start, &crate::storage::keys::prefix_end(&start))?.is_empty() {
+                    let db = &self.ctx.sess.db;
+                    let xmin = crate::txn::unchanged::XMINS_UNKNOWN;
+                    let m = crate::txn::unchanged::Measured { ts: snap, armed: 0, layout, rows, live, xmin, may_toast };
+                    db.unchanged.keep(&db.store, t.oid, m);
+                }
+                live
+            }
+        };
         let tuples = keys.iter().map(Vec::len).sum::<usize>();
         progress.scanned_all(tuples as u64);
         let (pages, est) = super::vacuum::btree_pages_sorted(bix, &plan.ix_types, merge_sorted(keys), tuples);

@@ -52,6 +52,10 @@ pub struct Measured {
     pub may_toast: bool,
 }
 
+/// A measure's xmins when its pass didn't read them (an index build's): no frozen xid is
+/// decided by them (`oldest_xmin` is None), so a VACUUM reads the rows for it.
+pub const XMINS_UNKNOWN: (u64, u64) = (0, u64::MAX);
+
 impl Measured {
     /// The oldest xmin at or past `frozen` (u64::MAX: none), as the measure's pass finds it;
     /// None: not known from the smallest and largest.
