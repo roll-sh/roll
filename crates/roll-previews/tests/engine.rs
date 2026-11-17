@@ -79,6 +79,7 @@ async fn a_fork_waits_for_approval_and_a_failed_step_is_retried() {
     // previews reach anything (`egress_forks`).
     let egress = e.apps.egress.lock().clone();
     assert!(!egress.is_empty() && egress.values().all(|x| *x == roll_previews::settings::EgressRule::Roll), "{egress:?}");
+    assert_eq!(p.reaches, roll_previews::settings::EgressRule::Roll, "and it says so");
 
     // A new push un-approves it: its services stop and it waits again.
     e.code.edit("chg_f", |c| {

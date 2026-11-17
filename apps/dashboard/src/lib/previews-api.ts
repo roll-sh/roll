@@ -94,6 +94,8 @@ export interface Preview {
   release?: { head: string; ms: number; before_ms: number | null } | null;
   /** Kept past its TTL until then (epoch ms). */
   kept_until?: number | null;
+  /** What its code may reach: a fork's preview is `roll` by default though the project's reach anything (`egress_forks`). */
+  reaches?: "open" | "roll";
   /** The pull request a Git URL service's preview is of (roll apps' push hook). A fork's runs only at `approved_head`. */
   pull?: { number: number; url: string; fork: boolean; approved_head: string | null; approved_by: string | null };
   /** When it goes (its TTL, or a keep, running out), once that's close (a day ahead). */
