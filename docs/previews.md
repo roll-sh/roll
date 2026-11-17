@@ -1677,10 +1677,10 @@ Ranked by what a person notices first. Done so far:
    `feature/roll-previews-closed-builds`, gated): rolld's adapter deploys nothing to a closed
    environment that doesn't say so, and a Git URL fork's head is approved under Roll only again.
    Its PR and live check follow #222 onto main.
-2. **A Git URL service's preview reported to its repository** (Vercel's status and comment): built
-   and gated on apps' #138 (branch `feature/roll-previews-git-report4`). Its live check points
-   roll's GitHub App at a fake GitHub (`scripts/lib/fake-github.py`) and expects the fork's
-   `roll/preview` pending, then success with one comment. Run it, then open the PR.
+2. **A Git URL service's preview reported to its repository, in review (#232):** `roll/preview` and
+   the pull request comment through roll's GitHub App (apps' #138). The live check against a fake
+   GitHub (`scripts/lib/fake-github.py`) saw the fork's `roll/preview` go pending, then success,
+   with one comment edited in place.
 3. **Masking's leftovers** (an independent review's findings 6 and 8): the browser's own cuts (a
    console error's first 200 characters, page text lines, an a11y snippet) happen before
    masking, so a value straddling one can show its start. Mask in the parsers with the masks the
