@@ -144,6 +144,18 @@ pub fn ignored(stored: &[(u32, OwnedStoredValue)]) -> Vec<String> {
         .collect()
 }
 
+/// The `_ignored_source` entries (byte values of the stored `_ignored`).
+pub fn ignored_source(stored: &[(u32, OwnedStoredValue)]) -> Vec<&[u8]> {
+    stored
+        .iter()
+        .filter(|(f, _)| *f == IGNORED_FIELD)
+        .filter_map(|(_, v)| match v {
+            OwnedStoredValue::Bytes(b) => Some(b.as_slice()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Parses stored `_source` bytes.
 pub fn parse_source(bytes: &[u8]) -> EsResult<Value> {
     Ok(crate::json::parse(bytes)?.unwrap_or(Value::Null))

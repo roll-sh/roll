@@ -54,6 +54,9 @@ pub const AUTHENTICATED_HEADER: &str = "x-roll-authenticated-user";
 /// expression). It can only take privileges away, so a client sending it gains nothing.
 pub const INDEX_SCOPE_HEADER: &str = "x-roll-index-scope";
 
+/// The id of the API key [`Principal::owner_scoped`] stands for: no key document has it.
+pub const INDEX_SCOPE_KEY: &str = "roll-index-scope";
+
 /// Elasticsearch's run-as header: the request runs as this user once the authenticating
 /// user's `run_as` privilege allows it (`xpack.security.authc.run_as.enabled`).
 pub const RUN_AS_HEADER: &str = "es-security-runas-user";
@@ -120,8 +123,8 @@ impl Principal {
         let limited_by = users::reserved_roles().get("superuser").cloned().map(|d| obj! { "superuser" => d }).unwrap_or(Value::Null);
         Principal {
             kind: AuthKind::ApiKey(Box::new(ApiKeyAuth {
-                id: "roll-index-scope".into(),
-                name: Value::from("roll-index-scope"),
+                id: INDEX_SCOPE_KEY.into(),
+                name: Value::from(INDEX_SCOPE_KEY),
                 role_descriptors: obj! { "index_scope" => obj! { "cluster" => Value::Arr(Vec::new()), "indices" => Value::Arr(vec![obj! { "names" => Value::Arr(names), "privileges" => Value::Arr(vec![Value::from("all")]) }]) } },
                 limited_by,
                 cross_cluster: false,
