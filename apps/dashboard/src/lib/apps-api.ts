@@ -280,7 +280,10 @@ export function describePending(p: Pending): string | null {
 }
 
 export interface FirewallRule {
-  action: "allow" | "deny";
+  /** `limit`: let in at `per_minute` a client, a 429 past it. */
+  action: "allow" | "deny" | "limit";
+  per_minute?: number;
+  burst?: number;
   /** A path, or a prefix ending in `*`. */
   path?: string;
   methods?: string[];
@@ -295,8 +298,16 @@ export function parseFirewall(text: string): FirewallRule[] {
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith("#"))
     .map((l) => {
-      const [action, ...rest] = l.split(/\s+/);
-      const rule: FirewallRule = { action: action === "allow" ? "allow" : "deny" };
+      const [action, ...words] = l.split(/\s+/);
+      const rule: FirewallRule = { action: action === "allow" ? "allow" : action === "limit" ? "limit" : "deny" };
+      let rest = words;
+      // `limit N[:BURST] …`
+      if (rule.action === "limit") {
+        const [n, b] = (rest[0] ?? "").split(":");
+        rule.per_minute = Number(n) || 60;
+        if (b) rule.burst = Number(b) || undefined;
+        rest = rest.slice(1);
+      }
       for (let i = 0; i < rest.length; i++) {
         const t = rest[i];
         if (t.startsWith("ua=")) {
@@ -313,7 +324,7 @@ export function parseFirewall(text: string): FirewallRule[] {
 /** The rules as one line each, as `parseFirewall` reads them. */
 export function formatFirewall(rules: FirewallRule[]): string {
   return rules
-    .map((r) => [r.action, r.path, r.methods?.length ? `method=${r.methods.join(",")}` : undefined, r.user_agent ? `ua=${r.user_agent}` : undefined].filter(Boolean).join(" "))
+    .map((r) => [r.action, r.action === "limit" ? `${r.per_minute ?? 60}${r.burst ? `:${r.burst}` : ""}` : undefined, r.path, r.methods?.length ? `method=${r.methods.join(",")}` : undefined, r.user_agent ? `ua=${r.user_agent}` : undefined].filter(Boolean).join(" "))
     .join("\n");
 }
 

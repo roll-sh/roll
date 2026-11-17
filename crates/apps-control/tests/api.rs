@@ -3684,6 +3684,17 @@ async fn firewall_rules_decide_in_order() {
     assert_eq!(req("HEAD", "/report", "curl").await, StatusCode::FORBIDDEN, "HEAD is a GET");
     assert_eq!(req("GET", "/", "Mozilla badbot/2").await, StatusCode::FORBIDDEN);
     assert_eq!(req("GET", "/", "Mozilla").await, StatusCode::OK, "nothing matching lets it in");
+    // A limit rule: its own rate a client, the rest of the site untouched.
+    let (st, e) = call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "limit", "path": "/login", "per_minute": 1, "burst": 2}]}))).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let mut got = Vec::new();
+    for _ in 0..3 {
+        got.push(req("GET", "/login", "curl").await);
+    }
+    assert_eq!(got, [StatusCode::OK, StatusCode::OK, StatusCode::TOO_MANY_REQUESTS], "its burst through, the next held");
+    assert_eq!(req("GET", "/", "curl").await, StatusCode::OK, "other paths aren't limited");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "limit", "path": "/x"}]}))).await.0, StatusCode::BAD_REQUEST, "a limit says its rate");
+    assert_eq!(call(&w.api, "PUT", &base, Some(json!({"firewall": [{"action": "deny", "path": "/x", "per_minute": 5}]}))).await.0, StatusCode::BAD_REQUEST);
     call(&w.api, "PUT", &base, Some(json!({"firewall": null}))).await;
     assert_eq!(req("GET", "/admin/users", "curl").await, StatusCode::OK);
 }

@@ -977,8 +977,21 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     }
     // Its firewall rules (a 403 that says nothing of them).
     let ua = req.headers().get(header::USER_AGENT).map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned()).unwrap_or_default();
-    if !ours && !gate.firewall.is_empty() && !gate.firewall_allows(req.method().as_str(), &crate::model::normal_path(req.uri().path()), &ua) {
-        return by("firewall", page(StatusCode::FORBIDDEN, "Not allowed", "This service doesn't answer this request."));
+    if !ours && !gate.firewall.is_empty() {
+        match gate.firewall_verdict(req.method().as_str(), &crate::model::normal_path(req.uri().path()), &ua) {
+            crate::live::Verdict::Allow => {}
+            crate::live::Verdict::Deny => return by("firewall", page(StatusCode::FORBIDDEN, "Not allowed", "This service doesn't answer this request.")),
+            // A rule's own limit (Vercel's rate-limit rules): its bucket per client, before anything wakes.
+            crate::live::Verdict::Limit(bucket, limit) => {
+                if let Err(wait) = apps.live(service, env).take_token_in(bucket, crate::live::client_ip(client.as_deref()), &limit) {
+                    let mut r = page(StatusCode::TOO_MANY_REQUESTS, "Slow down", "Too many requests from your address. Try again in a moment.");
+                    if let Ok(v) = HeaderValue::from_str(&(wait.as_secs_f64().ceil() as u64).max(1).to_string()) {
+                        r.headers_mut().insert(header::RETRY_AFTER, v);
+                    }
+                    return by("rate_limit", r);
+                }
+            }
+        }
     }
     // Its rate limit per client, before anything wakes (a cache refresh is roll's, not a client's).
     if let Some(limit) = &gate.rate
