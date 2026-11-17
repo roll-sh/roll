@@ -1120,6 +1120,7 @@ impl Engine {
         self.usage_read.lock().remove(&r.id);
         self.secrets_told.lock().remove(&r.id);
         self.egress_told.lock().remove(&r.id);
+        self.git_reporting.lock().remove(&r.id);
         self.forget_masks(&r.id);
         info!(preview = %r.id, "previews: deleted");
         Ok(())
@@ -1150,6 +1151,10 @@ impl Engine {
     /// tried at the next report.
     pub(super) async fn report_on_git(&self, p: &Preview, s: &crate::Settings, deleted: Option<Option<&str>>) {
         let (Some(gr), Some(service)) = (self.git_report.get(), p.repo.strip_prefix("git:")) else { return };
+        // One report at a time per preview (what's posted, and the comment's id, read and kept
+        // in turn).
+        let turn = self.git_reporting.lock().entry(p.id.clone()).or_default().clone();
+        let _turn = turn.lock().await;
         // Only a project that stands for the service speaks for it on its repository (anyone may
         // put any service on their own canvas: `Workspace::trusts`).
         let stands = self.workspace.get(roll_workspace::Scope::All, &p.project).is_ok_and(|project| self.workspace.trusts(&project, roll_workspace::Kind::Service, service));

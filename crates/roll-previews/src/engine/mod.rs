@@ -157,6 +157,9 @@ pub struct Engine {
     counters: Counters,
     /// The hosts each preview's egress proxy refused that its activity already says.
     egress_told: Mutex<HashMap<String, std::collections::HashSet<String>>>,
+    /// Held while a Git URL preview's report is posted: a converge's and a screenshot's at once
+    /// would each make the pull request's first comment before either kept its id.
+    git_reporting: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// What each preview's output mustn't show (`masks.rs`).
     log_masks: Mutex<HashMap<String, masks::Masks>>,
     /// Screenshots taken at once on this node ([`screenshot_slots`]).
@@ -227,6 +230,7 @@ impl Engine {
             counters: Counters::default(),
             shooting: Arc::new(tokio::sync::Semaphore::new(screenshot_slots())),
             egress_told: Mutex::new(HashMap::new()),
+            git_reporting: Mutex::new(HashMap::new()),
             log_masks: Mutex::new(HashMap::new()),
             warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),
