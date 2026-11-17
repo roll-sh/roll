@@ -18,6 +18,8 @@ pub mod leaks;
 pub mod oauth;
 pub mod rate;
 pub mod sinks;
+pub mod client_credentials;
+mod clients_api;
 pub mod redact;
 pub mod store;
 pub mod tighten;
@@ -99,10 +101,10 @@ fn checksum(body: &str) -> String {
     (0..6).rev().map(|i| ALPHABET[((c >> (i * 5)) & 31) as usize] as char).collect()
 }
 
-/// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`) and other
-/// products' made the same way ([`new_secret`]): apps' deploy hooks (`rlk_`). (`rlh_` is roll code's
-/// automations' inbound webhook secrets: another shape, not ours.)
-pub const SECRET_PREFIXES: [&str; 4] = ["rlt_", "rlo_", "rlf_", "rlk_"];
+/// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`), machine
+/// clients' (`rlc_`), and other products' made the same way ([`new_secret`]): apps' deploy hooks
+/// (`rlk_`). (`rlh_` is roll code's automations' inbound webhook secrets: another shape, not ours.)
+pub const SECRET_PREFIXES: [&str; 5] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_"];
 
 /// Whether `s` is shaped like a roll secret ([`SECRET_PREFIXES`]) whose checksum holds: what
 /// scanners look for. Secrets made before checksums don't pass, but still work.
@@ -520,6 +522,13 @@ pub struct Access {
     pub(crate) github_keys: leaks::GithubKeys,
     /// OAuth registrations lately, per network (open registration's limit).
     pub(crate) registrations: std::sync::Mutex<Window>,
+    /// How OIDC issuers' keys are fetched for trusted machine clients: rolld's guarded client.
+    /// Unset: only clients with pinned keys sign in that way.
+    pub oidc_fetch: std::sync::OnceLock<Arc<dyn roll_oidc::Fetch + Send + Sync>>,
+    /// Issuers' keys, cached (roll-oidc's rules).
+    pub(crate) oidc_keys: roll_oidc::Keys,
+    /// Machine clients' sign-ins lately, per client (a cap on tokens minted, per node).
+    pub(crate) sign_ins: roll_oidc::Window,
     /// Device requests lately, per network (RFC 8628's device authorization is open too).
     pub(crate) device_starts: std::sync::Mutex<Window>,
     /// Wrong device codes entered lately, per caller: a user code is short, so guessing is bounded.
@@ -530,7 +539,7 @@ pub struct Access {
 
 /// What a user who isn't an admin reaches, and so what their tokens can (docs/accounts.md, "What a
 /// session can reach").
-pub const USER_REACH: [&str; 3] = ["code", "agents", "workspace"];
+pub const USER_REACH: [&str; 4] = ["code", "agents", "workspace", "search"];
 
 impl Access {
     pub fn open(target: &code_sql::Target, pg: code_sql::PgOptions, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
@@ -543,7 +552,7 @@ impl Access {
 
     /// On a database already open (tests: `code_sql::Db::open_or_test`, so they run on Postgres too).
     pub fn with_db(db: code_sql::Db, config: Config, resolvers: Resolvers) -> Result<Arc<Access>> {
-        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
+        Ok(Arc::new(Access { store: Store::new(db)?, config, resolvers, chat: Default::default(), nodes: Default::default(), revokers: Default::default(), limiter: Default::default(), sinks: Default::default(), people: Default::default(), mail_gate: Default::default(), github_keys: Default::default(), registrations: Default::default(), oidc_fetch: Default::default(), oidc_keys: Default::default(), sign_ins: Default::default(), device_starts: Default::default(), device_guesses: Default::default(), policy_cache: Default::default() }))
     }
 
     /// The resource of `kind` named `id`, with its project and environment filled in.
@@ -792,7 +801,7 @@ impl Access {
         Ok((g, secret))
     }
 
-    fn web_url(&self) -> &str {
+    pub(crate) fn web_url(&self) -> &str {
         self.config.web_url.trim_end_matches('/')
     }
 

@@ -1,7 +1,14 @@
 // Tests of the dashboard's file import (vitest).
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { BulkBatcher, bulkFailures, bulkLines, columnTypes, csvDocument, csvHeader, CsvReader, detectFormat, indexNameFrom, indexNameProblem, jsonDocuments, NdjsonReader } from "./search-import";
+import { BulkBatcher, bulkFailures, bulkLines, columnTypes, csvDocument, csvHeader, CsvReader, detectFormat, indexNameFrom, indexNameProblem, jsonDocuments, MAX_RECORD_BYTES, NdjsonReader } from "./search-import";
+
+/** A document's `_bulk` lines (it must be sendable). */
+function linesOf(doc: Record<string, unknown>, idField: string | null): string {
+  const b = bulkLines(doc, idField);
+  assert.ok("lines" in b, JSON.stringify(b));
+  return b.lines;
+}
 
 /** Feeds `text` to a reader in chunks of `n` characters. */
 function chunked<T>(text: string, n: number, push: (t: string) => T[], end: () => T[]): T[] {
@@ -53,9 +60,9 @@ test("files read in chunks give the same documents as read whole", () => {
 
 test("bulk batches stay under the byte limit and report failures by document", () => {
   const b = new BulkBatcher(130);
-  const lines = bulkLines({ id: 7, t: "x".repeat(20) }, "id");
+  const lines = linesOf({ id: 7, t: "x".repeat(20) }, "id");
   assert.equal(lines.split("\n")[0], '{"index":{"_id":"7"}}');
-  assert.equal(bulkLines({ t: 1 }, "id").split("\n")[0], '{"index":{}}');
+  assert.equal(linesOf({ t: 1 }, "id").split("\n")[0], '{"index":{}}');
   const batches = [b.add(lines), b.add(lines), b.add(lines), b.take(), b.take()];
   assert.deepEqual(
     batches.map((x) => x?.docs ?? 0),
@@ -69,4 +76,28 @@ test("bulk batches stay under the byte limit and report failures by document", (
   assert.equal(indexNameFrom("_.json"), "import");
   assert.notEqual(indexNameProblem("Products"), null);
   assert.notEqual(indexNameProblem("_x"), null);
+});
+
+test("an import sends what the file holds: exact numbers and ids, no metadata in the source, bounded lines", () => {
+  // Integers past 2^53 and digits past a double keep their text, ids too.
+  const nd = new NdjsonReader();
+  const [doc] = nd.push('{"id": 12345678901234567890, "n": 0.30000000000000000001, "ok": 1.5}\n');
+  assert.equal(linesOf(doc, "id"), '{"index":{"_id":"12345678901234567890"}}\n{"id":12345678901234567890,"n":0.30000000000000000001,"ok":1.5}\n');
+  assert.equal(linesOf(jsonDocuments('[{"v": 9007199254740993}]').docs[0], null).split("\n")[1], '{"v":9007199254740993}');
+  // `_id` is metadata Elasticsearch refuses in a source: it's the id, and is taken out.
+  assert.equal(linesOf({ _id: "a1", t: 1 }, null), '{"index":{"_id":"a1"}}\n{"t":1}\n');
+  assert.equal(linesOf({ _id: "a1", sku: "s9" }, "sku"), '{"index":{"_id":"s9"}}\n{"sku":"s9"}\n');
+  // An object can't be an id: that document is refused, not sent as "[object Object]".
+  assert.ok("error" in bulkLines({ id: { a: 1 } }, "id"));
+  // A CSV column named __proto__ is a field; an integer past 2^53 is sent as its text.
+  const csvDoc = csvDocument(["__proto__", "big"], ["string", "long"], ["x", "12345678901234567"]);
+  assert.equal(linesOf(csvDoc, null).split("\n")[1], '{"__proto__":"x","big":"12345678901234567"}');
+  assert.deepEqual(columnTypes([["2026-10-02", "2026-10-02T10:00:00Z"]], 2), ["date", "date"]);
+  // A file with no line breaks can't grow one string past the limit: the line is an error, and
+  // the documents after it still come.
+  const r = new NdjsonReader();
+  assert.deepEqual(r.push("x".repeat(MAX_RECORD_BYTES + 1)), []);
+  assert.deepEqual(r.push('yz\n{"a":1}\n'), [{ a: 1 }]);
+  assert.equal(r.errorCount, 1);
+  assert.equal(r.errors[0].at, 1);
 });

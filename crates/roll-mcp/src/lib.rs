@@ -25,11 +25,14 @@
 //! - Search mode: `?tools=search` (or `X-MCP-Tools: search`) lists a search tool and two run tools
 //!   instead of every tool ([`search`]).
 
+pub mod ask;
+pub mod card;
 pub mod lockdown;
 pub mod modern;
 pub mod prompts;
 pub mod resources;
 pub mod search;
+pub mod skills;
 pub mod tasks;
 pub mod tools;
 pub mod ui;
@@ -61,6 +64,11 @@ const URL_ELICITATION_REQUIRED: i64 = -32042;
 
 /// Protocol versions spoken, newest first.
 pub const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// Every version roll speaks, newest first, as `server/discover` and the server card list them.
+pub(crate) fn supported_versions() -> Vec<&'static str> {
+    std::iter::once(modern::MODERN).chain(PROTOCOL_VERSIONS).collect()
+}
 const SSE_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(15);
 /// How often a call that asked for progress (`_meta.progressToken`) hears it's still running (it
 /// may be waiting on a person's approval), so a client doesn't give up on it.
@@ -153,6 +161,7 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
         as_user,
         ip: None,
         url_elicitation: false,
+        form_elicitation: false,
         modern: false,
         toolsets: None,
         readonly: false,
@@ -190,7 +199,7 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     if !caller {
         return unauthorized(&m.config);
     }
-    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, form_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
         let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
@@ -388,7 +397,8 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).and_then(session_client))
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
+    let form_elicitation = modern && modern::form_elicitation(&messages[0]);
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, form_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
@@ -486,6 +496,8 @@ struct Ctx {
     as_user: bool,
     /// The client opens URLs for elicitation: an approval comes back as one to open, then retry.
     url_elicitation: bool,
+    /// A 2026-07-28 client that fills in forms: a call missing an id asks for it (`ask`).
+    form_elicitation: bool,
     /// A modern request (2026-07-28): served on its own, its answers marked as that revision's.
     modern: bool,
     /// The products whose tools are listed (`None`: every product's).
@@ -621,6 +633,8 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     rpc_error(id, -32602, "arguments must be an object")
                 } else if ctx.readonly && !tool_names(ctx).contains(&name) {
                     rpc_result(id, json!({ "content": [{ "type": "text", "text": format!("{name} isn't read-only, and this connection is (?readonly=1): connect without it to change things") }], "isError": true }))
+                } else if let Some(r) = ask_for_missing(ctx, &name, &mut args, &params).await {
+                    rpc_result(id, r)
                 } else {
                     // A client that takes tasks gets one for a call that runs long (or waits for
                     // a person); everyone else waits for the answer.
@@ -642,13 +656,13 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 Err((code, message)) => rpc_error(id, code, message),
             },
             "resources/list" => {
-                let mut list = resources::list();
-                if ctx.ui
-                    && let Some(a) = list.as_array_mut()
-                {
-                    a.push(ui::resource());
+                let mut all = resources::list().as_array().cloned().unwrap_or_default();
+                // The MCP Apps view, for a host that renders it; then the skills' files.
+                if ctx.ui {
+                    all.push(ui::resource());
                 }
-                rpc_result(id, json!({ "resources": list }))
+                all.extend(skills::resources(&tool_names(ctx)));
+                rpc_result(id, json!({ "resources": all }))
             }
             "resources/read" => match params.get("uri").and_then(Value::as_str) {
                 Some(resources::GUIDE) => rpc_result(id, resources::guide()),
@@ -669,7 +683,17 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                         }
                     }
                 }
+                Some(uri) if uri.starts_with("skill://") => match skills::read(uri, &tool_names(ctx)) {
+                    Some(v) => rpc_result(id, v),
+                    // The Skills extension's answer for a file roll doesn't serve.
+                    None => rpc_error(id, -32602, format!("No skill file is served at {uri}")),
+                },
                 other => rpc_error(id, -32002, format!("resource not found: {}", other.unwrap_or(""))),
+            },
+            "skills/list" => rpc_result(id, skills::list(&tool_names(ctx))),
+            "skills/get" => match skills::get(params.get("uri").and_then(Value::as_str).unwrap_or(""), &tool_names(ctx)) {
+                Ok(v) => rpc_result(id, v),
+                Err(e) => rpc_error(id, -32602, e),
             },
             "resources/templates/list" => rpc_result(id, json!({ "resourceTemplates": resources::templates(&tool_names(ctx)) })),
             "prompts/list" => rpc_result(id, prompts::list(&tool_names(ctx))),
@@ -721,6 +745,37 @@ async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, String> {
     Ok(json!({ "completion": { "values": values, "hasMore": more } }))
 }
 
+/// A call missing an id it needs, from a client that fills in forms: the person's choice from the
+/// retry's `inputResponses` goes into `args`; while one is still missing, the form asking for it
+/// (its choices what the connection may read), or why the call stops. `None`: run the call.
+async fn ask_for_missing(ctx: &Arc<Ctx>, name: &str, args: &mut Value, params: &Value) -> Option<Value> {
+    if !ctx.form_elicitation {
+        return None;
+    }
+    let refused = |why: String| json!({ "content": [{ "type": "text", "text": why }], "isError": true });
+    if let Some(responses) = params.get("inputResponses")
+        && let Err(why) = ask::fill(args, responses)
+    {
+        return Some(refused(why));
+    }
+    // Only a tool this connection is offered; the gate still decides the call.
+    let tool = tools::all().iter().find(|t| t.name == name).filter(|_| tool_names(ctx).iter().any(|n| n == name))?;
+    let (param, src) = ask::missing(tool, args)?;
+    if !tool_names(ctx).iter().any(|t| t == src.tool) {
+        return None;
+    }
+    // The choices, read through the gate with the caller's token (never asking a person).
+    let answer = call_as(ctx, src.tool, (src.args)(args), true).await?;
+    if answer["isError"] == true {
+        return None;
+    }
+    let (values, more) = prompts::values(&answer["structuredContent"], src.fields, "");
+    if values.is_empty() {
+        return None;
+    }
+    Some(ask::input_required(tool.title, param, &values, more))
+}
+
 /// The names of the tools this connection is offered (what prompts may use).
 fn tool_names(ctx: &Ctx) -> Vec<String> {
     ctx.names.get_or_init(|| ctx.tools().iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()).clone()
@@ -752,9 +807,17 @@ fn initialize(ctx: &Ctx, params: &Value) -> Value {
 
 /// What roll offers, the same in `initialize` and `server/discover`.
 fn capabilities(tasks: bool) -> Value {
-    let mut c = json!({ "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false }, "completions": {} });
+    let mut c = json!({
+        "tools": { "listChanged": false },
+        "resources": { "listChanged": false, "subscribe": false },
+        "prompts": { "listChanged": false },
+        "completions": {},
+        // Skills over MCP: `skills/list`, `skills/get`, and their files as resources (no directories).
+        "extensions": { skills::EXT: {} },
+    });
+    // MCP Apps: HTML views for the hosts that render them.
+    c["extensions"][ui::EXT] = json!({});
     // 2026-07-28's tasks extension, where results can be sealed (tasks::on).
-    c["extensions"] = json!({ ui::EXT: {} });
     if tasks {
         c["extensions"][tasks::EXT] = json!({});
     }
@@ -790,7 +853,7 @@ Read the resource roll://access/me for what this connection may do, in words, an
 
 /// roll's Horizon mark for clients that show a server's icon (2025-11-25): the dashboard's favicon,
 /// the brand export's output, inline so it needs no public URL. Sent once, in `initialize`.
-fn server_icon() -> Value {
+pub(crate) fn server_icon() -> Value {
     use base64::Engine;
     static ICON: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         // The crate's own copy of the dashboard's favicon (`@roll/brand`'s export): roll-mcp builds
@@ -1026,7 +1089,11 @@ async fn outcome(tool: &str, resp: Response) -> Value {
         }
         let text = match status {
             StatusCode::UNAUTHORIZED => format!("{msg}: the token isn't valid any more (reconnect)"),
-            StatusCode::FORBIDDEN => format!("not allowed: {msg}"),
+            // Where the person can allow it, when roll says (the token's page, the rule proposed).
+            StatusCode::FORBIDDEN => match body.get("widen").and_then(Value::as_str) {
+                Some(w) => format!("not allowed: {msg}. If the user wants this token to be able to, they can allow it here: {w}"),
+                None => format!("not allowed: {msg}"),
+            },
             StatusCode::NOT_FOUND => format!("not found: {msg}"),
             _ => msg,
         };
