@@ -1618,7 +1618,7 @@ Ranked by what a person notices first. Done so far:
   branch and pull-request previews (#116), link variables from the branch (#123), secrets links to
   a branched parent (#150, #160 with roll secrets #151, #175). In review: Linear (#118), the
   search data key (#153), a working day's freeze window (#174, measured: no database cost), a
-  note's picture on the change page (#111), the Rules dialog's roll apps note (#135).
+  note's picture on the change page (#111), the Rules dialog's roll apps note (#135), a filter on the Previews list (#192).
 
 1. **A Git URL service's preview reported to its repository, rolld's side** (after apps' #138):
    previews' side and rolld's `GitReport` are built (branch `feature/roll-previews-git-report2`,
@@ -1628,15 +1628,24 @@ Ranked by what a person notices first. Done so far:
    #143 (reviewed); after it merges, the live check in `scripts/preview-apps.sh` with
    `egress: "roll"`: 1.1.1.1 unreachable from the pv- instance, a listed host through the proxy,
    a refused one in the activity.
-3. **Screenshots of roll apps' services on the fleet**: one node is done. A multi-node Docker
+3. **A "preview ready" once per push, for chat and Slack templates** (with code-control's
+   automations): the `preview` event fires on every change of a preview (state, screenshot,
+   cost), so a "post the preview to Slack when it's ready" template would post several times a
+   push (Vercel posts once per deployment). Needs a field or event kind that fires once when a
+   head becomes ready (`preview.ready_head`, say), then the gallery template; the events are
+   code-control's.
+4. **Tests for rolld's `GitReport`** (after #138): a unit test of the connection's parsing, and the
+   live check against `~/.cache/rpv/fake-github.py`-style fake GitHub (installations, token,
+   statuses, comments and edits recorded) once roll code's App can be pointed at it.
+5. **Screenshots of roll apps' services on the fleet**: one node is done. A multi-node Docker
    fleet needs previews' own internal screenshot route on the service's holder
    (`cluster.dispatch(&apps_control::lease_key(service), …)`); the cloud fleet runs Fargate,
    where it's a browser task of its own, with the cloud thread. Low while the fleet is Fargate.
-4. **Cheap Postgres branches without reflinks** (ext4 hosts like ai-server): a page server or
+6. **Cheap Postgres branches without reflinks** (ext4 hosts like ai-server): a page server or
    pg-engine as the branch store; neither planned (the Postgres strategy session, 2026-11-17);
    not blocking (the fleet's volumes are XFS).
-5. **Watch: pg-control's recovery to a time seconds old** (unowned).
-6. **Watch: a cold start on a Docker name conflict**: a preview's services each making its egress
+7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+8. **Watch: a cold start on a Docker name conflict**: a preview's services each making its egress
    proxy under one name was fixed (#137); if it comes back, log both starts' container ids.
 
 Looked at and kept: previews' copy of a preview's variables in its roll apps environment, next
