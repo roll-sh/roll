@@ -63,7 +63,7 @@ export function OutsideDatabases() {
       }
     >
       <p className="mb-2 text-[11.5px] text-muted">
-        Postgres, MySQL, Redis or MongoDB that roll doesn&apos;t run (RDS, Supabase, PlanetScale, ElastiCache, Upstash, Atlas, your own server). Managed: two login roles take turns, roll sets the free one&apos;s password on each rotation, and the
+        Postgres, MySQL, Redis or MongoDB that roll doesn&apos;t run (RDS, Supabase, PlanetScale, ElastiCache, Upstash, your own server; MongoDB Atlas has its own section below). Managed: two login roles take turns, roll sets the free one&apos;s password on each rotation, and the
         one in use keeps working through the grace period. Dynamic: each lease gets a login of its own in a group role, valid until the lease ends. Link <span className="font-mono">DB_USER</span> and{" "}
         <span className="font-mono">DB_PASSWORD</span> to it.
       </p>

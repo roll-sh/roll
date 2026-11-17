@@ -796,7 +796,7 @@ grace period (its revocation goes through the rotator).
 
 ### Databases outside roll
 
-A Postgres, MySQL, Redis or MongoDB server roll doesn't run (Amazon RDS, Supabase, Neon, PlanetScale, ElastiCache, Upstash, MongoDB Atlas, a server of the customer's own)
+A Postgres, MySQL, Redis or MongoDB server roll doesn't run (Amazon RDS, Supabase, Neon, PlanetScale, ElastiCache, Upstash, a server of the customer's own)
 has its logins rotated by roll itself, with no rotator to write, as Infisical's secret rotation
 does, and issues a login per lease, as Vault's database engine does. A project registers it
 (`POST …/outside-databases {name, url, roles?, group?, ca?}`, `admin`; `roll secrets databases add
@@ -862,9 +862,16 @@ ends its lease. Every change is kept across a restart the way the server keeps i
 SAVE` with an ACL file (a failure fails the change, or a restart would bring back a retired
 password), else `CONFIG REWRITE` where there's a config file.
 
-**MongoDB** (`mongodb+srv://user:password@cluster.example.net`, Atlas's form, or
+**MongoDB** (`mongodb+srv://user:password@cluster.example.net` or
 `mongodb://user:password@host1,host2/?tls=true&authSource=admin`; `tls=true` is required unless
-private addresses are allowed, and the URL may carry what Atlas's strings do, nothing else). User
+private addresses are allowed, and the URL may carry what Atlas-style strings do, nothing else)
+works on a replica set or sharded cluster of the customer's own, or a host that lets the admin run
+MongoDB's user commands. **It doesn't work on MongoDB Atlas, on any tier.** Atlas's "Unsupported
+Commands" table marks `createUser`, `updateUser`, `usersInfo`, `grantRolesToUser` and
+`revokeRolesFromUser` unsupported on Free and Flex, M10+ Core and M10+ Infinite clusters alike
+(`dropUser` on M10+ only), and Atlas rolls back a user change made other than through its UI, CLI or
+Admin API. A URL whose host is an Atlas domain (`*.mongodb.net`, `*.mongodbgov.net`) is refused when
+it's registered, pointing to "MongoDB Atlas" below, which goes through the Admin API instead. User
 management runs on the primary, found with `hello` among the seed hosts only: a server naming a
 primary outside them is refused, and a `mongodb+srv://` name's SRV targets must sit inside its own
 domain (the spec's rule), so a server or a DNS answer can't send roll anywhere else. roll logs in with
@@ -1156,6 +1163,107 @@ and haven't been run against a real account yet.
 
 An account a key links to, or with a retired key or a dynamic user still to drop, can't be deleted
 (409).
+### MongoDB Atlas
+
+Atlas manages database users only through its UI, CLI and Admin API ("Databases outside roll"
+explains why its clusters can't be reached the other way), so roll rotates an Atlas project's users
+and makes a user per lease through the Admin API, as Vault's MongoDB Atlas database plugin does. A
+project registers the Atlas project (`POST …/atlas-projects`, `admin`; `roll secrets atlas add NAME
+--group-id ID --client-id ID [--user A --user B] [--role R…]`, the client secret on stdin; or the
+dashboard, next to Snowflake):
+
+- `group_id` is the Atlas project's id (24 hex digits; the Admin API calls it `groupId`).
+- `client_id` and `client_secret` are an organization service account's (`mdb_sa_id_…`,
+  `mdb_sa_sk_…`). The secret is sealed with the project's data key, bound to the registration's row,
+  and never returned, logged or audited. Answers show only the client id.
+- `managed_users` are two database users (password users on `admin`) that managed links rotate in
+  turn. Both must exist when the project is registered.
+- `roles` are what dynamic users get, as the Atlas CLI writes them: `role@db` or
+  `role@db.collection` (`readWrite@shop`, `read@shop.orders`), built-in or custom, 16 at most.
+  `atlasAdmin` is refused. Atlas checks a custom role when it creates a user.
+- At least one of `managed_users` and `roles` must be set. One project can't register a user
+  another of its registrations already rotates in the same Atlas project (409).
+
+Registering takes a token and reads the managed users (or, with none, lists the project's users)
+once, outside any transaction. A refusal is a 400 with Atlas's status and error code, never its
+message or the secret.
+
+**Calls.** The service account's token comes from `POST https://cloud.mongodb.com/api/oauth/token`
+(client credentials: `Authorization: Basic <client_id:client_secret>`,
+`grant_type=client_credentials`). It is kept in rolld's memory per registration until a minute
+before its `expires_in` (an hour), never stored or logged, and a 401 from the API takes one new
+token and retries once. A wrong secret is Atlas's `invalid_client`. The calls are:
+
+| Call | Version (`Accept`, and `Content-Type` with a body) |
+| --- | --- |
+| `GET /api/atlas/v2/groups/{groupId}/databaseUsers?itemsPerPage=1` (registering with no managed users) | `application/vnd.atlas.2023-01-01+json` |
+| `GET …/databaseUsers/admin/{username}` | `application/vnd.atlas.2023-01-01+json` |
+| `PATCH …/databaseUsers/admin/{username}` (a password, or a dynamic user's `deleteAfterDate`) | `application/vnd.atlas.2023-01-01+json` |
+| `POST …/databaseUsers` (a dynamic user) | `application/vnd.atlas.2023-01-01+json` |
+| `DELETE …/databaseUsers/admin/{username}` (a lease's end) | `application/vnd.atlas.2023-01-01+json` |
+| `GET …/clusters/{name}`, else `GET …/flexClusters/{name}` (a link's cluster) | `application/vnd.atlas.2024-08-05+json`, `application/vnd.atlas.2024-11-13+json` |
+
+`databaseUsers` has one resource version in the Admin API's specification (the 2025-03-12 release):
+`2023-01-01`. Atlas answers 406 to a version a resource doesn't have, so no 2025 date is sent there.
+A `PATCH` sends the user back as Atlas returned it, with only the password (or the date) changed,
+as Vault's plugin does, so its roles and scopes stay as they are. Every call goes through the same
+guarded client as Snowflake's: HTTPS to `cloud.mongodb.com` only (no other host is ever built into
+a URL), a public address rolld resolved itself, no redirects, 15 seconds a request, and at most
+256 KiB read from an answer. An error carries Atlas's status and `errorCode`, never a request body
+or Atlas's message.
+
+It's the link kind `mongodb_atlas`, with one credential (`login`) of three fields: `username`,
+`password` (32 letters and digits: the API calls the field alphanumeric, and nothing needs escaping
+in a connection string) and `connection_string`. The links are `managed` or `dynamic`. Two options:
+
+- `cluster` names a cluster (dedicated or Flex). `connection_string` is then its public
+  `mongodb+srv://…` string as Atlas gives it (`connectionStrings.standardSrv`; no credentials), and a
+  dynamic user can reach only that cluster (`scopes`). A `connection_string` link without it is a
+  400, and so is a cluster Atlas doesn't know (checked when the link is written).
+- `roles` (dynamic only) picks some of the registration's roles (default: all of them).
+
+The dashboard suggests `MONGODB_USERNAME` and `MONGODB_PASSWORD` (and `MONGODB_CONNECTION_STRING`).
+
+**Managed.** The two users take turns as a database's two roles do ("Databases outside roll"): each
+issue (linking, every `rotate_days`, `…/rotate`) sets a new password on the user not handed out
+last and hands it out. The user in use keeps its password until its grace period ends; then its
+password is replaced by one nobody knows. Rotating again within the grace is a 409, and an Atlas
+project's managed credential serves one environment (409 elsewhere).
+
+**Atlas applies a user change asynchronously.** Its API answers at once, and the cluster takes the
+change when Atlas deploys it, about a minute in practice; Atlas's documentation gives no figure. So a
+new password can be refused for a minute or so after a rotation, while the old login keeps working
+through the grace. The grace is 60 minutes by default and a managed link can't set `grace_minutes`
+below 5. Something that reads the new value right after a rotation should retry a refused login for
+a minute or two.
+
+**Dynamic.** Each lease gets the user `roll_<lease>` (`roll_lse_…`), made by `POST …/databaseUsers`
+with its password, the link's roles, `deleteAfterDate` (the lease's end plus ten minutes), a
+`description` and the label `roll-secrets-lease`. So Atlas deletes the user even if roll is down.
+Atlas takes a date at most a week ahead, so for a lease of nearly a week the date is capped at a week
+from the call, less five minutes: Atlas may then remove the user a few minutes before the lease
+ends. A renewal moves the date (`PATCH`). Ending the lease (expiry, `DELETE …/leases/{id}`) deletes the
+user; one Atlas already removed counts as deleted. If making the user fails, it's deleted again
+before the resolve answers. Like a new password, a new user can take a minute to work. Checks,
+sandboxes and previews (untrusted) never get a dynamic user. Dynamic users count against the Atlas
+project's database user limit (100 by default, 900 at most).
+
+**The service account's role.** Give it the organization role Organization Member and, on the one
+project, **Project Database Access Admin** (`GROUP_DATABASE_ACCESS_ADMIN`). The Admin API's
+specification requires that role for creating, updating and deleting database users, and Project
+Read Only for reading users and clusters; every project role includes Project Read Only. No
+narrower role manages database users (Project Stream Processing Owner can too, but it's deprecated
+and grants much more). If the organization requires an API access list, add roll's egress
+addresses to the service account's: Atlas checks a token's use, not its creation, against the list.
+
+The flow is tested against a fake Admin API that checks the token, the versions and the bodies
+(`an_atlas_project_rotates_two_users_in_turn_and_makes_a_user_per_lease`). The calls, the token
+flow, the versions and the role follow Atlas's documentation and OpenAPI specification and haven't
+been run against a real Atlas account yet.
+
+A project a key links to, or with a retired password or a dynamic user still to delete, can't be
+deleted (409).
+
 ### GCP and Azure
 Short-lived GCP and Azure access tokens for each lease, as Vault's GCP and Azure engines give, with
 no key of the customer's stored anywhere: **roll is an OpenID Connect issuer**, and the customer's
@@ -1404,6 +1512,7 @@ roll secrets leases  [--renew ID | --revoke ID]
 roll secrets databases ls | add NAME [--role A --role B] [--group G] [--ca FILE] (admin URL on stdin) | rm ID
 roll secrets directories ls | add NAME --url URL --bind-dn DN [--flavor F] [--account DN…] [--user-base-dn DN] [--group DN…] [--ca FILE] (bind password on stdin) | rm ID
 roll secrets snowflake ls | add NAME --account A [--privatelink] --admin-user U [--admin-role R] --key FILE|- [--auth password] [--user U] [--role R…] | rm ID
+roll secrets atlas   ls | add NAME --group-id ID --client-id ID [--user A --user B] [--role role@db…] (client secret on stdin) | rm ID
 roll secrets aws-users ls | add NAME USER --role ROLE | rm ID
 roll secrets clouds  ls | add-gcp NAME --audience A --service-account SA | add-azure NAME --tenant T --client-id C [--scope S] | rm ID
 roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
@@ -2638,6 +2747,9 @@ isn't in the workspace is 404.
 | `GET /snowflake-accounts` | | `SnowflakeAccount[]` (`read` on the project; never the admin key, only its fingerprint) |
 | `POST /snowflake-accounts` | `{name, account, privatelink?, admin_user, admin_role?, admin_private_key, auth?: "key_pair" \| "password", managed_user?, roles?: [role]}` | 201 `SnowflakeAccount` (`admin`; signs in once and finds the managed user and the roles first: 400 with Snowflake's reason) |
 | `DELETE /snowflake-accounts/{id}` | | 204; 409 while a key links to it, or a retired key or a dynamic user waits (`admin`) |
+| `GET /atlas-projects` | | `AtlasProject[]` (`read` on the project; the client id, never the secret) |
+| `POST /atlas-projects` | `{name, group_id, client_id, client_secret, managed_users?: [a, b], roles?: ["role@db"]}` | 201 `AtlasProject` (`admin`; takes a token and finds the managed users first: 400 with Atlas's status and error code) |
+| `DELETE /atlas-projects/{id}` | | 204; 409 while a key links to it, or a retired password or a dynamic user waits (`admin`) |
 | `GET /cloud-accounts` | | `CloudAccount[]` (`read` on the project) |
 | `POST /cloud-accounts` | `{name, cloud: "gcp", audience, service_account}` or `{name, cloud: "azure", tenant, client_id, scope?}` | 201 `CloudAccount` (`admin`; 400 when a made-up project's token is taken, or this project's isn't) |
 | `DELETE /cloud-accounts/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -3041,7 +3153,9 @@ rotating a database's admin password and editing registrations in place (#75), s
 8. **More dynamic credentials**: Kubernetes service account tokens (Vault, Infisical). LDAP and
    Active Directory passwords are built (`feature/roll-secrets-ldap`: "Directories (LDAP and Active
    Directory)", managed accounts taking turns and a user per lease), and Snowflake on top of it
-   (`feature/roll-secrets-snowflake`: "Snowflake", key slots taking turns and a user per lease).
+   (`feature/roll-secrets-snowflake`: "Snowflake", key slots taking turns and a user per lease),
+   and MongoDB Atlas through its Admin API on top of that (`feature/roll-secrets-mongodb-atlas`:
+   "MongoDB Atlas", two users taking turns and a user per lease).
 9. **Java and .NET clients, a Pulumi provider, a Lambda extension and an Ansible lookup** (Spring,
    `IConfiguration`; AWS's Parameters and Secrets extension; Vault's and 1Password's Ansible).
 10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
@@ -3267,8 +3381,8 @@ Open pull requests after this one:
 - **#43, dynamic GCP and Azure credentials** (after #20): roll as an OIDC issuer
   (`/v1/secrets/oidc`); GCP's workload identity federation and Azure's federated credentials trust
   its token for one project, checked with a decoy project at registration.
-- **#42, MongoDB outside roll** (after #41): rotation and a user per lease for Atlas and replica
-  sets; the primary only among the seeds, SRV targets inside their domain, SCRAM with the server's
+- **#42, MongoDB outside roll** (after #41): rotation and a user per lease for replica sets (not
+  Atlas, which refuses the user commands on every tier: "MongoDB Atlas" uses its Admin API); the primary only among the seeds, SRV targets inside their domain, SCRAM with the server's
   signature checked.
 - **#41, Redis outside roll** (after #39): two ACL users take turns (`#<sha256>` passwords), or a
   user per lease copying a template user's rules; the tenant's replies read by a bounded parser.

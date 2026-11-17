@@ -18,6 +18,7 @@ pub mod health;
 pub mod outside;
 pub mod directories;
 pub mod snowflake;
+pub mod atlas;
 mod turns;
 pub mod aws;
 pub mod iam;
@@ -304,7 +305,7 @@ pub struct Options {
     /// The kinds of outside platforms syncs push to (docs/secrets.md, "Syncs").
     pub syncs: Syncs,
     /// Posts audit rows to sinks (docs/secrets.md, "Audit log"), and calls rotators, OIDC issuers
-    /// and Snowflake accounts' SQL API through rolld's guarded client; `None`: none of them.
+    /// Snowflake accounts' SQL API and MongoDB Atlas's Admin API through rolld's guarded client; `None`: none of them.
     pub deliver: Option<std::sync::Arc<dyn sinks::Deliver>>,
     /// roll-access's grants, looked up when a sync made by one pushes (never cached).
     pub grants: Option<std::sync::Arc<dyn roll_auth::Grants>>,
@@ -483,6 +484,10 @@ impl Secrets {
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(snowflake::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone() }));
         }
+        db.ensure_schema(atlas::SCHEMA)?;
+        if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
+            links.register(Arc::new(atlas::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone(), tokens: Default::default() }));
+        }
         Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default() })
     }
 
@@ -625,7 +630,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "directories", "snowflake_accounts", "aws_users", "aws_roles", "cloud_accounts", "cas", "ca_certs", "ssh_cas"];
+const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "directories", "snowflake_accounts", "atlas_projects", "aws_users", "aws_roles", "cloud_accounts", "cas", "ca_certs", "ssh_cas"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked, and no
 /// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,
