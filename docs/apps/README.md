@@ -2659,10 +2659,9 @@ put items 1–11 first. A second review that day (after #78, against the same si
 3. **Challenge mode** (Vercel's Attack Challenge Mode): a `challenge` firewall action and an
    environment switch serving a small proof-of-work page and an HMAC cookie, verified bots let
    through.
-4. **Functions in a static site** (Netlify Functions, Vercel's `api/`): today
-   `netlify/functions` and `api/*.js` are dropped without a word; first name them in the plan's
-   skipped list, then build them into a small Node service beside the site behind a generated
-   `service:` rewrite.
+4. **Functions in a static site** (Netlify Functions, Vercel's `api/`): the plan names them now
+   (`netlify/functions`, `netlify/edge-functions`, `api/`) and points at a web service with a
+   route; next, build them into a small Node service beside the site behind a generated route.
 5. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
    on main, `watch_secrets` holds one `SecretSource::wait_digest` long poll per watched
    environment instead of polling every minute. Each watched environment needs a task of its

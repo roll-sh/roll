@@ -246,6 +246,15 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         p.release = Some(cmd.clone());
         p.notes.push(format!("pre-deploy: the Procfile's release: {cmd}"));
     }
+    // A static site's functions (Netlify's, Vercel's `api/`) never run: said, not dropped silently.
+    if p.start.as_deref() == Some(static_site::START) {
+        for (dir, what, route) in [("netlify/functions", "Netlify Functions", "/.netlify/functions/*"), ("netlify/edge-functions", "Netlify Edge Functions", "the paths they answer"), ("api", "Vercel functions", "/api/*")] {
+            let n = tree.list(dir).iter().filter(|f| [".js", ".mjs", ".cjs", ".ts", ".mts", ".py", ".go"].iter().any(|e| f.ends_with(e)) || f.ends_with('/')).count();
+            if n > 0 {
+                p.notes.push(format!("{dir}/ has {n} {what}, which a static site doesn't run: put them in a web service and route {route} to it (the environment's routes)"));
+            }
+        }
+    }
     // Vercel's crons, whatever builds it (a Next.js app's usually).
     if let Some(text) = tree.read("vercel.json").and_then(|b| String::from_utf8(b).ok()) {
         for c in site_configs::vercel_crons(&text) {
