@@ -3501,7 +3501,7 @@
               }
             }
           },
-          "description": "`{ username, password }` (a deploy token, app password or access token as `password`; one line each)"
+          "description": "`{ username, password }` (a deploy token, app password or access token as `password`; one line each), or `{ username, secret }` (the name of the project's secret that holds it, read from its production secrets at each fetch: a rotated token just works, nothing is kept here)"
         },
         "responses": {
           "200": {
