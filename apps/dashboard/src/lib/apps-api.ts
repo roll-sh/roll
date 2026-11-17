@@ -682,6 +682,18 @@ export interface RouteStat {
   max_ms: number;
 }
 
+/** One deployment's or instance's requests in a `RouteStats` window. */
+export interface SplitStat {
+  deployment?: string;
+  instance?: string;
+  requests: number;
+  errors: number;
+  client_errors: number;
+  p50_ms: number;
+  p95_ms: number;
+  max_ms: number;
+}
+
 export interface RouteStats {
   minutes: number;
   requests: number;
@@ -689,6 +701,10 @@ export interface RouteStats {
   cut: boolean;
   /** The busiest, the most 5xx and the slowest (5 requests or more), each at most 50. */
   routes: RouteStat[];
+  /** The same requests by the deployment that answered (a canary beside the live one), the busiest first. */
+  deployments?: SplitStat[];
+  /** And by the instance that answered. */
+  instances?: SplitStat[];
 }
 
 /** A trace's root span, its duration and its spans' count. */

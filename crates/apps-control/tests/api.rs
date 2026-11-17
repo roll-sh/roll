@@ -4109,6 +4109,13 @@ async fn errors_and_latency_read_by_route() {
     let route = |r: &str| v["routes"].as_array().unwrap().iter().find(|x| x["route"] == r).cloned().unwrap_or_else(|| panic!("{v}"));
     assert_eq!((route("/users/:id")["requests"].as_u64(), route("/users/:id")["errors"].as_u64()), (Some(3), Some(0)), "{v}");
     assert_eq!((route("/checkout")["requests"].as_u64(), route("/checkout")["errors"].as_u64(), route("/checkout")["method"].as_str()), (Some(1), Some(1), Some("GET")), "{v}");
+    // The same requests by the deployment and the instance that answered.
+    let live = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None).await.1["active"]["id"].clone();
+    assert_eq!((&v["deployments"][0]["deployment"], v["deployments"][0]["requests"].as_u64(), v["deployments"][0]["errors"].as_u64()), (&live, Some(4), Some(1)), "{v}");
+    // By instance: all four, the first instance's among them (a busy machine may wake a second).
+    let insts = v["instances"].as_array().unwrap();
+    assert_eq!(insts.iter().map(|i| i["requests"].as_u64().unwrap()).sum::<u64>(), 4, "{v}");
+    assert!(insts.iter().any(|i| i["instance"] == inst.as_str()), "{v}");
 }
 
 /// What runs is billed: requests through the proxy and the instance's CPU and memory reach the

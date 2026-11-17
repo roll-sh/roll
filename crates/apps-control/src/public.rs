@@ -556,7 +556,7 @@ impl SiteRequest {
 
 async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &crate::live::Template, req: SiteRequest, service: &str, env: &str, began: Instant) -> Response {
     let key = tpl.site.clone().unwrap_or_default();
-    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: req.seen, span: None };
+    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: req.seen, span: None, deployment: Default::default() };
     let request_id = req.request_id.as_deref().map(|v| v.chars().take(64).collect()).unwrap_or_else(|| crate::model::random(16));
     let done = |status: u16, bytes: u64| {
         live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, status, bytes);
@@ -934,7 +934,7 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
         // 5xx alert for an environment its owner stopped.
         let metered = if matches!(by, "paused" | "maintenance") { 0 } else { status };
         apps.live(service, env).meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, metered, 0);
-        Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen, span: None }.write_by(status, began, by);
+        Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen, span: None, deployment: Default::default() }.write_by(status, began, by);
     }
     let mut r = their_page(&apps, service, env, r).await;
     // A preview's answers (and a deployment's own URL, a copy of what's live) are never indexed,
@@ -1119,7 +1119,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             let bytes = r.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).unwrap_or(0);
             let bytes = if head { 0 } else { bytes };
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, r.status().as_u16(), bytes);
-            Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span: None }.write_cached(r.status().as_u16(), began, bytes);
+            Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span: None, deployment: Default::default() }.write_cached(r.status().as_u16(), began, bytes);
         };
         match hit {
             Some(crate::resp_cache::Hit::Fresh(r)) => {
@@ -1194,7 +1194,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // The access line's method and path (no query: it can carry tokens), and with traces on
     // the proxy's own span in the request's trace (the wait, a wake, the answer).
     let span = gate.traces.then(|| ProxySpan::start(&apps, service, env, req.headers()));
-    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span };
+    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span, deployment: Default::default() };
     let pq = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
     let Ok(uri) = format!("http://{}{pq}", lease.addr).parse::<Uri>() else {
         return (StatusCode::BAD_REQUEST, "bad request").into_response();
@@ -1256,6 +1256,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         && axum::body::HttpBody::size_hint(req.body()).exact() == Some(0);
     let replay = bodiless.then(|| (req.method().clone(), pq.clone(), req.headers().clone(), req.version()));
     let (mut instance, mut cold, mut waited_ms) = (lease.inst.name.clone(), lease.cold, lease.waited.as_millis() as u64);
+    *access.deployment.lock() = Some(lease.inst.deployment.clone());
     let send = async { if h2 { apps.client_h2.request(req).await } else { apps.client.request(req).await } };
     // Its timeout runs to the answer's head: an upgrade, or a stream that has begun, is the
     // app's to keep.
@@ -1294,6 +1295,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
                 Ok(l) => {
                     lease = l;
                     (instance, cold, waited_ms) = (lease.inst.name.clone(), lease.cold, lease.waited.as_millis() as u64);
+                    *access.deployment.lock() = Some(lease.inst.deployment.clone());
                     let mut r = Request::new(Body::empty());
                     (*r.method_mut(), *r.headers_mut(), *r.version_mut()) = (method, headers, version);
                     *r.uri_mut() = format!("http://{}{pq}", lease.addr).parse().unwrap_or_default();
@@ -1484,6 +1486,9 @@ struct Access {
     log: crate::logs::LogSink,
     seen: Seen,
     span: Option<ProxySpan>,
+    /// The deployment whose instance answered, once a lease names it (a canary's or the live
+    /// one's): its line says it, so metrics split by deployment.
+    deployment: parking_lot::Mutex<Option<String>>,
 }
 
 /// The proxy's own span in a request's trace (traces on, Cloud Run's): it continues the
@@ -1648,6 +1653,9 @@ impl Access {
             "bytes": bytes, "instance": instance, "request_id": request_id, "cold": cold, "waited_ms": waited_ms,
             "ip": s.ip, "ua": s.ua, "host": s.host,
         });
+        if let Some(d) = self.deployment.lock().as_deref() {
+            line["deployment"] = serde_json::json!(d);
+        }
         s.mark(&mut line);
         self.log.line(line.to_string());
         if let Some(p) = &self.span {

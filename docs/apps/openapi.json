@@ -2569,7 +2569,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/routes": {
       "get": {
-        "description": "Answers `RouteStats` (the last 5–60 minutes, default 60): the access log grouped by method and route, id-like segments `:id` and no query; the busiest, the most 5xx and the slowest (5 requests or more), each at most 50.",
+        "description": "Answers `RouteStats` (with `deployments` and `instances`: the same requests by the deployment and the instance that answered, the busiest 50 of each) (the last 5–60 minutes, default 60): the access log grouped by method and route, id-like segments `:id` and no query; the busiest, the most 5xx and the slowest (5 requests or more), each at most 50.",
         "operationId": "getServicesIdEnvironmentsEnvRoutes",
         "parameters": [
           {
@@ -2591,7 +2591,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`RouteStats` (the last 5–60 minutes, default 60): the access log grouped by method and route, id-like segments `:id` and no query; the busiest, the most 5xx and the slowest (5 requests or more), each at most 50"
+            "description": "`RouteStats` (with `deployments` and `instances`: the same requests by the deployment and the instance that answered, the busiest 50 of each) (the last 5–60 minutes, default 60): the access log grouped by method and route, id-like segments `:id` and no query; the busiest, the most 5xx and the slowest (5 requests or more), each at most 50"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
