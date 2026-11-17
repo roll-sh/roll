@@ -481,7 +481,9 @@ impl Engine {
     /// without them, saying which). The leases of the dynamic credentials among them come back
     /// too: the caller keeps them while what it starts runs ([`Engine::keep_leases`]) or revokes
     /// them when it's done.
-    pub(super) async fn resolve_secrets(&self, r: &Row, untrusted: bool, dynamic: bool, consumer: &str) -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
+    /// Also the keys whose values are plain (a host, a port: roll secrets' `plain`, and a followed
+    /// key whose field isn't a credential), which a preview's logs may show.
+    pub(super) async fn resolve_secrets(&self, r: &Row, untrusted: bool, dynamic: bool, consumer: &str) -> anyhow::Result<(Vec<(String, String)>, Vec<String>, Vec<String>)> {
         let consumer = format!("preview:{}/{consumer}", env_name(&r.id));
         let got = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted, dynamic, &consumer).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
         let mut problems = got.problems.clone();
@@ -494,16 +496,21 @@ impl Engine {
         }
         // A followed key: the branch's value for that field, or blank (never the parent's).
         let mut values = got.values;
+        let mut plain = got.plain;
         if !got.followed.is_empty() {
             let branches = self.branch_vars(&r.id).await?;
             for (name, kind, parent, field) in got.followed {
                 let vars = branches.iter().find(|(k, p, _)| *k == kind && *p == parent).map(|(_, _, v)| v.clone()).unwrap_or_default();
                 let value = crate::names::follow(kind, &field, vars);
                 values.retain(|(k, _)| *k != name);
+                plain.retain(|k| *k != name);
+                if !masks::credential_name(&field) {
+                    plain.push(name.clone());
+                }
                 values.push((name, value));
             }
         }
-        Ok((values, got.leases))
+        Ok((values, got.leases, plain))
     }
 
     /// A start of `service` runs on `leases` now: the previous start's are revoked (that
@@ -560,6 +567,15 @@ impl Engine {
                 }
                 fresh
             };
+            if fresh.is_empty() {
+                continue;
+            }
+            // A name is its code's to choose (`<secret>.example.com`): masked as its logs are.
+            let Ok(values) = self.masks(&r.id).await else {
+                let _ = self.store.log(&r.id, &format!("its code tried to reach {} hosts outside roll (refused)", fresh.len()));
+                continue;
+            };
+            let fresh: Vec<String> = fresh.iter().map(|h| code_preview::runner::mask(h, &values)).collect();
             // `<host> private`: listed, but it resolves only to private addresses.
             let (private, unlisted): (Vec<String>, Vec<String>) = fresh.into_iter().partition(|h| h.ends_with(" private"));
             if !unlisted.is_empty() {

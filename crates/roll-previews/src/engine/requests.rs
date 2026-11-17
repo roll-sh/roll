@@ -441,7 +441,7 @@ impl Engine {
             }
         }
         // Masked from now on, before its services (or roll apps) are given it.
-        self.add_masks(id, masks::secret_values(&[], &changes.values().flatten().map(|v| (String::new(), v.clone())).collect::<Vec<_>>(), &[]));
+        self.add_masks(id, masks::secret_values(&[], &[], &changes.values().flatten().map(|v| (String::new(), v.clone())).collect::<Vec<_>>(), &[]));
         self.stale_masks(id);
         let vars = self.store.update_vars(id, |vars| {
             for (k, v) in &changes {

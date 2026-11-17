@@ -69,12 +69,12 @@ impl EnvSource for Engine {
         // A protected base (production) reaches a preview only when the project allows it and
         // the change is trusted; a fork's code never gets it.
         let untrusted = !(s.secrets.allow_production && r.trusted);
-        let (secrets, leases) = self.resolve_secrets(&r, untrusted, true, service).await?;
+        let (secrets, leases, plain) = self.resolve_secrets(&r, untrusted, true, service).await?;
         self.keep_leases(&r, service, &leases).await?;
         let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(preview)?).collect();
         let branches = self.resource_env(preview).await?;
         // Its logs hide what this start is given (its dynamic credentials included).
-        self.add_masks(preview, masks::secret_values(&secrets, &own, &branches));
+        self.add_masks(preview, masks::secret_values(&secrets, &plain, &own, &branches));
         for (k, v) in secrets.into_iter().chain(own).chain(branches) {
             set(&mut env, &k, v);
         }

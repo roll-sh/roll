@@ -49,7 +49,7 @@ impl Engine {
         // The values as a start would get them, but no dynamic credential: a fresh one isn't what
         // the running service holds (a start's own are added as it starts, [`Engine::add_masks`]).
         // One a roll secrets from before `dynamic: false` issues anyway is ended at once.
-        let (secrets, leases) = self.resolve_secrets(&r, untrusted, false, "logs").await.map_err(|e| Error::Conflict(format!("its logs wait for what they must hide: {e:#}")))?;
+        let (secrets, leases, plain) = self.resolve_secrets(&r, untrusted, false, "logs").await.map_err(|e| Error::Conflict(format!("its logs wait for what they must hide: {e:#}")))?;
         for l in &leases {
             if let Err(e) = self.secrets.revoke(&r.project_id, l).await {
                 warn!(preview = %id, lease = %l, error = %e, "previews: ending a credential read to mask logs (it expires by itself)");
@@ -57,7 +57,7 @@ impl Engine {
         }
         let branches = self.resource_env(id).await.map_err(|e| Error::Conflict(format!("its logs wait for what they must hide: {e:#}")))?;
         let own = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(id)?).collect::<Vec<_>>();
-        let values = secret_values(&secrets, &own, &branches);
+        let values = secret_values(&secrets, &plain, &own, &branches);
         let mut all = self.log_masks.lock();
         let m = all.entry(id.to_string()).or_default();
         m.read_at = now;
@@ -81,6 +81,40 @@ impl Engine {
     pub(super) fn forget_masks(&self, id: &str) {
         self.log_masks.lock().remove(id);
     }
+
+    /// A screenshot run's words as anyone who reads the preview (and the pull request's comment)
+    /// may see them: what went wrong on the page, its links, text, markup and API operations are
+    /// the page's own, which its code wrote. (A picture can't be masked: a page that renders a
+    /// secret shows it.)
+    pub(super) async fn mask_shot(&self, id: &str, shot: &mut crate::ports::Shot) -> Result<()> {
+        let values = self.masks(id).await?;
+        mask_strings(&mut shot.health, &values);
+        mask_strings(&mut shot.a11y, &values);
+        mask_strings(&mut shot.links, &values);
+        mask_strings(&mut shot.text, &values);
+        mask_strings(&mut shot.api, &values);
+        for p in &mut shot.pages {
+            mask_strings(&mut p.report, &values);
+        }
+        Ok(())
+    }
+}
+
+/// Every string in `v` masked (through its JSON: every field, nested ones too).
+fn mask_strings<T: serde::Serialize + serde::de::DeserializeOwned>(v: &mut T, values: &[String]) {
+    fn walk(j: &mut serde_json::Value, values: &[String]) {
+        match j {
+            serde_json::Value::String(s) => *s = code_preview::runner::mask(s, values),
+            serde_json::Value::Array(a) => a.iter_mut().for_each(|x| walk(x, values)),
+            serde_json::Value::Object(o) => o.values_mut().for_each(|x| walk(x, values)),
+            _ => {}
+        }
+    }
+    let Ok(mut j) = serde_json::to_value(&*v) else { return };
+    walk(&mut j, values);
+    if let Ok(back) = serde_json::from_value(j) {
+        *v = back;
+    }
 }
 
 fn add(have: &mut Vec<String>, values: Vec<String>) {
@@ -95,22 +129,35 @@ fn add(have: &mut Vec<String>, values: Vec<String>) {
     }
 }
 
-/// What of a preview's environment is secret: every value from roll secrets and of the project's
-/// and the preview's own variables (they're revealed only by `reveal` routes), and of the
-/// branches' variables their credentials (a password, a key or token, a URL's password), not
-/// their hosts and names.
-pub(super) fn secret_values(secrets: &[(String, String)], own: &[(String, String)], branches: &[(String, String)]) -> Vec<String> {
-    let mut out: Vec<String> = secrets.iter().chain(own).map(|(_, v)| v.clone()).collect();
+/// What of a preview's environment is secret: every value from roll secrets (but a `plain` one:
+/// a linked host or port, only a URL's password in it) and of the project's and the preview's own
+/// variables (they're revealed only by `reveal` routes), and of the branches' variables their
+/// credentials (a password, a key or token, a URL's password), not their hosts and names.
+pub(super) fn secret_values(secrets: &[(String, String)], plain: &[String], own: &[(String, String)], branches: &[(String, String)]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (k, v) in secrets {
+        if plain.contains(k) {
+            out.extend(url_password(v));
+        } else {
+            out.push(v.clone());
+        }
+    }
+    out.extend(own.iter().map(|(_, v)| v.clone()));
     for (k, v) in branches {
-        let k = k.to_ascii_uppercase();
-        // `…_PROPERTIES`: a client's config (Kafka's `sasl.jaas.config=… password="…"`), whole.
-        if ["PASSWORD", "PASSWD", "PASS", "SECRET", "TOKEN", "KEY", "PROPERTIES"].iter().any(|w| k.ends_with(w) || k.contains(&format!("{w}_"))) {
+        if credential_name(k) {
             out.push(v.clone());
         }
         out.extend(url_password(v));
     }
     out.retain(|v| v.lines().any(|l| l.trim().len() >= 6));
     out
+}
+
+/// A variable or field named like a credential: a password, secret, token or key, or a client's
+/// properties (Kafka's `sasl.jaas.config=… password="…"`).
+pub(super) fn credential_name(name: &str) -> bool {
+    let k = name.to_ascii_uppercase();
+    ["PASSWORD", "PASSWD", "PASS", "SECRET", "TOKEN", "KEY", "PROPERTIES"].iter().any(|w| k.ends_with(w) || k.contains(&format!("{w}_")))
 }
 
 /// The password in `scheme://user:password@host…`, as written and decoded.
@@ -145,6 +192,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_pages_own_words_are_masked_wherever_they_sit() {
+        let mut health = Some(crate::PageHealth { errors: 1, first_error: Some("TypeError: key sk_test_51Hx9 rejected".into()), failed: 1, first_failed: Some("GET /api?token=sk_test_51Hx9 → 401".into()), unstable: false });
+        mask_strings(&mut health, &["sk_test_51Hx9".to_string()]);
+        let h = health.unwrap();
+        assert_eq!((h.first_error.as_deref(), h.first_failed.as_deref(), h.errors), (Some("TypeError: key *** rejected"), Some("GET /api?token=*** → 401"), 1));
+    }
+
+    #[test]
     fn secrets_whole_and_branches_credentials_only() {
         let secrets = vec![("STRIPE_KEY".to_string(), "sk_test_abcdef".to_string()), ("FLAG".into(), "on".into())];
         let own = vec![("API_TOKEN".to_string(), "line-one\nline-two".to_string())];
@@ -154,9 +209,13 @@ mod tests {
             ("DATABASE_URL".into(), "postgres://pv_abc:p%40ss-word@pv-abc.postgres.internal:5432/app".into()),
             ("AWS_SECRET_ACCESS_KEY".into(), "wJalrXUtnFEMI".into()),
         ];
-        let v = secret_values(&secrets, &own, &branches);
+        let v = secret_values(&secrets, &[], &own, &branches);
         assert_eq!(v, ["sk_test_abcdef", "line-one\nline-two", "s3cretpw", "p%40ss-word", "p@ss-word", "wJalrXUtnFEMI"]);
         let line = "connecting to postgres://pv_abc:p@ss-word@pv-abc.postgres.internal with sk_test_abcdef, line-two";
         assert_eq!(code_preview::runner::mask(line, &v), "connecting to postgres://pv_abc:***@pv-abc.postgres.internal with ***, ***");
+        // roll secrets' `plain` (a linked host): shown, but a URL's password in one isn't.
+        let linked = vec![("STAGING_HOST".to_string(), "staging-db.internal".to_string()), ("STAGING_URL".into(), "postgres://app:hunter22@staging-db.internal/app".into())];
+        let plain = ["STAGING_HOST".to_string(), "STAGING_URL".to_string()];
+        assert_eq!(secret_values(&linked, &plain, &[], &[]), ["hunter22"]);
     }
 }
