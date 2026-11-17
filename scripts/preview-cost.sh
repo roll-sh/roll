@@ -243,6 +243,9 @@ ROBOTS_LOCKED=$(curl -sS -o /dev/null -D - -H "Host: $HOST" "http://$API/" | tr 
 RQ=$(curl -sS "http://$API/v1/previews/$PV/requests")
 REQS=$(echo "$RQ" | python3 -c "import json,sys; r=json.load(sys.stdin)['requests']; print('%d; newest: %s; queries: %s' % (len(r), ' '.join(str(r[0][k]) for k in ('method', 'path', 'status')) if r else 'none', any('?' in x['path'] for x in r)))")
 case "$REQS" in *"newest: GET / 200; queries: False") ;; *) echo "the preview's request log should list its visits without their queries: $REQS"; exit 1;; esac
+# And from the CLI (`roll preview requests`): its visits, and none with --errors.
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" | grep -q " 200 GET    /  " || { echo "roll preview requests should list GET / 200: $(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" | head -3)"; exit 1; }
+[ -z "$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" --errors)" ] || { echo "roll preview requests --errors should list only 4xx and 5xx"; exit 1; }
 # The service's DATABASE_URL is the branch's own role, which can't read the WAL (where the pages
 # from before the mask are) and isn't a superuser.
 APP_DB=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
