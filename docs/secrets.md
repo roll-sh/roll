@@ -2810,6 +2810,11 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
    one combined tree, merged with main and gated once, each pull request then queued behind the
    last, as roll search lands theirs), and each later turn the next batch, so thirty pull requests
    take a handful of lock cycles instead of thirty.
+0b. **The polling path at scale** (building: `feature/roll-secrets-poll-path`): the Performance
+   table's Postgres numbers are from 2026-11-13, before conditional reads, live digests and preview
+   branches; `digest` was 143 ms at 9,900 keys, and every operator, CSI driver and ESO poll pays a
+   304's cost. Re-measured on both databases, the cost in cores at 1,000 pods every 30 s, and a
+   digest cache keyed on the database's change counters if it measures as a win.
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
@@ -2902,7 +2907,9 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
    redaction hiding every value that comes from roll secrets, not only `sensitive` ones (agreed;
    #198 gives them `plain`, the link fields that aren't credentials, so a renamed one stays hidden).
    *Waits on roll previews:* masking secret values in a preview service's logs and its jobs' output
-   (building, on `feature/roll-previews-mask-logs`; apps' `seal` for what previews sets there).
+   (#200 and #203, approved here: logs, job output, screenshot text, health bodies, egress names;
+   their egress proxy refuses before resolving, and a fork's preview now defaults to Roll-only
+   egress with a DNS server that resolves nothing outside).
 13. *Waits on other threads:* a live check of OpenSearch links, roll redis and nosql keeping a
    rotated password a while, splitting the CLI's `secrets.rs` once the queue has landed.
 14. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
