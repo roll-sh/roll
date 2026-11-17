@@ -29,6 +29,9 @@ pub enum Kind {
     Enum(&'static [&'static str]),
     /// An analyzer name that must resolve.
     Analyzer,
+    /// A text field's index-time `analyzer`: it must resolve and be allowed to index
+    /// (`TextParams.Analyzers`: `checkAllowedInMode(INDEX_TIME)`).
+    IndexAnalyzer,
     Similarity,
     Normalizer,
     /// `meta`: up to 5 string entries.
@@ -259,10 +262,17 @@ pub fn parse_value(def: &ParamDef, field: &str, type_name: &str, v: &Value, ctx:
             }
             Value::Str(s)
         }
-        Kind::Analyzer => {
+        Kind::Analyzer | Kind::IndexAnalyzer => {
             let s = v.to_es_string();
             if !ctx.has_analyzer(&s) {
                 return Err(EsError::illegal_argument(format!("analyzer [{s}] has not been configured in mappings")));
+            }
+            if let (Kind::IndexAnalyzer, Some(filters)) = (def.kind, ctx.search_time_analyzers.get(&s)) {
+                return Err(EsError::new(
+                    500,
+                    "mapper_exception",
+                    format!("analyzer [{s}] contains filters [{}] that are not allowed to run in index time mode.", filters.join(", ")),
+                ));
             }
             Value::Str(s)
         }

@@ -107,7 +107,13 @@ impl roll_previews::ports::Apps for RollApps {
                 .filter(|x| x["source"]["kind"] != "upload")
                 .map(|x| roll_previews::ports::CatalogService {
                     name: s(&x["name"]).unwrap_or_default(),
-                    repo: (x["source"]["kind"] == "repo").then(|| s(&x["source"]["repo"])).flatten(),
+                    // A Git URL service is `git:<its id>`: its branch previews are made by roll apps'
+                    // pushes (`Engine::git_push`), at the pushed commit.
+                    repo: match x["source"]["kind"].as_str() {
+                        Some("repo") => s(&x["source"]["repo"]),
+                        Some("git") => s(&x["id"]).map(|id| format!("git:{id}")),
+                        _ => None,
+                    },
                     root: s(&x["source"]["root"]).unwrap_or_default(),
                     memory_mb: x["run"]["memory_mb"].as_u64().unwrap_or(512) as u32,
                 })
@@ -137,10 +143,12 @@ impl roll_previews::ports::Apps for RollApps {
         for l in links.as_array().into_iter().flatten() {
             let Some((_, _, vars)) = t.branches.iter().find(|(k, parent, _)| l["kind"] == k.as_str() && l["ref"] == parent.as_str()) else { continue };
             let prefix = l["prefix"].as_str().unwrap_or("");
+            // Every variable the link gives, from the branch: by roll apps' names, and blank for
+            // one the branch has no value for, never production's (a stream's brokers and login,
+            // an OpenSearch login, would reach production's data).
             for name in l["vars"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-                if let Some((_, v)) = vars.iter().find(|(k, _)| name.strip_prefix(prefix) == Some(k.as_str())) {
-                    set.insert(name.to_string(), json!(v));
-                }
+                let plain = name.strip_prefix(prefix).unwrap_or(name);
+                set.insert(name.to_string(), json!(link_value(plain, vars).unwrap_or_default()));
             }
         }
         // What roll set last time and no longer wants (a removed preview variable or project
@@ -262,6 +270,37 @@ impl roll_previews::ports::Apps for RollApps {
     }
 }
 
+/// A roll apps link's variable `name` (its prefix taken off) as a preview's branch gives it:
+/// the branch's own variable of that name, or roll apps' name for one the branch names otherwise
+/// (a bucket's endpoint, a stream's brokers and SASL login, a search cluster's API key or
+/// OpenSearch login, from the branch's `ELASTICSEARCH_URL` and its credentials). `None`: the
+/// branch has nothing for it.
+fn link_value(name: &str, vars: &[(String, String)]) -> Option<String> {
+    let get = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    if let Some(v) = get(name) {
+        return Some(v);
+    }
+    let search = || get("ELASTICSEARCH_URL").and_then(|u| url::Url::parse(&u).ok());
+    let decode = |s: &str| urlencoding::decode(s).map(|c| c.into_owned()).unwrap_or_else(|_| s.to_string());
+    match name {
+        "AWS_ENDPOINT_URL" => get("AWS_ENDPOINT_URL_S3"),
+        "KAFKA_BROKERS" => get("KAFKA_BOOTSTRAP_SERVERS"),
+        "KAFKA_USERNAME" => get("KAFKA_SASL_USERNAME"),
+        "KAFKA_PASSWORD" => get("KAFKA_SASL_PASSWORD"),
+        "OPENSEARCH_URL" => get("ELASTICSEARCH_URL"),
+        "OPENSEARCH_USERNAME" => search().map(|u| decode(u.username())).filter(|u| !u.is_empty()),
+        "OPENSEARCH_PASSWORD" => search().and_then(|u| u.password().map(decode)),
+        // roll search takes `ApiKey base64(<cluster>:<password>)` for a cluster's own login;
+        // a `<user>@<cluster>` login has no key form.
+        "ELASTICSEARCH_API_KEY" => search().and_then(|u| {
+            use base64::Engine as _;
+            let (user, pass) = (decode(u.username()), u.password().map(decode)?);
+            (!user.is_empty() && !user.contains('@')).then(|| base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}")))
+        }),
+        _ => None,
+    }
+}
+
 /// The variable in a preview's roll apps environment that names the variables roll set there.
 const SET_BY_ROLL: &str = "ROLL_PREVIEW_SET";
 
@@ -294,6 +333,30 @@ pub trait Reach: Send + Sync {
 }
 
 /// roll previews' notes for roll apps' feedback button, by the preview's environment name.
+/// roll apps' pushes to branches of a Git URL service that none of its environments follows: each
+/// branch's preview (`Engine::git_push`). Handed off at once, the hook is waiting.
+pub struct GitPushes(pub std::sync::Weak<roll_previews::Engine>);
+
+#[async_trait]
+impl apps_control::integrations::GitPushes for GitPushes {
+    /// Pull requests too: previews names a same-repo one's branch preview, and runs a fork's only
+    /// at a head a writer approved.
+    fn takes_pulls(&self) -> bool {
+        true
+    }
+
+    async fn pushed(&self, push: apps_control::integrations::GitPush) {
+        let Some(engine) = self.0.upgrade() else { return };
+        let pull = push.pull.map(|p| roll_previews::ports::GitPull { number: p.number, title: p.title, url: p.url, fork: p.fork });
+        let p = roll_previews::ports::GitPush { service: push.service, url: push.url, branch: push.branch, sha: push.sha, message: push.message, pull };
+        tokio::spawn(async move {
+            if let Err(e) = engine.git_push(&p).await {
+                tracing::warn!(service = %p.service, branch = %p.branch, error = %e, "previews: a Git URL service's push");
+            }
+        });
+    }
+}
+
 pub struct Notes(pub std::sync::Weak<roll_previews::Engine>);
 
 #[async_trait]
@@ -450,6 +513,23 @@ fn already(last: Option<&(String, String)>, key: &str, env: &Value) -> Already {
 
 #[cfg(test)]
 mod tests {
+    /// Every variable of a roll apps link to a branched resource comes from the branch, under
+    /// roll apps' names, or is blank: a stream's brokers and login, a bucket's endpoint and a
+    /// search cluster's key or OpenSearch login never stay production's.
+    #[test]
+    fn a_links_variables_come_from_the_branch_or_are_blank() {
+        let v = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
+        let stream = v(&[("KAFKA_BOOTSTRAP_SERVERS", "b:9092"), ("KAFKA_SASL_USERNAME", "pv"), ("KAFKA_SASL_PASSWORD", "s")]);
+        assert_eq!(["KAFKA_BROKERS", "KAFKA_USERNAME", "KAFKA_PASSWORD"].map(|n| super::link_value(n, &stream)), [Some("b:9092".into()), Some("pv".into()), Some("s".into())]);
+        assert_eq!(super::link_value("AWS_ENDPOINT_URL", &v(&[("AWS_ENDPOINT_URL_S3", "http://s3")])).as_deref(), Some("http://s3"));
+        let es = v(&[("ELASTICSEARCH_URL", "https://br-1:p%40ss@search.test")]);
+        assert_eq!(super::link_value("OPENSEARCH_USERNAME", &es).as_deref(), Some("br-1"));
+        assert_eq!(super::link_value("OPENSEARCH_PASSWORD", &es).as_deref(), Some("p@ss"));
+        assert_eq!(super::link_value("ELASTICSEARCH_API_KEY", &es).as_deref(), Some("YnItMTpwQHNz"), "base64(br-1:p@ss)");
+        assert_eq!(super::link_value("ELASTICSEARCH_API_KEY", &v(&[("ELASTICSEARCH_URL", "https://u%40br-1:p@search.test")])), None, "a user@cluster login has no key form");
+        assert_eq!(super::link_value("CASSANDRA_KEYSPACE", &v(&[("CASSANDRA_USERNAME", "pv")])), None, "nothing for it: blank, not production's");
+    }
+
     use super::*;
 
     /// A poll while previews' own deploy is going waits on it, once it's live it's done, and only

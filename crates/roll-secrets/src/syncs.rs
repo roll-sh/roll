@@ -592,7 +592,7 @@ impl Secrets {
         let mut values = BTreeMap::new();
         let mut problems = vec![];
         let mut skipped = BTreeSet::new();
-        let mut resolver = Resolver::new(self, project, &dek, caller, true, &caller.principal);
+        let mut resolver = Resolver::new(self, project, env, &dek, caller, true, &caller.principal)?;
         resolver.no_dynamic = true;
         // Every entry resolves, values or not: its stamp takes the resolved value's fingerprint,
         // so a change that only comes through a reference is pushed too.

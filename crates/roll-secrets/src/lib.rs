@@ -55,14 +55,14 @@ mod caller;
 pub mod kms;
 mod write;
 
-pub use access::{Action, Approval, Caller, Minted, People, Person, Scope, Workloads};
+pub use access::{Action, Approval, Caller, Minted, People, Person, Scope, Workloads, PREVIEWS};
 pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter};
-pub use envs::{EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
+pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
 pub use links::{Link, LinkProvider, Links, Mode};
-pub use read::{Grid, Problem, Secret, Source, Values, Version};
+pub use read::{Followed, Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
 pub use exports::Export;
 pub use identities::{Identity, Login, NewIdentity};
@@ -410,6 +410,8 @@ impl Secrets {
         db.add_column("environments", "reminded_at", "INTEGER")?;
         // An ephemeral environment running vetted code may read a protected base (envs.rs).
         db.add_column("environments", "trusted", "INTEGER")?;
+        // The resources an ephemeral environment's preview branched: links to them aren't followed.
+        db.add_column("environments", "branches", "TEXT")?;
         // Client addresses identities log in from (identities.rs).
         db.add_column("identities", "allowed_ips", "TEXT")?;
         // When a value stops working outside roll (a vendor's key, a certificate): ms, or null.
@@ -437,6 +439,8 @@ impl Secrets {
         db.ensure_schema(pki::SCHEMA)?;
         db.ensure_schema(ssh::SCHEMA)?;
         db.ensure_schema(aws::SCHEMA)?;
+        // How a role trusts roll (aws.rs): absent is the ExternalId, as before there were two.
+        db.add_column("aws_roles", "trust", "TEXT")?;
         db.ensure_schema(issuer::SCHEMA)?;
         db.ensure_schema(clouds::SCHEMA)?;
         db.ensure_schema(iam::SCHEMA)?;
@@ -444,7 +448,11 @@ impl Secrets {
         let mut links = opts.links;
         let unwrap = kms::Unwrapper::new(opts.kms.clone());
         if let Some(sts) = &opts.sts {
-            links.register(Arc::new(aws::Provider { db: db.clone(), sts: sts.clone() }));
+            let issuing = match (&opts.clouds, &opts.keyring) {
+                (Some(c), Ok(keys)) => Some(aws::Issuing { url: c.issuer.clone(), keys: keys.clone() }),
+                _ => None,
+            };
+            links.register(Arc::new(aws::Provider { db: db.clone(), sts: sts.clone(), issuing }));
             links.register(Arc::new(iam::Provider { db: db.clone(), sts: sts.clone() }));
         }
         if let (Some(c), Ok(keys)) = (&opts.clouds, &opts.keyring) {
