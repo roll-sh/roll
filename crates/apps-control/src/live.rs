@@ -232,6 +232,8 @@ pub struct Gate {
     pub headers: Vec<crate::model::HeaderRule>,
     /// Traces are on: the proxy adds its own span to each request's trace.
     pub traces: bool,
+    /// Its pages carry roll's Web Vitals tag.
+    pub vitals: bool,
 }
 
 /// Clients a rate limit remembers at most (a full bucket is the same as none, so those go first).

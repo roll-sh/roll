@@ -96,6 +96,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&before=&instance=&deployment=&stream=&level=&where=&q=&http=&status=&min_ms=&by=` | | `LogLine[]` or SSE; `before` (unix ms) reads back to a time (not followed), `instance`/`deployment`/`stream` narrow it (followed too), `level` keeps lines at that level or worse (a line that says none isn't; 400 for another word), `where` keeps lines whose JSON or logfmt fields say all its terms (`level:error user_id:42`, `key:*`, `-key:value`, `a.b:x`, quoted values; at most 10; 400 for one that isn't `key:value`), `X-Roll-Search-Truncated: 1` when a read back stopped short; `http=1`: the proxy's access log (`stream: "http"`, text `AccessLine`), `status` (`500`, `5xx`, `400-499`), `min_ms` and `by` (one reason, or `any`: every answer roll gave itself) filtering it | read |
 | `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=&format=` | | `Metrics`; `format=prometheus`: the last finished minute as Prometheus text (`roll_apps_requests_per_minute`, `…_errors_per_minute`, `…_latency_ms{quantile}`, `…_cpu_seconds_per_minute`, `…_memory_bytes`, `…_instances`, `…_cold_starts_per_minute`, `…_cold_start_ms`, labelled `service`, `service_id`, `environment`) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/routes?minutes=` | | `RouteStats` (the last 5–60 minutes, default 60): the access log grouped by method and route, id-like segments `:id` and no query; the busiest, the most 5xx and the slowest (5 requests or more), each at most 50 | read |
+| `GET /v1/apps/services/{id}/environments/{env}/vitals?minutes=` | | `{ minutes, samples, metrics: { lcp?, inp?, cls?, fcp?, ttfb?: { p75, rating: "good" \| "needs-improvement" \| "poor", samples } }, routes: { route, samples, metrics }[], cut }`: what visitors' browsers measured with `vitals: true` (the last 60–10,080 minutes, default 1,440), p75s rated by web.dev's thresholds, overall and for the 20 routes with the most page loads | read |
 | `GET /v1/apps/services/{id}/environments/{env}/analytics?minutes=` | | `Analytics` (the last 60–10,080 minutes, default 1,440): visitors and page views from the access log, no script or cookie | read |
 | `POST /v1/apps/services/{id}/environments/{env}/visit` | `{ to }` | `{ url }`: a one-use ticket (a minute) into a sign-in-gated environment for the person signed in, as the URL that opens `to` (a URL at one of its names: its generated hostname or an active custom domain; 400 otherwise, and for an environment without `access.signed_in`); the dashboard's `/dashboard/apps/visit` asks for it and goes on | a person signed in only (403 for a token); rolld's gate lets in only admins until roll apps serves users |
 | `GET /v1/apps/services/{id}/environments/{env}/traces?minutes=&min_ms=` | | `{ minutes, traces: TraceSummary[], cut }`: recent traces (5–10,080 minutes, default 60), newest first, at most 100; `min_ms` keeps the slower ones | read |
@@ -343,6 +344,14 @@ type EnvironmentPut = {
    *  roll's own; the app's own variables win), at public addresses only. 400 for hosts with
    *  `open`; 409 where the node's runtime can't close a network (Fargate). null: `open`. */
   egress?: { mode: "roll" | "open"; hosts?: string[] } | null;
+  /** Web Vitals: from the next request its HTML page loads (200, uncompressed by asking the app
+   *  for identity) get `<script src="/__roll/vitals.js" defer>` before `</body>` (the page's
+   *  caching stays the app's; its ETag made weak), which measures LCP, INP, CLS, FCP and TTFB in
+   *  the browser and sends one beacon to `POST /__roll/vitals` on the same host when the page is
+   *  hidden (at most 2 KiB; its path kept as a route, bounded numbers; 600 a minute an
+   *  environment, then 429). No cookie, no id; the edge's country is kept. Off: those paths are
+   *  the app's. */
+  vitals?: boolean;
   follow_tag?: boolean;
   /** A preview environment (ephemeral) only, set by roll previews: a visitor who came in through
    *  its access link gets roll previews' feedback button on its pages (`/__roll/feedback.js`
@@ -404,6 +413,7 @@ type Environment = EnvironmentSummary & {
   follow_tag: boolean;        // an image service's tag is watched: a new digest behind it deploys
   redeploy_on_secrets: boolean; // the project's secrets changing redeploys it (same image, new values)
   traces: boolean; // its instances send OpenTelemetry traces to roll
+  vitals: boolean; // its pages measure their Web Vitals for roll (`…/vitals`)
   egress: { mode: "roll" | "open"; hosts: string[] }; // what its code may reach (roll: roll and the hosts)
   egress_refused?: { host: string; private?: true }[]; // hosts its egress proxy refused lately, oldest first, at most 20: not listed, or (private) listed but resolving only to private addresses
   feedback: boolean;          // a preview's pages carry roll previews' feedback button

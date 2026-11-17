@@ -378,6 +378,8 @@ export interface EnvironmentPut {
   redeploy_on_secrets?: boolean;
   /** Its instances send OpenTelemetry traces to roll (`OTEL_*` from the next deploy). */
   traces?: boolean;
+  /** Its pages measure their Web Vitals (a tag roll adds). */
+  vitals?: boolean;
   /** What its code may reach from the next deploy: roll and `hosts` only, or anything. null: open. */
   egress?: Egress | null;
   /** Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until false. */
@@ -471,6 +473,8 @@ export interface Environment extends EnvironmentSummary {
   redeploy_on_secrets?: boolean;
   /** Its instances send OpenTelemetry traces to roll. */
   traces?: boolean;
+  /** Its pages measure their Web Vitals for roll. */
+  vitals?: boolean;
   /** People signed in to roll who can open its project get in. */
   signed_in?: boolean;
   /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
@@ -660,6 +664,22 @@ export interface Span {
 }
 
 /** Visitors and page views from the access log (no script, no cookie). */
+/** A Web Vital's 75th percentile, rated by web.dev's thresholds. */
+export interface Vital {
+  p75: number;
+  rating: "good" | "needs-improvement" | "poor";
+  samples: number;
+}
+export type VitalName = "lcp" | "inp" | "cls" | "fcp" | "ttfb";
+/** What visitors' browsers measured (`vitals: true`): overall and for the busiest routes. */
+export interface Vitals {
+  minutes: number;
+  samples: number;
+  metrics: Partial<Record<VitalName, Vital>>;
+  routes: { route: string; samples: number; metrics: Partial<Record<VitalName, Vital>> }[];
+  cut: boolean;
+}
+
 export interface Analytics {
   minutes: number;
   /** Minutes a point of `series` stands for. */
@@ -981,6 +1001,7 @@ export const appsApi = {
   /** Errors and latency by route over the last `minutes` (5–60). */
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),
+  vitals: (id: string, e: string, minutes = 1440) => call<Vitals>("GET", `${env(id, e)}/vitals${qs({ minutes })}`),
   traces: (id: string, e: string, minutes = 60) => call<{ minutes: number; traces: TraceSummary[]; cut: boolean }>("GET", `${env(id, e)}/traces${qs({ minutes })}`),
   trace: (id: string, e: string, trace: string) => call<{ trace: string; spans: Span[] }>("GET", `${env(id, e)}/traces/${enc(trace)}`),
   usage: (id: string, e: string, days = 30) => call<Usage>("GET", `${env(id, e)}/usage${qs({ days })}`),
