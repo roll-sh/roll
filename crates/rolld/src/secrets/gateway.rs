@@ -130,6 +130,9 @@ pub struct Link {
     caller: (bool, Option<roll_auth::SignedIn>),
     /// A newer link took over: it opens no more streams and closes once they're done.
     replaced: tokio::sync::watch::Sender<bool>,
+    /// The link that replaced it: a stream asked of this one opens there instead, so a caller that
+    /// took this link just before a reconnect (an identity's renewal) loses nothing.
+    next: OnceLock<std::sync::Weak<Link>>,
     /// What opened it is gone: the link closes with 4401 now, saying why.
     revoked: tokio::sync::watch::Sender<Option<String>>,
 }
@@ -139,29 +142,42 @@ impl Link {
     /// Checked first, every time: a revoked token or a deleted gateway opens nothing, and closes
     /// the link.
     pub(crate) async fn open(self: &Arc<Self>, host: &str, port: u16) -> Result<Audited, String> {
+        let link = self.newest();
         let target = format!("{host}:{port}");
-        self.ready(&target).await?;
-        match self.mux.open(host, port).await {
-            Ok(s) => Ok(Audited { s, target, link: self.clone() }),
+        link.ready(&target).await?;
+        match link.mux.open(host, port).await {
+            Ok(s) => Ok(Audited { s, target, link }),
             Err(why) => {
-                self.audit(&target, format!("not opened: {why}"));
-                Err(format!("gateway {}: {why}", self.gateway))
+                link.audit(&target, format!("not opened: {why}"));
+                Err(format!("gateway {}: {why}", link.gateway))
             }
         }
+    }
+
+    /// This link, or the newest of the links that replaced it.
+    fn newest(self: &Arc<Self>) -> Arc<Link> {
+        let mut link = self.clone();
+        while *link.replaced.borrow()
+            && let Some(next) = link.next.get().and_then(std::sync::Weak::upgrade)
+        {
+            link = next;
+        }
+        link
     }
 
     /// `srv`'s SRV record, looked up by the gateway with the network's DNS: its targets, each in
     /// the gateway's allow-list (the gateway checks), at most [`proto::MAX_TARGETS`], every one a
     /// host name and a port. Checked first and audited, as a stream is.
     pub(crate) async fn resolve_srv(self: &Arc<Self>, srv: &str) -> Result<Vec<(String, u16)>, String> {
+        let link = self.newest();
         let target = format!("SRV {srv}");
-        self.ready(&target).await?;
-        let answer = self.mux.resolve(srv).await.and_then(|targets| targets.iter().map(|t| host_port(t).ok_or_else(|| "the gateway answered a target roll doesn't read".to_string())).collect::<Result<Vec<_>, _>>());
+        link.ready(&target).await?;
+        let answer = link.mux.resolve(srv).await.and_then(|targets| targets.iter().map(|t| host_port(t).ok_or_else(|| "the gateway answered a target roll doesn't read".to_string())).collect::<Result<Vec<_>, _>>());
         match &answer {
-            Ok(t) => self.audit(&target, format!("{} targets", t.len())),
-            Err(why) => self.audit(&target, format!("not answered: {why}")),
+            Ok(t) => link.audit(&target, format!("{} targets", t.len())),
+            Err(why) => link.audit(&target, format!("not answered: {why}")),
         }
-        answer.map_err(|why| format!("gateway {}: {why}", self.gateway))
+        answer.map_err(|why| format!("gateway {}: {why}", link.gateway))
     }
 
     /// Whether the link may carry `target` now: not being replaced, and what opened it still
@@ -367,9 +383,10 @@ impl Gateways {
         let node = self.cluster.node_id().to_string();
         let (replaced, mut replaced_rx) = tokio::sync::watch::channel(false);
         let (revoked, mut revoked_rx) = tokio::sync::watch::channel(None);
-        let link = Arc::new(Link { gateway: id.clone(), mux: mux.clone(), secrets: secrets.clone(), grants: self.grants.clone(), grant: grant.clone(), caller, replaced, revoked });
+        let link = Arc::new(Link { gateway: id.clone(), mux: mux.clone(), secrets: secrets.clone(), grants: self.grants.clone(), grant: grant.clone(), caller, replaced, next: OnceLock::new(), revoked });
         // The newest link opens streams; the one it replaces finishes its own, then closes.
         if let Some(old) = self.links.lock().unwrap().insert(id.clone(), link.clone()) {
+            let _ = old.next.set(Arc::downgrade(&link));
             let _ = old.replaced.send(true);
         }
         let allow: Vec<String> = hello.allow.iter().take(proto::MAX_ALLOW).map(|a| a.chars().take(200).collect()).collect();
@@ -563,6 +580,21 @@ mod tests {
     #[derive(Default)]
     struct Tokens(Mutex<HashMap<String, roll_auth::Grant>>);
 
+    /// How long a workload login's token lives here: seconds, not its identity's minutes, so a
+    /// gateway's renewal shows within the test.
+    const WORKLOAD_LIFE_MS: i64 = 8_000;
+
+    impl Tokens {
+        fn add(&self, prefix: &str, name: &str, rule: roll_auth::scope::Rule) -> (String, String) {
+            static N: AtomicUsize = AtomicUsize::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            let (secret, id) = (format!("rlt_{prefix}test{n}"), format!("{prefix}_{n}"));
+            let g = roll_auth::Grant { ask_otherwise: false, user: None, id: id.clone().into(), name: name.into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) };
+            self.0.lock().unwrap().insert(secret.clone(), g);
+            (secret, id)
+        }
+    }
+
     impl roll_auth::Grants for Tokens {
         fn grant(&self, id: &str) -> Option<roll_auth::Grant> {
             self.0.lock().unwrap().values().find(|g| &*g.id == id).cloned()
@@ -570,18 +602,16 @@ mod tests {
     }
 
     impl roll_secrets::Workloads for Tokens {
-        fn mint(&self, _: &str, _: roll_auth::scope::Rule, _: Option<Vec<String>>, _: u32, _: Option<&str>) -> roll_secrets::Result<roll_secrets::Minted> {
-            Err(roll_secrets::Error::BadRequest("no identities here".into()))
+        fn mint(&self, name: &str, rule: roll_auth::scope::Rule, _: Option<Vec<String>>, _: u32, _: Option<&str>) -> roll_secrets::Result<roll_secrets::Minted> {
+            let (secret, id) = self.add("workload", name, rule);
+            Ok(roll_secrets::Minted { id, secret, expires_at: chrono::Utc::now().timestamp_millis() + WORKLOAD_LIFE_MS })
         }
         fn revoke(&self, id: &str) -> roll_secrets::Result<()> {
             self.0.lock().unwrap().retain(|_, g| &*g.id != id);
             Ok(())
         }
         fn token(&self, _: &axum::http::Extensions, name: &str, rule: roll_auth::scope::Rule) -> roll_secrets::Result<roll_secrets::Minted> {
-            let n = self.0.lock().unwrap().len();
-            let (secret, id) = (format!("rlt_gatewaytest{n}"), format!("tok_{n}"));
-            let g = roll_auth::Grant { ask_otherwise: false, user: None, id: id.clone().into(), name: name.into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(roll_auth::scope::Scope(vec![rule])) };
-            self.0.lock().unwrap().insert(secret.clone(), g);
+            let (secret, id) = self.add("tok", name, rule);
             Ok(roll_secrets::Minted { id, secret, expires_at: 0 })
         }
         fn revoke_token(&self, id: &str, _: &str) -> roll_secrets::Result<()> {
@@ -691,10 +721,10 @@ mod tests {
     }
 
     /// `roll gateway up`, in process, dialing `url` and allowing `allow`; its log lines are kept.
-    fn gateway_up(url: &str, gw: &str, token: &str, allow: &[String]) -> Up {
+    fn gateway_up(url: &str, gw: &str, auth: Auth, allow: &[String]) -> Up {
         let lines = Arc::new(Mutex::new(vec![]));
         let l = lines.clone();
-        let agent = Agent { url: url.into(), gateway: gw.into(), auth: Auth::Token(token.into()), allow: AllowList::parse(allow.iter().map(String::as_str)).unwrap(), version: "test".into(), log: Arc::new(move |s: &str| l.lock().unwrap().push(s.to_string())) };
+        let agent = Agent { url: url.into(), gateway: gw.into(), auth, allow: AllowList::parse(allow.iter().map(String::as_str)).unwrap(), version: "test".into(), log: Arc::new(move |s: &str| l.lock().unwrap().push(s.to_string())) };
         (tokio::spawn(roll_gateway::agent::run(agent)), lines)
     }
 
@@ -714,7 +744,7 @@ mod tests {
         }
 
         fn up(&self, gw: &str, token: &str, allow: &[String]) -> Up {
-            gateway_up(&self.url, gw, token, allow)
+            gateway_up(&self.url, gw, Auth::Token(token.into()), allow)
         }
 
         async fn linked(&self, gw: &str) -> Arc<Link> {
@@ -726,6 +756,41 @@ mod tests {
             }
             panic!("the gateway never connected");
         }
+    }
+
+    /// A cluster's service-account issuer (ES256), its keys pinned on an identity as a cluster's are.
+    struct Issuer(ring::signature::EcdsaKeyPair);
+
+    impl Issuer {
+        fn new() -> Issuer {
+            use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
+            let rng = ring::rand::SystemRandom::new();
+            let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+            Issuer(EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng).unwrap())
+        }
+        fn jwks(&self) -> Json {
+            use ring::signature::KeyPair;
+            let p = self.0.public_key().as_ref();
+            json!({ "keys": [{ "kty": "EC", "crv": "P-256", "kid": "k1", "use": "sig", "x": b64(&p[1..33]), "y": b64(&p[33..65]) }] })
+        }
+        fn sign(&self, claims: Json) -> String {
+            let signed = format!("{}.{}", b64(json!({ "alg": "ES256", "kid": "k1", "typ": "JWT" }).to_string().as_bytes()), b64(claims.to_string().as_bytes()));
+            let sig = self.0.sign(&ring::rand::SystemRandom::new(), signed.as_bytes()).unwrap();
+            format!("{signed}.{}", b64(sig.as_ref()))
+        }
+    }
+
+    fn b64(b: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+    }
+
+    /// Bytes there and back through a stream to the echo server.
+    async fn echoes(s: &mut Audited, msg: &[u8]) {
+        s.write_all(msg).await.unwrap();
+        let mut back = vec![0u8; msg.len()];
+        tokio::time::timeout(Duration::from_secs(5), s.read_exact(&mut back)).await.expect("the echo came back").unwrap();
+        assert_eq!(back, msg);
     }
 
     async fn echo_server() -> u16 {
@@ -821,6 +886,67 @@ mod tests {
         let stopped = tokio::time::timeout(Duration::from_secs(1), agent).await.expect("the link closes within a second").unwrap();
         assert!(stopped.unwrap_err().contains("refused"), "a deleted gateway's link closes with 4401");
         assert!(r.hub.link(&gw).is_none());
+
+        // A gateway on Kubernetes has no token of its own: it logs in with its pod's OIDC token
+        // through an identity made for it, and opens its link with the token that login got.
+        let made: Json = r.http.post(format!("{}/v1/secrets/projects/{}/gateways", r.url, r.project)).json(&json!({ "name": "k8s", "token": false })).send().await.unwrap().json().await.unwrap();
+        let gw = made["gateway"]["id"].as_str().unwrap().to_string();
+        assert!(made["token"].is_null());
+        let (cluster, iss, sub) = (Issuer::new(), "https://kubernetes.default.svc.cluster.local", "system:serviceaccount:roll:gateway");
+        let identity = json!({ "name": "gw-k8s", "issuer": iss, "audience": "roll", "subject": sub, "gateway": gw, "jwks": cluster.jwks().to_string() });
+        let identity: Json = r.http.post(format!("{}/v1/secrets/projects/{}/identities", r.url, r.project)).json(&identity).send().await.unwrap().json().await.unwrap();
+        let idn = identity["id"].as_str().unwrap().to_string();
+        let oidc_file = r._dir.path().join("oidc-token");
+        let now = chrono::Utc::now().timestamp();
+        std::fs::write(&oidc_file, cluster.sign(json!({ "iss": iss, "aud": "roll", "sub": sub, "iat": now, "exp": now + 3600 }))).unwrap();
+        let (agent, lines) = gateway_up(&r.url, &gw, Auth::Identity { identity: idn.clone(), oidc_file }, &[format!("127.0.0.1:{echo}")]);
+        let first = r.linked(&gw).await;
+        let minted = |link: &Link| {
+            let id = link.grant.clone().expect("a link opened with a token");
+            let g = roll_auth::Grants::grant(&*r.tokens, &id).expect("a live token");
+            assert!(id.starts_with("workload_") && &*g.name == "gw-k8s", "the identity's login made the token that opened the link ({id}, {})", g.name);
+            id
+        };
+        let before = minted(&first);
+        let mut inflight = first.open("127.0.0.1", echo).await.unwrap();
+        echoes(&mut inflight, b"before the renewal").await;
+
+        // Its token nears its end: the gateway logs in again and opens a new link with the new
+        // token, which replaces the old one.
+        let mut second = None;
+        for _ in 0..200 {
+            second = r.hub.link(&gw).filter(|l| !Arc::ptr_eq(l, &first));
+            if second.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let second = second.expect("the gateway renewed its link before its token ended");
+        let after = minted(&second);
+        assert_ne!(before, after, "the new link carries the new login's token");
+        assert!(lines.lock().unwrap().iter().any(|l| l.contains("logging in again")), "{:?}", lines.lock().unwrap());
+        // Nothing is lost: the stream in flight on the old link goes on while it drains, a caller
+        // that took the old link just before the switch gets its stream on the new one, and new
+        // streams open there.
+        echoes(&mut inflight, b"after the renewal").await;
+        let mut late = first.open("127.0.0.1", echo).await.expect("a stream asked of the replaced link opens on the new one");
+        echoes(&mut late, b"late").await;
+        let mut fresh = r.hub.link(&gw).unwrap().open("127.0.0.1", echo).await.unwrap();
+        echoes(&mut fresh, b"fresh").await;
+        drop((inflight, late, fresh));
+
+        // Deleting the identity revokes what its logins got and drops the link at once, as a
+        // revoked token does; the gateway can't log in again, so it stops.
+        let deleted = r.http.delete(format!("{}/v1/secrets/projects/{}/identities/{idn}", r.url, r.project)).send().await.unwrap();
+        assert!(deleted.status().is_success(), "{}", deleted.status());
+        let dropped = async {
+            while r.hub.link(&gw).is_some() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(1), dropped).await.expect("the link closes within a second, with no stream asking");
+        let stopped = tokio::time::timeout(Duration::from_secs(5), agent).await.expect("the gateway stops").unwrap();
+        assert!(stopped.unwrap_err().contains("refused the login"), "{:?}", lines.lock().unwrap());
         let _ = &r.secrets;
     }
 
@@ -897,7 +1023,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(vec![]));
         let (ch, ca) = clickhouse_server(seen.clone()).await;
         let (lb, to) = balancer(nodes.iter().map(|n| n.url.clone()).collect()).await;
-        let (agent, lines) = gateway_up(&lb, &gw, &token, &[format!("localhost:{ch}")]);
+        let (agent, lines) = gateway_up(&lb, &gw, Auth::Token(token), &[format!("localhost:{ch}")]);
 
         // The link lands on the holder of secrets:gateway:<id>, and only there.
         let on_holder = async |nodes: &[Node]| -> usize {

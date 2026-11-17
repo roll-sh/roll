@@ -657,7 +657,8 @@ pub enum GatewaysCmd {
         /// The gateway's id (gw_…).
         #[arg(long)]
         gateway: String,
-        /// HOST:PORT, HOST:*, *.SUFFIX:PORT, CIDR:PORT or CIDR:* (IPv6 in brackets); repeat it.
+        /// HOST:PORT, *.SUFFIX:PORT or CIDR:PORT (IPv6 in brackets), where PORT may also be a range
+        /// LOW-HIGH (both included, 1-65535) or *; repeat it.
         #[arg(long = "allow", num_args = 1)]
         allow: Vec<String>,
         /// A file of allow-list entries, one a line (# comments).
@@ -666,7 +667,7 @@ pub enum GatewaysCmd {
         /// A file holding the gateway's roll token (else ROLL_GATEWAY_TOKEN).
         #[arg(long)]
         token_file: Option<std::path::PathBuf>,
-        /// Log in through this workload identity (id_…) instead of a token.
+        /// Log in through this workload identity (idn_…) instead of a token.
         #[arg(long, requires = "oidc_token_file")]
         identity: Option<String>,
         /// The OIDC token file the identity logs in with, read again at each login (Kubernetes'

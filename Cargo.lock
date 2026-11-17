@@ -7085,6 +7085,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "hickory-resolver",
+ "httpdate",
  "ipnet",
  "rand 0.8.8",
  "reqwest",

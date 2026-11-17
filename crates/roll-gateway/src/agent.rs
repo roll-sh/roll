@@ -137,6 +137,9 @@ async fn login(a: &Agent) -> Result<(String, Option<Instant>), Login> {
         .await
         .map_err(|e| Login::Failed(e.without_url().to_string()))?;
     let status = r.status();
+    // roll's clock when it answered: the token's end is on it, so a gateway whose own clock is off
+    // still logs in again on time.
+    let answered = r.headers().get(reqwest::header::DATE).and_then(|d| httpdate::parse_http_date(d.to_str().ok()?).ok());
     let body: serde_json::Value = r.json().await.unwrap_or_default();
     if status.is_client_error() && status.as_u16() != 429 {
         let why = body["error"].as_str().unwrap_or(status.as_str()).to_string();
@@ -145,11 +148,16 @@ async fn login(a: &Agent) -> Result<(String, Option<Instant>), Login> {
     let (Some(token), Some(expires_at)) = (body["token"].as_str(), body["expires_at"].as_i64()) else {
         return Err(Login::Failed(format!("the login answered {status}")));
     };
-    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default();
-    // At four fifths of its life, and at least a minute before it ends.
-    let left = Duration::from_millis((expires_at - now_ms).max(0) as u64);
-    let refresh = left.mul_f64(0.8).min(left.saturating_sub(Duration::from_secs(60))).max(Duration::from_secs(30));
-    Ok((token.to_string(), Some(Instant::now() + refresh)))
+    let now = answered.unwrap_or_else(std::time::SystemTime::now);
+    let now_ms = now.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default();
+    Ok((token.to_string(), Some(Instant::now() + refresh_in(Duration::from_millis((expires_at - now_ms).max(0) as u64)))))
+}
+
+/// When to log in again, for a token with `left` to live: at four fifths of its life and at least
+/// a minute before it ends, never sooner than 30 s (nor than half of what's left, for a token
+/// shorter than a minute), and never sooner than a second.
+fn refresh_in(left: Duration) -> Duration {
+    left.mul_f64(0.8).min(left.saturating_sub(Duration::from_secs(60))).max((left / 2).min(Duration::from_secs(30))).max(Duration::from_secs(1))
 }
 
 fn ws_url(base: &str, gateway: &str) -> String {
@@ -314,6 +322,17 @@ async fn dial(mux: Mux, id: u32, open: proto::Open, allow: Arc<AllowList>, log: 
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    #[test]
+    fn an_identitys_token_is_renewed_before_it_ends() {
+        let at = |s: u64| super::refresh_in(Duration::from_secs(s)).as_secs_f64();
+        // 15 minutes: at four fifths; 5 minutes: a minute before the end.
+        assert_eq!((at(900), at(300), at(100)), (720.0, 240.0, 40.0));
+        // Under a minute or so: half-way, and never past its end; at least a second.
+        assert_eq!((at(70), at(40), at(8), at(0)), (30.0, 20.0, 4.0, 1.0));
+    }
+
     #[test]
     fn the_link_url_follows_the_api_scheme() {
         assert_eq!(super::ws_url("https://roll.example.com/", "gw_1"), "wss://roll.example.com/v1/secrets/gateways/gw_1/connect");

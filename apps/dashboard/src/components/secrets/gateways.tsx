@@ -166,14 +166,14 @@ export function Gateways() {
 }
 
 /** Which of the project's gateways a database or directory is reached through, if any. */
-export function GatewayPicker({ value, onChange }: { value: string; onChange: (id: string) => void }) {
+export function GatewayPicker({ value, onChange, title = "Reached through", none = "roll directly (a public address)" }: { value: string; onChange: (id: string) => void; title?: string; none?: string }) {
   const { api } = useSecrets();
   const list = useLoad(() => api.gateways(), [api]);
   return (
     <label>
-      <span className={label}>Reached through</span>
+      <span className={label}>{title}</span>
       <select value={value} onChange={(e) => onChange(e.target.value)} className={`${field} text-[12px]`}>
-        <option value="">roll directly (a public address)</option>
+        <option value="">{none}</option>
         {(list.data ?? []).map((g) => (
           <option key={g.id} value={g.id}>
             gateway {g.name} ({g.status.online ? "online" : "offline"})

@@ -1,7 +1,7 @@
 //! The gateway's allow-list: what it may reach, decided inside the network, not by roll.
 //!
-//! An entry is `HOST:PORT`, `HOST:*`, `*.SUFFIX:PORT`, `CIDR:PORT` or `CIDR:*` (an IPv6 address
-//! or CIDR in brackets: `[fd00::/8]:5432`). A name is allowed by a name entry, or when every
+//! An entry is a host, a `*.SUFFIX` or a CIDR, then a port: `HOST:PORT`, `HOST:LOW-HIGH` (a range,
+//! both ends included) or `HOST:*` (an IPv6 address or CIDR in brackets: `[fd00::/8]:5432`). A name is allowed by a name entry, or when every
 //! address it resolves to (on the gateway) is in a CIDR entry for the port; an IP literal only by
 //! a CIDR entry. An empty list allows nothing.
 //!
@@ -23,13 +23,24 @@ enum Host {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Port {
     One(u16),
+    /// `LOW-HIGH`, both included, `LOW <= HIGH`.
+    Range(u16, u16),
     Any,
 }
 
 impl Port {
     fn covers(self, p: u16) -> bool {
-        matches!(self, Port::Any) || self == Port::One(p)
+        match self {
+            Port::One(one) => one == p,
+            Port::Range(low, high) => (low..=high).contains(&p),
+            Port::Any => true,
+        }
     }
+}
+
+/// A port, 1–65535, written in digits only (no sign, no spaces).
+fn port(s: &str) -> Option<u16> {
+    (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<u16>().ok()).flatten().filter(|p| *p != 0)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,7 +59,7 @@ fn name(s: &str) -> bool {
 }
 
 fn parse_entry(raw: &str) -> Result<Entry, String> {
-    let bad = || format!("{raw}: an entry is HOST:PORT, *.SUFFIX:PORT or CIDR:PORT (the port may be *)");
+    let bad = || format!("{raw}: an entry is HOST:PORT, *.SUFFIX:PORT or CIDR:PORT (the port may be LOW-HIGH, 1-65535, or *)");
     let (host, port) = match raw.strip_prefix('[') {
         Some(rest) => {
             let (h, p) = rest.split_once("]:").ok_or_else(bad)?;
@@ -56,9 +67,13 @@ fn parse_entry(raw: &str) -> Result<Entry, String> {
         }
         None => raw.rsplit_once(':').ok_or_else(bad)?,
     };
-    let port = match port {
-        "*" => Port::Any,
-        p => Port::One(p.parse::<u16>().ok().filter(|p| *p != 0).ok_or_else(bad)?),
+    let port = match port.split_once('-') {
+        _ if port == "*" => Port::Any,
+        Some((low, high)) => match (self::port(low), self::port(high)) {
+            (Some(low), Some(high)) if low <= high => Port::Range(low, high),
+            _ => return Err(bad()),
+        },
+        None => Port::One(self::port(port).ok_or_else(bad)?),
     };
     let host = if let Ok(net) = host.parse::<IpNet>() {
         Host::Net(net.trunc())
@@ -236,9 +251,38 @@ mod tests {
         assert!(l.check("a b", 5432, never).await.is_err());
         // Nothing listed: nothing reached.
         assert!(AllowList::default().check("10.0.0.1", 5432, never).await.is_err());
-        for bad in ["10.0.0.0/8", "host:0", "host:99999", "*.:5432", "a/b:1", "[fd00::1:5432"] {
+        for bad in ["10.0.0.0/8", "host:0", "host:99999", "host:+5432", "*.:5432", "a/b:1", "[fd00::1:5432"] {
             assert!(AllowList::parse([bad]).is_err(), "{bad}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_port_range_holds_both_ends_and_nothing_past_them() {
+        let l = AllowList::parse(["db.corp.internal:5432-5439", "*.ldap.corp:636-637", "10.0.0.0/8:27017-27019", "[fd00::/8]:9000-9000"]).unwrap();
+        let never = |_: String, _: u16| async { panic!("resolved a name the list can't allow") };
+        let named = |_: String, p: u16| async move { Ok(vec![SocketAddr::from(([192, 168, 9, 9], p))]) };
+        for (host, inside, outside) in [("db.corp.internal", [5432, 5435, 5439], [5431, 5440]), ("dc1.ldap.corp", [636, 636, 637], [635, 638])] {
+            for p in inside {
+                assert!(l.check(host, p, named).await.is_ok(), "{host}:{p}");
+            }
+            for p in outside {
+                assert!(l.check(host, p, never).await.is_err(), "{host}:{p}");
+            }
+        }
+        for (p, ok) in [(27016, false), (27017, true), (27018, true), (27019, true), (27020, false)] {
+            assert_eq!(l.check("10.1.2.3", p, never).await.is_ok(), ok, "10.1.2.3:{p}");
+        }
+        assert!(l.check("[fd00::1]", 9000, never).await.is_ok() && l.check("[fd00::1]", 9001, never).await.is_err());
+        // A name resolving into a CIDR range's port is allowed; one past it isn't looked up.
+        assert!(l.check("mongo.internal", 27019, |_, p| async move { Ok(vec![SocketAddr::from(([10, 0, 0, 5], p))]) }).await.is_ok());
+        assert!(l.check("mongo.internal", 27020, never).await.is_err());
+        // The entry is reported as given.
+        assert_eq!(l.entries()[0], "db.corp.internal:5432-5439");
+        // Strict: both ends 1-65535, LOW <= HIGH, digits only, one range.
+        for bad in ["host:5439-5432", "host:0-10", "host:1-65536", "host:-5432", "host:5432-", "host:5432--5439", "host:1-2-3", "host:a-b", "host:*-10", "host: 1-2", "10.0.0.0/8:+1-2", "[fd00::/8]:9000-1"] {
+            assert!(AllowList::parse([bad]).is_err(), "{bad}");
+        }
+        assert!(AllowList::parse(["host:1-65535"]).unwrap().check("host", 65535, named).await.is_ok());
     }
 
     #[tokio::test]

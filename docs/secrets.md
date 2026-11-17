@@ -1054,14 +1054,18 @@ roll makes it for people and the operator only, never for a token (a project-wid
 cover a gateway's id), like identities. A gateway on Kubernetes, EC2 or in CI can instead log in
 with its own OIDC token: a workload identity made with `"gateway": "gw_…"` mints exactly that rule
 at each login (its environments, folders and actions are refused, they don't apply), for its
-`ttl_minutes`; the gateway logs in again and opens a new link before its token ends. `GET
+`ttl_minutes`; the gateway logs in again at four fifths of its token's life (at least a minute
+before the end, timed on roll's clock from the login's `Date`) and opens a new link, which replaces
+the old one: streams in flight finish on the old link, and any asked of it after the switch open on
+the new one. Deleting or re-keying the identity drops the link at once. In the dashboard, the
+identity form's "A login gets" picks the gateway. `GET
 …/gateways` lists them with their status, `DELETE …/gateways/{id}` (`admin`; `roll secrets
 gateways rm`) deletes one no database or directory uses (409 otherwise), revokes the token made
 with it and closes its link at once.
 
 **The binary.** `roll --url https://roll.example.com secrets gateways up --gateway gw_… --allow
 10.0.0.0/8:5432 --allow ldap.corp.internal:636` (or `--allow-file FILE`, one entry a line, `#`
-comments), with the token in `ROLL_GATEWAY_TOKEN` (or `--token-file`), or `--identity id_…` and
+comments), with the token in `ROLL_GATEWAY_TOKEN` (or `--token-file`), or `--identity idn_…` and
 the OIDC token in a file (`--oidc-token-file`, re-read at each login: Kubernetes' projected token,
 `/var/run/secrets/…`; make the identity with `roll secrets identities add NAME --issuer … --subject
 … --gateway gw_…`). It's a subcommand of `roll` (`crates/roll-cli`) beside the gateway's `ls`,
@@ -1074,8 +1078,10 @@ gateways up` is its whole entrypoint), and it needs no project: its credential n
 doubling to 30 s, ±50%); a 4401 close (credential refused or gateway deleted) stops it, unless it
 logs in through an identity, which logs in again first.
 
-**The allow-list is the gateway's.** Each `--allow` is `HOST:PORT`, `HOST:*`, `*.SUFFIX:PORT`,
-`CIDR:PORT` or `CIDR:*` (IPv6 in brackets). The gateway refuses anything else before resolving
+**The allow-list is the gateway's.** Each `--allow` is `HOST:PORT`, `*.SUFFIX:PORT` or `CIDR:PORT`
+(IPv6 in brackets), where `PORT` is one port, a range `LOW-HIGH` (both included, 1–65535, `LOW <=
+HIGH`: `10.0.0.0/8:5432-5439`) or `*`. An entry that doesn't parse stops the gateway at start, saying
+which. The gateway refuses anything else before resolving
 or dialing: a name must match a name entry, or resolve (on the gateway, with the network's DNS) only
 to addresses inside a CIDR entry for that port; an IP literal must be inside a CIDR entry. Without
 an entry it refuses everything. So a compromised or buggy roll can't use it to scan or reach the
