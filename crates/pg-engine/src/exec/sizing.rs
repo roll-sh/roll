@@ -3260,9 +3260,13 @@ fn mark_passed(
     entries: bool,
 ) -> Option<Vec<(Tid, bool)>> {
     // First under the read lock: an index whose entries have nothing to kill (the usual
-    // case) changes nothing, and concurrent scans of it don't serialize.
+    // case) changes nothing, and concurrent scans of it don't serialize. (A scan's marks
+    // alone, entries not wanted, are left while a writer holds the lock or waits for it, as
+    // _bt_killitems leaves them on a leaf page changed since the scan read it: under many
+    // writers each scan's mark waited behind the table's writes, and a writer preempted
+    // holding the lock stopped every scan of the table.)
     {
-        let rf = db.relfiles.of(table).read();
+        let rf = if entries { Some(db.relfiles.of(table).read()) } else { db.relfiles.of(table).try_read() }?;
         let (Some(heap), Some(bt)) = (rf.heaps.get(&table), rf.btrees.get(&index)) else {
             return None;
         };
