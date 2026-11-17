@@ -291,3 +291,130 @@ fn old_duplicate_ctids_repaired_once() {
     drop(s);
     eng.shutdown();
 }
+
+// ── MultiXact state across a restart and a crash ──
+//
+// Recorded from PostgreSQL 18.6 (HANDOFF "MultiXact"): two KEY SHARE lockers of row 1 (a
+// multi), a lone FOR SHARE locker of row 2, a FOR UPDATE locker of row 3 and an updater of
+// row 4, all committed; then a FOR NO KEY UPDATE locker of row 4 still running. After a clean
+// restart (that locker rolled back first) every xmax is as it was, the rolled-back locker's
+// too; after a crash the running locker's is gone (its WAL record was never written). The
+// multi's members resolve, and the next multi made is the one after it.
+
+/// The xids of the transactions' locks are relative to the first locker's (`xa`).
+fn mx_xid(s: &mut Session) -> i64 {
+    one(s, "SELECT txid_current()").trim_start_matches("Int8(").trim_end_matches(')').parse().unwrap()
+}
+
+/// Runs the lockers; returns `xa` and the session still holding row 4's lock.
+fn mx_scenario(eng: &Engine) -> (i64, Session) {
+    let mut c = eng.connect(4, "postgres", "postgres", "t").unwrap();
+    c.query("CREATE TABLE d (id int PRIMARY KEY, v int)").unwrap();
+    c.query("INSERT INTO d SELECT g, g FROM generate_series(1, 4) g").unwrap();
+    let mut a = eng.connect(2, "postgres", "postgres", "t").unwrap();
+    let mut b = eng.connect(3, "postgres", "postgres", "t").unwrap();
+    a.query("BEGIN").unwrap();
+    let xa = mx_xid(&mut a);
+    b.query("BEGIN").unwrap();
+    mx_xid(&mut b);
+    a.query("SELECT id FROM d WHERE id = 1 FOR KEY SHARE").unwrap();
+    b.query("SELECT id FROM d WHERE id = 1 FOR KEY SHARE").unwrap();
+    a.query("SELECT id FROM d WHERE id = 2 FOR SHARE").unwrap();
+    a.query("COMMIT").unwrap();
+    b.query("COMMIT").unwrap();
+    c.query("BEGIN").unwrap();
+    mx_xid(&mut c);
+    c.query("SELECT id FROM d WHERE id = 3 FOR UPDATE").unwrap();
+    c.query("UPDATE d SET v = 40 WHERE id = 4").unwrap();
+    c.query("COMMIT").unwrap();
+    a.query("BEGIN").unwrap();
+    mx_xid(&mut a);
+    a.query("SELECT id FROM d WHERE id = 4 FOR NO KEY UPDATE").unwrap();
+    (xa, a)
+}
+
+/// Each row's xmax (relative to `xa`, or "multi"), the multi's members, its mxid_age, the
+/// row locks pgrowlocks finds, and how far after it the next multi made is.
+fn mx_state(eng: &Engine, s: &mut Session, xa: i64) -> String {
+    let rel = |v: &str| -> String {
+        let n: i64 = v.trim_start_matches("Oid(").trim_end_matches(')').parse().unwrap();
+        if n == 0 {
+            "0".into()
+        } else if n >= xa - 5 {
+            format!("xa+{}", n - xa)
+        } else {
+            "multi".into()
+        }
+    };
+    let mut out: Vec<String> = rows(s, "SELECT id, v, xmax FROM d ORDER BY id")
+        .iter()
+        .map(|r| {
+            let f: Vec<&str> = r.split(' ').collect();
+            format!("{} {} {}", f[0], f[1], rel(f[2]))
+        })
+        .collect();
+    out.push(one(s, &format!("SELECT xid::text::int8 - {xa}, mode FROM pg_get_multixact_members((SELECT xmax FROM d WHERE id = 1))")));
+    out.push(one(s, "SELECT mxid_age(xmax), (SELECT count(*) FROM pgrowlocks('d')) FROM d WHERE id = 1"));
+    let mut t = eng.connect(9, "postgres", "postgres", "t").unwrap();
+    s.query("BEGIN; SELECT id FROM d WHERE id = 2 FOR KEY SHARE").unwrap();
+    t.query("BEGIN; SELECT id FROM d WHERE id = 2 FOR KEY SHARE").unwrap();
+    out.push(one(s, "SELECT (SELECT xmax::text::int8 FROM d WHERE id = 2) - (SELECT xmax::text::int8 FROM d WHERE id = 1)"));
+    s.query("COMMIT").unwrap();
+    t.query("COMMIT").unwrap();
+    out.join(" | ")
+}
+
+const MX_KEPT: &str = "Int4(1) Int4(1) multi | Int4(2) Int4(2) xa+0 | Int4(3) Int4(3) xa+2 | Int4(4) Int4(40) xa+3 | Int8(0) Text(\"keysh\")\nInt8(1) Text(\"keysh\") | Int4(1) Int8(0) | Int8(1)";
+
+#[test]
+fn multixact_survives_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let eng = open(tmp.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query("CREATE EXTENSION pgrowlocks").unwrap();
+    let (xa, mut a) = mx_scenario(&eng);
+    a.query("ROLLBACK").unwrap();
+    drop((s, a));
+    eng.shutdown();
+    drop(eng);
+    let eng = open(tmp.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    assert_eq!(mx_state(&eng, &mut s, xa), MX_KEPT);
+    drop(s);
+    eng.shutdown();
+}
+
+/// The child: the lockers, `xa` in `xa`, then SIGKILL while row 4's locker runs.
+#[test]
+fn multixact_crash_child() {
+    let Ok(dir) = std::env::var("CRASH_MX_DIR") else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    let eng = open(&dir.join("data"));
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query("CREATE EXTENSION pgrowlocks").unwrap();
+    let (xa, _a) = mx_scenario(&eng);
+    std::fs::write(dir.join("xa"), xa.to_string()).unwrap();
+    let me = std::process::id().to_string();
+    std::process::Command::new("kill").args(["-9", &me]).status().unwrap();
+    unreachable!("still alive after SIGKILL");
+}
+
+#[test]
+fn multixact_survives_a_crash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let st = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "multixact_crash_child", "--nocapture", "--test-threads=1"])
+        .env("CRASH_MX_DIR", tmp.path())
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!st.success(), "the child wasn't killed");
+    let xa: i64 = std::fs::read_to_string(tmp.path().join("xa")).unwrap().parse().unwrap();
+    let eng = open(&tmp.path().join("data"));
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    assert_eq!(mx_state(&eng, &mut s, xa), MX_KEPT.replace("Int4(40) xa+3", "Int4(40) 0"));
+    drop(s);
+    eng.shutdown();
+}

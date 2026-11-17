@@ -2075,6 +2075,10 @@ pub struct Catalog {
     /// first normal xid.
     #[serde(default, skip_serializing_if = "pmap::PMap::is_empty")]
     pub frozen_xids: pmap::PMap<u64>,
+    /// pg_class.relminmxid of relations with storage where it isn't the first MultiXactId
+    /// (one made once the database had multis, or one VACUUM advanced).
+    #[serde(default, skip_serializing_if = "pmap::PMap::is_empty")]
+    pub min_mxids: pmap::PMap<u64>,
     /// pg_class.relfilenode of relations whose storage was replaced (TRUNCATE, a rewrite,
     /// REINDEX, ...), where it no longer equals the oid.
     #[serde(default, skip_serializing_if = "pmap::PMap::is_empty")]

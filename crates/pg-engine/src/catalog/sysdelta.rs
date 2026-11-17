@@ -179,6 +179,9 @@ fn changed_relations(a: &Catalog, b: &Catalog) -> Option<BTreeSet<u32>> {
     a.frozen_xids.diff(&b.frozen_xids, |x, y| x == y, |k, _, _| {
         out.insert(k);
     });
+    a.min_mxids.diff(&b.min_mxids, |x, y| x == y, |k, _, _| {
+        out.insert(k);
+    });
     // (Postgres's own relations' rows aren't regenerated alone.)
     if out.first().is_some_and(|o| *o < FIRST_USER_OID) {
         return None;

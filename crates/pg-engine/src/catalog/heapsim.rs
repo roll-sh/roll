@@ -104,6 +104,8 @@ enum Xs {
 /// (anything that ended before it is settled for everyone: GlobalVisState).
 pub struct Vis<'a> {
     xids: &'a Xids,
+    /// The database's MultiXactIds, for an xmax that is one with an update member.
+    multis: Option<&'a parking_lot::Mutex<crate::txn::multixact::MultiXacts>>,
     pub horizon: u64,
     /// The last transaction looked up whose fate is settled (rows come in runs of one
     /// writer's).
@@ -124,6 +126,7 @@ impl<'a> Vis<'a> {
     fn with_horizon(xids: &'a Xids, horizon: u64) -> Vis<'a> {
         Vis {
             xids,
+            multis: None,
             horizon,
             settled: std::cell::Cell::new(None),
         }
@@ -171,6 +174,31 @@ impl<'a> Vis<'a> {
     pub fn removable(&self, x: u64) -> bool {
         x < self.horizon
     }
+
+    /// Transaction `x`'s state, as the MultiXact rules read it.
+    pub fn xid_state(&self, x: u64) -> crate::txn::multixact::XState {
+        use crate::txn::multixact::XState;
+        match self.state(x) {
+            Xs::Running => XState::Running,
+            Xs::Committed => XState::Committed,
+            Xs::Aborted => XState::Aborted,
+        }
+    }
+
+    pub fn xids(&self) -> &'a Xids {
+        self.xids
+    }
+
+    /// With the database's MultiXactIds.
+    pub fn with_multis(mut self, m: &'a parking_lot::Mutex<crate::txn::multixact::MultiXacts>) -> Vis<'a> {
+        self.multis = Some(m);
+        self
+    }
+
+    /// Multi `m`'s members, when the database's are known.
+    pub fn multi_members(&self, m: u32) -> Option<std::sync::Arc<[crate::txn::multixact::Member]>> {
+        self.multis?.lock().members(m)
+    }
 }
 
 /// HeapTupleSatisfiesVacuum's verdict.
@@ -204,26 +232,88 @@ pub struct Tup {
     /// longer one held as u16::MAX, which no page has room for either).
     pub len: u16,
     heap_only: bool,
-    hot_updated: bool,
+    /// HEAP_HOT_UPDATED (`HOT_UPDATED`) and the xmax's bits (`multixact::XMAX_BITS`: a
+    /// lock's, a multi's, HEAP_KEYS_UPDATED).
+    flags: u8,
+}
+
+/// `Tup::flags`' HEAP_HOT_UPDATED bit.
+const HOT_UPDATED: u8 = 1;
+const _: () = assert!(crate::txn::multixact::XMAX_BITS & HOT_UPDATED == 0);
+
+/// What a delete or an update leaves on the version it replaces (`Heap::delete_cid`,
+/// `Heap::update_cid`): its command id (HeapTupleHeaderAdjustCmax) and xmax, and the xmax
+/// the new version starts with (the old one's lockers, still running).
+#[derive(Clone, Copy, Debug)]
+pub struct Replace {
+    pub cmax: u32,
+    pub xmax: crate::txn::multixact::Xmax,
+    pub carried: crate::txn::multixact::Xmax,
+}
+
+impl Replace {
+    /// The version's own command id, `xid` alone as its xmax (`key`: a delete's, or an
+    /// update changing the key: HEAP_KEYS_UPDATED).
+    pub fn plain(t: &Tup, xid: u64, key: bool) -> Replace {
+        Replace {
+            cmax: t.cid,
+            xmax: crate::txn::multixact::Xmax {
+                raw: xid,
+                bits: if key { crate::txn::multixact::KEYS_UPDATED } else { 0 },
+            },
+            carried: Default::default(),
+        }
+    }
 }
 
 /// `Tup::prev_off` of a version whose previous one is on another page.
 const FAR_PREV: u16 = u16::MAX;
 
 impl Tup {
+    pub fn hot_updated(&self) -> bool {
+        self.flags & HOT_UPDATED != 0
+    }
+
+    fn set_hot_updated(&mut self, on: bool) {
+        self.flags = (self.flags & !HOT_UPDATED) | on as u8;
+    }
+
+    /// The raw xmax and its bits.
+    pub fn xmax_of(&self) -> crate::txn::multixact::Xmax {
+        crate::txn::multixact::Xmax {
+            raw: self.xmax,
+            bits: self.flags & crate::txn::multixact::XMAX_BITS,
+        }
+    }
+
+    pub fn set_xmax(&mut self, x: crate::txn::multixact::Xmax) {
+        self.xmax = x.raw;
+        self.flags = (self.flags & HOT_UPDATED) | (x.bits & crate::txn::multixact::XMAX_BITS);
+    }
+
+    /// The transaction that updated or deleted the version (HeapTupleHeaderGetUpdateXid; 0:
+    /// none, its xmax a lock's only).
+    fn update_xid(&self, v: &Vis) -> u64 {
+        use crate::txn::multixact::{IS_MULTI, LOCK_ONLY};
+        if self.flags & (LOCK_ONLY | IS_MULTI) == 0 {
+            return self.xmax;
+        }
+        crate::txn::multixact::updater(self.xmax_of(), |m| v.multi_members(m))
+    }
 
     fn status(&self, v: &Vis) -> Htsv {
         match v.state(self.xmin) {
             Xs::Aborted => Htsv::Dead,
             Xs::Running => Htsv::InsertInProgress,
             Xs::Committed => {
-                if self.xmax == 0 {
+                let xmax = self.update_xid(v);
+                if xmax == 0 {
                     return Htsv::Live;
                 }
-                match v.state(self.xmax) {
+                match v.state(xmax) {
                     Xs::Aborted => Htsv::Live,
                     Xs::Running => Htsv::DeleteInProgress,
-                    Xs::Committed if v.removable(self.xmax) => Htsv::Dead,
+                    Xs::Committed if v.removable(xmax) => Htsv::Dead,
                     Xs::Committed => Htsv::RecentlyDead,
                 }
             }
@@ -800,6 +890,13 @@ pub struct VacuumResult {
     pub vm_visible_frozen: u32,
     pub vm_frozen: u32,
     pub skipped_all_visible: bool,
+    /// The oldest MultiXactId left in a read page's xmax (NewRelminMxid's hold; None: none).
+    pub min_multi: Option<u32>,
+    /// The pages a version's xmax made it freeze (not FREEZE's): their rows' xmins no longer
+    /// hold relfrozenxid back.
+    pub frozen_blocks: Vec<u32>,
+    /// The versions whose xmax freezing changed, and to what.
+    pub xmax_changed: Vec<(Tid, crate::txn::multixact::Xmax)>,
 }
 
 /// The pages a VACUUM may skip by the visibility map (lazy_scan_heap's skipwithvm,
@@ -1184,7 +1281,8 @@ impl Heap {
         self.pages.get(blk as usize).is_some_and(|p| {
             p.all_visible
                 && p.lps.iter().all(|l| match l {
-                    Lp::Normal(t) => t.xmin < crate::txn::xids::FIRST_NORMAL_XID && t.xmin != lps::SETTLED_XMIN,
+                    // (A locker's xmax too: heap_lock_tuple clears the page's all-frozen bit.)
+                    Lp::Normal(t) => t.xmin < crate::txn::xids::FIRST_NORMAL_XID && t.xmin != lps::SETTLED_XMIN && t.xmax == 0,
                     _ => true,
                 })
         })
@@ -1605,7 +1703,7 @@ impl Heap {
             xmin,
             xmax: 0,
             heap_only: false,
-            hot_updated: false,
+            flags: 0,
             next: 0,
             row: super::keymap::NO_ROW,
             prev_off: 0,
@@ -1708,12 +1806,12 @@ impl Heap {
 
     /// heap_delete.
     pub fn delete(&mut self, key: &[u8], xid: u64, v: &Vis) {
-        self.delete_cid(key, xid, v, &mut |t| t.cid);
+        self.delete_cid(key, xid, v, &mut |_, t| Replace::plain(t, xid, true));
     }
 
-    /// `delete`, the version's command id set as `cmax` says (HeapTupleHeaderAdjustCmax),
-    /// in the same lookup.
-    pub fn delete_cid(&mut self, key: &[u8], xid: u64, v: &Vis, cmax: &mut dyn FnMut(&Tup) -> u32) {
+    /// `delete`, the version's command id and xmax set as `replace` says, in the same
+    /// lookup.
+    pub fn delete_cid(&mut self, key: &[u8], xid: u64, v: &Vis, replace: &mut dyn FnMut(Tid, &Tup) -> Replace) {
         self.writes += 1;
         let Some((b, off)) = self.locate(key, v) else {
             return;
@@ -1721,9 +1819,10 @@ impl Heap {
         let p = &mut self.pages[b as usize];
         let mut row = super::keymap::NO_ROW;
         p.update_tup(off, |t| {
-            t.cid = cmax(t);
-            t.xmax = xid;
-            t.hot_updated = false;
+            let r = replace((b, off), t);
+            t.cid = r.cmax;
+            t.set_xmax(r.xmax);
+            t.set_hot_updated(false);
             row = t.row;
         });
         p.set_prunable(xid);
@@ -1750,6 +1849,57 @@ impl Heap {
         self.compact_rows();
     }
 
+    /// heap_lock_tuple: the version of the row under `key` a locker sees (`locate_for`;
+    /// `mine`: its transaction's ids), then while `lock` says to go on, the versions that
+    /// replaced it, in order (heap_lock_updated_tuple), each given the xmax `lock` returns
+    /// for it (None: unchanged). `lock` gets each version and its place in that order.
+    pub fn lock_tuple(
+        &mut self,
+        key: &[u8],
+        v: &Vis,
+        mine: &dyn Fn(u64) -> bool,
+        lock: &mut dyn FnMut(usize, Tid, &Tup) -> (Option<crate::txn::multixact::Xmax>, bool),
+    ) {
+        let Some(first) = self.locate_for(key, v, mine) else { return };
+        let mut tid = first;
+        let mut later: Vec<Tid> = Vec::new();
+        for i in 0.. {
+            let Some(t) = self.tuple(tid) else { return };
+            let (set, go_on) = lock(i, tid, &t);
+            if let Some(x) = set {
+                let p = &mut self.pages[tid.0 as usize];
+                p.update_tup(tid.1, |t| t.set_xmax(x));
+            }
+            if !go_on {
+                return;
+            }
+            if i == 0 {
+                // (The versions after it: from the row's newest back to it.)
+                let mut at = self.keys.get(key);
+                while let Some(a) = at
+                    && a != first
+                {
+                    later.push(a);
+                    at = self.prev_of(a);
+                }
+                if at.is_none() {
+                    return;
+                }
+            }
+            match later.pop() {
+                Some(n) => tid = n,
+                None => return,
+            }
+        }
+    }
+
+    /// The version at `tid` gets xmax `x` (one kept for it: `multixact::XMAX_PREFIX`).
+    pub fn set_xmax_at(&mut self, tid: Tid, x: crate::txn::multixact::Xmax) {
+        if let Some(p) = self.pages.get_mut(tid.0 as usize) {
+            p.update_tup(tid.1, |t| t.set_xmax(x));
+        }
+    }
+
     /// heap_update: the new version goes on the old one's page if it fits (a HOT update
     /// when `hot` allows: no indexed column changed), else where an insert would go.
     /// Returns the new version's TID and whether it was HOT.
@@ -1762,11 +1912,12 @@ impl Heap {
         hot: bool,
         v: &Vis,
     ) -> (Tid, bool) {
-        self.update_cid(old_key, new_key, len, (xid, 0), hot, v, &mut |t| t.cid)
+        self.update_cid(old_key, new_key, len, (xid, 0), hot, v, &mut |_, t| Replace::plain(t, xid, false))
     }
 
-    /// `update`, the new version's raw command id `cid` and the old one's becoming
-    /// `cmax(old version)` (HeapTupleHeaderAdjustCmax), in one lookup of the row.
+    /// `update`, the new version's raw command id `cid`, and the old one's command id and
+    /// xmax, and the new one's xmax, as `replace` gives them for the old version, in one
+    /// lookup of the row.
     #[allow(clippy::too_many_arguments)]
     pub fn update_cid(
         &mut self,
@@ -1776,10 +1927,14 @@ impl Heap {
         (xid, cid): (u64, u32),
         hot: bool,
         v: &Vis,
-        cmax: &mut dyn FnMut(&Tup) -> u32,
+        replace: &mut dyn FnMut(Tid, &Tup) -> Replace,
     ) -> (Tid, bool) {
         let Some((krow, (ob, ooff))) = self.locate_row(old_key, v) else {
             return (self.insert(new_key, len, xid, cid, &mut InsertMode::single()), false);
+        };
+        let r = match self.pages[ob as usize].tup(ooff) {
+            Some(o) => replace((ob, ooff), &o),
+            None => Replace { cmax: 0, xmax: crate::txn::multixact::Xmax { raw: xid, bits: 0 }, carried: Default::default() },
         };
         // (No pruning here: heap_update leaves that to the scans that read the page.)
         let free = self.pages[ob as usize].heap_free();
@@ -1794,6 +1949,7 @@ impl Heap {
         let mut t = Self::new_tup(len, xid);
         t.heap_only = hot;
         t.cid = cid;
+        t.set_xmax(r.carried);
         // (The key stays: its row, found above, is the new version's.)
         if !moved {
             t.row = krow;
@@ -1803,9 +1959,9 @@ impl Heap {
         let op = &mut self.pages[ob as usize];
         let mut old_row = super::keymap::NO_ROW;
         op.update_tup(ooff, |o| {
-            o.cid = cmax(o);
-            o.xmax = xid;
-            o.hot_updated = hot;
+            o.cid = r.cmax;
+            o.set_xmax(r.xmax);
+            o.set_hot_updated(hot);
             o.next = if hot { noff } else { 0 };
             old_row = o.row;
         });
@@ -2053,11 +2209,11 @@ impl Heap {
                             Htsv::RecentlyDead => {}
                             _ => break,
                         }
-                        if !t.hot_updated {
+                        if !t.hot_updated() {
                             break;
                         }
                         off = t.next as usize;
-                        prior_xmax = t.xmax;
+                        prior_xmax = t.update_xid(v);
                     }
                     _ => break,
                 }
@@ -2073,7 +2229,7 @@ impl Heap {
                 if matches!(htsv[c], Some(Htsv::RecentlyDead | Htsv::DeleteInProgress))
                     && let Lp::Normal(t) = lp(c)
                 {
-                    prunable(t.xmax);
+                    prunable(t.update_xid(v));
                 }
             };
             if ndead == 0 {
@@ -2103,7 +2259,7 @@ impl Heap {
             let Lp::Normal(t) = lp(off) else { continue };
             match status(htsv, off, &t) {
                 Htsv::Dead => changes.push((off, Lp::Unused)),
-                Htsv::RecentlyDead | Htsv::DeleteInProgress => prunable(t.xmax),
+                Htsv::RecentlyDead | Htsv::DeleteInProgress => prunable(t.update_xid(v)),
                 _ => {}
             }
         }
@@ -2151,6 +2307,24 @@ impl Heap {
         truncate: bool,
         skip: Skip,
         freeze: bool,
+    ) -> VacuumResult {
+        let mut keep = |x: crate::txn::multixact::Xmax| crate::txn::multixact::Frozen { xmax: x, required: false };
+        self.vacuum_frz(v, nindexes, cleanup, truncate, skip, freeze, &mut keep)
+    }
+
+    /// `vacuum_with`, freezing xmaxes as `frz` says (heap_prepare_freeze_tuple's xmax half): a
+    /// read page is frozen when VACUUM FREEZE asks or one of its versions' xmax makes it
+    /// mandatory, each xmax then becoming what `frz` gave for it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn vacuum_frz(
+        &mut self,
+        v: &Vis,
+        nindexes: usize,
+        cleanup: Option<bool>,
+        truncate: bool,
+        skip: Skip,
+        freeze: bool,
+        frz: &mut dyn FnMut(crate::txn::multixact::Xmax) -> crate::txn::multixact::Frozen,
     ) -> VacuumResult {
         self.settle(v);
         let rel_pages = self.pages.len() as u32;
@@ -2256,22 +2430,63 @@ impl Heap {
                 }
             }
         }
-        if freeze {
-            for (b, p) in self.pages.iter_mut().enumerate() {
-                if scan[b] {
-                    let mut frozen = 0u64;
-                    for i in 0..p.lps.len() {
-                        p.lps.update(i, |t| {
-                            if v.removable(t.xmin) && v.state(t.xmin) == Xs::Committed {
-                                t.xmin = 2;
-                                frozen += 1;
-                            }
-                        });
-                    }
-                    res.frozen_pages += u32::from(frozen > 0);
-                    res.tuples_frozen += frozen;
+        {
+            use crate::txn::multixact::{Xmax, precedes};
+            let mut min_multi: Option<u32> = None;
+            let mut hold = |x: Xmax| {
+                if x.is_multi() && min_multi.is_none_or(|m| precedes(x.raw as u32, m)) {
+                    min_multi = Some(x.raw as u32);
                 }
+            };
+            for (b, p) in self.pages.iter_mut().enumerate() {
+                if !scan[b] {
+                    continue;
+                }
+                // (Each version with an xmax: what freezing would make it.)
+                let mut plan: Vec<(usize, Xmax, Xmax)> = Vec::new();
+                let mut required = freeze;
+                for i in 0..p.lps.len() {
+                    if let Some(Lp::Normal(t)) = p.lps.get(i)
+                        && t.xmax != 0
+                    {
+                        let f = frz(t.xmax_of());
+                        required |= f.required;
+                        plan.push((i, t.xmax_of(), f.xmax));
+                    }
+                }
+                if !required {
+                    for &(_, old, _) in &plan {
+                        hold(old);
+                    }
+                    continue;
+                }
+                if !freeze {
+                    res.frozen_blocks.push(b as u32);
+                }
+                let mut frozen = 0u64;
+                let mut changed = vec![false; p.lps.len()];
+                for &(i, old, new) in &plan {
+                    hold(new);
+                    if new != old {
+                        p.lps.update(i, |t| t.set_xmax(new));
+                        changed[i] = true;
+                        res.xmax_changed.push(((b as u32, i as u16 + 1), new));
+                    }
+                }
+                for (i, ch) in changed.iter().enumerate() {
+                    let mut xmin = false;
+                    p.lps.update(i, |t| {
+                        if v.removable(t.xmin) && v.state(t.xmin) == Xs::Committed {
+                            t.xmin = 2;
+                            xmin = true;
+                        }
+                    });
+                    frozen += u64::from(xmin || *ch);
+                }
+                res.frozen_pages += u32::from(frozen > 0);
+                res.tuples_frozen += frozen;
             }
+            res.min_multi = min_multi;
         }
         // The map bits it set (on pages truncated below too).
         for (b, &(was_visible, was_frozen)) in before.iter().enumerate() {
@@ -2443,7 +2658,7 @@ impl Heap {
                     if t.status(v) != Htsv::Dead {
                         return false;
                     }
-                    if !t.hot_updated || t.next == 0 {
+                    if !t.hot_updated() || t.next == 0 {
                         return true;
                     }
                     off = t.next;
@@ -2502,13 +2717,13 @@ impl Heap {
                     }
                     Lp::Normal(t) => {
                         let row = is_row((b as u32, i as u16 + 1));
-                        let links = t.heap_only || t.hot_updated;
+                        let links = t.heap_only || t.hot_updated();
                         put_varint(out, 3 + row as u64 * 2 + links as u64);
                         if !row {
                             put_varint(out, t.len as u64);
                         }
                         if links {
-                            put_varint(out, t.heap_only as u64 | (t.hot_updated as u64) << 1);
+                            put_varint(out, t.heap_only as u64 | (t.hot_updated() as u64) << 1);
                             put_varint(out, t.next as u64);
                         }
                     }
@@ -2616,8 +2831,9 @@ impl Heap {
             let mut prev = Vec::new();
             for (j, lp) in lps.into_iter().enumerate() {
                 let mut chain = |t: &mut Tup, f: u8, next: u16| {
-                    (t.heap_only, t.hot_updated, t.next) = (f & 1 != 0, f & 2 != 0, next);
-                    if t.hot_updated && next != 0 {
+                    (t.heap_only, t.next) = (f & 1 != 0, next);
+                    t.set_hot_updated(f & 2 != 0);
+                    if t.hot_updated() && next != 0 {
                         prev.push((next, j as u16 + 1));
                     }
                 };

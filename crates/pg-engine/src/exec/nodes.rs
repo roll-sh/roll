@@ -859,7 +859,11 @@ impl Node for LockRowsNode {
                     tests.push(Some((key, None)));
                     continue;
                 }
-                match lock_row(t, &key, mark, wait, Xltw::Lock, ctx)? {
+                let locked = lock_row(t, &key, mark, wait, Xltw::Lock, ctx)?;
+                if !matches!(locked, Locked::Skip) {
+                    crate::exec::sizing::row_locked(t, &key, crate::exec::scan::lock_mode(mark), ctx)?;
+                }
+                match locked {
                     Locked::Skip => continue 'rows,
                     Locked::Same => tests.push(Some((key, None))),
                     Locked::Newer(b) => {
