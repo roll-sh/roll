@@ -567,7 +567,7 @@ async fn run() -> anyhow::Result<()> {
     // above this line, or its links 404.
     // People's accounts: what a person made acts while they can sign in, and a person's canvas
     // stands only for what's theirs (roll_workspace::Workspace::trusts, asked by every consumer).
-    let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()) };
+    let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()), search: search.as_ref().map(|s| s.control.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
     // Its tokens are roll-access's: grants for syncs a token made, workload tokens for identities.
     let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people)?;
@@ -589,6 +589,8 @@ async fn run() -> anyhow::Result<()> {
     }
     // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
     access::sinks(&access);
+    // Trusted machine clients' issuers' keys: the guarded client roll secrets' identities use.
+    let _ = access.oidc_fetch.set(secrets::oidc_fetch(&args, !auth.enforcing()));
     // Approvals can be posted to a Slack channel through roll code's chat ops.
     if let Some(c) = &code {
         access::chat(&access, &c.code);
@@ -615,6 +617,7 @@ async fn run() -> anyhow::Result<()> {
         .info_route(cluster.node_id().to_string())
         .merge(on.off_routes())
         .merge(roll_access::oauth::public_router(access.clone()))
+        .merge(roll_mcp::card::routes(&access::api_url(&args), &args.web_url))
         .merge(auth.gate("api", router));
     let mut router = auth.cors(router).layer(axum::middleware::from_fn(logs::access));
     if let Some(c) = &code {

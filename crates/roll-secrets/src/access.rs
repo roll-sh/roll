@@ -331,6 +331,9 @@ pub struct Caller {
     pub runtime: bool,
 }
 
+/// roll previews' in-process consumer: the operator's equal for an environment's branches.
+pub const PREVIEWS: &str = "roll:previews";
+
 impl Caller {
     pub fn operator() -> Caller {
         Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false }
