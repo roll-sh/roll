@@ -3,7 +3,7 @@ import { useState } from "react";
 import type { SnowflakeAccount, SnowflakeAuth } from "@/lib/secrets-api";
 import { Segmented } from "../agents/ui/toggle-group";
 import { useSecrets } from "./secrets-page";
-import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, useLoad } from "./ui";
+import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, textareaField, useLoad } from "./ui";
 
 /** An account identifier: myorg-myaccount, or a locator such as xy12345.us-east-2.aws. */
 const ACCOUNT = /^[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?(\.[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?)*$/;
@@ -137,7 +137,7 @@ export function SnowflakeAccounts() {
           </div>
           <label className="sm:col-start-2">
             <span className="mb-1 block text-[11px] font-medium text-subtle">Admin private key, PEM (kept sealed)</span>
-            <textarea value={key} onChange={(e) => setKey(e.target.value)} rows={4} placeholder="-----BEGIN PRIVATE KEY-----" spellCheck={false} autoComplete="off" className={`${field} font-mono text-[11px]`} />
+            <textarea value={key} onChange={(e) => setKey(e.target.value)} rows={4} placeholder="-----BEGIN PRIVATE KEY-----" spellCheck={false} autoComplete="off" className={`${textareaField} font-mono text-[11px]`} />
           </label>
           <div className="sm:col-start-2">
             <Segmented
