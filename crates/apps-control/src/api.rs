@@ -162,7 +162,7 @@ async fn import(State(apps): S, b: Bytes) -> R {
     use apps_build::project::{VarSpec, compose_to_toml, entry_kind, entry_run, parse_project};
     let v = body(&b)?;
     let text = |k: &str| v.get(k).and_then(Value::as_str);
-    if [text("roll_toml"), text("compose")].into_iter().flatten().any(|t| t.len() > 1 << 20) {
+    if [text("roll_toml"), text("compose"), text("render"), text("fly"), text("railway"), text("heroku"), text("procfile")].into_iter().flatten().any(|t| t.len() > 1 << 20) {
         return Err(Error::BadRequest("the file is at most 1 MiB".into()));
     }
     // A repo's own roll.toml (a "deploy to roll" link): its root's, at a revision or its head.
@@ -202,15 +202,32 @@ async fn import(State(apps): S, b: Bytes) -> R {
     let (git_url, git_branch) = from_git.as_ref().map(|(u, b, _)| (Some(u.clone()), Some(b.clone()))).unwrap_or_default();
     let repo = text("repo").map(str::to_string);
     let from_repo = from_repo.or(from_git.map(|(_, _, t)| t));
-    let (toml_text, notes) = match (from_repo, text("roll_toml"), text("compose")) {
-        (Some(t), None, None) => (t, Vec::new()),
-        (None, Some(t), None) => (t.to_string(), Vec::new()),
+    // Another platform's file (Render's Blueprint, fly.toml, railway.json, Heroku's app.json and
+    // Procfile), read as roll.toml with notes on what isn't carried over.
+    let platform: Vec<(&str, String)> = ["render", "fly", "railway", "heroku"].into_iter().filter_map(|k| Some((k, text(k)?.to_string()))).collect();
+    let procfile = text("procfile").map(str::to_string);
+    let given = [from_repo.is_some(), text("roll_toml").is_some(), text("compose").is_some()].into_iter().filter(|b| *b).count() + platform.len();
+    if given != 1 {
+        return Err(Error::BadRequest("give one of roll_toml, compose, render, fly, railway, heroku (with procfile), repo or git".into()));
+    }
+    let (toml_text, notes) = match (from_repo, text("roll_toml"), text("compose"), platform.into_iter().next()) {
+        (Some(t), _, _, _) => (t, Vec::new()),
+        (_, Some(t), _, _) => (t.to_string(), Vec::new()),
         // Off the runtime's threads: a large file is a few hundred milliseconds of parsing.
-        (None, None, Some(c)) => {
+        (_, _, Some(c), _) => {
             let c = c.to_string();
             tokio::task::spawn_blocking(move || compose_to_toml(&c)).await.map_err(|e| Error::Internal(e.to_string()))?.map_err(|e| Error::BadRequest(e.to_string()))?
         }
-        _ => return Err(Error::BadRequest("give one of roll_toml, compose, repo or git".into())),
+        (_, _, _, Some((kind, t))) => tokio::task::spawn_blocking(move || match kind {
+            "render" => apps_build::imports::render_to_toml(&t),
+            "fly" => apps_build::imports::fly_to_toml(&t),
+            "railway" => apps_build::imports::railway_to_toml(&t),
+            _ => apps_build::imports::heroku_to_toml(&t, procfile.as_deref()),
+        })
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?
+        .map_err(|e| Error::BadRequest(e.to_string()))?,
+        _ => return Err(Error::BadRequest("give one of roll_toml, compose, render, fly, railway, heroku, repo or git".into())),
     };
     let f = parse_project(&toml_text).map_err(|e| Error::BadRequest(e.to_string()))?;
     let apps: serde_json::Map<String, Value> = f

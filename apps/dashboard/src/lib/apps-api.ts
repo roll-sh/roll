@@ -699,6 +699,10 @@ export interface AppMetrics {
   cut: boolean;
 }
 
+/** A file `POST /v1/apps/import` reads: roll's own, Compose, or another platform's (Heroku's
+ *  app.json with its Procfile's text, if it has one). */
+export type ImportFile = { roll_toml: string } | { compose: string } | { render: string } | { fly: string } | { railway: string } | { heroku: string; procfile?: string };
+
 /** A Web Vital's 75th percentile, rated by web.dev's thresholds. */
 export interface Vital {
   p75: number;
@@ -920,7 +924,7 @@ export const appsApi = {
   /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
   exportProject: (project: string, databases: Record<string, string>) => call<{ roll_toml: string; notes: string[] }>("POST", `/v1/apps/projects/${enc(project)}/export`, { databases }),
   /** A roll.toml or Compose file read as a project (nothing made). */
-  importProject: (file: { roll_toml: string } | { compose: string } | { repo: string; revision?: string } | { git: string; branch?: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
+  importProject: (file: ImportFile | { repo: string; revision?: string } | { git: string; branch?: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
 
   services: (project?: string) => call<Service[]>("GET", `/v1/apps/services${qs({ project })}`),
   /** Makes the service and places its card; a repo or an image source deploys to production at once. */

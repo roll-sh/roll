@@ -19,6 +19,7 @@ mod java;
 mod node;
 pub mod packages;
 mod php;
+pub mod imports;
 pub mod project;
 mod python;
 pub mod site_configs;
