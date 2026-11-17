@@ -48,6 +48,21 @@ impl Api {
         })
     }
 
+    /// POST `body` as is (`content_type`) to a product's route as the operator: its status and JSON
+    /// answer (roll search's bulk takes NDJSON).
+    fn post_raw(&self, path: &str, content_type: &str, body: Vec<u8>) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
+        let router = self.0.get().ok_or_else(|| Error::Link("the product APIs aren't up yet".into()))?.clone();
+        let mut req = Request::builder().method(Method::POST).uri(path).header("content-type", content_type);
+        req.extensions_mut().map(|e| e.insert(roll_auth::Operator));
+        let req = req.body(Body::from(body)).map_err(|e| Error::Internal(e.to_string()))?;
+        tokio::runtime::Handle::current().block_on(async move {
+            let resp = router.oneshot(req).await.map_err(|e| Error::Link(e.to_string()))?;
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.map_err(|e| Error::Link(e.to_string()))?.to_bytes();
+            Ok((status, if bytes.is_empty() { Json::Null } else { serde_json::from_slice(&bytes).unwrap_or(Json::Null) }))
+        })
+    }
+
     /// Call a product's route as the operator; a status other than 2xx is an error naming it.
     fn call(&self, method: Method, path: &str, body: Option<Json>) -> roll_secrets::Result<Json> {
         let (status, v) = self.call_status(method.clone(), path, body)?;
