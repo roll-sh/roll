@@ -133,11 +133,16 @@ impl Runs {
         let mut val = Vec::new();
         let mut segs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         let mut seg: Option<(&[u8], &[u8])> = None;
+        // (Each key with its version made in one buffer: no allocation per key.)
+        let (mut key, version) = (Vec::new(), (!ts).to_be_bytes());
         for (k, [v1, v2]) in items {
             val.clear();
             val.extend_from_slice(v1);
             val.extend_from_slice(v2);
-            if let Err(err) = w.add(&mvcc_key(k, ts), Some(&val)) {
+            key.clear();
+            key.extend_from_slice(k);
+            key.extend_from_slice(&version);
+            if let Err(err) = w.add(&key, Some(&val)) {
                 w.abandon();
                 return Err(err);
             }
@@ -175,8 +180,13 @@ impl Runs {
         self.next_id += 1;
         let mut w = SstWriter::create_run(&self.dir, id, false)?;
         let mut segs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        // (Each key with its version made in one buffer: no allocation per key.)
+        let (mut key, version) = (Vec::new(), (!ts).to_be_bytes());
         for k in keys {
-            if let Err(err) = w.add(&mvcc_key(&k, ts), None) {
+            key.clear();
+            key.extend_from_slice(&k);
+            key.extend_from_slice(&version);
+            if let Err(err) = w.add(&key, None) {
                 w.abandon();
                 return Err(err);
             }
