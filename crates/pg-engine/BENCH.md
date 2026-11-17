@@ -285,6 +285,85 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Storage round 2: scan runs (2026-11-17, agent 245)
+
+HANDOFF "Storage round 2" has what changed. **b246** is origin's `61414bc58`, **c1** the
+round's two commits on it (`cand/a245`). Plain dist builds (`tools/dist.sh`, line tables) of
+separate source snapshots, each with its own target dir (`~/.cache/a245/bin/<label>`).
+**b245** / **n003**: the round's first base `0ade2f479` and the same scan code on it (n003
+also has an early form of the next candidate's dead-entry sets, which nothing below without
+deletions reaches): the TPC-H and lane B gates ran on those while b246 and c1 built.
+Harnesses: agents 231's and 239's (`~/.cache/a245/bench/bulk2.sh`, `tpch/scripts/gpass.sh`,
+`point/bench/pairs.sh`), lanes as in the brief, each run under its lane's lock after waiting
+for quiet CPUs. The host was at load 40-95 all morning (other sessions' builds and
+benchmarks): foreign load is given; the gates read user instructions.
+
+### Bulk (1M rows, settled, bg_ steps counted; G user instructions, 5 alternating pairs, lane C)
+
+| step | b246 | c1 | % per pair | median |
+|---|---|---|---|---|
+| COPY in | 10.486 | 10.486 | +0.0 x5 | +0.0 |
+| CREATE INDEX | 6.200 | 6.120 | -1.3 / -1.3 / -1.4 / -1.2 / -1.3 | -1.3 |
+| CREATE UNIQUE INDEX | 4.482 | 4.406 | -1.9 / -1.7 / -2.5 / -1.4 / -1.1 | -1.7 |
+| COPY out | 3.215 | 3.120 | -3.0 x5 | -3.0 |
+| INSERT … SELECT | 7.162 | 7.060 | -1.4 / -1.3 / -1.3 / -1.7 / -0.4 | -1.3 |
+| UPDATE half | 12.955 | 12.896 | -0.7 / -0.8 / -0.5 / -0.7 / -0.4 | -0.7 |
+| DELETE a quarter | 6.026 | 5.902 | -2.9 / -5.3 / +0.7 / +0.2 / -1.1 | -1.1 |
+| bg after it (compaction) | 6.746 | 7.219 | +7.3 / +18.5 / -2.8 / +2.3 / +4.0 | +4.0 |
+| VACUUM | 1.873 | 1.820 | -2.8 x5 | -2.8 |
+| ANALYZE | 0.547 | 0.494 | -9.7 x5 | -9.7 |
+| `count(*), sum(c)` | 0.519 | 0.460 | -11.4 x5 | -11.4 |
+| count(*) (Seq Scan, extra step) | 0.261 | 0.203 | -22.2 x5 | -22.2 |
+| sum(a) (Seq Scan, extra step) | 0.467 | 0.409 | -12.4 x5 | -12.4 |
+| **all steps** | 60.234 | 59.974 | -0.5 / +0.5 / -1.3 / -0.7 / -0.5 | **-0.5** |
+| all steps but the compaction after DELETE | 53.475 | 52.759 | -1.5 / -1.7 / -1.1 / -1.1 / -1.0 | **-1.3** |
+
+Rows equal in every run (count and sums of every column of both tables). Every scanning step
+is lower in every pair. The compaction after DELETE runs the same code in both (it reads with
+`Cursor::head`, not `run_into`) and does a different amount of work from run to run (4.2 to
+35.6 MB written, 6.6 to 7.9 G: the L0 files it finds when `deletions_due` fires differ), which
+moves the total (its pairs -2.8 to +18.5%). Foreign load 2.2-4.7 cores in every run's busiest
+step (other sessions' unpinned builds on the lane; the server cgroup's instruction counts
+don't see them: each step but the compaction repeats within 0.1%).
+
+### Same day, same lane and settings (medians; PostgreSQL and pgrust 2 runs each)
+
+| | PostgreSQL 18.6 | pgrust | b246 | c1 |
+|---|---|---|---|---|
+| all steps, G | 52.33 | 44.61 | 60.23 | 59.97 |
+| count(*) by Seq Scan | 0.284 | 0.058 | 0.261 | 0.203 |
+| sum(a) by Seq Scan | 0.394 | 0.099 | 0.467 | 0.409 |
+| `count(*), sum(c)` | 0.489 | 0.171 | 0.519 | 0.460 |
+
+c1 (plain dist) 1.15x PostgreSQL, 1.34x pgrust (b246 1.15x, 1.35x).
+
+### TPC-H q01 and q06 (SF1, 2 GB cache, lane C; a fresh engine, a warm-up, 5 runs in one perf window; 3 alternating pairs)
+
+| | q01 G ins / run | q01 G cycles | q06 G ins / run | q06 G cycles | foreign |
+|---|---|---|---|---|---|
+| b245 | 11.899 / 11.899 / 11.900 | 6.39 / 5.52 / 6.20 | 8.634 / 8.635 / 8.637 | 4.90 / 4.40 / 4.86 | 1.84 / 0.75 / 1.79 |
+| n003 | 11.363 / 11.362 / 11.363 | 5.45 / 5.69 / 6.01 | 8.207 / 8.210 / 8.208 | 4.19 / 4.27 / 4.68 | 0.87 / 1.22 / 1.77 |
+
+-4.51% and -4.94% user instructions in every pair; result hashes equal.
+
+### The store's scan alone (in process: `fill_batch` of 1024 rows over 1M compacted rows, 20 scans; verify build, CPUs 12-13)
+
+| | instructions a row |
+|---|---|
+| without `run_rows` | 410 |
+| `run_rows` (c1) | 234 |
+
+### Point and range reads (alternating pairs, fresh server and 100,000-row fixture each)
+
+| cell | pairs | instr/op | cycles/op | ops/s | foreign |
+|---|---|---|---|---|---|
+| range read (100 rows), 8 clients, lane B, b245 / n003 | 5 | -1.8 / -3.9 / +1.7 / -0.8 / +0.9%, median -0.8% | median -0.9% | median +3.2% | 1.54 and 2.04 in pairs 1-2, else 0.1-0.5 |
+| point select, 8 clients, lane A, b246 / c1 | 2 | -1.5% (3.10 cores, flagged) / -0.3% (0.08) | +1.1 / -5.2% | | |
+
+A range read's 100 rows are a small part of its 345k instructions (the statement's own work,
+the wire); a point select's path (`point.rs`, `Block::seek`) didn't change. Lane A was shared
+with another agent's benchmarks all morning (a pair took 20-30 minutes of waiting): two pairs.
+
 ## Short write transactions, round 6 (2026-11-14/15, agent 235)
 
 HANDOFF "Short write transactions, round 6" has what changed, what was dropped and the leads.

@@ -10497,6 +10497,53 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Storage round 2: scan runs, the vector caches' lifetime (agent 245)
+
+BENCH.md "Storage round 2" has the measurements. Two commits (`cand/a245`); the round's
+format change (dead-entry sets, format 2 runs) is the next candidate, on these
+(`cand/a245-2`, its own section below once landed).
+
+- **A scan's rows a block at a time** (`Block::run_rows`, from `Cursor::run_into`). A
+  sequential scan's rows went through `Block::read` (the entry decoded into a `BlockPos`, its
+  key rebuilt), `run_into`'s checks and `push_value` / `RowBatch::push_in` (the key copied
+  again) one at a time: count(*) on the bulk table was 348 user instructions a row, the
+  store's part about 250 (`Block::read` 28%, `fill_batch_with` 24%, `push_in` 20% of a
+  Seq Scan's count). When the block is the scan's only source below its end (no other
+  source's head, `bound`; every entry in range), the entries after the one pushed go into the
+  batch straight from the block's bytes: each key is the last row's first `shared` bytes and
+  the entry's own (`RowBatch::push_shared`), the version the block's for entries at it (`F_TS`,
+  checked once) or the entry's last 8 bytes. It stops where the general loop has work: a
+  derived value (an index entry's), a deletion, the last row's key again (an older version;
+  at a restart compared whole), a version the snapshot doesn't see, out-of-line values when
+  the scan resolves them; `pos` is left on that entry, decoded, as `step` leaves it. Results:
+  count(*) by Seq Scan -22.2% (271 instructions a row), sum(a) -12.4%, `count(*), sum(c)`
+  -11.4%, ANALYZE -9.7%, VACUUM -2.8%, COPY out -3.0%, CREATE INDEX -1.3%, INSERT ... SELECT
+  -1.3% (every pair); TPC-H q01 -4.5%, q06 -4.9% (every pair); point and range reads level.
+  The store's scan alone (an in-process loop of `fill_batch` over 1M rows, verify build) went
+  from 410 to 234 instructions a row.
+- **The vector index caches' lifetime** (`impl Drop for Database` ->
+  `index_am::evict_database`). hnsw's graphs, ivfflat's lists, bloom's pages and the updated
+  rows' sets are cached per database instance in process-wide maps, and each entry holds the
+  index's `AmStore`, so its `Store`: a database the engine closed idle kept its store and
+  every vector of its indexes in memory until an index was loaded or built again (agent
+  241's note). They go with the `Database` now. `pgvector_hnsw::truncate_reindex_and_reopen`
+  checks the first store is gone once its session is (it fails without the fix: "the closed
+  database's store is kept").
+
+Measured and not kept:
+- `run_rows` also where another source's head lies past the block's end (`bound` checked
+  against the block's last key once per call): with interleaved sources (the bulk UPDATE's
+  versions in L0 over the table in L1, every other row) a call takes a row and the check is a
+  second key comparison per row: DELETE +2.8% (five pairs of an earlier build, n002).
+
+Left (largest first):
+1. count(*) is now 0.71x PostgreSQL's by Seq Scan but 3.5x pgrust's (0.203 against 0.284 and 0.058 G):
+   after the store, `Partials::batch_run` and `partial_chunk` (16%
+   of it), and the batch's keys, which an aggregate over values never reads (copied for the
+   rows the row path takes; a batch that knows no row takes it could leave them out).
+2. Index entries (derived values) and rows under another source go the general way: a
+   merging scan's runs end at every other row when an UPDATE's versions are in L0.
+
 ## Storage format v2: design (agent 231)
 
 **Measured first**, offline, by `storage::sst::study` (an ignored test: `FMT_DIR=<a store's
