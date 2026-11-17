@@ -364,8 +364,9 @@ none of the service's environments follows, after checking the branch really is 
   its services asleep meanwhile. One waiting holds a place under `max_previews` (anyone can open
   them). A close deletes the preview. A later push never makes a row trusted again. A fork's row
   is found by its number (a writer's branch named `pull/7` is another preview). Approving is a
-  person's call (a token gets 403), and it's refused while the project says Roll only, which
-  doesn't cover roll apps yet. A title loses control and invisible formatting characters.
+  person's call (a token gets 403). Roll only holds there too: roll apps runs the `pv-`
+  environment on a network of its own (apps' #143). A title loses control and invisible
+  formatting characters.
   `a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head`; live in
   `scripts/preview-apps.sh` with GitHub's `pull_request` events through roll apps' hook (#115:
   `GitPushes::takes_pulls`).

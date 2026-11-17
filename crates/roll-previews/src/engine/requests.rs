@@ -280,12 +280,8 @@ impl Engine {
     /// code's `approve-run` for a Git URL service's preview). Only the head the preview is at; the
     /// next push waits again.
     pub fn approve(&self, id: &str, head: &str, by: &str) -> Result<Preview> {
-        // Roll only doesn't reach roll apps yet (its egress, the apps thread's): a fork's code
-        // there would run with branched data and the open internet, so it isn't released.
-        let row = self.store.row(id)?;
-        if row.repo.starts_with("git:") && self.store.settings(&row.project_id)?.egress == crate::settings::EgressRule::Roll {
-            return Err(Error::Conflict("this project limits what previews may reach (Roll only), which doesn't cover services hosted on roll apps yet: a fork's code isn't approved to run there".into()));
-        }
+        // Roll only holds on roll apps too (apps' #143: its pv- environment on a network of its
+        // own), so a fork's head is released under it as anywhere else.
         self.store.approve_git_pull(id, head, by)?;
         self.store.log(id, &format!("{} approved by {by}", short(head)))?;
         let r = self.store.update(id, |row| {

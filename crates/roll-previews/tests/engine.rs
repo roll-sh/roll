@@ -1069,7 +1069,8 @@ async fn a_git_url_services_branch_push_makes_its_preview() {
 /// the next push waits again, and closing the pull request deletes it.
 #[tokio::test]
 async fn a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head() {
-    let e = env(json!({ "enabled": true }));
+    // Roll only: roll apps holds it too (apps' #143), so the approval isn't refused for it.
+    let e = env(json!({ "enabled": true, "egress": "roll" }));
     e.ws.place(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Service, "svc_shop", 0.0, 0.0).unwrap();
     *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "shop".into(), repo: Some("git:svc_shop".into()), root: String::new(), memory_mb: 256 }]);
     let push = |sha: Option<&str>| roll_previews::ports::GitPush {

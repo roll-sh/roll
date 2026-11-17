@@ -121,6 +121,38 @@ T4=$(now_ms)
 APPS_ROBOTS=$(curl -sS -o /dev/null -D - -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 30 | tr -d '\r' | sed -n 's/^x-robots-tag: //Ip')
 [ "$APPS_ROBOTS" = noindex ] || { echo "a pv- environment's page should carry X-Robots-Tag: noindex, not '$APPS_ROBOTS'"; exit 1; }
 
+say "Roll only on roll apps (apps' #143): the pv- instance reaches nothing but its listed hosts"
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"roll","egress_hosts":["example.com"]}' >/dev/null
+api POST "/v1/previews/$PV/refresh" >/dev/null
+for _ in $(seq 1 600); do
+  E=$(api GET "/v1/apps/services/$SVC/environments/$ENV")
+  [ "$(echo "$E" | jq_ "(d.get('egress') or {}).get('mode')")" = roll ] && [ "$(echo "$E" | jq_ "(d.get('latest') or {}).get('status','')")" = active ] && break
+  sleep 1
+done
+[ "$(echo "$E" | jq_ "(d.get('egress') or {}).get('mode')")" = roll ] || { echo "the pv- environment should be closed: $(echo "$E" | jq_ "d.get('egress')")"; exit 1; }
+curl -sS -o /dev/null -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 120
+INST=""
+for _ in $(seq 1 60); do INST=$(docker ps --format '{{.Names}}' | grep "^roll-apps-${SVC#svc_}-$ENV-" | head -1); [ -n "$INST" ] && break; sleep 1; done
+EGRESS_APPS=$(docker exec "$INST" python3 -c '
+import socket, urllib.request
+r = []
+try:
+    socket.create_connection(("1.1.1.1", 443), 3); r.append("1.1.1.1 reached")
+except OSError:
+    r.append("1.1.1.1 unreachable")
+for host, want in (("example.com", "listed"), ("github.com", "unlisted")):
+    try:
+        urllib.request.urlopen("https://%s/" % host, timeout=20); r.append("%s %s through" % (want, host))
+    except Exception:
+        r.append("%s %s refused" % (want, host))
+print(", ".join(r))')
+[ "$EGRESS_APPS" = "1.1.1.1 unreachable, listed example.com through, unlisted github.com refused" ] || { echo "a closed pv- instance should reach only its listed hosts: $EGRESS_APPS"; exit 1; }
+# What its proxy refused reaches the preview's activity (roll apps' egress_refused).
+for _ in $(seq 1 120); do api GET "/v1/previews/$PV/activity" | grep -q "github.com" && break; sleep 1; done
+api GET "/v1/previews/$PV/activity" | grep -q "github.com" || { echo "the refused host should be in the preview's activity"; exit 1; }
+EGRESS_APPS="$EGRESS_APPS; said in its activity"
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress":"open","egress_hosts":[]}' >/dev/null
+
 say "a preview's own variable reaches its roll apps environment, and leaves it once removed"
 apps_vars() { api GET "/v1/apps/services/$SVC/environments/$ENV/variables" | jq_ "' '.join(sorted(v['name'] for v in d['vars']))"; }
 until_vars() { # until_vars <python test on the names, as n>
@@ -384,6 +416,7 @@ cat <<EOF
 | … → its deploy active (a Docker build of the change's commit) | $((T2 - T0)) ms |
 | First request through roll apps (cold) | $((T4 - T3)) ms |
 | X-Robots-Tag on the pv- environment's page | $APPS_ROBOTS |
+| Roll only on the pv- instance (a direct connection / a listed host / an unlisted one) | $EGRESS_APPS |
 | Body / the Redis host the service saw / the preview's Redis branch | $BODY / $WHERE / $BRANCH |
 | Variables on the environment | $VARS |
 | A stream link's KAFKA_USERNAME on the pv- environment | the branch's SASL user ($KAFKA_PV), not production's link's |
