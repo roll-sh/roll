@@ -832,7 +832,9 @@ waits on a sibling PR reaching main is last.
 9. **`apps_purge_cache`** once apps' #139 is on main: a sibling of `apps_restart` for
    `POST …/environments/{env}/cache/purge {paths?}` (deploy in production, write elsewhere, by
    the environment's prefix row).
-10. **More tools that wait:** `apps_wait_deploy` is in #108; branch backups and search reindexes
+10. **More tools that wait:** `apps_wait_deploy` is in #108. Rechecked on main (05:50): Postgres
+   branch backups and restores answer once done (nothing to wait on); search's reindexes are
+   Elasticsearch's own `_tasks` behind the operator's request route. Branch backups and search reindexes
    can use `until` once their routes answer a state to wait on (search's reindex is an
    Elasticsearch task today, with no roll route to watch). Recheck with `mcpc` (`~/.local/share/roll-mcp/live/mcpc-tasks.sh`), and with the
    TypeScript SDK's `client/ext/tasks` once it ships.
