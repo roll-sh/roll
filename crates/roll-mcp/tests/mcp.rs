@@ -695,6 +695,10 @@ async fn a_subscription_hears_the_tools_change() {
         .header("authorization", format!("Bearer {asker}"))
         .body(Body::from(listen.to_string()))
         .unwrap();
+    // Asking only for what roll doesn't send is refused rather than held open.
+    let nothing = json!({ "jsonrpc": "2.0", "id": "listen:0", "method": "subscriptions/listen", "params": { "_meta": meta, "notifications": { "resourcesListChanged": true } } });
+    let (_, _, refused) = d.http_with(&asker, Method::POST, "/v1/mcp", Some(nothing), &[("mcp-protocol-version", "2026-07-28"), ("mcp-method", "subscriptions/listen")]).await;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
     let mut body = d.router.clone().oneshot(req).await.unwrap().into_body();
     let mut buf = String::new();
     // The next JSON-RPC message on the stream (keep-alive comments skipped), within 15 s.

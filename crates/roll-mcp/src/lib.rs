@@ -399,7 +399,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     // 2026-07-28's long-lived channel for list changes (SEP-2575): an open stream of its own.
-    if !batch && messages.len() == 1 && messages[0]["method"] == "subscriptions/listen" {
+    if ctx.modern && !batch && messages.len() == 1 && messages[0]["method"] == "subscriptions/listen" {
         return listen(ctx, &messages[0]).await;
     }
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
@@ -408,7 +408,12 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
             .map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string())));
         Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE)).into_response()
     } else if wants_sse(&ctx.headers) {
-        let stream = futures::stream::once(Box::pin(async move { with_list_changed(process(&ctx, messages).await) }))
+        // A 2026-07-28 client hears list changes only on a listen stream it asked for (SEP-2575).
+        let legacy = !ctx.modern;
+        let stream = futures::stream::once(Box::pin(async move {
+            let answers = process(&ctx, messages).await;
+            if legacy { with_list_changed(answers) } else { answers }
+        }))
             .flat_map(futures::stream::iter)
             .map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string())));
         Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE)).into_response()
@@ -416,7 +421,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         let mut responses = process(&ctx, messages).await;
         // An access request was approved: the connection's tools changed. A client that takes a
         // stream hears it (MCP's `notifications/tools/list_changed`) before the answer.
-        if accepts_sse(&ctx.headers) && widened(&responses) {
+        if !ctx.modern && accepts_sse(&ctx.headers) && widened(&responses) {
             let events: Vec<_> = with_list_changed(responses).into_iter().map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string()))).collect();
             return Sse::new(futures::stream::iter(events)).into_response();
         }
@@ -782,6 +787,38 @@ async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, String> {
 }
 
 /// The names of the tools this connection is offered (what prompts may use).
+/// Subscriptions open at once per token (the operator's counts as one).
+const LISTENS_PER_TOKEN: usize = 4;
+
+/// One open subscription of a token's, counted until it's dropped.
+struct ListenSlot(String);
+
+static LISTENS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> = std::sync::LazyLock::new(Default::default);
+
+impl ListenSlot {
+    fn take(who: &str) -> Option<ListenSlot> {
+        let mut open = LISTENS.lock().unwrap_or_else(|e| e.into_inner());
+        let n = open.entry(who.to_string()).or_default();
+        if *n >= LISTENS_PER_TOKEN {
+            return None;
+        }
+        *n += 1;
+        Some(ListenSlot(who.to_string()))
+    }
+}
+
+impl Drop for ListenSlot {
+    fn drop(&mut self) {
+        let mut open = LISTENS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = open.get_mut(&self.0) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                open.remove(&self.0);
+            }
+        }
+    }
+}
+
 /// How often an open subscription looks at its grant again, and how long one stays open.
 const LISTEN_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 const LISTEN_FOR: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -803,10 +840,18 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
         agreed["promptsListChanged"] = json!(true);
     }
     // Tagged with the subscription like everything on its stream: a client matches the ack by it.
+    if !tools && !prompts {
+        return Json(rpc_error(id, -32602, "nothing to listen for: roll sends toolsListChanged and promptsListChanged")).into_response();
+    }
     let ack = json!({ "jsonrpc": "2.0", "method": "notifications/subscriptions/acknowledged", "params": { "notifications": agreed, "_meta": { "io.modelcontextprotocol/subscriptionId": id } } });
     let grant = match &ctx.principal {
         Principal::Grant(g) => Some(g.id.to_string()),
         Principal::Operator => None,
+    };
+    // A few open at once per token: each looks at its grant every few seconds.
+    let held = match ListenSlot::take(grant.as_deref().unwrap_or("operator")) {
+        Some(h) => h,
+        None => return Json(rpc_error(id, -32000, format!("at most {LISTENS_PER_TOKEN} subscriptions open at once per token: close one first"))).into_response(),
     };
     let access = ctx.m.config.access.clone();
     let deadline = tokio::time::Instant::now() + LISTEN_FOR;
@@ -821,13 +866,15 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
         last: Option<Vec<String>>,
         queue: Vec<Value>,
         done: bool,
+        /// Held while the stream lives: dropped with it, whoever ends it.
+        _slot: ListenSlot,
     }
     // What it's offered as it subscribes: a change from here on is told.
     let last = match &grant {
         Some(g) => now(ctx.clone(), g.clone(), access.clone()).await,
         None => Some(Vec::new()),
     };
-    let start = State { ctx, last, queue: vec![ack], done: false };
+    let start = State { ctx, last, queue: vec![ack], done: false, _slot: held };
     let stream = futures::stream::unfold(start, move |mut s| {
         let (id, grant, access) = (id.clone(), grant.clone(), access.clone());
         async move {
@@ -906,7 +953,7 @@ fn initialize(ctx: &Ctx, params: &Value) -> Value {
 /// What roll offers, the same in `initialize` and `server/discover`.
 fn capabilities(tasks: bool) -> Value {
     // Tools change when an access request is approved: said on that call's stream.
-    let mut c = json!({ "tools": { "listChanged": true }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false }, "completions": {} });
+    let mut c = json!({ "tools": { "listChanged": true }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": true }, "completions": {} });
     // 2026-07-28's tasks extension, where results can be sealed (tasks::on).
     c["extensions"] = json!({ ui::EXT: {} });
     if tasks {
@@ -1059,9 +1106,8 @@ fn writes_to(ctx: &Ctx, name: &str) -> Option<(String, bool)> {
     })
 }
 
-/// Candidates a scan sends, and projects it asks about.
-const SCAN_CANDIDATES: usize = 2000;
-const SCAN_PROJECTS: usize = 10;
+/// The most projects a token's write is checked against (one scan each).
+const SCAN_PROJECTS: usize = 50;
 
 /// The value of a roll secret a write would put where people and agents read it. Asked of roll
 /// secrets' own scan (`POST …/leaks`) as the caller, through the gated router, so it only ever
@@ -1076,7 +1122,11 @@ async fn secret_value_in(ctx: &Arc<Ctx>, name: &str, args: &Value) -> Option<gua
     if !g.scope.may("secrets", roll_auth::scope::Action::Reveal) {
         return None;
     }
-    let candidates = guard::candidates(args, SCAN_CANDIDATES);
+    // Only words that look like a credential (a region or `production` never matches), all of
+    // them: past roll secrets' limit for a scan the call isn't sent.
+    let Some(candidates) = guard::candidates(args) else {
+        return Some(guard::Found { kind: format!("more than {} words that look like credentials (too many to check)", guard::MAX_CANDIDATES), at: "arguments".into() });
+    };
     if candidates.is_empty() {
         return None;
     }
@@ -1092,14 +1142,28 @@ async fn secret_value_in(ctx: &Arc<Ctx>, name: &str, args: &Value) -> Option<gua
             })),
         }
     }
-    if every && let Ok(list) = read_route(ctx, "/v1/workspace/projects", "guard").await {
-        projects.extend(list.as_array().into_iter().flatten().filter_map(|p| p["id"].as_str().map(str::to_string)));
+    if every {
+        match guard_route(ctx, "GET", "/v1/workspace/projects", None).await {
+            Ok(list) => projects.extend(list.as_array().into_iter().flatten().filter_map(|p| p["id"].as_str().map(str::to_string))),
+            Err(e) => tracing::warn!(error = %e, tool = %name, "the credential guard couldn't list the token's projects"),
+        }
     }
     projects.sort();
     projects.dedup();
+    if projects.len() > SCAN_PROJECTS {
+        return Some(guard::Found { kind: format!("words that look like credentials, and the token reaches more than {SCAN_PROJECTS} projects' secrets (too many to check)"), at: "arguments".into() });
+    }
     let words: Vec<&str> = candidates.iter().map(|(w, _)| w.as_str()).collect();
-    for p in projects.into_iter().take(SCAN_PROJECTS) {
-        let Ok(found) = post_route(ctx, &format!("/v1/secrets/projects/{}/leaks", percent_encoding::utf8_percent_encode(&p, percent_encoding::NON_ALPHANUMERIC)), json!({ "candidates": words })).await else { continue };
+    for p in projects {
+        let route = format!("/v1/secrets/projects/{}/leaks", percent_encoding::utf8_percent_encode(&p, percent_encoding::NON_ALPHANUMERIC));
+        let found = match guard_route(ctx, "POST", &route, Some(json!({ "candidates": words }))).await {
+            Ok(f) => f,
+            // Not checked (roll secrets is off, or refused it): said, not silent.
+            Err(e) => {
+                tracing::warn!(error = %e, tool = %name, "the credential guard couldn't scan a project's secrets");
+                continue;
+            }
+        };
         if let Some(f) = found.as_array().and_then(|l| l.first()) {
             let at = f["index"].as_u64().and_then(|i| candidates.get(i as usize)).map_or("arguments".to_string(), |(_, at)| at.clone());
             let kind = format!("the value of roll secret {} ({})", f["key"].as_str().unwrap_or("?"), f["environment"].as_str().unwrap_or("?"));
@@ -1109,14 +1173,15 @@ async fn secret_value_in(ctx: &Arc<Ctx>, name: &str, args: &Value) -> Option<gua
     None
 }
 
-/// A POST through the gated router with the caller's token (the guard's scan), its JSON answer.
-async fn post_route(ctx: &Arc<Ctx>, route: &str, body: Value) -> Result<Value, String> {
+/// A request through the gated router with the caller's token, for the guard: quiet (it never
+/// asks a person), its JSON answer.
+async fn guard_route(ctx: &Arc<Ctx>, method: &str, route: &str, body: Option<Value>) -> Result<Value, String> {
     // roll secrets audits a guard's scans as `secrets.guard`, apart from a person's scans.
-    let mut req = Request::builder().method("POST").uri(route).header(header::CONTENT_TYPE, "application/json").header("x-roll-guard", "1");
+    let mut req = Request::builder().method(method).uri(route).header(header::CONTENT_TYPE, "application/json").header("x-roll-guard", "1");
     for (k, v) in forward_headers(&ctx.headers, &Value::Null).iter() {
         req = req.header(k, v);
     }
-    let mut req = req.body(Body::from(body.to_string())).map_err(|e| e.to_string())?;
+    let mut req = req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).map_err(|e| e.to_string())?;
     req.extensions_mut().insert(McpCall { tool: "guard".into(), args: Arc::new(json!({ "route": route })), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: true });
     let resp = match ctx.m.api.clone().oneshot(req).await {
         Ok(r) => r,

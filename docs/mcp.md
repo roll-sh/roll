@@ -113,16 +113,20 @@ write a credential where people and other agents read it is refused before it's 
 workspace (names, descriptions) and agents (messages). That's how a prompt-injected agent leaks a
 secret: by writing it somewhere it's read.
 
-- Found: AWS access keys, GitHub tokens (`ghp_`…, `github_pat_`), Slack tokens, Stripe live keys,
-  Google API keys, Anthropic and OpenAI keys, PEM private keys, and roll's own credentials (`rlt_`,
+- Found: AWS access keys (not AWS's documentation `…EXAMPLE` keys), GitHub tokens (`ghp_`…, `github_pat_`), Slack tokens, Stripe live keys,
+  Google API keys, Anthropic and OpenAI keys, PEM private keys (a block with a base64 body, not
+  a bare header in code that parses keys), and roll's own credentials (`rlt_`,
   `rlo_`, `rlf_`, `rlc_`, `rlk_`, by their checksum, so never a false positive). roll's are refused
   in every product but roll secrets, where keeping one is the point; the others only in the
   products above (a database, a queue or apps' variables are where credentials belong).
 - The values of the project's own roll secrets too, for a token that may reveal them (the one that
-  could have read a value to leak): the words a write would put where others read (8 to 512
-  characters, up to 2,000) go to roll secrets' own scan (`POST /v1/secrets/projects/{p}/leaks`)
+  could have read a value to leak): the words a write would put where others read that look like
+  credentials (as roll code's landings judge them: at least 12 characters, a digit or a capital,
+  enough entropy, so `production` or `us-east-1` never match; all of them, and a write with more
+  than 20,000, roll secrets' limit for a scan, isn't sent) go to roll secrets' own scan (`POST /v1/secrets/projects/{p}/leaks`)
   as the token, through the gate, for the projects its secrets rules name (or, with a rule over
-  every project, the ones it can list; at most 10). That scan only ever matches values the caller
+  every project, the ones it can list, quietly: never asking a person; past 50 the write isn't
+  sent). A scan that fails is logged, not silent. That scan only ever matches values the caller
   may reveal, so the guard is never a test of a guess. The refusal names the key and environment.
   The scan carries `X-Roll-Guard: 1` (roll secrets audits it as `secrets.guard`). A key tagged
   `sensitive` is matched only for runtime callers, never for a token (that would be a one-bit
@@ -294,7 +298,11 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     prompts one) whenever the connection's tools change: an access request approved, a rule
     remembered, the token edited. Each carries `_meta["io.modelcontextprotocol/subscriptionId"]`.
     The grant is looked up again every 5 s, never cached; when it stops working, or after an hour,
-    the stream answers the listen request (`result: {}`) and closes, and the client listens again.
+    the stream answers the listen request (`result: {}`, the graceful end the spec added after
+    SEP-2575) and closes, and the client listens again. At most 4 are open at once per token; a
+    listen asking for nothing roll sends is refused (`-32602`). A 2026-07-28 client hears list
+    changes only there; an older one hears `list_changed` on the call that approved an access
+    request.
     Checked live with the official TypeScript SDK v2 (`live/sdk2/listen.mjs`): its `listChanged`
     option opens the subscription by itself, and an access request approved mid-session refreshes
     its tools (9 to 18). That run found two interop bugs, both fixed: the ack must carry the
