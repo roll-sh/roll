@@ -2798,8 +2798,8 @@ credential checked at registration), #97 (search keys say `access: data`), #102 
 service-account tokens), #105 (Java), #110 (.NET with `IConfiguration`), #113 (an AWS Lambda
 extension that logs in with the function's role), #117 (an Ansible collection), #132 (LDAP and
 Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (Pulumi), #147
-(approvals in the audit, on #114) and #165 (Elasticsearch, OpenSearch, Cassandra and ScyllaDB
-outside roll, on #132).
+(approvals in the audit, on #114), #165 (Elasticsearch, OpenSearch, Cassandra and ScyllaDB
+outside roll, on #132) and #166 (a gateway into private networks, on #132).
 
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
@@ -2826,13 +2826,17 @@ outside roll, on #132).
 5. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
    backup schedules, rotation windows, directories, Snowflake accounts, ACME bindings): the
    resources once their routes are on main, the tools with roll MCP.
-6. **A gateway into private networks** (building: `feature/roll-secrets-gateway`; Infisical's Gateway, Akeyless'): a small process inside a
+6. **A gateway into private networks** (#166, on #132; Infisical's Gateway, Akeyless'): a small process inside a
    VPC that dials out to roll and carries rotations, dynamic credentials, directory calls and ACME
    challenges to private addresses, so private databases need neither a public address nor
    `allow_private`, and pre-authorized ACME names can be checked after all. Its link is a
    workload identity; it carries only the conversations rolld starts, only to the hosts its own
    local allow-list names (a compromised roll can't scan the network through it), as bytes with TLS
-   end to end; on a fleet its link and the calls through it run on one lease holder.
+   end to end; on a fleet its link and the calls through it run on one lease holder. Built: Postgres,
+   MySQL, SQL Server, Redis, MongoDB and LDAP/AD through it, a real agent over a WebSocket in rolld's
+   tests (allow-list, backpressure, revocation) and Postgres end to end. Building on it: revocation at
+   once (every stream open looks the token and record up). Then ClickHouse, RabbitMQ and
+   `mongodb+srv://` through it, ACME's pre-authorized names checked through it, and a fleet test.
 7. **Pulumi** (#145): roll's Terraform provider through Pulumi's any-Terraform-provider package
    from a local build (no registry release), with TypeScript, Python and Go SDKs generated and an
    end-to-end `pulumi up`/`destroy` checked. Pulumi keeps every input in its state (encrypted), so
