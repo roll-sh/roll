@@ -557,7 +557,13 @@ impl Engine {
                     self.store.set_healthy(&r.id, &name, &rev)?;
                     self.store.log(&r.id, &format!("{name} is healthy ({path}: {status})"))?;
                 }
-                Some((status, said)) => anyhow::bail!("{name} answered {status} on {path}: {}", said.chars().take(200).collect::<String>()),
+                // Its answer is its code's words, and becomes the preview's error (the pull
+                // request's comment): masked as its logs are.
+                Some((status, said)) => {
+                    // Masked whole, then cut: a value the cut splits isn't left half shown.
+                    let said: String = code_preview::runner::mask(&said, &self.masks(&r.id).await?).chars().take(200).collect();
+                    anyhow::bail!("{name} answered {status} on {path}: {said}")
+                }
                 None => {}
             }
         }
