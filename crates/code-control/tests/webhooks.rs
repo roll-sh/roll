@@ -869,13 +869,24 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
     assert_eq!(keys(&got["status"]), sorted(vec!["context", "state", "target_url", "description", "creator", "created_at", "updated_at"]));
     assert_eq!((got["status"]["context"].as_str(), got["status"]["state"].as_str()), (Some("ci/x"), Some("pending")));
 
-    // preview = {change, preview: Preview | null}
+    // preview = {change, preview: Preview | null, became?: ["ready" | "visual_change"]}
     a.ok("POST", &format!("/v1/code/changes/{id}/preview"), None).await;
     let got = ev.next("preview").await;
-    assert_eq!(keys(&got), ["change", "preview"]);
+    assert_eq!(keys(&got), ["became", "change", "preview"]);
     assert_eq!(got["change"], id);
     assert_eq!(keys(&got["preview"]), sorted(vec!["state", "url", "postgres", "redis", "error", "created_at"]));
-    assert_eq!(got["preview"]["state"], "running");
+    assert_eq!((got["preview"]["state"].as_str(), got["became"].clone()), (Some("running"), json!(["ready"])));
+    // `became` is what an update reached for the first time at its head: a preview environment
+    // ready once a push, not again when it wakes from sleep.
+    let at = |state: &str, head: &str| -> code_control::model::Preview {
+        serde_json::from_value(json!({ "state": "running", "url": null, "postgres": null, "redis": null, "error": null, "created_at": 1,
+            "environment": { "id": "pv_1", "slug": "s", "state": state, "services": [], "resources": [], "sleeping_usd_month": 0.0, "active_usd_hour": 0.0, "head": head } }))
+        .unwrap()
+    };
+    for (state, head, became) in [("creating", "cs_1", None), ("ready", "cs_1", Some(json!(["ready"]))), ("sleeping", "cs_1", None), ("ready", "cs_1", None), ("updating", "cs_2", None), ("ready", "cs_2", Some(json!(["ready"])))] {
+        a.code.report_environment(&id, Some(&at(state, head))).unwrap();
+        assert_eq!(ev.next("preview").await.get("became").cloned(), became, "{state} at {head}");
+    }
     a.ok("DELETE", &format!("/v1/code/changes/{id}/preview"), None).await;
     assert_eq!(ev.next("preview").await, json!({ "change": id, "preview": null }));
 

@@ -265,6 +265,24 @@ pub struct Preview {
     pub environment: Option<PreviewEnvironment>,
 }
 
+impl Preview {
+    /// The head it's up at: a preview environment `ready` or `sleeping` (a visit wakes it), else
+    /// roll code's own preview running or asleep. `""` for a head it doesn't name.
+    pub fn up_at(&self) -> Option<&str> {
+        let up = match &self.environment {
+            Some(e) => e.state == "ready" || e.state == "sleeping",
+            None => matches!(self.state, PreviewState::Running | PreviewState::Sleeping),
+        };
+        up.then(|| self.environment.as_ref().and_then(|e| e.head.as_deref()).unwrap_or(""))
+    }
+
+    /// The head whose visual change waits for someone to accept it.
+    pub fn visual_change_at(&self) -> Option<&str> {
+        let v = self.environment.as_ref()?.visual_review.as_ref().filter(|v| v.state == "changed")?;
+        Some(v.head.as_deref().unwrap_or(""))
+    }
+}
+
 /// What a change shows of its preview environment (roll previews' `Preview`, summed up).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PreviewEnvironment {

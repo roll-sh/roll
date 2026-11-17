@@ -207,8 +207,8 @@ impl Previews {
         let Ok(c) = code.change_or_404(change_id) else { return };
         let Some(mut p) = c.preview else { return };
         f(&mut p);
-        if code.db.set_change_preview(change_id, Some(&p)).is_ok() {
-            code.emit(&c.repo_id, "preview", json!({ "change": change_id, "preview": p }));
+        if let Err(e) = code.report_environment(change_id, Some(&p)) {
+            warn!(change = change_id, error = %e, "recording a preview");
         }
     }
 

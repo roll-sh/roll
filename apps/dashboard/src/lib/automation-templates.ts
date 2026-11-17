@@ -186,6 +186,26 @@ export const CHATOPS_TEMPLATES: AutomationTemplate[] = [
         step("status", "slack.status", { ...started, channel: "{{ event.data.channel }}", thread_ts: "{{ event.data.thread_ts }}" }),
       ]),
   },
+  {
+    id: "slack-preview-ready",
+    title: "Post a change's preview to Slack when it's ready",
+    description: "A message in a channel each time a change's preview is ready at a new push (roll previews), with a link to open it. Waking up or a new screenshot doesn't post again.",
+    trigger: "code",
+    steps: ["slack.post"],
+    integration: "slack",
+    build: (ctx) => {
+      const p = ctx.projects.find((x) => x.repo) ?? ctx.projects[0];
+      return spec(
+        "Previews in Slack",
+        "A message once a push, when its preview is ready.",
+        { type: "code", events: ["preview"], repos: p?.repo ? [p.repo] : [] },
+        // The channel is the owner's pick: left empty, so the builder asks for it.
+        [step("post", "slack.post", { channel: "", text: "The preview of {{ event.data.change }} in {{ event.data.repo }} is ready: {{ event.data.preview.url }}" })],
+        // `became` names what an update reached for the first time at its head.
+        { filters: [{ field: "event.data.became", op: "contains", value: "ready" }] },
+      );
+    },
+  },
 ];
 
 export const TEMPLATES: AutomationTemplate[] = [
@@ -368,7 +388,8 @@ export const TEMPLATES: AutomationTemplate[] = [
             link: "{{ event.data.preview.environment.dashboard_url }}",
           }),
         ],
-        { filters: [{ field: "event.data.preview.environment.visual_review.state", op: "equals", value: "changed" }] },
+        // Once a head: `became` names what an update reached for the first time at its head.
+        { filters: [{ field: "event.data.became", op: "contains", value: "visual_change" }] },
       );
     },
   },

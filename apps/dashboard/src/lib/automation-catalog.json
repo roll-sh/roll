@@ -1166,6 +1166,7 @@
           "fields": [
             "repo",
             "change",
+            "became",
             "preview.state",
             "preview.url",
             "preview.environment.state",
@@ -1173,6 +1174,10 @@
           ],
           "kind": "preview",
           "sample": {
+            "became": [
+              "ready",
+              "visual_change"
+            ],
             "change": "chg_0123456789abcd",
             "preview": {
               "created_at": 1762000000000,
