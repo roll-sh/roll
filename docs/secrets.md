@@ -167,6 +167,10 @@ steps:
   (a PEM key) arrives whole and can't add variables of its own. A key that doesn't resolve fails
   the step, naming it.
 - No dependencies: Node's own `fetch`, nothing to bundle or audit.
+- **`client-id: mcl_…`** signs the job in to roll for any product as a trusted machine client
+  (docs/permissions.md, "Machine clients": `roll token client create --github owner/repo`), with
+  the same OIDC token, and exports that token, masked first, as `ROLL_TOKEN`; with an
+  `environment` it then reads the values with it. It can't be combined with `identity` or `token`.
 - **`scan: true`** guards a repository on GitHub the way roll code guards the ones it hosts: the
   lines a pull request adds (`git diff base...HEAD`; check out with `fetch-depth: 0`) are cut into
   candidates as `roll secrets scan` cuts them and checked with `POST …/leaks` (fingerprints; only
@@ -245,15 +249,22 @@ key. The values themselves aren't re-encrypted; only the data key is wrapped.
   in the audit log (`project.kms`).
 ## AWS
 Short-lived AWS credentials for each lease, as Vault's AWS engine and Infisical's dynamic secrets
-give: a project registers a role in its own account (`POST …/aws-roles {name, role_arn}`,
+give: a project registers a role in its own account (`POST …/aws-roles {name, role_arn, trust?}`,
 `roll secrets aws-roles add`, the Integrations tab; admin), and three keys link to it in `dynamic`
 mode (`access_key_id`, `secret_access_key`, `session_token`: one credential, so they share one
-session per resolve). Each resolve assumes the role (STS AssumeRole with roll's own credentials) for
-the lease's TTL plus five minutes (15 minutes to 12 hours, within the role's own maximum).
-- **The trust policy** lets roll's role assume it with the condition `sts:ExternalId =
-  roll-secrets:<project>`. Registering a role assumes it once, and first tries a made-up project's
-  ExternalId: a role that takes any (another customer's that trusts roll, say) is refused, so no
-  tenant can register and assume someone else's role.
+session per resolve). Each resolve assumes the role for the lease's TTL plus five minutes (15
+minutes to 12 hours, within the role's own maximum). The role trusts roll one of two ways:
+- **roll's issuer** (`trust: "oidc"`, the dashboard's default), as GCP and Azure work: an IAM OIDC
+  identity provider for roll's issuer (`/v1/secrets/oidc`, audience `sts.amazonaws.com`), and a
+  trust policy with the conditions `aud = sts.amazonaws.com` and `sub = roll-secrets:<project>`.
+  Each session is `AssumeRoleWithWebIdentity` with a token roll's issuer signs for the project:
+  roll holds no AWS credential at all. The issuer must be public over HTTPS
+  (`ROLL_CODE_PUBLIC_URL`).
+- **ExternalId** (`trust: "external_id"`, the API's default): roll's own AWS role assumes it (STS
+  AssumeRole with roll's credentials) with the condition `sts:ExternalId = roll-secrets:<project>`.
+- **Either way** registering a role assumes it once, and first tries a made-up project (its
+  ExternalId, or a token for it): a role that takes any (another customer's that trusts roll, say)
+  is refused, so no tenant can register and assume someone else's role.
 - **Ending a lease** doesn't end its session early (STS can't revoke one session): it stays valid at
   AWS until it expires, the TTL plus five minutes at most. To cut every session at once, revoke the
   role's older sessions in IAM. A session can't be renewed: resolve again for a new one.
@@ -262,8 +273,8 @@ the lease's TTL plus five minutes (15 minutes to 12 hours, within the role's own
 **IAM users' access keys**, rotated by roll as Infisical's AWS IAM rotation does, for what can't
 use a role's sessions (a vendor that takes only a key pair, an old CI). A project registers an IAM
 user next to one of its roles (`POST …/aws-users {name, role, user}`, `roll secrets aws-users add
-NAME USER --role ROLE`, the Integrations tab; admin): roll acts as that role (with the project's
-ExternalId), whose policy allows `iam:ListAccessKeys`, `iam:CreateAccessKey` and
+NAME USER --role ROLE`, the Integrations tab; admin): roll acts as that role (one that trusts roll
+by the project's ExternalId), whose policy allows `iam:ListAccessKeys`, `iam:CreateAccessKey` and
 `iam:DeleteAccessKey` on the user, and registering lists the user's keys to check. It's the link kind
 `aws_iam_user`, `managed` (`access_key_id` and `secret_access_key`, one credential `key`).
 
@@ -2459,9 +2470,11 @@ isn't in the workspace is 404.
 | `GET /aws-roles` | | `AwsRole[]` (`read` on the project) |
 | `POST /aws-roles` | `{name, role_arn}` | 201 `AwsRole` after assuming it (admin; 400 when its trust policy doesn't pin `sts:ExternalId`) |
 | `DELETE /aws-roles/{id}` | | 204 (admin; 409 `in_use` while a key links to it) |
+| `PATCH /aws-roles/{id}` | `{name?, role_arn?, trust?}` | `AwsRole` (admin; a new ARN or trust is proved as a new role's is, before anything changes; 409 `in_use` switching a role IAM users rotate through away from `external_id`; leases already issued run out) |
 | `GET /aws-users` | | `AwsUser[]` (`read` on the project) |
 | `POST /aws-users` | `{name, role, user}` | 201 `AwsUser` (`admin`; lists the user's keys as the role first: 400 with AWS's code) |
 | `DELETE /aws-users/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
+| `PATCH /aws-users/{id}` | `{name?, role?}` | `AwsUser` (admin; another ExternalId role of the project, proved by listing the user's keys through it; keys already issued keep working) |
 | `GET /rotations` | | `Rotation[]`: every managed credential the caller may read (environment, keys, resource, `rotate_days`, `issued_at`, `next_due`, `last_error`) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
@@ -2555,8 +2568,8 @@ type Change = { seq: number; environment: string; path: string; message: string;
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; withheld: string[]; sensitive: string[]; followed: Followed[] }; // followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; followed: Followed[]; digest?: string }; // digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld: string[]; sensitive: string[]; followed: Followed[] }; // plain: of linked, keys whose link field isn't a credential (a host, a port), which a consumer hiding secret values in logs may show (every other value is a secret); followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; followed: Followed[]; digest?: string }; // plain: as above; digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
 type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };

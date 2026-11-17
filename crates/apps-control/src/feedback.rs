@@ -24,6 +24,7 @@ const SCRIPT: &str = include_str!("../assets/feedback.js");
 /// Adds the tag to a page as it streams: before the first `</body>` (matched across chunks, in
 /// any case), or at the end of a page without one. Memory stays one chunk.
 struct Tagger {
+    tag: &'static [u8],
     held: Vec<u8>,
     done: bool,
 }
@@ -39,7 +40,7 @@ impl Tagger {
         buf.extend_from_slice(chunk);
         if let Some(at) = buf.windows(Self::CLOSE.len()).position(|w| w.eq_ignore_ascii_case(Self::CLOSE)) {
             self.done = true;
-            buf.splice(at..at, TAG.iter().copied());
+            buf.splice(at..at, self.tag.iter().copied());
             return buf;
         }
         let keep = (Self::CLOSE.len() - 1).min(buf.len());
@@ -51,7 +52,7 @@ impl Tagger {
         let mut rest = std::mem::take(&mut self.held);
         if !self.done {
             self.done = true;
-            rest.extend_from_slice(TAG);
+            rest.extend_from_slice(self.tag);
         }
         rest
     }
@@ -60,19 +61,33 @@ impl Tagger {
 /// A page with the button added as it streams; anything that isn't an uncompressed 200 HTML page
 /// passes as it came.
 pub fn add(resp: Response) -> Response {
+    tag(resp, TAG, true)
+}
+
+/// A page with `tag` added as it streams, before `</body>` (roll's own scripts: the feedback
+/// button, Web Vitals); anything that isn't an uncompressed 200 HTML page passes as it came.
+/// `personal`: the page is this visitor's now (no shared cache keeps it); otherwise every visitor
+/// gets the same bytes, so its caching stays the app's (its ETag made weak: the bytes changed).
+pub fn tag(resp: Response, tag: &'static [u8], personal: bool) -> Response {
     let html = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|t| t.trim_start().to_ascii_lowercase().starts_with("text/html"));
     let plain = resp.headers().get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).is_none_or(|e| e.eq_ignore_ascii_case("identity"));
     if resp.status() != StatusCode::OK || !html || !plain {
         return resp;
     }
     let (mut parts, body) = resp.into_parts();
-    // This visitor's page now: no shared cache may hand it to anyone else.
     parts.headers.remove(header::CONTENT_LENGTH);
-    parts.headers.remove(header::ETAG);
-    // An app's `no-store` stays: the page still mustn't be kept.
-    let no_store = parts.headers.get(header::CACHE_CONTROL).and_then(|v| v.to_str().ok()).is_some_and(|v| v.to_ascii_lowercase().contains("no-store"));
-    parts.headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(if no_store { "private, no-store" } else { "private, no-cache" }));
-    let stream = futures::stream::unfold((body.into_data_stream(), Tagger { held: Vec::new(), done: false }, false), |(mut s, mut t, ended)| async move {
+    if personal {
+        // This visitor's page now: no shared cache may hand it to anyone else.
+        parts.headers.remove(header::ETAG);
+        // An app's `no-store` stays: the page still mustn't be kept.
+        let no_store = parts.headers.get(header::CACHE_CONTROL).and_then(|v| v.to_str().ok()).is_some_and(|v| v.to_ascii_lowercase().contains("no-store"));
+        parts.headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(if no_store { "private, no-store" } else { "private, no-cache" }));
+    } else if let Some(e) = parts.headers.get(header::ETAG).and_then(|v| v.to_str().ok()).filter(|e| !e.starts_with("W/")).map(|e| format!("W/{e}"))
+        && let Ok(v) = HeaderValue::from_str(&e)
+    {
+        parts.headers.insert(header::ETAG, v);
+    }
+    let stream = futures::stream::unfold((body.into_data_stream(), Tagger { tag, held: Vec::new(), done: false }, false), |(mut s, mut t, ended)| async move {
         if ended {
             return None;
         }
@@ -117,7 +132,7 @@ pub fn script(target: &str) -> Response {
 mod tests {
     #[test]
     fn the_tag_goes_before_the_body_closes_even_across_chunks() {
-        let mut t = super::Tagger { held: Vec::new(), done: false };
+        let mut t = super::Tagger { tag: super::TAG, held: Vec::new(), done: false };
         let mut out = t.push(b"<p>hi</p></BO");
         out.extend(t.push(b"DY></html>"));
         out.extend(t.finish());
