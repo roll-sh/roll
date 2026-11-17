@@ -2787,7 +2787,9 @@ staging's database. It's first below.
 On main: #20, #62, #63 (the CSI provider), #65 (conditional reads and client caches), #85
 (roll-access's tokens), #74 (live links' digests), #66 (Terraform without values in state) and
 #67 (transit in the Go and Python clients, 2026-11-17 as 0fa832ddf) and #151 (previews follow
-their branches, 2026-11-17 as 48868a1e2; roll previews fills followed names from their branch next).
+their branches, 2026-11-17 as 48868a1e2; with roll previews' #160, fdffd596f, a preview's every
+followed key, renamed or not, gets its branch's value or a blank: the hole the twenty-eighth review
+found is closed, checked live).
 In pull requests to main, each green: #68 (AWS through roll's issuer; roles and users edited in
 place; next to land, pre-gated on main), #69–#73, #75–#77, #79 with #95,
 #81 (read quotas across the fleet), #82 (metrics), #83 (scheduled backups), #86 (rotation
@@ -2807,14 +2809,17 @@ Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (
    Caddy and lego get certificates from a project's CA with no roll client (lego and certbot checked
    against a local rolld). Accounts always bind an EAB key (looked up on every request, ended with
    its maker's reach); `dns-01` through public DNS, `http-01` through the guarded client, and
-   pre-authorized names for clusters roll can't reach (off by default). Next on it: `tls-alpn-01`,
-   reusing valid authorizations across orders, and checking pre-authorized names through a gateway
-   (item 6) once that's built.
+   pre-authorized names for clusters roll can't reach (off by default). Building on it:
+   `tls-alpn-01` and reusing valid authorizations across orders; then checking pre-authorized names
+   through a gateway (item 6) once that's built.
 4. **Active Directory, done against Samba AD** (#132): every step run against a real domain
    controller with a delegated bind account. It found AD's hour-long acceptance of a reset account's
    previous password, now closed by a throwaway reset first; logins also hand out the UPN and
    `sAMAccountName`. Left for a Windows Server: its password policies, AD CS certificates, LDAP
    signing and channel binding, replication between domain controllers (an account of the user's).
+4b. **Elasticsearch/OpenSearch and Cassandra/ScyllaDB outside roll** (building:
+   `feature/roll-secrets-outside-search-cql`, on #132): Vault's database engine has both; two
+   roles taking turns and a login per lease, as the other outside engines, each checked live.
 5. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
    backup schedules, rotation windows, directories, Snowflake accounts, ACME bindings): the
    resources once their routes are on main, the tools with roll MCP.
