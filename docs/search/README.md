@@ -208,6 +208,18 @@ clusters appear in workspace projects (the `search` resource kind). A person who
 sees their own clusters, and the Search page leaves out the storage location and the cache, which
 `GET /v1/search` doesn't give them.
 
+The Playground tab compares two configurations of one query on an index or data stream, side by
+side (`lib/search-playground.ts`): keyword (`multi_match` over the mapping's text fields), semantic
+(`semantic` on a `semantic_text` field, or `knn` on a `dense_vector` field with the query embedded
+first through a text-embedding endpoint, because roll's `knn` doesn't resolve
+`query_vector_builder.text_embedding`), hybrid (an `rrf` or weighted `linear` retriever over both),
+or a raw body with `{{query}}`. Each hit shows its rank, score, `_id`, highlighted passages (the
+`semantic` highlighter's chunks for `semantic_text`), how it moved between A and B, and an Explain
+tree (`_explain`; a `semantic` query, which `_explain` can't rewrite, is explained by a `_search`
+limited to that id; a hybrid hit shows each part). Either side copies as curl, Python or JavaScript
+with the key from `$ROLL_SEARCH_API_KEY` (OpenSearch-flavor clusters: OpenSearch's clients and
+`$OPENSEARCH_USERNAME`/`$OPENSEARCH_PASSWORD`).
+
 ## Metering and pricing
 
 Every 60 s the control plane accounts each loaded cluster's loaded time exactly (load and unload
