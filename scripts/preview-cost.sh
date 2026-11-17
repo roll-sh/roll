@@ -454,7 +454,7 @@ if [ -n "$PG_BRANCH" ]; then
 fi
 
 say "a preview's own variable reaches its running service; roll's names are refused"
-ROLL_CLI="$ROOT/target/debug/roll"
+ROLL_CLI=${ROLL_CLI:-"$ROOT/target/debug/roll"}
 ROLL_API_URL="http://$API" "$ROLL_CLI" preview env "$PV" FEATURE_FLAG=on >/dev/null
 if ROLL_API_URL="http://$API" "$ROLL_CLI" preview env "$PV" DATABASE_URL=postgres://elsewhere >/dev/null 2>&1; then echo "DATABASE_URL should be refused as a preview variable"; exit 1; fi
 VAR_SEEN=""
