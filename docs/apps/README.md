@@ -1465,7 +1465,7 @@ name (creating another of that name says to restore it or delete it for good). T
 Settings → Apps lists it under Recently deleted (`GET /v1/apps/services?deleted=true`,
 `roll apps restore --list`); Restore (`POST …/services/{id}/restore`, `roll apps restore -s
 <name>`) clears the mark, places its card on the canvas again and loads its environments' live
-deployments as a new owner would. Its activity says who deleted and restored it. A deleted
+deployments as a new owner would (a token needs `deploy` for it: production runs again). Its activity says who deleted and restored it. A deleted
 service's delete (Delete now) deletes it for good at once; otherwise the prune sweep does 48
 hours after the delete, on its owner (a node takes the lease of one nobody holds): everything
 the old delete removed goes then, its volume after a last backup kept a week. The flow is

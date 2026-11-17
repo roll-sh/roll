@@ -39,7 +39,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}` | | `Service` | read |
 | `PATCH /v1/apps/services/{id}` | `ServicePatch` | `Service` | write |
 | `DELETE /v1/apps/services/{id}` | | 204: the service stops (pending deploys cancelled, instances removed) and is hidden, kept 48 hours for a restore with its environments, volumes, images, backups, domains, links and name; every other route of it is a 404. A deleted service's `DELETE` deletes it for good now (frees its name); the prune sweep does after 48 hours | delete |
-| `POST /v1/apps/services/{id}/restore` | | `Service`: a deleted service back as it was, its live deployments loaded again and its card placed on the canvas; 409 when it isn't deleted | write |
+| `POST /v1/apps/services/{id}/restore` | | `Service`: a deleted service back as it was, its live deployments loaded again and its card placed on the canvas; 409 when it isn't deleted | deploy |
 | `GET /v1/apps/services/{id}/activity?all=` | | `Event[]` (`audit.*`, newest first, 200): who changed what, never a value; `all=1`: every kind (deploys, failures, crash loops, alerts, domains, spend), the service's timeline | read |
 | `GET /v1/apps/services/{id}/links` | | `Link[]` | read |
 | `PUT /v1/apps/services/{id}/links/{kind}/{ref}` | `{prefix?}` | `Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it) | write |
