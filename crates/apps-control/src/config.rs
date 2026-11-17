@@ -121,6 +121,7 @@ mod tests {
             public: false,
             drain_s: Some(1),
             cpu_target: Some(1),
+            memory_target: Some(1),
             restart: Restart::Never,
             restart_tries: Some(1),
             affinity: true,

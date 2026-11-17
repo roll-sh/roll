@@ -72,6 +72,8 @@ export interface Run {
   drain_s?: number;
   /** A web service also scales on CPU: another instance while they average over this percent for a minute (10–100). */
   cpu_target?: number;
+  /** And on memory: another while they average over this percent of their memory for a minute (10–100). */
+  memory_target?: number;
   suspend_after_s: number;
   sleep_after_s: number;
   volume?: { mount: string; size_gb: number };

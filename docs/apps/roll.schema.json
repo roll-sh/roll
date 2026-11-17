@@ -129,6 +129,12 @@
           "minimum": 0,
           "description": "Scale out above this CPU percent."
         },
+        "memory_target": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 100,
+          "description": "Scale out above this percent of each instance's memory."
+        },
         "restart": {
           "type": "string",
           "enum": [
