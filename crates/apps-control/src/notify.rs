@@ -18,8 +18,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 18] = [
+pub const EVENTS: [&str; 19] = [
     "deploy.failed",
+    "error.new",
     "crash_loop",
     "deploy.active",
     "spend.alert",
@@ -38,7 +39,7 @@ pub const EVENTS: [&str; 18] = [
     "volume.backup_failed",
     "volume.full",
 ];
-const DEFAULT_EVENTS: [&str; 15] = ["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
+const DEFAULT_EVENTS: [&str; 16] = ["deploy.failed", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
 /// (whoever heard an alert hears it clear; there's nothing else to ask for).
 fn wants(events: &[String], kind: &str, data: &Value) -> bool {
@@ -377,6 +378,7 @@ impl Apps {
             "alert.errors" => (format!("{what}: errors"), format!("{}% of its {} requests in five minutes answered 5xx (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["threshold"])),
             "alert.latency" => (format!("{what}: slow"), format!("Its p95 latency reached {} ms (the alert is at {} ms).", e.data["value"], e.data["threshold"])),
             "alert.capacity" => (format!("{what}: at capacity"), format!("{}% of its {} requests in five minutes found all {} instances busy ({} requests each at once). Raise its max instances (`roll apps set --max`) or its concurrency, or make it answer faster (the alert is at {}%).", e.data["value"], e.data["requests"], e.data["max_instances"], e.data["concurrency"], e.data["threshold"])),
+            "error.new" => (format!("{what}: a new error, {}", e.data["name"].as_str().unwrap_or("an error")), "Its log has an error it hasn't had before. The Metrics tab's Errors shows it whole, with how often it happens.".to_string()),
             "alert.log" => (format!("{what}: its log says {}", e.data["pattern"]), format!("{} lines in five minutes matched (the alert is at {}).", e.data["count"], e.data["threshold"])),
             "volume.full" => (format!("{what}: its volume is {}% full", e.data["pct"]), format!("It holds {:.1} GB of its {} GB: give it more room (`roll apps set --volume`) or delete what it doesn't need before it fills up.", e.data["used_bytes"].as_f64().unwrap_or(0.0) / 1_073_741_824.0, e.data["size_gb"])),
             "volume.backup_failed" => (format!("{what}: volume backup failed"), format!("The daily backup of its volume failed: {}. The last one that worked is still there.", e.data["error"].as_str().unwrap_or("no reason given"))),

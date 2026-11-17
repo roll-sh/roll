@@ -1751,6 +1751,7 @@ impl Apps {
                 self.sweep_uploads().await;
                 for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {
                     self.judge_alerts(&l).await;
+                    self.note_new_errors(&l).await;
                 }
             }
             // roll's GitHub App's events for the services here, every second.

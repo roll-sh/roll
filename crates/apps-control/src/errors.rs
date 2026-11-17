@@ -240,7 +240,47 @@ pub fn occurrences(lines: &[LogLine]) -> Vec<Occurrence> {
     out
 }
 
+/// What an error is, never what it says (a notification carries this, not a line of the log): its
+/// type (`ZeroDivisionError`, `java.lang.IllegalStateException`), `panic`, or `an error line`.
+pub fn name_of(o: &Occurrence) -> String {
+    let lines: Vec<&str> = o.text.lines().collect();
+    let name = match o.kind {
+        Kind::Go => "panic".to_string(),
+        Kind::Line => return "an error line".into(),
+        k => parts(k, &lines).0,
+    };
+    let name: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || "._$".contains(*c)).take(120).collect();
+    if name.is_empty() { "an error".into() } else { name }
+}
+
 impl Apps {
+    /// New errors in an environment's log since it was last looked at (the alerts' pass, each
+    /// minute on the owner): a fingerprint it has never had is an `error.new` event, once ever
+    /// (kept in `error_groups`, so a restart doesn't say it again). The event names the error's
+    /// type, never its message.
+    pub async fn note_new_errors(self: &Arc<Self>, l: &crate::live::EnvLive) {
+        let key = crate::env_key(&l.service, &l.env);
+        let now = code_sql::now_ms();
+        let since = self.errors_seen.lock().insert(key, now).unwrap_or(now - 60_000);
+        // A little before, so a trace that began just before the last look is read whole.
+        let (lines, _) = self.logs.read(&format!("env:{}/{}", l.service, l.env), |x| matches!(x.stream, Stream::Stdout | Stream::Stderr), Some(since - 30_000), None, 20_000).await;
+        let mut said = BTreeSet::new();
+        for o in occurrences(&lines).into_iter().filter(|o| o.at >= since) {
+            if !said.insert(o.fingerprint.clone()) {
+                continue;
+            }
+            let name = name_of(&o);
+            let (sid, e, f, n, at) = (l.service.clone(), l.env.clone(), o.fingerprint.clone(), name.clone(), o.at);
+            if !self.db(move |s| s.remember_error(&sid, &e, &f, &n, at)).await.unwrap_or(false) {
+                continue;
+            }
+            let (sid, e, dep) = (l.service.clone(), l.env.clone(), l.template().map(|t| t.deployment.clone()));
+            let data = json!({ "fingerprint": o.fingerprint, "kind": o.kind.name(), "name": name });
+            let _ = self.db(move |s| s.add_event("error.new", &sid, &e, dep.as_deref(), &data)).await;
+            l.log.stream(Stream::System).line(format!("a new error: {name} ({})", o.fingerprint));
+        }
+    }
+
     /// `GET …/environments/{env}/errors?minutes=`: the last 5–10,080 minutes' errors, grouped,
     /// the most frequent first (at most 50).
     pub async fn errors(self: &Arc<Self>, service: &str, env: &str, minutes: i64) -> Result<Value> {

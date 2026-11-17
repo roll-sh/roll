@@ -250,6 +250,8 @@ pub struct Apps {
     visits: Mutex<HashMap<String, visit::Seen>>,
     /// Web Vitals beacons kept this minute, by environment: (minute, count).
     pub(crate) vitals_seen: Mutex<HashMap<String, (i64, u32)>>,
+    /// When each environment's log was last looked at for new errors ([`errors`]).
+    pub(crate) errors_seen: Mutex<HashMap<String, i64>>,
     /// Each environment's `needs_deploy` as last worked out (it decrypts every variable and asks
     /// each linked product for its own): when, the settings generation and active deployment it
     /// was for, and the answer. Good for a minute, or until either moves.
@@ -408,6 +410,7 @@ impl Apps {
             access_gen: std::sync::atomic::AtomicU64::new(0),
             visits: Mutex::new(HashMap::new()),
             vitals_seen: Mutex::new(HashMap::new()),
+            errors_seen: Mutex::new(HashMap::new()),
             needs: Mutex::new(HashMap::new()),
             settings_gen: std::sync::atomic::AtomicU64::new(0),
             changes: tokio::sync::broadcast::channel(256).0,

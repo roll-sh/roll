@@ -993,8 +993,16 @@ each opens whole), `roll apps errors [--sample]`.
 - **Each group:** its count, first and last seen, how many instances, and the newest whole as
   its sample (8 KiB). The most frequent first, at most 50, from at most the newest 100,000 lines.
 
+- **A new one tells someone** (Sentry's and Error Reporting's new-issue alerts): each minute
+  the owner reads what's new in the log, and a fingerprint the environment has never had is an
+  `error.new` event, once ever (`error_groups` keeps them, so a restart doesn't repeat one), for
+  notifications (on by default) and webhooks. It names the error's type (`ValueError`, `panic`,
+  `an error line`), never its message, as `alert.log` names its pattern and never a line.
+
 `errors.rs`' unit test joins and groups Python, Node, JVM and Go traces and JSON error lines;
-`api.rs::errors_group_from_the_environments_log` reads them back over the API.
+`api.rs::errors_group_from_the_environments_log` reads them back over the API, and
+`a_new_error_is_an_event_once` sees one event for an error, none for it again, one for another,
+and never the card number in its message.
 
 ## Log levels
 
@@ -2530,25 +2538,23 @@ put items 1–11 first. A second review that day (after #78, against the same si
    doesn't follow and every pull request (`GitPush`, `GitPull`), each checked against the
    repository's refs; previews builds the environments, comments and gates forks behind a
    writer's approval (its side is the previews thread's, stacked on this).
-2. **A new error tells someone** (Sentry's and Error Reporting's new-issue alerts): an `error.new`
-   event when a fingerprint first appears (a group's first sighting kept per environment), for
-   notifications and webhooks; and the log's own view showing a trace as one entry. The grouping
-   itself is built ("Errors").
-3. **Wait for CI and statuses on Git URL services**: check runs read through the GitHub App, GitLab
+2. **Wait for CI and statuses on Git URL services**: check runs read through the GitHub App, GitLab
    and Bitbucket statuses through the Git login (through `PublicOnly`), so `wait_for_ci` and commit
    statuses work beyond roll code repos.
-4. **Imports from other platforms** (Render's Heroku migration, Railway's and Koyeb's): `render.yaml`,
+3. **Imports from other platforms** (Render's Heroku migration, Railway's and Koyeb's): `render.yaml`,
    `fly.toml`, `railway.json`/`.toml` and `app.json`+Procfile converted to roll.toml beside the
    Compose converter.
-5. **Rollouts that wait for a person** (Vercel's manual Rolling Releases, Cloud Run's held split):
+4. **Rollouts that wait for a person** (Vercel's manual Rolling Releases, Cloud Run's held split):
    `rollout.manual`, a route to advance or abort, the Deployments tab.
-6. **Cache purges by tag** (`Vercel-Cache-Tag`, `Netlify-Cache-Tag`, surrogate keys): a tag index in
+5. **Cache purges by tag** (`Vercel-Cache-Tag`, `Netlify-Cache-Tag`, surrogate keys): a tag index in
    the response cache and `{tags}` on `…/cache/purge`.
-7. **Health check settings, and workers' health** (Fly's `[checks]`): interval and failures per
+6. **Health check settings, and workers' health** (Fly's `[checks]`): interval and failures per
    service, and a worker's `health_command` run in its instance, so a hung consumer is replaced.
-8. **Variables as files in builds**: a file variable mounted into the build as a BuildKit
+7. **Variables as files in builds**: a file variable mounted into the build as a BuildKit
    secret (`--mount=type=secret,target=…`) for an `.npmrc` or a private registry's login, never in
    a layer.
+8. **A stack trace as one entry in the log view**: the Logs tab and `roll apps logs` showing a
+   trace's lines together (`errors::occurrences` already joins them), with a link to its group.
 9. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
    on main, `watch_secrets` holds one `SecretSource::wait_digest` long poll per watched
    environment instead of polling every minute. Each watched environment needs a task of its
