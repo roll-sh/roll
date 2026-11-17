@@ -917,7 +917,9 @@ impl Engine {
             let n = seen.entry(kind).or_default();
             let suffix = (*n > 0).then(|| env_suffix(&parent));
             *n += 1;
-            for (k, v) in suffixed(vars, suffix.as_deref()) {
+            // With the names a roll secrets link to the parent would hand out, so the parent's
+            // values under them don't survive the secrets layer (`names::with_standard`).
+            for (k, v) in suffixed(crate::names::with_standard(kind, vars), suffix.as_deref()) {
                 set(&mut env, &k, v);
             }
         }

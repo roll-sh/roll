@@ -342,6 +342,16 @@ A preview's secrets are an environment of the project's secrets (`feature/roll-s
 docs/secrets.md) called `pv-<preview id>` (an ephemeral environment, labelled `preview`), inheriting from `secrets.base` (`development` by
 default) with the project's `env` overrides and the branched resources' URLs on top.
 
+- **A link to a branched parent never hands out the parent's values.** A secrets environment
+  inherits its base's links, so a link there to Postgres project P (`PGPASSWORD`, `PGHOST`…), a
+  stream (`KAFKA_USERNAME`…), a bucket, Redis or a search cluster that the preview branched would
+  still give the parent's (a fork's code included). The branch's values go by those names too,
+  set after the secrets layer so they win (`names::with_standard`: `PG*` parsed from the branch's
+  app URI, the stream's SASL login, the search branch's key and login), and a credential the
+  branch has none for is blank (a NoSQL HTTP token, Kafka client properties). The roll secrets
+  thread follows with the exact fix: a link to a branched parent isn't resolved at all and comes
+  back as `followed`, its name filled from the branch even under a custom prefix.
+  `a_branchs_values_go_by_the_names_a_link_to_its_parent_would_use`.
 - **Protected values stay out of preview code.** A preview resolves its secrets as `untrusted`
   (roll secrets' flag): nothing of a protected environment resolves, whether directly, by
   reference, by import or through the base. The preview gets its own overrides and links. Only
