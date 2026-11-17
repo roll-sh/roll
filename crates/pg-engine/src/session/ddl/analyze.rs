@@ -709,6 +709,9 @@ impl Ddl<'_, '_> {
             }
             _ => {}
         }
+        if tg.ty == DataType::TsVector {
+            return Ok(Some(tsvector_stats(tg, values, &width)));
+        }
         let (eq, lt) = type_ops(&tg.ty);
         // (Values sort and compare under the column's collation, attcollation: a
         // non-byte-order one's groups and order are its own.)
@@ -1682,6 +1685,82 @@ fn trivial_stats(
         distinct: 0.0,
         slots: Vec::new(),
     })
+}
+
+/// compute_tsvector_stats (ts_typanalyze): the null fraction, the average width, the column
+/// taken as unique, and the most common lexemes by Lossy Counting, sorted by length then bytes
+/// (tsmatchsel's binary search), their frequencies followed by the least and the greatest.
+fn tsvector_stats(tg: &Target, values: &[&Value], width: &dyn Fn(&Value) -> usize) -> ColStats {
+    let num_mcelem = tg.stattarget as usize * 10;
+    let bucket_width = (num_mcelem + 10) * 1000 / 7;
+    // (lexeme, frequency, delta)
+    let mut items: Vec<(String, usize, usize)> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let (mut null_cnt, mut total_width, mut lexeme_no, mut b_current) = (0usize, 0f64, 0usize, 1usize);
+    for v in values {
+        let Value::TsVector(tv) = v else {
+            null_cnt += 1;
+            continue;
+        };
+        total_width += width(v) as f64;
+        for lx in &tv.lexemes {
+            match index.get(&lx.word) {
+                Some(&i) => items[i].1 += 1,
+                None => {
+                    index.insert(lx.word.clone(), items.len());
+                    items.push((lx.word.clone(), 1, b_current - 1));
+                }
+            }
+            lexeme_no += 1;
+            if lexeme_no % bucket_width == 0 {
+                // prune_lexemes_hashtable.
+                items.retain(|it| it.1 + it.2 > b_current);
+                index = items.iter().enumerate().map(|(i, it)| (it.0.clone(), i)).collect();
+                b_current += 1;
+            }
+        }
+    }
+    let samplerows = values.len();
+    if null_cnt >= samplerows {
+        return ColStats { attnum: 0, inherit: false, nullfrac: 1.0, width: 0, distinct: 0.0, slots: Vec::new() };
+    }
+    let nonnull_cnt = (samplerows - null_cnt) as f64;
+    let nullfrac = null_cnt as f64 / samplerows as f64;
+    let mut st = ColStats {
+        attnum: 0,
+        inherit: false,
+        nullfrac: nullfrac as f32,
+        width: (total_width / nonnull_cnt) as i32,
+        distinct: (-1.0 * (1.0 - nullfrac)) as f32,
+        slots: Vec::new(),
+    };
+    let cutoff = 9 * lexeme_no / bucket_width;
+    let mut track: Vec<&(String, usize, usize)> = items.iter().filter(|it| it.1 > cutoff).collect();
+    let mut minfreq = track.iter().map(|t| t.1).min().unwrap_or(lexeme_no).min(lexeme_no);
+    let maxfreq = track.iter().map(|t| t.1).max().unwrap_or(0);
+    let mut keep = track.len();
+    if num_mcelem < track.len() {
+        track.sort_by_key(|t| std::cmp::Reverse(t.1));
+        minfreq = track[num_mcelem - 1].1;
+        keep = num_mcelem;
+    }
+    track.truncate(keep);
+    if !track.is_empty() {
+        track.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.0.as_bytes().cmp(b.0.as_bytes())));
+        let mut numbers: Vec<f32> = track.iter().map(|t| (t.1 as f64 / nonnull_cnt) as f32).collect();
+        numbers.push((minfreq as f64 / nonnull_cnt) as f32);
+        numbers.push((maxfreq as f64 / nonnull_cnt) as f32);
+        st.slots.push(StatSlot {
+            kind: KIND_MCELEM,
+            // (TextEqualOperator, the default collation.)
+            op: 98,
+            coll: 100,
+            numbers: Some(numbers),
+            values: Some((DataType::Text, track.iter().map(|t| t.0.clone()).collect())),
+            parsed: Default::default(),
+        });
+    }
+    st
 }
 
 /// compute_array_stats: the most common elements (with the minimum, maximum and null-element

@@ -137,6 +137,8 @@ pub fn type_width(ty: &DataType) -> u32 {
             let precision = ((*m - 4) >> 16) & 0xffff;
             Some(8 + 2 * ((precision as i64 + 6) / 4))
         }
+        // (type_maximum_size: the bits in bytes, and two int32 headers.)
+        DataType::Bit(m) | DataType::Varbit(m) if *m > 0 => Some((*m as i64 + 7) / 8 + 8),
         _ => None,
     };
     match max {
@@ -666,18 +668,50 @@ pub(crate) fn io_cast(from: &DataType, to: &DataType) -> bool {
             T::Bool | T::Char | T::Name | T::Inet | T::Cidr | T::Xml | T::Regclass
         ) || string(t)
     };
-    (string(to) && !with_function(from)) || (string(from) && !with_function(to))
+    // (regclass has text's input function, text(regclass) no cast: CoerceViaIO.)
+    (string(to) && !(with_function(from) && !matches!(from, T::Regclass))) || (string(from) && !with_function(to))
 }
 
 fn binary_coercible(from: &DataType, to: &DataType) -> bool {
     use DataType as T;
+    // (pg_cast's castmethod 'b': integer, oid and the reg* types among themselves, through
+    // integer or oid, and regproc / regprocedure, regoper / regoperator.)
+    let reg = |t: &DataType| {
+        matches!(
+            t,
+            T::Regclass
+                | T::Regtype
+                | T::Regproc
+                | T::Regprocedure
+                | T::Regnamespace
+                | T::Regrole
+                | T::Regconfig
+                | T::Regdictionary
+                | T::Regoper
+                | T::Regoperator
+                | T::Regcollation
+        )
+    };
+    let oidish = |t: &DataType| matches!(t, T::Int4 | T::Oid);
     from == to
         // (Dropping a length modifier is a relabeling.)
         || (from.same_base(to) && to.typmod() < 0)
         || matches!(
             (from, to),
-            (T::Varchar(_) | T::Text, T::Varchar(_) | T::Text) | (T::Name, T::Text)
+            (T::Varchar(_) | T::Text, T::Varchar(_) | T::Text)
+                | (T::Name, T::Text)
+                | (T::Xml, T::Text | T::Varchar(_))
+                | (T::Cidr, T::Inet)
+                | (T::Regproc, T::Regprocedure)
+                | (T::Regprocedure, T::Regproc)
+                | (T::Regoper, T::Regoperator)
+                | (T::Regoperator, T::Regoper)
         )
+        // (To a length, the length coercion function runs all the same.)
+        || (matches!(from, T::Text | T::Varchar(_) | T::Xml) && matches!(to, T::Bpchar(m) if *m < 0))
+        || (matches!(from, T::Bit(_) | T::Varbit(_)) && matches!(to, T::Bit(m) | T::Varbit(m) if *m < 0))
+        || (oidish(from) && (oidish(to) || reg(to)))
+        || (reg(from) && oidish(to))
 }
 
 /// A constant (after folding): Some(None) for a non-constant one that is still a
@@ -849,6 +883,9 @@ impl Est<'_> {
                     0.5
                 }
             }
+            // function_selectivity: a function called by name (not an operator), without a
+            // support function, has its default.
+            Expr::Call(d, _, _) if d.name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') => 0.3333333,
             Expr::Call(d, args, _) if args.len() == 2 => {
                 // (An equality under a nondeterministic collation: the most common values
                 // compared by it, var_eq_const with the operator's collation.)
@@ -872,6 +909,18 @@ impl Est<'_> {
                 }
                 if let Some(o) = user_operator(self.cat, d)
                     && let Some(sel) = self.user_op(self.user, o, d, &args[0], &args[1])
+                {
+                    return sel;
+                }
+                if d.name == "@@"
+                    && crate::sql::func::oper_row(d.name, d).rest == 3686
+                    && let Some(sel) = self.tsmatchsel(&args[0], &args[1])
+                {
+                    return sel;
+                }
+                if matches!(d.name, "@>" | "&&" | "<@")
+                    && crate::sql::func::oper_row(d.name, d).rest == 3817
+                    && let Some(sel) = self.arraycontsel(d.name, &args[0], &args[1])
                 {
                     return sel;
                 }
@@ -1114,6 +1163,119 @@ impl Est<'_> {
             sel = 1.0 - sel - nullfrac;
         }
         Some(sel.clamp(0.0, 1.0))
+    }
+
+    /// tsmatchsel of `l @@ r`, a tsvector column against a constant tsquery: tsquerysel over
+    /// the column's most common lexemes (None: a default it doesn't know better than).
+    fn tsmatchsel(&self, l: &Expr, r: &Expr) -> Option<f64> {
+        let (v, c) = match (self.var(l), self.constant(r)) {
+            (Some(v), Some(c)) => (v, c),
+            _ => match (self.constant(l), self.var(r)) {
+                (Some(c), Some(v)) => (v, c),
+                _ => return None,
+            },
+        };
+        let Some(c) = c else {
+            return Some(0.0);
+        };
+        let (DataType::TsVector, Value::TsQuery(q)) = (v.ty(), &c) else {
+            return None;
+        };
+        if q.items.is_empty() {
+            return Some(0.0);
+        }
+        let Some(st) = v.stats(self.cat) else {
+            return Some(ts_opr_selec(&q.items, 0, None, 0.0));
+        };
+        let (vals, nums) = slot(st, 4, self.fmt).unwrap_or_default();
+        let sel = if !vals.is_empty() && nums.len() == vals.len() + 2 {
+            let lookup: Vec<(&str, f64)> = vals
+                .iter()
+                .zip(&nums)
+                .map(|(v, n)| (if let Value::Text(t) = v { &**t } else { "" }, *n))
+                .collect();
+            ts_opr_selec(&q.items, 0, Some(&lookup), nums[nums.len() - 2])
+        } else {
+            ts_opr_selec(&q.items, 0, None, 0.0)
+        };
+        Some(sel * (1.0 - st.nullfrac as f64))
+    }
+
+    /// arraycontsel of `l op r` (`@>`, `&&`, `<@`) for an array column against a constant
+    /// array: calc_arraycontsel from the column's most common elements (None: the operator's
+    /// default, which `<@` keeps, mcelem_array_contained_selec not being modelled).
+    fn arraycontsel(&self, op: &str, l: &Expr, r: &Expr) -> Option<f64> {
+        let (v, c, op) = match (self.var(l), self.constant(r)) {
+            (Some(v), Some(c)) => (v, c, op),
+            _ => match (self.constant(l), self.var(r)) {
+                (Some(c), Some(v)) => (
+                    v,
+                    c,
+                    match op {
+                        "@>" => "<@",
+                        "<@" => "@>",
+                        o => o,
+                    },
+                ),
+                _ => return None,
+            },
+        };
+        let Some(c) = c else {
+            return Some(0.0);
+        };
+        let (DataType::Array(et), Value::Array(a)) = (v.ty(), &c) else {
+            return None;
+        };
+        if **et != a.elem || op == "<@" {
+            return None;
+        }
+        // (A NULL in the constant: `@>` matches nothing, `&&` ignores it.)
+        let mut items: Vec<&Value> = Vec::with_capacity(a.items.len());
+        for x in &a.items {
+            if x.is_null() {
+                if op == "@>" {
+                    return Some(0.0);
+                }
+            } else {
+                items.push(x);
+            }
+        }
+        let ty = a.elem.clone();
+        items.sort_by(|x, y| cmp_as(x, y, &ty));
+        // mcelem_array_contain_overlap_selec.
+        let stats = v.stats(self.cat);
+        let (vals, nums) = stats.and_then(|st| slot(st, 4, self.fmt)).unwrap_or_default();
+        let numbers = !vals.is_empty() && nums.len() == vals.len() + 3;
+        let minfreq = if numbers { nums[vals.len()] } else { 2.0 * 0.005 };
+        let mut selec: f64 = if op == "@>" { 1.0 } else { 0.0 };
+        let mut at = 0;
+        for (i, x) in items.iter().enumerate() {
+            if i > 0 && cmp_as(items[i - 1], x, &ty) == Ordering::Equal {
+                continue;
+            }
+            let mut matched = false;
+            while at < vals.len() {
+                match cmp_as(&vals[at], x, &ty) {
+                    Ordering::Less => at += 1,
+                    o => {
+                        matched = o == Ordering::Equal;
+                        break;
+                    }
+                }
+            }
+            let elem = if matched && numbers {
+                at += 1;
+                nums[at - 1]
+            } else {
+                0.005_f64.min(minfreq / 2.0)
+            };
+            selec = if op == "@>" { selec * elem } else { selec + elem - selec * elem };
+            selec = selec.clamp(0.0, 1.0);
+        }
+        if let Some(st) = stats {
+            selec *= 1.0 - st.nullfrac as f64;
+        }
+        Some(selec.clamp(0.0, 1.0))
     }
 
     /// scalararraysel_containment: `const = ANY (array column)` estimated as `column @>
@@ -2018,7 +2180,9 @@ pub fn ops(e: &Expr) -> usize {
 pub fn qual_cost(e: &Expr) -> f64 {
     let mut n = 0.0;
     e.walk(&mut |x| match x {
-        Expr::Call(..) => n += 1.0,
+        // (Its function's procost: 10 or 100 for some built-ins, the text search, XML and
+        // privilege functions.)
+        Expr::Call(d, ..) => n += builtin_proc(d.oid).map_or(1.0, |(_, _, cost)| cost),
         // (GREATEST / LEAST: a MinMaxExpr, cost_qual_eval_walker's one operator.)
         Expr::MinMax(..) => n += 1.0,
         // (A row comparison checks every pair, once: its `=`s aren't calls of their own.)
@@ -2049,6 +2213,55 @@ pub fn qual_cost(e: &Expr) -> f64 {
         _ => {}
     });
     n * CPU_OPERATOR_COST
+}
+
+/// tsquery_opr_selec: a tsquery's selectivity from its lexemes' frequencies among the most
+/// common lexemes (sorted by length, then bytes), item `i` on (polish notation).
+fn ts_opr_selec(items: &[crate::types::tsearch::QueryItem], i: usize, lookup: Option<&[(&str, f64)]>, minfreq: f64) -> f64 {
+    use crate::types::tsearch::{OP_AND, OP_NOT, OP_OR, OP_PHRASE, QueryItem};
+    const DEFAULT_TS_MATCH_SEL: f64 = 0.005;
+    let sel = match items.get(i) {
+        Some(QueryItem::Val(op)) if op.prefix => {
+            let Some(lk) = lookup.filter(|l| l.len() >= 100) else {
+                return DEFAULT_TS_MATCH_SEL * 4.0;
+            };
+            let (mut matched, mut all, mut n) = (0.0f64, 0.0f64, 0usize);
+            for (w, f) in lk {
+                if w.len() >= op.word.len() && w.as_bytes()[..op.word.len()] == *op.word.as_bytes() {
+                    matched += f - matched * f;
+                    n += 1;
+                }
+                all += f - all * f;
+            }
+            let (matched, all) = (matched.clamp(0.0, 1.0), all.clamp(0.0, 1.0));
+            let s = matched + (1.0 - all) * (n as f64 / lk.len() as f64);
+            s.max(DEFAULT_TS_MATCH_SEL.min(minfreq / 2.0))
+        }
+        Some(QueryItem::Val(op)) => {
+            let Some(lk) = lookup else {
+                return DEFAULT_TS_MATCH_SEL;
+            };
+            let key = op.word.as_bytes();
+            match lk.binary_search_by(|(w, _)| w.len().cmp(&key.len()).then_with(|| w.as_bytes().cmp(key))) {
+                Ok(j) => lk[j].1,
+                Err(_) => DEFAULT_TS_MATCH_SEL.min(minfreq / 2.0),
+            }
+        }
+        Some(QueryItem::Opr { oper, left, .. }) => {
+            let s1 = ts_opr_selec(items, i + 1, lookup, minfreq);
+            match *oper {
+                OP_NOT => 1.0 - s1,
+                OP_AND | OP_PHRASE => s1 * ts_opr_selec(items, i + *left as usize, lookup, minfreq),
+                OP_OR => {
+                    let s2 = ts_opr_selec(items, i + *left as usize, lookup, minfreq);
+                    s1 + s2 - s1 * s2
+                }
+                _ => 0.0,
+            }
+        }
+        _ => 0.0,
+    };
+    sel.clamp(0.0, 1.0)
 }
 
 /// eqjoinsel without MCV matching: (1 - nullfrac) products over the larger ndistinct.

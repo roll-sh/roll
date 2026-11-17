@@ -467,6 +467,17 @@ impl Detail {
     }
 }
 
+/// Whether `p` (through projections, sorts and limits) is a table its own quals or
+/// constraints prove empty (`DummyInfo::table`): PostgreSQL's dummy rel, whose width
+/// set_rel_size never sets.
+fn dummy_base(p: &Plan) -> bool {
+    match p {
+        Plan::Empty { info: Some(d), .. } => d.table.is_some(),
+        Plan::Project { input, .. } | Plan::Sort { input, .. } | Plan::Limit { input, .. } => dummy_base(input),
+        _ => false,
+    }
+}
+
 /// An output column of a node: its estimated width, and the base relation column it is.
 #[derive(Clone, Default)]
 struct ColInfo {
@@ -5749,8 +5760,10 @@ impl Builder<'_, '_> {
             b.node.width = reads + whole;
         }
         // (A join whose columns nothing above reads is 0 wide; so is a scan of them.)
-        let unread_scan = b.node.is_scan() && self.needed.get(&addr(p)).is_some_and(|m| m.iter().all(|x| !x));
-        if b.node.width == 0 && !b.node.is_join() && !unread_scan {
+        // (So is an inheritance tree's Append of them: its appendrel's reltarget.)
+        let unread_scan = (b.node.is_scan() || matches!(&**p, Plan::Append { inh: Some(_), .. }))
+            && self.needed.get(&addr(p)).is_some_and(|m| m.iter().all(|x| !x));
+        if b.node.width == 0 && !b.node.is_join() && !unread_scan && !dummy_base(p) {
             b.node.width = b.exported.len() as u32 * 4;
         }
         if self.o.verbose && b.node.output.is_empty() && b.node.node_type != "ModifyTable" {
@@ -6079,6 +6092,11 @@ impl Builder<'_, '_> {
                     }
                     _ => vec![Name::same("NULL"); *ncols],
                 };
+                // (A table its own quals or constraints prove empty is a dummy rel before
+                // set_rel_size sets its width: its columns are 0 wide.)
+                if dummy_base(p) {
+                    n.cols = vec![ColInfo::default(); *ncols];
+                }
                 Built::passthrough(n, names)
             }
             Plan::Values { rows, .. } if rows.len() == 1 => {
@@ -6111,7 +6129,11 @@ impl Builder<'_, '_> {
                         groups: None,
                     })
                     .collect();
-                n.width = n.cols.iter().map(|c| c.width).sum();
+                // (Of the columns read above: its reltarget's.)
+                n.width = match self.needed.get(&key) {
+                    Some(m) if m.len() == n.cols.len() => n.cols.iter().zip(m).filter(|(_, x)| **x).map(|(c, _)| c.width).sum(),
+                    _ => n.cols.iter().map(|c| c.width).sum(),
+                };
                 let names = (1..=*ncols)
                     .map(|i| Name::col(&refname, &format!("column{i}")))
                     .collect();
@@ -6359,6 +6381,13 @@ impl Builder<'_, '_> {
                 for c in calls {
                     if calls.len() == 1 && !c.func.out_cols.is_empty() && c.func.out_cols.len() + *ordinality as usize == cols.len() {
                         widths.extend(c.func.out_cols.iter().map(|(_, t)| type_width(t)));
+                    } else if calls.len() == 1
+                        && let DataType::Row(r) = &c.ty
+                        && r.fields.len() + *ordinality as usize == cols.len()
+                    {
+                        // (A record's columns, a column definition list's or a composite
+                        // type's: its reltarget's.)
+                        widths.extend(r.fields.iter().map(|(_, t)| type_width(t)));
                     } else {
                         widths.push(type_width(&c.ty));
                     }
@@ -6370,6 +6399,7 @@ impl Builder<'_, '_> {
                     Some(m) if m.len() == widths.len() && widths.len() == cols.len() => {
                         widths.iter().zip(m).filter(|(_, x)| **x).map(|(w, _)| w).sum()
                     }
+                    _ if widths.len() == cols.len() && calls.len() == 1 && matches!(calls[0].ty, DataType::Row(_)) => widths.iter().sum(),
                     _ => calls.iter().map(|c| type_width(&c.ty)).sum::<u32>() + if *ordinality { 8 } else { 0 },
                 };
                 // (A worker can run it when its calls are parallel safe:
@@ -6397,7 +6427,7 @@ impl Builder<'_, '_> {
                 }
                 Built::passthrough(n, names)
             }
-            Plan::PlCall { func, ncols, .. } => {
+            Plan::PlCall { func, ncols, args, .. } => {
                 let refname = self.refname(p);
                 let mut n = ExNode::new("Function Scan");
                 let schema = self.ctx.catalog().schema_name(func.schema).to_string();
@@ -6416,8 +6446,11 @@ impl Builder<'_, '_> {
                         .map(|(c, _)| Name::col(&refname, c))
                         .collect()
                 };
-                n.rows = 1000.0;
-                n.total_cost = 10.25;
+                // cost_functionscan: the call (procost, its arguments) runs to completion
+                // before the first row, then a tuple per row (prorows).
+                n.rows = if func.returns_set { func.prorows() as f64 } else { 1.0 };
+                n.startup_cost = func.procost() as f64 * costs::CPU_OPERATOR_COST + args.iter().map(costs::qual_cost).sum::<f64>();
+                n.total_cost = n.startup_cost + n.rows * costs::CPU_TUPLE_COST;
                 Built::passthrough(n, names)
             }
             Plan::Filter { input, pred } => {
@@ -14378,6 +14411,9 @@ impl Builder<'_, '_> {
             Some(sets) if !ordered && !no_hash => self.sets_sorted_cheaper(&c.node, groups, sets, aggs),
             _ => false,
         };
+        // (Grouping sets: the plan's rollups in order, hashed or sorted, each with its sets
+        // (create_groupingsets_path costs them).)
+        let mut rollups: Option<Vec<(bool, Vec<usize>)>> = None;
         if let (Some(sets), true) = (sets, ordered || no_hash || sorted_cheaper) {
             // (The sets that sort make the rollups.)
             let sortable: Vec<usize> = (0..sets.len()).filter(|i| !must_hash.contains(i)).collect();
@@ -14450,6 +14486,14 @@ impl Builder<'_, '_> {
                     n.details.push(Detail::List("Hash Key", hash_keys(self, cols)));
                 }
             }
+            rollups = Some(
+                hash_sets
+                    .iter()
+                    .rev()
+                    .map(|(si, _)| (true, vec![*si]))
+                    .chain(chains.iter().map(|(chain, _)| (false, chain.clone())))
+                    .collect(),
+            );
             // (Keys the input fixes to constants need no sort.)
             let fixed = super::paths::constant_columns(input);
             let is_fixed = |i: &usize| matches!(groups.get(*i), Some(Expr::Col(j, _)) if fixed.get(*j).copied().unwrap_or(false));
@@ -14578,14 +14622,18 @@ impl Builder<'_, '_> {
                     "HashAggregate"
                 }
                 .into();
-                for (_, cols) in crate::exec::agg::hashed_sets_order(sets) {
+                let mut r = Vec::new();
+                for (si, cols) in crate::exec::agg::hashed_sets_order(sets) {
                     n.details.push(Detail::List("Hash Key", hash_keys(self, &cols)));
+                    r.push((true, vec![si]));
                 }
-                for _ in sets.iter().filter(|s| s.is_empty()) {
+                for (si, _) in sets.iter().enumerate().filter(|(_, s)| s.is_empty()) {
                     n.details.push(Detail::List("Group Key", vec!["()".into()]));
+                    r.push((false, vec![si]));
                 }
                 n.details.push(Detail::HashAggInfo(0));
                 n.rows = (c.node.rows * 0.2).clamp(1.0, 200.0) * sets.len() as f64;
+                rollups = Some(r);
             }
         }
         let gcols: Vec<ColInfo> = groups
@@ -14620,10 +14668,56 @@ impl Builder<'_, '_> {
         let (trans, fin) = crate::sql::paths::parallel::agg_clause_costs(aggs, crate::sql::paths::parallel::AggSplit::Simple);
         let group_ops = costs::CPU_OPERATOR_COST * kept.len() as f64;
         match n.strategy {
+            // create_groupingsets_path: each rollup's groups (estimate_num_groups per set, an
+            // empty one 1) and cost_agg; the first reads the input (as AGG_SORTED in mixed
+            // mode), later hashed ones and the first sorted one add only their aggregation,
+            // later sorted ones a sort of the input too.
+            _ if sets.is_some() && n.strategy != Some("Plain") && rollups.as_ref().is_some_and(|r| !r.is_empty()) => {
+                let (r, sets) = (rollups.as_ref().expect("checked"), sets.expect("checked"));
+                let hashed_only = r.iter().all(|x| x.0);
+                let (num_trans, space) = crate::sql::paths::parallel::agg_transitions(aggs);
+                let gucs = crate::sql::paths::Gucs::read(self.ctx);
+                let agg = |hashed: bool, ncols: usize, groups: f64, start: f64, total: f64, rows: f64| -> (f64, f64) {
+                    let per = rows * (trans + costs::CPU_OPERATOR_COST * ncols as f64);
+                    if hashed {
+                        let st = total + per;
+                        let (s, t, _) = gucs.hashagg_spill(rows, c.node.width, groups, num_trans, space);
+                        (st + s, st + groups * (fin + costs::CPU_TUPLE_COST) + t)
+                    } else {
+                        (start, total + per + groups * (fin + costs::CPU_TUPLE_COST))
+                    }
+                };
+                let mut rows = 0.0;
+                let mut first_sort = true;
+                for (i, (hashed, chain)) in r.iter().enumerate() {
+                    let ng: f64 = chain
+                        .iter()
+                        .map(|&si| {
+                            let ks: Vec<Expr> = sets[si].iter().filter_map(|&k| groups.get(k).cloned()).collect();
+                            self.group_num_groups(&ks, &c.node.cols, in_rows)
+                        })
+                        .sum();
+                    let ncols = chain.iter().map(|&si| sets[si].len()).max().unwrap_or(0);
+                    rows += ng;
+                    if i == 0 {
+                        (n.startup_cost, n.total_cost) =
+                            agg(*hashed && hashed_only, ncols, ng, c.node.startup_cost, c.node.total_cost, in_rows);
+                        first_sort &= *hashed;
+                    } else if *hashed || first_sort {
+                        n.total_cost += agg(*hashed, ncols, ng, 0.0, 0.0, in_rows).1;
+                        first_sort &= *hashed;
+                    } else {
+                        let (ss, st) = costs::sort_cost(0.0, in_rows, c.node.width, None);
+                        n.total_cost += agg(false, ncols, ng, ss, st, in_rows).1;
+                    }
+                }
+                n.rows = rows;
+            }
             Some("Plain") => {
+                // (cost_agg's AGG_PLAIN: the final functions are startup cost too.)
                 n.rows = 1.0;
-                n.startup_cost = c.node.total_cost + in_rows * trans;
-                n.total_cost = n.startup_cost + fin + costs::CPU_TUPLE_COST;
+                n.startup_cost = c.node.total_cost + in_rows * trans + fin;
+                n.total_cost = n.startup_cost + costs::CPU_TUPLE_COST;
             }
             Some("Hashed") if sets.is_none() => {
                 n.rows = ngroups;
@@ -16680,11 +16774,13 @@ impl Builder<'_, '_> {
                 .and_then(|v| v.table.columns.get(v.col))
                 .and_then(|c| c.collation.clone())
         };
+        let tctx = self.ctx;
+        let type_name = move |t: &DataType| tctx.catalog().format_type(t, None, &tctx.search_path);
         let relabel = |k: &Expr, t: String, cols: &[ColInfo]| match k {
             Expr::Call(d, a, _)
                 if kind == JoinKind::Inner && d.name == crate::sql::binder::INDETERMINATE_HASH =>
             {
-                format!("({t})::{}", a[0].ty().typname())
+                format!("({t})::{}", type_name(&a[0].ty()))
             }
             // (Under a nondeterministic collation: an explicit COLLATE is a relabelling,
             // and an inner or semi join's clause comes from its equivalence class, a member
@@ -16696,7 +16792,7 @@ impl Builder<'_, '_> {
                             && own_coll(&a[0], cols).as_deref() != d.coll.as_ref().map(|c| c.name.as_str()))) =>
             {
                 let t = t.strip_suffix(&format!(" COLLATE {}", d.coll.as_ref().map_or("", |c| c.name.as_str()))).unwrap_or(&t).to_string();
-                format!("({t})::{}", a[0].ty().typname())
+                format!("({t})::{}", type_name(&a[0].ty()))
             }
             _ => t,
         };
@@ -16708,7 +16804,7 @@ impl Builder<'_, '_> {
             let (outer_cols, inner_cols) = (&l.node.cols, &r.node.cols);
             let side = |this: &mut Self, k: &Expr, names: &[Name], cols: &[ColInfo]| match strip_widening(k) {
                 Expr::Cast(inner, from, to, false) if from != to && !from.same_base(to) => {
-                    format!("({})::{}", this.show(inner, names, Cx::Upper), to.typname())
+                    format!("({})::{}", this.show(inner, names, Cx::Upper), this.ctx.catalog().format_type(to, None, &this.ctx.search_path))
                 }
                 k2 => relabel(k, this.show(k2, names, Cx::Upper), cols),
             };
@@ -16738,7 +16834,7 @@ impl Builder<'_, '_> {
                 if own_coll(&x, cols).unwrap_or_else(|| "default".into()) == coll {
                     return None;
                 }
-                Some(format!("({})::{}", this.show(&x, names, Cx::Upper), x.ty().typname()))
+                Some(format!("({})::{}", this.show(&x, names, Cx::Upper), this.ctx.catalog().format_type(&x.ty(), None, &this.ctx.search_path)))
             };
             let a = match relabeled(self, oa, outer_names, outer_cols) {
                 Some(t) => t,
