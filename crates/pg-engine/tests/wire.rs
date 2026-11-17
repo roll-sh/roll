@@ -4776,7 +4776,9 @@ fn protocol_cases() {
         ])),
         // Index builds count as sequential scans of the table; ON CONFLICT's arbiter checks
         // as index scans; a new relation's creator holds its AccessExclusiveLock.
-        c("stat_counts", |a| session(a, &[], &[
+        // (The view's first expansion, warmed in the setup: a loaded machine took longer than
+        // a step's quiet window for it.)
+        c("stat_counts", |a| session(a, &["select 1 from pg_stat_xact_user_tables limit 1", "select 1 from pg_locks limit 1"], &[
             query("begin"),
             query("create table stc(id int primary key, v int)"),
             query("create index stc_v on stc(v)"),
