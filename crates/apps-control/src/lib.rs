@@ -2142,7 +2142,7 @@ impl Apps {
         }
         // A reference's template is names, not a value: shown, and what an edit starts from.
         let (sid, e) = (service.to_string(), env.to_string());
-        let raw = self.db(move |s| s.variables(&sid, &e)).await?;
+        let (raw, files) = self.db(move |s| Ok((s.variables(&sid, &e)?, s.variable_files(&sid, &e)?))).await?;
         let vars: Vec<VarView> = r
             .vars
             .iter()
@@ -2152,7 +2152,7 @@ impl Apps {
                 let sealed = r.sealed.contains(k);
                 let masked = if sealed { SEALED_MASK.to_string() } else if source == "roll" { v.clone() } else { mask(v) };
                 let reference = (source == "reference").then(|| raw.get(k).cloned()).flatten();
-                VarView { name: k.clone(), masked, source, reference, sealed }
+                VarView { name: k.clone(), masked, source, reference, sealed, file: files.get(k).cloned() }
             })
             .collect();
         Ok(json!({ "vars": vars }))
@@ -2185,16 +2185,53 @@ impl Apps {
                 seal.insert(n.as_str().ok_or_else(|| Error::BadRequest("seal is a list of names".into()))?.to_string());
             }
         }
-        if set.len() + unset.len() + seal.len() > 500 {
+        // Kept as files (Render's secret files): a name to an absolute path, or null for the
+        // environment again.
+        let mut files: Vec<(String, Option<String>)> = Vec::new();
+        if let Some(f) = o.get("files") {
+            for (k, p) in f.as_object().ok_or_else(|| Error::BadRequest("files is an object of names to paths (or null)".into()))? {
+                files.push((k.clone(), match p {
+                    Value::Null => None,
+                    Value::String(p) => Some(check_file_path(p)?),
+                    _ => return Err(Error::BadRequest(format!("files.{k} is an absolute path, or null"))),
+                }));
+            }
+        }
+        if set.len() + unset.len() + seal.len() + files.len() > 500 {
             return Err(Error::BadRequest("at most 500 variables at once".into()));
         }
         let (sid, e) = (service.to_string(), env.to_string());
-        let have = self.db(move |s| s.variables(&sid, &e)).await?;
+        let (have, mut kept) = self.db(move |s| Ok((s.variables(&sid, &e)?, s.variable_files(&sid, &e)?))).await?;
         if let Some(n) = seal.iter().find(|n| unset.contains(n) || !(set.contains_key(*n) || have.contains_key(*n))) {
             return Err(Error::BadRequest(format!("{n} isn't one of the environment's own variables to seal")));
         }
-        let (sid, e) = (service.to_string(), env.to_string());
+        if let Some((n, _)) = files.iter().find(|(n, p)| p.is_some() && (unset.contains(n) || !(set.contains_key(n) || have.contains_key(n)))) {
+            return Err(Error::BadRequest(format!("{n} isn't one of the environment's own variables to keep as a file")));
+        }
+        for (n, p) in &files {
+            match p {
+                Some(p) => kept.insert(n.clone(), p.clone()),
+                None => kept.remove(n),
+            };
+        }
+        for n in &unset {
+            kept.remove(n);
+        }
+        if kept.len() > MAX_FILES {
+            return Err(Error::BadRequest(format!("at most {MAX_FILES} variables as files")));
+        }
+        let mut paths: Vec<&String> = kept.values().collect();
+        paths.sort();
+        if paths.windows(2).any(|w| w[0] == w[1]) {
+            return Err(Error::BadRequest("two variables can't be the same file".into()));
+        }
+        let (sid, e, gone) = (service.to_string(), env.to_string(), unset.clone());
         self.db(move |s| s.change_variables(&sid, &e, &set, &unset, &seal)).await?;
+        // Unset ones' files go with them.
+        for (n, p) in files.into_iter().chain(gone.into_iter().map(|n| (n, None))) {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_variable_file(&sid, &e, &n, p.as_deref())).await?;
+        }
         self.variables(service, env, None).await
     }
 
@@ -2919,6 +2956,24 @@ fn record_for(host: &str) -> &'static str {
 
 pub fn volume_name(service: &str, env: &str) -> String {
     format!("roll-apps-vol-{}-{env}", service.strip_prefix("svc_").unwrap_or(service))
+}
+
+/// The most variables an environment keeps as files.
+pub const MAX_FILES: usize = 20;
+
+/// A path a variable may be written to in an instance: absolute, at most 256 characters, no `..`
+/// or empty segment, no control character, not in the system's own trees (`/proc`, `/sys`,
+/// `/dev`), and not a folder.
+pub fn check_file_path(p: &str) -> Result<String> {
+    let bad = || Error::BadRequest(format!("{p:?} isn't a path a file can go to (absolute, e.g. /etc/secrets/key.json; not under /proc, /sys or /dev)"));
+    let segs: Vec<&str> = p.split('/').skip(1).collect();
+    if !p.starts_with('/') || p.len() > 256 || p.ends_with('/') || p.chars().any(char::is_control) || segs.iter().any(|s| s.is_empty() || *s == "." || *s == "..") {
+        return Err(bad());
+    }
+    if matches!(segs.first(), Some(&("proc" | "sys" | "dev"))) {
+        return Err(bad());
+    }
+    Ok(p.to_string())
 }
 
 pub fn network_name(project: &str, env: &str) -> String {

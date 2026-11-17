@@ -622,6 +622,13 @@ pub enum AppsCmd {
         /// shell's).
         #[arg(long, value_name = "PATH")]
         from_file: Option<PathBuf>,
+        /// Keep a variable as a file in its instances instead of their environment,
+        /// `NAME=/etc/secrets/key.json` (Render's secret files); repeatable.
+        #[arg(long = "as-file", value_name = "NAME=PATH")]
+        as_file: Vec<String>,
+        /// Put a variable kept as a file back in the environment; repeatable.
+        #[arg(long = "not-file", value_name = "NAME")]
+        not_file: Vec<String>,
         /// Put them live now: a redeploy of the live image with the new values (Heroku's
         /// `config:set`), followed until it's live.
         #[arg(long, conflicts_with = "reveal")]
@@ -3115,7 +3122,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Vars { target, set, unset, mut seal, reveal, from_file, deploy, plain } => {
+        AppsCmd::Vars { target, set, unset, mut seal, reveal, from_file, deploy, plain, as_file, not_file } => {
+            let mut files = serde_json::Map::new();
+            for f in &as_file {
+                let (n, p) = f.split_once('=').ok_or_else(|| anyhow::anyhow!("--as-file is NAME=/path"))?;
+                files.insert(n.to_string(), json!(p));
+            }
+            for n in &not_file {
+                files.insert(n.clone(), Value::Null);
+            }
             let svc = service(api, &target).await?;
             let base = format!("{}/variables", env_path(&svc, &target.env));
             let mut m = serde_json::Map::new();
@@ -3127,7 +3142,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 m.extend(vars.into_iter().map(|(k, v)| (k, Value::String(v))));
             }
-            if !set.is_empty() || !unset.is_empty() || !m.is_empty() || !seal.is_empty() {
+            if !set.is_empty() || !unset.is_empty() || !m.is_empty() || !seal.is_empty() || !files.is_empty() {
                 for kv in set {
                     let (k, v) = kv.split_once('=').ok_or_else(|| anyhow::anyhow!("{kv}: set variables as KEY=value"))?;
                     m.insert(k.to_string(), v.into());
@@ -3140,7 +3155,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     eprintln!("sealed as secrets (--plain NAME keeps one revealable): {}", auto.join(", "));
                 }
                 seal.extend(auto);
-                api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset, "seal": seal }))).await?;
+                api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset, "seal": seal, "files": files }))).await?;
                 if deploy {
                     let dep = api.post(&format!("{}/redeploy", env_path(&svc, &target.env)), json!({})).await?;
                     if !json_out {

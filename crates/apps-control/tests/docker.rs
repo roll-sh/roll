@@ -1082,3 +1082,39 @@ async fn a_closed_environments_private_caller_wakes_it() {
     let _ = docker(&["network", "rm", &net]).await;
     w.apps.shutdown().await;
 }
+
+/// A variable kept as a file is in the container at its path, readable by the app, before it
+/// starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_variable_kept_as_a_file_is_in_the_container() {
+    let Some(w) = docker_world().await else { return };
+    let start = "mkdir -p /tmp/w; cat /etc/secrets/app.conf > /tmp/w/index.html; httpd -f -p $PORT -h /tmp/w";
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "filed", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"port": 8080, "start": start, "memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let settled = |dep: String| {
+        let (api, env) = (w.api.clone(), env.clone());
+        async move {
+            for _ in 0..1200 {
+                let (_, x) = call(&api, "GET", &format!("{env}/deploys/{dep}"), None, "application/json", None).await;
+                if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
+                    return x;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Value::Null
+        }
+    };
+    settled(svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string()).await;
+    let (st, v) = call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"set": {"APP_CONF": "from-a-file\nline two"}, "files": {"APP_CONF": "/etc/secrets/app.conf"}})), "application/json", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({})), "application/json", None).await;
+    let d = settled(r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string()).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let host = svc["environments"][0]["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
+    let resp = w.public.clone().oneshot(Request::get("/").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
+    let body = String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
+    assert_eq!(body, "from-a-file\nline two");
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+}

@@ -524,6 +524,45 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
     assert_eq!(get("/dash".into(), Some(session), true).await.0, StatusCode::FOUND);
 }
 
+/// Secret files (Render's): a variable kept as a file is out of the instance's environment and
+/// in its files at its path; paths are checked; null puts it back, and unsetting it drops both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_variable_kept_as_a_file_reaches_the_instance_there() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let vars = format!("{env}/variables");
+    for bad in ["etc/key", "/proc/self/x", "/etc/../x", "/etc/secrets/", "/a\nb"] {
+        assert_eq!(call(&w.api, "PATCH", &vars, Some(json!({"set": {"KEY": "x"}, "files": {"KEY": bad}}))).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    assert_eq!(call(&w.api, "PATCH", &vars, Some(json!({"files": {"NOPE": "/etc/x"}}))).await.0, StatusCode::BAD_REQUEST, "not a variable");
+    let key = r#"{"type":"service_account","private_key":"-----BEGIN KEY-----\nabc\n-----END KEY-----"}"#;
+    let (st, v) = call(&w.api, "PATCH", &vars, Some(json!({"set": {"GCP_KEY": key, "PLAIN": "1"}, "seal": ["GCP_KEY"], "files": {"GCP_KEY": "/etc/secrets/gcp.json"}}))).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let row = v["vars"].as_array().unwrap().iter().find(|x| x["name"] == "GCP_KEY").cloned().unwrap();
+    assert_eq!((row["file"].as_str(), row["sealed"].as_bool()), (Some("/etc/secrets/gcp.json"), Some(true)), "{v}");
+    let live = |w: &World| {
+        let names: Vec<String> = w.fake.instances(&id).into_iter().filter(|(_, _, s)| *s == apps_control::runtime::fake::FakeState::Running).map(|(n, _, _)| n).collect();
+        w.fake.spec(names.last().expect("a running instance")).unwrap()
+    };
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
+    settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
+    let spec = live(&w);
+    assert_eq!(spec.files, vec![("/etc/secrets/gcp.json".to_string(), key.to_string())]);
+    assert!(!spec.vars.iter().any(|(k, _)| k == "GCP_KEY") && spec.vars.iter().any(|(k, _)| k == "PLAIN"), "a file isn't in the environment too");
+    // Back into the environment, then gone with its variable.
+    call(&w.api, "PATCH", &vars, Some(json!({"files": {"GCP_KEY": null}}))).await;
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
+    settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
+    let spec = live(&w);
+    assert!(spec.files.is_empty() && spec.vars.iter().any(|(k, _)| k == "GCP_KEY"));
+    call(&w.api, "PATCH", &vars, Some(json!({"files": {"PLAIN": "/run/plain"}}))).await;
+    let (_, v) = call(&w.api, "PATCH", &vars, Some(json!({"unset": ["PLAIN"]}))).await;
+    assert!(v.to_string().find("/run/plain").is_none(), "{v}");
+    assert!(w.apps.store.variable_files(&id, "production").unwrap().is_empty());
+}
+
 /// Egress rules: an environment with `egress` `roll` runs on a network with no route out, its
 /// listed hosts through its proxy (the variables HTTP clients read, the project's services
 /// reached directly), what the proxy refused shown; hosts need `roll` and are names; opened

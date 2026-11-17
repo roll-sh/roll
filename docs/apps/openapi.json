@@ -3281,7 +3281,7 @@
               }
             }
           },
-          "description": "`{set?: {[name]: value}, unset?: string[], seal?: string[]}` (set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed)"
+          "description": "`{set?: {[name]: value}, unset?: string[], seal?: string[], files?: {[name]: path | null}}` (set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed. `files`: kept as a file at an absolute path in its instances, not in their environment, from the next deploy (0444; at most 20; not under `/proc`, `/sys` or `/dev`, no `..`; two can't share a path; null puts it back; unsetting a variable drops its file; 400 otherwise; on Fargate the deploy fails for now)"
         },
         "responses": {
           "200": {
