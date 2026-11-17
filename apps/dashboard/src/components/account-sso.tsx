@@ -58,7 +58,15 @@ export function SsoSection() {
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <span className="font-medium">{c.name}</span>
               <span className="font-mono text-[11.5px] text-subtle">{c.issuer}</span>
-              <span className="text-muted">{c.domains.join(", ")}</span>
+              <span className="text-muted">
+                {c.domains.map((d, i) => (
+                  <span key={d}>
+                    {i > 0 && ", "}
+                    {d}
+                    {!c.verified.includes(d) && <span className="ml-1 text-[11px] text-subtle">(not verified)</span>}
+                  </span>
+                ))}
+              </span>
               <span className="flex-1" />
               {removing === c.id ? (
                 <span className="flex items-center gap-2">
@@ -76,10 +84,38 @@ export function SsoSection() {
                 </button>
               )}
             </div>
+            {c.domains.some((d) => !c.verified.includes(d)) && (
+              <div className="mt-2 rounded-lg border border-line-2 bg-canvas px-3 py-2 text-[12px] text-muted">
+                <p>
+                  A domain counts once its DNS proves it&apos;s yours: add a TXT record at <span className="font-mono text-fg">{c.dns.name}</span> (for each domain) with the
+                  value below, then verify. Until then nobody signs in through this provider there.
+                </p>
+                <div className="mt-1.5 flex items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate font-mono text-fg">{c.dns.value}</span>
+                  <button onClick={() => navigator.clipboard.writeText(c.dns.value)} className={btn} aria-label="Copy the TXT value">
+                    <Copy className="size-3.5" />
+                  </button>
+                  <button
+                    onClick={() =>
+                      accountsApi.verifySso(c.id).then(
+                        (n) => {
+                          setError(n.verified.length === c.verified.length ? `No new domain had the record yet (DNS can take a while).` : null);
+                          void load();
+                        },
+                        (e) => setError(errorText(e)),
+                      )
+                    }
+                    className={btn}
+                  >
+                    Verify
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[12px] text-muted">
               <label className="flex items-center gap-1.5">
                 <input type="checkbox" checked={c.enforce} onChange={(e) => void change(c.id, { enforce: e.target.checked })} />
-                Required for these domains
+                Required for these domains (their other sessions end)
               </label>
               <label className="flex items-center gap-1.5">
                 <input type="checkbox" checked={c.provision} onChange={(e) => void change(c.id, { provision: e.target.checked })} />
@@ -139,7 +175,10 @@ function NewConnection({ onMade, onCancel }: { onMade: () => void; onCancel: () 
           Make accounts for new people
         </label>
       </div>
-      <p className="text-[12px] text-subtle">roll reads the provider&apos;s discovery document now; once saved, register the redirect URI it shows at the provider.</p>
+      <p className="text-[12px] text-subtle">
+        roll reads the provider&apos;s discovery document now. Once saved, register the redirect URI it shows at the provider, and prove each domain with the TXT
+        record it shows. Admins link their own accounts from Sign-in methods.
+      </p>
       {error && <p className="text-[12px] text-danger">{error}</p>}
       <div className="flex items-center gap-2">
         <button onClick={save} disabled={busy || !!problem} className={primary}>

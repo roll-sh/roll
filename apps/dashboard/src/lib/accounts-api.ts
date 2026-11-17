@@ -19,7 +19,8 @@ export interface User {
   disabled: boolean;
   created_at: number;
   totp: boolean;
-  identities: { provider: Provider; login: string; email: string }[];
+  /** GitHub, Google, or an SSO connection's link (`sso:<id>`). */
+  identities: { provider: Provider | `sso:${string}`; login: string; email: string }[];
 }
 
 export interface Session {
@@ -99,12 +100,18 @@ export interface SsoConnection {
   created_at: number;
   /** What to register at the provider as the sign-in redirect. */
   redirect_uri: string;
+  /** Domains a TXT record proved: only these route sign-ins, link, provision or enforce. */
+  verified: string[];
+  /** The TXT record that proves a domain (`name` with the domain in place of `<domain>`). */
+  dns: { name: string; value: string };
 }
 
 export const accountsApi = {
   info: () => call<{ providers: Providers }>("GET", ""),
   /** Sign in through the SSO connection for the email's domain (`no_sso` when none answers). */
   ssoStart: (email: string, opts: { invite?: string; return_to?: string } = {}) => call<{ url: string }>("POST", "/sso/start", { email, ...opts }),
+  /** Link the signed-in account through the SSO connection for its own email. */
+  ssoLink: () => call<{ url: string }>("POST", "/sso/start", { intent: "link", return_to: "/dashboard/account" }),
   session: () => call<SessionState>("GET", "/session"),
   peekInvite: (token: string) => call<{ email: string; expires_at: number }>("POST", "/invites/peek", { token }),
   emailStart: (email: string, invite?: string) => call<{ challenge: string }>("POST", "/email/start", { email, invite }),
@@ -119,7 +126,7 @@ export const accountsApi = {
   updateMe: (name: string) => call<User>("PATCH", "/me", { name }),
   sessions: () => call<Session[]>("GET", "/me/sessions"),
   revokeSession: (id: string) => call<null>("DELETE", `/me/sessions/${encodeURIComponent(id)}`),
-  unlink: (provider: Provider) => call<null>("DELETE", `/me/identities/${provider}`),
+  unlink: (provider: Provider | `sso:${string}`) => call<null>("DELETE", `/me/identities/${encodeURIComponent(provider)}`),
   totpBegin: () => call<{ secret: string; otpauth_url: string; qr_png: string }>("POST", "/me/totp"),
   totpConfirm: (code: string) => call<{ recovery_codes: string[] }>("POST", "/me/totp/confirm", { code }),
   totpDisable: (code: string) => call<null>("DELETE", "/me/totp", { code }),
@@ -138,6 +145,8 @@ export const accountsApi = {
   updateSso: (id: string, c: { name?: string; client_id?: string; client_secret?: string; domains?: string[]; enforce?: boolean; provision?: boolean }) =>
     call<SsoConnection>("PATCH", `/sso/${encodeURIComponent(id)}`, c),
   removeSso: (id: string) => call<null>("DELETE", `/sso/${encodeURIComponent(id)}`),
+  /** Check the connection's domains' TXT records now. */
+  verifySso: (id: string) => call<SsoConnection>("POST", `/sso/${encodeURIComponent(id)}/verify`),
 };
 
 /** "acme.com, @acme.co.uk" as domains, or what's wrong with it (the API checks again). */

@@ -126,9 +126,11 @@ CREATE TABLE IF NOT EXISTS sso_connections (
     client_id TEXT NOT NULL,
     client_secret TEXT NOT NULL,
     domains TEXT NOT NULL,
+    verified TEXT NOT NULL,
     enforce INTEGER NOT NULL,
     provision INTEGER NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    challenge TEXT NOT NULL
 ) WITHOUT ROWID;
 ";
 
@@ -362,8 +364,10 @@ pub struct Accounts {
     http: reqwest::Client,
     /// SSO providers' URLs are the operator's choice: never a private address, never a redirect.
     sso_http: reqwest::Client,
-    /// SSO providers' endpoints, by issuer, with when they were read.
-    sso_discovery: std::sync::Mutex<std::collections::HashMap<String, (sso::Endpoints, std::time::Instant)>>,
+    /// SSO providers' endpoints and keys (or that they didn't answer), by issuer, with when.
+    sso_discovery: std::sync::Mutex<std::collections::HashMap<String, (sso::Discovered, std::time::Instant)>>,
+    /// TXT records, for proving SSO domains (DNS over HTTPS; a table in tests).
+    txt: std::sync::RwLock<Arc<dyn sso::TxtLookup>>,
     owners: Option<Arc<dyn Owners>>,
 }
 
@@ -381,12 +385,28 @@ impl Accounts {
         db.ensure_schema(SCHEMA)?;
         let mailer = Mailer::new(&config.mail).await?;
         let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(10)).user_agent("roll").build()?;
-        let mut sso = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(10)).user_agent("roll");
+        // No proxy: a proxy would resolve names itself, past the private-address guard.
+        let mut sso = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(10)).user_agent("roll").no_proxy();
         if !config.sso_allow_private {
             sso = sso.dns_resolver(Arc::new(roll_net::PublicOnly));
         }
         let sso_http = sso.build()?;
-        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), owners })
+        // How each session began (`sso`, or not): enforcing SSO ends the others.
+        if !db.has_column("sessions", "method")? {
+            db.add_column("sessions", "method", "TEXT")?;
+        }
+        let doh = std::env::var("ROLL_ACCOUNTS_DOH").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "https://cloudflare-dns.com/dns-query".into());
+        let txt: Arc<dyn sso::TxtLookup> = Arc::new(sso::Doh { client: sso_http.clone(), url: doh });
+        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), owners })
+    }
+
+    /// Where SSO domains' TXT records are read (tests answer from a table).
+    pub fn set_txt_lookup(&self, lookup: Arc<dyn sso::TxtLookup>) {
+        *self.txt.write().unwrap_or_else(|e| e.into_inner()) = lookup;
+    }
+
+    pub(crate) fn txt_lookup(&self) -> Arc<dyn sso::TxtLookup> {
+        self.txt.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn config(&self) -> &Config {
@@ -453,15 +473,15 @@ impl Accounts {
     /// in).
     pub fn issue(&self, user: &str, user_agent: &str) -> Result<Issued> {
         self.sso_not_enforced(user)?;
-        self.issue_session(user, user_agent)
+        self.issue_session(user, user_agent, None)
     }
 
     /// A session for a person their company's SSO provider just signed in.
     pub(crate) fn issue_sso(&self, user: &str, user_agent: &str) -> Result<Issued> {
-        self.issue_session(user, user_agent)
+        self.issue_session(user, user_agent, Some("sso"))
     }
 
-    fn issue_session(&self, user: &str, user_agent: &str) -> Result<Issued> {
+    fn issue_session(&self, user: &str, user_agent: &str, method: Option<&str>) -> Result<Issued> {
         self.provision_owner(user);
         let now = self.db.now_ms()?;
         let token = new_token("rls");
@@ -478,8 +498,8 @@ impl Accounts {
             // The user's sessions that ended go with each new one: no sweeper needed.
             c.execute("DELETE FROM sessions WHERE user_id = ? AND (expires_at <= ? OR (level = 'full' AND seen_at <= ?))", params![user, now, now - SESSION_IDLE_MS])?;
             c.execute(
-                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                params![sha256_hex(&token), id, user, level, now, now, now + ttl, user_agent],
+                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![sha256_hex(&token), id, user, level, now, now, now + ttl, user_agent, method],
             )?;
             Ok(mfa)
         })?;
@@ -488,6 +508,12 @@ impl Accounts {
 
     /// The second factor passed: the owing session is replaced by a new, full one.
     pub(crate) fn complete(&self, owed: &roll_auth::SecondFactorOwed, user_agent: &str) -> Result<Issued> {
+        // A sign-in that began some other way while SSO was enforced (or before it was) doesn't
+        // finish: the provider signs those people in.
+        let method = self.db.read(|c| c.query_row("SELECT method FROM sessions WHERE id = ?", [owed.session.as_str()], |r| r.get::<_, Option<String>>(0)).optional())?.flatten();
+        if method.as_deref() != Some("sso") {
+            self.sso_not_enforced(&owed.user)?;
+        }
         let now = self.db.now_ms()?;
         let token = new_token("rls");
         let id = new_id("ses");
@@ -497,8 +523,8 @@ impl Accounts {
                 return Err(Error::signed_out());
             }
             c.execute(
-                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent) VALUES (?, ?, ?, 'full', ?, ?, ?, ?)",
-                params![sha256_hex(&token), id, owed.user, now, now, now + SESSION_TTL_MS, user_agent],
+                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method) VALUES (?, ?, ?, 'full', ?, ?, ?, ?, ?)",
+                params![sha256_hex(&token), id, owed.user, now, now, now + SESSION_TTL_MS, user_agent, method],
             )?;
             Ok(())
         })?;

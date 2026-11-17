@@ -54,6 +54,7 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/sso/start", post(sso_start))
         .route("/v1/accounts/sso/{id}", axum::routing::patch(update_sso).delete(remove_sso))
         .route("/v1/accounts/sso/{id}/callback", get(sso_callback))
+        .route("/v1/accounts/sso/{id}/verify", post(verify_sso))
         .route_layer(axum::middleware::from_fn(json_only))
         .with_state(accounts)
 }
@@ -330,19 +331,25 @@ async fn finish_redirect(a: &Arc<Accounts>, headers: &HeaderMap, done: Result<Fi
 
 #[derive(Deserialize)]
 struct SsoStart {
+    #[serde(default)]
     email: String,
+    #[serde(default)]
+    intent: Option<String>,
     invite: Option<String>,
     return_to: Option<String>,
 }
 
-/// Start a sign-in through the SSO connection that answers for the email's domain (404 `no_sso`
-/// if none does; the dashboard then offers the other ways).
-async fn sso_start(State(a): S, b: Bytes) -> Result<Response> {
-    let SsoStart { email, invite, return_to } = body(&b)?;
-    let started = a.sso_start(&email, invite.as_deref(), return_to.as_deref()).await.map_err(|e| match e {
-        Error::NotFound(m) => Error::BadRequest(m, Some("no_sso")),
-        e => e,
-    })?;
+/// Start a sign-in through the SSO connection that answers for the email's domain (400 `no_sso`
+/// if none does; the dashboard then offers the other ways), or (`intent: "link"`, a session) link
+/// the signed-in person's account through the connection for their own email.
+async fn sso_start(State(a): S, me: Me, b: Bytes) -> Result<Response> {
+    let SsoStart { email, intent, invite, return_to } = body(&b)?;
+    let link_user = match intent.as_deref().unwrap_or("signin") {
+        "signin" => None,
+        "link" => Some(signed_in(me)?.user),
+        other => return Err(Error::BadRequest(format!("intent is signin or link, not {other}"), None)),
+    };
+    let started = a.sso_start(&email, invite.as_deref(), return_to.as_deref(), link_user).await?;
     let resp = Json(json!({ "url": started.url })).into_response();
     Ok(with_cookies(resp, [cookie(&a, a.config.oauth_cookie(), &started.browser, 10 * 60_000)]))
 }
@@ -352,7 +359,7 @@ async fn sso_callback(State(a): S, Path(id): Path<String>, Query(q): Query<Callb
         return finish_redirect(&a, &headers, Err(Error::BadRequest("the SSO provider".into(), Some("provider"))), "/signin".into(), true).await;
     };
     let browser = roll_auth::cookie(&headers, a.config.oauth_cookie()).map(str::to_string);
-    let done = a.sso_callback(&id, &code, &state, browser.as_deref()).await;
+    let done = a.sso_callback(&id, &code, &state, browser).await;
     if let Err(e) = &done {
         tracing::info!(connection = %id, error = %e, "accounts: an SSO sign-in failed");
     }
@@ -374,6 +381,12 @@ async fn update_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>, b: Byte
     admin(&a, &me, &op)?;
     let ch: crate::sso::ConnectionChange = body(&b)?;
     Ok(Json(blocking(&a, move |a| a.update_sso(&id, ch)).await?).into_response())
+}
+
+/// Check the connection's domains' TXT records now; the ones that have it are verified.
+async fn verify_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    Ok(Json(a.verify_sso(&id).await?).into_response())
 }
 
 async fn remove_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
@@ -452,8 +465,12 @@ async fn revoke_my_session(State(a): S, me: Me, Path(id): Path<String>) -> Resul
 
 async fn unlink(State(a): S, me: Me, Path(p): Path<String>) -> Result<StatusCode> {
     let u = signed_in(me)?;
-    let p = provider(&p)?;
-    blocking(&a, move |a| a.unlink(&u.user, p.as_str())).await?;
+    // GitHub, Google, or an SSO connection's link (`sso:<id>`).
+    let p = match p.strip_prefix("sso:") {
+        Some(id) if !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') => p.clone(),
+        _ => provider(&p)?.as_str().to_string(),
+    };
+    blocking(&a, move |a| a.unlink(&u.user, &p)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
