@@ -219,7 +219,11 @@ Three ways, as the best products offer:
   Secret as it was. Its status says what happened. Outside the operator's own namespaces a
   RollSecret logs in as a service account of its own namespace (`spec.serviceAccountName`, a
   10-minute token the operator requests), so creating a RollSecret never reaches what the
-  operator's identity, or another team's, reaches.
+  operator's identity, or another team's, reaches. `spec.rolloutRestart` names the Deployments,
+  StatefulSets and DaemonSets that read the Secret: a change restarts them (`kubectl rollout
+  restart`'s annotation), each one that opts in with a `roll.sh/restart-on` annotation naming the
+  RollSecret (so a RollSecret's author can't restart a workload that didn't ask). One that couldn't
+  be restarted waits in `status.pendingRestarts` and is tried again on every pass.
 - **Push (the `kubernetes` sync)**: roll writes a Secret with credentials for the cluster it holds,
   sealed. For clusters roll can reach and the operator can't run in.
 ## Customer-managed keys
