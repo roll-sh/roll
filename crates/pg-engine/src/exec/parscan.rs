@@ -770,11 +770,16 @@ impl IndexChunk {
                 }
             }
             Some((store, ts)) if !ds.is_empty() => {
-                let mut keys = ds.clone();
-                keys.sort_unstable();
-                keys.dedup();
                 // (`keys` sorted and without duplicates: an entry's row is at its key's
-                // place, found by a search.)
+                // place, found by a search; entries already in their rows' order (a primary
+                // key's) are their own places.)
+                let sorted = ds.windows(2).all(|w| w[0] < w[1]);
+                let mut keys = ds.clone();
+                if !sorted {
+                    keys.sort_unstable();
+                    keys.dedup();
+                }
+                let place = |e: usize, d: &[u8]| if sorted { Ok(e) } else { keys.binary_search(&d) };
                 rows.clear();
                 match dense_rows(store, &keys, *ts, rows) {
                     Err(e) => {
@@ -782,8 +787,8 @@ impl IndexChunk {
                         return Err(e);
                     }
                     Ok(Some(at)) => {
-                        for d in &ds {
-                            if let Ok(j) = keys.binary_search(d)
+                        for (e, d) in ds.iter().enumerate() {
+                            if let Ok(j) = place(e, d)
                                 && let Some(i) = at[j]
                             {
                                 match rows.value_in(i as usize) {
@@ -795,8 +800,8 @@ impl IndexChunk {
                     }
                     Ok(None) => {
                         let got = store.get_versions(&keys, *ts).inspect_err(|_| *done = true)?;
-                        for d in &ds {
-                            if let Ok(j) = keys.binary_search(d)
+                        for (e, d) in ds.iter().enumerate() {
+                            if let Ok(j) = place(e, d)
                                 && let Some((_, Some(v))) = &got[j]
                             {
                                 b.push(d, v.clone());
