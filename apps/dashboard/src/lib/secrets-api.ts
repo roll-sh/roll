@@ -212,12 +212,12 @@ export function secretsApi(project: string) {
     sinks: () => req<Sink[]>("GET", `${P}/audit/sinks`),
     /** The `whsec_…` signing secret comes back once. */
     /** Postgres outside roll: registering one connects to it and checks both roles. */
-    outsideDatabases: () => req<OutsideDatabase[]>("GET", `${P}/outside-databases`),
-    addOutsideDatabase: (d: { name: string; url: string; roles: [string, string] | []; group?: string; ca?: string }) => req<OutsideDatabase>("POST", `${P}/outside-databases`, d),
-    deleteOutsideDatabase: (id: string) => req<null>("DELETE", `${P}/outside-databases/${enc(id)}`),
     githubApps: () => req<GitHubApp[]>("GET", `${P}/github-apps`),
     addGitHubApp: (a: { name: string; app_id: number; installation_id: number; private_key: string; api_base?: string; repositories: string[]; permissions: Record<string, string> }) => req<GitHubApp>("POST", `${P}/github-apps`, a),
     deleteGitHubApp: (id: string) => req<null>("DELETE", `${P}/github-apps/${enc(id)}`),
+    outsideDatabases: () => req<OutsideDatabase[]>("GET", `${P}/outside-databases`),
+    addOutsideDatabase: (d: { name: string; url: string; roles: [string, string] | []; group?: string; ca?: string }) => req<OutsideDatabase>("POST", `${P}/outside-databases`, d),
+    deleteOutsideDatabase: (id: string) => req<null>("DELETE", `${P}/outside-databases/${enc(id)}`),
     /** `format` other than `roll` needs the SIEM's `token` (sealed, never shown again). */
     createSink: (url: string, fromStart = false, format: SinkFormat = "roll", token?: string) =>
       req<Sink & { secret: string }>("POST", `${P}/audit/sinks`, { url, from_start: fromStart, ...(format !== "roll" && { format, token }) }),

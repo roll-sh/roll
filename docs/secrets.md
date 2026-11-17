@@ -2514,12 +2514,12 @@ isn't in the workspace is 404.
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
-| `GET /github-apps` | | `GitHubApp[]` (`read` on the project; never the key) |
-| `POST /github-apps` | `{name, app_id, installation_id, private_key, repositories, permissions, api_base?}` | 201 `GitHubApp` (`admin`; gets and revokes a token first: 400 with GitHub's reason) |
-| `DELETE /github-apps/{id}` | | 204; 409 while a key links to it or a lease holds a token (`admin`) |
 | `GET /cloud-accounts` | | `CloudAccount[]` (`read` on the project) |
 | `POST /cloud-accounts` | `{name, cloud: "gcp", audience, service_account}` or `{name, cloud: "azure", tenant, client_id, scope?}` | 201 `CloudAccount` (`admin`; 400 when a made-up project's token is taken, or this project's isn't) |
 | `DELETE /cloud-accounts/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `GET /github-apps` | | `GitHubApp[]` (`read` on the project; never the key) |
+| `POST /github-apps` | `{name, app_id, installation_id, private_key, repositories, permissions, api_base?}` | 201 `GitHubApp` (`admin`; gets and revokes a token first: 400 with GitHub's reason) |
+| `DELETE /github-apps/{id}` | | 204; 409 while a key links to it or a lease holds a token (`admin`) |
 | `GET /v1/secrets/oidc/.well-known/openid-configuration` | | roll's issuer's discovery document (public) |
 | `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public) |
 | `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
