@@ -1287,6 +1287,8 @@ impl Apps {
             rate_limit: r.rate_limit,
             firewall: r.firewall.clone(),
             headers: r.headers.clone(),
+            egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&r.egress.hosts) } else { Vec::new() },
+            egress: r.egress.clone(),
             scaling,
             wait_for_ci: r.wait_for_ci,
             waiting_for_ci,
@@ -1317,7 +1319,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused", "held", "hostname", "traces"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused", "held", "hostname", "traces", "egress"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1413,6 +1415,16 @@ impl Apps {
             ),
             Some(_) => return Err(Error::BadRequest(format!("headers is at most {} rules, or null", crate::model::MAX_HEADER_RULES))),
         };
+        // What its code may reach: `{mode: "roll", hosts?}` closes its network, null or
+        // `{mode: "open"}` opens it.
+        let egress = match o.get("egress") {
+            None => None,
+            Some(Value::Null) => Some(crate::model::Egress::default()),
+            Some(v) => Some(serde_json::from_value::<crate::model::Egress>(v.clone()).map_err(|e| Error::BadRequest(format!("egress is {{mode: \"roll\" | \"open\", hosts?}} or null: {e}")))?.check()?),
+        };
+        if egress.as_ref().is_some_and(crate::model::Egress::closed) && !self.deps.runtime.closes_egress() {
+            return Err(Error::Conflict("egress \"roll\" needs a runtime that can close an environment's network (Docker on this host); this node's can't".into()));
+        }
         let branch = match o.get("branch") {
             None => None,
             Some(Value::Null) => Some(None),
@@ -1611,6 +1623,13 @@ impl Apps {
             self.live(service, env).forget_gate();
             self.changed(service);
         }
+        // Instances are made from the next deploy on with it (a network of their own, the proxy's
+        // variables); what runs keeps its way out until then.
+        if let Some(eg) = egress {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_egress(&sid, &e, &eg)).await?;
+            self.changed(service);
+        }
         if let Some(rules) = headers {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_headers(&sid, &e, &rules)).await?;
@@ -1705,6 +1724,7 @@ impl Apps {
         let (p, e, l) = (project.to_string(), env.to_string(), leaving.to_string());
         if let Ok(false) = self.db(move |s| s.env_in_use(&p, &e, &l)).await {
             self.deps.runtime.remove_network(&network_name(project, env)).await;
+            self.deps.runtime.remove_network(&closed_network_name(project, env)).await;
         }
     }
 
@@ -2854,6 +2874,12 @@ pub fn volume_name(service: &str, env: &str) -> String {
 
 pub fn network_name(project: &str, env: &str) -> String {
     format!("roll-apps-net-{}-{env}", project.strip_prefix("prj_").unwrap_or(project))
+}
+
+/// The project environment's network with no route out (its services with `egress` `roll`):
+/// they reach each other there, and the open ones on [`network_name`].
+pub fn closed_network_name(project: &str, env: &str) -> String {
+    format!("{}-closed", network_name(project, env))
 }
 
 /// A free spot on a project's canvas for a new card (the same grid the dashboard uses).

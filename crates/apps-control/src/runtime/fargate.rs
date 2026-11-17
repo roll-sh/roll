@@ -905,7 +905,7 @@ impl Runtime for Fargate {
 
     /// Nothing yet: tasks aren't on a project network (Cloud Map is later), so a service reaches
     /// another by its public URL.
-    async fn ensure_network(&self, _name: &str, _service: &str) -> anyhow::Result<()> {
+    async fn ensure_network(&self, _name: &str, _service: &str, _closed: bool) -> anyhow::Result<()> {
         Ok(())
     }
 

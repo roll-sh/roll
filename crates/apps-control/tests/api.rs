@@ -361,6 +361,49 @@ async fn traces_sent_by_instances_read_back() {
     assert!(vars.get("OTEL_SERVICE_NAME").is_none(), "{vars}");
 }
 
+/// Egress rules: an environment with `egress` `roll` runs on a network with no route out, its
+/// listed hosts through its proxy (the variables HTTP clients read, the project's services
+/// reached directly), what the proxy refused shown; hosts need `roll` and are names; opened
+/// again, the next deploy is back on the project's network.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closed_egress_runs_on_its_own_network_with_a_proxy() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "min_instances": 1})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    for bad in [json!({"mode": "open", "hosts": ["api.stripe.com"]}), json!({"mode": "roll", "hosts": ["10.0.0.1"]}), json!({"mode": "roll", "hosts": ["*"]}), json!({"mode": "shut"})] {
+        assert_eq!(call(&w.api, "PUT", &env, Some(json!({"egress": bad}))).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll", "hosts": ["API.Stripe.com", "*.sentry.io"]}}))).await;
+    assert_eq!((st, &e["egress"]), (StatusCode::OK, &json!({"mode": "roll", "hosts": ["*.sentry.io", "api.stripe.com"]})), "{e}");
+    let live = |w: &World| {
+        let names: Vec<String> = w.fake.instances(&id).into_iter().filter(|(_, _, s)| *s == apps_control::runtime::fake::FakeState::Running).map(|(n, _, _)| n).collect();
+        w.fake.spec(names.last().expect("a running instance")).unwrap()
+    };
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
+    settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
+    let spec = live(&w);
+    let closed = apps_control::closed_network_name(&w.project, "production");
+    assert_eq!((spec.closed, spec.network.as_deref()), (true, Some(closed.as_str())));
+    assert!(w.fake.closed_networks().contains(&closed));
+    let var = |k: &str| spec.vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let hosts = vec!["*.sentry.io".to_string(), "api.stripe.com".to_string()];
+    assert_eq!(var("HTTPS_PROXY"), Some(apps_control::runtime::egress::proxy_url(&hosts)));
+    assert!(var("NO_PROXY").is_some_and(|n| n.split(',').any(|h| h == "api")), "the project's services are reached directly: {:?}", var("NO_PROXY"));
+    assert_eq!(w.fake.proxies.lock().last().map(|(n, h)| (n.clone(), h.clone())), Some((closed.clone(), hosts)));
+    w.fake.refuse("evil.example.com", false);
+    w.fake.refuse("internal.example.com", true);
+    assert_eq!(call(&w.api, "GET", &env, None).await.1["egress_refused"], json!([{"host": "evil.example.com"}, {"host": "internal.example.com", "private": true}]));
+    // Opened: the next deploy is back on the project's network, with no proxy.
+    let (_, e) = call(&w.api, "PUT", &env, Some(json!({"egress": null}))).await;
+    assert_eq!(e["egress"], json!({"mode": "open", "hosts": []}), "{e}");
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
+    settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
+    let spec = live(&w);
+    assert_eq!((spec.closed, spec.network), (false, Some(apps_control::network_name(&w.project, "production"))));
+    assert!(!spec.vars.iter().any(|(k, _)| k == "HTTPS_PROXY"));
+}
+
 /// Visitors and page views from the access log: page loads only (not an API's calls), a visitor
 /// an address and browser a day, the referring site's host (never its own), the edge's country.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

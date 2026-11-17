@@ -323,6 +323,14 @@ type EnvironmentPut = {
    *  `OTEL_TRACES_EXPORTER` and `OTEL_SERVICE_NAME` from the next deploy (its own variables win).
    *  409 where the node has no OTLP address. */
   traces?: boolean;
+  /** What its code may reach (roll previews' `egress`): `roll` runs its instances, from the next
+   *  deploy, on a network of the project environment's own with no route out (Docker
+   *  `--internal`): roll is reached (its links' relays, the project's services there), nothing
+   *  else. `hosts` (at most 20 names, `*.` for subdomains; never addresses) are still reached on
+   *  443 and 80 through its egress proxy, by `HTTP_PROXY`/`HTTPS_PROXY` (with `NO_PROXY` naming
+   *  roll's own; the app's own variables win), at public addresses only. 400 for hosts with
+   *  `open`; 409 where the node's runtime can't close a network (Fargate). null: `open`. */
+  egress?: { mode: "roll" | "open"; hosts?: string[] } | null;
   follow_tag?: boolean;
   /** A preview environment (ephemeral) only, set by roll previews: a visitor who came in through
    *  its access link gets roll previews' feedback button on its pages (`/__roll/feedback.js`
@@ -383,6 +391,8 @@ type Environment = EnvironmentSummary & {
   follow_tag: boolean;        // an image service's tag is watched: a new digest behind it deploys
   redeploy_on_secrets: boolean; // the project's secrets changing redeploys it (same image, new values)
   traces: boolean; // its instances send OpenTelemetry traces to roll
+  egress: { mode: "roll" | "open"; hosts: string[] }; // what its code may reach (roll: roll and the hosts)
+  egress_refused?: { host: string; private?: true }[]; // hosts its egress proxy refused lately, oldest first, at most 20: not listed, or (private) listed but resolving only to private addresses
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
   maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
   paused?: true;              // paused (absent: not)

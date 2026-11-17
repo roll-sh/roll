@@ -377,6 +377,8 @@ export interface EnvironmentPut {
   redeploy_on_secrets?: boolean;
   /** Its instances send OpenTelemetry traces to roll (`OTEL_*` from the next deploy). */
   traces?: boolean;
+  /** What its code may reach from the next deploy: roll and `hosts` only, or anything. null: open. */
+  egress?: Egress | null;
   /** Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until false. */
   paused?: boolean;
   /** `false` resumes deploys held after a rollback. */
@@ -427,6 +429,13 @@ export interface Domain {
   redirect_to?: string | null;
 }
 
+/** What an environment's code may reach: `roll` keeps it on a network with no route out, the
+ *  listed hosts (on 443 and 80) through its egress proxy. */
+export interface Egress {
+  mode: "roll" | "open";
+  hosts?: string[];
+}
+
 export interface Environment extends EnvironmentSummary {
   service: string;
   branch: string | null;
@@ -461,6 +470,10 @@ export interface Environment extends EnvironmentSummary {
   redeploy_on_secrets?: boolean;
   /** Its instances send OpenTelemetry traces to roll. */
   traces?: boolean;
+  /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
+  egress?: Egress;
+  /** Hosts its egress proxy refused lately: not listed, or (`private`) resolving only to private addresses. */
+  egress_refused?: { host: string; private?: true }[];
   /** A push deploys only once its commit's checks pass. */
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */

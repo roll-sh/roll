@@ -1033,6 +1033,11 @@ pub struct Environment {
     /// Headers its answers carry ([]: none).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<HeaderRule>,
+    /// What its code may reach: anything (`open`), or roll and the listed hosts (`roll`).
+    pub egress: Egress,
+    /// Hosts its egress proxy refused lately (its code tried them; they aren't listed).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub egress_refused: Vec<crate::runtime::egress::Refused>,
     /// A worker that follows its work: the backlog it last read (null before the first read)
     /// and the instances that wants.
     pub scaling: Option<Scaling>,
@@ -1168,6 +1173,69 @@ pub struct HeaderRule {
 
 /// The most header rules an environment has.
 pub const MAX_HEADER_RULES: usize = 20;
+
+/// What an environment's code may reach (docs/apps/README.md, "Egress"; roll previews'
+/// `egress`): anything, or only roll (its links, the project's other services there) and
+/// `hosts`, through its egress proxy.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Egress {
+    pub mode: EgressMode,
+    /// With `roll`: hosts outside roll it may still reach on 443 and 80 (`api.stripe.com`, or
+    /// `*.sentry.io` for its subdomains).
+    #[serde(default)]
+    pub hosts: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EgressMode {
+    #[default]
+    Open,
+    Roll,
+}
+
+/// The most hosts an environment's egress lists.
+pub const MAX_EGRESS_HOSTS: usize = 20;
+
+impl Egress {
+    /// No route out but roll's.
+    pub fn closed(&self) -> bool {
+        self.mode == EgressMode::Roll
+    }
+
+    /// Checked as given: host names (lower case, no IP addresses), `*.` only as a prefix, only
+    /// with `roll`.
+    pub fn check(mut self) -> Result<Egress> {
+        let bad = |m: String| Err(Error::BadRequest(format!("egress: {m}")));
+        if self.hosts.len() > MAX_EGRESS_HOSTS {
+            return bad(format!("at most {MAX_EGRESS_HOSTS} hosts"));
+        }
+        for h in &mut self.hosts {
+            *h = h.trim().trim_end_matches('.').to_ascii_lowercase();
+        }
+        if let Some(h) = self.hosts.iter().find(|h| !egress_host_ok(h)) {
+            return bad(format!("{h:?} isn't a host name (api.stripe.com, or *.sentry.io for its subdomains)"));
+        }
+        if !self.hosts.is_empty() && !self.closed() {
+            return bad("hosts are for mode \"roll\" (with \"open\" everything is reachable)".into());
+        }
+        self.hosts.sort();
+        self.hosts.dedup();
+        Ok(self)
+    }
+}
+
+/// A host an egress may list: a DNS name of two labels or more (never an address), or `*.` and
+/// one (its subdomains). roll previews' `egress_hosts` take the same.
+pub fn egress_host_ok(h: &str) -> bool {
+    let name = h.strip_prefix("*.").unwrap_or(h);
+    let labels: Vec<&str> = name.split('.').collect();
+    name.len() <= 253
+        && labels.len() >= 2
+        && labels.iter().all(|l| !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-') && l.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
+        && !labels.last().is_some_and(|tld| tld.bytes().all(|b| b.is_ascii_digit()))
+}
 
 impl HeaderRule {
     /// Checked as given, names kept lower case. Never one that frames the answer or is roll's
