@@ -12,6 +12,7 @@
 pub mod api;
 mod mail;
 mod oauth;
+pub mod sso;
 mod twofactor;
 
 use code_sql::{Db, OptionalExtension, Target, params};
@@ -117,6 +118,17 @@ CREATE TABLE IF NOT EXISTS throttle (
     key TEXT PRIMARY KEY,
     n INTEGER NOT NULL,
     since INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS sso_connections (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    issuer TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    client_secret TEXT NOT NULL,
+    domains TEXT NOT NULL,
+    enforce INTEGER NOT NULL,
+    provision INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 ";
 
@@ -227,6 +239,9 @@ pub struct Config {
     /// The gate checks nothing (a daemon on loopback without `ROLL_ADMIN_TOKEN`): anyone may use
     /// the admin routes, as every other route.
     pub open: bool,
+    /// `ROLL_ACCOUNTS_SSO_ALLOW_PRIVATE`: SSO providers on private addresses and plain http
+    /// (local development and tests only; never on by itself).
+    pub sso_allow_private: bool,
 }
 
 impl Config {
@@ -247,6 +262,7 @@ impl Config {
             google: app("ROLL_ACCOUNTS_GOOGLE_CLIENT_ID", "ROLL_ACCOUNTS_GOOGLE_CLIENT_SECRET").map(|a| ProviderConfig::new(Provider::Google, a)),
             secret_key: var("ROLL_SECRET_KEY").map(|k| Secret::new(&k)),
             open,
+            sso_allow_private: var("ROLL_ACCOUNTS_SSO_ALLOW_PRIVATE").is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
         }
     }
 
@@ -344,6 +360,10 @@ pub struct Accounts {
     config: Config,
     mailer: Mailer,
     http: reqwest::Client,
+    /// SSO providers' URLs are the operator's choice: never a private address, never a redirect.
+    sso_http: reqwest::Client,
+    /// SSO providers' endpoints, by issuer, with when they were read.
+    sso_discovery: std::sync::Mutex<std::collections::HashMap<String, (sso::Endpoints, std::time::Instant)>>,
     owners: Option<Arc<dyn Owners>>,
 }
 
@@ -361,7 +381,12 @@ impl Accounts {
         db.ensure_schema(SCHEMA)?;
         let mailer = Mailer::new(&config.mail).await?;
         let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(10)).user_agent("roll").build()?;
-        Ok(Accounts { db, config, mailer, http, owners })
+        let mut sso = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(10)).user_agent("roll");
+        if !config.sso_allow_private {
+            sso = sso.dns_resolver(Arc::new(roll_net::PublicOnly));
+        }
+        let sso_http = sso.build()?;
+        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), owners })
     }
 
     pub fn config(&self) -> &Config {
@@ -423,8 +448,20 @@ impl Accounts {
         Ok(row.filter(|(_, _, disabled, _)| !disabled).map(|(handle, admin, _, code_owner)| roll_auth::SignedIn { user: user.to_string(), handle, admin, code_owner, session: String::new() }))
     }
 
-    /// A new session for `user`: full, or owing a second factor when they have one on.
+    /// A new session for `user`: full, or owing a second factor when they have one on. Refused
+    /// for a person whose domain's SSO connection enforces it ([`Accounts::issue_sso`] signs them
+    /// in).
     pub fn issue(&self, user: &str, user_agent: &str) -> Result<Issued> {
+        self.sso_not_enforced(user)?;
+        self.issue_session(user, user_agent)
+    }
+
+    /// A session for a person their company's SSO provider just signed in.
+    pub(crate) fn issue_sso(&self, user: &str, user_agent: &str) -> Result<Issued> {
+        self.issue_session(user, user_agent)
+    }
+
+    fn issue_session(&self, user: &str, user_agent: &str) -> Result<Issued> {
         self.provision_owner(user);
         let now = self.db.now_ms()?;
         let token = new_token("rls");
@@ -656,6 +693,29 @@ impl Accounts {
             Ok(())
         })?;
         tracing::info!(user = %id, "accounts: user created from an invite");
+        Ok(id)
+    }
+
+    /// A new account for a person an SSO connection with `provision` vouched for: never an admin,
+    /// invited by that connection.
+    pub(crate) fn provision_user(&self, email: &str, name: Option<&str>, identity: (&str, &str)) -> Result<String> {
+        let handle = self.pick_handle(None, email)?;
+        let id = new_id("usr");
+        let now = self.db.now_ms()?;
+        let name: String = name.map(str::trim).filter(|n| !n.is_empty()).unwrap_or(&handle).chars().take(100).collect();
+        let (provider, subject) = identity;
+        self.db.write(|c| {
+            if c.query_row("SELECT 1 FROM users WHERE email = ? OR handle = ?", [email, handle.as_str()], |_| Ok(())).optional()?.is_some() {
+                return Err(Error::Conflict("an account has this email or handle; try again".into()));
+            }
+            c.execute(
+                "INSERT INTO users (id, email, handle, name, admin, disabled, code_owner_id, invited_by, created_at) VALUES (?, ?, ?, ?, 0, 0, NULL, ?, ?)",
+                params![id, email, handle, name, provider, now],
+            )?;
+            c.execute("INSERT INTO identities (provider, subject, user_id, email, login, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![provider, subject, id, email, email, now])?;
+            Ok(())
+        })?;
+        tracing::info!(user = %id, by = %provider, "accounts: user provisioned by SSO");
         Ok(id)
     }
 

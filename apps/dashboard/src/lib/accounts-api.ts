@@ -82,8 +82,29 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return data as T;
 }
 
+/** Which sign-ins this roll offers (`sso`: a company's provider answers for some domains). */
+export type Providers = { email: boolean; github: boolean; google: boolean; sso?: boolean };
+
+/** A company's OpenID Connect provider (docs/accounts.md, "SSO"): never its secret. */
+export interface SsoConnection {
+  id: string;
+  name: string;
+  issuer: string;
+  client_id: string;
+  domains: string[];
+  /** People of these domains sign in only through it. */
+  enforce: boolean;
+  /** A verified person of these domains with no account gets one (never an admin). */
+  provision: boolean;
+  created_at: number;
+  /** What to register at the provider as the sign-in redirect. */
+  redirect_uri: string;
+}
+
 export const accountsApi = {
-  info: () => call<{ providers: { email: boolean; github: boolean; google: boolean } }>("GET", ""),
+  info: () => call<{ providers: Providers }>("GET", ""),
+  /** Sign in through the SSO connection for the email's domain (`no_sso` when none answers). */
+  ssoStart: (email: string, opts: { invite?: string; return_to?: string } = {}) => call<{ url: string }>("POST", "/sso/start", { email, ...opts }),
   session: () => call<SessionState>("GET", "/session"),
   peekInvite: (token: string) => call<{ email: string; expires_at: number }>("POST", "/invites/peek", { token }),
   emailStart: (email: string, invite?: string) => call<{ challenge: string }>("POST", "/email/start", { email, invite }),
@@ -110,7 +131,22 @@ export const accountsApi = {
   users: () => call<User[]>("GET", "/users"),
   updateUser: (id: string, patch: { admin?: boolean; disabled?: boolean }) => call<User>("PATCH", `/users/${encodeURIComponent(id)}`, patch),
   signOutUser: (id: string) => call<null>("DELETE", `/users/${encodeURIComponent(id)}/sessions`),
+
+  ssoConnections: () => call<SsoConnection[]>("GET", "/sso"),
+  addSso: (c: { name?: string; issuer: string; client_id: string; client_secret: string; domains: string[]; enforce?: boolean; provision?: boolean }) =>
+    call<SsoConnection>("POST", "/sso", c),
+  updateSso: (id: string, c: { name?: string; client_id?: string; client_secret?: string; domains?: string[]; enforce?: boolean; provision?: boolean }) =>
+    call<SsoConnection>("PATCH", `/sso/${encodeURIComponent(id)}`, c),
+  removeSso: (id: string) => call<null>("DELETE", `/sso/${encodeURIComponent(id)}`),
 };
+
+/** "acme.com, @acme.co.uk" as domains, or what's wrong with it (the API checks again). */
+export function ssoDomains(text: string): { domains: string[] } | { problem: string } {
+  const domains = [...new Set(text.split(/[\s,]+/).map((d) => d.trim().toLowerCase().replace(/^@/, "")).filter(Boolean))];
+  if (domains.length === 0) return { problem: "Name the email domains it answers for" };
+  const bad = domains.find((d) => !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d));
+  return bad ? { problem: `${bad} isn't a domain` } : { domains };
+}
 
 // ── the session, for every component ──
 

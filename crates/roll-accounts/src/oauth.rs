@@ -86,13 +86,13 @@ pub(crate) enum Finished {
 }
 
 /// A callback's state row, used up.
-struct State {
-    intent: String,
-    user_id: Option<String>,
-    invite_id: Option<String>,
-    verifier: String,
-    nonce: String,
-    return_to: String,
+pub(crate) struct State {
+    pub intent: String,
+    pub user_id: Option<String>,
+    pub invite_id: Option<String>,
+    pub verifier: String,
+    pub nonce: String,
+    pub return_to: String,
 }
 
 /// What the provider says about the person, with a verified email.
@@ -111,7 +111,7 @@ pub(crate) fn safe_return(return_to: Option<&str>, default: &str) -> String {
     }
 }
 
-fn b64url(b: &[u8]) -> String {
+pub(crate) fn b64url(b: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
 
@@ -158,6 +158,11 @@ impl Accounts {
 
     /// Use up a state for `p`, if it's live and this browser started it.
     fn take_state(&self, p: Provider, state: &str, browser: Option<&str>) -> Result<State> {
+        self.take_state_named(p.as_str(), state, browser)
+    }
+
+    /// Use up a state for the provider named so (`github`, `sso:<id>`).
+    pub(crate) fn take_state_named(&self, provider: &str, state: &str, browser: Option<&str>) -> Result<State> {
         let now = self.db.now_ms()?;
         let bad = || Error::BadRequest("the sign-in expired or came from another browser; start again".into(), Some("state"));
         let hash = sha256_hex(state);
@@ -165,7 +170,7 @@ impl Accounts {
             let row = c
                 .query_row(
                     "SELECT intent, user_id, invite_id, verifier, nonce, browser_hash, return_to, expires_at FROM oauth_states WHERE state_hash = ? AND provider = ?",
-                    [hash.as_str(), p.as_str()],
+                    [hash.as_str(), provider],
                     |r| {
                         Ok((
                             State { intent: r.get(0)?, user_id: r.get(1)?, invite_id: r.get(2)?, verifier: r.get(3)?, nonce: r.get(4)?, return_to: r.get(6)? },
@@ -314,7 +319,7 @@ impl Accounts {
 
 /// A provider's JSON answer, at most [`MAX_BODY`] bytes; a non-2xx status or an `error` field
 /// is an error (its text, never a token).
-async fn read_json(mut resp: reqwest::Response) -> std::result::Result<Value, String> {
+pub(crate) async fn read_json(mut resp: reqwest::Response) -> std::result::Result<Value, String> {
     let status = resp.status();
     let mut body = Vec::new();
     while let Some(chunk) = resp.chunk().await.map_err(|e| e.without_url().to_string())? {

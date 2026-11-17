@@ -2,6 +2,7 @@ import { Check, Copy, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } f
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { accountsApi, refreshSession, useSession, type Invite, type Provider, type Session, type User } from "@/lib/accounts-api";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
+import { SsoSection } from "./account-sso";
 import { AppShell } from "./app-shell";
 
 const card = "rounded-xl border border-line-2 bg-sheet inset-shadow-highlight";
@@ -42,6 +43,7 @@ export function AccountPage() {
           <Sessions />
           {user.admin && <Invites />}
           {user.admin && <Users me={user.id} />}
+          {user.admin && <SsoSection />}
         </div>
       )}
     </AppShell>
