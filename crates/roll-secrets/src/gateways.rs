@@ -195,7 +195,14 @@ impl Secrets {
         // Issued outside the transaction; a failure takes the record back out.
         let mut secret = None;
         if let (true, Some(w)) = (token, workloads) {
-            match w.token(ext, &format!("gateway {}", n.name), rule(&id)) {
+            // The operator's token is the operator's, as `POST /v1/access/tokens` makes it: on a
+            // server without sign-in the gate marks no one, and roll-access makes a token only for
+            // a request that names its caller.
+            let mut ext = ext.clone();
+            if caller.principal == "operator" {
+                ext.insert(roll_auth::Operator);
+            }
+            match w.token(&ext, &format!("gateway {}", n.name), rule(&id)) {
                 Ok(m) => {
                     self.db.write(|c| c.execute("UPDATE gateways SET token_id = ? WHERE id = ?", params![m.id, id]))?;
                     secret = Some(m.secret);

@@ -1072,13 +1072,20 @@ impl roll_secrets::Workloads for Workloads {
     }
 
     /// A gateway's token, made for the request's caller as `POST /v1/access/tokens` makes one.
+    /// Refusals are said in the gateway form's words: roll-access's are about its own callers and
+    /// fields.
     fn token(&self, ext: &axum::http::Extensions, name: &str, rule: roll_auth::scope::Rule) -> roll_secrets::Result<roll_secrets::Minted> {
         let new = roll_access::store::NewGrant { name: name.chars().take(64).collect(), rules: roll_auth::scope::Scope(vec![rule]), ..Default::default() };
         let (access, ext) = (self.0.clone(), ext.clone());
         // On the store's blocking threads, as `mint`.
         match tokio::runtime::Handle::current().block_on(async move { access.create_grant(&ext, new).await }) {
             Ok((g, secret)) => Ok(roll_secrets::Minted { id: g.id, secret, expires_at: g.expires_at.unwrap_or_default() }),
-            Err(roll_access::Error::Forbidden(m)) => Err(Error::Forbidden(m)),
+            Err(roll_access::Error::Forbidden(_) | roll_access::Error::Unauthorized(_)) => {
+                Err(Error::Forbidden("roll couldn't tell whose this gateway's token would be: sign in, or add the gateway without a token and log it in through a workload identity".into()))
+            }
+            Err(roll_access::Error::BadRequest(m)) if m.starts_with("roll's policy") => {
+                Err(Error::BadRequest("roll's token policy has every token expire, and a gateway's lasts until the gateway is deleted: add the gateway without a token and log it in through a workload identity".into()))
+            }
             Err(roll_access::Error::BadRequest(m)) => Err(Error::BadRequest(m)),
             Err(roll_access::Error::Conflict(m) | roll_access::Error::TooMany(m)) => Err(Error::TooMany(m)),
             Err(e) => Err(Error::Internal(format!("making a gateway's token: {e}"))),

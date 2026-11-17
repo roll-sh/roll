@@ -446,8 +446,13 @@ impl roll_secrets::Workloads for Gate {
         self.tokens.lock().unwrap().retain(|_, g| &*g.id != id);
         Ok(())
     }
-    /// As `POST /v1/access/tokens`: its owner is whoever's request it is.
+    /// As `POST /v1/access/tokens`: its owner is whoever's request it is. As roll-access's
+    /// `create_grant`, extensions that name no one (no operator marker, person or grant) are
+    /// refused, even on an open server.
     fn token(&self, ext: &axum::http::Extensions, name: &str, rule: roll_auth::scope::Rule) -> roll_secrets::Result<roll_secrets::Minted> {
+        if !roll_auth::Operator::on(ext) && ext.get::<roll_auth::SignedIn>().is_none() && roll_auth::Grant::on(ext).is_none() {
+            return Err(roll_secrets::Error::Forbidden("these extensions name no one".into()));
+        }
         let (secret, id) = self.grant(name, rule, ext.get::<roll_auth::SignedIn>().map(|u| u.user.as_str()));
         Ok(roll_secrets::Minted { id, secret, expires_at: 0 })
     }
@@ -2687,6 +2692,7 @@ async fn a_gateway_has_one_token_that_opens_only_its_link_and_reaches_its_projec
     let (s, ci) = api.req(Method::POST, "/gateways", Some(json!({ "name": "ci", "token": false })), Some(&admin)).await;
     assert!(s == StatusCode::CREATED && ci.get("token").is_none(), "{ci}");
 
+    // The operator on a server without sign-in (no one marked on the request) gets its token.
     let made = api.ok(Method::POST, "/gateways", Some(json!({ "name": "vpc" }))).await;
     let gw = made["gateway"]["id"].as_str().unwrap().to_string();
     let secret = made["token"].as_str().unwrap().to_string();
