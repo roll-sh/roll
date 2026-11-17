@@ -1110,7 +1110,19 @@ eab ls NAME`).
   - `dns-01`: roll looks up `_acme-challenge.<name>` TXT through public DNS (Cloudflare's resolvers,
     not the fleet's own, so a private zone can't answer for a name; the system resolver where
     private addresses are allowed), nothing cached, 10 seconds, 32 records read at most.
-  - `tls-alpn-01` isn't offered.
+  - `tls-alpn-01` (RFC 8737): roll resolves the name through the same guard as `http-01` (public
+    addresses only, unless `ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`), connects to that address on port 443
+    only and makes one TLS 1.2+ handshake with SNI the name and ALPN `acme-tls/1`, all within 10
+    seconds. The server must choose `acme-tls/1`; its certificate (self-signed by design, so any is
+    taken that parses and is 16 KiB at most, while the handshake's own signatures are still
+    checked) must have exactly one subjectAltName, the name, and the critical
+    `id-pe-acmeIdentifier` extension (1.3.6.1.5.5.7.1.31) holding an OCTET STRING of SHA-256 of the
+    key authorization. Not for wildcards or IP addresses.
+  - **Reused authorizations.** A new order for a name the account already proved reuses that
+    authorization, as Let's Encrypt does (cert-manager expects it): the same account, CA and
+    identifier, the same `wildcard`, valid, with an hour or more left. The order lists it in
+    `authorizations` and is `ready` without a challenge. Reusing never extends an authorization (a
+    day from when it was made); the order ends with the earliest of its authorizations.
   - **Pre-authorized names** (`PATCH …/cas/{id}/acme {pre_authorize: true}`, `roll secrets cas acme
     pre-authorize NAME on`, the panel's checkbox; off by default, audited): every name an account's
     binding takes is valid at once, with no challenge. Most internal names resolve to private
@@ -1118,8 +1130,11 @@ eab ls NAME`).
     VPC) use. **The binding's HMAC key is then the whole proof**: whoever holds it gets certificates
     for every name the binding takes. Give each cluster its own binding with only its names, and an
     end.
-- **Finalize** goes through the same path as `…/cas/{id}/sign`: the CSR's signature is checked and only
-  its public key and names are taken (exactly the order's names); usages and lifetime (30 days, or the
+- **Finalize** first checks the order's names against the CA's policy and the account's binding again
+  (`unauthorized` if either no longer takes one: an order, or an authorization it reuses, may
+  predate the change; a revoked binding stops every request), then goes through the same path as
+  `…/cas/{id}/sign`: the CSR's signature is checked and only its public key and names are taken
+  (exactly the order's names); usages and lifetime (30 days, or the
   CA's `max_days` if shorter) are the CA's. The certificate is recorded with `source: "acme"` (the
   CA's list, its CRL and OCSP have it) and `issued_by: "acme:<binding>"`, and audited
   (`ca.acme.issue`, naming the binding and its maker) in the write that makes the order valid.
@@ -1131,7 +1146,8 @@ eab ls NAME`).
   (a MAC with a deployment-wide key, so handing one out writes nothing) and used once (stored until it
   would expire). `key-change` takes the old key's request wrapping the new key's. A request is 64 KiB
   at most, an order 100 names, an account 300 orders a day. Orders and their authorizations last a
-  day; used nonces, old orders and expired certificates' rows go in the sweep. Errors are RFC 8555
+  day (an order reusing an authorization ends with it); used nonces, old orders, authorizations no
+  live order lists and expired certificates' rows go in the sweep. Errors are RFC 8555
   problem documents (`urn:ietf:params:acme:error:*`) and never hold key material. State lives in the
   database: any node of a fleet answers any request; claiming a challenge or an order, using a nonce
   and issuing are each one write, and challenges are checked outside any transaction.
@@ -2580,7 +2596,7 @@ isn't in the workspace is 404.
 | `POST /v1/secrets/ocsp/{id}` | an OCSP request (DER) | an OCSP response (`application/ocsp-response`); no token |
 | `GET /v1/secrets/ocsp/{id}/{request}` | | the same, the request base64 and URL-encoded (RFC 6960 A.1); no token |
 | `POST /cas/{id}/sign` | `{csr, days?, ttl_minutes?}` | `{certificate, ca, serial, names, not_after}` (`write`, audited); 400 for a name outside the policy or a lifetime past `max_days` |
-| `GET /cas/{id}/acme` | | `{directory, pre_authorize, challenges, bindings: AcmeBinding[]}` (`read`); a binding is `{id, label, names, expires_at, created_at, created_by, revoked_at, revoked_by, used_at, accounts}` |
+| `GET /cas/{id}/acme` | | `{directory, pre_authorize, challenges, bindings: AcmeBinding[]}` (`read`; `challenges` is `http-01`, `dns-01` and `tls-alpn-01`, or none without rolld's checks); a binding is `{id, label, names, expires_at, created_at, created_by, revoked_at, revoked_by, used_at, accounts}` |
 | `PATCH /cas/{id}/acme` | `{pre_authorize}` | the same (`admin`, audited) |
 | `POST /cas/{id}/acme/eab` | `{label?, names?, days?}` | 201 `AcmeBinding` with `key_id`, `hmac_key` (base64url, this answer only) and `directory` (`admin`, audited) |
 | `DELETE /cas/{id}/acme/eab/{eab}` | | 204: its accounts stop at once (`admin`, audited) |
@@ -2589,9 +2605,9 @@ isn't in the workspace is 404.
 | `POST /v1/secrets/acme/{ca}/new-account` | JWS (`jwk`) of `{contact?, termsOfServiceAgreed?, onlyReturnExisting?, externalAccountBinding}` | 201 and `Location` (200 for the key's existing account); `externalAccountRequired` without a binding |
 | `POST /v1/secrets/acme/{ca}/acct/{id}` | JWS (`kid`): empty, `{contact}` or `{status: "deactivated"}` | the account |
 | `POST /v1/secrets/acme/{ca}/acct/{id}/orders` | JWS, empty | `{orders}`: its orders that haven't expired |
-| `POST /v1/secrets/acme/{ca}/new-order` | JWS of `{identifiers}` (`dns`, `ip`) | 201 order; `rejectedIdentifier` outside the CA's policy or the binding's names; `rateLimited` past 300 a day |
+| `POST /v1/secrets/acme/{ca}/new-order` | JWS of `{identifiers}` (`dns`, `ip`) | 201 order (a name the account proved reuses its valid authorization); `rejectedIdentifier` outside the CA's policy or the binding's names; `rateLimited` past 300 a day |
 | `POST /v1/secrets/acme/{ca}/order/{id}` | JWS, empty | the order: `pending`, `ready`, `processing`, `valid` (with `certificate`) or `invalid` |
-| `POST /v1/secrets/acme/{ca}/order/{id}/finalize` | JWS of `{csr}` | the order, `valid`; `orderNotReady`, `badCSR` (names other than the order's) |
+| `POST /v1/secrets/acme/{ca}/order/{id}/finalize` | JWS of `{csr}` | the order, `valid`; `orderNotReady`, `badCSR` (names other than the order's), `unauthorized` (a name the CA's policy or the binding no longer takes) |
 | `POST /v1/secrets/acme/{ca}/authz/{id}` | JWS: empty or `{status: "deactivated"}` | the authorization and its challenges |
 | `POST /v1/secrets/acme/{ca}/chall/{id}` | JWS: empty, or `{}` to validate now | the challenge, `valid` or `invalid` with its `error` |
 | `POST /v1/secrets/acme/{ca}/cert/{serial}` | JWS, empty | `application/pem-certificate-chain`: the certificate, then the CA's |

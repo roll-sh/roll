@@ -3918,7 +3918,7 @@ async fn acme(c: &Client<'_>, cmd: AcmeCmd, json_out: bool) -> anyhow::Result<()
             if state == "on" {
                 println!("{ca}: a binding's names are valid without a challenge; its HMAC key is the whole proof.");
             } else {
-                println!("{ca}: every name is proven with http-01 or dns-01.");
+                println!("{ca}: every name is proven with http-01, dns-01 or tls-alpn-01.");
             }
         }
         AcmeCmd::Eab(EabCmd::Add { ca, names, days, label }) => {

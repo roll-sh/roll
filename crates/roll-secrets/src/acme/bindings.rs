@@ -113,7 +113,8 @@ impl Secrets {
         Ok(format!("{}/v1/secrets/acme/{ca}", api.trim_end_matches('/')))
     }
 
-    /// rolld's challenge checks: http-01 and dns-01 work once it's set. Set once, at startup.
+    /// rolld's challenge checks: http-01, dns-01 and tls-alpn-01 work once it's set. Set once, at
+    /// startup.
     pub fn set_acme_checks(&self, checks: Arc<dyn Checks>) {
         let _ = self.acme.checks.set(checks);
     }
@@ -123,7 +124,7 @@ impl Secrets {
         self.project(project)?;
         let (_, _, _, pre_authorize) = self.ca_of(Some(project), ca)?;
         let bindings = self.db.read(|c| c.query(&format!("SELECT {BINDING_COLUMNS} FROM acme_bindings b WHERE b.ca_id = ? ORDER BY b.created_at DESC"), [ca], binding_row))?;
-        let challenges = if self.acme.checks.get().is_some() { vec!["http-01", "dns-01"] } else { vec![] };
+        let challenges = if self.acme.checks.get().is_some() { vec!["http-01", "dns-01", "tls-alpn-01"] } else { vec![] };
         Ok(Settings { directory: format!("{}/directory", self.acme_base(ca)?), pre_authorize, challenges, bindings })
     }
 
@@ -212,17 +213,26 @@ impl Secrets {
         })
     }
 
-    /// Expired nonces, orders a day past their end (with their authorizations and challenges) and
-    /// certificates past theirs.
+    /// Expired nonces, orders and authorizations a day past their end (an authorization once no
+    /// order lists it: a reused one outlives the order that made it, never the orders reusing it),
+    /// and certificates past theirs.
     pub(crate) fn sweep_acme(&self) -> Result<()> {
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             c.execute("DELETE FROM acme_nonces WHERE expires_at < ?", [code_sql::now_ms()])?;
             let old = c.query("SELECT id FROM acme_orders WHERE expires_at < ? LIMIT 500", [now - KEEP_MS], |r| r.get::<_, String>(0))?;
             for o in &old {
-                c.execute("DELETE FROM acme_challenges WHERE authz_id IN (SELECT id FROM acme_authz WHERE order_id = ?)", [o])?;
-                c.execute("DELETE FROM acme_authz WHERE order_id = ?", [o])?;
+                c.execute("DELETE FROM acme_order_authz WHERE order_id = ?", [o])?;
                 c.execute("DELETE FROM acme_orders WHERE id = ?", [o])?;
+            }
+            let gone = c.query(
+                "SELECT z.id FROM acme_authz z WHERE z.expires_at < ? AND NOT EXISTS (SELECT 1 FROM acme_order_authz l WHERE l.authz_id = z.id) LIMIT 500",
+                [now - KEEP_MS],
+                |r| r.get::<_, String>(0),
+            )?;
+            for z in &gone {
+                c.execute("DELETE FROM acme_challenges WHERE authz_id = ?", [z])?;
+                c.execute("DELETE FROM acme_authz WHERE id = ?", [z])?;
             }
             c.execute("DELETE FROM acme_certs WHERE not_after < ?", [now])?;
             Ok(())
@@ -232,6 +242,7 @@ impl Secrets {
 
 /// ACME's rows for a CA, when the CA goes.
 pub(crate) fn forget_ca(c: &Conn<'_>, ca: &str) -> Result<()> {
+    c.execute("DELETE FROM acme_order_authz WHERE order_id IN (SELECT id FROM acme_orders WHERE ca_id = ?)", [ca])?;
     for t in ["acme_bindings", "acme_accounts", "acme_orders", "acme_authz", "acme_challenges", "acme_certs"] {
         c.execute(&format!("DELETE FROM {t} WHERE ca_id = ?"), [ca])?;
     }

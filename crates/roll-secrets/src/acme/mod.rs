@@ -9,11 +9,13 @@
 //!   names and an end. Every request of an account looks its binding up (never cached): revoking
 //!   it, its end, or its maker no longer reaching the project stops the account at once.
 //! - An order's names are within the CA's policy and the binding's names. Each is then proven with
-//!   `http-01` or `dns-01` through rolld's [`Checks`] (outside any transaction), or, where the CA
-//!   pre-authorizes, valid at once: the binding's key is then the whole proof.
-//! - Finalize signs the CSR through the same path as `…/cas/{id}/sign` (`source: "acme"`): the
-//!   CA's list, revocation, the CRL and OCSP all have it. `revoke-cert` takes the ordering
-//!   account's signature or the certificate's own key's.
+//!   `http-01`, `dns-01` or `tls-alpn-01` through rolld's [`Checks`] (outside any transaction), or,
+//!   where the CA pre-authorizes, valid at once: the binding's key is then the whole proof. A name
+//!   the account already proved on the CA reuses that authorization until it ends (never extended).
+//! - Finalize checks the names against the CA's policy and the binding again (either may have
+//!   changed since the order), then signs the CSR through the same path as `…/cas/{id}/sign`
+//!   (`source: "acme"`): the CA's list, revocation, the CRL and OCSP all have it. `revoke-cert`
+//!   takes the ordering account's signature or the certificate's own key's.
 //! - Nonces, accounts, orders, authorizations and challenges live in the database, so any node of
 //!   a fleet answers any request; each read-then-write (using a nonce, claiming a challenge or an
 //!   order, issuing) is one write. Expired nonces, orders and certificates go in the sweep.
@@ -89,6 +91,14 @@ CREATE TABLE IF NOT EXISTS acme_authz (
     expires_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS acme_authz_order ON acme_authz (order_id);
+CREATE INDEX IF NOT EXISTS acme_authz_reuse ON acme_authz (account_id, value);
+CREATE INDEX IF NOT EXISTS acme_authz_expiry ON acme_authz (expires_at);
+CREATE TABLE IF NOT EXISTS acme_order_authz (
+    order_id TEXT NOT NULL,
+    authz_id TEXT NOT NULL,
+    PRIMARY KEY (order_id, authz_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS acme_order_authz_authz ON acme_order_authz (authz_id);
 CREATE TABLE IF NOT EXISTS acme_challenges (
     id TEXT PRIMARY KEY,
     authz_id TEXT NOT NULL,
@@ -137,20 +147,38 @@ const ORDER_MS: i64 = 24 * 60 * 60_000;
 const KEEP_MS: i64 = 24 * 60 * 60_000;
 /// A claim on a challenge or an order that a node took and never finished is taken over after this.
 const CLAIM_MS: i64 = 2 * 60_000;
+/// A valid authorization is reused by a new order only while it has this long left (an order
+/// ends with the earliest of its authorizations).
+const REUSE_MIN_MS: i64 = 60 * 60_000;
 /// The most of an http-01 answer read.
 const ANSWER_MAX: usize = 8 * 1024;
 /// TXT records read at one name.
 const TXT_MAX: usize = 32;
 
 /// What validating a challenge reaches outside roll. rolld's resolves through public DNS and
-/// fetches through its guarded client (`roll_net::PublicOnly`, no redirects, the literal-host
-/// check, bounded reads); tests inject fakes.
+/// fetches and connects through its guarded checks (`roll_net::PublicOnly`, no redirects, the
+/// literal-host check, bounded reads); tests inject fakes.
 pub trait Checks: Send + Sync {
     /// The TXT records at `name` (each record's strings joined), within a timeout.
     fn txt(&self, name: &str) -> std::result::Result<Vec<String>, String>;
     /// GET `url` (`http://`, port 80) without following redirects: a 2xx answer's first `limit`
     /// bytes at most.
     fn get(&self, url: &str, limit: usize) -> std::result::Result<Vec<u8>, String>;
+    /// tls-alpn-01 (RFC 8737): a TLS handshake with `name` on port 443, SNI `name`, offering only
+    /// `acme-tls/1`. The server chooses `acme-tls/1` and presents a certificate whose one SAN is
+    /// `name`, with the critical `id-pe-acmeIdentifier` extension holding `digest` (SHA-256 of the
+    /// key authorization).
+    fn tls_alpn(&self, name: &str, digest: &[u8; 32]) -> std::result::Result<(), AlpnFailure>;
+}
+
+/// Why a tls-alpn-01 check failed.
+#[derive(Debug)]
+pub enum AlpnFailure {
+    /// No `acme-tls/1` handshake: the name didn't resolve to an address roll may reach, the
+    /// connection or handshake failed, or the server chose another protocol.
+    Tls(String),
+    /// The handshake's certificate doesn't prove the name.
+    Incorrect(String),
 }
 
 /// ACME's state on a node: rolld's checks once it says, and the nonce key once read.
@@ -279,6 +307,23 @@ struct Live {
     policy: Policy,
     ca_name: String,
     pre_authorize: bool,
+}
+
+impl Live {
+    /// Whether an account with this binding may have `value`: within the CA's policy and the
+    /// binding's names. Checked at new-order and again at finalize.
+    fn takes(&self, value: &str) -> std::result::Result<(), String> {
+        if !self.policy.allows(value) {
+            let ips = if self.policy.allow_ip { " and IP addresses" } else { "" };
+            return Err(format!("{} doesn't sign for {value}: it takes names under {}{ips}", self.ca_name, self.policy.domains.join(", ")));
+        }
+        if let Some(names) = &self.names
+            && !binding_allows(names, value)
+        {
+            return Err(format!("this account's binding doesn't take {value}: it takes {}", names.join(", ")));
+        }
+        Ok(())
+    }
 }
 
 /// A request in progress: its CA, its URLs, who's asking.
@@ -579,22 +624,17 @@ impl Secrets {
     }
 
     /// newOrder (RFC 8555 §7.4): every name within the CA's policy and the binding's names; each
-    /// gets an authorization, valid at once where the CA pre-authorizes, else with challenges.
+    /// gets an authorization, valid at once where the CA pre-authorizes, else with challenges. A
+    /// name the account already proved on this CA reuses that authorization (same identifier and
+    /// wildcard, valid, an hour or more left), as Let's Encrypt does: it keeps its own end, and the
+    /// order ends with the earliest of its authorizations.
     fn new_order(&self, req: &Req<'_>, jws: &Jws, (a, live): &(Account, Live)) -> Acme<Answer> {
         let p = jws.json()?;
         let list = p["identifiers"].as_array().filter(|l| !l.is_empty() && l.len() <= NAMES_MAX).ok_or_else(|| Problem::malformed(format!("an order names 1–{NAMES_MAX} identifiers")))?;
         let mut ids: Vec<(String, String)> = vec![];
         for v in list {
             let (kind, value) = identifier(v)?;
-            if !live.policy.allows(&value) {
-                let ips = if live.policy.allow_ip { " and IP addresses" } else { "" };
-                return Err(Problem::new("rejectedIdentifier", 400, format!("{} doesn't sign for {value}: it takes names under {}{ips}", live.ca_name, live.policy.domains.join(", "))));
-            }
-            if let Some(names) = &live.names
-                && !binding_allows(names, &value)
-            {
-                return Err(Problem::new("rejectedIdentifier", 400, format!("this account's binding doesn't take {value}: it takes {}", names.join(", "))));
-            }
+            live.takes(&value).map_err(|m| Problem::new("rejectedIdentifier", 400, m))?;
             if !ids.iter().any(|(_, v)| *v == value) {
                 ids.push((kind, value));
             }
@@ -603,34 +643,55 @@ impl Secrets {
             return Err(Problem::new("rejectedIdentifier", 400, "this server validates no challenges: an admin of the CA's project can pre-authorize its bindings' names"));
         }
         let now = self.db.now_ms()?;
-        let expires = now + ORDER_MS;
         let order = names::new_id("ord", 16);
         self.db.write(|c| {
             let recent: i64 = c.query_row("SELECT COUNT(*) FROM acme_orders WHERE account_id = ? AND created_at > ?", params![a.id, now - 86_400_000], |r| r.get(0))?;
             if recent >= ORDERS_PER_DAY {
                 return Err(Error::TooMany(format!("this account made {ORDERS_PER_DAY} orders in the last day: that's the most")));
             }
+            let mut expires = now + ORDER_MS;
+            let mut reused: Vec<Option<String>> = vec![];
+            for (kind, value) in &ids {
+                let bare = value.strip_prefix("*.").unwrap_or(value);
+                let found: Option<(String, i64)> = c
+                    .query_row(
+                        "SELECT id, expires_at FROM acme_authz WHERE account_id = ? AND ca_id = ? AND kind = ? AND value = ? AND wildcard = ? AND status = 'valid' AND expires_at > ? ORDER BY expires_at DESC LIMIT 1",
+                        params![a.id, req.ca, kind, bare, i64::from(value.starts_with("*.")), now + REUSE_MIN_MS],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                if let Some((_, end)) = &found {
+                    expires = expires.min(*end);
+                }
+                reused.push(found.map(|(id, _)| id));
+            }
             let idents: Vec<Ident> = ids.iter().map(|(k, v)| Ident { r#type: k.clone(), value: v.clone() }).collect();
             c.execute(
                 "INSERT INTO acme_orders (id, ca_id, account_id, identifiers, status, expires_at, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
                 params![order, req.ca, a.id, crate::json(&idents), expires, now],
             )?;
-            for (kind, value) in &ids {
+            for ((kind, value), reuse) in ids.iter().zip(&reused) {
+                if let Some(az) = reuse {
+                    c.execute("INSERT INTO acme_order_authz (order_id, authz_id) VALUES (?, ?)", params![order, az])?;
+                    continue;
+                }
                 let az = names::new_id("az", 16);
                 let wildcard = value.starts_with("*.");
                 let bare = value.strip_prefix("*.").unwrap_or(value);
                 let status = if live.pre_authorize { "valid" } else { "pending" };
                 c.execute(
                     "INSERT INTO acme_authz (id, order_id, ca_id, account_id, kind, value, wildcard, status, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![az, order, req.ca, a.id, kind, bare, i64::from(wildcard), status, expires],
+                    params![az, order, req.ca, a.id, kind, bare, i64::from(wildcard), status, now + ORDER_MS],
                 )?;
+                c.execute("INSERT INTO acme_order_authz (order_id, authz_id) VALUES (?, ?)", params![order, az])?;
                 if live.pre_authorize {
                     continue;
                 }
-                // http-01 can't prove a wildcard; dns-01 can't prove an IP address.
+                // http-01 and tls-alpn-01 can't prove a wildcard; dns-01 and tls-alpn-01 (here)
+                // can't prove an IP address.
                 let types: &[&str] = match (kind.as_str(), wildcard) {
                     ("dns", true) => &["dns-01"],
-                    ("dns", false) => &["http-01", "dns-01"],
+                    ("dns", false) => &["http-01", "dns-01", "tls-alpn-01"],
                     _ => &["http-01"],
                 };
                 for t in types {
@@ -664,6 +725,11 @@ impl Secrets {
             let stale = o.stored == "processing" && o.claimed_at.is_some_and(|t| t < now - CLAIM_MS) && o.expires_at > now;
             if o.status != "ready" && !stale {
                 return Ok(Err(o.status));
+            }
+            // The CA's policy or the binding may have narrowed since the order (or the
+            // authorization it reuses) was made.
+            for i in &o.identifiers {
+                live.takes(&i.value).map_err(Error::Forbidden)?;
             }
             let mut wanted: Vec<String> = o.identifiers.iter().map(|i| i.value.clone()).collect();
             wanted.sort();
@@ -716,7 +782,7 @@ impl Secrets {
         })?;
         let (kind, value, wildcard, status, expires_at) = row.ok_or_else(|| Problem::not_found("authorization"))?;
         let challenges = self.db.read(|c| c.query("SELECT id, type, token, status, validated_at, error FROM acme_challenges WHERE authz_id = ? ORDER BY type DESC", [id], challenge_row))?;
-        let status = if status == "pending" && expires_at <= now { "expired".to_string() } else { status };
+        let status = if (status == "pending" || status == "valid") && expires_at <= now { "expired".to_string() } else { status };
         let mut v = json!({
             "identifier": { "type": kind, "value": value },
             "status": status,
@@ -775,7 +841,8 @@ impl Secrets {
     }
 
     /// Prove control of an identifier: the key authorization at `/.well-known/acme-challenge/`
-    /// (http-01) or its digest in `_acme-challenge`'s TXT records (dns-01), through rolld.
+    /// (http-01), its digest in `_acme-challenge`'s TXT records (dns-01) or in the certificate an
+    /// `acme-tls/1` handshake presents (tls-alpn-01), through rolld.
     fn validate(&self, typ: &str, kind: &str, value: &str, tok: &str, key_auth: &str) -> Acme<()> {
         let checks = self.acme.checks.get().ok_or_else(|| Problem::new("serverInternal", 500, "this server validates no challenges"))?;
         match typ {
@@ -799,6 +866,14 @@ impl Secrets {
                 } else {
                     Err(Problem::new("incorrectResponse", 403, format!("no TXT record at {name} holds the key authorization's digest")))
                 }
+            }
+            "tls-alpn-01" => {
+                use sha2::Digest;
+                let digest: [u8; 32] = sha2::Sha256::digest(key_auth.as_bytes()).into();
+                checks.tls_alpn(value, &digest).map_err(|e| match e {
+                    AlpnFailure::Tls(m) => Problem::new("tls", 400, format!("tls-alpn-01 with {value}:443: {m}")),
+                    AlpnFailure::Incorrect(m) => Problem::new("incorrectResponse", 403, format!("tls-alpn-01 with {value}:443: {m}")),
+                })
             }
             t => Err(Problem::malformed(format!("roll doesn't validate {t}"))),
         }
@@ -923,10 +998,12 @@ fn order_state(c: &Conn<'_>, account: &str, id: &str, now: i64) -> Result<Option
         .query_row("SELECT identifiers, status, expires_at, claimed_at, serial FROM acme_orders WHERE id = ? AND account_id = ?", [id, account], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
         .optional()?;
     let Some((identifiers, stored, expires_at, claimed_at, serial)) = row else { return Ok(None) };
-    let authz = c.query("SELECT id, status FROM acme_authz WHERE order_id = ? ORDER BY id", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let authz = c.query("SELECT z.id, z.status FROM acme_order_authz l JOIN acme_authz z ON z.id = l.authz_id WHERE l.order_id = ? ORDER BY z.id", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let status = match stored.as_str() {
         "pending" | "processing" if expires_at <= now => "invalid".to_string(),
-        "pending" if authz.iter().any(|(_, s)| s != "valid" && s != "pending") => "invalid".into(),
+        // An order lists at least one authorization; one listing none (made before orders listed
+        // them) is never ready.
+        "pending" if authz.is_empty() || authz.iter().any(|(_, s)| s != "valid" && s != "pending") => "invalid".into(),
         "pending" if authz.iter().all(|(_, s)| s == "valid") => "ready".into(),
         s => s.to_string(),
     };

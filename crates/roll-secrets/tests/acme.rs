@@ -1,6 +1,6 @@
 //! ACME on a project's CA (docs/secrets.md, "ACME"), driven by a real ACME client (instant-acme)
 //! in process: its HTTP goes straight to the router, and challenges are answered by a fake web
-//! server and a fake DNS zone. Nothing here reaches the internet. On SQLite by default;
+//! server, a fake DNS zone and fake `acme-tls/1` servers. Nothing here reaches the internet. On SQLite by default;
 //! `ROLL_CODE_TEST_DATABASE=postgres://…` runs it on Postgres.
 
 use axum::Router;
@@ -8,6 +8,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use instant_acme::{Account, AuthorizationStatus, BodyWrapper, BytesResponse, ChallengeType, ExternalAccountKey, HttpClient, Identifier, NewAccount, NewOrder, OrderStatus, RetryPolicy, RevocationRequest};
+use roll_secrets::acme::AlpnFailure;
 use roll_secrets::{Keyring, Options, Secrets};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -17,11 +18,13 @@ use tower::ServiceExt;
 
 const API: &str = "https://roll.example";
 
-/// The internet as far as challenges go: web pages by URL and TXT records by name.
+/// The internet as far as challenges go: web pages by URL, TXT records by name, and the digest
+/// each name's `acme-tls/1` certificate carries.
 #[derive(Default)]
 struct World {
     pages: Mutex<HashMap<String, String>>,
     txt: Mutex<HashMap<String, Vec<String>>>,
+    alpn: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl roll_secrets::acme::Checks for World {
@@ -31,6 +34,13 @@ impl roll_secrets::acme::Checks for World {
     fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>, String> {
         let page = self.pages.lock().unwrap().get(url).cloned().ok_or("404 Not Found")?;
         Ok(page.into_bytes().into_iter().take(limit).collect())
+    }
+    fn tls_alpn(&self, name: &str, digest: &[u8; 32]) -> Result<(), AlpnFailure> {
+        match self.alpn.lock().unwrap().get(name) {
+            None => Err(AlpnFailure::Tls("connection refused".into())),
+            Some(d) if d[..] == digest[..] => Ok(()),
+            Some(_) => Err(AlpnFailure::Incorrect("the acmeIdentifier isn't the key authorization's digest".into())),
+        }
     }
 }
 
@@ -68,6 +78,7 @@ struct Setup {
     router: Router,
     client: InProcess,
     world: Arc<World>,
+    db: code_sql::Db,
     project: String,
     _dir: tempfile::TempDir,
 }
@@ -79,13 +90,13 @@ impl Setup {
         let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
         let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
         let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, clouds: None, workloads: None };
-        let secrets = Arc::new(Secrets::new(db, ws.clone(), opts).unwrap());
+        let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         secrets.set_public_api(API.into());
         let world = Arc::new(World::default());
         secrets.set_acme_checks(world.clone());
         let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets));
         let client = InProcess { router: router.clone(), posts: Default::default() };
-        let mut s = Setup { router, client, world, project: String::new(), _dir: dir };
+        let mut s = Setup { router, client, world, db, project: String::new(), _dir: dir };
         s.project = s.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await.1["id"].as_str().unwrap().to_string();
         s
     }
@@ -147,18 +158,28 @@ async fn an_acme_client_gets_certificates_from_a_projects_ca_only_with_a_live_bi
     // Names outside the CA's policy are refused.
     assert_eq!(problem(account.new_order(&NewOrder::new(&[dns("api.example.com")])).await.err().unwrap()), "rejectedIdentifier");
 
-    // http-01 for a name, dns-01 for a wildcard, through the fake web server and zone.
-    let mut order = account.new_order(&NewOrder::new(&[dns("api.svc.internal"), dns("*.web.svc.internal")])).await.unwrap();
+    // http-01 for a name, dns-01 for a wildcard, tls-alpn-01 for another name, through the fake
+    // web server, zone and acme-tls/1 server.
+    let mut order = account.new_order(&NewOrder::new(&[dns("api.svc.internal"), dns("*.web.svc.internal"), dns("edge.svc.internal")])).await.unwrap();
+    let mut edge_authz = String::new();
     let mut authzs = order.authorizations();
     while let Some(a) = authzs.next().await {
         let mut a = a.unwrap();
         assert_eq!(a.status, AuthorizationStatus::Pending);
-        let wildcard = a.identifier().wildcard;
-        let mut ch = a.challenge(if wildcard { ChallengeType::Dns01 } else { ChallengeType::Http01 }).unwrap();
-        if wildcard {
-            s.world.txt.lock().unwrap().insert("_acme-challenge.web.svc.internal".into(), vec!["unrelated".into(), ch.key_authorization().dns_value()]);
-        } else {
-            s.world.pages.lock().unwrap().insert(format!("http://api.svc.internal/.well-known/acme-challenge/{}", ch.token), ch.key_authorization().as_str().to_string());
+        let name = a.identifier().to_string();
+        let kind = match name.as_str() {
+            "*.web.svc.internal" => ChallengeType::Dns01,
+            "edge.svc.internal" => ChallengeType::TlsAlpn01,
+            _ => ChallengeType::Http01,
+        };
+        if kind == ChallengeType::TlsAlpn01 {
+            edge_authz = a.url().to_string();
+        }
+        let mut ch = a.challenge(kind.clone()).unwrap();
+        match kind {
+            ChallengeType::Dns01 => drop(s.world.txt.lock().unwrap().insert("_acme-challenge.web.svc.internal".into(), vec!["unrelated".into(), ch.key_authorization().dns_value()])),
+            ChallengeType::TlsAlpn01 => drop(s.world.alpn.lock().unwrap().insert("edge.svc.internal".into(), ch.key_authorization().digest().as_ref().to_vec())),
+            _ => drop(s.world.pages.lock().unwrap().insert(format!("http://api.svc.internal/.well-known/acme-challenge/{}", ch.token), ch.key_authorization().as_str().to_string())),
         }
         ch.set_ready().await.unwrap();
     }
@@ -185,7 +206,7 @@ async fn an_acme_client_gets_certificates_from_a_projects_ca_only_with_a_live_bi
     let serial: String = leaf.raw_serial().iter().map(|b| format!("{b:02x}")).collect();
     let listed = s.ok(Method::GET, &format!("/cas/{id}/certificates"), None).await;
     let row = listed.as_array().unwrap().iter().find(|c| c["serial"] == serial.as_str()).expect("listed");
-    assert_eq!((row["source"].as_str(), row["names"].clone()), (Some("acme"), json!(["*.web.svc.internal", "api.svc.internal"])));
+    assert_eq!((row["source"].as_str(), row["names"].clone()), (Some("acme"), json!(["*.web.svc.internal", "api.svc.internal", "edge.svc.internal"])));
     assert_eq!(row["issued_by"], format!("acme:{}", eab["key_id"].as_str().unwrap()));
 
     // revoke-cert by the ordering account puts it on the CA's CRL.
@@ -198,6 +219,20 @@ async fn an_acme_client_gets_certificates_from_a_projects_ca_only_with_a_live_bi
     let audit = s.ok(Method::GET, "/audit", None).await;
     let actions: Vec<&str> = audit.as_array().unwrap().iter().filter_map(|e| e["action"].as_str()).collect();
     assert!(actions.contains(&"ca.acme.issue") && actions.contains(&"ca.revoke"), "{actions:?}");
+
+    // A name the account proved is ready again at once: the order lists the same authorization.
+    let mut again = account.new_order(&NewOrder::new(&[dns("edge.svc.internal")])).await.unwrap();
+    assert_eq!(again.state().status, OrderStatus::Ready);
+    let reused = {
+        let mut authzs = again.authorizations();
+        let a = authzs.next().await.unwrap().unwrap();
+        (a.url().to_string(), a.status)
+    };
+    assert_eq!(reused, (edge_authz, AuthorizationStatus::Valid));
+    // A binding narrowed since (no route narrows one yet; the row stands for it) stops it at finalize.
+    let narrowed = s.db.write(|c| c.execute("UPDATE acme_bindings SET names = ? WHERE id = ?", [r#"["api.svc.internal"]"#, eab["key_id"].as_str().unwrap()]));
+    assert_eq!(narrowed.unwrap(), 1);
+    assert_eq!(problem(again.finalize().await.err().unwrap()), "unauthorized");
 
     // Pre-authorized names: a binding's names are valid at once, nothing else is.
     s.ok(Method::PATCH, &format!("/cas/{id}/acme"), Some(json!({ "pre_authorize": true }))).await;
