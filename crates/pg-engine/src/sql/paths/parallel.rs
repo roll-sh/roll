@@ -739,8 +739,13 @@ pub fn agg_clause_costs(aggs: &[crate::sql::plan::AggCall], split: AggSplit) -> 
             Some(u) => u.final_.is_some(),
             None => finalfn != 0,
         };
+        // (get_func_cost of the final and transition functions: a user aggregate's are its
+        // functions' procost, 100 for a SQL or PL one.)
         if split != AggSplit::Partial && has_final {
-            per_group += CPU_OPERATOR_COST;
+            per_group += match &a.user {
+                Some(u) => u.final_.as_ref().map_or(CPU_OPERATOR_COST, qual_cost),
+                None => CPU_OPERATOR_COST,
+            };
         }
         per_group += a.direct.iter().map(qual_cost).sum::<f64>();
         // (The transition state, unless an earlier call's is shared.)
@@ -754,7 +759,10 @@ pub fn agg_clause_costs(aggs: &[crate::sql::plan::AggCall], split: AggSplit) -> 
             }
             states.push(k);
         }
-        per_row += CPU_OPERATOR_COST;
+        per_row += match &a.user {
+            Some(u) if !u.internal => qual_cost(&u.trans).max(CPU_OPERATOR_COST),
+            _ => CPU_OPERATOR_COST,
+        };
         match split {
             AggSplit::Final => {
                 if deserialfn != 0 {

@@ -6928,7 +6928,12 @@ impl Builder<'_, '_> {
                     .map(|e| match e {
                         Expr::Col(j, _) if *j < c.node.cols.len() => c.node.cols[*j].clone(),
                         e => ColInfo {
-                            width: type_width(&e.ty()),
+                            // (A domain's value has no typmod of its own: exprTypmod of a
+                            // CoerceToDomain is -1.)
+                            width: match e {
+                                Expr::CoerceToDomain(..) => type_width(&e.ty().without_typmod()),
+                                _ => type_width(&e.ty()),
+                            },
                             var: None,
                             // (An expression of columns of known distinct counts, none with
                             // statistics: as many values as their combinations.)

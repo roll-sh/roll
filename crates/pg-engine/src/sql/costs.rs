@@ -831,6 +831,12 @@ impl Est<'_> {
             },
         };
         let (gt, eq) = ineq(op)?;
+        // (addRangeClause takes only the operators scalarltsel, scalarlesel, scalargtsel or
+        // scalargesel estimate: a box's `<=` is areasel's.)
+        let rest = crate::sql::func::oper_row(d.name, d).rest;
+        if rest != 0 && !matches!(rest, 103 | 104 | 336 | 337) {
+            return None;
+        }
         let _g = op_coll(d);
         Some((
             var.clone(),
@@ -911,6 +917,18 @@ impl Est<'_> {
                     && let Some(sel) = self.user_op(self.user, o, d, &args[0], &args[1])
                 {
                     return sel;
+                }
+                // (An operator eqsel or neqsel estimates under another name: point `~=`.)
+                match crate::sql::func::oper_row(d.name, d).rest {
+                    101 if d.name != "=" => {
+                        let _g = op_coll(d);
+                        return self.binary_op("=", &args[0], &args[1]);
+                    }
+                    102 if d.name != "<>" => {
+                        let _g = op_coll(d);
+                        return self.binary_op("<>", &args[0], &args[1]);
+                    }
+                    _ => {}
                 }
                 if d.name == "@@"
                     && crate::sql::func::oper_row(d.name, d).rest == 3686
