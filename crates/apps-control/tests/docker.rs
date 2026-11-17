@@ -348,12 +348,19 @@ async fn a_sites_vercel_json_and_netlify_toml_rules_answer() {
 
 /// A service from an upload of `files`, built from its generated Dockerfile and live: its id and host.
 async fn deploy_tree(w: &World, name: &str, files: &[(&str, &str)]) -> (String, String) {
-    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "upload"}, "run": {"memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
+    deploy_tree_with(w, name, files, json!({})).await
+}
+
+/// [`deploy_tree`] with the service's build settings.
+async fn deploy_tree_with(w: &World, name: &str, files: &[(&str, &str)], build: Value) -> (String, String) {
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "upload"}, "build": build, "run": {"memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
     let tree = tempfile::tempdir().unwrap();
     for (path, body) in files {
-        std::fs::write(tree.path().join(path), body).unwrap();
+        let p = tree.path().join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
     }
     let mut bundle = Vec::new();
     roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
@@ -373,6 +380,35 @@ async fn deploy_tree(w: &World, name: &str, files: &[(&str, &str)]) -> (String, 
     assert_eq!(d["status"], "active", "{name}: {d}\n{log}");
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
     (id, env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string())
+}
+
+/// A static site's functions run (the `functions` builder): Netlify's Web handler and its Lambda
+/// one, Vercel's `(req, res)` and a TypeScript Web handler, each answering at its path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_static_sites_functions_build_and_answer() {
+    let Some(w) = docker_world().await else { return };
+    let files = [
+        ("index.html", "<h1>site</h1>"),
+        ("netlify/functions/hello.mjs", "export default async (req) => new Response(`hello ${new URL(req.url).searchParams.get('who')}`)"),
+        ("netlify/functions/legacy.js", "exports.handler = async (event) => ({ statusCode: 201, body: `legacy ${event.httpMethod}` })"),
+        ("api/ping.js", "module.exports = (req, res) => res.status(200).json({ pong: req.query.n })"),
+        ("api/web.ts", "export default async (req: Request): Promise<Response> => new Response('typed')"),
+    ];
+    let (_, host) = deploy_tree_with(&w, "site-fn", &files, json!({"builder": "functions"})).await;
+    let fetch = |path: &'static str| {
+        let req = Request::get(path).header("host", host.as_str()).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(req).await.unwrap();
+            let st = resp.status();
+            (st, String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    assert_eq!(fetch("/.netlify/functions/hello?who=roll").await, (StatusCode::OK, "hello roll".to_string()));
+    assert_eq!(fetch("/.netlify/functions/legacy").await, (StatusCode::CREATED, "legacy GET".to_string()));
+    assert_eq!(fetch("/api/ping?n=7").await, (StatusCode::OK, r#"{"pong":"7"}"#.to_string()));
+    assert_eq!(fetch("/api/web").await, (StatusCode::OK, "typed".to_string()));
+    assert_eq!(fetch("/api/nope").await.0, StatusCode::NOT_FOUND);
 }
 
 /// What the generated Dockerfiles of Node, Python and Go make actually builds and answers, and a

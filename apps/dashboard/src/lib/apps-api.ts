@@ -32,7 +32,7 @@ export type Source =
   | { kind: "git"; url: string; root?: string };
 
 export interface Build {
-  builder: "auto" | "dockerfile";
+  builder: "auto" | "dockerfile" | "functions";
   dockerfile?: string;
   install?: string;
   build?: string;
@@ -580,7 +580,7 @@ export interface NewDeploy {
 export type DeployTrigger = "push" | "manual" | "rollback" | "upload" | "api" | "settings" | "promote";
 
 export interface Plan {
-  provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "static";
+  provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "static" | "functions";
   framework: string | null;
   language_version: string | null;
   install: string | null;
@@ -593,6 +593,8 @@ export interface Plan {
   spa?: boolean;
   /** Datastores the code has client libraries for (New service offers to make and link them). */
   uses?: ("postgres" | "redis")[];
+  /** A static site's function directories (`netlify/functions`, `api`) the `functions` builder runs. */
+  functions?: string[];
 }
 
 export interface RootCandidate {
@@ -1422,4 +1424,23 @@ export function deployChange(
       }
     }
   return { pending, finished, seen };
+}
+
+/** Where each platform's functions answer, to route them to their service. */
+export const FUNCTION_ROUTES: Record<string, string> = { "netlify/functions": "/.netlify/functions/*", api: "/api/*" };
+
+/**
+ * A static site's functions, run (Netlify Functions, Vercel's `api/`): a service of them from the
+ * same source (the `functions` builder), and the site's environment routing their paths to it.
+ * Its environment of the same name answers, so the site's `env` must be one the new service has
+ * (a new service has production).
+ */
+export async function runFunctions(siteId: string, env: string, dirs: string[]): Promise<Service> {
+  const site = await appsApi.service(siteId);
+  const fns = await appsApi.create({ project: site.project, name: `${site.name}-fn`.slice(0, 40), source: site.source, build: { ...site.build, builder: "functions" }, run: { port: 8080 } });
+  const current = await appsApi.environment(siteId, env);
+  const wanted = dirs.map((d) => FUNCTION_ROUTES[d]).filter((p): p is string => !!p);
+  const routes = [...(current.routes ?? []).filter((r) => !wanted.includes(r.path)), ...wanted.map((path) => ({ path, service: fns.name }))];
+  await appsApi.putEnvironment(siteId, env, { routes });
+  return fns;
 }

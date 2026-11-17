@@ -230,9 +230,10 @@
           "type": "string",
           "enum": [
             "auto",
-            "dockerfile"
+            "dockerfile",
+            "functions"
           ],
-          "description": "auto: detect; dockerfile: build the tree's own Dockerfile."
+          "description": "auto: detect; dockerfile: build the tree's own Dockerfile; functions: run a static site's netlify/functions and api/ as a Node service."
         },
         "dockerfile": {
           "type": "string",

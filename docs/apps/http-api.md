@@ -177,7 +177,7 @@ type Source =
 
 type Build = {
   /** auto: detect (a Dockerfile wins); dockerfile: use `dockerfile`. */
-  builder: "auto" | "dockerfile";
+  builder: "auto" | "dockerfile" | "functions"; // functions: a static site's netlify/functions and api/ as a Node service ("Functions in a static site")
   dockerfile?: string; // path in the tree, default "Dockerfile"
   install?: string;    // overrides the detected commands
   build?: string;
@@ -525,7 +525,7 @@ type ProjectImport = {
 type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string /* a Git URL, fetched at its branch's head as its deploy would be */; branch?: string; root?: string; git_login?: { username: string; password: string } /* a private repository's */ } | { files: Record<string, string> };
 
 type Plan = {
-  provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "static";
+  provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "static" | "functions";
   framework: string | null;  // next, django, rails, spring…
   language_version: string | null;
   install: string | null;
@@ -538,6 +538,7 @@ type Plan = {
   /** Datastores the root's manifests have client libraries for ("pg in package.json"): New
    *  service offers to make and link them. Absent when none. */
   uses?: ("postgres" | "redis")[];
+  functions?: string[]; // a static site's function directories the functions builder runs (netlify/functions, api)
   /** The Procfile's `release:` (Heroku's release phase): the deployment's pre-deploy command when
    *  the service sets none. Absent without one, and for a tree's own Dockerfile. A Procfile's `web:`
    *  (`worker:` for a worker) is `start` when the service names none. */

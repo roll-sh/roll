@@ -14,6 +14,7 @@ mod df;
 mod docker;
 mod dotnet;
 mod elixir;
+pub mod functions;
 mod golang;
 mod java;
 mod node;
@@ -93,6 +94,9 @@ pub enum Builder {
     Auto,
     /// Build the tree's own Dockerfile.
     Dockerfile,
+    /// Run a static site's functions (`netlify/functions/`, `api/`) as a small Node service
+    /// ([`functions`]).
+    Functions,
 }
 
 /// How a tree builds and runs (`Plan` in docs/apps/http-api.md).
@@ -124,6 +128,10 @@ pub struct Plan {
     /// vercel.json's `crons`: paths the service calls on a schedule ([`site_configs::vercel_crons`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub crons: Vec<Cron>,
+    /// A static site's function directories the `functions` builder runs (`netlify/functions`,
+    /// `api`): a service of their own beside it does ([`functions`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub functions: Vec<String>,
 }
 
 /// The images a Dockerfile builds on (its `FROM`s), for watching them move: not its own stages,
@@ -175,6 +183,8 @@ pub enum Provider {
     Dotnet,
     Elixir,
     Static,
+    /// A static site's functions ([`functions`]).
+    Functions,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -285,7 +295,10 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         for (dir, what, route) in [("netlify/functions", "Netlify Functions", "/.netlify/functions/*"), ("netlify/edge-functions", "Netlify Edge Functions", "the paths they answer"), ("api", "Vercel functions", "/api/*")] {
             let n = tree.list(dir).iter().filter(|f| [".js", ".mjs", ".cjs", ".ts", ".mts", ".py", ".go"].iter().any(|e| f.ends_with(e)) || f.ends_with('/')).count();
             if n > 0 {
-                p.notes.push(format!("{dir}/ has {n} {what}, which a static site doesn't run: put them in a web service and route {route} to it (the environment's routes)"));
+                p.notes.push(format!("{dir}/ has {n} {what}, which a static site doesn't run: Run its functions makes a service of them, with {route} routed to it"));
+                if functions::DIRS.iter().any(|(d, _)| *d == dir) {
+                    p.functions.push(dir.to_string());
+                }
             }
         }
     }
@@ -315,6 +328,9 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
 
 fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
     let o = overrides.trimmed();
+    if o.builder == Builder::Functions {
+        return functions::plan(tree, &o);
+    }
     if o.builder == Builder::Dockerfile || tree.read("Dockerfile").is_some() {
         return docker::plan(tree, &o);
     }
@@ -462,6 +478,7 @@ impl Draft {
             uses: Vec::new(),
             release: None,
             crons: Vec::new(),
+            functions: Vec::new(),
         }
     }
 }

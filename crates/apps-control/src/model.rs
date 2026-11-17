@@ -366,6 +366,8 @@ pub enum Builder {
     #[default]
     Auto,
     Dockerfile,
+    /// A static site's functions, as a Node service (`apps_build::functions`).
+    Functions,
 }
 
 impl Build {
@@ -400,6 +402,7 @@ impl Build {
             builder: match self.builder {
                 Builder::Auto => apps_build::Builder::Auto,
                 Builder::Dockerfile => apps_build::Builder::Dockerfile,
+                Builder::Functions => apps_build::Builder::Functions,
             },
             dockerfile: self.dockerfile.clone(),
             install: self.install.clone(),

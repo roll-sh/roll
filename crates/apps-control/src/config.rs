@@ -62,6 +62,7 @@ fn apply_one(c: &AppConfig, build: &Build, run: &Run) -> Result<(Build, Run)> {
         b.builder = match v {
             apps_build::Builder::Auto => Builder::Auto,
             apps_build::Builder::Dockerfile => Builder::Dockerfile,
+            apps_build::Builder::Functions => Builder::Functions,
         };
     }
     for (from, to) in [(&c.dockerfile, &mut b.dockerfile), (&c.install, &mut b.install), (&c.build, &mut b.build), (&c.start, &mut b.start), (&c.pre_deploy, &mut r.pre_deploy), (&c.health_path, &mut r.health_path)] {
