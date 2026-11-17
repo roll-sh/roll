@@ -67,13 +67,23 @@ type Problem struct {
 
 // Values are an environment's values. Dynamic keys hold a short-lived credential that ends with
 // its lease (Leases; Renew keeps it); Linked keys come from a link to a resource, whose address a
-// container network may need rewritten.
+// container network may need rewritten. Followed keys link a resource a preview branched: they
+// aren't in Values, and roll previews sets them from its branch.
 type Values struct {
 	Values   map[string]string `json:"values"`
 	Problems []Problem         `json:"problems"`
 	Leases   []string          `json:"leases"`
 	Dynamic  []string          `json:"dynamic"`
 	Linked   []string          `json:"linked"`
+	Followed []Followed        `json:"followed,omitempty"`
+}
+
+// Followed is a key left out because it links a resource the environment's preview branched.
+type Followed struct {
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	Parent string `json:"parent"`
+	Field  string `json:"field"`
 }
 
 // Lease is a dynamic credential's lease.
@@ -268,6 +278,7 @@ func (v *Values) clone() *Values {
 	out.Leases = append([]string(nil), v.Leases...)
 	out.Dynamic = append([]string(nil), v.Dynamic...)
 	out.Linked = append([]string(nil), v.Linked...)
+	out.Followed = append([]Followed(nil), v.Followed...)
 	return &out
 }
 
@@ -387,12 +398,13 @@ func (c *Client) ResolveSealed(ctx context.Context, env, path, consumer string, 
 		return nil, err
 	}
 	var s struct {
-		Sealed   Sealed    `json:"sealed"`
-		Context  string    `json:"context"`
-		Problems []Problem `json:"problems"`
-		Leases   []string  `json:"leases"`
-		Dynamic  []string  `json:"dynamic"`
-		Linked   []string  `json:"linked"`
+		Sealed   Sealed     `json:"sealed"`
+		Context  string     `json:"context"`
+		Problems []Problem  `json:"problems"`
+		Leases   []string   `json:"leases"`
+		Dynamic  []string   `json:"dynamic"`
+		Linked   []string   `json:"linked"`
+		Followed []Followed `json:"followed"`
 	}
 	if err := c.call(ctx, http.MethodPost, e+"/resolve", map[string]any{"consumer": consumer, "path": orRoot(path), "seal_to": PublicKey(key)}, &s); err != nil {
 		return nil, err
@@ -401,7 +413,7 @@ func (c *Client) ResolveSealed(ctx context.Context, env, path, consumer string, 
 	if err != nil {
 		return nil, err
 	}
-	v := Values{Problems: s.Problems, Leases: s.Leases, Dynamic: s.Dynamic, Linked: s.Linked}
+	v := Values{Problems: s.Problems, Leases: s.Leases, Dynamic: s.Dynamic, Linked: s.Linked, Followed: s.Followed}
 	if err := json.Unmarshal(plain, &v.Values); err != nil {
 		return nil, errors.New("the sealed values aren't a map")
 	}

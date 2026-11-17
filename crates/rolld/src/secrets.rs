@@ -362,6 +362,9 @@ pub fn link_provider(api: &Api, kind: &str) -> Option<Arc<dyn LinkProvider>> {
         "bucket" => Some(Arc::new(Bucket(api.clone()))),
         "stream" => Some(Arc::new(Stream(api.clone()))),
         "nosql" => Some(Arc::new(Nosql(api.clone()))),
+        // A data-only key of the cluster's own (`ELASTICSEARCH_API_KEY`, or an OpenSearch-flavor
+        // cluster's internal user), never its password.
+        "search" => Some(Arc::new(Search(api.clone(), Default::default()))),
         _ => None,
     }
 }
@@ -864,6 +867,7 @@ impl roll_secrets::health::CodeRefs for CodeRefs {
 pub struct People {
     pub accounts: Arc<roll_accounts::Accounts>,
     pub code: Option<Arc<code_control::Code>>,
+    pub search: Option<Arc<search_control::Control>>,
 }
 
 impl roll_secrets::People for People {
@@ -883,11 +887,47 @@ impl roll_secrets::People for People {
 }
 
 /// What of a person's canvas is theirs: everything for an admin; a repo under their roll code
-/// owner; nothing else until each product says who owns its resources. A failed lookup is a no.
+/// owner; a search cluster they own; nothing else until each product says who owns its resources.
+/// A failed lookup is a no.
 impl roll_workspace::Owners for People {
     fn trusts(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
         let Ok(Some(p)) = roll_secrets::People::person(self, user) else { return false };
-        p.admin || (kind == roll_workspace::Kind::Repo && roll_secrets::access::OwnProjects::owns_repo(p.code_owner.as_deref(), r#ref))
+        p.admin
+            || match kind {
+                roll_workspace::Kind::Repo => roll_secrets::access::OwnProjects::owns_repo(p.code_owner.as_deref(), r#ref),
+                roll_workspace::Kind::Search => self.search.as_ref().is_some_and(|s| matches!(s.store.owner_of(r#ref), Ok(Some(Some(o))) if o == user)),
+                _ => false,
+            }
+    }
+}
+
+/// After a product's own route changes a resource's credential (a password reset, a restore),
+/// tell roll secrets, so every folder linking it live moves its digest at once (watches, syncs,
+/// apps' redeploys and conditional reads see it). Without this they'd still see it within
+/// seconds: a digest reads live values' fingerprints. Only the route's pattern is looked at.
+pub async fn source_changes(axum::extract::State(s): axum::extract::State<Arc<Secrets>>, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let changed = (req.method() == Method::POST).then(|| changed_source(req.uri().path())).flatten();
+    let resp = next.run(req).await;
+    if let Some((kind, r#ref)) = changed
+        && resp.status().is_success()
+    {
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = s.source_changed(kind, &r#ref) {
+                tracing::warn!(%kind, "telling roll secrets a credential changed failed: {e}");
+            }
+        });
+    }
+    resp
+}
+
+/// The link kind and resource a credential-changing product route names.
+fn changed_source(path: &str) -> Option<(&'static str, String)> {
+    let p: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match p.as_slice() {
+        ["v1", "redis", "databases", id, "password" | "restore"] => Some(("redis", id.to_string())),
+        ["v1", "nosql", "databases", id, "password" | "reset" | "restore"] => Some(("nosql", id.to_string())),
+        ["v1", "projects", id, "branches", _, "restore" | "reset"] => Some(("postgres", id.to_string())),
+        _ => None,
     }
 }
 

@@ -104,6 +104,34 @@ async fn a_token_from_the_cli_is_held_to_its_rules() {
     assert!(audit.as_array().unwrap().iter().any(|e| e["decision"] == "ask"), "{audit}");
 }
 
+/// `roll token client` makes machine clients: one with a secret trades it at the token endpoint
+/// for a token held to its rules, one given an openssl PEM signs with its key, and revoking the
+/// first ends its token at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules() {
+    const ED25519_PUB: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA5rj3iN7HTU2KOZ5TXM2Zyw8+3iISgidPeqHONeMvZQM=\n-----END PUBLIC KEY-----\n";
+    let (api, dir) = serve().await;
+    let made = json_of(&roll(&api, "", &["--json", "token", "client", "create", "nightly", "--product", "postgres", "--allow", "read", "--expires", "7d"]));
+    let (client_id, secret) = (made["client_id"].as_str().unwrap(), made["client_secret"].as_str().unwrap());
+    let form = [("grant_type", "client_credentials"), ("client_id", client_id), ("client_secret", secret)];
+    let body = form.iter().map(|(k, v)| format!("{k}={}", urlencoding::encode(v))).collect::<Vec<_>>().join("&");
+    let answer: Value = reqwest::Client::new().post(made["token_endpoint"].as_str().unwrap()).header("content-type", "application/x-www-form-urlencoded").body(body).send().await.unwrap().json().await.unwrap();
+    let token = answer["access_token"].as_str().unwrap_or_else(|| panic!("{answer}")).to_string();
+    assert!(roll(&api, &token, &["db", "list"]).status.success());
+    assert!(!roll(&api, &token, &["db", "delete", "prj_a"]).status.success());
+
+    let key = dir.path().join("ci.pub.pem");
+    std::fs::write(&key, ED25519_PUB).unwrap();
+    let signed = json_of(&roll(&api, "", &["--json", "token", "client", "create", "deploy", "--preset", "read-only", "--public-key", key.to_str().unwrap()]));
+    assert!(signed.get("client_secret").is_none(), "{signed}");
+    let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
+    let by_key: Vec<(&str, bool)> = list.as_array().unwrap().iter().map(|c| (c["client_id"].as_str().unwrap(), c["signs_with_key"] == true)).collect();
+    assert_eq!(by_key, vec![(signed["client_id"].as_str().unwrap(), true), (client_id, false)]);
+
+    assert!(roll(&api, "", &["token", "client", "revoke", client_id]).status.success());
+    assert!(!roll(&api, &token, &["db", "list"]).status.success());
+}
+
 /// `roll login` signs a person's CLI in through the browser: it registers itself, the consent
 /// screen's answer comes back to its loopback port, commands with no token set use the login
 /// (within what was allowed), and `roll logout` revokes the connection. With no browser here

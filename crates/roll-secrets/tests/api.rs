@@ -19,6 +19,10 @@ struct Fake {
     password: Mutex<u32>,
     issued: Mutex<u32>,
     live_keys: Mutex<Vec<String>>,
+    /// The product doesn't answer.
+    down: std::sync::atomic::AtomicBool,
+    /// Every resource it was asked to read or issue for, in order.
+    asked: Mutex<Vec<String>>,
 }
 
 impl LinkProvider for Fake {
@@ -37,9 +41,14 @@ impl LinkProvider for Fake {
         &[("url", Mode::Live), ("access_key_id", Mode::Managed), ("secret_access_key", Mode::Managed)]
     }
     fn read(&self, r#ref: &str, _: &str, _: &Link) -> roll_secrets::Result<Secret> {
+        self.asked.lock().unwrap().push(r#ref.to_string());
+        if self.down.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(roll_secrets::Error::Link("bucket: timed out".into()));
+        }
         Ok(Secret::new(format!("s3://{ref}?pw={}", self.password.lock().unwrap())))
     }
-    fn issue(&self, _: &str, _: &str, _: &Link, _: &str, _: Option<u64>) -> roll_secrets::Result<Issued> {
+    fn issue(&self, r#ref: &str, _: &str, _: &Link, _: &str, _: Option<u64>) -> roll_secrets::Result<Issued> {
+        self.asked.lock().unwrap().push(r#ref.to_string());
         let mut n = self.issued.lock().unwrap();
         *n += 1;
         let id = format!("AK{n}");
@@ -689,6 +698,79 @@ async fn ephemeral_environments_inherit_their_base_and_go_by_label_or_expiry() {
 }
 
 #[tokio::test]
+async fn a_preview_never_gets_a_value_of_a_resource_it_branched() {
+    let api = Api::new().await;
+    for r in ["assets", "logs"] {
+        api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/{r}", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    }
+    let link = |r: &str, field: &str, mode: &str| json!({ "kind": "bucket", "ref": r, "field": field, "mode": mode });
+    api.ok(
+        Method::POST,
+        "/environments/staging/changes",
+        Some(json!({ "ops": [
+            { "op": "set", "key": "BUCKET_URL", "link": link("assets", "url", "live") },
+            { "op": "set", "key": "AWS_SECRET_ACCESS_KEY", "link": link("assets", "secret_access_key", "managed") },
+            { "op": "set", "key": "TEMP_KEY", "link": link("assets", "access_key_id", "dynamic") },
+            { "op": "set", "key": "LOGS_URL", "link": link("logs", "url", "live") },
+        ] })),
+    )
+    .await;
+    api.fake.asked.lock().unwrap().clear();
+    // roll previews ensures pv-1 over staging, naming what it branched; a key of its own reaching
+    // a followed one by reference doesn't resolve either.
+    let ensure = |branches: Option<Value>| {
+        let mut b = json!({ "base": "staging", "labels": { "preview": "pv-1" }, "secrets": [{ "op": "set", "key": "MIRROR", "value": "${BUCKET_URL}" }], "replace": true });
+        if let Some(l) = branches {
+            b["branches"] = l;
+        }
+        b
+    };
+    let assets = json!([{ "kind": "bucket", "parent": "assets" }]);
+    let made = api.ok(Method::PUT, "/environments/pv-1", Some(ensure(Some(assets.clone())))).await;
+    assert_eq!(made["environment"]["branches"], assets);
+    let followed = json!([
+        { "name": "AWS_SECRET_ACCESS_KEY", "kind": "bucket", "parent": "assets", "field": "secret_access_key" },
+        { "name": "BUCKET_URL", "kind": "bucket", "parent": "assets", "field": "url" },
+        { "name": "TEMP_KEY", "kind": "bucket", "parent": "assets", "field": "access_key_id" },
+    ]);
+    let v = api.values("pv-1", "/").await;
+    assert_eq!((v["values"]["LOGS_URL"].as_str(), v["values"].as_object().unwrap().len()), (Some("s3://logs?pw=0"), 2), "LOGS_URL and MIRROR: {v}");
+    assert_eq!((v["followed"].clone(), v["problems"][0]["key"].as_str()), (followed.clone(), Some("MIRROR")));
+    let r = api.ok(Method::POST, "/environments/pv-1/resolve", Some(json!({ "consumer": "preview:pv-1/web", "untrusted": true }))).await;
+    assert_eq!((r["followed"].clone(), r["values"].get("BUCKET_URL"), r["leases"].clone()), (followed.clone(), None, json!([])));
+    let sk = [7u8; 32];
+    let sealed = api.ok(Method::POST, "/environments/pv-1/resolve", Some(json!({ "consumer": "preview:pv-1/web", "seal_to": roll_secrets::crypto::public_key(&sk) }))).await;
+    assert_eq!((sealed["followed"].clone(), sealed["leases"].clone()), (followed, json!([])), "named in the clear, nothing issued");
+    let (_, text) = api.call(Method::GET, "/environments/pv-1/values?format=dotenv", None).await;
+    assert!(text.as_str().unwrap().contains("LOGS_URL=") && !text.as_str().unwrap().contains("BUCKET_URL=") && !text.as_str().unwrap().contains("s3://assets"), "{text}");
+    let digest = api.ok(Method::GET, "/environments/pv-1/digest", None).await["digest"].clone();
+    api.secrets.forget_live_fingerprints();
+    assert_eq!(api.ok(Method::GET, "/environments/pv-1/digest", None).await["digest"], digest);
+    let (s, e) = api.call(Method::GET, "/environments/pv-1/secrets/BUCKET_URL/value", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("followed")));
+    assert!(api.fake.asked.lock().unwrap().iter().all(|r| r == "logs"), "the parent was never asked: {:?}", api.fake.asked.lock().unwrap());
+
+    // An ensure without the field keeps the list; a standard environment has none.
+    api.ok(Method::PUT, "/environments/pv-1", Some(ensure(None))).await;
+    assert_eq!(api.ok(Method::GET, "/environments/pv-1", None).await["branches"], assets);
+    let (s, _) = api.call(Method::PUT, "/environments/staging", Some(json!({ "branches": [] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    // Nobody else changes the list: adding changes what previews fills, removing would hand the
+    // preview's code the parent's values. The same list, or none, is fine.
+    let t = api.token(json!({ "name": "ci", "actions": ["read", "reveal", "write"] }));
+    let both = json!([{ "kind": "bucket", "parent": "assets" }, { "kind": "bucket", "parent": "logs" }]);
+    let (s, _) = api.req(Method::PUT, "/environments/pv-1", Some(ensure(Some(both.clone()))), Some(&t)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = api.req(Method::PUT, "/environments/pv-2", Some(ensure(Some(both))), Some(&t)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = api.req(Method::PUT, "/environments/pv-1", Some(ensure(Some(json!([])))), Some(&t)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = api.req(Method::PUT, "/environments/pv-1", Some(ensure(Some(assets.clone()))), Some(&t)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(api.values("pv-1", "/").await["values"].get("BUCKET_URL").is_none(), "still followed");
+}
+
+#[tokio::test]
 async fn the_grid_flags_differences_and_promote_copies_them() {
     let api = Api::new().await;
     for (env, v) in [("development", "a"), ("staging", "a"), ("production", "b")] {
@@ -895,6 +977,41 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     let renewed = api.ok(Method::POST, &format!("/leases/{lease}/renew"), Some(json!({ "ttl_minutes": 120 }))).await;
     assert!(renewed["expires_at"].as_i64().unwrap() > before + 60 * 60_000);
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
+    // A reader ends its own lease (Terraform's ephemeral reads close theirs with a read token), but
+    // not another's: that would drop a running service's credential.
+    // A roll-access token reading staging, as rolld's gate passes its requests on.
+    let reader = {
+        use roll_auth::scope::{Action as A, Effect, Resources, Rule, Scope, Selector};
+        let rule = Rule {
+            product: "secrets".into(),
+            resources: Resources::Some(vec![Selector::Project { project: api.project.clone() }]),
+            environments: Some(vec!["staging".into()]),
+            paths: None,
+            actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Reveal, Effect::Allow)]),
+        };
+        roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_tf".into(), name: "tf".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) }
+    };
+    let as_reader = |method: Method, path: String, body: Option<Value>| {
+        let mut req = Request::builder().method(method).uri(format!("/v1/secrets/projects/{}{path}", api.project)).header("content-type", "application/json").body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).unwrap();
+        req.extensions_mut().insert(roll_auth::Operator);
+        req.extensions_mut().insert(reader.clone());
+        let router = api.router.clone();
+        async move {
+            let resp = router.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+        }
+    };
+    let mine = as_reader(Method::POST, "/environments/staging/resolve".into(), Some(json!({ "consumer": "app:web" }))).await.1;
+    let other = b["leases"][0].as_str().unwrap();
+    assert_eq!(as_reader(Method::DELETE, format!("/leases/{other}"), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(as_reader(Method::POST, format!("/leases/{other}/renew"), None).await.0, StatusCode::FORBIDDEN, "nor keep it alive");
+    assert_eq!(as_reader(Method::DELETE, format!("/leases/{}", mine["leases"][0].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
+    // Whoever may delete there ends any.
+    api.ok(Method::DELETE, &format!("/leases/{other}"), None).await;
+    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 2);
     // A reader that can't renew (External Secrets Operator) asks for none: the key is left out
     // (named in `dynamic`), no lease. With `strict`, a key that doesn't resolve fails the whole
     // read, so the reader keeps what it had instead of writing an empty value.
@@ -902,7 +1019,7 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     api.ok(Method::PUT, "/required", Some(json!([{ "key": "TEMP_KEY" }]))).await;
     let pulled = api.ok(Method::GET, "/environments/staging/values?dynamic=false&strict=1", None).await;
     assert!(pulled["values"].get("TEMP_KEY").is_none() && pulled["dynamic"] == json!(["TEMP_KEY"]), "{pulled}");
-    assert_eq!((pulled["leases"].as_array().map(Vec::len), api.fake.live_keys.lock().unwrap().len()), (Some(0), 3));
+    assert_eq!((pulled["leases"].as_array().map(Vec::len), api.fake.live_keys.lock().unwrap().len()), (Some(0), 2));
     // So does a service's resolve that can't renew (a preview's): no credential, no lease.
     let preview = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "preview:pr-7", "dynamic": false }))).await;
     assert!(preview["values"].get("TEMP_KEY").is_none() && preview["dynamic"] == json!(["TEMP_KEY"]) && preview["leases"] == json!([]), "{preview}");
@@ -913,21 +1030,21 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     api.ok(Method::POST, "/environments", Some(json!({ "slug": "pr-dyn", "base": "staging" }))).await;
     let revealed = api.ok(Method::GET, "/environments/pr-dyn/secrets/TEMP_KEY/value", None).await;
     assert!(revealed["value"] == "" && revealed["problems"].to_string().contains("dynamic"), "a preview's reveal issues no dynamic credential: {revealed}");
-    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
+    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 2);
     api.set("staging", "BROKEN", "${NOPE}").await;
     let (s, e) = api.call(Method::GET, "/environments/staging/values?dynamic=false&strict=1", None).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("unresolved")), "{e}");
     // Dynamic keys asked for, and the read refused: what it issued is revoked, nothing outlives it.
     let (s, _) = api.call(Method::GET, "/environments/staging/values?strict=1", None).await;
-    assert_eq!((s, api.fake.live_keys.lock().unwrap().len()), (StatusCode::CONFLICT, 3));
+    assert_eq!((s, api.fake.live_keys.lock().unwrap().len()), (StatusCode::CONFLICT, 2));
     api.ok(Method::DELETE, "/environments/staging/secrets/BROKEN", None).await;
 
     // An environment that goes takes its managed credentials with it.
     api.ok(Method::POST, "/environments", Some(json!({ "slug": "tmp" }))).await;
     api.ok(Method::PUT, "/environments/tmp/secrets/KEY_ID", Some(json!({ "link": link("access_key_id", "managed") }))).await;
-    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 4);
-    api.ok(Method::DELETE, "/environments/tmp", None).await;
     assert_eq!(api.fake.live_keys.lock().unwrap().len(), 3);
+    api.ok(Method::DELETE, "/environments/tmp", None).await;
+    assert_eq!(api.fake.live_keys.lock().unwrap().len(), 2);
 
     // A cache revalidates with the digest: unchanged is a 304 that decrypts and issues nothing; a
     // change reads again; and a folder with a dynamic key always reads again (a
@@ -956,10 +1073,24 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     api.set("development", "NEW_FLAG", "on").await;
     let (s, moved) = get("development", "", tag.clone()).await;
     assert!(s == StatusCode::OK && moved.is_some() && moved != tag);
-    // A folder with a live link always reads again: its product may change the credential (a
-    // password reset) without the digest moving.
+    // A live link counts its value as the product answers: unchanged, a 304; changed by the product
+    // itself (a password reset through it), the digest moves once the fingerprint is read again
+    // (within seconds), and at once when the product says so.
     let (_, production) = get("production", "digest=1", None).await;
-    assert_eq!(get("production", "", production).await.0, StatusCode::OK, "it reads a live link");
+    assert_eq!(get("production", "", production.clone()).await.0, StatusCode::NOT_MODIFIED, "the live value is as it was");
+    // A product that doesn't answer for a moment leaves the digest as it was.
+    api.fake.down.store(true, std::sync::atomic::Ordering::Relaxed);
+    api.secrets.forget_live_fingerprints();
+    let held = api.ok(Method::GET, "/environments/production/digest", None).await;
+    api.fake.down.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(held["digest"].as_str(), production.as_deref(), "a passing error moves nothing");
+    *api.fake.password.lock().unwrap() += 1;
+    api.secrets.forget_live_fingerprints();
+    let (s, reset) = get("production", "", production.clone()).await;
+    assert!(s == StatusCode::OK && reset != production, "a password reset in the product moves it");
+    *api.fake.password.lock().unwrap() += 1;
+    api.secrets.source_changed("bucket", "assets").unwrap();
+    assert_eq!(get("production", "", reset).await.0, StatusCode::OK, "a product that says so moves it at once");
     let (_, staging) = get("staging", "dynamic=false&digest=1", None).await;
     assert_eq!(get("staging", "", staging.clone()).await.0, StatusCode::OK, "it holds a dynamic key");
     assert_eq!(get("staging", "dynamic=false", staging.clone()).await.0, StatusCode::NOT_MODIFIED);
@@ -2210,7 +2341,10 @@ async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token()
     let (s, l) = login(issuer.sign(claims("repo:acme/web:ref:refs/heads/main", "refs/heads/main", now + 300))).await;
     assert_eq!(s, StatusCode::OK, "{l}");
     let token = l["token"].as_str().unwrap().to_string();
-    assert!(token.starts_with("rlt_") && l["expires_at"].as_i64().unwrap() <= (now + 601) * 1000);
+    // At most ten minutes from when it was issued (bounded by the answer's time, not `now`: a
+    // loaded machine can take more than a second to log in).
+    let answered = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    assert!(token.starts_with("rlt_") && l["expires_at"].as_i64().unwrap() <= answered + 600_000, "{l}");
     let (s, v) = api.req(Method::GET, "/environments/staging/values", None, Some(&token)).await;
     assert_eq!((s, v["values"]["API_KEY"].as_str()), (StatusCode::OK, Some("staging-key")));
     let (s, _) = api.req(Method::GET, "/environments/production/values", None, Some(&token)).await;

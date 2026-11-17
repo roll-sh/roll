@@ -428,6 +428,34 @@ async fn a_wait_outlasting_its_request_goes_on_as_a_task() {
     assert_eq!(got["result"]["result"]["structuredContent"]["status"], "completed", "{got}");
 }
 
+/// MCP Apps: a host that declares them in `initialize` keeps them for its session (the id says
+/// so: roll keeps none), its row-reading tools point at roll's table view, and the view is served
+/// as an app's HTML; a host that didn't declare them sees no UI at all.
+#[tokio::test]
+async fn a_host_that_renders_apps_gets_the_table_view() {
+    let d = Daemon::new();
+    let caps = json!({ "extensions": { "io.modelcontextprotocol/ui": { "mimeTypes": ["text/html;profile=mcp-app"] } } });
+    let (_, h, _) = d.http(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": caps, "clientInfo": { "name": "host", "version": "1" } } }))).await;
+    let session = h["mcp-session-id"].to_str().unwrap().to_string();
+    let rpc = |method: &'static str, params: Value, session: Option<String>| {
+        let d = &d;
+        async move {
+            let h: Vec<(&str, String)> = session.map(|s| vec![("mcp-session-id", s)]).unwrap_or_default();
+            let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            d.http_with(OPERATOR, Method::POST, "/v1/mcp", Some(json!({ "jsonrpc": "2.0", "id": 2, "method": method, "params": params })), &h).await.2["result"].clone()
+        }
+    };
+    let tools = rpc("tools/list", json!({}), Some(session.clone())).await;
+    let ui_of = |list: &Value, name: &str| list["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).map(|t| t["_meta"]["ui"]["resourceUri"].clone()).unwrap_or(Value::Null);
+    assert_eq!(ui_of(&tools, "postgres_query"), "ui://roll/table", "{tools}");
+    assert_eq!(ui_of(&tools, "postgres_delete_project"), Value::Null, "only tools that read rows");
+    let view = rpc("resources/read", json!({ "uri": "ui://roll/table" }), Some(session)).await;
+    assert_eq!(view["contents"][0]["mimeType"], "text/html;profile=mcp-app", "{view}");
+    assert!(view["contents"][0]["text"].as_str().unwrap().contains("ui/initialize"));
+    // A host that didn't declare them: no UI.
+    assert_eq!(ui_of(&rpc("tools/list", json!({}), None).await, "postgres_query"), Value::Null);
+}
+
 /// A 2026-07-28 client (the stateless core) is served with no `initialize`: each request names its
 /// version and what the client offers in `_meta`, its headers must say what its body says, its
 /// answers say they're complete (lists may be kept a minute, for this caller only), no session is
@@ -460,6 +488,23 @@ async fn a_2026_client_is_served_without_initialize() {
     assert_eq!((r["resultType"].as_str(), r["supportedVersions"][0].as_str(), r["_meta"]["io.modelcontextprotocol/serverInfo"]["name"].as_str()), (Some("complete"), Some("2026-07-28"), Some("roll")), "{out}");
     assert!(r["supportedVersions"].as_array().unwrap().iter().any(|v| v == "2025-11-25"), "legacy too: {out}");
     assert!(h.get("mcp-session-id").is_none(), "no session");
+    // The server card (SEP-2127), public, says the same before a client connects, and the
+    // domain's AI Catalog names it.
+    let get = |path: &str| {
+        let req = Request::builder().uri(path).header("accept", "application/mcp-server-card+json").body(Body::empty()).unwrap();
+        async move {
+            let res = roll_mcp::card::routes("https://api.example.com", "https://roll.example.com").oneshot(req).await.unwrap();
+            let kind = res.headers()["content-type"].to_str().unwrap().to_string();
+            (kind, serde_json::from_slice::<Value>(&res.into_body().collect().await.unwrap().to_bytes()).unwrap())
+        }
+    };
+    let (kind, card) = get("/v1/mcp/server-card").await;
+    assert_eq!(kind, "application/mcp-server-card+json");
+    let remote = &card["remotes"][0];
+    assert_eq!((remote["url"].as_str(), &remote["supportedProtocolVersions"]), (Some("https://api.example.com/v1/mcp"), &r["supportedVersions"]), "{card}");
+    assert_eq!(card["version"], r["_meta"]["io.modelcontextprotocol/serverInfo"]["version"], "{card}");
+    let (_, catalog) = get("/.well-known/ai-catalog.json").await;
+    assert_eq!(catalog["entries"][0]["url"], "https://api.example.com/v1/mcp/server-card", "{catalog}");
 
     let (s, h, out) = send(OPERATOR, 2, "tools/list", json!({}), std_headers("tools/list", None)).await;
     assert_eq!((s, out["result"]["cacheScope"].as_str(), out["result"]["ttlMs"].as_u64()), (StatusCode::OK, Some("private"), Some(60_000)), "{out}");

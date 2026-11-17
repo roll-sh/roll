@@ -25,6 +25,7 @@
 //! - Search mode: `?tools=search` (or `X-MCP-Tools: search`) lists a search tool and two run tools
 //!   instead of every tool ([`search`]).
 
+pub mod card;
 pub mod lockdown;
 pub mod modern;
 pub mod prompts;
@@ -32,6 +33,7 @@ pub mod resources;
 pub mod search;
 pub mod tasks;
 pub mod tools;
+pub mod ui;
 
 use axum::body::Body;
 use axum::extract::State;
@@ -60,6 +62,11 @@ const URL_ELICITATION_REQUIRED: i64 = -32042;
 
 /// Protocol versions spoken, newest first.
 pub const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// Every version roll speaks, newest first, as `server/discover` and the server card list them.
+pub(crate) fn supported_versions() -> Vec<&'static str> {
+    std::iter::once(modern::MODERN).chain(PROTOCOL_VERSIONS).collect()
+}
 const SSE_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(15);
 /// How often a call that asked for progress (`_meta.progressToken`) hears it's still running (it
 /// may be waiting on a person's approval), so a client doesn't give up on it.
@@ -158,6 +165,7 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
         search: false,
         lockdown: false,
         tasks: false,
+        ui: false,
         client: None,
         names: Default::default(),
     };
@@ -188,7 +196,7 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     if !caller {
         return unauthorized(&m.config);
     }
-    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, client: None, as_user: false, names: Default::default() };
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
         let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
@@ -366,6 +374,13 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     let (modern_url, modern_name) = if modern { modern::client(&messages[0]) } else { (false, None) };
     // The tasks extension, declared on a 2026-07-28 request itself.
     let tasks = modern && tasks::declared(&messages[0]);
+    // MCP Apps: on a modern request itself, in `initialize`, or carried by the session id since.
+    let ui_declared = messages.iter().find(|m| m["method"] == "initialize").map(|m| ui::declared(&m["params"]["capabilities"]));
+    let ui = if modern {
+        ui::declared(&messages[0]["params"]["_meta"][modern::CAPABILITIES])
+    } else {
+        ui_declared.unwrap_or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).is_some_and(|v| session_rest(v).is_some_and(|r| r.starts_with(ui::SESSION_FLAG))))
+    };
     let url_elicitation = if modern { modern_url } else { declared.unwrap_or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with(SESSION_URL))) };
     // Who's calling, as it named itself in `initialize` (carried in the session id after), for
     // the audit log: a hint, never a proof.
@@ -379,7 +394,7 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).and_then(session_client))
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, modern, toolsets, readonly, search, lockdown, tasks, client, names: Default::default() });
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
@@ -403,17 +418,24 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     if let Some(url) = declared {
         use base64::Engine;
         let name = named.map(|n| format!("{}.", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(n))).unwrap_or_default();
-        if let Ok(v) = HeaderValue::from_str(&format!("{}{name}{}", if url { SESSION_URL } else { SESSION_PLAIN }, roll_access::new_id("s"))) {
+        let flag = if ui_declared == Some(true) { ui::SESSION_FLAG } else { "" };
+        if let Ok(v) = HeaderValue::from_str(&format!("{}{flag}{name}{}", if url { SESSION_URL } else { SESSION_PLAIN }, roll_access::new_id("s"))) {
             resp.headers_mut().insert("mcp-session-id", v);
         }
     }
     resp
 }
 
-/// The client name a session id carries (`roll-url-1.<base64>.<random>`), cleaned again.
+/// What follows a session id's prefix: its flags (`~ui.`), the client's name, a random part.
+fn session_rest(id: &str) -> Option<&str> {
+    id.strip_prefix(SESSION_URL).or_else(|| id.strip_prefix(SESSION_PLAIN))
+}
+
+/// The client name a session id carries (`roll-url-1.[~ui.]<base64>.<random>`), cleaned again.
 fn session_client(id: &str) -> Option<String> {
     use base64::Engine;
-    let rest = id.strip_prefix(SESSION_URL).or_else(|| id.strip_prefix(SESSION_PLAIN))?;
+    let rest = session_rest(id)?;
+    let rest = rest.strip_prefix(ui::SESSION_FLAG).unwrap_or(rest);
     let (encoded, _) = rest.split_once('.')?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded).ok()?;
     roll_access::evaluate::client_name(&String::from_utf8_lossy(&bytes))
@@ -482,6 +504,8 @@ struct Ctx {
     lockdown: bool,
     /// The request declares 2026-07-28's tasks extension: a long call may answer with a task.
     tasks: bool,
+    /// The host renders MCP Apps (`ui`): tools that show rows point at roll's table view.
+    ui: bool,
     /// The client's name and version, as it said in `initialize`.
     client: Option<Arc<str>>,
     /// The names of the tools it's offered, worked out once per request (prompts, completions and
@@ -575,7 +599,14 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
             "initialize" => rpc_result(id, initialize(ctx, &params)),
             "server/discover" => rpc_result(id, modern::discover(&PROTOCOL_VERSIONS, capabilities(tasks_available(ctx)), instructions(ctx))),
             "ping" => rpc_result(id, json!({})),
-            "tools/list" => rpc_result(id, json!({ "tools": if ctx.search { search::listed(&ctx.tools()) } else { ctx.tools() } })),
+            "tools/list" => {
+                let mut tools = if ctx.search { search::listed(&ctx.tools()) } else { ctx.tools() };
+                // A host that renders MCP Apps shows the tools that answer rows in roll's table.
+                if ctx.ui && !ctx.search {
+                    ui::attach(&mut tools);
+                }
+                rpc_result(id, json!({ "tools": tools }))
+            }
             "tools/call" => {
                 let mut name = params.get("name").and_then(Value::as_str).unwrap_or("").to_string();
                 let mut args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
@@ -616,9 +647,18 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                 Ok(v) => rpc_result(id, v),
                 Err((code, message)) => rpc_error(id, code, message),
             },
-            "resources/list" => rpc_result(id, json!({ "resources": resources::list() })),
+            "resources/list" => {
+                let mut list = resources::list();
+                if ctx.ui
+                    && let Some(a) = list.as_array_mut()
+                {
+                    a.push(ui::resource());
+                }
+                rpc_result(id, json!({ "resources": list }))
+            }
             "resources/read" => match params.get("uri").and_then(Value::as_str) {
                 Some(resources::GUIDE) => rpc_result(id, resources::guide()),
+                Some(ui::TABLE) => rpc_result(id, ui::read()),
                 Some(resources::ME) => match read_me(ctx).await {
                     Ok(v) => rpc_result(id, v),
                     Err((message, data)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32603, "message": message, "data": data } }),
@@ -720,8 +760,9 @@ fn initialize(ctx: &Ctx, params: &Value) -> Value {
 fn capabilities(tasks: bool) -> Value {
     let mut c = json!({ "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false }, "completions": {} });
     // 2026-07-28's tasks extension, where results can be sealed (tasks::on).
+    c["extensions"] = json!({ ui::EXT: {} });
     if tasks {
-        c["extensions"] = json!({ tasks::EXT: {} });
+        c["extensions"][tasks::EXT] = json!({});
     }
     c
 }
@@ -755,7 +796,7 @@ Read the resource roll://access/me for what this connection may do, in words, an
 
 /// roll's Horizon mark for clients that show a server's icon (2025-11-25): the dashboard's favicon,
 /// the brand export's output, inline so it needs no public URL. Sent once, in `initialize`.
-fn server_icon() -> Value {
+pub(crate) fn server_icon() -> Value {
     use base64::Engine;
     static ICON: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         // The crate's own copy of the dashboard's favicon (`@roll/brand`'s export): roll-mcp builds
