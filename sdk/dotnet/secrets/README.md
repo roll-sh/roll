@@ -3,7 +3,7 @@
 A client for roll secrets (docs/secrets.md, "Consumption"), with the same surface as
 `@roll/secrets`, `sdk/go/secrets` and `sdk/java/secrets`: an environment's values, the runtime
 resolve (sealed to a key only this process holds, if asked), the digest that moves when the values
-would, and a watch that follows it and renews dynamic leases. .NET 8 and the base class library
+would, a watch that follows it and renews dynamic leases, and encryption keys (transit). .NET 8 and the base class library
 only (`System.Net.Http`, `System.Text.Json`, `System.Security.Cryptography`; X25519, which .NET
 lacks, is the library's own, checked against RFC 7748). NuGet package `Roll.Secrets`.
 
@@ -33,10 +33,25 @@ await using var w = c.Watch("production", new WatchOptions
 
 // Read per request? Keep answers 30 s, then revalidate (a 304 while unchanged).
 using var cached = new RollSecretsClient(new RollSecretsOptions { CacheTtl = TimeSpan.FromSeconds(30) });
+
+// An encryption key (docs/secrets.md, "Encryption keys"): the key stays in roll.
+var cards = c.Transit("cards");
+var ct = await cards.EncryptAsync(cardNumber, $"order:{id}");   // roll:v1:…, bound to the context
+var number = await cards.DecryptStringAsync(ct, $"order:{id}"); // audited, as a reveal
+var index = await cards.HmacAsync(email);                       // a lookup column over encrypted emails
 ```
 
+`Transit(name)` takes bytes (`ReadOnlyMemory<byte>`) or text (sent as UTF-8) for
+`EncryptAsync(data, context)`, `SignAsync(data)`, `VerifyAsync(data, signature)` and
+`HmacAsync(data)`; `DecryptAsync(ciphertext, context)` answers bytes and `DecryptStringAsync` text.
+Ciphertexts, signatures and HMACs name the key version that made them (`roll:v<n>:…`), so they keep
+working after a rotation. Signatures are Ed25519 over the bytes as given: `PublicKeysAsync()` is
+every version's public key (`Version`, `PublicKey` as base64, `Pem`, `Jwk`), for a service that
+checks them without roll. A wrong context or a retired version is a 400, a key the token may not
+use a 403. Making, rotating and retiring keys is `roll secrets transit`'s, not the client's.
+
 Errors are `RollSecretsException` (`Status`, `Code`: `forbidden`, `unresolved`…); neither they
-nor `SecretValues.ToString()` hold a value, and `RollSecretsOptions` is a class whose `ToString()`
+nor `SecretValues.ToString()` hold a value (nor, for transit, a plaintext, ciphertext or signed input), and `RollSecretsOptions` is a class whose `ToString()`
 doesn't print the token.
 
 `DigestAsync(env, path)` reads the digest; `DigestSinceAsync(env, path, since, wait)` long-polls
@@ -64,4 +79,5 @@ builder.Configuration.AddRollSecrets("production", s =>
 environment), and `s.Optional` keeps a failed first load from stopping the app.
 
 Tests: `dotnet test` here (CI's `dotnet` job), or without .NET installed, `./dotnet-in-docker.sh test`
-(the `mcr.microsoft.com/dotnet/sdk:8.0` image, NuGet's cache in `~/.cache/roll-secrets-nuget`).
+(the `mcr.microsoft.com/dotnet/sdk:8.0` image, NuGet's cache in `~/.cache/roll-secrets-nuget`;
+`ROLL_DOTNET_NAME` names the container).

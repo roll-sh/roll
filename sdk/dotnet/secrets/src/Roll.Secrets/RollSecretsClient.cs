@@ -189,7 +189,7 @@ public sealed class RollSecretsClient : IDisposable
         }
     }
 
-    private async Task<JsonDocument> CallAsync(HttpMethod method, string path, byte[]? body, CancellationToken ct, TimeSpan wait = default)
+    internal async Task<JsonDocument> CallAsync(HttpMethod method, string path, byte[]? body, CancellationToken ct, TimeSpan wait = default)
     {
         var a = await AuthedAsync(t => SendAsync(t, method, path, body, null, wait, ct), ct).ConfigureAwait(false);
         return Json.Parse(a.Body.Length == 0 ? "{}"u8.ToArray() : a.Body);
@@ -390,6 +390,19 @@ public sealed class RollSecretsClient : IDisposable
         string url = "/v1/secrets/projects/" + Seg(await ProjectIdAsync(ct).ConfigureAwait(false)) + "/leases/" + Seg(lease) + "/renew";
         using var d = await CallAsync(HttpMethod.Post, url, body, ct).ConfigureAwait(false);
         return Lease.Parse(d.RootElement);
+    }
+
+    // Encryption keys.
+
+    /// <summary>
+    /// The project's encryption key <paramref name="name"/> (docs/secrets.md, "Encryption keys"):
+    /// data is encrypted, signed and HMACed by roll, and the key never leaves it. It asks roll
+    /// nothing until it's used.
+    /// </summary>
+    public Transit Transit(string name)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        return new Transit(this, name);
     }
 
     // Watching.

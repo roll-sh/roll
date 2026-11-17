@@ -117,6 +117,7 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    using var c = new RollSecretsClient(); // ROLL_API_URL, ROLL_TOKEN or ROLL_IDENTITY, ROLL_PROJECT
    await using var w = c.Watch("production", new WatchOptions { OnChange = v => Reload(v.Values) });
    builder.Configuration.AddRollSecrets("production", s => s.ReloadOnChange = true);
+   var ct = await c.Transit("cards").EncryptAsync(cardNumber, $"order:{id}");
    ```
 8. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
@@ -2900,7 +2901,7 @@ rotating a database's admin password and editing registrations in place (#75), s
 9. **Java and .NET clients, a Pulumi provider, a Lambda extension and an Ansible lookup** (Spring,
    `IConfiguration`; AWS's Parameters and Secrets extension; Vault's and 1Password's Ansible). .NET
    is built (`sdk/dotnet/secrets`, `feature/roll-secrets-dotnet`: values, sealed resolves with its
-   own X25519, long-polled watches, the cache, and `AddRollSecrets` for `IConfiguration`).
+   own X25519, long-polled watches, the cache, transit, and `AddRollSecrets` for `IConfiguration`).
 10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
    CAs**.
 11. *The user's call:* land the stack (#62, then #63–#73; roll search before #62).
