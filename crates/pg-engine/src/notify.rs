@@ -174,13 +174,6 @@ impl Hub {
         (bytes / 8192) as f64 / 1_048_576.0
     }
 
-    /// Notifications waiting for `pid` (the session sends them itself).
-    pub fn take(&self, pid: i32) -> Vec<Notification> {
-        self.get(pid)
-            .map(|l| l.lock().pending.drain(..).collect())
-            .unwrap_or_default()
-    }
-
     /// `pid` now waits for its client outside a transaction block: send what's pending and
     /// deliver further notifications directly until `busy`.
     pub fn idle(&self, pid: i32) {
@@ -222,6 +215,11 @@ impl ListenerHandle {
     /// `Hub::busy`.
     pub fn busy(&self) {
         self.0.lock().idle = false;
+    }
+
+    /// Notifications waiting for the session (it sends them itself).
+    pub fn take(&self) -> Vec<Notification> {
+        self.0.lock().pending.drain(..).collect()
     }
 }
 

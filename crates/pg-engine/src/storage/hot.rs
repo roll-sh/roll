@@ -200,9 +200,15 @@ impl Hot {
     }
 
     /// Count a scan in `p`'s range, which isn't kept (a sequential scan of the relation, an
-    /// index scan of a few of its keys): true when it is time to keep it.
+    /// index scan of a few of its keys): true when it is time to keep it. A scan counted while
+    /// another thread counts goes uncounted: every unique-key probe counts here, and with more
+    /// connections than cores a thread preempted holding this lock left the others to spin,
+    /// yield behind the whole run queue and sleep (a 32-client tail of milliseconds); the
+    /// count only decides when to try keeping the range.
     pub(super) fn note_scan(&self, p: Prefix) -> bool {
-        let mut seen = self.seen.lock();
+        let Some(mut seen) = self.seen.try_lock() else {
+            return false;
+        };
         if seen.len() > 64 * MAX_RANGES {
             seen.clear();
         }

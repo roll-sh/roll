@@ -506,6 +506,12 @@ pub struct Pending {
     /// The backend's own WAL (pg_stat_get_backend_wal): records and bytes.
     pub wal: (i64, i64),
     pub tabs: super::fasthash::HashMap<u32, TabCounts>,
+    /// Relations whose shared entry this backend made or found (`ensure`), while the
+    /// database's statistics were pruned last at `ensured_at` (`Database::pgstat_pruned_at`):
+    /// only a prune removes entries, so until the next one these need no look under the lock
+    /// every session shares (`tabs` empties at every report).
+    ensured: super::fasthash::HashSet<u32>,
+    ensured_at: u64,
     /// Tuples returned and fetched and blocks read by scans of one relation in a row
     /// (`count_returned`, `count_fetched`, `count_blocks`: a row at a time), not yet in
     /// `tabs` (`flush_returned`).
@@ -756,11 +762,25 @@ pub fn wal_lsn(db: &crate::txn::Database) -> u64 {
 /// The relation gets its shared entry when the backend first counts for it
 /// (pgstat_prep_pending_entry).
 fn ensure(ctx: &ExecCtx, rel: u32) {
-    if ctx.sess.pgstat.borrow().tabs.contains_key(&rel) {
-        return;
+    let pruned_at = ctx.sess.db.pgstat_pruned_at.load(std::sync::atomic::Ordering::Acquire);
+    {
+        let mut p = ctx.sess.pgstat.borrow_mut();
+        if p.ensured_at != pruned_at {
+            p.ensured.clear();
+            p.ensured_at = pruned_at;
+        }
+        if p.ensured.contains(&rel) {
+            p.tab(rel);
+            return;
+        }
+        if p.tabs.contains_key(&rel) {
+            return;
+        }
     }
     ctx.sess.db.pgstat.lock().tables.entry(rel).or_default();
-    ctx.sess.pgstat.borrow_mut().tab(rel);
+    let mut p = ctx.sess.pgstat.borrow_mut();
+    p.ensured.insert(rel);
+    p.tab(rel);
 }
 
 /// A sequential scan of `rel` started (pgstat_count_heap_scan).

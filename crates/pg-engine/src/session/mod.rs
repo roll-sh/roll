@@ -749,9 +749,10 @@ impl Session {
         self.state.db.notify.attach(self.state.pid, sink);
     }
 
-    /// Notifications received and not yet delivered.
+    /// Notifications received and not yet delivered. (Through the session's own listener:
+    /// at every ReadyForQuery, so not under the lock of the hub every session shares.)
     pub fn take_notifications(&self) -> Vec<crate::notify::Notification> {
-        self.state.db.notify.take(self.state.pid)
+        self.listener().map(crate::notify::ListenerHandle::take).unwrap_or_default()
     }
 
     /// The client is waiting: deliver notifications directly (outside a transaction block).
