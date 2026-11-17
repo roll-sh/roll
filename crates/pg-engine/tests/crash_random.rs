@@ -932,7 +932,9 @@ fn power_cut_at_every_point() {
     // Commit `i`'s keys: two small ones, or ten (an SST of its own) when i % 25 == 24.
     let keys = |i: u64| -> Vec<Vec<u8>> { (0..if i % 25 == 24 { 10 } else { 2 }).map(|k| format!("{i:04}-{k}").into_bytes()).collect() };
     // (Commit 50 also deletes the first key of each of commits 0..20: the compaction after it
-    // marks them dead in their L1 files, `Store::mark_dead`, instead of writing them again.)
+    // marks them dead in their L1 files, `Store::mark_dead`, instead of writing them again;
+    // after commit 55 those files are written again without them, as VACUUM does,
+    // `Store::reclaim_dead`.)
     let deletes = 50u64;
     if let Ok(dir) = std::env::var("POWER_EVERY_CHILD") {
         let s = Store::open(&Path::new(&dir).join("db"), opts()).unwrap();
@@ -952,6 +954,7 @@ fn power_cut_at_every_point() {
                     let sets = std::fs::read_dir(Path::new(&dir).join("db")).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "dv")).count();
                     println!("marked {sets}");
                 }
+                55 => println!("reclaimed {}", s.reclaim_dead(b"", b"").unwrap()),
                 _ => {}
             }
         }
@@ -1003,6 +1006,8 @@ fn power_cut_at_every_point() {
     assert_eq!(code, Some(0), "{out}");
     let marked: u64 = out.lines().find_map(|l| l.strip_prefix("marked ")?.parse().ok()).unwrap();
     assert!(marked > 0, "no file marked: {out}");
+    let reclaimed: u64 = out.lines().find_map(|l| l.strip_prefix("reclaimed ")?.parse().ok()).unwrap();
+    assert!(reclaimed > 0, "no marked file written again: {out}");
     let ops: u64 = out.lines().find_map(|l| l.strip_prefix("ops ")?.parse().ok()).unwrap();
     assert!(ops > 100, "only {ops} operations recorded");
     for at in 1..=ops {

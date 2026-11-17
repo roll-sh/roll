@@ -402,6 +402,13 @@ pub struct Store {
     horizon_seen: AtomicU64,
     bg: Mutex<()>,
     bg_running: AtomicBool,
+    /// A thread waits for a quiet moment to write marked files again (`schedule_reclaim`).
+    reclaim_running: AtomicBool,
+    /// Held while a marked file is written again (`reclaim_one`, outside `bg`): `close`
+    /// takes it first (after `closing`, which stops a rewrite at its next block), so no file
+    /// of this store is written once a store opened after it may use the directory.
+    reclaim: Mutex<()>,
+    closing: AtomicBool,
     /// A commit's run went to L1 as it was since `maybe_compact` last looked (`alone_at_bottom`).
     linked_bottom: AtomicBool,
     closed: AtomicBool,
@@ -659,6 +666,9 @@ impl Store {
             horizon_seen: AtomicU64::new(last_ts),
             bg: Mutex::new(()),
             bg_running: AtomicBool::new(false),
+            reclaim_running: AtomicBool::new(false),
+            reclaim: Mutex::new(()),
+            closing: AtomicBool::new(false),
             linked_bottom: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             hot: hot::Hot::default(),
@@ -683,6 +693,8 @@ impl Store {
         if store.view().l0.len() >= store.opts.l0_compaction_trigger {
             store.schedule_background();
         }
+        // (Marked files a session before left: written again at the first quiet moment.)
+        store.schedule_reclaim();
         // Older WAL files are fully covered now.
         for seq in wal_seqs {
             if seq != replay_seq {
@@ -1876,6 +1888,7 @@ impl Store {
                         .and_then(|_| this.maybe_compact())
                         .and_then(|_| this.collect_ranges());
                     this.bg_running.store(false, Ordering::Release);
+                    this.schedule_reclaim();
                     if let Err(e) = r {
                         warn!(dir = %this.dir.display(), error = %e, "background flush/compaction failed");
                         break;
@@ -2393,6 +2406,134 @@ impl Store {
         Ok(Marked::Dead(Arc::new(f.with_dead(&self.dir, &dead, f.meta.dv.map_or(1, |g| g + 1))?)))
     }
 
+    /// Write again the L1 files whose range meets [start, end) (an empty `end`: unbounded)
+    /// that have dead entries (`mark_dead`) making up at least `RECLAIM_DEAD` of them: what a
+    /// compaction would have written of them, so their dead entries' space is returned (VACUUM
+    /// of a table, as PostgreSQL's returns a table's space; and at a quiet moment,
+    /// `schedule_reclaim`). One file at a time, each written outside `bg` (`reclaim_one`).
+    /// Returns how many were written again.
+    pub fn reclaim_dead(&self, start: &[u8], end: &[u8]) -> Result<usize> {
+        let mut tried = std::collections::HashSet::new();
+        let mut n = 0;
+        loop {
+            if self.closed.load(Ordering::Acquire) {
+                return Ok(n);
+            }
+            let next = self.view().l1.iter().find(|s| reclaimable(s) && s.overlaps(start, end) && tried.insert(s.meta.id)).cloned();
+            let Some(f) = next else { return Ok(n) };
+            n += self.reclaim_one(&f)? as usize;
+        }
+    }
+
+    /// L1 file `f` (marked) written again without its dead entries, then put in its place
+    /// unless a compaction replaced it meanwhile (marked it again or merged it: the new file
+    /// is dropped). Written without holding `bg`, so flushes and compactions don't wait for
+    /// it (the reclaim thread runs at the lowest priority); only the swap holds it.
+    fn reclaim_one(&self, f: &Arc<SstReader>) -> Result<bool> {
+        let _r = self.reclaim.lock();
+        if self.closing.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        let mut merge = Merge::new(vec![Cursor::level_uncached(vec![f.clone()])], Vec::new());
+        let mut w = self.sst_writer(self.next_id.fetch_add(1, Ordering::Relaxed), true)?;
+        let mut n = 0u32;
+        while let Some(i) = merge.min()? {
+            n = n.wrapping_add(1);
+            if n.is_multiple_of(1024) && self.closing.load(Ordering::Acquire) {
+                w.abandon();
+                return Ok(false);
+            }
+            let (k, v) = merge.sources[i].head().expect("a head entry");
+            if let Err(e) = w.add(k, v) {
+                w.abandon();
+                return Err(e);
+            }
+            merge.sources[i].advance();
+        }
+        let outputs = match w.entries() {
+            0 => {
+                w.abandon();
+                Vec::new()
+            }
+            _ => vec![Arc::new(SstReader::open(&self.dir, w.finish()?, self.opts.cache.clone())?)],
+        };
+        let _bg = self.bg.lock();
+        let v = self.view();
+        if self.closed.load(Ordering::Acquire) || !v.l1.iter().any(|s| Arc::ptr_eq(s, f)) {
+            for o in &outputs {
+                o.mark_obsolete();
+            }
+            return Ok(false);
+        }
+        let mut m = self.manifest.lock();
+        let mut vw = self.view.write();
+        let mut l1 = Vec::with_capacity(vw.l1.len() + outputs.len());
+        for s in &vw.l1 {
+            if Arc::ptr_eq(s, f) {
+                l1.extend(outputs.iter().cloned());
+            } else {
+                l1.push(s.clone());
+            }
+        }
+        let mut next = m.clone();
+        next.l1 = l1.iter().map(|s| s.meta.clone()).collect();
+        next.next_id = self.next_id.load(Ordering::Relaxed);
+        if let Err(e) = write_manifest(&self.dir, &next) {
+            for o in &outputs {
+                o.mark_obsolete();
+            }
+            return Err(e);
+        }
+        *m = next;
+        *vw = Arc::new(View { mem: vw.mem.clone(), imm: vw.imm.clone(), l0: vw.l0.clone(), l1, rdels: vw.rdels.clone() });
+        drop(vw);
+        drop(m);
+        f.mark_obsolete();
+        info!(dir = %self.dir.display(), file = f.meta.id, dead = f.meta.dead, "wrote a marked file again");
+        Ok(true)
+    }
+
+    /// When L1 has marked files, a thread (at the lowest CPU priority, `SCHED_IDLE`: it runs
+    /// only on CPUs nothing else wants) writes them again once no commit has come for
+    /// `RECLAIM_QUIET`, one at a time, looking again before each; it ends when none is left
+    /// or the store closes.
+    fn schedule_reclaim(self: &Arc<Self>) {
+        if !self.opts.background || !self.view().l1.iter().any(|s| reclaimable(s)) || self.reclaim_running.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        let spawned = std::thread::Builder::new().name("roll-reclaim".into()).spawn(move || {
+            idle_priority();
+            let mut seen = (u64::MAX, std::time::Instant::now());
+            loop {
+                std::thread::sleep(RECLAIM_TICK);
+                let Some(this) = weak.upgrade() else { return };
+                let ts = this.assigned_ts();
+                if ts != seen.0 {
+                    seen = (ts, std::time::Instant::now());
+                }
+                let next = this.view().l1.iter().find(|s| reclaimable(s)).cloned();
+                let done = match next {
+                    _ if this.closed.load(Ordering::Acquire) => true,
+                    None => true,
+                    Some(_) if seen.1.elapsed() < RECLAIM_QUIET => false,
+                    Some(f) => this.reclaim_one(&f).inspect_err(|e| warn!(dir = %this.dir.display(), error = %e, "writing a marked file again failed")).is_err(),
+                };
+                if done {
+                    this.reclaim_running.store(false, Ordering::Release);
+                    // (A file marked after the last look schedules it again.)
+                    if !this.closed.load(Ordering::Acquire) && this.view().l1.iter().any(|s| reclaimable(s)) && !this.reclaim_running.swap(true, Ordering::AcqRel) {
+                        continue;
+                    }
+                    return;
+                }
+            }
+        });
+        if spawned.is_err() {
+            self.reclaim_running.store(false, Ordering::Release);
+        }
+    }
+
     /// Rewrite linked L1 files individually on clean close. Each replacement is
     /// durable before publication; unrelated L1 files and concurrent frozen L0
     /// sources keep their identities. Only one replacement file is added at a time.
@@ -2428,6 +2569,8 @@ impl Store {
     /// Flush everything to SSTs and stop accepting commits. After this the store holds no
     /// memory beyond what the caller keeps alive.
     pub fn close(self: &Arc<Self>) -> Result<()> {
+        self.closing.store(true, Ordering::Release);
+        let _r = self.reclaim.lock();
         // Range deletions still pending are applied first (compacted, collected, their
         // markers retired), and runs linked into commits rewritten (compacted): a build from
         // before them reading the files after a clean shutdown would see deleted rows again,
@@ -3007,6 +3150,29 @@ pub struct Scan {
     /// is recorded at its first live key past `dead::MIN_DEAD` of them); None: not looked for.
     dead: Option<(Arc<dead::DeadRanges>, Vec<u8>)>,
     dead_run: u32,
+}
+
+/// A marked file is written again (`Store::reclaim_dead`) once its dead entries are at least
+/// 1 / `RECLAIM_DEAD` of its entries.
+const RECLAIM_DEAD: u64 = 16;
+/// No commit for this long is a quiet moment (`Store::schedule_reclaim`), looked at every
+/// `RECLAIM_TICK`.
+const RECLAIM_QUIET: std::time::Duration = std::time::Duration::from_secs(2);
+const RECLAIM_TICK: std::time::Duration = std::time::Duration::from_millis(500);
+
+fn reclaimable(s: &SstReader) -> bool {
+    s.meta.dv.is_some() && s.meta.dead * RECLAIM_DEAD >= s.meta.entries
+}
+
+/// The calling thread runs only when a CPU has nothing else to run (`SCHED_IDLE`).
+fn idle_priority() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: a plain system call on the calling thread (pid 0) with a parameter block of
+    // its own.
+    unsafe {
+        let p = libc::sched_param { sched_priority: 0 };
+        let _ = libc::sched_setscheduler(0, libc::SCHED_IDLE, &p);
+    }
 }
 
 /// The files of `l1` (in key order, none overlapping another: each file's first and last
@@ -4396,6 +4562,20 @@ mod tests {
         assert_eq!(rows(&s, s.visible_ts()), want);
         let sets = || std::fs::read_dir(dir.path()).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "dv")).count();
         assert_eq!(sets(), s.view().l1.iter().filter(|f| f.meta.dv == Some(2)).count());
+        // VACUUM's (and a quiet moment's) rewrite: the marked files written again without
+        // their dead entries, the rows the same, their sets gone, the store smaller.
+        let marked: Vec<u64> = s.view().l1.iter().filter(|f| f.meta.dv.is_some()).map(|f| f.meta.id).collect();
+        let (bytes, live) = (|s: &Store| s.view().l1.iter().map(|f| f.meta.size).sum::<u64>(), s.view().l1.iter().map(|f| f.live_entries()).sum::<u64>());
+        let b0 = bytes(&s);
+        assert_eq!(s.reclaim_dead(b"table002", b"").unwrap(), 0);
+        assert_eq!(s.reclaim_dead(b"", b"").unwrap(), marked.len());
+        assert!(s.view().l1.iter().all(|f| f.meta.dv.is_none() && !marked.contains(&f.meta.id)));
+        assert!(bytes(&s) < b0, "{} {b0}", bytes(&s));
+        assert_eq!(s.view().l1.iter().map(|f| f.meta.entries).sum::<u64>(), live);
+        // (No set named: format 2, or 4 for files with dictionaries; never 3.)
+        assert_eq!(sets(), 0);
+        assert_ne!(format(dir.path()), 3);
+        assert_eq!(rows(&s, s.visible_ts()), want);
         // A write in its range: written again, without its dead entries.
         s.commit(vec![(key(3), Some(val(3, 7)))], |_| Ok(())).unwrap();
         s.flush_memtables().unwrap();
