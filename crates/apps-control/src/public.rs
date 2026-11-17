@@ -525,7 +525,7 @@ impl SiteRequest {
 
 async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &crate::live::Template, req: SiteRequest, service: &str, env: &str, began: Instant) -> Response {
     let key = tpl.site.clone().unwrap_or_default();
-    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: req.seen };
+    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: req.seen, span: None };
     let request_id = req.request_id.as_deref().map(|v| v.chars().take(64).collect()).unwrap_or_else(|| crate::model::random(16));
     let done = |status: u16, bytes: u64| {
         live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, status, bytes);
@@ -903,7 +903,7 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
         // 5xx alert for an environment its owner stopped.
         let metered = if matches!(by, "paused" | "maintenance") { 0 } else { status };
         apps.live(service, env).meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, metered, 0);
-        Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen }.write_by(status, began, by);
+        Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen, span: None }.write_by(status, began, by);
     }
     let mut r = their_page(&apps, service, env, r).await;
     // A preview's answers (and a deployment's own URL, a copy of what's live) are never indexed,
@@ -1054,7 +1054,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             let bytes = r.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).unwrap_or(0);
             let bytes = if head { 0 } else { bytes };
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, r.status().as_u16(), bytes);
-            Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req) }.write_cached(r.status().as_u16(), began, bytes);
+            Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span: None }.write_cached(r.status().as_u16(), began, bytes);
         };
         match hit {
             Some(crate::resp_cache::Hit::Fresh(r)) => {
@@ -1126,8 +1126,10 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             return by("wake", page(StatusCode::SERVICE_UNAVAILABLE, "Starting up", "The service is waking up or failing to start. Try again in a few seconds."));
         }
     };
-    // The access line's method and path (no query: it can carry tokens).
-    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req) };
+    // The access line's method and path (no query: it can carry tokens), and with traces on
+    // the proxy's own span in the request's trace (the wait, a wake, the answer).
+    let span = gate.traces.then(|| ProxySpan::start(&apps, service, env, req.headers()));
+    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span };
     let pq = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
     let Ok(uri) = format!("http://{}{pq}", lease.addr).parse::<Uri>() else {
         return (StatusCode::BAD_REQUEST, "bad request").into_response();
@@ -1162,6 +1164,10 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     let h = req.headers_mut();
     if let Some(host) = host {
         h.insert(HeaderName::from_static("x-forwarded-host"), host);
+    }
+    // The app's SDK continues the trace under the proxy's span.
+    if let Some(v) = access.span.as_ref().and_then(|p| HeaderValue::from_str(&p.traceparent()).ok()) {
+        h.insert(HeaderName::from_static("traceparent"), v);
     }
     let proto = if apps.cfg.scheme == "https" { "https" } else { "http" };
     h.insert(HeaderName::from_static("x-forwarded-proto"), HeaderValue::from_static(proto));
@@ -1400,7 +1406,89 @@ impl Drop for Done {
 struct Access {
     log: crate::logs::LogSink,
     seen: Seen,
+    span: Option<ProxySpan>,
 }
+
+/// The proxy's own span in a request's trace (traces on, Cloud Run's): it continues the
+/// client's `traceparent` or starts a trace, the app's spans are its children, and a cold start's
+/// wait is a child of its own (`roll wake`), so a slow first request shows why.
+struct ProxySpan {
+    sink: crate::logs::LogSink,
+    trace: String,
+    span: String,
+    parent: String,
+    start_ns: u64,
+}
+
+impl ProxySpan {
+    fn start(apps: &Apps, service: &str, env: &str, headers: &axum::http::HeaderMap) -> ProxySpan {
+        let start_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+        let sink = apps.logs.sink(crate::traces::key(service, env), crate::logs::Stream::System);
+        let (trace, parent) = headers.get("traceparent").and_then(|v| v.to_str().ok()).and_then(parse_traceparent).unwrap_or_else(|| (hex_id(16), String::new()));
+        ProxySpan { sink, trace, span: hex_id(8), parent, start_ns }
+    }
+
+    fn traceparent(&self) -> String {
+        format!("00-{}-{}-01", self.trace, self.span)
+    }
+
+    fn end(&self, seen: &Seen, status: u16, began: Instant, instance: &str, cold: bool, waited_ms: u64) {
+        let end = self.start_ns + began.elapsed().as_nanos() as u64;
+        let mut attrs = vec![
+            ("http.request.method".to_string(), seen.method.clone()),
+            ("url.path".to_string(), seen.path.clone()),
+            ("http.response.status_code".to_string(), status.to_string()),
+            ("roll.cold_start".to_string(), cold.to_string()),
+        ];
+        if !instance.is_empty() {
+            attrs.push(("roll.instance".to_string(), instance.to_string()));
+        }
+        let root = crate::otlp::Span {
+            trace: self.trace.clone(),
+            span: self.span.clone(),
+            parent: self.parent.clone(),
+            name: format!("{} {}", seen.method, crate::traffic::route_of(&seen.path)),
+            service: "roll".into(),
+            start: self.start_ns,
+            end,
+            error: status >= 500,
+            attrs,
+        };
+        self.sink.line(serde_json::to_string(&root).expect("a span serializes"));
+        if cold && waited_ms > 0 {
+            let wake = crate::otlp::Span {
+                trace: self.trace.clone(),
+                span: hex_id(8),
+                parent: self.span.clone(),
+                name: "roll wake".into(),
+                service: "roll".into(),
+                start: self.start_ns,
+                end: (self.start_ns + waited_ms * 1_000_000).min(end),
+                error: false,
+                attrs: vec![("roll.instance".to_string(), instance.to_string())],
+            };
+            self.sink.line(serde_json::to_string(&wake).expect("a span serializes"));
+        }
+    }
+}
+
+/// A W3C `traceparent` (`00-<trace>-<span>-<flags>`): its trace and span ids, when it's one.
+fn parse_traceparent(v: &str) -> Option<(String, String)> {
+    let mut f = v.trim().split('-');
+    let (ver, trace, span, flags) = (f.next()?, f.next()?, f.next()?, f.next()?);
+    let hex = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    // Ids of all zeros are invalid; version ff is.
+    let id = |s: &str, n: usize| hex(s, n) && s.bytes().any(|b| b != b'0');
+    (hex(ver, 2) && ver != "ff" && id(trace, 32) && id(span, 16) && hex(flags, 2)).then(|| (trace.to_string(), span.to_string()))
+}
+
+/// A random id of `bytes` bytes, in hex.
+fn hex_id(bytes: usize) -> String {
+    let mut b = vec![0u8; bytes];
+    getrandom::fill(&mut b).expect("the OS's random numbers");
+    hex::encode(b)
+}
+
 
 /// What an access line says of the request: its method and path (no query: it can carry
 /// tokens), and who asked (the address the fleet vouches for, the user agent, the host): what an
@@ -1485,6 +1573,9 @@ impl Access {
         });
         s.mark(&mut line);
         self.log.line(line.to_string());
+        if let Some(p) = &self.span {
+            p.end(s, status, began, instance, cold, waited_ms);
+        }
     }
 
     /// An answer from the cache: no instance saw it, its bytes still went out.
@@ -1518,6 +1609,16 @@ async fn accepts(addr: std::net::SocketAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_traceparent_is_continued_only_when_it_is_one() {
+        use super::parse_traceparent as p;
+        let ids = Some(("4bf92f3577b34da6a3ce929d0e0e4736".to_string(), "00f067aa0ba902b7".to_string()));
+        assert_eq!(p("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"), ids);
+        for bad in ["ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "00-00000000000000000000000000000000-00f067aa0ba902b7-01", "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01", "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01", "00-4bf92f35-00f067aa0ba902b7-01", "garbage"] {
+            assert_eq!(p(bad), None, "{bad}");
+        }
+    }
+
     #[test]
     fn an_encoding_is_taken_by_its_own_q_and_star_only_for_the_rest() {
         use super::accept_q as q;
