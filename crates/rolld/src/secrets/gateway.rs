@@ -658,7 +658,8 @@ mod tests {
         assert!(lines.lock().unwrap().iter().any(|l| l.contains("refused 127.0.0.1:9")), "the gateway logs its refusal");
 
         // Revoking its token drops the link, and the gateway stops (its token won't work again).
-        roll_secrets::Workloads::revoke(&*r.tokens, &r.tokens.0.lock().unwrap()[&token].id).unwrap();
+        let id = r.tokens.0.lock().unwrap()[&token].id.to_string();
+        roll_secrets::Workloads::revoke(&*r.tokens, &id).unwrap();
         let stopped = tokio::time::timeout(Duration::from_secs(10), agent).await.expect("the gateway stops").unwrap();
         assert!(stopped.unwrap_err().contains("refused"), "a revoked token ends the gateway");
         assert!(r.hub.link(&gw).is_none());

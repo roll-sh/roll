@@ -6976,6 +6976,7 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-fetch",
+ "roll-gateway",
  "roll-previews",
  "roll-secrets",
  "roll-workspace",

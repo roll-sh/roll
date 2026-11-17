@@ -1059,15 +1059,17 @@ at each login (its environments, folders and actions are refused, they don't app
 gateways rm`) deletes one no database or directory uses (409 otherwise), revokes the token made
 with it and drops its link.
 
-**The binary.** `roll gateway up --url https://roll.example.com --gateway gw_… --allow
+**The binary.** `roll --url https://roll.example.com secrets gateways up --gateway gw_… --allow
 10.0.0.0/8:5432 --allow ldap.corp.internal:636` (or `--allow-file FILE`, one entry a line, `#`
 comments), with the token in `ROLL_GATEWAY_TOKEN` (or `--token-file`), or `--identity id_…` and
 the OIDC token in a file (`--oidc-token-file`, re-read at each login: Kubernetes' projected token,
-`/var/run/secrets/…`). It's a subcommand of `roll` (`crates/roll-cli`), over a small crate,
+`/var/run/secrets/…`; make the identity with `roll secrets identities add NAME --issuer … --subject
+… --gateway gw_…`). It's a subcommand of `roll` (`crates/roll-cli`) beside the gateway's `ls`,
+`add` and `rm` (`roll gateway` is roll code's model gateway already), over a small crate,
 `crates/roll-gateway`, that holds the wire, the multiplexer, the allow-list and the agent loop:
-rolld and the CLI share the wire, and the crate is tested on its own (no HTTP client, no product).
-One static binary that's already on the machine is the simplest thing to run in a container
-(`roll gateway up` is its whole entrypoint). It opens one WebSocket to `GET
+rolld and the CLI share the wire, and the crate is tested on its own (no product in it). One
+binary that's already on the machine is the simplest thing to run in a container (`roll secrets
+gateways up` is its whole entrypoint), and it needs no project: its credential names the gateway. It opens one WebSocket to `GET
 /v1/secrets/gateways/{id}/connect` and reconnects with jittered exponential backoff (0.5 s
 doubling to 30 s, ±50%); a 4401 close (credential refused or gateway deleted) stops it, unless it
 logs in through an identity, which logs in again first.
@@ -1120,6 +1122,7 @@ directory's) to the internal route `POST /internal/secrets/gateways/{id}/call`, 
 the deployment key every node shares (the admin URL and the new password are in it), so bytes never
 stream between nodes and roll-cluster's 4 MiB forward limit holds. On one node all of this is a
 no-op: the link and the call are local.
+The internal route takes only a request another node signed (`roll_cluster::Forwarded`).
 
 **Status.** Each link writes its status to the gateway's row (shared by every node): `connected`,
 the `node`, `version`, the allow-list it reported, `connected_at`, `last_seen_at` (every 30 s while
@@ -3025,8 +3028,9 @@ rotating a database's admin password and editing registrations in place (#75), s
    and Active Directory)", managed accounts taking turns and a user per lease).
 9. **Java and .NET clients, a Pulumi provider, a Lambda extension and an Ansible lookup** (Spring,
    `IConfiguration`; AWS's Parameters and Secrets extension; Vault's and 1Password's Ansible).
-10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
-   CAs**.
+10. **A gateway into private networks** (Infisical's and Akeyless' gateways; built on
+   `feature/roll-secrets-gateway`, "Gateways": ClickHouse, RabbitMQ and `mongodb+srv://` through one
+   next); **ACME on project CAs**.
 11. *The user's call:* land the stack (#62, then #63–#73; roll search before #62).
 12. *Waits on roll MCP's #25 on `main`:* #64 (#30 onto #62: roll-access's tokens replace `rlst_`;
    roll MCP's `feature/mcp-on-landing` is #25 with it, its gate passing), then a workload identity
