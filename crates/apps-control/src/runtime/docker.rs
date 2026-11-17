@@ -159,7 +159,11 @@ impl Docker {
             return Ok(Some(SocketAddr::from(([127, 0, 0, 1], p))));
         }
         if let Some(e) = &self.engine {
-            return Ok(e.inspect(name).await?.closed);
+            // In a sandbox the instance has no network of its own: the sandbox's address is its.
+            if let Some(a) = e.inspect(name).await?.closed {
+                return Ok(Some(a));
+            }
+            return Ok(e.inspect(&sandbox_name(name)).await.ok().and_then(|s| s.closed));
         }
         let out = docker(&["inspect", "-f", "{{index .Config.Labels \"sh.roll.apps.closed\"}} {{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", name]).await?;
         let mut f = out.split_whitespace();
@@ -213,7 +217,16 @@ impl Docker {
             self.known.lock().sandboxes.remove(instance);
         }
         let i = self.engine.as_ref()?.inspect(&sandbox_name(instance)).await.ok()?;
-        let s = Sandbox { id: i.id, pid: i.pid?, port: i.exposed?, host: i.gateways };
+        // On a network with no route out its containers have no gateway of their own; the host's
+        // connections still come from the network's (its IPAM gateway).
+        let mut host = i.gateways;
+        if host.is_empty()
+            && let Some(net) = &i.network
+            && let Some(g) = gateway(net).await.and_then(|g| g.parse().ok())
+        {
+            host.push(g);
+        }
+        let s = Sandbox { id: i.id, pid: i.pid?, port: i.exposed?, host };
         self.known.lock().sandboxes.insert(instance.to_string(), s.clone());
         Some(s)
     }
@@ -255,9 +268,14 @@ impl Docker {
                 true
             }
         };
-        let poked = match self.id_and_port(instance).await {
-            Ok((_, Some(hp))) => tokio::time::timeout(Duration::from_millis(200), tokio::net::TcpStream::connect(("127.0.0.1", hp))).await.is_ok_and(|c| c.is_ok()),
-            _ => false,
+        // Its published port, or a closed sandbox's address on its network.
+        let at = match self.id_and_port(instance).await {
+            Ok((_, Some(hp))) => Some(SocketAddr::from(([127, 0, 0, 1], hp))),
+            _ => engine.inspect(&sandbox_name(instance)).await.ok().and_then(|s| s.closed),
+        };
+        let poked = match at {
+            Some(a) => tokio::time::timeout(Duration::from_millis(200), tokio::net::TcpStream::connect(a)).await.is_ok_and(|c| c.is_ok()),
+            None => false,
         };
         // Taken: the count moves when it accepts, and accepting closed its listener.
         if poked {
@@ -440,12 +458,11 @@ impl Runtime for Docker {
         if let Some(engine) = &self.engine {
             // A web instance on a network: its network first, in a sandbox that runs from now on.
             if self.netns
-                && !spec.closed
                 && let (Some(_), Some(_)) = (spec.port, &spec.network)
             {
                 let sandbox = sandbox_name(&spec.name);
                 let made = async {
-                    engine.create(&sandbox, &sandbox_config(spec, host_port)).await?;
+                    engine.create(&sandbox, &sandbox_config(spec, host_port, host_gateway.as_deref())).await?;
                     engine.start(&sandbox).await
                 }
                 .await;
@@ -914,7 +931,7 @@ pub const CAP_DROP: [&str; 4] = ["NET_RAW", "MKNOD", "AUDIT_WRITE", "SETFCAP"];
 ///
 /// The sandbox's container: busybox asleep, holding the instance's network, its aliases on the
 /// project network and its published port; nothing else, and allowed nothing else.
-fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>) -> serde_json::Value {
+fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>, host_gateway: Option<&str>) -> serde_json::Value {
     use serde_json::json;
     let mut host = json!({
         "Memory": 16i64 << 20,
@@ -926,7 +943,7 @@ fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>) -> serde_json::Va
         "ReadonlyRootfs": true,
         "RestartPolicy": {"Name": "no"},
         "Init": true,
-        "ExtraHosts": ["host.docker.internal:host-gateway"],
+        "ExtraHosts": host_gateway.map(|g| vec![format!("host.docker.internal:{g}")]).unwrap_or_default(),
         "LogConfig": {"Type": "none", "Config": {}},
     });
     let mut config = json!({
@@ -934,10 +951,17 @@ fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>) -> serde_json::Va
         "Cmd": ["sleep", "2147483647"],
         "Labels": { LABEL: spec.service, format!("{LABEL}.env"): spec.env, format!("{LABEL}.role"): "network" },
     });
-    if let (Some(p), Some(hp)) = (spec.port, host_port) {
+    // The app's port: published on loopback, or (a closed network publishes nothing) only
+    // exposed, the sandbox reached at its address there.
+    if let Some(p) = spec.port {
         let port = format!("{p}/tcp");
         config["ExposedPorts"] = json!({ &port: {} });
-        host["PortBindings"] = json!({ &port: [{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}] });
+        if let Some(hp) = host_port {
+            host["PortBindings"] = json!({ &port: [{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}] });
+        }
+        if spec.closed {
+            config["Labels"][format!("{LABEL}.closed")] = json!(p.to_string());
+        }
     }
     if let Some(net) = &spec.network {
         host["NetworkMode"] = json!(net);
