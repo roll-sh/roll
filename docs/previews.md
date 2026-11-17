@@ -1628,22 +1628,30 @@ Ranked by what a person notices first. Done so far:
    #143 (reviewed); after it merges, the live check in `scripts/preview-apps.sh` with
    `egress: "roll"`: 1.1.1.1 unreachable from the pv- instance, a listed host through the proxy,
    a refused one in the activity.
-3. **A "preview ready" once per push, in review** (branch `feature/roll-previews-ready-once`):
-   roll code's `preview` event carries `became: ["ready"]` the first time a preview is up at a
-   head (not when it wakes, nor at a cost or screenshot change) and `["visual_change"]` the first
-   time a visual change waits; the gallery's "Post a change's preview to Slack when it's ready"
-   and the visual-review template filter on it, so they post once a push, as Vercel's Slack app
-   does.
-4. **Tests for rolld's `GitReport`** (after #138): a unit test of the connection's parsing, and the
+3. **What a preview shows, masked** (#200, reviewed by the roll secrets thread; the page's words
+   stacked on it as `feature/roll-previews-mask-pages`). Anyone who can read a preview reads its
+   logs, its jobs' output (a teardown's goes into the pull request's comment) and what its page
+   said in a screenshot run (the comment's "What went wrong"). Its code, a fork's included, can
+   print what it was given. Each is masked as checks' output is: values from roll secrets, the
+   project's and the preview's own variables, and the branches' credentials. Its roll apps
+   variables are sealed (apps' #191 hides those in apps' own logs). A picture can't be masked.
+4. **Deploy a preview's services at once** (performance): step 4 deploys them one after another,
+   and on roll apps each deploy waits up to 2 s for its rollout within a pass. Branching went
+   the same way (#196: change → ready 14 s, from 16.6–18.4 s). Measure first with a project of
+   three services (the live check has one), and land it only on a measured win.
+5. **In review:** #196 (a preview's data resources branched at once) and #197 (`became` on roll
+   code's `preview` event: roll code's "post a preview to Slack when it's ready" template posts
+   once a push).
+6. **Tests for rolld's `GitReport`** (after #138): a unit test of the connection's parsing, and the
    live check against `~/.cache/rpv/fake-github.py`-style fake GitHub (installations, token,
    statuses, comments and edits recorded) once roll code's App can be pointed at it.
-5. **Screenshots of roll apps' services on the fleet**: one node is done. A multi-node Docker
+7. **Screenshots of roll apps' services on the fleet**: one node is done. A multi-node Docker
    fleet needs previews' own internal screenshot route (operator-only, in `OPERATOR_ONLY`) run on
    the service's holder through `cluster.dispatch(&apps_control::lease_key(service), …)`, with
    `Shot` and `ShotOptions` serialised across (the PNGs as base64); it can't be checked here (one
    Docker daemon serves every local node), and the cloud fleet runs Fargate, where it's a browser
    task of its own, with the cloud thread. Low while the fleet is Fargate.
-6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17 on ai-server's ext4): Docker's `local` volume driver mounts an overlay
    (`--opt type=overlay`, lower = a read-only base copy of the parent, upper = the branch's own),
    with no privileges beyond Docker's. A 1.4 GB pgbench parent (scale 50) branched this way was
@@ -1659,8 +1667,8 @@ Ranked by what a person notices first. Done so far:
      too long.
    - The cost: a full copy per parent (not per branch), and a replay at each branch.
    - Ranked below the fleet's needs: XFS volumes already share blocks.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned).
-8. **Watch: a cold start on a Docker name conflict**: a preview's services each making its egress
+9. **Watch: pg-control's recovery to a time seconds old** (unowned).
+10. **Watch: a cold start on a Docker name conflict**: a preview's services each making its egress
    proxy under one name was fixed (#137); if it comes back, log both starts' container ids.
 
 Looked at and not planned: sharing the default branch's running services with a preview
