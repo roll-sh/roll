@@ -253,6 +253,8 @@ pub struct Apps {
     pub(crate) vitals_seen: Mutex<HashMap<String, (i64, u32)>>,
     /// When each environment's log was last looked at for new errors ([`errors`]).
     pub(crate) errors_seen: Mutex<HashMap<String, i64>>,
+    /// Manual rollouts waiting for a person, by deployment: what they say, and the wake.
+    pub(crate) rollout_waits: Mutex<HashMap<String, deploy::RolloutGate>>,
     /// Each environment's `needs_deploy` as last worked out (it decrypts every variable and asks
     /// each linked product for its own): when, the settings generation and active deployment it
     /// was for, and the answer. Good for a minute, or until either moves.
@@ -412,6 +414,7 @@ impl Apps {
             visits: Mutex::new(HashMap::new()),
             vitals_seen: Mutex::new(HashMap::new()),
             errors_seen: Mutex::new(HashMap::new()),
+            rollout_waits: Mutex::new(HashMap::new()),
             needs: Mutex::new(HashMap::new()),
             settings_gen: std::sync::atomic::AtomicU64::new(0),
             changes: tokio::sync::broadcast::channel(256).0,
@@ -1252,7 +1255,7 @@ impl Apps {
             Some(l) => (
                 l.instances().iter().map(|i| Instance { id: i.name.clone(), deployment: i.deployment.clone(), state: i.state(), started_at: i.started_at(), in_flight: i.in_flight() }).collect(),
                 l.crash_loop(),
-                l.canary().map(|(deployment, share)| crate::model::Canary { deployment, share }),
+                l.canary().map(|(deployment, share)| crate::model::Canary { waiting: self.rollout_waits.lock().contains_key(&deployment), deployment, share }),
                 l.scaling().map(|(backlog, wanted)| crate::model::Scaling { backlog, wanted }),
             ),
             None => (Vec::new(), None, None, None),

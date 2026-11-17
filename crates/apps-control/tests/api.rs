@@ -2456,6 +2456,29 @@ async fn a_gradual_rollout_shares_requests_and_rolls_back_a_deployment_that_erro
     assert_eq!((st, v["deployment"].clone()), (StatusCode::OK, d2["id"].clone()));
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(w.fake.instances(&id).iter().all(|(_, dep, _)| *dep == d2["id"]), "the canary's instances are gone");
+    // A manual rollout (Vercel's manual rolling releases): its step passes, then it waits for a
+    // person; advanced past its last step it's live, rolled back by one it fails.
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"unset": ["FAKE_UNHEALTHY"]}))).await;
+    let (st, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"rollout": {"steps": [50], "step_s": 1, "error_pct": 20, "manual": true}}}))).await;
+    assert_eq!(st, StatusCode::OK, "{s}");
+    let (_, d4) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    let d4 = d4["id"].as_str().unwrap().to_string();
+    let held = get_until(&w.api, &base, |e| e["canary"]["waiting"] == true).await;
+    assert_eq!((held["canary"]["deployment"].as_str(), held["active"]["id"].as_str()), (Some(d4.as_str()), d2["id"].as_str()), "held at 50%, the old one still live: {held}");
+    let act = |dep: String, action: &'static str| {
+        let (api, base) = (w.api.clone(), base.clone());
+        async move { call(&api, "POST", &format!("{base}/deploys/{dep}/rollout"), Some(json!({ "action": action }))).await.0 }
+    };
+    assert_eq!(act(d4.clone(), "advance").await, StatusCode::ACCEPTED);
+    assert_eq!(settled(&w, &id, "production", &d4).await["status"], "active");
+    assert_eq!(act(d4.clone(), "advance").await, StatusCode::CONFLICT, "not waiting any more");
+    let (_, d5) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
+    let d5 = d5["id"].as_str().unwrap().to_string();
+    get_until(&w.api, &base, |e| e["canary"]["waiting"] == true).await;
+    assert_eq!(act(d5.clone(), "abort").await, StatusCode::ACCEPTED);
+    let d5 = settled(&w, &id, "production", &d5).await;
+    assert!(d5["status"] == "failed" && d5["error"].as_str().unwrap().contains("by a person"), "{d5}");
+    assert_eq!(call(&w.api, "GET", &base, None).await.1["active"]["id"].as_str(), Some(d4.as_str()));
 }
 
 /// The service page follows a service instead of polling it: a tick when someone changes it,

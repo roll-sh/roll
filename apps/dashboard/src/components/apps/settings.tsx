@@ -60,6 +60,7 @@ interface Form {
   rolloutSteps: string;
   rolloutStep: string;
   rolloutErrors: string;
+  rolloutManual: boolean;
   h2c: boolean;
   public: boolean;
   restart: "always" | "on_failure" | "never";
@@ -121,6 +122,7 @@ export function formOf(s: Service): Form {
     rolloutSteps: (s.run.rollout?.steps ?? []).join(", "),
     rolloutStep: str(s.run.rollout?.step_s),
     rolloutErrors: str(s.run.rollout?.error_pct),
+    rolloutManual: !!s.run.rollout?.manual,
     h2c: !!s.run.h2c,
     public: s.run.public !== false,
     restart: s.run.restart ?? "always",
@@ -198,8 +200,8 @@ export function patchOf(s: Service, f: Form): ServicePatch {
       ...(f.alertLog.trim() ? { log_match: f.alertLog.trim() } : {}),
       log_count: Number(f.alertLogCount) || 10,
     };
-  if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors)
-    run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5 };
+  if (f.rolloutSteps !== before.rolloutSteps || f.rolloutStep !== before.rolloutStep || f.rolloutErrors !== before.rolloutErrors || f.rolloutManual !== before.rolloutManual)
+    run.rollout = { steps: rolloutSteps(f.rolloutSteps) ?? [], step_s: Number(f.rolloutStep) || 120, error_pct: Number(f.rolloutErrors) || 5, ...(f.rolloutManual ? { manual: true } : {}) };
   if (f.h2c !== before.h2c) run.h2c = f.h2c ? true : null;
   if (f.public !== before.public) run.public = f.public ? null : false;
   if (f.affinity !== before.affinity) run.affinity = f.affinity ? true : null;
@@ -607,6 +609,12 @@ export function SettingsTab({
                   <Field label="Each step (s)">{t("rolloutStep", "120")}</Field>
                   <Field label="Roll back at 5xx (%)" hint="of its requests in a step, and more than the old one">
                     {t("rolloutErrors", "5")}
+                  </Field>
+                  <Field label="Each step" hint="by itself after its time, or held until you advance it">
+                    <select value={form.rolloutManual ? "manual" : "timed"} onChange={(e) => set("rolloutManual", e.target.value === "manual")} className={`${input} w-full`}>
+                      <option value="timed">Advances by itself</option>
+                      <option value="manual">Waits for you</option>
+                    </select>
                   </Field>
                 </>
               )}

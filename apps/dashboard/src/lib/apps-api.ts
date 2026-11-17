@@ -82,7 +82,7 @@ export interface Run {
   alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number };
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
-  rollout?: { steps: number[]; step_s: number; error_pct: number };
+  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean };
   /** The app speaks HTTP/2 without TLS (a gRPC server). */
   h2c?: boolean;
   /** false: no public URL, only the project's private network (absent: public). */
@@ -462,7 +462,7 @@ export interface Environment extends EnvironmentSummary {
   /** Its instances keep crashing: three or more in the last ten minutes. */
   crash_loop: { crashes: number; last_at: number; last_error: string } | null;
   /** A gradual rollout under way: the new deployment and the percent of requests it takes. */
-  canary?: { deployment: string; share: number } | null;
+  canary?: { deployment: string; share: number; /** Its step passed and it waits for a person (`rollout.manual`). */ waiting?: boolean } | null;
   /** Its own run settings over the service's; empty: the service's. */
   run?: Partial<Record<EnvRunField, number>>;
   /** It has a deploy hook. */
@@ -991,6 +991,8 @@ export const appsApi = {
   backUp: (id: string, e: string) => call<Backup>("POST", `${env(id, e)}/volume/backups`),
   restore: (id: string, e: string, b: string) => call<Backup>("POST", `${env(id, e)}/volume/backups/${encodeURIComponent(b)}/restore`),
   cancel: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/cancel`),
+  /** What a person says to a manual rollout waiting for them. */
+  rollout: (id: string, e: string, d: string, action: "advance" | "all" | "abort") => call<{ deployment: string }>("POST", `${dep(id, e, d)}/rollout`, { action }),
 
   restart: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/restart`),
   /** Just this one: a fresh instance answers before it leaves (a web service's), the others stay. */

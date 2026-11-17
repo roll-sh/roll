@@ -359,6 +359,10 @@ pub enum AppsCmd {
         /// A step whose 5xx share reaches this (and beats the old deployment's) rolls back.
         #[arg(long, value_name = "PERCENT")]
         rollout_errors: Option<u8>,
+        /// Each rollout step waits for a person once it passes (`true`), or advances by itself;
+        /// `roll apps rollout advance|all|abort` decides.
+        #[arg(long)]
+        rollout_manual: Option<bool>,
         /// The app speaks HTTP/2 without TLS (a gRPC server): `true` or `false`.
         #[arg(long)]
         h2c: Option<bool>,
@@ -737,6 +741,14 @@ pub enum AppsCmd {
         target: Target,
         #[arg(long, default_value_t = 60)]
         minutes: i64,
+    },
+    /// A manual rollout waiting after its step: `advance` to the next step, `all` to every
+    /// request, or `abort` back to what was live.
+    Rollout {
+        #[command(flatten)]
+        target: Target,
+        #[arg(value_parser = ["advance", "all", "abort"])]
+        action: String,
     },
     /// How fast its pages are for real visitors (its environment's Web Vitals on, `roll apps env
     /// --vitals true`): each metric's p75 and rating, and the busiest routes'.
@@ -2417,10 +2429,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, rollout, rollout_step, rollout_errors, rollout_manual, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
-            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() {
+            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() {
                 let mut r = svc["run"]["rollout"].as_object().cloned().unwrap_or_default();
                 match rollout.as_deref() {
                     None => {}
@@ -2437,6 +2449,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 if let Some(n) = rollout_errors {
                     r.insert("error_pct".into(), json!(n));
+                }
+                if let Some(m) = rollout_manual {
+                    r.insert("manual".into(), json!(m));
                 }
                 Some(Value::Object(r))
             } else {
@@ -3286,6 +3301,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             v
+        }
+        AppsCmd::Rollout { target, action } => {
+            let svc = service(api, &target).await?;
+            let path = env_path(&svc, &target.env);
+            let env = api.get(&path).await?;
+            let Some(dep) = env["canary"]["deployment"].as_str().filter(|_| env["canary"]["waiting"] == true) else {
+                anyhow::bail!("{} has no rollout waiting for anyone", target.env);
+            };
+            api.call(reqwest::Method::POST, &format!("{path}/deploys/{}/rollout", enc(dep)), Some(json!({ "action": action }))).await?
         }
         AppsCmd::Vitals { target, minutes } => {
             let svc = service(api, &target).await?;
