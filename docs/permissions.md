@@ -235,8 +235,9 @@ roll token acting as that person, with no consent screen and no roll sign-in.
 - **Registering an app** (the operator): `POST /v1/access/enterprise/apps {name, rules,
   public_jwk?}` answers its `client_id` (`ent_…`, what the provider puts in an assertion) and, with
   no key, a `client_secret` shown once. `rules` is the most the app may do for a person.
-  `GET /v1/access/enterprise` lists both (never a secret); `DELETE …/apps/{id}` removes an app and
-  revokes every person's connection to it.
+  `GET /v1/access/enterprise` lists both (never a secret) with roll's `audience` (what a provider
+  puts in `aud`) and `token_endpoint`; `DELETE …/apps/{id}` removes an app and revokes every
+  person's connection to it. The access overview's "Enterprise sign-in" panel does all of this.
 - **Signing in:** `POST /v1/access/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`,
   `assertion=<ID-JAG>` (header `typ: oauth-id-jag+jwt`) and the app's own authentication
   (`client_secret_basic`, `client_secret_post` or `private_key_jwt`); an assertion alone is

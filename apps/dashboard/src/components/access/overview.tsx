@@ -34,6 +34,7 @@ import { useWorkspace } from "@/lib/workspace-store";
 import { Link } from "../link";
 import { btn, Connecting, CopyButton, danger, EmptyPanel, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 import { Builder } from "./builder";
+import { EnterprisePanel } from "./enterprise";
 import { MachineClients } from "./machine-clients";
 import { AccessShell, relative, usePoll } from "./shell";
 
@@ -82,6 +83,7 @@ export function AccessOverview() {
             }}
           />
         )}
+        {me?.kind === "operator" && <EnterprisePanel />}
         <Workloads />
       </div>
     </AccessShell>

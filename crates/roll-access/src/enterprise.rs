@@ -395,8 +395,15 @@ type S = axum::extract::State<Arc<Access>>;
 
 pub(crate) async fn get_config(axum::extract::State(a): S, ext: axum::http::Extensions) -> crate::Result<axum::Json<Value>> {
     crate::api::operator_only(&a, &ext, "see roll's enterprise identity providers")?;
+    // What a provider is set up with: roll's audience (`aud`) and where an app trades assertions.
+    let api = a.config.api_url.trim_end_matches('/').to_string();
     let e = tokio::task::spawn_blocking(move || a.enterprise()).await.map_err(|e| Error::Internal(e.to_string()))??;
-    Ok(axum::Json(json!({ "idps": e.idps, "apps": e.apps.iter().map(view).collect::<Vec<_>>() })))
+    Ok(axum::Json(json!({
+        "idps": e.idps,
+        "apps": e.apps.iter().map(view).collect::<Vec<_>>(),
+        "audience": api,
+        "token_endpoint": format!("{api}/v1/access/oauth/token"),
+    })))
 }
 
 #[derive(Deserialize)]

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { installLink, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
+import { installLink, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, idpFromForm, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -187,5 +187,19 @@ describe("one-click installs", () => {
     const vscode = installLink("vscode", url)!;
     expect(JSON.parse(decodeURIComponent(vscode.href.slice("vscode:mcp/install?".length)))).toEqual({ name: "roll", type: "http", url });
     expect(installLink("claude-code", url)).toBeNull();
+  });
+});
+
+describe("idpFromForm", () => {
+  const form = { issuer: "https://acme.okta.com", name: " Okta ", matching: "email" as const, domains: "", jwks: "", admins: false };
+  it("needs an https issuer and, matching by email, the domains it vouches for", () => {
+    expect(idpFromForm({ ...form, issuer: "http://acme.okta.com" })).toEqual({ problem: "The issuer is an https URL" });
+    expect(idpFromForm(form)).toEqual({ problem: "Name the email domains it vouches for" });
+    expect(idpFromForm({ ...form, domains: "acme.com, nope" })).toEqual({ problem: "nope isn't a domain" });
+    expect(idpFromForm({ ...form, domains: "acme.com", jwks: "{}" })).toMatchObject({ problem: expect.stringContaining("JWKS") });
+    expect(idpFromForm({ ...form, domains: "@Acme.com acme.com, acme.co.uk", admins: true })).toEqual({
+      idp: { issuer: "https://acme.okta.com", matching: "email", domains: ["acme.com", "acme.co.uk"], admins: true, name: "Okta" },
+    });
+    expect(idpFromForm({ ...form, matching: "aud_sub" })).toEqual({ idp: { issuer: "https://acme.okta.com", matching: "aud_sub", name: "Okta" } });
   });
 });

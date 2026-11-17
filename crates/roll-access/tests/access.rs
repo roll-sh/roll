@@ -2089,6 +2089,7 @@ async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
     assert!(listed["apps"][0].get("client_secret").is_none() && listed["apps"][0].get("secret_hash").is_none(), "never its secret: {listed}");
 
     let api = d.access.config.api_url.trim_end_matches('/').to_string();
+    assert_eq!((listed["audience"].as_str(), listed["token_endpoint"].as_str()), (Some(api.as_str()), Some(format!("{api}/v1/access/oauth/token").as_str())), "what the provider is set up with");
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
     let idjag = |claims: Value| {
         let mut h = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
