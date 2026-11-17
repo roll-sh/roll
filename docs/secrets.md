@@ -2800,7 +2800,8 @@ extension that logs in with the function's role), #117 (an Ansible collection), 
 Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (Pulumi), #147
 (approvals in the audit, on #114), #165 (Elasticsearch, OpenSearch, Cassandra and ScyllaDB
 outside roll, on #132), #166 (a gateway into private networks, on #132), #169 (a credential
-guard's scans audited as `secrets.guard`, for roll MCP) and #173 (MongoDB Atlas, on #136).
+guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on #136) and #194
+(TOTP keys).
 
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
@@ -2838,7 +2839,7 @@ guard's scans audited as `secrets.guard`, for roll MCP) and #173 (MongoDB Atlas,
    Atlas login (it now refuses Atlas hosts and points here). Users taking turns and a user per
    lease (`deleteAfterDate` as a backstop) through an organization service account, as Vault's
    Atlas plugin. Unconfirmed against a real account (the user's call).
-4d. **TOTP codes from a stored seed** (building: `feature/roll-secrets-totp`), as Vault's TOTP
+4d. **TOTP codes from a stored seed** (#194), as Vault's TOTP
    engine and 1Password's one-time passwords: a `totp` key hands out its current code (`reveal`,
    audited, never the code in the row) to CI that logs into a 2FA-protected service; the CLI, the
    dashboard (a countdown) and the three clients.
