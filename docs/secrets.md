@@ -2794,17 +2794,16 @@ windows), #87 (encryption keys by name), #88 (password policies), #92 (SaaS rota
 credential checked at registration), #97 (search keys say `access: data`), #102 (Kubernetes
 service-account tokens), #105 (Java), #110 (.NET with `IConfiguration`), #113 (an AWS Lambda
 extension that logs in with the function's role), #117 (an Ansible collection), #132 (LDAP and
-Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (Pulumi) and #147
-(approvals in the audit, on #114).
+Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (Pulumi), #147
+(approvals in the audit, on #114) and #151 (previews follow their branches).
 
-0. **Previews follow their branches** (building: `feature/roll-secrets-preview-branches`, designed
-   with roll previews): an ephemeral environment carries what its preview branched
-   (`branches: [{kind, parent}]` on ensure, set only by roll previews or the operator). A link to a
-   branched parent isn't resolved at all (no provider call, no lease, never a parent's value):
-   answers list it under `followed: [{name, kind, parent, field}]`, and roll previews sets each name
-   from its branch by field, blank where the branch has none (their #123 rule, for apps' and
-   secrets' links alike). Meanwhile roll previews sets the providers' default names from the branch
-   after the secrets layer, so they win.
+0. **Previews follow their branches** (#151, designed with roll previews; land it first): an
+   ephemeral environment carries what its preview branched (`branches: [{kind, parent}]` on
+   ensure, changed only by roll previews or the operator). A link to a branched parent isn't
+   resolved at all (no provider call, no lease, never a parent's value): answers list it under
+   `followed: [{name, kind, parent, field}]`, and roll previews sets each name from its branch by
+   field, blank where the branch has none. roll previews builds that side on #151; their #150 is the
+   stopgap meanwhile (the providers' default names set from the branch, after the secrets layer).
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
