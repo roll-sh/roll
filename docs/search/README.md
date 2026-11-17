@@ -202,7 +202,11 @@ and copies a request as curl; a profiled search opens on its profile tree. The d
 document bodies go out as typed (`1.0` stays a float to dynamic mapping, longs above 2^53 stay
 exact, key order is kept), `_source` is cut from the response text, and responses are re-indented
 token by token (`lib/search-docs.ts`: `formatJson`, `hitSources`, `sourceCells`). Index names and mappings are fetched only when a completion needs
-them, so opening the console never wakes a sleeping cluster. The dashboard reaches `/v1/search`
+them, so opening the console never wakes a sleeping cluster. The Relevance tab edits synonym sets
+(`_synonyms`: rules as rows or as text, ids kept, each save saying which indices' analyzers it
+reloaded, and the index settings that use a set) and query rules (`_query_rules`: each rule as a
+sentence, criteria and pin or hide actions edited in a form, reordered by `priority`, and a test that
+runs the `rule` retriever and marks the pinned hits; `lib/search-relevance.ts`). The dashboard reaches `/v1/search`
 through rolld's API like every product (`VITE_ROLL_API`, the session from sign-in), and search
 clusters appear in workspace projects (the `search` resource kind). A person who isn't an admin
 sees their own clusters, and the Search page leaves out the storage location and the cache, which
