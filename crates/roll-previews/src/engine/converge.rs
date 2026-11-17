@@ -313,7 +313,10 @@ impl Engine {
         // (`STAGING_PGPASS`): set from the branch as the environment's own key, so whoever
         // resolves it (roll apps too, which reads the environment itself) gets the branch's value,
         // never the parent's. Read from the base's list (links, no values): nothing resolved.
-        for (key, kind, parent, field) in self.secrets.links(&r.project_id, &s.secrets.base).await.unwrap_or_default() {
+        // Unreadable: the converge fails (tried again) rather than let roll apps resolve a
+        // renamed link to the parent.
+        let links = self.secrets.links(&r.project_id, &s.secrets.base).await.map_err(|e| anyhow::anyhow!("secrets: reading the base's links: {e:#}"))?;
+        for (key, kind, parent, field) in links {
             if vars.iter().any(|(k, _)| *k == key) {
                 continue;
             }
