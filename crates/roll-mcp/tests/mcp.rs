@@ -229,6 +229,18 @@ async fn tools_follow_the_tokens_rules() {
     let refused = d.tool(&asker, "postgres_list_projects", json!({})).await;
     let said = refused["content"][0]["text"].as_str().unwrap_or_default();
     assert!(said.contains("access_request_access") && said.contains(r#""action":"read""#), "{said}");
+    // It asks for that read for a while; once approved, waiting on it answers on a stream that
+    // says the tools changed first, and the list then has the tool.
+    let asked = d.tool(&asker, "access_request_access", json!({ "product": "postgres", "action": "read", "for": "15m", "reason": "list the databases" })).await;
+    let apr = asked["structuredContent"]["id"].as_str().unwrap_or_else(|| panic!("{asked}")).to_string();
+    assert!(!names(&d.rpc(&asker, "tools/list", json!({})).await).contains(&"postgres_list_projects".to_string()));
+    assert_eq!(d.http(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::OK);
+    let call = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "access_wait_approval", "arguments": { "approval_id": apr, "wait": 0 } } });
+    let req = Request::builder().method(Method::POST).uri("/v1/mcp").header("content-type", "application/json").header("accept", "application/json, text/event-stream").header("authorization", format!("Bearer {asker}")).body(Body::from(call.to_string())).unwrap();
+    let raw = String::from_utf8(d.router.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    let (changed, answer) = (raw.find("notifications/tools/list_changed"), raw.find(r#""id":7"#));
+    assert!(changed.is_some() && answer.is_some() && changed < answer, "{raw}");
+    assert!(names(&d.rpc(&asker, "tools/list", json!({})).await).contains(&"postgres_list_projects".to_string()));
     let pending = d.tool(&asker, "postgres_delete_project", json!({ "project": "pa" })).await;
     assert_eq!((pending["isError"].as_bool(), pending["structuredContent"]["status"].as_str()), (Some(false), Some("approval_pending")), "{pending}");
     let id = pending["structuredContent"]["approval"].as_str().unwrap();

@@ -398,12 +398,23 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
-    let mut resp = if wants_sse(&ctx.headers) || progress.is_some() {
+    let mut resp = if progress.is_some() {
         let stream = progress_stream(Box::pin(async move { process(&ctx, messages).await }), progress, PROGRESS_EVERY)
+            .map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string())));
+        Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE)).into_response()
+    } else if wants_sse(&ctx.headers) {
+        let stream = futures::stream::once(Box::pin(async move { with_list_changed(process(&ctx, messages).await) }))
+            .flat_map(futures::stream::iter)
             .map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string())));
         Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE)).into_response()
     } else {
         let mut responses = process(&ctx, messages).await;
+        // An access request was approved: the connection's tools changed. A client that takes a
+        // stream hears it (MCP's `notifications/tools/list_changed`) before the answer.
+        if accepts_sse(&ctx.headers) && widened(&responses) {
+            let events: Vec<_> = with_list_changed(responses).into_iter().map(|r| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(r.to_string()))).collect();
+            return Sse::new(futures::stream::iter(events)).into_response();
+        }
         match responses.pop() {
             // A method the revision doesn't have is a 404 (with its JSON-RPC error), so a client
             // tells it from a server that has no MCP endpoint here.
@@ -452,6 +463,23 @@ fn wants_sse(h: &HeaderMap) -> bool {
 
 fn accepts_sse(h: &HeaderMap) -> bool {
     accept(h).contains("text/event-stream")
+}
+
+/// Whether an answer is an access request just approved (the connection may do more, so its
+/// tools changed).
+fn widened(responses: &[Value]) -> bool {
+    responses.iter().any(|r| {
+        let s = &r["result"]["structuredContent"];
+        s["method"] == "GRANT" && s["state"] == "approved"
+    })
+}
+
+/// The answers, with `notifications/tools/list_changed` first when the tools changed.
+fn with_list_changed(responses: Vec<Value>) -> Vec<Value> {
+    if !widened(&responses) {
+        return responses;
+    }
+    std::iter::once(json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" })).chain(responses).collect()
 }
 
 type Work = Pin<Box<dyn Future<Output = Vec<Value>> + Send>>;
@@ -758,7 +786,8 @@ fn initialize(ctx: &Ctx, params: &Value) -> Value {
 
 /// What roll offers, the same in `initialize` and `server/discover`.
 fn capabilities(tasks: bool) -> Value {
-    let mut c = json!({ "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false }, "completions": {} });
+    // Tools change when an access request is approved: said on that call's stream.
+    let mut c = json!({ "tools": { "listChanged": true }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false }, "completions": {} });
     // 2026-07-28's tasks extension, where results can be sealed (tasks::on).
     c["extensions"] = json!({ ui::EXT: {} });
     if tasks {
@@ -1062,6 +1091,12 @@ async fn outcome(tool: &str, resp: Response) -> Value {
                 (format!("{} bytes of {ct} (base64 in structuredContent.content_b64)", bytes.len()), json!({ "content_type": ct, "bytes": bytes.len(), "content_b64": b64 }))
             }
         },
+    };
+    // An access request approved: say what changed, for a client that won't hear list_changed.
+    let text = if structured["method"] == "GRANT" && structured["state"] == "approved" {
+        format!("Approved: {}. This connection's tools changed: list them again (tools/list) to see the ones it may use now.\n\n{text}", structured["summary"].as_str().unwrap_or("the access asked for"))
+    } else {
+        text
     };
     json!({ "content": [{ "type": "text", "text": text }], "structuredContent": structured, "isError": false })
 }
