@@ -720,6 +720,16 @@ pub enum AppsCmd {
         #[arg(long, default_value_t = 1440)]
         minutes: i64,
     },
+    /// Its errors, grouped from its log (stack traces joined, the same error at another line one
+    /// group): how many, when last seen, and (`--sample`) the newest one whole.
+    Errors {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, default_value_t = 1440)]
+        minutes: i64,
+        #[arg(long)]
+        sample: bool,
+    },
     /// The app's own metrics its OpenTelemetry SDK sent (its environment's Traces switch on):
     /// each series' latest point (a gauge's value, a counter's rate a second, a histogram's mean).
     AppMetrics {
@@ -3235,6 +3245,27 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             a
+        }
+        AppsCmd::Errors { target, minutes, sample } => {
+            let svc = service(api, &target).await?;
+            let v = api.get(&format!("{}/errors?minutes={minutes}", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                let groups = v["groups"].as_array().cloned().unwrap_or_default();
+                if groups.is_empty() {
+                    println!("no errors in the last {minutes} minutes ({} lines read)", v["scanned"]);
+                }
+                for g in &groups {
+                    let last = g["last_seen"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
+                    println!("{:>6}×  {}  [{}] {}", g["count"], last, s(&g["kind"]), s(&g["title"]));
+                    if sample {
+                        for l in s(&g["sample"]).lines() {
+                            println!("          {l}");
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            v
         }
         AppsCmd::AppMetrics { target, minutes } => {
             let svc = service(api, &target).await?;
