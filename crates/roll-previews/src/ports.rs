@@ -426,6 +426,11 @@ pub trait Apps: Send + Sync {
     /// service until it succeeds, so nothing is left running).
     async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()>;
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String>;
+    /// The latest requests to the preview's services through roll, newest first (none where the
+    /// backend serves them itself).
+    fn requests(&self, _preview: &str) -> Vec<crate::RequestLine> {
+        Vec::new()
+    }
     /// The service's output as it comes, after its last `lines`: `None` where it can't be
     /// followed (the engine reads `logs` again every few seconds instead).
     async fn follow(&self, _preview: &str, _service: &str, _lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {

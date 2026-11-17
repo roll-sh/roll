@@ -473,6 +473,8 @@ export const previewsApi = {
   wake: (id: string) => call<Preview>("POST", `${one(id)}/wake`),
   /** Re-branches every resource, or the ones named (`"<kind>:<parent>"`). */
   reset: (id: string, resources?: string[]) => call<Preview>("POST", `${one(id)}/reset`, resources?.length ? { resources } : {}),
+  /** Its latest requests through roll, newest first (roll's runtime; a roll apps instance's are roll apps'). */
+  requests: (id: string) => call<{ requests: RequestLine[] }>("GET", `${one(id)}/requests`),
   logs: (id: string, opts: { service?: string; lines?: number } = {}) =>
     call<{ service: string; lines: string[] }>("GET", `${one(id)}/logs${query(opts)}`),
   /** Newest first. */
@@ -507,6 +509,9 @@ export function parseSse(rest: string, text: string): { events: { event: string;
   });
   return { events, rest: left };
 }
+
+/** A request to a preview's service through roll: when (ms), the method, the path (never the query), the status, ms until the answer's headers. */
+export type RequestLine = { at: number; service: string; method: string; path: string; status: number; ms: number };
 
 /** A service's last `lines`, then its output as it comes (`…/logs?follow=1`, read with the
  * operator's headers, which EventSource can't send). Resolves when the stream ends or `signal`

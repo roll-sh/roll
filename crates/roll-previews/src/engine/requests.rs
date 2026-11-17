@@ -517,6 +517,12 @@ impl Engine {
         self.store.preview(id)
     }
 
+    /// Its latest requests through roll, newest first (on its holder, which serves them).
+    pub fn requests(&self, id: &str) -> Result<Vec<crate::RequestLine>> {
+        self.store.row(id)?;
+        Ok(self.apps.requests(id))
+    }
+
     pub async fn logs(&self, id: &str, service: Option<&str>, lines: usize) -> Result<(String, Vec<String>)> {
         let services = self.store.services(id)?;
         let svc = match service {
