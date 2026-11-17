@@ -51,6 +51,9 @@ export interface SearchInfo {
   history_retention_s: number;
   defaults: SearchDefaults;
   pricing: SearchPricing;
+  /** A signed-in person's (not an admin's): how many clusters, and always-on ones, they may own
+   * (0: no cap). Past one, a create, branch or switch to always-on answers 409 saying so. */
+  caps?: { clusters: number; always_on: number };
   /** The operator's (and admins') only: where the node keeps its data, and its node-wide figures. */
   storage?: string;
   loaded?: number;
@@ -208,14 +211,22 @@ export const searchApi = {
   revokeKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/keys/${encodeURIComponent(key)}`),
 };
 
-/** An Elasticsearch error body's reason (`error.reason`, or the first root cause's). */
+/**
+ * An Elasticsearch error body's reason (`error.reason`, or the first root cause's), followed by
+ * the innermost `caused_by` reason when the outer one doesn't already say it: a parse failure's
+ * outer reason is a generic wrapper ("Failed to build [query_rule] …") and the cause is the news.
+ */
 export function esReason(body: unknown, status: number): string {
   const e = (body as { error?: unknown } | null)?.error;
   if (typeof e === "string") return e;
   if (e && typeof e === "object") {
-    const o = e as { type?: string; reason?: string; root_cause?: { reason?: string }[] };
+    type Cause = { type?: string; reason?: string; caused_by?: Cause };
+    const o = e as Cause & { root_cause?: { reason?: string }[] };
     const reason = o.reason ?? o.root_cause?.[0]?.reason;
-    if (reason) return o.type ? `${o.type}: ${reason}` : reason;
+    let inner: Cause | undefined = o.caused_by;
+    for (let i = 0; inner?.caused_by && i < 16; i++) inner = inner.caused_by;
+    const cause = inner?.reason && reason && !reason.includes(inner.reason) ? `: ${inner.reason}` : "";
+    if (reason) return (o.type ? `${o.type}: ${reason}` : reason) + cause;
   }
   return `HTTP ${status}`;
 }

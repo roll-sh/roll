@@ -1153,8 +1153,9 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
         let names: Vec<&str> = rm.keys().map(String::as_str).collect();
         runtime::check_time_series(&t.idx, &names, true)?;
     }
-    // Named top-level kNN searches match before the query's named queries.
-    if !knn.is_empty() {
+    // Named top-level kNN searches match before the query's named queries. The sections were
+    // parsed (and checked) once for the whole request; only names need them again here.
+    if !knn.is_empty() && src.knn.iter().any(|m| m.contains_key("_name")) {
         let secs = knn::sections(src)?;
         if secs.len() == knn.len() {
             for (s, q) in secs.iter().zip(knn) {
@@ -1191,7 +1192,7 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
         },
         None => q,
     };
-    if !src.knn.is_empty() {
+    if src.knn.iter().any(|m| m.contains_key("inner_hits")) {
         knn::inner_hits(&qctx, &knn::sections_with_inner(src)?)?;
     }
     // `SeqNoPrimaryTermPhase` on nested inner hits.

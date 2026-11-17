@@ -338,6 +338,12 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     o.open(path)?.write_all(text.as_bytes())
 }
 
+/// How roll-access's trusted machine clients fetch their issuers' keys: the guarded client roll
+/// secrets' identities use, private addresses only where webhooks may go to them.
+pub fn oidc_fetch(args: &crate::Args, open: bool) -> Arc<dyn roll_oidc::Fetch + Send + Sync> {
+    Arc::new(syncs::OidcFetch::new(args.code_webhook_allow_private.unwrap_or(open)))
+}
+
 pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, access: Arc<roll_access::Access>, people: People) -> anyhow::Result<Arc<Secrets>> {
     let system = args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty());
     let target = match system {
