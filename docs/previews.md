@@ -257,6 +257,14 @@ behind the `Apps` trait:
   - Each gets an ephemeral environment `pv-<preview id>`: `PUT …/environments/pv-…`
     `{branch: null, ephemeral: true}`.
   - The branches' URLs and the project's overrides are set as its variables.
+  - Every variable of a link to a branched resource comes from the branch, under roll apps'
+    names (a stream's `KAFKA_BROKERS`/`KAFKA_USERNAME`/`KAFKA_PASSWORD`, a bucket's
+    `AWS_ENDPOINT_URL`, a search cluster's `ELASTICSEARCH_API_KEY` or `OPENSEARCH_URL`/
+    `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD`, from the branch's login), or is set blank when
+    the branch has nothing for it (a Redis branch gives its `REDIS_REST_URL`/`REDIS_REST_TOKEN`
+    too). Never production's: until 2026-11-16 a name that differed
+    from the branch's kept production's value, so a stream's or an OpenSearch cluster's preview
+    reached production's data. `a_links_variables_come_from_the_branch_or_are_blank`.
   - It is deployed at the change's git commit (or its image, for an image service), with an
     `Idempotency-Key` of `pv-<id>@<sha>`, so a retry after a crash returns the same deployment.
     When the environment already runs that commit (a reset's new URLs), it's redeployed: the
@@ -332,6 +340,16 @@ A preview's secrets are an environment of the project's secrets (`feature/roll-s
 docs/secrets.md) called `pv-<preview id>` (an ephemeral environment, labelled `preview`), inheriting from `secrets.base` (`development` by
 default) with the project's `env` overrides and the branched resources' URLs on top.
 
+- **A link to a branched parent never hands out the parent's values.** A secrets environment
+  inherits its base's links, so a link there to Postgres project P (`PGPASSWORD`, `PGHOST`…), a
+  stream (`KAFKA_USERNAME`…), a bucket, Redis or a search cluster that the preview branched would
+  still give the parent's (a fork's code included). The branch's values go by those names too,
+  set after the secrets layer so they win (`names::with_standard`: `PG*` parsed from the branch's
+  app URI, the stream's SASL login, the search branch's key and login), and a credential the
+  branch has none for is blank (a NoSQL HTTP token, Kafka client properties). The roll secrets
+  thread follows with the exact fix: a link to a branched parent isn't resolved at all and comes
+  back as `followed`, its name filled from the branch even under a custom prefix.
+  `a_branchs_values_go_by_the_names_a_link_to_its_parent_would_use`.
 - **Protected values stay out of preview code.** A preview resolves its secrets as `untrusted`
   (roll secrets' flag): nothing of a protected environment resolves, whether directly, by
   reference, by import or through the base. The preview gets its own overrides and links. Only
@@ -462,12 +480,19 @@ preview's services then get `HTTPS_PROXY`/`HTTP_PROXY` pointing at its egress pr
 container (`roll-previews-egress-<id>`, the screenshot image's Node running `egress.js`) on the
 preview's network as `roll-egress` and on Docker's default network. It passes on HTTPS tunnels
 and plain HTTP to a listed host on port 443 or 80 only, and refuses anything else with a 403.
+A listed name is the tenant's choice and may point anywhere, so the proxy resolves it itself and
+connects only to a public address, the one it checked (roll-net's `private_ip`: loopback,
+private, link-local and the cloud's metadata address, CGNAT, IPv4 inside IPv6), never to the
+host, roll's own network or the cloud's metadata; a name that resolves only to private addresses
+is refused and said as such (before 2026-11-16 it was connected to: `169.254.169.254.nip.io`
+listed would have reached the metadata service).
 Each pass, what it refused is said in the preview's activity, each host once. Code that ignores
 the variables still can't get out, because the network has no route. A sidecar rather than a
 listener on the host, because containers can't always reach the host (they can't on ai-server:
 its firewall), while container to container always works. Changing the list restarts the
 services, and the proxy goes with the preview's last service. Live: github.com reached through
-it, example.com refused and said in the activity.
+it, example.com refused and said in the activity, and a listed `169.254.169.254.nip.io` refused
+as a private address.
 
 ## Safety
 
@@ -1568,7 +1593,9 @@ Ranked by what a person notices first. Done so far:
 4. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
    daemon left containers) failed a wake with "the container name is already in use". A remove
    that dropped the service's entry before stopping it could start a second container under the
-   name (fixed); if it comes back, log both starts' container ids.
+   name (fixed), and a preview's services starting at once each made its egress proxy under the
+   one name (fixed 2026-11-16: one make at a time per preview); if it comes back, log both
+   starts' container ids.
 
 
 Looked at and kept: previews' copy of a preview's variables in its roll apps environment, next

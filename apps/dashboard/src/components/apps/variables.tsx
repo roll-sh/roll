@@ -19,10 +19,11 @@ const SOURCE_TONE: Record<VariableSource, string> = {
 };
 
 /**
- * Workspace kinds a service can link to, by their link kind: databases give their URLs, a bucket
- * and a stream credentials of their own, a NoSQL database its login, another service its URLs.
+ * Workspace kinds a service can link to, by their link kind: databases give their URLs, a bucket,
+ * a stream and a search cluster credentials of their own (a search key has data access only), a
+ * NoSQL database its login, another service its URLs.
  */
-export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", bucket: "bucket", stream: "stream", nosql: "nosql", service: "service" };
+export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", bucket: "bucket", stream: "stream", nosql: "nosql", search: "search", service: "service" };
 
 /** `sealSet`: the seal was chosen by hand (a secret-looking name no longer decides it). */
 type Edit = { name: string; value: string; seal?: boolean; sealSet?: boolean };
@@ -418,7 +419,7 @@ function Links({ service, project, runner, onChange }: { service: string; projec
     <section className={panel}>
       <div className="flex min-h-14 items-center justify-between gap-3 border-b border-line px-5 py-3">
         <h2 className="text-[15px] font-medium">Links</h2>
-        <span className="text-[12px] text-subtle">A link adds a database's connection variables, or another service's URLs.</span>
+        <span className="text-[12px] text-subtle">A link adds a resource's connection variables, or another service's URLs.</span>
       </div>
       <ul className="divide-y divide-line">
         {links?.length === 0 && <li className="px-5 py-4 text-[13px] text-muted">Nothing linked.</li>}

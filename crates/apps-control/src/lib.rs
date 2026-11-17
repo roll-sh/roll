@@ -1660,6 +1660,11 @@ impl Apps {
         let sid = svc.id.clone();
         let links = self.db(move |s| s.links_minted(&sid)).await?;
         for (kind, r, prefix, minted) in links {
+            // A preview (an ephemeral environment) never gets a resource's production variables:
+            // roll previews sets the branched ones itself, by name; another service's URLs stay.
+            if env.ephemeral && kind != LinkKind::Service {
+                continue;
+            }
             let read = self.link_values(svc, kind, &r, &env.name, minted).await;
             match read {
                 Ok(vs) => {
