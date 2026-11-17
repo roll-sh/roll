@@ -1968,10 +1968,9 @@ mod tests {
         assert_eq!(v, V::Str("Search ranks text.".into()));
         assert_eq!(top_snippets(&["Nothing here.".into()], "search", 5, 300), V::Null);
         // A long text of one-word chunks, every one holding the term: linear, not quadratic.
-        let started = std::time::Instant::now();
-        let long = "rust. ".repeat(40_000);
-        assert!(matches!(top_snippets(&[long], "rust", 3, 1), V::Multi(v) if v.len() == 3));
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+        crate::test_support::assert_linear("top_snippets", 2_500, |n| vec!["rust. ".repeat(n)], |long| {
+            assert!(matches!(top_snippets(&long, "rust", 3, 1), V::Multi(v) if v.len() == 3));
+        });
     }
 
 }

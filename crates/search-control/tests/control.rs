@@ -64,13 +64,28 @@ async fn env_with(f: impl FnOnce(&mut SearchConfig)) -> Env {
     tokio::spawn(search_server::serve(listener, control.node.clone(), search_server::ListenOptions::default()));
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://{}", api_listener.local_addr().unwrap());
-    let router = search_control::api::router(control.clone());
+    let router = search_control::api::router(control.clone()).layer(axum::middleware::from_fn(as_person));
     tokio::spawn(async move { axum::serve(api_listener, router).await });
     Env { control, api, es: format!("http://{es_addr}"), http: reqwest::Client::new(), home, objects, cfg }
 }
 
 async fn env() -> Env {
     env_with(|_| {}).await
+}
+
+/// What rolld's gate puts on a request, from `x-test-as`: `admin` is a signed-in admin (who also
+/// carries `Operator`), `usr_…` a signed-in person who isn't one. Without it, an open daemon's
+/// request (neither).
+async fn as_person(mut req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let who = req.headers().get("x-test-as").and_then(|v| v.to_str().ok()).map(str::to_string);
+    if let Some(who) = who {
+        let admin = who == "admin";
+        if admin {
+            req.extensions_mut().insert(roll_auth::Operator);
+        }
+        req.extensions_mut().insert(roll_auth::SignedIn { user: format!("usr_{who}"), handle: who, admin, code_owner: None, session: "ses_test".into() });
+    }
+    next.run(req).await
 }
 
 impl Env {
@@ -95,6 +110,18 @@ impl Env {
         let (s, v) = self.call(reqwest::Method::POST, path, Some(body)).await;
         assert_eq!(s, 200, "{path}: {v}");
         v
+    }
+
+    /// [`Env::call`] as a signed-in person (see [`as_person`]).
+    async fn call_as(&self, who: &str, method: reqwest::Method, path: &str, body: Option<Value>) -> (u16, Value) {
+        let mut req = self.http.request(method, format!("{}{path}", self.api)).header("x-test-as", who);
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        let r = req.send().await.unwrap();
+        let status = r.status().as_u16();
+        let text = r.text().await.unwrap();
+        (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
     }
 
     /// A request to the Elasticsearch port, as a client with Basic auth would send it.
@@ -302,6 +329,92 @@ async fn lifecycle() {
     let (s, v) = e.es(&user, &pw, reqwest::Method::GET, "/_mapping", None).await;
     assert_eq!((s, index_names(&v)), (200, Vec::<String>::new()));
     e.control.shutdown().await.unwrap();
+}
+
+/// Signed-in people's own clusters (docs/accounts.md, "Phase 2"): each person lists and reaches
+/// only theirs (another's is a 404, as if it didn't exist), what they create and branch is theirs,
+/// a branch keeps its parent's owner whoever cuts it, and admins and the operator see everything.
+#[tokio::test]
+async fn people_see_only_their_own_clusters() {
+    use reqwest::Method;
+    let e = env().await;
+    let names = |v: &Value| v.as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let (s, a) = e.call_as("alice", Method::POST, "/v1/search/clusters", Some(json!({ "name": "alice-app" }))).await;
+    assert_eq!((s, a["owner"].as_str()), (200, Some("usr_alice")), "{a}");
+    let (s, b) = e.call_as("bob", Method::POST, "/v1/search/clusters", Some(json!({ "name": "bob-app" }))).await;
+    assert_eq!((s, b["owner"].as_str()), (200, Some("usr_bob")), "{b}");
+    let ops = e.post("/v1/search/clusters", json!({ "name": "ops" })).await;
+    assert!(ops["owner"].is_null(), "the operator's has no owner: {ops}");
+    let (_, by_admin) = e.call_as("admin", Method::POST, "/v1/search/clusters", Some(json!({ "name": "admins" }))).await;
+    assert!(by_admin["owner"].is_null(), "nor an admin's: {by_admin}");
+
+    assert_eq!(names(&e.call_as("alice", Method::GET, "/v1/search/clusters", None).await.1), ["alice-app"]);
+    assert_eq!(names(&e.call_as("bob", Method::GET, "/v1/search/clusters", None).await.1), ["bob-app"]);
+    assert_eq!(names(&e.call_as("admin", Method::GET, "/v1/search/clusters", None).await.1), ["alice-app", "bob-app", "ops", "admins"]);
+
+    // Bob's cluster, by name or id, and the operator's: no such cluster for alice, on every route.
+    let bob_id = b["id"].as_str().unwrap();
+    for path in ["/v1/search/clusters/bob-app".to_string(), format!("/v1/search/clusters/{bob_id}"), "/v1/search/clusters/ops/usage".into(), "/v1/search/clusters/bob-app/indices".into()] {
+        let (s, v) = e.call_as("alice", Method::GET, &path, None).await;
+        assert_eq!((s, v["error"].as_str()), (404, Some(&*format!("no search cluster {}", path.split('/').nth(4).unwrap()))), "{path}");
+    }
+    assert_eq!(e.call_as("alice", Method::POST, "/v1/search/clusters/bob-app/password", Some(json!({}))).await.0, 404);
+    assert_eq!(e.call_as("alice", Method::POST, "/v1/search/clusters/bob-app/request", Some(json!({ "method": "GET", "path": "/" }))).await.0, 404);
+    assert_eq!(e.call_as("alice", Method::DELETE, "/v1/search/clusters/bob-app", None).await.0, 404);
+    assert_eq!(e.call_as("alice", Method::POST, "/v1/search/clusters", Some(json!({ "name": "stolen", "parent": "bob-app" }))).await.0, 404, "nor branch it");
+    assert_eq!(e.call_as("bob", Method::GET, "/v1/search/clusters/bob-app", None).await.0, 200, "bob's is still there");
+
+    // Her own branch is hers; one an admin cuts from her cluster is hers too.
+    let (s, dev) = e.call_as("alice", Method::POST, "/v1/search/clusters/alice-app/branches", Some(json!({ "name": "alice-dev" }))).await;
+    assert_eq!((s, dev["owner"].as_str()), (200, Some("usr_alice")), "{dev}");
+    let (s, cut) = e.call_as("admin", Method::POST, "/v1/search/clusters", Some(json!({ "name": "alice-fix", "parent": "alice-app" }))).await;
+    assert_eq!((s, cut["owner"].as_str()), (200, Some("usr_alice")), "{cut}");
+    assert_eq!(names(&e.call_as("alice", Method::GET, "/v1/search/clusters", None).await.1), ["alice-app", "alice-dev", "alice-fix"]);
+    assert_eq!(names(&e.call_as("bob", Method::GET, "/v1/search/clusters", None).await.1), ["bob-app"]);
+
+    // The node-wide figures and where the data is are the operator's.
+    let (_, mine) = e.call_as("alice", Method::GET, "/v1/search", None).await;
+    assert!(mine["storage"].is_null() && mine["cache"].is_null() && mine["loaded"].is_null() && mine["pricing"].is_object(), "{mine}");
+    let (_, all) = e.call_as("admin", Method::GET, "/v1/search", None).await;
+    assert!(all["storage"].is_string() && all["cache"].is_object(), "{all}");
+}
+
+/// A person's clusters and always-on clusters are capped (`--search-max-*-per-person`); branches
+/// count toward the parent's owner, and the operator and admins aren't held to it.
+#[tokio::test]
+async fn people_are_held_to_their_cluster_caps() {
+    use reqwest::Method;
+    let e = env_with(|c| c.person_caps = search_control::store::Caps { clusters: 3, always_on: 1 }).await;
+    let create = |name: &str, idle: Option<i64>| json!({ "name": name, "idle_timeout_s": idle });
+    assert_eq!(e.call_as("alice", Method::POST, "/v1/search/clusters", Some(create("a1", None))).await.0, 200);
+    assert_eq!(e.call_as("alice", Method::POST, "/v1/search/clusters", Some(create("a2", Some(0)))).await.0, 200);
+    let (_, info) = e.call_as("alice", Method::GET, "/v1/search", None).await;
+    assert_eq!(info["caps"], json!({ "clusters": 3, "always_on": 1 }));
+
+    // A second always-on one, made or switched to: 409, and the cap still lets a2 change.
+    let (s, v) = e.call_as("alice", Method::POST, "/v1/search/clusters", Some(create("a3", Some(0)))).await;
+    let msg = v["error"].as_str().unwrap_or_default();
+    assert!(s == 409 && msg.starts_with("you have 1 always-on") && msg.contains("may have 1") && msg.contains("sleeps when idle") && msg.contains("--search-max-always-on-per-person"), "{s} {v}");
+    let (s, v) = e.call_as("alice", Method::PATCH, "/v1/search/clusters/a1", Some(json!({ "idle_timeout_s": 0 }))).await;
+    assert_eq!((s, v["error"].as_str()), (409, Some(msg)));
+    assert_eq!(e.call_as("alice", Method::PATCH, "/v1/search/clusters/a2", Some(json!({ "max_in_flight": 8 }))).await.0, 200);
+
+    // A branch counts: the third cluster is one, and past the cap neither a create nor a branch passes.
+    assert_eq!(e.call_as("alice", Method::POST, "/v1/search/clusters/a1/branches", Some(json!({ "name": "a1-dev" }))).await.0, 200);
+    let (s, v) = e.call_as("alice", Method::POST, "/v1/search/clusters", Some(create("a4", None))).await;
+    let msg = v["error"].as_str().unwrap_or_default();
+    assert!(s == 409 && msg.starts_with("you have 3 search clusters") && msg.contains("may have 3") && msg.contains("--search-max-clusters-per-person"), "{s} {v}");
+    let (s, v) = e.call_as("alice", Method::POST, "/v1/search/clusters", Some(json!({ "name": "a1-x", "parent": "a1" }))).await;
+    assert_eq!((s, v["error"].as_str()), (409, Some(msg)));
+    assert!(e.control.store.by_name("a1-x").await.unwrap().is_none());
+
+    // An admin isn't capped, even cutting a branch that is alice's or switching hers to always-on.
+    let (s, cut) = e.call_as("admin", Method::POST, "/v1/search/clusters", Some(json!({ "name": "a1-fix", "parent": "a1" }))).await;
+    assert_eq!((s, cut["owner"].as_str()), (200, Some("usr_alice")), "{cut}");
+    assert_eq!(e.call_as("admin", Method::PATCH, "/v1/search/clusters/a1", Some(json!({ "idle_timeout_s": 0 }))).await.0, 200);
+    assert!(e.call_as("admin", Method::GET, "/v1/search", None).await.1["caps"].is_null());
+    // Alice's count toward nobody else: bob still makes his.
+    assert_eq!(e.call_as("bob", Method::POST, "/v1/search/clusters", Some(create("b1", None))).await.0, 200);
 }
 
 #[tokio::test]
