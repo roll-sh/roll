@@ -114,7 +114,8 @@ pub struct Database {
     pub watch: watch::Watch,
     /// Big tables' measures, for VACUUM to skip those nothing changed since (`unchanged`).
     pub unchanged: unchanged::Unchanged,
-    seqs: Mutex<HashMap<u32, SeqState>>,
+    /// (The fast hasher: a load's row ids are each a lookup here.)
+    seqs: Mutex<crate::exec::fasthash::HashMap<u32, SeqState>>,
     /// (On a cache line of its own: every transaction takes an id, and what the statements
     /// read of the database sits next to it.)
     next_txn: crate::counter::Padded<AtomicU64>,
@@ -269,7 +270,7 @@ impl Database {
             moved: Mutex::new(HashMap::new()),
             watch: Default::default(),
             unchanged: Default::default(),
-            seqs: Mutex::new(HashMap::new()),
+            seqs: Mutex::new(Default::default()),
             next_txn: crate::counter::Padded(AtomicU64::new(1)),
             sessions: AtomicUsize::new(0),
             temp_cleanups: AtomicUsize::new(0),
