@@ -2810,6 +2810,9 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
    tree gated green on all 17 steps): round 1 #69, #70, #72, #76, #77 as they are, round 2 #71, #73,
    #75 after it (they merged #70's head, which the squash queue can't take in one round), within
    one lock turn; #147 after, if it merges clean. Then batch 2 the same way.
+0a. **A thirtieth independent security review** (running): tonight's PRs (#132, #136, #144,
+   #165, #166, #173, #194, #227, #229) read cold for leaks, SSRF, injection, authorization, ACME's
+   JWS and nonces, the gateway's revocation and bounds.
 0c. **Azure DevOps** (#227): a sync to variable groups as secret variables, and Azure Pipelines
    logging in with its own OIDC token (one pipeline or service connection per identity), as Vault,
    Infisical and Doppler integrate. Azure never returns a secret variable's value and its update
