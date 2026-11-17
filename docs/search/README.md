@@ -533,4 +533,20 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    disabled user, fails the run without running anything. Elasticsearch keeps running these jobs
    (checked on 9.5.5); compatibility.md has the difference and what each job type does. The
    dashboard's file import keeps exact numbers and ids and reads files with bounded memory (#103).
-   The next review follows per-user access (#127): it changes who may reach what.
+   The review of per-person access (#127) found one hole, now closed. A scoped token allowed to
+   create clusters in a project could create one with a `parent` outside that project. The new
+   cluster is a branch, so the token could read any cluster's indices. That create now also needs
+   `write` on the parent, as `…/{id}/branches` does. The rest holds:
+   - Every `/v1/search/clusters/{id}/…` call checks the owner. It does so before the fleet
+     forwards it, and again on the owner node, behind its gate.
+   - Another person's cluster answers the same 404 as a missing one.
+   - A cluster's credentials and keys name that cluster only. Remote clusters reach only the
+     cluster itself, and reindex from a remote is off: the whitelist is empty.
+   - `fs` and `url` repositories need `path.repo`, which rolld doesn't set.
+   - A person's canvas reaches only their own clusters (`Workspace::trusts`), on every read and
+     issue.
+
+   A create, or a branch whose name is taken, answers 409, so a person learns that a cluster of
+   that name exists. That is accepted: names are host labels (`<name>.search.…`), global like S3
+   bucket names, and the 409 shows nothing else about the cluster. Left, low: a person's
+   `GET …/{id}` shows the node id their cluster is loaded on (`status.node`).
