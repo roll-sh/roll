@@ -2810,9 +2810,11 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
    tree gated green on all 17 steps): round 1 #69, #70, #72, #76, #77 as they are, round 2 #71, #73,
    #75 after it (they merged #70's head, which the squash queue can't take in one round), within
    one lock turn; #147 after, if it merges clean. Then batch 2 the same way.
-0c. **Azure DevOps** (building: `feature/roll-secrets-azure-devops`): a sync to variable groups
-   as secret variables, and Azure Pipelines logging in with its own OIDC token (one service
-   connection per identity), as Vault, Infisical and Doppler integrate.
+0c. **Azure DevOps** (#227): a sync to variable groups as secret variables, and Azure Pipelines
+   logging in with its own OIDC token (one pipeline or service connection per identity), as Vault,
+   Infisical and Doppler integrate. Azure never returns a secret variable's value and its update
+   rewrites the whole group, so the sync sends every value on each push and refuses a group holding
+   secrets it doesn't manage. Unconfirmed against a real organization (the user's call).
 0e. **Four more syncs** (building: `feature/roll-secrets-more-syncs`): Supabase Edge Function
    secrets, Cloudflare Pages variables, Azure App Configuration and HashiCorp Vault / OpenBao KV v2
    (the gradual way off Vault), as Infisical syncs to each.
