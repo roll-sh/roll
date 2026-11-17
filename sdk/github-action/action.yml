@@ -1,5 +1,5 @@
 name: roll secrets
-description: An environment of roll secrets in the job, masked, through a workload identity (no stored token).
+description: An environment of roll secrets in the job, masked, through a workload identity (no stored token); or the job signed in to roll as a trusted machine client (ROLL_TOKEN).
 branding:
   icon: lock
   color: blue
@@ -12,6 +12,9 @@ inputs:
     required: false
   token:
     description: A roll token with a rule on the project, instead of an identity (keep it in the repository's secrets).
+    required: false
+  client-id:
+    description: A trusted machine client (mcl_…, `roll token client create --github owner/repo`) the job signs in as with its own OIDC token, for any product. Without an environment, the action only exports that token, masked, as ROLL_TOKEN. The job needs `permissions: id-token: write`.
     required: false
   project:
     description: The project (prj_…). An identity's or a token's own project when left out.
