@@ -1057,7 +1057,7 @@ at each login (its environments, folders and actions are refused, they don't app
 `ttl_minutes`; the gateway logs in again and opens a new link before its token ends. `GET
 …/gateways` lists them with their status, `DELETE …/gateways/{id}` (`admin`; `roll secrets
 gateways rm`) deletes one no database or directory uses (409 otherwise), revokes the token made
-with it and drops its link.
+with it and closes its link at once.
 
 **The binary.** `roll --url https://roll.example.com secrets gateways up --gateway gw_… --allow
 10.0.0.0/8:5432 --allow ldap.corp.internal:636` (or `--allow-file FILE`, one entry a line, `#`
@@ -1126,9 +1126,17 @@ The internal route takes only a request another node signed (`roll_cluster::Forw
 
 **Status.** Each link writes its status to the gateway's row (shared by every node): `connected`,
 the `node`, `version`, the allow-list it reported, `connected_at`, `last_seen_at` (every 30 s while
-up). It's online when connected and seen within 90 s. The link checks its token every 30 s
-(roll-access answers revocation and expiry, never cached) and closes with 4401 once it's gone, or the
-gateway was deleted.
+up). It's online when connected and seen within 90 s.
+
+**Revocation takes effect at once.** Before every stream it opens (each provider call through the
+gateway asks for one), the link looks up its token through roll-access, as the connect does, and
+the gateway's record, never cached. If either is gone (the token revoked or expired, its maker no
+longer reaching the project, the gateway deleted), the stream is refused and the link closes with
+4401. `DELETE …/gateways/{id}`, and deleting or re-keying the identity that logged a gateway in,
+also re-check the link on the lease's holder right away, through the same dispatch as the calls
+(`Call::Recheck`), so a link with no stream open closes too. A holder that can't be reached doesn't
+fail the delete: the next stream's check covers it. An idle link still re-checks every 30 s, as a
+backstop.
 
 **Where it plugs in.** Databases outside roll (`gateway` on `POST …/outside-databases`: Postgres,
 MySQL, SQL Server, Redis and MongoDB with `mongodb://` hosts; ClickHouse and RabbitMQ speak HTTPS

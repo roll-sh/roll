@@ -6,6 +6,11 @@
 //! (connect, TLS, the statements) is dispatched there through roll-cluster
 //! (`POST /internal/secrets/gateways/{id}/call`, its body sealed with the deployment key), never
 //! bytes streamed between nodes. On one node the link and the call are both here.
+//!
+//! A link carries nothing once what opened it is gone: every stream it opens first looks up its
+//! token and the gateway's record (never cached), deleting a gateway or revoking a credential
+//! through roll secrets re-checks its link on the holder at once (`Call::Recheck`, the same
+//! dispatch), and an idle link re-checks every 30 s.
 
 use super::outside::{Engine as DbEngine, Via};
 use axum::body::Body;
@@ -29,7 +34,8 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 const HELLO_WAIT: Duration = Duration::from_secs(10);
-/// How often a link reports it's up and checks its credential (never cached).
+/// How often a link reports it's up and checks its credential (never cached): the backstop for
+/// an idle link, since each stream checks before it opens.
 const CHECK_EVERY: Duration = Duration::from_secs(30);
 /// How long a replaced link may finish its streams.
 const DRAIN: Duration = proto::STREAM_LIFETIME;
@@ -52,6 +58,9 @@ pub(crate) enum Call {
     DbExtendLogin { url: String, ca: Option<String>, name: String, until: i64 },
     DbDropLogin { url: String, ca: Option<String>, name: String },
     Dir { url: String, flavor: Flavor, bind_dn: String, bind_password: String, ca: Option<String>, op: DirOp },
+    /// Check the link's credential and the gateway's record now, closing it if either is gone
+    /// (a gateway deleted, a credential revoked through roll secrets). Needs no link.
+    Recheck,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -92,12 +101,15 @@ impl Call {
                     DirOp::AccountNames { dns } => d.account_names(&b, &dns).map(|names| json!(names.into_iter().map(|n| (n.account_name, n.upn)).collect::<Vec<_>>())),
                 }
             }
+            // `local_call` answers it before looking for a link.
+            Call::Recheck => Ok(Json::Null),
         }
     }
 }
 
 /// The gateways' links on this node.
 pub struct Gateways {
+    me: std::sync::Weak<Gateways>,
     links: Mutex<HashMap<String, Arc<Link>>>,
     cluster: Arc<Cluster>,
     secrets: OnceLock<Arc<Secrets>>,
@@ -105,8 +117,6 @@ pub struct Gateways {
     grants: Arc<dyn roll_auth::Grants>,
     /// The deployment allows plain text to private addresses (local development only).
     allow_private: bool,
-    /// How often a link checks its credential ([`CHECK_EVERY`]; shorter in tests).
-    check_every: Duration,
 }
 
 /// One gateway's link.
@@ -114,16 +124,33 @@ pub struct Link {
     gateway: String,
     mux: Mux,
     secrets: Arc<Secrets>,
+    grants: Arc<dyn roll_auth::Grants>,
+    /// The grant that opened it (its id), or the operator and the person who did.
+    grant: Option<String>,
+    caller: (bool, Option<roll_auth::SignedIn>),
     /// A newer link took over: it opens no more streams and closes once they're done.
     replaced: tokio::sync::watch::Sender<bool>,
+    /// What opened it is gone: the link closes with 4401 now, saying why.
+    revoked: tokio::sync::watch::Sender<Option<String>>,
 }
 
 impl Link {
     /// A stream to `host:port` through the gateway, audited when it ends (target and bytes).
+    /// Checked first, every time: a revoked token or a deleted gateway opens nothing, and closes
+    /// the link.
     pub(crate) async fn open(self: &Arc<Self>, host: &str, port: u16) -> Result<Audited, String> {
         let target = format!("{host}:{port}");
         if *self.replaced.borrow() {
             return Err(format!("gateway {}'s link is being replaced: try again", self.gateway));
+        }
+        match self.gone().await {
+            Ok(None) => {}
+            Ok(Some(why)) => {
+                self.audit(&target, format!("not opened: {why}"));
+                self.revoke(why.clone());
+                return Err(format!("gateway {}'s link was closed: {why}", self.gateway));
+            }
+            Err(e) => return Err(format!("gateway {}: checking its credential failed ({e}): try again", self.gateway)),
         }
         match self.mux.open(host, port).await {
             Ok(s) => Ok(Audited { s, target, link: self.clone() }),
@@ -132,6 +159,34 @@ impl Link {
                 Err(format!("gateway {}: {why}", self.gateway))
             }
         }
+    }
+
+    /// Why the link must end now, if it must: its token revoked or expired, the gateway deleted,
+    /// or its maker no longer reaching the project. Looked up now, never cached. `Err`: the lookup
+    /// itself failed (a database hiccup), which isn't a revocation.
+    async fn gone(&self) -> Result<Option<String>, String> {
+        let (grants, grant, s, id, caller) = (self.grants.clone(), self.grant.clone(), self.secrets.clone(), self.gateway.clone(), self.caller.clone());
+        let checked = tokio::task::spawn_blocking(move || {
+            let current = match grant {
+                Some(g) => match grants.grant(&g) {
+                    Some(now) => Some(now),
+                    None => return Ok(Some("its token was revoked or has ended".to_string())),
+                },
+                None => None,
+            };
+            match s.gateway_link(&id, caller.0, caller.1.as_ref(), current.as_ref()) {
+                Ok(_) => Ok(None),
+                Err(roll_secrets::Error::Unauthorized(m) | roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m)) => Ok(Some(m)),
+                Err(e) => Err(e.to_string()),
+            }
+        })
+        .await;
+        checked.map_err(|e| e.to_string())?
+    }
+
+    /// Close the link with 4401 (its loop does, at once).
+    fn revoke(&self, why: String) {
+        self.revoked.send_replace(Some(why));
     }
 
     fn audit(&self, target: &str, outcome: String) {
@@ -186,7 +241,7 @@ enum End {
 
 impl Gateways {
     pub fn new(cluster: Arc<Cluster>, grants: Arc<dyn roll_auth::Grants>, allow_private: bool) -> Arc<Gateways> {
-        let g = Arc::new(Gateways { links: Default::default(), cluster, secrets: OnceLock::new(), grants, allow_private, check_every: CHECK_EVERY });
+        let g = Arc::new_cyclic(|me| Gateways { me: me.clone(), links: Default::default(), cluster, secrets: OnceLock::new(), grants, allow_private });
         tokio::spawn(release_idle(Arc::downgrade(&g)));
         g
     }
@@ -246,6 +301,15 @@ impl Gateways {
             let opened = secrets.open_hop(id, &raw).map_err(|e| e.to_string())?;
             let call: Call = serde_json::from_slice(&opened).map_err(|_| "a forwarded call roll doesn't read".to_string())?;
             drop(opened);
+            if let Call::Recheck = call {
+                let link = self.links.lock().unwrap().get(id).cloned();
+                if let Some(link) = link
+                    && let Ok(Some(why)) = link.gone().await
+                {
+                    link.revoke(why);
+                }
+                return Ok(Json::Null);
+            }
             let link = self.link(id).ok_or_else(|| format!("gateway {id} isn't connected: start it (roll gateway up) and check its status"))?;
             let allow_private = self.allow_private;
             tokio::task::spawn_blocking(move || call.run(link, allow_private)).await.map_err(|e| e.to_string())?
@@ -273,7 +337,8 @@ impl Gateways {
         let conn = roll_secrets::names::new_id("gwc", 12);
         let node = self.cluster.node_id().to_string();
         let (replaced, mut replaced_rx) = tokio::sync::watch::channel(false);
-        let link = Arc::new(Link { gateway: id.clone(), mux: mux.clone(), secrets: secrets.clone(), replaced });
+        let (revoked, mut revoked_rx) = tokio::sync::watch::channel(None);
+        let link = Arc::new(Link { gateway: id.clone(), mux: mux.clone(), secrets: secrets.clone(), grants: self.grants.clone(), grant: grant.clone(), caller, replaced, revoked });
         // The newest link opens streams; the one it replaces finishes its own, then closes.
         if let Some(old) = self.links.lock().unwrap().insert(id.clone(), link.clone()) {
             let _ = old.replaced.send(true);
@@ -288,7 +353,7 @@ impl Gateways {
         tracing::info!(gateway = %id, version = %hello.agent, "roll secrets: a gateway connected");
         mux.send_control(Kind::Welcome, &proto::Welcome { gateway: id.clone(), node });
         let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
-        let mut check = tokio::time::interval_at(tokio::time::Instant::now() + self.check_every, self.check_every);
+        let mut check = tokio::time::interval_at(tokio::time::Instant::now() + CHECK_EVERY, CHECK_EVERY);
         let mut heard = Instant::now();
         let moving = guard.ending();
         tokio::pin!(moving);
@@ -320,6 +385,9 @@ impl Gateways {
                     }
                 }
                 _ = &mut moving => break End::Moved,
+                _ = revoked_rx.changed() => {
+                    break End::Revoked(revoked_rx.borrow().clone().unwrap_or_else(|| "its credential was revoked".into()));
+                }
                 _ = replaced_rx.changed(), if drain_until.is_none() => {
                     drain_until = Some(tokio::time::Instant::now() + DRAIN);
                 }
@@ -333,8 +401,14 @@ impl Gateways {
                     }
                 }
                 _ = check.tick() => {
-                    if let Some(why) = self.still_allowed(&secrets, &id, &conn, grant.as_deref(), &caller).await {
-                        break End::Revoked(why);
+                    match link.gone().await {
+                        Ok(Some(why)) => break End::Revoked(why),
+                        Ok(None) => {
+                            let (s, i, c) = (secrets.clone(), id.clone(), conn.clone());
+                            let _ = tokio::task::spawn_blocking(move || s.gateway_seen(&i, &c)).await;
+                        }
+                        // A database hiccup isn't a revocation: the next check decides.
+                        Err(e) => tracing::warn!(gateway = %id, "checking a gateway's link failed: {e}"),
                     }
                 }
             }
@@ -363,38 +437,22 @@ impl Gateways {
         drop(guard);
     }
 
-    /// Why the link must end now, if it must: its token revoked or expired, the gateway deleted,
-    /// or its maker no longer reaching the project. Looked up now, never cached.
-    async fn still_allowed(&self, secrets: &Arc<Secrets>, id: &str, conn: &str, grant: Option<&str>, caller: &(bool, Option<roll_auth::SignedIn>)) -> Option<String> {
-        let current = match grant {
-            Some(g) => match self.grants.grant(g) {
-                Some(now) => Some(now),
-                None => return Some("its token was revoked or has ended".into()),
-            },
-            None => None,
-        };
-        let (s, i, c, caller) = (secrets.clone(), id.to_string(), conn.to_string(), caller.clone());
-        let checked = tokio::task::spawn_blocking(move || {
-            s.gateway_link(&i, caller.0, caller.1.as_ref(), current.as_ref())?;
-            s.gateway_seen(&i, &c)
-        })
-        .await;
-        match checked {
-            Ok(Ok(_)) => None,
-            Ok(Err(roll_secrets::Error::Unauthorized(m) | roll_secrets::Error::Forbidden(m) | roll_secrets::Error::NotFound(m))) => Some(m),
-            // A database hiccup isn't a revocation: the next check decides.
-            Ok(Err(e)) => {
-                tracing::warn!(gateway = id, "checking a gateway's link failed: {e}");
-                None
-            }
-            Err(_) => None,
-        }
-    }
-
     fn forget(&self, link: &Arc<Link>) {
         let mut links = self.links.lock().unwrap();
         if links.get(&link.gateway).is_some_and(|l| Arc::ptr_eq(l, link)) {
             links.remove(&link.gateway);
+        }
+    }
+}
+
+/// roll secrets re-checks a link when a gateway is deleted or a credential that may open one is
+/// revoked: dispatched to the gateway's holder as a call is. One that can't be reached isn't a
+/// failure: the link checks before every stream it opens, and every 30 s.
+impl roll_secrets::gateways::Links for Gateways {
+    fn recheck(&self, id: &str) {
+        let Some(me) = self.me.upgrade() else { return };
+        if let Err(e) = me.call(id, Call::Recheck) {
+            tracing::warn!(gateway = id, "re-checking a gateway's link failed (its next stream checks again): {e}");
         }
     }
 }
@@ -533,8 +591,9 @@ mod tests {
             let tokens = Arc::new(Tokens::default());
             let cfg = roll_cluster::ClusterConfig::new("node-a", "http://127.0.0.1:1", roll_cluster::ClusterConfig::random_node_id().into_bytes());
             let cluster = Cluster::join(Box::new(roll_cluster::Memory::solo()), cfg).unwrap();
-            // Checks every half second, not every 30 s.
-            let hub = Arc::new(Gateways { links: Default::default(), cluster, secrets: OnceLock::new(), grants: tokens.clone(), allow_private: true, check_every: Duration::from_millis(500) });
+            // Links check every 30 s, as in production: anything faster here is the per-stream check
+            // or the re-check a delete sends.
+            let hub = Gateways::new(cluster, tokens.clone(), true);
             let opts = roll_secrets::Options {
                 keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
                 key_source: roll_secrets::KeySource::Env,
@@ -552,6 +611,7 @@ mod tests {
                 directory: None,
                 clouds: None,
                 workloads: Some(tokens.clone()),
+                gateways: Some(hub.clone()),
             };
             let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::new(db, ws.clone(), opts)).unwrap());
             hub.set_secrets(secrets.clone());
@@ -565,8 +625,8 @@ mod tests {
         }
 
         /// A gateway and its token, as `POST …/gateways` makes them.
-        async fn gateway(&self) -> (String, String) {
-            let made: Json = self.http.post(format!("{}/v1/secrets/projects/{}/gateways", self.url, self.project)).json(&json!({ "name": "vpc" })).send().await.unwrap().json().await.unwrap();
+        async fn gateway(&self, name: &str) -> (String, String) {
+            let made: Json = self.http.post(format!("{}/v1/secrets/projects/{}/gateways", self.url, self.project)).json(&json!({ "name": name })).send().await.unwrap().json().await.unwrap();
             (made["gateway"]["id"].as_str().unwrap().into(), made["token"].as_str().unwrap().into())
         }
 
@@ -622,9 +682,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_gateway_reaches_only_its_allow_list_holds_a_window_for_a_slow_reader_and_drops_when_revoked() {
+    async fn a_gateway_reaches_only_its_allow_list_holds_a_window_for_a_slow_reader_and_drops_at_once_when_revoked_or_deleted() {
         let r = Rolld::start().await;
-        let (gw, token) = r.gateway().await;
+        let (gw, token) = r.gateway("vpc").await;
         let echo = echo_server().await;
         let written = Arc::new(AtomicUsize::new(0));
         let flood = flood_server(written.clone()).await;
@@ -663,11 +723,24 @@ mod tests {
         assert!(audit.contains(&format!("127.0.0.1:{echo}")) && audit.contains("127.0.0.1:9") && !audit.contains("hello through"), "{audit}");
         assert!(lines.lock().unwrap().iter().any(|l| l.contains("refused 127.0.0.1:9")), "the gateway logs its refusal");
 
-        // Revoking its token drops the link, and the gateway stops (its token won't work again).
+        // Its token revoked in roll-access: the very next stream is refused, not 30 s later, and
+        // the link closes with 4401, so the gateway stops (its token won't work again).
         let id = r.tokens.0.lock().unwrap()[&token].id.to_string();
         roll_secrets::Workloads::revoke(&*r.tokens, &id).unwrap();
-        let stopped = tokio::time::timeout(Duration::from_secs(10), agent).await.expect("the gateway stops").unwrap();
+        let refused = link.open("127.0.0.1", echo).await.err().expect("a revoked token opens nothing");
+        assert!(refused.contains("revoked"), "{refused}");
+        let stopped = tokio::time::timeout(Duration::from_secs(2), agent).await.expect("the gateway stops").unwrap();
         assert!(stopped.unwrap_err().contains("refused"), "a revoked token ends the gateway");
+        assert!(r.hub.link(&gw).is_none());
+
+        // Deleting a gateway closes its link within a second, with no stream asking.
+        let (gw, token) = r.gateway("office").await;
+        let (agent, _) = r.up(&gw, &token, &[format!("127.0.0.1:{echo}")]);
+        r.linked(&gw).await;
+        let deleted = r.http.delete(format!("{}/v1/secrets/projects/{}/gateways/{gw}", r.url, r.project)).send().await.unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        let stopped = tokio::time::timeout(Duration::from_secs(1), agent).await.expect("the link closes within a second").unwrap();
+        assert!(stopped.unwrap_err().contains("refused"), "a deleted gateway's link closes with 4401");
         assert!(r.hub.link(&gw).is_none());
         let _ = &r.secrets;
     }
@@ -682,7 +755,7 @@ mod tests {
             return;
         }
         let r = Rolld::start().await;
-        let (gw, token) = r.gateway().await;
+        let (gw, token) = r.gateway("vpc").await;
         let (_agent, lines) = r.up(&gw, &token, &["127.0.0.1:18432".to_string()]);
         r.linked(&gw).await;
         let url = "postgres://postgres:pw@127.0.0.1:18432/postgres?sslmode=disable".to_string();

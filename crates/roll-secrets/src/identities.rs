@@ -290,6 +290,10 @@ impl Secrets {
                 }
             }
         }
+        // A gateway it logs in closes its link now if one of those opened it.
+        if let Some(g) = identity.gateway.as_deref().filter(|_| !live.is_empty()) {
+            self.recheck_gateway(g);
+        }
         Ok(identity)
     }
 
@@ -298,14 +302,14 @@ impl Secrets {
         caller.need(Action::Admin, &Scope::project(project))?;
         self.project(project)?;
         let now = self.db.now_ms()?;
-        let live: Vec<String> = self.db.write(|c| {
-            let name: Option<String> = c.query_row("SELECT name FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?;
-            let name = name.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
+        let (live, gateway): (Vec<String>, Option<String>) = self.db.write(|c| {
+            let found: Option<(String, Option<String>)> = c.query_row("SELECT name, gateway FROM identities WHERE id = ? AND project_id = ?", [id, project], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let (name, gateway) = found.ok_or_else(|| Error::NotFound(format!("no identity {id}")))?;
             c.execute("DELETE FROM identities WHERE id = ?", [id])?;
             let live: Vec<String> = c.query("SELECT grant_id FROM identity_logins WHERE identity = ? AND expires_at > ?", params![id, now], |r| r.get(0))?;
             let n = live.len();
             audit::record(c, project, caller, "identity.delete", None, None, &[], &format!("deleted identity {name} ({n} live token{} revoked)", if n == 1 { "" } else { "s" }), now)?;
-            Ok::<_, Error>(live)
+            Ok::<_, Error>((live, gateway))
         })?;
         // What it gave out ends with it (outside the transaction: roll-access's own store).
         if let Some(w) = &self.workloads {
@@ -314,6 +318,10 @@ impl Secrets {
                     tracing::warn!(identity = %id, grant = %g, "revoking a deleted identity's token failed: {e}");
                 }
             }
+        }
+        // A gateway it logged in closes its link now if one of those opened it.
+        if let Some(g) = gateway.as_deref().filter(|_| !live.is_empty()) {
+            self.recheck_gateway(g);
         }
         Ok(())
     }

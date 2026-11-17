@@ -333,6 +333,9 @@ pub struct Options {
     /// Sets passwords and makes users on LDAP and Active Directory servers outside roll
     /// (directories.rs); `None`: not on this server.
     pub directory: Option<std::sync::Arc<dyn directories::Directory>>,
+    /// Gateways' links (rolld), re-checked at once when a gateway is deleted or a credential that
+    /// may open one is revoked here; `None`: no links on this server.
+    pub gateways: Option<std::sync::Arc<dyn gateways::Links>>,
 }
 
 /// The secrets store.
@@ -349,6 +352,7 @@ pub struct Secrets {
     unwrap: kms::Unwrapper,
     sts: Option<Arc<dyn aws::Sts>>,
     workloads: Option<Arc<dyn access::Workloads>>,
+    gateway_links: Option<Arc<dyn gateways::Links>>,
     open: bool,
     trust_forwarded_for: bool,
     web_url: Option<String>,
@@ -483,7 +487,7 @@ impl Secrets {
         if let (Some(directory), Ok(keys)) = (&opts.directory, &opts.keyring) {
             links.register(Arc::new(directories::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), directory: directory.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default() })
     }
 
     pub fn links(&self) -> &Links {

@@ -97,6 +97,13 @@ pub struct MadeGateway {
     pub token: Option<String>,
 }
 
+/// Gateways' links, where they're held (rolld): re-check gateway `id`'s link now, closing it if
+/// its credential or its record is gone. Blocking; a holder that can't be reached isn't an error
+/// (the link checks before every stream it opens).
+pub trait Links: Send + Sync {
+    fn recheck(&self, id: &str);
+}
+
 /// Who a link belongs to, once its caller may open it.
 #[derive(Debug, Clone)]
 pub struct LinkOf {
@@ -204,7 +211,7 @@ impl Secrets {
     }
 
     /// Delete a gateway no database or directory goes through; its token is revoked and its link
-    /// drops at its next check.
+    /// closes at once.
     pub fn delete_gateway(&self, project: &str, id: &str, caller: &Caller) -> Result<()> {
         caller.need(Action::Admin, &Scope::project(project))?;
         self.project(project)?;
@@ -229,7 +236,15 @@ impl Secrets {
         {
             tracing::warn!(gateway = id, "revoking a deleted gateway's token failed: {e}");
         }
+        self.recheck_gateway(id);
         Ok(())
+    }
+
+    /// Close gateway `id`'s link now if what opened it is gone (outside any transaction).
+    pub(crate) fn recheck_gateway(&self, id: &str) {
+        if let Some(l) = &self.gateway_links {
+            l.recheck(id);
+        }
     }
 
     /// The gateway a database or directory is registered through: one of the project's.

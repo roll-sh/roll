@@ -311,6 +311,8 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
         workloads: Some(Arc::new(Workloads(access))),
         people: Some(Arc::new(people)),
         kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private, gateways: gateways.clone() })), directory: Some(Arc::new(directory::Guarded { allow_private, gateways: gateways.clone() })), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
+        // A deleted gateway, or a revoked credential that opened one, closes its link at once.
+        gateways: Some(gateways.clone()),
     };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
@@ -1243,6 +1245,7 @@ mod tests {
             directory: None,
             clouds: None,
             workloads: None,
+            gateways: None,
         };
         let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
         let set = axum::http::Request::put(format!("/v1/secrets/projects/{project}/environments/production/secrets/DB_URL"))

@@ -506,7 +506,7 @@ impl Api {
         let clouds = Arc::new(FakeClouds::default());
         let gate = Arc::new(Gate::default());
         let granted: Arc<dyn roll_auth::Grants> = Arc::new(Granted { gate: gate.clone(), people: people.clone() });
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), directory: Some(directory.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }) };
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), directory: Some(directory.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }), gateways: None };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));
         let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, outside, directory, clouds, project: String::new(), _dir: dir };
@@ -1766,7 +1766,7 @@ async fn a_cloud_account_trusts_one_projects_token() {
     // The deployment key rotates: the issuer's key is resealed with the new one (health says when
     // the previous key can go), and keeps signing once the previous key is gone.
     let reopen = |current: &str, previous: Option<&str>| {
-        let opts = Options { keyring: Ok(Keyring::new(current, previous).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: api.clouds.clone() }), kms: None, sts: None, outside: None, directory: None, workloads: None };
+        let opts = Options { keyring: Ok(Keyring::new(current, previous).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: api.clouds.clone() }), kms: None, sts: None, outside: None, directory: None, workloads: None, gateways: None };
         Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap()
     };
     let (old, new) = ("k".repeat(32), "n".repeat(32));
@@ -2324,7 +2324,7 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
     let cert = api.values("production", "/").await["values"]["TLS_CERT"].clone();
     assert!(cert.as_str().is_some_and(|c| c.starts_with("-----BEGIN CERTIFICATE-----")), "{cert}");
     let node = |keyring: Keyring| {
-        let opts = Options { keyring: Ok(keyring), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, directory: None, clouds: None, workloads: None };
+        let opts = Options { keyring: Ok(keyring), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, directory: None, clouds: None, workloads: None, gateways: None };
         Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap())
     };
     // The deployment key rotates: health counts the wrapped project as not resealed until the
@@ -2351,7 +2351,7 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
     assert_eq!(roll_secrets::router(fresh).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::LOCKED);
     // Back with roll alone: no KMS needed any more.
     *api.kms.revoked.lock().unwrap() = false;
-    let opts = Options { keyring: Ok(Keyring::new(&"n".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, directory: None, clouds: None, workloads: None };
+    let opts = Options { keyring: Ok(Keyring::new(&"n".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, directory: None, clouds: None, workloads: None, gateways: None };
     let after = Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap());
     assert!(roll_secrets::router(after.clone()).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status().is_success());
     *api.kms.revoked.lock().unwrap() = true;
