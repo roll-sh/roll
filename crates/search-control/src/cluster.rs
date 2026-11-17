@@ -171,16 +171,13 @@ pub(crate) async fn release_idle(control: Weak<crate::Control>) {
     }
 }
 
-/// Runs a `/v1/search/clusters/{id}/…` call on the cluster's owner (a cluster's settings,
-/// credentials, indices and console reach it where it's loaded); other calls run here.
-pub(crate) async fn on_owner(c: Arc<crate::Control>, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+/// Runs a `/v1/search/clusters/{id}/…` call about cluster `name` on its owner (a cluster's
+/// settings, credentials, indices and console reach it where it's loaded); here off a fleet. The
+/// API resolves the cluster and checks the caller first (`crate::api`).
+pub(crate) async fn on_owner(c: &crate::Control, name: &str, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
     let Some(cluster) = c.cluster_leases().map(|l| l.cluster().clone()) else { return next.run(req).await };
-    let id = req.uri().path().strip_prefix("/v1/search/clusters/").and_then(|r| r.split('/').next()).filter(|s| !s.is_empty()).map(str::to_string);
-    let Some(id) = id.and_then(|id| urlencoding::decode(&id).ok().map(|s| s.into_owned())) else { return next.run(req).await };
-    // An unknown cluster is answered here (404).
-    let Ok(d) = c.get(&id).await else { return next.run(req).await };
     cluster
-        .dispatch(&key(&d.name), req, |req, guard| async move {
+        .dispatch(&key(name), req, |req, guard| async move {
             let r = next.run(req).await;
             drop(guard);
             r
