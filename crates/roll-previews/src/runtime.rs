@@ -245,6 +245,8 @@ impl Runtime {
                     rt.stop(&p, &s, &live, None).await;
                     rt.forget(&(p, s), live);
                 }
+                // Its request log is the new holder's now.
+                rt.requests.lock().remove(preview);
             }
         });
     }
@@ -668,6 +670,10 @@ impl Runtime {
         let started = std::time::Instant::now();
         let (method, path) = (req.method().to_string(), req.uri().path().chars().take(300).collect::<String>());
         let resp = self.proxy_to(preview, service, req, feedback).await;
+        // Not after its services went (removed, or moved to another node meanwhile).
+        if !self.live.lock().keys().any(|(p, _)| p == preview) {
+            return resp;
+        }
         let line = crate::RequestLine { at: self.store.now_ms().unwrap_or(0), service: service.into(), method, path, status: resp.status().as_u16(), ms: started.elapsed().as_millis() as u64 };
         let mut all = self.requests.lock();
         let kept = all.entry(preview.to_string()).or_default();
