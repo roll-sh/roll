@@ -70,6 +70,33 @@ pub enum Token {
     },
     /// Take back what an approval allowed a token for a while (`roll token show` lists them).
     TakeBack { id: String, approval: String },
+    /// Ask a person, with the token you're using (ROLL_TOKEN), for one more rule for a while,
+    /// saying why; `--wait` waits for the decision.
+    ///
+    /// Example:
+    ///   roll token request --product postgres --allow delete --resource prj_ab… --for 1h \
+    ///     --reason "drop the scratch database" --wait
+    Request {
+        #[arg(long)]
+        product: String,
+        /// One action: read, write, delete, reveal, deploy or admin.
+        #[arg(long)]
+        allow: String,
+        /// One resource (every resource of the product when left out).
+        #[arg(long)]
+        resource: Option<String>,
+        #[arg(long)]
+        environment: Option<String>,
+        /// 15m, 1h, 8h or 1d.
+        #[arg(long = "for", default_value = "1h")]
+        for_: String,
+        /// Why: the person deciding reads it.
+        #[arg(long)]
+        reason: String,
+        /// Wait (up to 10 minutes) until a person decides.
+        #[arg(long)]
+        wait: bool,
+    },
     /// Which tokens need attention and why (admin over everything, never expiring, unused,
     /// narrower than their rules, roaming), each with its fix.
     Checkup,
@@ -874,6 +901,27 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
                 println!("{}", serde_json::to_string_pretty(&g)?);
             } else {
                 println!("revoked {} ({})", s(&g["id"]), s(&g["name"]));
+            }
+        }
+        Token::Request { product, allow, resource, environment, for_, reason, wait } => {
+            let mut asked = api.post("/v1/access/requests", json!({ "product": product, "action": allow, "resource": resource, "environment": environment, "for": for_, "reason": reason })).await?;
+            let id = s(&asked["id"]).to_string();
+            if wait {
+                eprintln!("waiting for a person to decide {id} (on roll's approvals page, in chat, or `roll mcp approve {id}`)…");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+                while asked["state"] == "pending" && std::time::Instant::now() < deadline {
+                    asked = api.get(&format!("/v1/access/approvals/{}?wait=55", urlencoding::encode(&id))).await?;
+                }
+            }
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&asked)?);
+            } else {
+                match asked["state"].as_str() {
+                    Some("approved") => println!("{id} approved: this token may {allow} on {product} for {for_}"),
+                    Some("denied") => anyhow::bail!("{id} denied{}", asked["reason"].as_str().map(|r| format!(": {r}")).unwrap_or_default()),
+                    Some("pending") => println!("{id} waits for a person: {}", s(&asked["summary"])),
+                    other => anyhow::bail!("{id} is {}", other.unwrap_or("unknown")),
+                }
             }
         }
         Token::Tools { id } => {
