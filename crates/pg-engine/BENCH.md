@@ -541,6 +541,39 @@ Level: the pairs with little foreign load are -0.8, -0.7 (range) and +0.0% (poin
 the run that shared its CPUs reads more instructions (a session's waits count). Lane A was
 shared with another agent's benchmarks: three pairs.
 
+## Reclaiming marked files (2026-11-17, agent 247)
+
+HANDOFF "Reclaiming marked files" has what changed. **b247** is origin's `6d3b7e9e5`, **r1** the
+candidate's code on it (`cand/a247`). Plain dist builds of separate source snapshots. The 1M-row
+bulk script (agent 245's `bulk2.sh`, settled, bg_ steps counted) on lane C, b247, r1 and another
+arm alternating, five rounds; round 1 lacked the background threads' counts (the perf container
+ran outside the host's cgroup namespace) and is left out. Foreign load 1.4-3.9 cores at each
+run's busiest step (the host at load 25-65).
+
+### Bulk (G user instructions, medians of rounds 2-5, per pair %)
+
+| step | b247 | r1 | median % | per pair % |
+|---|---|---|---|---|
+| DELETE a quarter | 6.461 | 6.254 | -4.4 | -5.4 / -4.4 / +0.2 |
+| **bg after it** (compaction, then the quiet-moment rewrite) | 3.477 | 7.123 | +113.5 | +114.3 / +113.5 / +95.4 |
+| VACUUM | 1.795 | 1.795 | 0.0 | 0.0 x3 |
+| every other step | | | 0.0 to +0.3 | |
+| **all steps** | 55.544 | 59.009 | **+6.3** | +6.6 / +6.3 / +6.2 |
+| cycles, all steps | 28.405 | 32.437 | +14.2 | +17.4 / +14.2 / +11.3 |
+| MB written | 168.2 | 179.8 | +6.7 | +6.7 / -14.1 / +6.9 |
+
+Rows equal in every run (count and sums of every column of both tables).
+
+### The store's files after the DELETE (one run each, `ls` steps: after the compaction settled, 10 s later, after VACUUM)
+
+| | b247 (marked) | r1 |
+|---|---|---|
+| .sst bytes | 41.70 MB each time | 39.37 MB each time (-5.6%) |
+| `bulk_a`, `bulk_id` | 4.91 + 3.22 MB (a quarter of their entries dead) and 0.3 MB of sets | 3.70 + 2.11 MB, no sets |
+
+r1 wrote both files again within 2 s of the compaction, before the script's VACUUM: the quiet
+moment came first. Peak memory (cgroup) b247 324-389 MB, r1 320-378; VmHWM 267-277 and 272-283.
+
 ## Storage round 2: scan runs (2026-11-17, agent 245)
 
 HANDOFF "Storage round 2" has what changed. **b246** is origin's `61414bc58`, **c1** the

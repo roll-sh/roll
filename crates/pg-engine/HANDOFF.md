@@ -10701,6 +10701,68 @@ Left (largest first):
    12% of q07's and q09's zstd time at 256 MB, and better ratios for 16 kB blocks), or smaller
    blocks for the files point probes read; both a format change of their own.
 
+## Reclaiming marked files: VACUUM and quiet moments (agent 247)
+
+BENCH.md "Reclaiming marked files" has the measurements. One commit (`cand/a247`), no format
+change: a store it writes is read by every build since dead-entry sets (format 3), and by earlier
+ones once no set is named (format 2).
+
+A compaction that finds an L1 file's keys only deleted in L0 marks the dead entries (agent 245's
+dead-entry sets, `Store::mark_dead`) instead of writing the file again; the entries stayed in the
+file until a later compaction wrote it, and the store was 7.8% larger after the bulk script's
+DELETE than with the rewrite (42.0 against 38.9 MB). `Store::reclaim_dead(start, end)` now writes
+such files again, without their dead entries, as the compaction would have written them
+(`Cursor::level_uncached` reads a marked file without its dead entries; the output is one file in
+the old one's place, its set deleted with it):
+
+- **VACUUM of a table** reclaims the table's range (its rows, indexes and TOAST share the table's
+  first 4 key bytes), as PostgreSQL's VACUUM returns a table's space; autovacuum's VACUUM does it
+  too, so a table vacuumed after a big DELETE gets its space back then.
+- **At a quiet moment**: after the background flush/compaction thread's work (and when a store
+  opens) while L1 has a marked file, a thread `roll-reclaim` (SCHED_IDLE: it runs only on CPUs nothing else wants) looks
+  every 0.5 s and writes one marked file once no commit has come for 2 s (by `assigned_ts`, so
+  the commit path is unchanged), until none is left or the store closes.
+- Only files whose dead entries are at least a sixteenth of them (`RECLAIM_DEAD`): rewriting a
+  64 MB file for a few dead rows costs more than the space.
+- **Without hurting foreground work**: a file is written outside the compaction lock (`bg`); only
+  the swap takes it, and it gives up when a compaction replaced or marked the file again
+  meanwhile (by `Arc::ptr_eq` on the view's reader). Its blocks are read uncached (nothing is
+  evicted). The writer's ids come from `next_id` as the compaction's do.
+- **Closing**: `close` sets `closing` and takes the `reclaim` lock first: a rewrite in progress
+  stops at its next 1024 entries (its temp file abandoned) or finishes its swap, and none starts
+  after, so no file of a store is written once a store opened after it may use the directory.
+- **Crash safety** is the compaction's: the new file is fsynced and renamed before the manifest
+  names it (`write_manifest` fsyncs the directory first), the old file and its set are deleted
+  after the manifest no longer names them; at open, files no manifest names are deleted. Tests:
+  `deletions_mark_dead_entries_instead_of_rewriting` (a range with no marked file reclaims none;
+  all are written again, rows equal at the latest snapshot, entries the live ones, the sets'
+  files gone, the store smaller, no set named), `power_cut_at_every_point` (commit 55 reclaims the
+  files commit 50's deletions marked: every write, fsync, rename and removal of it is a cut point).
+
+**Measured** (BENCH "Reclaiming marked files"; plain dist builds of b247 and r1, lane C,
+rounds 2-5 of five alternating, bg_ steps counted): the store's files after the DELETE's
+compaction and VACUUM 41.70 -> 39.37 MB (-5.6%; the two index files 4.91 + 3.22 MB marked ->
+3.70 + 2.11 MB written again, and their 0.3 MB of sets gone), the same as the rewrite agent 245's
+marking replaced. What it costs is that rewrite: the bulk script's instructions +6.3% (every pair
++6.2 to +6.6%), all in the background after the DELETE (3.48 -> 7.12 G: the quiet-moment thread
+rewrites the two files about 2 s after the compaction marked them), foreground steps level
+(DELETE -4.4%, VACUUM 1.795 G both: nothing left for it). It gives back in CPU what
+marking saved; the space is what PostgreSQL's VACUUM returns. Whether that is the right trade for
+the bulk gate is the coordinator's call: a longer quiet time leaves it to VACUUM (the same
+instructions in this script, which vacuums right after its DELETE), and `RECLAIM_DEAD` decides
+which files are worth it.
+
+Left: copying a marked file's blocks that have no dead entry instead of re-encoding them (format
+2's stored blocks are what a writer would write: agent 231's design item 6); here every block had
+a dead entry (a quarter of the rows, spread evenly), so it would not have helped this script.
+
+Verified on `974184c44` (origin's head): `tools/quick-check.sh` (build, clippy with no new warning,
+tests 385 passed in 23 binaries, crash seeds 1-3 x 2 rounds and power_cut_at_every_point, regress
+51,148 / 51,150 with none newly differing, isolation 1,647 / 1,648, pg_dump_tap 14,609), the storage unit tests, block_format,
+storage_format, storage_upgrade_batches, storage_linked_gc, crash_bulk and power_cut_at_every_point
+built `--profile verify-checked`, and the storage unit tests and power_cut_at_every_point on its
+merge with the next candidate (`cand/a247-2`).
+
 ## Storage round 2: scan runs, the vector caches' lifetime (agent 245)
 
 BENCH.md "Storage round 2" has the measurements. Two commits (`cand/a245`); the round's
