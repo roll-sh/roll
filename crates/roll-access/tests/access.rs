@@ -1122,6 +1122,9 @@ async fn two_people_approve_what_the_policy_names() {
     let (s, a) = approve("usr_bob", json!({})).await;
     assert_eq!((s, a["state"].as_str(), a["approved_by"].clone()), (StatusCode::OK, Some("pending"), json!(["usr_bob"])), "{a}");
     assert_eq!(a["gates"], json!([{ "approvals": 2, "approved": 1 }]), "what it still needs");
+    // An admin acts as the operator and is still named (the page knows they've approved).
+    let (_, me) = d.as_user("usr_bob", Method::GET, "/v1/access", None).await;
+    assert_eq!((me["kind"].as_str(), me["user"]["id"].as_str()), (Some("operator"), Some("usr_bob")), "{me}");
     assert_eq!(approve("usr_bob", json!({})).await.0, StatusCode::CONFLICT);
     assert_eq!(approve("usr_carol", json!({ "remember": "1h" })).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await.1["code"], "approval_pending");

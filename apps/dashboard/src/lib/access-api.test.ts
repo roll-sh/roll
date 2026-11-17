@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
+import { deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -182,6 +182,11 @@ describe("two-person approvals", () => {
     expect(gateProgress({ gates: [] })).toBeNull();
     expect(gateProgress({ gates: [{ approvals: 2, approved: 1 }], approved_by: ["usr_bob"] })).toBe("approved by usr_bob · 1 more approval needed");
     expect(gateProgress({ gates: [{ approvals: 2, approved: 0, approvers: ["usr_a", "usr_b"] }] })).toBe("2 more approvals needed (from usr_a, usr_b)");
+  });
+  it("names whoever is looking as an approval records them", () => {
+    expect(deciderName({ kind: "operator", locked: true })).toBe("operator");
+    expect(deciderName({ kind: "operator", user: { id: "usr_bob", handle: "bob" }, locked: true })).toBe("usr_bob");
+    expect(deciderName(null)).toBeNull();
   });
   it("names a rule as the policy panel lists it, and a gated approval isn't remembered", () => {
     expect(describeApprovalRule({ product: "secrets", actions: ["reveal"], environments: ["production"], approvals: 2 })).toBe("Secrets · reveal · production: 2 approvals");

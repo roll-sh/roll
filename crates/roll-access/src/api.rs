@@ -210,7 +210,11 @@ pub(crate) fn operator_only(access: &Access, ext: &Extensions, what: &str) -> cr
 
 async fn me(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
     Ok(Json(match who(&a, &ext)? {
-        Who::Operator => json!({ "kind": "operator", "locked": a.config.locked }),
+        // A signed-in admin acts as the operator, and is still who they are (what they approved).
+        Who::Operator => match ext.get::<roll_auth::SignedIn>() {
+            Some(u) => json!({ "kind": "operator", "user": { "id": u.user, "handle": u.handle }, "locked": a.config.locked }),
+            None => json!({ "kind": "operator", "locked": a.config.locked }),
+        },
         Who::Grant(g) => {
             let id = g.id.to_string();
             let grant = blocking(a.clone(), move |a| a.store.get(&id)).await?;

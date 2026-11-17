@@ -1,6 +1,6 @@
 import { Bell, Hand } from "lucide-react";
 import { useEffect, useState } from "react";
-import { accessApi, approvalWhere, gateProgress, productName, REMEMBER, RISKY, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
+import { accessApi, approvalWhere, deciderName, gateProgress, productName, REMEMBER, RISKY, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
 import { createIntegrationsApi, type ChatInstall } from "@/lib/integrations-api";
 import { call } from "@/lib/roll-api";
 import { useShownOwner } from "../agents/use-connection";
@@ -14,6 +14,7 @@ import { AccessShell, relative, usePoll } from "./shell";
  */
 export function Approvals({ focus }: { focus?: string }) {
   const pending = usePoll(() => accessApi.approvals("pending"), 2500);
+  const { data: me } = usePoll(() => accessApi.me(), 60_000);
   const recent = usePoll(() => accessApi.approvals(), 10_000);
   const refresh = async () => {
     await Promise.all([pending.refresh(), recent.refresh()]);
@@ -40,7 +41,7 @@ export function Approvals({ focus }: { focus?: string }) {
         ) : (
           <section className="space-y-3" aria-label="Waiting for you">
             {waiting.map((a) => (
-              <Pending key={a.id} a={a} focused={a.id === focus} refresh={refresh} />
+              <Pending key={a.id} a={a} focused={a.id === focus} refresh={refresh} viewer={deciderName(me)} />
             ))}
           </section>
         )}
@@ -64,14 +65,15 @@ export function Approvals({ focus }: { focus?: string }) {
   );
 }
 
-function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refresh: () => Promise<void> }) {
+function Pending({ a, focused, refresh, viewer }: { a: Approval; focused: boolean; refresh: () => Promise<void>; viewer: string | null }) {
   const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
   const [reason, setReason] = useState("");
   const [denying, setDenying] = useState(false);
   const [remember, setRemember] = useState<Remember>("once");
   const [error, setError] = useState<string | null>(null);
   // Approved here, and roll's policy asks someone else too: this person's part is done.
-  const [approvedHere, setApprovedHere] = useState(false);
+  const [approvedNow, setApprovedHere] = useState(false);
+  const approvedHere = approvedNow || Boolean(viewer && a.approved_by?.includes(viewer));
   const decide = async (approve: boolean) => {
     setBusy(approve ? "approve" : "deny");
     setError(null);

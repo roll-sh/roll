@@ -177,6 +177,13 @@ export function approvalWhere(a: Pick<Approval, "environment" | "scope_path">): 
 /** Whether approving it can be remembered: it's about one resource, and roll's policy doesn't ask several people for it. */
 export const rememberable = (a: Pick<Approval, "resource" | "gates">) => Boolean(a.resource && !a.resource.startsWith("new in ")) && !a.gates?.length;
 
+/** The name an approval records for whoever is looking (`operator`, or a person's `usr_…`). */
+export function deciderName(me: Me | null): string | null {
+  if (!me) return null;
+  if (me.kind === "operator") return me.user?.id ?? "operator";
+  return me.kind === "user" ? me.user.id : null;
+}
+
 /** One rule of roll's policy a pending approval must pass: so many approvals from whom, so many so far. */
 export interface Gate {
   approvals: number;
@@ -291,7 +298,8 @@ export interface Catalog {
 }
 
 export type Me =
-  | { kind: "operator"; locked: boolean }
+  /** The operator's token, or a signed-in admin (`user`), who acts as the operator. */
+  | { kind: "operator"; user?: { id: string; handle: string }; locked: boolean }
   | { kind: "token" | "oauth"; grant: Grant; locked: boolean }
   /** A signed-in user who isn't an admin: their tokens act as them and reach only `reach`. */
   | { kind: "user"; user: { id: string; handle: string }; reach: string[]; approve_people?: Action[]; locked: boolean };
