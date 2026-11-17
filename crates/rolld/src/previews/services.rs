@@ -307,10 +307,29 @@ impl roll_previews::ports::Apps for RollApps {
 /// branch has nothing for it.
 fn link_value(name: &str, vars: &[(String, String)]) -> Option<String> {
     let get = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let search = || get("ELASTICSEARCH_URL").and_then(|u| url::Url::parse(&u).ok());
+    // With the branch's data-only credential (as production's link has), the URL carries none
+    // of the branch's own login: the key, or the data user, is what the service gets.
+    match name {
+        "ELASTICSEARCH_URL" if get("ELASTICSEARCH_API_KEY").is_some() => {
+            return search().map(|mut u| {
+                let _ = (u.set_username(""), u.set_password(None));
+                u.to_string().trim_end_matches('/').to_string()
+            });
+        }
+        "OPENSEARCH_URL" => {
+            if let (Some(user), Some(pass)) = (get("OPENSEARCH_USERNAME"), get("OPENSEARCH_PASSWORD")) {
+                return search().map(|mut u| {
+                    let _ = (u.set_username(&user), u.set_password(Some(&pass)));
+                    u.to_string().trim_end_matches('/').to_string()
+                });
+            }
+        }
+        _ => {}
+    }
     if let Some(v) = get(name) {
         return Some(v);
     }
-    let search = || get("ELASTICSEARCH_URL").and_then(|u| url::Url::parse(&u).ok());
     let decode = |s: &str| urlencoding::decode(s).map(|c| c.into_owned()).unwrap_or_else(|_| s.to_string());
     match name {
         "AWS_ENDPOINT_URL" => get("AWS_ENDPOINT_URL_S3"),
@@ -561,6 +580,13 @@ mod tests {
         assert_eq!(super::link_value("OPENSEARCH_PASSWORD", &es).as_deref(), Some("p@ss"));
         assert_eq!(super::link_value("ELASTICSEARCH_API_KEY", &es).as_deref(), Some("YnItMTpwQHNz"), "base64(br-1:p@ss)");
         assert_eq!(super::link_value("ELASTICSEARCH_API_KEY", &v(&[("ELASTICSEARCH_URL", "https://u%40br-1:p@search.test")])), None, "a user@cluster login has no key form");
+        // The branch's data-only credential, as production's link has: the URL without the
+        // branch's own login, the key (or the data user, for OpenSearch) instead.
+        let keyed = v(&[("ELASTICSEARCH_URL", "https://br-1:p@search.test"), ("ELASTICSEARCH_API_KEY", "ZGF0YQ==")]);
+        assert_eq!(super::link_value("ELASTICSEARCH_URL", &keyed).as_deref(), Some("https://search.test"));
+        assert_eq!(super::link_value("ELASTICSEARCH_API_KEY", &keyed).as_deref(), Some("ZGF0YQ=="));
+        let os = v(&[("ELASTICSEARCH_URL", "https://br-1:p@search.test"), ("OPENSEARCH_USERNAME", "link@br-1"), ("OPENSEARCH_PASSWORD", "d")]);
+        assert_eq!(super::link_value("OPENSEARCH_URL", &os).as_deref(), Some("https://link%40br-1:d@search.test"));
         assert_eq!(super::link_value("CASSANDRA_KEYSPACE", &v(&[("CASSANDRA_USERNAME", "pv")])), None, "nothing for it: blank, not production's");
     }
 
