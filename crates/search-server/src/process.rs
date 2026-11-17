@@ -214,7 +214,10 @@ mod tests {
                 let _ = woke.send(());
             });
             while !parking.parked.load(Ordering::Acquire) {
-                assert!(Instant::now() < deadline, "round {round}: the governor never parked");
+                // The hang this guards: a wake from elsewhere let the parker return before this
+                // loop saw it parked, and the loop waited for a flag that never came back.
+                assert!(rx.try_recv().is_err(), "round {round}: the parker returned before it was seen parked: something else woke it");
+                assert!(Instant::now() < deadline, "round {round}: the parker never parked in 30 s (parked = false, parker still running)");
                 std::thread::sleep(Duration::from_millis(1));
             }
             parking.wake();
