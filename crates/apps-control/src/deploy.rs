@@ -1295,6 +1295,17 @@ impl Apps {
         if run.pre_deploy.is_none() {
             run.pre_deploy = plan.release.clone();
         }
+        // vercel.json's crons: schedules that call their paths, unless the service already
+        // calls that path (its own schedules win).
+        if run.kind == RunType::Web && !run.tcp {
+            for (i, c) in plan.crons.iter().enumerate() {
+                let name = format!("vercel-{}", i + 1);
+                if run.schedules.len() < 20 && !run.schedules.iter().any(|s| s.path.as_deref() == Some(c.path.as_str()) || s.name == name) {
+                    log.line(format!("plan: vercel.json's cron {} calls {}", c.schedule, c.path));
+                    run.schedules.push(crate::model::Scheduled { name, schedule: c.schedule.clone(), command: String::new(), path: Some(c.path.clone()), timezone: None, timeout_s: None });
+                }
+            }
+        }
         // On a builder shared by services, the build reads a copy with its cache mounts
         // namespaced, outside the tree (so no `COPY . .` puts it in the image), next to the
         // Dockerfile's own `.dockerignore` if it has one; the namespace never reaches the log.
@@ -2278,9 +2289,9 @@ impl Apps {
             for e in all_envs.iter().filter(|e| e.service == svc.id && e.active.is_some() && !e.ephemeral) {
                 // What the live deployment runs with: roll.toml's `[[app.run.schedules]]` are in
                 // its template, not in the service's settings.
-                let run = match self.lives.lock().get(&crate::env_key(&svc.id, &e.name)).and_then(|l| l.template()) {
-                    Some(t) => t.run.clone(),
-                    None => svc.for_env(e).map(|s| s.run).unwrap_or_else(|_| svc.run.clone()),
+                let (run, secret) = match self.lives.lock().get(&crate::env_key(&svc.id, &e.name)).and_then(|l| l.template()) {
+                    Some(t) => (t.run.clone(), t.spec.vars.iter().find(|(k, _)| k == "CRON_SECRET").map(|(_, v)| v.clone())),
+                    None => (svc.for_env(e).map(|s| s.run).unwrap_or_else(|_| svc.run.clone()), None),
                 };
                 for sc in &run.schedules {
                     let Ok(schedule) = crate::cron::Schedule::parse(&sc.schedule, sc.timezone.as_deref()) else { continue };
@@ -2299,6 +2310,45 @@ impl Apps {
                     let (k, v) = (key.clone(), due.to_string());
                     let _ = self.db(move |s| s.set_state(&k, &v)).await;
                     let log = self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System);
+                    // A path: called through the environment's own proxy, skipped while the last
+                    // call is still out; a failure is `cron.failed`, as a command's is.
+                    if let Some(path) = sc.path.clone() {
+                        if !self.calling.lock().insert(key.clone()) {
+                            log.line(format!("scheduled {}: skipped, its last call to {path} is still out", sc.name));
+                            continue;
+                        }
+                        let host = url::Url::parse(&self.url(&e.slug)).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+                        let (this, sid, en, name, secret) = (self.clone(), svc.id.clone(), e.name.clone(), sc.name.clone(), secret.clone());
+                        let timeout = std::time::Duration::from_secs(sc.timeout_s.unwrap_or(300) as u64);
+                        tokio::spawn(async move {
+                            let began = std::time::Instant::now();
+                            let r = crate::public::call_scheduled(this.clone(), &sid, &en, &host, &path, secret.as_deref(), timeout).await;
+                            this.calling.lock().remove(&key);
+                            let ms = began.elapsed().as_millis() as u64;
+                            let call = match &r {
+                                Ok(s) => crate::model::ScheduleCall { at: code_sql::now_ms(), status: Some(*s), ms, error: None },
+                                Err(e) => crate::model::ScheduleCall { at: code_sql::now_ms(), status: None, ms, error: Some(e.clone()) },
+                            };
+                            let log = this.logs.sink(format!("env:{sid}/{en}"), Stream::System);
+                            match &r {
+                                Ok(s) => log.line(format!("scheduled {name}: GET {path} answered {s} in {ms} ms")),
+                                Err(e) => log.line(format!("scheduled {name}: GET {path}: {e}")),
+                            }
+                            let failed = !matches!(r, Ok(s) if (200..400).contains(&s));
+                            let (k, v) = (format!("sched-call:{sid}/{en}/{name}"), serde_json::to_string(&call).expect("a call serializes"));
+                            let data = serde_json::json!({ "schedule": name, "path": path, "http_status": call.status, "error": call.error });
+                            let _ = this
+                                .db(move |s| {
+                                    s.set_state(&k, &v)?;
+                                    if failed {
+                                        s.add_event("cron.failed", &sid, &en, None, &data)?;
+                                    }
+                                    Ok(())
+                                })
+                                .await;
+                        });
+                        continue;
+                    }
                     // Skipped while the last one it started still runs.
                     let jk = format!("sched-job:{}/{}/{}", svc.id, e.name, sc.name);
                     let j = jk.clone();

@@ -271,7 +271,7 @@ type Run = {
   rollback_on_crash?: boolean;
   /** Commands on a schedule on any service: each a job of the live deployment at its due times, skipped while its
    *  last job runs; at most 20; name a-z, 0-9 and - (unique, 32 at most), command 1–2000, timeout_s 1–86400. */
-  schedules?: { name: string; schedule: string; command: string; timezone?: string; timeout_s?: number }[];
+  schedules?: { name: string; schedule: string; command?: string; path?: string /* a web service's path GET'd instead of a command (Vercel's crons): through its own proxy on the owner, past its allow list, firewall, rate limit and access gate, with Authorization: Bearer $CRON_SECRET when the environment has one; a call still out skips the next; a non-2xx/3xx or no answer is cron.failed (data.path, http_status or error); timeout_s default 300 */; timezone?: string; timeout_s?: number }[];
 };
 
 type Service = {
@@ -428,7 +428,7 @@ type Environment = EnvironmentSummary & {
   signed_in?: true;          // people signed in to roll who can open its project get in (access.signed_in)
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
   volume_used?: { bytes: number; at: number }; // how full its volume was when last measured (hourly, on its owner), when it has one
-  schedules?: { name: string; next_run_at: number | null; last: { job: string; status: RunStatus; started_at: number } | null }[]; // run.schedules as they stand: next due (none paused, in a preview or undeployed) and the job each last started
+  schedules?: { name: string; next_run_at: number | null; last: { job: string; status: RunStatus; started_at: number } | null; last_call?: { at: number; status?: number; ms: number; error?: string } /* a path schedule's last call */ }[]; // run.schedules as they stand: next due (none paused, in a preview or undeployed) and the job each last started
   crash_loop: { crashes: number; last_at: number; last_error: string } | null; // 3+ crashes in 10 minutes
   canary: { deployment: string; share: number; waiting?: true } | null; // a gradual rollout under way: the percent of requests the new deployment takes; waiting: a manual rollout's step passed and it waits for a person
   run: { [field: string]: number }; // its own run settings over the service's ({}: the service's)

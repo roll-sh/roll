@@ -4192,6 +4192,33 @@ async fn a_web_service_runs_a_command_on_its_schedule() {
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
 }
 
+/// A schedule can call a path instead (Vercel's crons): GET through the environment's own
+/// proxy at each due time, its answer on the environment, and one that fails is `cron.failed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_schedule_calls_a_path_and_a_failing_answer_is_said() {
+    let w = world().await;
+    let s = json!([{"name": "ping", "schedule": "*/5 * * * *", "path": "/api/cron"}, {"name": "gone", "schedule": "*/5 * * * *", "path": "/missing/x"}]);
+    let (svc, _) = image_service(&w, "web", json!({"port": 80, "schedules": s})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments/production");
+    let (st, _) = call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_MISSING": "/missing"}}))).await;
+    assert!(st.is_success());
+    let (_, d) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
+    settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    let now = code_sql::now_ms();
+    w.apps.cron_pass(now).await;
+    w.apps.cron_pass(now + 6 * 60_000).await;
+    let env = get_until(&w.api, &base, |e| e["schedules"].as_array().is_some_and(|a| a.iter().all(|s| s["last_call"].is_object()))).await;
+    let call_of = |n: &str| env["schedules"].as_array().unwrap().iter().find(|s| s["name"] == n).unwrap()["last_call"]["status"].clone();
+    assert_eq!((call_of("ping"), call_of("gone")), (json!(200), json!(404)), "{env}");
+    let events = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    let failed: Vec<&Value> = events["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "cron.failed").collect();
+    assert_eq!(failed.len(), 1, "{events}");
+    assert_eq!((failed[0]["data"]["path"].as_str(), failed[0]["data"]["http_status"].as_u64()), (Some("/missing/x"), Some(404)));
+    let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"schedules": [{"name": "both", "schedule": "@daily", "command": "x", "path": "/y"}]}}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+}
+
 /// How full a volume is, measured on the owner: the environment says it, and passing 90% is
 /// `volume.full` once (again only after it went under 80%).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

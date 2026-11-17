@@ -402,9 +402,13 @@ impl Apps {
             }
             "cron.failed" | "job.failed" => {
                 let what_ran = if e.kind == "cron.failed" { "A scheduled run" } else { "A job" };
-                let how = match (e.data["status"].as_str(), e.data["exit_code"].as_i64()) {
-                    (Some("timed_out"), _) => "ran past its timeout".to_string(),
-                    (_, Some(c)) => format!("exited with code {c}"),
+                let how = match (e.data["status"].as_str(), e.data["exit_code"].as_i64(), e.data["path"].as_str()) {
+                    (_, _, Some(p)) => match e.data["http_status"].as_u64() {
+                        Some(c) => format!("calling {p} answered {c}"),
+                        None => format!("calling {p} got no answer: {}", e.data["error"].as_str().unwrap_or("it didn't answer")),
+                    },
+                    (Some("timed_out"), _, _) => "ran past its timeout".to_string(),
+                    (_, Some(c), _) => format!("exited with code {c}"),
                     _ => "didn't start".to_string(),
                 };
                 (format!("{what}: {} failed", if e.kind == "cron.failed" { "cron run" } else { "job" }), format!("{what_ran} {how}."))

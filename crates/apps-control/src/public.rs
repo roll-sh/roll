@@ -136,6 +136,33 @@ async fn serve_once(apps: Arc<Apps>, service: String, env: String, deployment: O
         .await
 }
 
+/// A request roll makes itself on a schedule (`run.schedules`' `path`, Vercel's crons): an
+/// extension no client can send, so it goes past the environment's allow list, firewall, rate
+/// limit and access gate, as its own owner's would.
+#[derive(Clone, Copy, Debug)]
+pub struct Scheduled;
+
+/// GET `path` of an environment on its owner (where the schedules run), as `host` asks, with
+/// its `CRON_SECRET`: the status, or why it never answered.
+pub(crate) async fn call_scheduled(apps: Arc<Apps>, service: &str, env: &str, host: &str, path: &str, secret: Option<&str>, timeout: std::time::Duration) -> std::result::Result<u16, String> {
+    let mut b = Request::builder().method(axum::http::Method::GET).uri(path).header(header::HOST, host).header(header::USER_AGENT, "roll-cron/1.0");
+    if let Some(s) = secret {
+        b = b.header(header::AUTHORIZATION, format!("Bearer {s}"));
+    }
+    let mut req = b.body(Body::empty()).map_err(|e| e.to_string())?;
+    req.extensions_mut().insert(Scheduled);
+    let r = tokio::time::timeout(timeout, async {
+        let r = proxy(apps, service, env, None, req).await;
+        let status = r.status().as_u16();
+        // Read (and dropped) so its instance's lease and meter end with it.
+        let _ = http_body_util::BodyExt::collect(http_body_util::Limited::new(r.into_body(), 1 << 20)).await;
+        status
+    })
+    .await
+    .map_err(|_| format!("it didn't answer within {} s", timeout.as_secs()))?;
+    Ok(r)
+}
+
 /// The owner's route for public traffic another node sends it ([`serve`]).
 const INTERNAL: &str = "/internal/apps/public";
 /// On it: the service, environment and deployment (`<service>/<env>[/<deployment>]`), and the
@@ -943,16 +970,19 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         Err(_) => return by("unavailable", page(StatusCode::SERVICE_UNAVAILABLE, "Unavailable", "This environment's settings couldn't be read. Try again in a few seconds.")),
     };
     let client = roll_cluster::client_addr(&req);
-    if !gate.admits(client.as_deref()) {
+    // roll's own call on a schedule: none of the environment's gates are for it.
+    let ours = req.extensions().get::<Scheduled>().is_some();
+    if !ours && !gate.admits(client.as_deref()) {
         return by("allow_list", page(StatusCode::FORBIDDEN, "Not from here", "This service only answers visitors from the networks its owner allowed."));
     }
     // Its firewall rules (a 403 that says nothing of them).
     let ua = req.headers().get(header::USER_AGENT).map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned()).unwrap_or_default();
-    if !gate.firewall.is_empty() && !gate.firewall_allows(req.method().as_str(), &crate::model::normal_path(req.uri().path()), &ua) {
+    if !ours && !gate.firewall.is_empty() && !gate.firewall_allows(req.method().as_str(), &crate::model::normal_path(req.uri().path()), &ua) {
         return by("firewall", page(StatusCode::FORBIDDEN, "Not allowed", "This service doesn't answer this request."));
     }
     // Its rate limit per client, before anything wakes (a cache refresh is roll's, not a client's).
     if let Some(limit) = &gate.rate
+        && !ours
         && req.extensions().get::<crate::resp_cache::Refresh>().is_none()
         && let Err(wait) = apps.live(service, env).take_token(crate::live::client_ip(client.as_deref()), limit)
     {
@@ -964,7 +994,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     }
     // A private environment answers only visitors with its token, before anything wakes. A
     // site's rewrite (a header only roll sets) was let in by the site, by the project's own rule.
-    let rewritten = req.headers().contains_key(VIA_SITE);
+    let rewritten = req.headers().contains_key(VIA_SITE) || ours;
     if !rewritten && let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
         // The access link's own redirect is a way in, not a refusal.
         return match turned_away.status() {

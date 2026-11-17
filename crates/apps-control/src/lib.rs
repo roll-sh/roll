@@ -255,6 +255,9 @@ pub struct Apps {
     pub(crate) errors_seen: Mutex<HashMap<String, i64>>,
     /// Manual rollouts waiting for a person, by deployment: what they say, and the wake.
     pub(crate) rollout_waits: Mutex<HashMap<String, deploy::RolloutGate>>,
+    /// Path schedules whose call is still out (`sched:<service>/<env>/<name>`): the next due
+    /// time is skipped, as a command's is while its job runs.
+    pub(crate) calling: Mutex<std::collections::HashSet<String>>,
     /// Each environment's `needs_deploy` as last worked out (it decrypts every variable and asks
     /// each linked product for its own): when, the settings generation and active deployment it
     /// was for, and the answer. Good for a minute, or until either moves.
@@ -433,6 +436,7 @@ impl Apps {
             vitals_seen: Mutex::new(HashMap::new()),
             errors_seen: Mutex::new(HashMap::new()),
             rollout_waits: Mutex::new(HashMap::new()),
+            calling: Mutex::new(std::collections::HashSet::new()),
             needs: Mutex::new(HashMap::new()),
             settings_gen: std::sync::atomic::AtomicU64::new(0),
             changes: tokio::sync::broadcast::channel(256).0,
