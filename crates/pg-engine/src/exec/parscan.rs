@@ -955,14 +955,14 @@ impl LazyBuf {
     /// The stored row `bytes` (under `key`) to be read in place: where its columns start,
     /// nothing decoded yet.
     pub(super) fn read<'a>(&'a mut self, d: &'a Decode, key: &'a [u8], bytes: &'a [u8]) -> Result<Lazy<'a>> {
-        use crate::storage::{row::skip_value, sst::get_varint};
+        use crate::storage::{cols::skip, sst::get_varint};
         let data = super::scan::row_data(bytes)?;
         let mut pos = 0;
         let n = get_varint(data, &mut pos)? as usize;
         for (i, off) in self.offs.iter_mut().enumerate() {
             if i < n {
                 *off = pos as u32;
-                skip_value(data, &mut pos)?;
+                skip(data, &mut pos)?;
             } else {
                 *off = u32::MAX;
             }
