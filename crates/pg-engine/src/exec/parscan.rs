@@ -657,12 +657,17 @@ impl<'c> Reader<'c> {
 /// A chunk of a secondary index's entries (or a bitmap heap scan's row keys: entries with
 /// the data key as their value) as the rows they point at, in their order, fetched from the
 /// store a batch at a time at the statement's snapshot (`Txn::store_reader`; None: an
-/// index-only scan's, the entry key standing in for the row).
+/// index-only scan's, the entry key standing in for the row). A fill (`FillRows`): the rows
+/// go into the scan's batch by reference, so the batch kernels take them as a table's.
 pub struct IndexChunk {
     pub entries: Box<dyn Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>> + Send>,
     pub fetch: Option<(Arc<crate::storage::Store>, u64)>,
-    buf: VecDeque<Result<(Vec<u8>, bytes::Bytes)>>,
+    /// An entry's error, after the rows of the entries before it went out.
+    err: Option<Error>,
     done: bool,
+    /// The fetch's scratch: the entries, a dense range's rows.
+    ents: Vec<(Vec<u8>, bytes::Bytes)>,
+    rows: RowBatch,
 }
 
 /// Index entries a chunk's rows are fetched for at a time.
@@ -670,85 +675,107 @@ const FETCH: usize = 256;
 
 impl IndexChunk {
     pub fn new(entries: TxnScan, fetch: Option<(Arc<crate::storage::Store>, u64)>) -> IndexChunk {
-        IndexChunk { entries: Box::new(entries), fetch, buf: VecDeque::new(), done: false }
+        IndexChunk { entries: Box::new(entries), fetch, err: None, done: false, ents: Vec::new(), rows: RowBatch::default() }
     }
 
     /// The rows stored under `keys[run]` (in that order; the invisible ones left out).
     pub fn keyed(keys: Arc<[Vec<u8>]>, run: std::ops::Range<usize>, fetch: (Arc<crate::storage::Store>, u64)) -> IndexChunk {
         let entries = run.map(move |i| Ok((Vec::new(), bytes::Bytes::copy_from_slice(&keys[i]))));
-        IndexChunk { entries: Box::new(entries), fetch: Some(fetch), buf: VecDeque::new(), done: false }
+        IndexChunk { entries: Box::new(entries), fetch: Some(fetch), err: None, done: false, ents: Vec::new(), rows: RowBatch::default() }
     }
-}
 
-impl Iterator for IndexChunk {
-    type Item = Result<(Vec<u8>, bytes::Bytes)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(x) = self.buf.pop_front() {
-                return Some(x);
-            }
-            if self.done {
-                return None;
-            }
-            let mut ents: Vec<(Vec<u8>, bytes::Bytes)> = Vec::with_capacity(FETCH);
-            while ents.len() < FETCH {
-                match self.entries.next() {
-                    Some(Ok(e)) => ents.push(e),
-                    Some(Err(e)) => {
-                        self.done = true;
-                        self.buf.push_back(Err(e));
-                        break;
-                    }
-                    None => {
-                        self.done = true;
-                        break;
-                    }
+    /// The rows of the next `FETCH` entries into `b`, in the entries' order.
+    fn fetch_into(&mut self, b: &mut RowBatch) -> Result<()> {
+        let ents = &mut self.ents;
+        ents.clear();
+        while ents.len() < FETCH {
+            match self.entries.next() {
+                Some(Ok(e)) => ents.push(e),
+                Some(Err(e)) => {
+                    self.done = true;
+                    self.err = Some(e);
+                    break;
                 }
-            }
-            let err = self.buf.pop_back();
-            match &self.fetch {
                 None => {
-                    // (Rows an index-only scan makes from its entries, as `index_row` counts.)
-                    super::scan::ROWS_FROM_INDEX_ENTRIES.fetch_add(ents.len() as u64, std::sync::atomic::Ordering::Relaxed);
-                    for (k, d) in ents {
-                        self.buf.push_back(Ok((d.to_vec(), bytes::Bytes::from(k))));
-                    }
+                    self.done = true;
+                    break;
                 }
-                Some((store, ts)) if !ents.is_empty() => {
-                    let mut keys: Vec<&[u8]> = ents.iter().map(|(_, d)| &d[..]).collect();
-                    keys.sort_unstable();
-                    keys.dedup();
-                    match dense_rows(store, &keys, *ts).transpose().unwrap_or_else(|| store.get_versions(&keys, *ts)) {
-                        Err(e) => {
-                            self.done = true;
-                            self.buf.push_back(Err(e));
-                        }
-                        Ok(got) => {
-                            // (`keys` sorted and without duplicates: an entry's row is at its
-                            // key's place, found by a search.)
-                            for (_, d) in &ents {
-                                if let Ok(j) = keys.binary_search(&&d[..])
-                                    && let Some((_, Some(b))) = &got[j]
-                                {
-                                    self.buf.push_back(Ok((d.to_vec(), b.clone())));
+            }
+        }
+        match &self.fetch {
+            None => {
+                // (Rows an index-only scan makes from its entries, as `index_row` counts.)
+                super::scan::ROWS_FROM_INDEX_ENTRIES.fetch_add(ents.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                for (k, d) in ents.iter() {
+                    b.push_copy(d, k);
+                }
+            }
+            Some((store, ts)) if !ents.is_empty() => {
+                let mut keys: Vec<&[u8]> = ents.iter().map(|(_, d)| &d[..]).collect();
+                keys.sort_unstable();
+                keys.dedup();
+                // (`keys` sorted and without duplicates: an entry's row is at its key's
+                // place, found by a search.)
+                let rows = &mut self.rows;
+                rows.clear();
+                match dense_rows(store, &keys, *ts, rows) {
+                    Err(e) => {
+                        self.done = true;
+                        return Err(e);
+                    }
+                    Ok(Some(at)) => {
+                        for (_, d) in ents.iter() {
+                            if let Ok(j) = keys.binary_search(&&d[..])
+                                && let Some(i) = at[j]
+                            {
+                                match rows.value_in(i as usize) {
+                                    (v, Some((buf, off))) => b.push_in(d, buf, off, v.len()),
+                                    (v, None) => b.push_copy(d, v),
                                 }
                             }
                         }
                     }
+                    Ok(None) => {
+                        let got = store.get_versions(&keys, *ts).inspect_err(|_| self.done = true)?;
+                        for (_, d) in ents.iter() {
+                            if let Ok(j) = keys.binary_search(&&d[..])
+                                && let Some((_, Some(v))) = &got[j]
+                            {
+                                b.push(d, v.clone());
+                            }
+                        }
+                    }
                 }
-                Some(_) => {}
             }
-            self.buf.extend(err);
+            Some(_) => {}
         }
+        Ok(())
+    }
+}
+
+impl FillRows for IndexChunk {
+    fn fill(&mut self, b: &mut RowBatch, _max: usize) -> Result<()> {
+        // (None pushed means done: entries whose rows are all invisible are passed over.)
+        let n = b.len();
+        while b.len() == n {
+            if let Some(e) = self.err.take() {
+                return Err(e);
+            }
+            if self.done {
+                break;
+            }
+            self.fetch_into(b)?;
+        }
+        Ok(())
     }
 }
 
 /// `Store::get_versions` of ascending `keys` of one integer key column close together (an
 /// index's entries in its table's order: a primary key's over a bulk load, `scan::dense_keys`),
 /// read as the range they span, a batch of rows at a time by reference, instead of a lookup
-/// each. None: not such keys.
-fn dense_rows(store: &crate::storage::Store, keys: &[&[u8]], ts: u64) -> Result<Option<Vec<Option<(u64, Option<bytes::Bytes>)>>>> {
+/// each: the rows read into `rows`, and per key its row's place there (None: no row). None:
+/// not such keys.
+fn dense_rows(store: &crate::storage::Store, keys: &[&[u8]], ts: u64, rows: &mut RowBatch) -> Result<Option<Vec<Option<u32>>>> {
     if !super::scan::dense_keys(keys.len(), |i| keys[i], false) {
         return Ok(None);
     }
@@ -756,26 +783,26 @@ fn dense_rows(store: &crate::storage::Store, keys: &[&[u8]], ts: u64) -> Result<
     let mut it = store.scan(keys[0], &end, ts);
     let mut out = Vec::with_capacity(keys.len());
     let mut want = keys.iter().peekable();
-    let mut b = RowBatch::default();
+    let mut from = rows.len();
     while want.peek().is_some() {
-        b.clear();
-        it.fill_batch(&mut b, keys.len() - out.len())?;
-        if b.is_empty() {
+        it.fill_batch(rows, keys.len() - out.len())?;
+        if rows.len() == from {
             break;
         }
-        for i in 0..b.len() {
-            let k = b.get(i).0;
+        for i in from..rows.len() {
+            let k = rows.get(i).0;
             while want.next_if(|w| **w < k).is_some() {
                 out.push(None);
             }
             if want.next_if(|w| **w == k).is_some() {
                 // (The version's time isn't read: only the row.)
-                out.push(Some((ts, Some(b.value_bytes(i)))));
+                out.push(Some(i as u32));
             }
             if want.peek().is_none() {
                 break;
             }
         }
+        from = rows.len();
     }
     out.resize(keys.len(), None);
     Ok(Some(out))
