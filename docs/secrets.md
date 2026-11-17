@@ -796,14 +796,15 @@ grace period (its revocation goes through the rotator).
 
 ### Databases outside roll
 
-A Postgres, MySQL, Redis or MongoDB server roll doesn't run (Amazon RDS, Supabase, Neon, PlanetScale, ElastiCache, Upstash, MongoDB Atlas, a server of the customer's own)
+A Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis, MongoDB, Elasticsearch, OpenSearch, Cassandra or ScyllaDB server roll doesn't run (Amazon RDS, Supabase, Neon, PlanetScale, ElastiCache, Upstash, MongoDB Atlas, Elastic Cloud, Amazon OpenSearch Service, a server of the customer's own)
 has its logins rotated by roll itself, with no rotator to write, as Infisical's secret rotation
 does, and issues a login per lease, as Vault's database engine does. A project registers it
 (`POST …/outside-databases {name, url, roles?, group?, ca?}`, `admin`; `roll secrets databases add
 NAME --role a --role b --group g`, the URL on stdin): `url` is an admin connection
 (`postgres://admin:…@host:5432/db`, `mysql://admin:…@host:3306/db`,
-`sqlserver://admin:…@host:1433/db`, `clickhouse://admin:…@host:8443/db` or
-`rabbitmq://admin:…@host:15671/vhost`, a user that may alter both
+`sqlserver://admin:…@host:1433/db`, `clickhouse://admin:…@host:8443/db`,
+`rabbitmq://admin:…@host:15671/vhost`, `elasticsearch://admin:…@host:9200`,
+`opensearch://admin:…@host:9200` or `cassandra://admin:…@host:9142/keyspace`, a user that may alter both
 roles and create roles in the group), sealed with the project's data key like a rotator's (only `host:port` is shown); `roles` are
 two login roles that take turns (managed links); `group` is a role whose grants dynamic logins get;
 one or both. `ca` is the server's CA certificates (PEM) when the system's don't cover it (RDS).
@@ -926,6 +927,77 @@ rotation (the rotated login signs in), a dynamic login that signs in with the gr
 can't once dropped, and an untrusted certificate refused. With TLS 1.3 enabled on the server as
 well (`tlsprotocols = 1.2,1.3`), SQL Server 2022 on Linux refused TDS 7.4 logins, Microsoft's own
 `sqlcmd` included: such a server needs TLS 1.2 allowed.
+
+**Elasticsearch and OpenSearch** too, as Vault's Elasticsearch plugin, through their security REST
+APIs over HTTPS (`elasticsearch://admin:…@host:9200` or `opensearch://admin:…@host:9200`; Elastic
+Cloud's `…es.io:443` works too; no path or settings), with the same guards as ClickHouse (the
+checked address pinned, the certificate verified against the URL's host, no redirects or proxy,
+answers read up to 64 KiB). Elasticsearch's users are the native realm's: rotation is `POST
+_security/user/<name>/_password`, a dynamic user `PUT _security/user/<name>` with `roles:
+[<group>]`, and ending the lease deletes it. OpenSearch's are the security plugin's internal
+users: rotation is a JSON patch of the password alone (`PATCH
+_plugins/_security/api/internalusers/<name>`), so the user's roles, backend roles and attributes
+stay, and a dynamic user gets the group in `opendistro_security_roles`. `group` is a role. Both
+clear a user's cached credentials when it changes, so the old password is refused at once and a
+deleted user's next request fails; neither has an expiry for a user, so a dynamic one lasts until
+roll ends its lease. The password goes in the request body over TLS; a refusal of a request with a
+body is reported by its status and `error.type` alone, since Elasticsearch quotes request bodies
+in some errors. The admin needs, on Elasticsearch, the `manage_security` cluster privilege (a role
+with only that is enough; there's no narrower one for users), and on OpenSearch a user mapped to a
+role in `plugins.security.restapi.roles_enabled` (`security_rest_api_access` on a default
+install, or the domain's master user on Amazon OpenSearch Service). OpenSearch's reserved and
+hidden users (its `admin`) can't be changed through the API, so they can't take turns. For example:
+
+```sh
+# Elasticsearch: a role for roll, two users that take turns, a role dynamic users get.
+PUT _security/role/roll_admin   {"cluster": ["manage_security"]}
+PUT _security/user/roll_admin   {"password": "…", "roles": ["roll_admin"]}
+PUT _security/role/reader       {"indices": [{"names": ["app"], "privileges": ["read"]}]}
+echo 'elasticsearch://roll_admin:…@es.example.com:9200' |
+  roll secrets databases add search --role app_blue --role app_green --group reader
+```
+
+**Cassandra and ScyllaDB** too, as Vault's Cassandra engine, over CQL's native protocol v4 with
+TLS (`cassandra://admin:…@host:9142/keyspace`; the keyspace is optional and checked at
+registration; no settings). rolld speaks the protocol itself through nosql-proto's bounded frames
+(capped at 256 KiB), on one connection to the address it checked, with the certificate verified
+against the URL's host: no driver goes looking for the cluster's other nodes. Rotation is `ALTER
+ROLE "<name>" WITH PASSWORD = '…'` on two roles that take turns; a dynamic login is `CREATE ROLE
+"<name>" WITH LOGIN = true AND PASSWORD = '…'` and `GRANT "<group>" TO "<name>"` (the group is a
+role), dropped if the grant fails. Neither database takes a password as a bound value, so it goes
+in the statement, over TLS; roll's passwords are letters and digits, so nothing needs escaping, and
+names are quoted (their case holds). A refused statement holding a password reports a syntax error
+by its kind alone (the server quotes the statement in one) and any other with the password cut out.
+Neither has an expiry for a role: ending the lease gives the role a password nobody knows, then
+`DROP ROLE IF EXISTS` (Cassandra keeps a dropped role's credentials cached for up to
+`credentials_validity`, 2 s by default, but takes a new password at once). Registering checks that
+both roles exist and can log in (`LIST ROLES OF`) and that the group exists; a server that lets
+anyone in (`AllowAllAuthenticator`) is refused. The admin needs a superuser, or `CREATE`, `ALTER`,
+`DROP`, `AUTHORIZE` and `DESCRIBE` on `ALL ROLES` and `SELECT` on `system_schema` for the keyspace check; the server needs `PasswordAuthenticator`,
+and `CassandraAuthorizer` for the group's grants to mean anything. Differences seen: Cassandra 5.0
+refuses a second password change on one role within 5 s (`Password for role … can only be changed
+every 5000ms`; roll's turns are at least minutes apart, and a lease's end tries the unknown
+password, then drops anyway); ScyllaDB 2026.3 makes no default `cassandra` superuser with a known
+password (name one with `auth_superuser_name` and `auth_superuser_salted_password`) and its `LIST
+ROLES` has no `datacenters` column. For example:
+
+```sql
+CREATE ROLE roll_admin WITH LOGIN = true AND PASSWORD = '…';
+GRANT CREATE ON ALL ROLES TO roll_admin;  GRANT ALTER ON ALL ROLES TO roll_admin;
+GRANT DROP ON ALL ROLES TO roll_admin;    GRANT AUTHORIZE ON ALL ROLES TO roll_admin;
+GRANT DESCRIBE ON ALL ROLES TO roll_admin; GRANT SELECT ON KEYSPACE system_schema TO roll_admin;
+CREATE ROLE reader;  GRANT SELECT ON KEYSPACE app TO reader;
+-- echo 'cassandra://roll_admin:…@db.example.com:9142/app' |
+--   roll secrets databases add cql --role app_blue --role app_green --group reader
+```
+
+`scripts/secrets-outside-check.sh [es] [os] [cassandra] [scylla]` checks all four live in Docker
+(Elasticsearch 9.5.5, OpenSearch 3.9.0, Cassandra 5.0.9 and ScyllaDB 2026.3.3, each with
+authentication on and TLS from a CA it makes): registering as the narrower admin above, refusals
+for a missing user, role or keyspace, a wrong admin password (never echoed) and an untrusted
+certificate; rotation (the new password logs in, the old one is refused, the user keeps its roles);
+a dynamic login that reads with the group's grants and can't write or read elsewhere; and its
+deletion (refused at once, twice is fine).
 
 ### Directories (LDAP and Active Directory)
 
