@@ -6,6 +6,7 @@ import { call } from "@/lib/roll-api";
 import { useShownOwner } from "../agents/use-connection";
 import { btn, Connecting, danger, EmptyPanel, ErrorNote, input, Panel, primary } from "../ui";
 import { AccessShell, relative, usePoll } from "./shell";
+import { useResourceNames } from "./use-names";
 
 /**
  * `/dashboard/access/approvals`: requests waiting on you (an `ask` action), live, with exactly what
@@ -88,6 +89,7 @@ function Pending({ a, focused, refresh, viewer }: { a: Approval; focused: boolea
     }
   };
   const destructive = RISKY.includes(a.action);
+  const { resourceName } = useResourceNames();
   return (
     <article className={`rise rounded-xl border bg-panel p-5 ${focused ? "border-accent/60" : "border-line"}`}>
       <div className="flex flex-wrap items-start gap-3">
@@ -103,7 +105,7 @@ function Pending({ a, focused, refresh, viewer }: { a: Approval; focused: boolea
             ) : null}
           </p>
           <h2 className="mt-1 truncate font-mono text-[14px]">
-            {a.resource ?? productName(a.product)}
+            <span title={a.resource ?? undefined}>{a.resource ? resourceName(a.product, a.resource) : productName(a.product)}</span>
             {(approvalWhere(a) || (accessRequest(a) && "every environment")) && <span className="text-muted"> · {approvalWhere(a) || "every environment"}</span>}
           </h2>
           {accessRequest(a) ? (
