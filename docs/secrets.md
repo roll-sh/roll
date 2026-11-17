@@ -2831,11 +2831,12 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
    vectors opening in it, standard library only, with Rails notes. Writing it found that Python's
    and Go's `Values` printed every value and their `Client` the token (#213 fixes both).
    Next: Java, .NET and Ruby kept in step as the others gain TOTP and transit.
-0b. **The polling path at scale** (building: `feature/roll-secrets-poll-path`): the Performance
-   table's Postgres numbers are from 2026-11-13, before conditional reads, live digests and preview
-   branches; `digest` was 143 ms at 9,900 keys, and every operator, CSI driver and ESO poll pays a
-   304's cost. Re-measured on both databases, the cost in cores at 1,000 pods every 30 s, and a
-   digest cache keyed on the database's change counters if it measures as a win.
+0b. **The polling path at scale** (building: `feature/roll-secrets-poll-path`): measured on main at
+   9,900 keys, a 304 costs ~140–165 ms on Postgres and `digest` ~138 ms, so 1,000 pods polling every
+   30 s spend ~4–5 cores saying "nothing changed". The digest's folder read and reference walk are
+   the cost; two variants (one read instead of two, then only the columns the digest needs) are
+   measured against main, and a digest cache keyed on the database's counters comes next if
+   tens of milliseconds remain.
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
