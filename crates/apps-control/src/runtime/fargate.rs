@@ -566,6 +566,9 @@ impl Runtime for Fargate {
         if spec.volume.is_some() {
             bail!("volumes aren't on the fleet yet");
         }
+        if !spec.files.is_empty() {
+            bail!("variables as files aren't on the fleet yet");
+        }
         env_file(&spec.vars)?;
         let task_def = self.task_def(spec).await?;
         self.instances.lock().insert(spec.name.clone(), Instance { spec: spec.clone(), task_def, task: None });

@@ -5,7 +5,8 @@
 //! variables: `FAKE_UNHEALTHY=1` answers 500 on every path, `FAKE_BOOT_MS` delays its first
 //! answer, `FAKE_SLOW_MS` delays every answer (requests pile up; one still waiting when the instance
 //! stops answers 502, as a killed process's would; `/sleep/<ms>` is one such request), `FAKE_MISSING=<prefix>` answers
-//! 404 for paths under it, `FAKE_CACHE=<value>` answers with it as `Cache-Control`, and counts
+//! 404 for paths under it, `FAKE_CACHE=<value>` answers with it as `Cache-Control` (and `Cache-Tag: <the path's first
+//! segment>, all`), and counts
 //! the requests it answers at `/count`, `FAKE_EXIT=<code>` makes it a
 //! job that exits with that code (cron runs, workers). The fake builder fails a build whose tree
 //! has a file `FAIL_BUILD`, and takes as many milliseconds as a file `SLOW_BUILD` says.
@@ -85,6 +86,10 @@ pub struct Fake {
     oom: Mutex<std::collections::HashSet<String>>,
     /// Instances busy at this share of their CPU ([`Fake::set_busy`]), from when it was set.
     busy: Mutex<HashMap<String, (f64, std::time::Instant)>>,
+    /// Instances whose health command fails from now on ([`Fake::fail_health`]).
+    failing: Mutex<std::collections::HashSet<String>>,
+    /// Memory an instance says it uses ([`Fake::set_memory`]; else 64 MiB).
+    memory: Mutex<HashMap<String, u64>>,
     /// Volumes' contents (what a backup reads and a restore writes).
     volumes: Mutex<HashMap<String, Vec<u8>>>,
     /// What a tag points at in its registry ([`Fake::move_tag`]); zeros when unset.
@@ -102,6 +107,17 @@ impl Fake {
     /// `name` uses `share` of its CPU from now on (its usage's CPU time grows at that rate).
     pub fn set_busy(&self, name: &str, share: f64) {
         self.busy.lock().insert(name.to_string(), (share, std::time::Instant::now()));
+    }
+
+    /// Instance `name`'s health command fails from now on (a consumer that hung), until it starts
+    /// again.
+    pub fn fail_health(&self, name: &str) {
+        self.failing.lock().insert(name.to_string());
+    }
+
+    /// Instance `name` uses this many bytes of memory from now on.
+    pub fn set_memory(&self, name: &str, bytes: u64) {
+        self.memory.lock().insert(name.to_string(), bytes);
     }
 
     /// Another service connects to `name`'s port while it sleeps (what Docker counts in its
@@ -274,6 +290,10 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent }))).into_response();
             if let Some(c) = cache {
                 r.headers_mut().insert(axum::http::header::CACHE_CONTROL, c);
+                let seg = req.uri().path().trim_start_matches('/').split('/').next().unwrap_or("").to_string();
+                if let Ok(t) = axum::http::HeaderValue::from_str(&format!("{seg}, all")) {
+                    r.headers_mut().insert("cache-tag", t);
+                }
             }
             r
         }
@@ -346,6 +366,8 @@ impl Runtime for Fake {
         if let Some(a) = self.accepted.lock().get_mut(name) {
             a.0 = 0;
         }
+        // A fresh process isn't the one that hung: its health starts over, as Docker's does.
+        self.failing.lock().remove(name);
         let spec = {
             let m = self.instances.lock();
             let i = m.get(name).ok_or_else(|| anyhow::anyhow!("no instance {name}"))?;
@@ -530,6 +552,10 @@ impl Runtime for Fake {
         matches!(self.state(name), Some(FakeState::Running | FakeState::Paused))
     }
 
+    async fn unhealthy(&self, name: &str) -> bool {
+        self.instances.lock().get(name).is_some_and(|i| i.spec.health.is_some() && i.state == FakeState::Running) && self.failing.lock().contains(name)
+    }
+
     async fn adopt(&self, spec: &InstanceSpec, _log: LogSink) -> Option<super::Adopted> {
         let m = self.instances.lock();
         let i = m.get(&spec.name).filter(|i| i.spec.deployment == spec.deployment)?;
@@ -556,7 +582,7 @@ impl Runtime for Fake {
             FakeState::Running => {
                 let cpu = self.instances.lock().get(name).map_or(0.0, |i| i.spec.cpu);
                 let grown = self.busy.lock().get(name).map_or(0.0, |(share, since)| share * cpu * since.elapsed().as_secs_f64() * 1e9);
-                Some(Usage { cpu_ns: 1_000_000 + grown as u64, memory_bytes: 64 << 20 })
+                Some(Usage { cpu_ns: 1_000_000 + grown as u64, memory_bytes: self.memory.lock().get(name).copied().unwrap_or(64 << 20) })
             }
             _ => None,
         }
@@ -583,10 +609,10 @@ impl Runtime for Fake {
 
     async fn egress_proxy(&self, network: &str, _service: &str, hosts: &[String]) -> anyhow::Result<String> {
         self.proxies.lock().push((network.to_string(), hosts.to_vec()));
-        Ok(super::egress::proxy_url(hosts))
+        Ok(super::egress::proxy_url(network, hosts))
     }
 
-    fn egress_refused(&self, _hosts: &[String]) -> Vec<super::egress::Refused> {
+    fn egress_refused(&self, _network: &str, _hosts: &[String]) -> Vec<super::egress::Refused> {
         self.refused.lock().clone()
     }
 

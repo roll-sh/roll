@@ -39,10 +39,23 @@ pub fn cookie(env: &str) -> String {
 }
 
 /// A path to send someone back to on the same site: one leading slash, no backslash (browsers
-/// read `/\host` as `//host`).
+/// read `/\host` as `//host`) and no control character (browsers drop tabs and newlines, so
+/// `/\t/host` would be `//host` too): those are percent-encoded.
 pub(crate) fn local_path(p: &str) -> String {
-    let p = p.replace('\\', "%5C");
-    format!("/{}", p.trim_start_matches('/'))
+    let mut out = String::with_capacity(p.len() + 1);
+    for c in p.chars() {
+        match c {
+            '\\' => out.push_str("%5C"),
+            c if c.is_control() => {
+                let mut b = [0u8; 4];
+                for x in c.encode_utf8(&mut b).bytes() {
+                    out.push_str(&format!("%{x:02X}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    format!("/{}", out.trim_start_matches('/'))
 }
 
 impl Apps {
@@ -132,5 +145,17 @@ impl Apps {
         }
         cache.insert(hash, Seen { env: key, user: user.clone(), until, generation, checked: now });
         Some(user)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_way_back_never_leaves_the_site() {
+        assert_eq!(super::local_path("/dash?x=1"), "/dash?x=1");
+        assert_eq!(super::local_path("//evil.example/"), "/evil.example/");
+        assert_eq!(super::local_path("/\\evil.example"), "/%5Cevil.example");
+        assert_eq!(super::local_path("\t/evil.example"), "/%09/evil.example");
+        assert_eq!(super::local_path("/\r\nSet-Cookie: x=1"), "/%0D%0ASet-Cookie: x=1");
     }
 }

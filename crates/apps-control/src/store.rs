@@ -231,6 +231,24 @@ CREATE TABLE IF NOT EXISTS variables (
     sealed TEXT NOT NULL,
     PRIMARY KEY (service, env, name)
 ) WITHOUT ROWID;
+-- An environment's variables kept as files in its instances (their absolute paths).
+-- Every error an environment has had (`errors::note_new_errors`), by fingerprint: the first time
+-- one is seen is its `error.new` event.
+CREATE TABLE IF NOT EXISTS error_groups (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    name TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    PRIMARY KEY (service, env, fingerprint)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS variable_files (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    PRIMARY KEY (service, env, name)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS links (
     service TEXT NOT NULL,
     kind TEXT NOT NULL,
@@ -417,6 +435,7 @@ pub struct EnvRow {
     pub tcp_port: Option<u16>,
     pub firewall: Vec<crate::model::FirewallRule>,
     pub headers: Vec<crate::model::HeaderRule>,
+    pub routes: Vec<crate::model::Route>,
     /// Paused (Render's Suspend): nothing of it runs, wakes, deploys or is scheduled until it's
     /// resumed.
     pub paused: bool,
@@ -425,6 +444,8 @@ pub struct EnvRow {
     pub held_by: Option<String>,
     /// What its code may reach.
     pub egress: crate::model::Egress,
+    /// Its pages measure their Web Vitals for roll (a tag the proxy adds).
+    pub vitals: bool,
 }
 
 /// A link: its kind, resource, variables' prefix, and the credentials it made for itself.
@@ -527,7 +548,7 @@ pub struct Store {
 }
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress";
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -598,7 +619,13 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         headers: r.get::<_, Option<String>>(22)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
         paused: r.get::<_, i64>(23)? != 0,
         held_by: r.get(24)?,
-        egress: r.get::<_, Option<String>>(25)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        // Unreadable (a newer shape, a broken row): closed, never open by accident.
+        egress: match r.get::<_, Option<String>>(25)? {
+            None => crate::model::Egress::default(),
+            Some(j) => serde_json::from_str(&j).unwrap_or(crate::model::Egress { mode: crate::model::EgressMode::Roll, hosts: Vec::new() }),
+        },
+        vitals: r.get::<_, i64>(26)? != 0,
+        routes: r.get::<_, Option<String>>(27)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
     })
 }
 
@@ -729,6 +756,8 @@ impl Store {
         db.add_column("runs", "attempt", "INTEGER NOT NULL DEFAULT 1")?;
         db.add_column("environments", "held_by", "TEXT")?;
         db.add_column("environments", "egress", "TEXT")?;
+        db.add_column("environments", "vitals", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("environments", "routes", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
         db.add_column("log_drains", "environments", "TEXT")?;
@@ -809,7 +838,7 @@ impl Store {
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -907,7 +936,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -924,7 +953,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "domains", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             c.execute(
@@ -1473,6 +1502,21 @@ impl Store {
         })
     }
 
+    /// A deploy `deploying` → `ready` (built and healthy beside the live one) with its
+    /// `deploy.ready` event, in one transaction: whoever sees it ready sees the event.
+    pub fn set_ready(&self, id: &str, service: &str, env: &str, data: &serde_json::Value) -> Result<bool> {
+        let now = self.now()?;
+        self.db.write(|c| {
+            let cur: Option<String> = c.query_row("SELECT status FROM deployments WHERE id = ?", [id], |r| r.get(0)).optional()?;
+            if cur.as_deref() != Some(DeployStatus::Deploying.as_str()) {
+                return Ok(false);
+            }
+            c.execute("UPDATE deployments SET status = ?, finished_at = COALESCE(?, finished_at) WHERE id = ?", params![DeployStatus::Ready.as_str(), (!DeployStatus::Ready.pending()).then_some(now), id])?;
+            insert_event(c, now, "deploy.ready", service, env, Some(id), data)?;
+            Ok(true)
+        })
+    }
+
     pub fn set_built(&self, id: &str, image: &str, plan: Option<&serde_json::Value>, run: Option<&Run>) -> Result<()> {
         self.db.write(|c| {
             c.execute("UPDATE deployments SET image = ?, plan = COALESCE(?, plan) WHERE id = ?", params![image, plan.map(to_json), id])?;
@@ -1845,6 +1889,28 @@ impl Store {
     pub fn ensure_trace_token(&self, service: &str, env: &str) -> Result<()> {
         let sealed = self.sealer.seal(&format!("trace:{service}:{env}"), &format!("rlx_{}", random(32)));
         self.db.execute("INSERT INTO trace_ingest (service, env, sealed) VALUES (?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed])?;
+        Ok(())
+    }
+
+    /// An error seen: whether it's the first time the environment has had it.
+    pub fn remember_error(&self, service: &str, env: &str, fingerprint: &str, name: &str, at: i64) -> Result<bool> {
+        Ok(self.db.execute("INSERT INTO error_groups (service, env, fingerprint, name, first_seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, env, fingerprint) DO NOTHING", params![service, env, fingerprint, name, at])? > 0)
+    }
+
+    /// The environment's variables kept as files: name → path.
+    pub fn variable_files(&self, service: &str, env: &str) -> Result<BTreeMap<String, String>> {
+        Ok(self.db.query("SELECT name, path FROM variable_files WHERE service = ? AND env = ?", params![service, env], |r| Ok((r.get(0)?, r.get(1)?)))?.into_iter().collect())
+    }
+
+    /// Kept as a file at `path`, or (none) in the environment again.
+    pub fn set_variable_file(&self, service: &str, env: &str, name: &str, path: Option<&str>) -> Result<()> {
+        match path {
+            Some(p) => self.db.execute(
+                "INSERT INTO variable_files (service, env, name, path) VALUES (?, ?, ?, ?) ON CONFLICT (service, env, name) DO UPDATE SET path = excluded.path",
+                params![service, env, name, p],
+            )?,
+            None => self.db.execute("DELETE FROM variable_files WHERE service = ? AND env = ? AND name = ?", params![service, env, name])?,
+        };
         Ok(())
     }
 
@@ -2229,6 +2295,12 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_routes(&self, service: &str, env: &str, routes: &[crate::model::Route]) -> Result<()> {
+        let j = (!routes.is_empty()).then(|| serde_json::to_string(routes).expect("routes serialize"));
+        self.db.execute("UPDATE environments SET routes = ? WHERE service = ? AND name = ?", params![j, service, env])?;
+        Ok(())
+    }
+
     pub fn set_headers(&self, service: &str, env: &str, rules: &[crate::model::HeaderRule]) -> Result<()> {
         let j = (!rules.is_empty()).then(|| serde_json::to_string(rules).expect("JSON"));
         self.db.execute("UPDATE environments SET headers = ? WHERE service = ? AND name = ?", params![j, service, env])?;
@@ -2299,6 +2371,11 @@ impl Store {
 
     pub fn set_maintenance(&self, service: &str, env: &str, message: Option<&str>) -> Result<()> {
         self.db.execute("UPDATE environments SET maintenance = ? WHERE service = ? AND name = ?", params![message, service, env])?;
+        Ok(())
+    }
+
+    pub fn set_vitals(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        self.db.execute("UPDATE environments SET vitals = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
         Ok(())
     }
 

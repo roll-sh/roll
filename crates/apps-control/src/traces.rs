@@ -23,10 +23,42 @@ pub(crate) fn key(service: &str, env: &str) -> String {
     format!("trace:{service}/{env}")
 }
 
+fn metric_key(service: &str, env: &str) -> String {
+    format!("metric:{service}/{env}")
+}
+
+/// One of OTLP's signals (`/v1/traces`, `/v1/logs`, `/v1/metrics`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signal {
+    Traces,
+    Logs,
+    Metrics,
+}
+
+impl Signal {
+    pub fn of(path: &str) -> Option<Signal> {
+        match path {
+            "traces" => Some(Signal::Traces),
+            "logs" => Some(Signal::Logs),
+            "metrics" => Some(Signal::Metrics),
+            _ => None,
+        }
+    }
+}
+
 impl Apps {
     /// Spans an environment's instances sent (OTLP/HTTP): kept, how many. Anything that isn't the
     /// environment's live token is the same 404.
     pub async fn ingest_traces(self: &Arc<Self>, service: &str, env: &str, token: &str, json: bool, gzip: bool, body: &[u8]) -> Result<usize> {
+        self.ingest_otlp(service, env, token, Signal::Traces, json, gzip, body).await
+    }
+
+    /// What an environment's instances sent on one of OTLP's signals: spans as its `trace:` log,
+    /// log records as lines of its own log (JSON: `level`, `msg`, `trace_id`, `span_id`, its
+    /// attributes; so the log's level and field filters read them), data points as its `metric:`
+    /// log. How many were kept.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ingest_otlp(self: &Arc<Self>, service: &str, env: &str, token: &str, signal: Signal, json: bool, gzip: bool, body: &[u8]) -> Result<usize> {
         let (sid, e) = (service.to_string(), env.to_string());
         let kept = self.db(move |s| s.trace_token(&sid, &e)).await.ok().flatten();
         if !kept.is_some_and(|k| crate::public::same(&k, token)) {
@@ -42,18 +74,62 @@ impl Apps {
         } else {
             body
         };
-        let spans = if json {
-            let v: Value = serde_json::from_slice(body).map_err(|e| Error::BadRequest(format!("its JSON: {e}")))?;
-            crate::otlp::from_json(&v)
-        } else {
-            crate::otlp::from_protobuf(body)
+        let v: Option<Value> = if json { Some(serde_json::from_slice(body).map_err(|e| Error::BadRequest(format!("its JSON: {e}")))?) } else { None };
+        let bad = |e: anyhow::Error| Error::BadRequest(e.to_string());
+        match signal {
+            Signal::Traces => {
+                let spans = match &v {
+                    Some(v) => crate::otlp::from_json(v),
+                    None => crate::otlp::from_protobuf(body),
+                }
+                .map_err(bad)?;
+                let sink = self.logs.sink(key(service, env), crate::logs::Stream::System);
+                for s in &spans {
+                    sink.line(serde_json::to_string(s).expect("a span serializes"));
+                }
+                Ok(spans.len())
+            }
+            Signal::Logs => {
+                let records = match &v {
+                    Some(v) => crate::otlp::logs_from_json(v),
+                    None => crate::otlp::logs_from_protobuf(body),
+                }
+                .map_err(bad)?;
+                let sink = self.logs.sink(format!("env:{service}/{env}"), crate::logs::Stream::Stdout);
+                for r in &records {
+                    let mut line = serde_json::Map::new();
+                    // Its attributes first, so roll's own names win.
+                    for (k, val) in &r.attrs {
+                        line.insert(k.clone(), json!(val));
+                    }
+                    if !r.level.is_empty() {
+                        line.insert("level".into(), json!(r.level));
+                    }
+                    line.insert("msg".into(), json!(r.body));
+                    if !r.trace.is_empty() {
+                        line.insert("trace_id".into(), json!(r.trace));
+                        line.insert("span_id".into(), json!(r.span));
+                    }
+                    if !r.service.is_empty() {
+                        line.insert("service".into(), json!(r.service));
+                    }
+                    sink.line(Value::Object(line).to_string());
+                }
+                Ok(records.len())
+            }
+            Signal::Metrics => {
+                let points = match &v {
+                    Some(v) => crate::otlp::metrics_from_json(v),
+                    None => crate::otlp::metrics_from_protobuf(body),
+                }
+                .map_err(bad)?;
+                let sink = self.logs.sink(metric_key(service, env), crate::logs::Stream::System);
+                for p in &points {
+                    sink.line(serde_json::to_string(p).expect("a point serializes"));
+                }
+                Ok(points.len())
+            }
         }
-        .map_err(|e| Error::BadRequest(e.to_string()))?;
-        let sink = self.logs.sink(key(service, env), crate::logs::Stream::System);
-        for s in &spans {
-            sink.line(serde_json::to_string(s).expect("a span serializes"));
-        }
-        Ok(spans.len())
     }
 
     async fn spans(self: &Arc<Self>, service: &str, env: &str, since: i64, trace: Option<&str>) -> (Vec<Span>, bool) {
@@ -85,6 +161,63 @@ impl Apps {
         out.sort_by(|a, b| b["start_ms"].as_u64().cmp(&a["start_ms"].as_u64()));
         out.truncate(100);
         Ok(json!({ "minutes": minutes, "traces": out, "cut": cut }))
+    }
+
+    /// `GET …/environments/{env}/app-metrics?minutes=`: what the app's OpenTelemetry SDK sent
+    /// as metrics (traces on), each series (a name and its attributes, at most 50, the busiest
+    /// first) bucketed to at most 60 points: a gauge's last value, a counter's rate a second, a
+    /// histogram's mean.
+    pub async fn app_metrics(self: &Arc<Self>, service: &str, env: &str, minutes: i64) -> Result<Value> {
+        self.service_env(service, env).await?;
+        let minutes = minutes.clamp(5, 10_080);
+        let now = code_sql::now_ms();
+        let since = now - minutes * 60_000;
+        let (lines, cut) = self.logs.read(&metric_key(service, env), |_| true, Some(since), None, MAX_LINES).await;
+        let step_ms = (minutes * 60_000 / 60).max(60_000);
+        let mut series: HashMap<String, (crate::otlp::Point, std::collections::BTreeMap<i64, crate::otlp::Point>, usize)> = HashMap::new();
+        for l in &lines {
+            let Ok(p) = serde_json::from_str::<crate::otlp::Point>(&l.text) else { continue };
+            let key = format!("{}{}", p.name, p.attrs.iter().map(|(k, v)| format!("|{k}={v}")).collect::<String>());
+            let t = if p.time > 0 { (p.time / 1_000_000) as i64 } else { l.t };
+            let e = series.entry(key).or_insert_with(|| (p.clone(), Default::default(), 0));
+            e.2 += 1;
+            // The bucket's last point (its newest by its own time).
+            let b = e.1.entry(t - t.rem_euclid(step_ms)).or_insert_with(|| p.clone());
+            if p.time > b.time {
+                *b = p.clone();
+            }
+            if p.time >= e.0.time {
+                e.0 = p;
+            }
+        }
+        let mut out: Vec<(usize, Value)> = series
+            .into_values()
+            .map(|(last, buckets, n)| {
+                let shows = if last.counter { "per_second" } else if last.kind == "histogram" { "mean" } else { "value" };
+                let mut points = Vec::new();
+                let mut prev: Option<&crate::otlp::Point> = None;
+                for (at, p) in &buckets {
+                    let v = match shows {
+                        // Between this bucket's last and the one before; a reset starts again.
+                        "per_second" => prev.and_then(|q| (p.value >= q.value && p.time > q.time).then(|| (p.value - q.value) / ((p.time - q.time) as f64 / 1e9))),
+                        "mean" => match (prev.and_then(|q| q.count.map(|c| (q.value, c))), p.count) {
+                            (Some((qs, qc)), Some(c)) if c > qc => Some((p.value - qs) / (c - qc) as f64),
+                            (_, Some(c)) if c > 0 => Some(p.value / c as f64),
+                            _ => None,
+                        },
+                        _ => Some(p.value),
+                    };
+                    if let Some(v) = v.filter(|v| v.is_finite()) {
+                        points.push(json!([at, v]));
+                    }
+                    prev = Some(p);
+                }
+                (n, json!({ "name": last.name, "kind": last.kind, "unit": last.unit, "attrs": last.attrs.iter().map(|(k, v)| json!({ "key": k, "value": v })).collect::<Vec<_>>(), "shows": shows, "points": points }))
+            })
+            .collect();
+        out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1["name"].as_str().cmp(&b.1["name"].as_str())));
+        out.truncate(50);
+        Ok(json!({ "minutes": minutes, "step_minutes": step_ms / 60_000, "series": out.into_iter().map(|(_, v)| v).collect::<Vec<_>>(), "cut": cut || lines.len() >= MAX_LINES }))
     }
 
     /// `GET …/environments/{env}/traces/{trace}`: its spans, in start order (the last week's).
