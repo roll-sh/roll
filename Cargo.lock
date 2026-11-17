@@ -6839,6 +6839,7 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-net",
+ "roll-oidc",
  "roll-workspace",
  "serde",
  "serde_json",
@@ -7073,6 +7074,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "roll-oidc"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ring",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "roll-previews"
 version = "0.1.0"
 dependencies = [
@@ -7128,6 +7139,7 @@ dependencies = [
  "regex",
  "ring",
  "roll-auth",
+ "roll-oidc",
  "roll-workspace",
  "rsa",
  "serde",
@@ -7242,6 +7254,7 @@ dependencies = [
  "roll-edge",
  "roll-mcp",
  "roll-net",
+ "roll-oidc",
  "roll-previews",
  "roll-secrets",
  "roll-workspace",
