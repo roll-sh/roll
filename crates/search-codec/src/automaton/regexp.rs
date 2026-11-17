@@ -950,7 +950,9 @@ mod tests {
             let e = compile(p, ALL, false, DEFAULT_WORK_LIMIT).unwrap_err();
             assert!(matches!(e, RegexpError::TooComplex(_)), "{p}: {e:?}");
             assert!(e.to_string().starts_with("Determinizing automaton with "), "{e}");
-            assert!(t.elapsed().as_secs() < 5, "{p} took {:?}", t.elapsed());
+            // A guard against unbounded work (minutes before the work limit), not a benchmark:
+            // a debug build on a host at load 35 took 6.2 s for the hardest of these.
+            assert!(t.elapsed().as_secs() < 30, "{p} took {:?}", t.elapsed());
         }
     }
 
