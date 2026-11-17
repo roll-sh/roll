@@ -3361,6 +3361,113 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     - Item 2's batches past the scan (joined rows from batches, the probe hits aggregated from
       columns), item 4 (streaming merge joins) and item 5 (work_mem for hash tables and sorts)
       are not started.
+- **Executor, round 19: the workers' lookups a batch of outer rows at a time, numerics encoded
+  without allocating** (agent 244; BENCH.md "Executor, round 19"). Base `61414bc58` (origin's
+  head with agent 238's values prefetch, `065d6e6b7`), head `eae0f8e2a` (rebased since, without changes, on agent 245's storage round 2). Lane C, all three
+  servers at max_parallel_workers_per_gather 2, max_parallel_workers 8 and a 2 GB cache, five
+  interleaved rounds the same afternoon: TPC-H SF1 PGO 9.95 (base) -> 9.84 s (head) against
+  PostgreSQL's 15.29 and pgrust's 9.90 (CPU 26.34 -> 25.66 s against 39.20 and 15.94); plain dist
+  12.01 -> 11.84 s (CPU 31.91 -> 31.03). Roll's total is now under pgrust's with PGO. Still slower
+  than PostgreSQL (PGO head): q02 0.39 / 0.24, q20 0.29 / 0.15, q11 0.15 / 0.09, q08 0.23 / 0.19,
+  q22 0.12 / 0.09, q13 0.92 / 0.88; q07 is now ahead (0.42 / 0.45).
+  - **A lookup stage takes 64 outer rows at a time** (`pipe::run_stages` holds them per stage,
+    `pipe::lookup_batch`, `Lookup::batch`, `entry_spans`, `Lookup::multi_get`): a parallel
+    worker's nested-loop inner index scans (inner and left joins: q07's orders by o_custkey
+    and lineitem by l_orderkey, q05 / q08 / q09 / q03 / q10's) made the index key of each outer
+    row, read its entries and fetched its rows one key at a time (`get_with`, the reader's held
+    block), so each outer row's rows missed the CPU's cache on their own. Now the stage holds
+    its outer rows until it has 64 (or the chunk ends, or a row has to go to the executor's
+    thread: `drain` runs the held rows first, so the rows come out in the same order), makes
+    their keys, reads the entries in key order (the entries' scan sought on from one key to the
+    next), then fetches every entry's row of the batch by one sorted multi-get
+    (`PointReader::get_sorted`, agent 238's: the misses of different outer rows overlap), and
+    joins each outer row with its rows, filtered and counted as `rows` does. A unique key's
+    probed entry is taken without its row's visibility checked (the multi-get checks it; one
+    the snapshot doesn't see goes the old way, `rows`). Unchanged: a small table's cached
+    lookups (`LookupScratch::cache`), semi and anti joins (see dropped), a NULL key, a key a
+    kernel leaves to `eval` (the row to the executor's thread, as before), and a batch whose
+    read failed (each row through `rows`). Aggregating scans (`partial_row`) and plain ones
+    (`run_rows`) drain the stages before a row that skips them and at the chunk's end;
+    `Scratch::forget` drops what a given-up run left. Against `61414bc58` (plain dist, three
+    rounds of 22 queries; every pass between 1.05 and 2.57 foreign cores, the host at load
+    25-50: other sessions' unpinned builds on lane C): user instructions q09 -3.8 / -4.6 /
+    -3.8%, q05 -2.8 / -2.8 / -3.3, q08 -2.4 / -2.7 / -2.5, q07 -1.6 / -1.9 / -1.9, every other
+    query within +-1% (round 1's q02 / q11 / q14 / q17 / q22 counts are broken windows: queries
+    the change doesn't run); cycles q07 -31.2 / -16.3 / -9.0, q08 -21.1 / -13.5 / -10.8, q09
+    -20.8 / -22.9 / -9.8, q05 -19.2 / +4.5 / -10.4, q03 -16.2 / -0.8 / -9.9. Own-run walls (a
+    fresh engine, 5 runs a pass, 3 alternating pairs): q03 0.521 -> 0.415 s, q09 1.372 -> 1.225,
+    q07 0.788 -> 0.709, q08 0.278 -> 0.254 (each 3 pairs of 3 faster), q05 0.530 -> 0.541 (2 of
+    3), q04 (path unchanged) 0.285 -> 0.287.
+    All 22 result hashes PostgreSQL's in every pass.
+  - **A numeric's encoding without a second conversion or a byte vector**
+    (`decint::i128_signed_le`): `storage::row::encode_value` of a numeric that fits an i128
+    converted it twice (`to_i128`, then `to_signed_bytes_le`'s own) and allocated the two's
+    complement bytes; q02's hash join spills 7/8 of its 158,720 inner rows (8 batches, as
+    PostgreSQL's), each with its ps_supplycost. Same bytes (the decint test against num-bigint).
+    Against the lookup commit (three rounds; 0.5-1.7 foreign cores): user instructions q17 -5.4
+    / -5.6 / -1.2%, q02 -0.9 / -1.0%, every other query within +-1%. Small; kept because nothing
+    is worse and the code is simpler.
+  - Dropped (patches in `~/.cache/a244/patches/`):
+    - Semi and anti joins through the batch: fetching every entry's row (`n001`) cost q22 +36%
+      user instructions (a customer's ~10 orders, each in its own block, where the old path
+      stops at the first), q21 +6.6, q04 +3.5; the first entry's row only, the others by the
+      old path (`n002`) q21 +11.5, q04 +7.7; first entries, then one more multi-get for the
+      outer rows they don't decide (`n004`) q21 +7.1, q04 +4.4. A semi join's first match is
+      mostly in its first entry's block, which the reader holds from the lookup before: a
+      batch's sorts and searches cost more than the misses it overlaps. `Lookup::batches` is
+      false for them.
+    - A small table's cached lookups through the batch (`n001`): every outer row made its key
+      twice (the batch's, then `rows`'). Cached stages run row by row as before.
+  - Measured, not changed (whole-run profiles of one 22-query pass on lane C, cycles, the
+    server's own samples; `~/.cache/a244/perf/whole-*.data`, `classes.py`):
+    - By function class, roll (`0ade2f479`, plain dist) against PostgreSQL
+      18.6: storage reads (blocks, block cache, merging scans, point reads) 28.7% against 25.3%,
+      column decode 22.8 against 6.5 (plus PostgreSQL's JIT deform, in its 29.9% "other"),
+      allocation and copies (mimalloc, `Value` drops and clones) 16.4 against 6.5, aggregation
+      10.0 against 1.3, joins and hashing 8.4 against 7.1, expressions 7.7 against 17.5,
+      visibility 5.2 in PostgreSQL. Roll's pass took 340k samples, PostgreSQL's 439k. pgrust's
+      binary is stripped and its plans JIT-compiled (30% of its samples in the binary, 9% in
+      JIT code): its classes can't be told apart.
+    - Decode's cost is the walk to the columns read (`Pre::decode`'s hottest instructions are
+      `skip`'s tag dispatch, a jump table per value): q15's dense bitmap heap scan (241k of 6M
+      lineitem rows, `dense_bitmap_scan`, run as a sequential scan because the bitmap holds over
+      1/32 of the table) decodes every row up to l_shipdate (column 10): `Pre::decode` is 51% of
+      q15's instructions. Decoding the filter's columns first and the rest only for rows that
+      pass saves only the three other columns' values, not the walk; not tried. The row format
+      (offsets to the values) is the store's.
+    - q15's EXPLAIN ANALYZE differs from PostgreSQL's (for agent 240's area): the engine shows
+      the Bitmap Index Scan "never executed" with `Index Searches: 0` and no "Rows Removed by
+      Index Recheck" / "Heap Blocks" lines where PostgreSQL shows `actual rows=241281`, one
+      search, `Rows Removed by Index Recheck: 551132` and `Heap Blocks: exact=12198
+      lossy=11210` (its 4 MB work_mem bitmap goes lossy).
+    - q20 (0.24 s against PostgreSQL's 0.10, same plan): 60% of its cycles are the SubPlan's
+      8,332 runs, 37% `fetch_entries` (the multi-get of ~7 random lineitem rows a run:
+      `get_sorted_snap` 11.4% self, `find_block` + `block_with` 11.6%: the block cache lookups'
+      misses, the store's read path), `_mi_page_malloc` 10% of cycles on 2% of instructions
+      (allocations on cold pages in the runs' scans).
+    - q02: the spill's encoding was ~8% of its instructions (`encode_value`, numerics' bytes,
+      `new_batch`); the nested loop's joined rows are made twice (`concat_rows`, then the Hash
+      node's `Narrow::shrink`), an allocation and a pass per row a protocol between the two
+      nodes could save.
+    - q13: per order row `partial_row` (lazy read, the probe, `Joined`, `row_words`,
+      `add_words`); the probe's matches aren't used by the column batch (`Pre` only drops
+      misses), so a fused probe-and-aggregate kernel over the batch is the next step there.
+  - Tests: quick-check on `eae0f8e2a` green (verify profile, Clippy 16 warnings, none new in a
+    changed file; 409 tests in 25 binaries with golden, wire, wire_waits and parallel_scan;
+    crash_random seeds 1-3 x 2 and power_cut_at_every_point; regression suite 51,148 / 51,150
+    with none newly differing; isolation 1,647 / 1,648; pg_dump TAP 14,609 passed).
+    golden (3) and parallel_scan (13) also pass with `--profile verify-checked` (debug
+    assertions: the multi-get's keys strictly ascending). No new test: the results and their order are the old path's (parallel_scan
+    compares the workers' lookups with the serial plan; every TPC-H hash is PostgreSQL's).
+  - Lane A's point reads: not measured. Neither change is on a point read's path: the batch is
+    the workers' lookup stage (`PointReader::get_sorted` and `get_with` unchanged), and
+    `encode_value`'s numeric arm runs when a row with a numeric is written.
+  - Left (largest first): q13's probe and partial aggregation as one batch kernel; q02's joined
+    rows made once (the nested loop building the Hash's narrowed row); the allocation class
+    (16% of roll's samples against PostgreSQL's 6.5: rows as `Vec<Value>` per row in the row
+    path); the store's block lookups per key (q20, q07: agent 245's area); q04 / q21's semi
+    joins (their per-key path is cheap; what's left is the misses of the outer rows' first
+    blocks).
 - **Executor, round 18: index scans' row fetches as one sorted multi-get, nested loops and
   Aggregates rescanned, cheaper hash-join tuple sizes** (agent 238; BENCH.md "Executor, round
   18"). Lane C, all three servers at max_parallel_workers_per_gather 2, max_parallel_workers 8
@@ -11546,6 +11653,113 @@ failed: all passed.
 Not this round's: roll's `VACUUM (VERBOSE)` sends none of PostgreSQL's INFO lines (agent 205's
 note, still open).
 
+## Short write transactions, round 7 (agent 243)
+
+BENCH.md "Short write transactions, round 7" has the pairs. Kept, one commit (handed in as
+`cand/a243`):
+
+1. *An index scan's kill marks are left while a writer holds the table's size model or waits
+   for it.* `sizing::mark_passed` (`Kills::mark`, the marks of the entries a scan passed,
+   _bt_killitems) took the table's model lock (`db.relfiles.of(table)`) shared to look for
+   entries to kill; now, when the caller doesn't want the entries back, it tries the lock and
+   leaves the marks when a writer holds it or waits for it (parking_lot's writer bit). That is
+   PostgreSQL's own behaviour under concurrent writes: _bt_killitems marks nothing on a leaf
+   page that changed since the scan read it, and the marks are hints a later scan or VACUUM
+   makes again. Single-session runs (golden, isolation's steps) never find the lock busy; the
+   models' outcome changes only where a concurrent writer was in the way. Why it mattered: an
+   off-CPU profile of the connection threads at 32 clients (`perf record -e sched:sched_switch
+   --call-graph dwarf`, `~/.cache/a243/bench/offcpu.sh` + `offagg.py`) had 5.4 thread-seconds
+   of sleep per second in the size models: `sizing::updated` (the UPDATE's heap model write,
+   exclusive) 2.1 s/s, and `mark_passed` behind it 2.5 s/s, 730 µs a sleep. 32 threads on 4
+   CPUs: a writer preempted holding the lock stops every scan of the table until it runs
+   again. With the change the `mark_passed` sleeps are gone (the writers' own remain).
+
+Measured (plain dist, `base2` = origin `61414bc58` against `c1` = it plus the change, and the
+same change behind a run-time switch in one binary; alternating pairs, agent 235's counting):
+at 32 clients, 14 pairs, tps +3.9% (±2.2% s.e.) and user cycles per transaction -3.1% (±0.7%)
+at equal foreign load (below); the last five clean pairs of the two builds tps +7.3% (4 of 5
+up), cycles -6.1%, p50 -8.1%. At 8 clients neutral: 15 pairs, tps +3.4% (±2.5%), cycles +0.5%
+(±0.6%). Point reads (8 clients, 5 pairs): instructions per query equal (-0.00% median, every
+pair within 0.16%), tps +1.0% (±4.1%) adjusted. Verification: `tools/quick-check.sh` on
+`c74a5eb1d` (on `6d3b7e9e5`): 10 test binaries built, clippy no new warning, 117 tests in 7
+binaries, regress 51,148 / 51,150 (0 newly differing), isolation 1647/1648, pg_dump_tap 14,609;
+golden, models_kept, kept_plans, heap_order_scan and big_tables also under `--profile
+verify-checked` (all pass).
+
+**Measuring on a loaded host.** Other sessions' unpinned builds ran on the lane all day (load
+averages 20-65, 0.1-2.6 cores of foreign work on the server CPUs). tps follows that load
+almost linearly: over every series, log(tps) fell 0.45-0.6 per foreign core (a pair 0.5 cores
+apart differs by ~25%), more than any change measured here, and the pair medians of the first
+gates (+23% tps for this change at 32 clients) were mostly that. `bench/adj.py` fits each
+series' per-pair log tps (and log cycles) ratios against the pairs' foreign-core difference;
+the intercept is the change at equal load, with its standard error. Cycles per transaction
+barely depend on the load (slope +0.04 to +0.12 per core), so they are the reliable signal on
+this host; tps differences under ~4% can't be resolved.
+
+Dropped (patches in `~/.cache/a243/patches/`):
+
+- *An admission limit* (`admission-limit-and-exp-switches.patch`, lead 3): a connection thread
+  waited for one of K places before working on a client message, gave it up while waiting for
+  its client or in a long wait (WAL fsync, heavyweight lock, pg_sleep), waited at most 2 ms.
+  At 32 clients (single runs of one binary against its switch off) K=4 -19% tps, K=6 -3%, futex calls per commit 4.2 -> 13 and context switches
+  10.6 -> 15.3: the per-statement handoff (a sleep and a wake for most statements) costs more
+  than the preemptions it avoids. A limit would need a handoff without a sleep (the waiting
+  thread spinning while the holder finishes, or one thread running several sessions).
+- *nextval's logged-ahead value without its own fsync wait* (235's patch, rebased:
+  `nextval-unwaited-log-rebased.patch`): again a loss at 32 clients, 4 clean pairs tps -8.3%
+  median (every pair down), CPU per transaction +6.6%; at 8 clients +6.5% (3 pairs) but +0.4%
+  (±2.8%) adjusted for load. With the size-model change the stall it removes is the next
+  queue (`identity_nextval` sleeps 3.75 thread-s per s at 32 clients in a busy-disk run), but
+  removing it lets more threads work at once on 4 CPUs, and that costs more: a cycles:u+k
+  profile by symbol of the two arms has the same shape (no lock or spin symbol grows;
+  parking_lot and sched_yield 0.5% in both), the extra CPU spread over everything.
+- *235's directed group-commit wakeups* (`directed-wake.patch`, lead 2): instructions per
+  transaction -1.2% (every pair down at 32 clients), but tps -5.7% (±6.8%) at 32 and -4.5%
+  (±3.1%) at 8 clients adjusted for load, cycles +4.4% and +2.4%. The fsyncing commit unparks
+  every covered waiter itself, one futex wake each, before it returns to its own client;
+  `notify_all` woke one and requeued the rest on the mutex, so the wakes were spread over the
+  woken threads. Futex calls per commit at 32 clients 4.1 -> 3.9, context switches 10.3 ->
+  10.4: no saving to pay for the leader's longer path.
+
+**Group commit (lead 1)**: fdatasync per commit on this lane 0.50-0.52 at 32 clients and
+0.72-0.77 at 8 (as 235 found). An fdatasync of a few hundred bytes into the preallocated WAL
+takes 23 µs at the median on this disk (p99 47 µs, md RAID0 of two NVMe), so the fsync is a
+small part of a commit's ~160 µs cycle at 32 clients: groups are as big as the commits that
+arrive while the next leader is woken and scheduled. PostgreSQL's and pgrust's four commits
+an fsync come from their CPUs being saturated (3.75 of 4 cores against roll's 3.35): a woken
+waiter waits for a core, and more commits join meanwhile. Halving roll's fsyncs would save at
+most ~0.25 x (pwrite + fdatasync's CPU, ~10-15 µs) a commit, under 1.5% of a transaction's
+~300 µs of CPU; the idle core time at 32 clients was lock waits (above), not the WAL. Not
+pursued further.
+
+**Plain build against PGO (lead 4)**: `tools/dist-pgo.sh` of `61414bc58` against the plain
+build, 8 clients, three alternating runs each, counted on the server per transaction: user
+instructions -21.6%, cycles -38%, uops not delivered by the front end -55%, i-cache fetch
+stalls (`icache_16b.ifdata_stall`) -61%, iTLB walks -60%, DSB-to-MITE switch penalty -17%.
+PGO wins in both ways at once: fewer instructions (it inlines whole hot chains: the memtable
+skiplist's search and insert into `Txn::commit`, `Block::seek`, `SstReader::block_with` and
+`find_block` into `storage::point::newest` / `PointReader::first_raw`, `btsim` leaf reads into
+`Kills::mark`, `Lps::get` into the heap model's callers) and a hot path laid out together
+(the front-end stalls). By symbol, no single function holds more than ~2.4% of the plain
+build's cycles that PGO removes; a few `#[inline]` hints would take back a percent or two at
+most, under what this host can gate, and the layout part needs the profile (or a link order
+file from one). The lever is shipping the PGO build, not source changes.
+
+What is left, by size:
+
+- **The size models' one lock per table** is the 32-client limit now: `sizing::updated` holds
+  the table's model exclusively for every UPDATE (2.1-2.6 thread-s/s of sleep at 32 clients,
+  0.6-1.3 ms a sleep). The heap model (`heapsim::Heap`: pages, the key map, the pending lists)
+  would need finer locking (a lock per page range with the key map apart) for 32 clients to
+  scale like 8; PostgreSQL locks one buffer at a time.
+- **nextval's stall** (above): it can land only with something that keeps the runnable
+  threads near the core count without a sleep per statement.
+- PGO for the shipped build (the pipeline is in `tools/dist-pgo.sh`).
+- Harness: `~/.cache/a243/bench` (235's, with arms `bin@K=V,...` running one binary with
+  `ROLL_EXP_K=V` switches, `matrix.sh`, `offcpu.sh`/`offagg.py`, `fe.sh`, `symprof.sh` on lane
+  A, `adj.py`). The exploration binary's switches are in the admission patch
+  (`src/admission.rs`).
+
 ## Short write transactions, round 6 (agent 235)
 
 **Coordinator's note (2026-11-17):** only step 1 (the UPDATE's unique-key point probe) landed with this section. Step 2 (directed group-commit wakeups, `d68ca4019` on `cand/a235`) is held back: on the newest base it lowered instructions and cycles per transaction but throughput fell 2.3% at 8 clients and 5.1% at 32 on quiet pairs. It lands only after a quiet-host measurement shows a throughput win.
@@ -14054,3 +14268,105 @@ information_schema.columns still took the materialized views' columns the relati
 them where it is read. `cargo test --profile verify-checked -p pg-engine --test wire`: 74 passed;
 quick-check again on the rebased tree before handing it in again.
 
+## MultiXact (agent 249, 2026-11-17)
+
+PostgreSQL leaves a row lock in the locked version's xmax: the locker's xid with
+HEAP_XMAX_LOCK_ONLY and the lock's strength, or a MultiXactId once another transaction (or
+another subtransaction of the same one) locks or updates the version while a locker runs. It
+stays after the lockers end, until the version is locked, updated or frozen again. Before this,
+the engine's row locks lived only in its lock manager and `xmax` read 0 for every row. Now the
+heap model keeps the xmax PostgreSQL would have, and every value below was matched against a
+private PostgreSQL 18.6 (`a249-pg`, `select version()` 18.6 on Alpine) with a probe that runs the
+same multi-session scenarios on both servers and compares them with xids renamed by first
+appearance (`~/.cache/a249/probe/cmp.py`: 243 lines, identical; `durable.py` for restart and
+crash).
+
+- **Tuple state** (`txn::multixact`, `catalog::heapsim::Tup::flags`). `Tup` keeps its 32 bytes:
+  `hot_updated` became a flags byte holding HEAP_HOT_UPDATED and the xmax bits (LOCK_ONLY,
+  KEYSHR / SHR / EXCL, IS_MULTI, KEYS_UPDATED). `multixact::new_xmax` is
+  compute_new_xmax_infomask (the locker alone; MultiXactIdCreate when another locker or an
+  updater runs, or the old xmax is a committed update; MultiXactIdExpand keeping running members
+  and a committed update; the stronger of two locks of one xid), `already_locked` heap_lock_tuple's
+  early exit (a lock as strong held by the transaction or a subtransaction of it),
+  `carried_xmax` heap_update's xmax for the new version (the old one's lockers still running:
+  our own lock, KEY SHARE lockers the update didn't wait for). Members sort by (xid, status), as
+  mXactCacheGetBySet leaves them; each transaction has its MultiXact cache
+  (`Txn::multi_for` / `multi_members`, 256 entries, made and read multis), so one member set
+  locked over many rows is one multi. Offsets follow GetNewMultiXactId (offset 0 skipped).
+- **Where it is set** (`exec::sizing::row_locked`, `replaced`): LockRows (a scan's marks and the
+  LockRows node), foreign key checks' FOR KEY SHARE (the three RI paths), ON CONFLICT DO UPDATE's
+  lock; UPDATE and DELETE compute the old version's xmax from what is there (one branch when it
+  is 0) and the new version's. A FOR KEY SHARE lock past a running update that left the key
+  alone locks the later versions too (heap_lock_updated_tuple_rec). Pruning, VACUUM and the
+  size models read the update xid through a multi (`Tup::update_xid`): a lock-only xmax is
+  live, as HeapTupleSatisfiesVacuum has it. A locked version keeps a page from all-frozen.
+- **What reads it**: `xmax` (the scan's system columns read the model's raw xmax: also a running
+  deleter's or an aborted updater's, which read 0 before), pgrowlocks (TM_BeingModified from the
+  xmax; members with their statuses; pids from the lock manager for top-level xids, 0 for a
+  subtransaction or a prepared or ended member, as BackendXidGetPid), `pg_get_multixact_members`
+  (its errors too), `mxid_age`, pg_class.relminmxid, VACUUM VERBOSE's "new relminmxid".
+- **Per database, durable with the rows** (`Database::multis`, `multixact::MULTI_PREFIX` 0x26,
+  `XMAX_PREFIX` 0x27). PostgreSQL's multis are the cluster's; here each database has its own
+  counter, kept in its own store with the rows whose xmax names them, so a single database's ids
+  are PostgreSQL's (and golden_wire's parallel files don't see each other's). A new multi's
+  members, and a version's xmax that outlives its writer (a lock's, or the lockers an update
+  kept), are state records the transaction writes beside its rows (`Txn::put_state`): kept out
+  of REPEATABLE READ's write-conflict check, committed with its writes, and, as PostgreSQL's WAL
+  records of them are, also when it rolls back or prepares (a commit of their own that doesn't
+  wait for an fsync; so does a transaction that only locked rows). An update, a delete, VACUUM's
+  freezing and TRUNCATE delete them. A model laid out afresh (`ensure`, the kept models'
+  background builder) applies each record whose row still has its version at the recorded TID.
+  The next multi and offset come from the last record when the database opens; members of older
+  multis are read as asked. Recorded on PostgreSQL: after a clean restart every xmax is as it was,
+  a rolled-back locker's too; after kill -9 a locker that was still running is gone (its WAL
+  record was never written) and the others stay; the multi's members resolve and the next multi
+  is the one after it. The engine gives the same (`tests/crash_ctids.rs`
+  `multixact_survives_a_restart` / `_a_crash`).
+- **Prepared transactions**: PREPARE writes its state records (as its WAL records are flushed
+  then): after a restart the prepared locker's xmax is there, pgrowlocks shows it with pid 0, a
+  new locker makes a multi with it, ROLLBACK PREPARED leaves no lock (matched on PostgreSQL).
+- **VACUUM** (`multixact::freeze_xmax`, `Heap::vacuum_frz`, `sizing::freeze_cutoffs`,
+  `Ddl::advance_min_mxid`). FreezeMultiXactId and heap_prepare_freeze_tuple's xmax half: a multi
+  before OldestMxact makes the page's freezing mandatory (a lock goes; an update stays as its xid
+  alone), one with a member before FreezeLimit or itself before MultiXactCutoff is replaced
+  (running lockers and the updater, as a new multi or a single xid), an xid xmax before OldestXmin
+  goes when the page freezes. A frozen page freezes its xmins too (VERBOSE's "frozen" line counts
+  them), and its rows no longer hold relfrozenxid back. FreezeLimit and MultiXactCutoff follow
+  vacuum_freeze_min_age / vacuum_multixact_freeze_min_age (capped at half the autovacuum max
+  ages; 0 for FREEZE). OldestMxact is the first multi made after the oldest running transaction
+  got its id (each multi keeps the next xid when it was made), else the next multi. relminmxid
+  (`Catalog::min_mxids`, record tag 52, a VACUUM/ANALYZE stats tag) becomes the oldest multi left
+  in a read page's xmax, else OldestMxact, when no all-visible page was skipped; new storage gets
+  GetOldestMultiXactId. pg_database.datminmxid reads 1 (initdb's) instead of 0.
+- **Aggressive VACUUM by table age** (`Ddl::aged`): a relfrozenxid at or before the next xid
+  less vacuum_freeze_table_age, or a relminmxid at or before the next multi less
+  vacuum_multixact_freeze_table_age (each at most 0.95 of its autovacuum max age), makes the
+  relation's VACUUM aggressive ("aggressively vacuuming", only all-frozen pages skipped), as
+  vacuum_get_cutoffs does; before, only FREEZE and DISABLE_PAGE_SKIPPING did.
+
+Not done: datminmxid's advance (it needs every relation of the database, its catalogs included,
+vacuumed: the catalogs' relminmxid isn't modelled); multixact truncation (members of multis before every table's relminmxid aren't dropped; the
+records are 12 + 9 bytes a member); a table too big to model (over 400,000 versions) keeps no
+xmax (reads 0, as before), and its VACUUM moves relminmxid to OldestMxact. Found on the way: `count(DISTINCT xmax)` runs here, PostgreSQL rejects it ("could not
+identify an ordering operator for type xid", 42883): not fixed.
+
+These supersede agent 229's "MultiXact: not done" note and agent 222's note on `new relminmxid`
+(their sections are left as they were).
+
+Tests: golden `a249_multixact` (single-session cases, ids shown relative to the session's own:
+lock strengths, weaker and stronger relocks, a subtransaction's multi and its members, a
+rollback to a savepoint, lock then update, the stale xmax after commit, a prepared locker, a
+foreign key check, ON CONFLICT DO UPDATE, the member function's errors); isolation spec
+`roll-multixact` (two and three lockers, a locker and an updater, FOR KEY SHARE past a running
+update, one multi for a member set over many rows; with PGISOLATION_EXTRA=1); `crash_ctids`
+`multixact_survives_a_restart` / `_a_crash`; `multixact` unit tests (the rules against values
+PostgreSQL gave).
+
+Verification (agent 249): golden (in-process, wire, shuffled: every file), the isolation specs
+around row locks (multixact-no-deadlock, multixact-no-forget, freeze-the-dead,
+lock-update-delete, lock-update-traversal, the tuplelock-*, fk-*, nowait-*, skip-locked-*,
+insert-conflict-do-update-*, eval-plan-qual, delete-abort-savept*, aborted-keyrevoke and others:
+53 of 53 specs and every permutation as before), lib, crash_ctids and golden again with
+`--profile verify-checked`, quick-check.
+
+Performance: PERF_PLACEHOLDER

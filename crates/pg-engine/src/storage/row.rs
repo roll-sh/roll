@@ -109,10 +109,11 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
             Numeric::NaN => out.push(tag::NUM_NAN),
             Numeric::PosInf => out.push(tag::NUM_PINF),
             Numeric::NegInf => out.push(tag::NUM_NINF),
-            Numeric::Finite { int, scale } if int.to_i128().is_some() => {
+            Numeric::Finite { int, scale } if let Some(v) = int.to_i128() => {
                 out.push(tag::NUMERIC);
                 put_varint(out, *scale as u64);
-                put_bytes(out, &int.to_signed_bytes_le());
+                let (b, n) = crate::types::decint::i128_signed_le(v);
+                put_bytes(out, &b[..n]);
             }
             Numeric::Finite { int, scale } => {
                 out.push(tag::NUMERIC_DEC);

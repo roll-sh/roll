@@ -4517,7 +4517,7 @@ impl InsertNode {
                 )?;
                 let latest = ctx.txn.borrow().get_latest(&c.existing)?;
                 if let Some((_, Some(_))) = &latest {
-                    super::sizing::row_locked(&t, &c.existing, mode, ctx)?;
+                    super::sizing::row_locked(t, &c.existing, mode, ctx)?;
                 }
                 let snapshot = ctx.txn.borrow().isolation.txn_snapshot();
                 let Some((ts, Some(bytes))) = latest else {
@@ -5559,7 +5559,10 @@ impl Node for UpdateNode {
             }
             // heap_update: changing a key column takes the row FOR UPDATE (what FOR KEY
             // SHARE lockers, foreign key checks among them, conflict with).
-            if ctx.with_catalog(|cat| crate::exec::scan::any_key_column(&t, cat, |i| old.get(i) != new.get(i))) {
+            let keys = ctx.with_catalog(|cat| crate::exec::scan::any_key_column(&t, cat, |i| old.get(i) != new.get(i)));
+            // (What the heap model's xmax for it says: HEAP_KEYS_UPDATED.)
+            super::sizing::note_update_keys(keys);
+            if keys {
                 lock_row_mode(&t, &dkey, RowLockMode::Update, Wait::Block, Xltw::Update, ctx)?;
             }
             // A row leaving its partition moves through the partitioned table updated. (Not

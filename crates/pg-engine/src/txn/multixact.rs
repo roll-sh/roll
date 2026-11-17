@@ -242,7 +242,7 @@ pub fn decode_multi(b: &[u8]) -> Option<(u64, u32, Vec<Member>)> {
     let mark = u64::from_be_bytes(b.get(..8)?.try_into().ok()?);
     let next_offset = u32::from_be_bytes(b.get(8..12)?.try_into().ok()?);
     let rest = &b[12..];
-    if rest.len() % 9 != 0 {
+    if !rest.len().is_multiple_of(9) {
         return None;
     }
     let members = rest

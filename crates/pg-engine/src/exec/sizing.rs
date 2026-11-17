@@ -2819,6 +2819,8 @@ pub fn updated(
     let xids = db.xids();
     // (The old version's TID, whether it had an xmax, and the one the new version carries.)
     let mut kept: Option<(Tid, bool, crate::txn::multixact::Xmax)> = None;
+    // (Whether the UPDATE changes a key column, as its executor found: `note_update_keys`.)
+    let noted = UPDATE_KEYS.with(|k| k.take());
     let (tid, hot, v, big) = loop {
         let assumed = known.is_none();
         let old_exts: Vec<Ext> = known.take().unwrap_or_default();
@@ -2894,8 +2896,9 @@ pub fn updated(
             // (The old version's command id as HeapTupleHeaderAdjustCmax sets it and its
             // xmax, within the update's lookup; an update changing a key column holds the
             // row FOR UPDATE.)
-            let key_changed = || {
-                old_key != new_key || ctx.with_catalog(|cat| super::scan::any_key_column(t, cat, |i| old.get(i) != new.get(i)))
+            let key_changed = || match noted {
+                Some(k) => k,
+                None => old_key != new_key || ctx.with_catalog(|cat| super::scan::any_key_column(t, cat, |i| old.get(i) != new.get(i))),
             };
             let mut replace = |at: Tid, o: &heapsim::Tup| {
                 let mode = if key_changed() { RowLockMode::Update } else { RowLockMode::NoKeyUpdate };
@@ -2952,6 +2955,18 @@ pub fn updated(
     Ok(Some((tid, hot)))
 }
 
+
+thread_local! {
+    /// Whether the row the next `updated` replaces had a key column changed, as the UPDATE's
+    /// executor found when it chose the row's lock (None: not known, `updated` finds out).
+    static UPDATE_KEYS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// The UPDATE about to replace a row changes a key column (`keys`): its lock is FOR UPDATE,
+/// and the old version's xmax gets HEAP_KEYS_UPDATED.
+pub fn note_update_keys(keys: bool) {
+    UPDATE_KEYS.with(|k| k.set(Some(keys)));
+}
 
 /// The xmax kept for table `oid`'s versions (`multixact::XMAX_PREFIX`: a lock's, outliving
 /// its transaction): (row key, TID, xmax) each.
@@ -3460,9 +3475,13 @@ fn mark_passed(
     entries: bool,
 ) -> Option<Vec<(Tid, bool)>> {
     // First under the read lock: an index whose entries have nothing to kill (the usual
-    // case) changes nothing, and concurrent scans of it don't serialize.
+    // case) changes nothing, and concurrent scans of it don't serialize. (A scan's marks
+    // alone, entries not wanted, are left while a writer holds the lock or waits for it, as
+    // _bt_killitems leaves them on a leaf page changed since the scan read it: under many
+    // writers each scan's mark waited behind the table's writes, and a writer preempted
+    // holding the lock stopped every scan of the table.)
     {
-        let rf = db.relfiles.of(table).read();
+        let rf = if entries { Some(db.relfiles.of(table).read()) } else { db.relfiles.of(table).try_read() }?;
         let (Some(heap), Some(bt)) = (rf.heaps.get(&table), rf.btrees.get(&index)) else {
             return None;
         };
@@ -5191,6 +5210,15 @@ pub fn set_vacuum_skip(freeze: bool, disable_page_skipping: bool) {
         heapsim::Skip::AllVisible
     };
     VACUUM_SKIP.with(|c| c.set((s, freeze)));
+}
+
+/// `set_vacuum_skip` for a relation an aggressive VACUUM processes (one its table ages made
+/// aggressive: only all-frozen pages are skipped, nothing frozen as FREEZE would).
+pub fn set_vacuum_skip_aggressive(freeze: bool, disable_page_skipping: bool, aggressive: bool) {
+    set_vacuum_skip(freeze, disable_page_skipping);
+    if aggressive && !disable_page_skipping {
+        VACUUM_SKIP.with(|c| c.set((heapsim::Skip::AllFrozen, freeze)));
+    }
 }
 
 /// vac_estimate_reltuples: a VACUUM that read `scanned` of `total` pages and found

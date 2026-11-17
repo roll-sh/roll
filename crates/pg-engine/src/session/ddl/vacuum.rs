@@ -532,6 +532,9 @@ impl Ddl<'_, '_> {
                             progress.set(8, indexes as i64);
                             super::analyze::ProgressEnd(&progress)
                         });
+                        // (Old enough by its relfrozenxid or relminmxid: aggressive too.)
+                        let aggressive = aggressive || (vacuum && self.aged(&r));
+                        crate::exec::sizing::set_vacuum_skip_aggressive(freeze, skip_pages, aggressive);
                         let report = (verbose && vacuum).then(|| {
                             let schema = self.cat.schema_name(r.schema).to_string();
                             if process_main {
@@ -855,6 +858,34 @@ impl Ddl<'_, '_> {
             self.cat.frozen_xids.insert(t.toast, new_toast.max(old_toast));
         }
         Ok(())
+    }
+
+    /// vacuum_get_cutoffs' table ages: a relfrozenxid at or before the next xid less
+    /// vacuum_freeze_table_age, or a relminmxid at or before the next multi less
+    /// vacuum_multixact_freeze_table_age (each at most 0.95 of its autovacuum max age), makes
+    /// the VACUUM aggressive.
+    fn aged(&self, t: &Table) -> bool {
+        use crate::txn::multixact::FIRST_MULTI;
+        let first = crate::txn::xids::FIRST_NORMAL_XID as u32;
+        let (xage, mage) = {
+            let s = self.ctx.sess.settings.borrow();
+            let age = |n: &str, max: &str| s.int(n).min((s.int(max) as f64 * 0.95) as i64).max(0) as u32;
+            (age("vacuum_freeze_table_age", "autovacuum_freeze_max_age"), age("vacuum_multixact_freeze_table_age", "autovacuum_multixact_freeze_max_age"))
+        };
+        // (TransactionIdPrecedesOrEquals / MultiXactIdPrecedesOrEquals: wraparound order.)
+        let at_or_before = |a: u32, b: u32| (a.wrapping_sub(b) as i32) <= 0;
+        let db = &self.ctx.sess.db;
+        let xlimit = match (db.xids().next() as u32).wrapping_sub(xage) {
+            l if l < first => first,
+            l => l,
+        };
+        let frozen = self.cat.frozen_xids.get(&t.oid).map_or(first, |x| *x as u32);
+        let mlimit = match db.multis.lock().next.wrapping_sub(mage) {
+            l if l < FIRST_MULTI => FIRST_MULTI,
+            l => l,
+        };
+        let minmxid = self.cat.min_mxids.get(&t.oid).map_or(FIRST_MULTI, |m| *m as u32);
+        at_or_before(frozen, xlimit) || at_or_before(minmxid, mlimit)
     }
 
     /// vac_update_relstats' relminmxid: the oldest MultiXactId the VACUUM left in a version's

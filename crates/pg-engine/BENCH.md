@@ -473,6 +473,162 @@ A range read's 100 rows are a small part of its 345k instructions (the statement
 the wire); a point select's path (`point.rs`, `Block::seek`) didn't change. Lane A was shared
 with another agent's benchmarks all morning (a pair took 20-30 minutes of waiting): two pairs.
 
+## Short write transactions, round 7 (2026-11-17, agent 243)
+
+HANDOFF "Short write transactions, round 7" has what changed, what was dropped and the leads.
+Kept: an index scan's kill marks left while a writer holds the table's size model
+(`cand/a243`; measured as `c1` = `51b963219` on `61414bc58`, `base2` = `61414bc58`).
+
+Harness: agent 235's (`~/.cache/a243/bench`, copied from `~/.cache/a235/bench`), lane A (servers
+on CPUs 6,7,24,25, 8 GiB; clients on 8,9,26,27), `short_txn` of 100,000 accounts, fsync and
+synchronous_commit on, `CHECKPOINT` and 5 s of quiet before each 10 s run, plain `--profile
+dist` builds through `tools/dist.sh`; instructions and cycles per transaction counted over the
+whole run (generic counters, every server thread), CPU µs/txn the server's user+sys. A pair is
+redone (4 tries) when either run saw more than 1.0 core of other tenants' work on the server
+CPUs; flagged pairs are listed, left out of medians. New this round: arms `bin@K=V` (one binary,
+`ROLL_EXP_K=V` run-time switches, so a change and its absence are the same build) and
+`bench/adj.py`, which fits each pair's log tps (and log cycles) ratio against the pairs'
+foreign-core difference: the intercept is the change at equal foreign load, ± its standard
+error. The host was loaded all day (load averages 20-65); log tps fell 0.45-0.6 per core of
+foreign work in every series, so a pair's tps difference is mostly the load difference unless
+both runs saw the same; cycles per transaction moved 0.04-0.12 per core.
+
+### The kept change, its builds against the origin head
+
+**32 clients, first series**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 (flagged) | 5,096 → 2,902 | -43.1% | -4.61% | +3.6% | +1.8% | +65.1% | 1.41 / 2.65 |
+| 2 (flagged) | 6,364 → 3,779 | -40.6% | -10.70% | +1.9% | +1.4% | +49.2% | 0.88 / 2.28 |
+| 3 | 9,016 → 5,716 | -36.6% | -5.69% | +2.0% | +10.2% | +21.1% | 0.35 / 0.99 |
+| 4 | 6,628 → 8,072 | +21.8% | +8.87% | -6.5% | -14.8% | -23.1% | 0.87 / 0.55 |
+| 5 | 6,752 → 8,008 | +18.6% | +3.59% | -3.0% | -4.6% | -10.1% | 0.99 / 0.63 |
+
+At equal foreign load (`adj.py`): tps: 4 pairs, at equal foreign -0.3% (±8.1% s.e.), per foreign core -0.44 log; user cycles/txn: 4 pairs, at equal foreign -2.9% (±1.5% s.e.), slope +0.04.
+
+**32 clients, second series (load averages 22-34)**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 6,908 → 7,410 | +7.3% | -4.01% | -3.1% | -3.6% | -8.1% | 0.86 / 0.81 |
+| 2 | 7,381 → 8,315 | +12.7% | +2.15% | -6.4% | -8.3% | -12.1% | 0.64 / 0.52 |
+| 3 | 9,023 → 9,199 | +2.0% | +0.77% | -6.4% | -5.7% | -7.9% | 0.30 / 0.53 |
+| 4 | 7,105 → 9,193 | +29.4% | +4.61% | -6.1% | -14.5% | -21.4% | 0.64 / 0.35 |
+| 5 | 7,956 → 7,496 | -5.8% | -0.75% | +3.0% | +6.8% | +6.1% | 0.53 / 0.79 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign +8.7% (±1.9% s.e.), per foreign core -0.48 log; user cycles/txn: 5 pairs, at equal foreign -3.9% (±1.8% s.e.), slope +0.10.
+
+**8 clients, first series**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 9,512 → 7,032 | -26.1% | -2.35% | +8.1% | +21.3% | +31.8% | 0.52 / 0.96 |
+| 2 | 10,371 → 8,131 | -21.6% | -2.77% | +6.4% | +17.8% | +21.8% | 0.26 / 0.83 |
+| 3 | 10,733 → 11,456 | +6.7% | +1.30% | -2.1% | -6.6% | -7.7% | 0.15 / 0.16 |
+| 4 | 9,931 → 10,486 | +5.6% | -0.31% | -1.1% | -1.4% | -1.9% | 0.23 / 0.23 |
+| 5 | 7,754 → 8,033 | +3.6% | -0.96% | -0.3% | -3.9% | -6.2% | 0.82 / 0.53 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign -1.2% (±4.7% s.e.), per foreign core -0.45 log; user cycles/txn: 5 pairs, at equal foreign +0.5% (±1.3% s.e.), slope +0.11.
+
+**8 clients, second series**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 7,349 → 8,893 | +21.0% | +2.22% | -3.1% | -11.1% | -15.5% | 0.88 / 0.61 |
+| 2 | 9,637 → 8,728 | -9.4% | -0.73% | +5.1% | +12.4% | +9.1% | 0.40 / 0.46 |
+| 3 | 9,477 → 9,962 | +5.1% | -2.37% | -2.1% | -2.8% | -4.1% | 0.29 / 0.27 |
+| 4 | 9,878 → 9,598 | -2.8% | +0.21% | -0.0% | +2.3% | -0.6% | 0.24 / 0.31 |
+| 5 | 10,188 → 10,299 | +1.1% | -0.20% | +0.7% | +2.2% | -0.4% | 0.28 / 0.39 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign +1.9% (±2.7% s.e.), per foreign core -0.62 log; user cycles/txn: 5 pairs, at equal foreign +0.2% (±1.2% s.e.), slope +0.14.
+
+**Point selects, 8 clients (point_select, 100,000 rows)**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 72,057 → 55,132 | -23.5% | -0.16% | +5.4% | +15.9% | +26.0% | 0.29 / 0.72 |
+| 2 | 76,491 → 65,527 | -14.3% | -0.00% | +5.1% | +15.1% | +17.2% | 0.22 / 0.41 |
+| 3 | 78,812 → 75,350 | -4.4% | -0.04% | +3.9% | +5.2% | +6.7% | 0.18 / 0.19 |
+| 4 | 72,321 → 71,685 | -0.9% | +0.02% | -1.4% | -0.6% | +1.0% | 0.22 / 0.31 |
+| 5 | 71,642 → 70,119 | -2.1% | +0.02% | -0.1% | -0.2% | +2.0% | 0.28 / 0.44 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign +1.0% (±4.1% s.e.), per foreign core -0.63 log; user cycles/txn: 5 pairs, at equal foreign +0.9% (±2.2% s.e.), slope +0.09.
+
+### The same change and the dropped ones as run-time switches of one binary (`exp2`, on `0ade2f479`)
+
+**Kill marks left while the model is busy, 32 clients**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 8,782 → 8,670 | -1.3% | +0.17% | +0.4% | +4.0% | +1.0% | 0.42 / 0.34 |
+| 2 | 7,857 → 9,935 | +26.4% | +1.50% | -4.5% | -9.8% | -13.8% | 0.83 / 0.36 |
+| 3 | 6,524 → 8,026 | +23.0% | -3.30% | -6.4% | -8.5% | -16.9% | 0.89 / 0.41 |
+| 4 | 7,398 → 9,495 | +28.3% | +3.56% | -4.5% | -13.1% | -20.0% | 0.74 / 0.36 |
+| 5 | 7,029 → 7,892 | +12.3% | +1.76% | -3.6% | -3.6% | -7.5% | 0.75 / 0.66 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign +1.5% (±5.6% s.e.), per foreign core -0.48 log; user cycles/txn: 5 pairs, at equal foreign -0.7% (±1.6% s.e.), slope +0.10.
+
+**Kill marks left while the model is busy, 8 clients**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 (flagged) | 4,968 → 6,835 | +37.6% | +4.62% | -6.6% | -12.8% | -20.1% | 1.76 / 1.28 |
+| 2 | 8,974 → 7,732 | -13.8% | +1.32% | +1.8% | +6.1% | +9.6% | 0.57 / 0.95 |
+| 3 | 9,037 → 9,708 | +7.4% | +4.56% | +1.9% | +0.9% | -3.3% | 0.62 / 0.48 |
+| 4 | 7,652 → 10,512 | +37.4% | +1.10% | +2.3% | -3.7% | -4.3% | 0.34 / 0.30 |
+| 5 | 10,825 → 10,977 | +1.4% | +2.85% | +2.1% | +1.6% | +0.0% | 0.14 / 0.10 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign +8.5% (±6.5% s.e.), per foreign core -0.52 log; user cycles/txn: 5 pairs, at equal foreign +0.8% (±1.4% s.e.), slope +0.09.
+
+**nextval logged ahead without its fsync wait (dropped), 32 clients**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 10,111 → 8,819 | -12.8% | -2.06% | +11.2% | +12.8% | +15.3% | 0.19 / 0.47 |
+| 2 | 6,879 → 6,377 | -7.3% | +6.37% | +3.3% | +4.2% | +6.8% | 0.72 / 0.95 |
+| 3 | 7,744 → 7,020 | -9.3% | -0.19% | +3.6% | +7.3% | +13.5% | 0.49 / 0.69 |
+| 4 | 8,024 → 7,654 | -4.6% | -0.74% | +1.5% | +5.9% | +8.1% | 0.60 / 0.56 |
+| 5 | 9,276 → 9,632 | +3.8% | -2.90% | -3.7% | -5.6% | -6.0% | 0.25 / 0.21 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign -2.0% (±2.4% s.e.), per foreign core -0.36 log; user cycles/txn: 5 pairs, at equal foreign -0.3% (±2.0% s.e.), slope +0.28.
+
+**nextval logged ahead without its fsync wait (dropped), 8 clients**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 8,452 → 9,297 | +10.0% | +1.55% | -2.4% | -6.0% | -8.5% | 0.73 / 0.47 |
+| 2 | 7,972 → 8,490 | +6.5% | +0.34% | -1.4% | -6.7% | -5.2% | 0.77 / 0.79 |
+| 3 | 9,051 → 9,087 | +0.4% | -4.21% | -1.1% | +4.6% | +5.5% | 0.47 / 0.48 |
+| 4 (flagged) | 4,581 → 3,919 | -14.5% | -9.09% | -1.0% | -0.3% | +6.4% | 1.96 / 2.15 |
+| 5 (flagged) | 4,891 → 4,971 | +1.6% | -0.53% | -1.4% | -1.4% | -2.9% | 1.63 / 1.67 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign +0.4% (±2.8% s.e.), per foreign core -0.49 log; user cycles/txn: 5 pairs, at equal foreign -1.4% (±0.1% s.e.), slope +0.03.
+
+**Directed group-commit wakeups (dropped), 32 clients**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 (flagged) | 8,282 → 3,842 | -53.6% | -13.11% | +7.4% | +14.8% | +74.0% | 0.42 / 2.28 |
+| 2 | 9,967 → 6,944 | -30.3% | -0.82% | +15.7% | +28.9% | +36.8% | 0.28 / 0.64 |
+| 3 | 8,549 → 8,935 | +4.5% | -4.08% | -5.5% | -10.0% | -11.3% | 0.34 / 0.35 |
+| 4 | 7,080 → 7,770 | +9.7% | -1.20% | +4.3% | +7.9% | +3.9% | 0.70 / 0.54 |
+| 5 | 10,370 → 8,666 | -16.4% | -5.47% | +7.1% | +13.6% | +14.5% | 0.25 / 0.35 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign -5.7% (±6.8% s.e.), per foreign core -0.40 log; user cycles/txn: 5 pairs, at equal foreign +4.4% (±4.2% s.e.), slope +0.03.
+
+**Directed group-commit wakeups (dropped), 8 clients**
+
+| pair | tps | Δ tps | Δ instr | Δ cycles | Δ CPU | Δ p50 | foreign cores |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 10,727 → 9,337 | -13.0% | -1.95% | +2.6% | +7.0% | +4.4% | 0.13 / 0.26 |
+| 2 | 11,200 → 10,769 | -3.8% | -0.24% | +2.4% | +5.1% | +4.1% | 0.17 / 0.12 |
+| 3 | 9,255 → 7,968 | -13.9% | +2.55% | +2.2% | +4.7% | +3.6% | 0.58 / 0.70 |
+| 4 | 8,839 → 8,614 | -2.5% | -4.66% | -4.8% | -2.6% | -3.8% | 0.61 / 0.50 |
+| 5 | 7,324 → 8,474 | +15.7% | +4.77% | +5.7% | -4.7% | -5.8% | 0.89 / 0.77 |
+
+At equal foreign load (`adj.py`): tps: 5 pairs, at equal foreign -4.5% (±3.1% s.e.), per foreign core -0.83 log; user cycles/txn: 5 pairs, at equal foreign +1.6% (±1.9% s.e.), slope +0.06.
+
 ## Short write transactions, round 6 (2026-11-14/15, agent 235)
 
 HANDOFF "Short write transactions, round 6" has what changed, what was dropped and the leads.
@@ -667,6 +823,108 @@ Dropped (patches in `~/.cache/a235/patches/`):
 | | 32 | -13.1%, -5.8% | -1.9%, -2.0% | +2.8%, -3.0% | +11.6%, +7.7% | 2 |
 | the memtable's skiplist under one epoch pin | 8 | +3.4% | -1.19% | -1.3% (every pair) | -4.7% | 3 |
 | | 32 | -1.9% | about 0 (-1.7, +2.6, -1.7, +1.3) | +0.6% | +2.3% | 4 |
+
+## Executor, round 19 (2026-11-17, agent 244)
+
+HANDOFF "Executor, round 19" has what changed: a parallel worker's nested-loop lookups (inner and
+left joins) a batch of 64 outer rows at a time (entries in key order, every row by one sorted
+multi-get), and a numeric's encoding without allocating. **base** is `61414bc58` (origin's head,
+with agent 238's values prefetch), **head** `eae0f8e2a`; `o000` / `o005` their plain dist builds
+(`tools/dist.sh`: fat LTO, the JCC padding, line tables), `p000` / `p005` their PGO builds
+(`tools/dist-pgo.sh` in a worktree of their own, training on CPUs 0,1,18,19). Harness: agent 238's
+(`~/.cache/a244/tpch/scripts`: `gpass.sh`, `ppass.sh`, `three.sh`, `abw.sh`), lane C, each server
+in its own container on CPUs 14,15,32,33 (`--memory 8g`, host network), the client on 16,17,34,35,
+every pass under `~/.cache/lane-c.lock`; all three servers at `max_parallel_workers_per_gather =
+2`, `max_parallel_workers = 8` and a 2 GB cache (pgrust's set with ALTER SYSTEM, a restart and
+SHOW). TPC-H SF1 from `bench tpch-load --sf 1`, the engine's data directory restored before every
+start. The host ran at load 25-65 all day (other sessions' builds and benchmarks); lane C's CPUs
+had 0.5-2.6 cores of foreign load in nearly every pass, so cycles and walls swing by +-20% (up to
++-50% on queries whose code didn't change) and no gate pass is under the 1.0 foreign-core bar.
+User instructions are exact; cycles are reported for the queries the change runs.
+
+### The lookups and the numeric encoding, gated (plain dist, user instructions and cycles a run, % against base, per round)
+
+| query | instructions % | cycles % |
+|---|---|---|
+| q09 (lineitem, orders, partsupp lookups) | -3.8 / -4.6 / -3.8 | -21 / -23 / -10 |
+| q05 | -2.8 / -2.8 / -3.3 | -19 / +4 / -10 |
+| q08 | -2.4 / -2.7 / -2.5 | -21 / -14 / -11 |
+| q07 (orders by o_custkey, lineitem by l_orderkey) | -1.6 / -1.9 / -1.9 | -31 / -16 / -9 |
+| q03 | +0.1 / +0.4 / -0.4 | -16 / -1 / -10 |
+| q04, q21, q22 (semi / anti: unchanged path) | within +-0.4 (round 1's q22 a broken window) | noise |
+| every other query | within +-1% (round 1's q02 / q11 / q14 / q17 / q22 broken windows) | noise, both ways |
+
+Foreign load per pass: base 2.57 / 1.63 / 1.05, head 1.84 / 2.23 / 1.49 cores. All 22 result hashes
+PostgreSQL's in every pass.
+
+Own-run walls (`abw.sh`: a fresh engine, a warm-up run, 5 runs a pass; 3 alternating pairs a query,
+median of each pass's runs; the host at load 25-50):
+
+| query | base s (3 pairs) | head s | head faster | medians |
+|---|---|---|---|---|
+| q03 | 0.520 / 0.521 / 0.523 | 0.423 / 0.398 / 0.415 | 3 of 3 | 0.521 -> 0.415 |
+| q09 | 1.264 / 1.372 / 1.373 | 1.153 / 1.225 / 1.225 | 3 of 3 | 1.372 -> 1.225 |
+| q07 | 0.600 / 0.788 / 0.918 | 0.477 / 0.709 / 0.715 | 3 of 3 | 0.788 -> 0.709 |
+| q08 | 0.294 / 0.278 / 0.268 | 0.272 / 0.254 / 0.248 | 3 of 3 | 0.278 -> 0.254 |
+| q05 | 0.481 / 0.722 / 0.530 | 0.541 / 0.581 / 0.406 | 2 of 3 | 0.530 -> 0.541 |
+| q04 (path unchanged) | 0.277 / 0.451 / 0.285 | 0.340 / 0.287 / 0.266 | 2 of 3 | 0.285 -> 0.287 |
+
+The numeric encoding alone (`n003` against `n002`, the lookups of an earlier version below it,
+three rounds, 0.5-1.7 foreign cores): user instructions q17 -5.4 / -5.6 / -1.2%, q02 -0.9 / -1.0%
+(its second round a broken window), every other query within +-1%.
+
+Dropped (patches in `~/.cache/a244/patches/`; user instructions, the median of three rounds, % against `0ade2f479`):
+
+| variant | q04 | q21 | q22 | q05 / q07 / q08 / q09 |
+|---|---|---|---|---|
+| `n001`: semi / anti joins and cached tables through the batch, every entry's row fetched | +3.5 | +6.6 | +36.4 | -3.1 / -1.6 / -2.5 / -3.2 |
+| `n002`: semi / anti by the first entry's row, the rest the old way; cached tables row by row | +7.7 | +11.6 | -0.7 | -2.9 / -1.1 / -2.3 / -3.3 |
+| `n004`: first entries, then one multi-get for the outer rows they don't decide | +4.4 | +7.1 | -0.9 | -2.9 / -0.8 / -2.2 / -3.5 |
+
+The same-day three-server run: five interleaved rounds (each PostgreSQL, pgrust and the four roll
+builds, the order rotated; `three.sh`, 3 runs a query a pass after a warm-up pass), 13:10-14:40 at
+host load 20-30. A pass over 1.0 foreign core isn't counted (passes by foreign load: PostgreSQL 1.52*
+0.20 0.35 0.68 0.27, pgrust 0.64 0.36 0.51 0.62 0.45, base 0.77 0.92 0.68 0.73 2.07*, head 1.31* 0.50
+0.74 1.36* 0.63, base PGO 0.46 0.34 0.97 0.55 1.45*, head PGO 0.95 0.52 1.34* 0.98 0.50). All 22 result
+hashes PostgreSQL's in every pass.
+
+### TPC-H SF1, plain dist (medians of the clean passes: 4 PostgreSQL, 4 base, 3 head, 5 pgrust)
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| PostgreSQL s | 2.62 | 0.24 | 0.51 | 0.21 | 0.37 | 0.50 | 0.45 | 0.19 | 1.61 | 0.77 | 0.09 | 0.69 | 0.88 | 0.21 | 0.39 | 0.29 | 0.91 | 3.36 | 0.07 | 0.15 | 0.68 | 0.09 | 15.29 |
+| base s | 0.50 | 0.50 | 0.48 | 0.28 | 0.47 | 0.39 | 0.57 | 0.30 | 1.30 | 0.69 | 0.17 | 0.49 | 1.07 | 0.23 | 0.39 | 0.34 | 0.74 | 1.90 | 0.09 | 0.30 | 0.68 | 0.12 | 12.01 |
+| head s | 0.53 | 0.46 | 0.42 | 0.28 | 0.39 | 0.38 | 0.50 | 0.28 | 1.28 | 0.68 | 0.18 | 0.45 | 1.11 | 0.22 | 0.41 | 0.41 | 0.81 | 1.94 | 0.07 | 0.30 | 0.64 | 0.12 | 11.84 |
+| pgrust s | 0.43 | 0.17 | 0.35 | 0.15 | 0.23 | 0.40 | 0.41 | 0.15 | 1.63 | 0.91 | 0.06 | 0.65 | 0.39 | 0.06 | 0.23 | 0.24 | 0.61 | 2.19 | 0.04 | 0.11 | 0.43 | 0.05 | 9.90 |
+| PostgreSQL CPU, s | 7.85 | 0.32 | 1.33 | 0.53 | 1.02 | 1.29 | 1.29 | 0.57 | 4.32 | 2.01 | 0.10 | 1.97 | 2.32 | 0.54 | 1.08 | 0.69 | 1.04 | 8.41 | 0.20 | 0.17 | 1.92 | 0.28 | 39.20 |
+| base CPU, s | 1.49 | 0.50 | 1.40 | 0.81 | 1.04 | 1.10 | 1.63 | 0.61 | 3.83 | 1.93 | 0.17 | 1.44 | 2.74 | 0.51 | 1.10 | 0.97 | 1.60 | 6.20 | 0.21 | 0.30 | 1.99 | 0.35 | 31.91 |
+| head CPU, s | 1.57 | 0.47 | 1.24 | 0.82 | 0.90 | 1.09 | 1.34 | 0.53 | 3.45 | 1.89 | 0.18 | 1.30 | 2.78 | 0.51 | 1.12 | 1.09 | 1.65 | 6.34 | 0.19 | 0.30 | 1.92 | 0.35 | 31.03 |
+| pgrust CPU, s | 0.94 | 0.22 | 0.69 | 0.31 | 0.43 | 0.86 | 0.90 | 0.30 | 3.15 | 0.99 | 0.06 | 1.10 | 0.77 | 0.14 | 0.44 | 0.38 | 0.67 | 2.39 | 0.08 | 0.12 | 0.89 | 0.11 | 15.94 |
+
+### TPC-H SF1, PGO (the same rounds: 4 PostgreSQL, 4 base PGO, 4 head PGO, 5 pgrust)
+
+| | q01 | q02 | q03 | q04 | q05 | q06 | q07 | q08 | q09 | q10 | q11 | q12 | q13 | q14 | q15 | q16 | q17 | q18 | q19 | q20 | q21 | q22 | sum |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| PostgreSQL s | 2.62 | 0.24 | 0.51 | 0.21 | 0.37 | 0.50 | 0.45 | 0.19 | 1.61 | 0.77 | 0.09 | 0.69 | 0.88 | 0.21 | 0.39 | 0.29 | 0.91 | 3.36 | 0.07 | 0.15 | 0.68 | 0.09 | 15.29 |
+| base PGO s | 0.48 | 0.41 | 0.42 | 0.22 | 0.36 | 0.34 | 0.49 | 0.24 | 1.16 | 0.57 | 0.14 | 0.41 | 0.89 | 0.19 | 0.33 | 0.32 | 0.58 | 1.46 | 0.06 | 0.25 | 0.54 | 0.11 | 9.95 |
+| head PGO s | 0.46 | 0.39 | 0.36 | 0.21 | 0.32 | 0.36 | 0.42 | 0.23 | 1.00 | 0.57 | 0.15 | 0.43 | 0.92 | 0.19 | 0.38 | 0.29 | 0.61 | 1.48 | 0.05 | 0.29 | 0.62 | 0.12 | 9.84 |
+| pgrust s | 0.43 | 0.17 | 0.35 | 0.15 | 0.23 | 0.40 | 0.41 | 0.15 | 1.63 | 0.91 | 0.06 | 0.65 | 0.39 | 0.06 | 0.23 | 0.24 | 0.61 | 2.19 | 0.04 | 0.11 | 0.43 | 0.05 | 9.90 |
+| PostgreSQL CPU, s | 7.85 | 0.32 | 1.33 | 0.53 | 1.02 | 1.29 | 1.29 | 0.57 | 4.32 | 2.01 | 0.10 | 1.97 | 2.32 | 0.54 | 1.08 | 0.69 | 1.04 | 8.41 | 0.20 | 0.17 | 1.92 | 0.28 | 39.20 |
+| base PGO CPU, s | 1.38 | 0.40 | 1.19 | 0.62 | 0.81 | 0.95 | 1.38 | 0.49 | 3.38 | 1.57 | 0.15 | 1.21 | 2.19 | 0.42 | 0.94 | 0.89 | 1.31 | 4.76 | 0.16 | 0.25 | 1.60 | 0.29 | 26.34 |
+| head PGO CPU, s | 1.36 | 0.40 | 1.03 | 0.62 | 0.69 | 0.97 | 1.15 | 0.46 | 2.90 | 1.58 | 0.15 | 1.19 | 2.23 | 0.41 | 1.06 | 0.82 | 1.31 | 4.74 | 0.15 | 0.30 | 1.79 | 0.33 | 25.66 |
+| pgrust CPU, s | 0.94 | 0.22 | 0.69 | 0.31 | 0.43 | 0.86 | 0.90 | 0.30 | 3.15 | 0.99 | 0.06 | 1.10 | 0.77 | 0.14 | 0.44 | 0.38 | 0.67 | 2.39 | 0.08 | 0.12 | 0.89 | 0.11 | 15.94 |
+
+- Head against base: plain 12.01 -> 11.84 s wall, CPU 31.91 -> 31.03 s (q09 3.83 -> 3.45, q07 1.63 ->
+  1.34, q05 1.04 -> 0.90, q03 1.40 -> 1.24, q08 0.61 -> 0.53 CPU s); PGO 9.95 -> 9.84 s wall, CPU 26.34
+  -> 25.66 s (q09 3.38 -> 2.90, q07 1.38 -> 1.15, q05 0.81 -> 0.69, q03 1.19 -> 1.03). The other
+  queries' moves both ways (q15 PGO 0.33 -> 0.38 s, q21 0.54 -> 0.62, q16 plain 0.34 -> 0.41) are on
+  paths the head doesn't change (user instructions within +-1% in the gate).
+- Roll's PGO head against PostgreSQL 9.84 s against 15.29 (0.64x), CPU 25.66 against 39.20; against
+  pgrust 9.84 against 9.90 s (0.99x), CPU 1.61x. Still slower than PostgreSQL (PGO head): q02 (0.39 /
+  0.24), q20 (0.29 / 0.15), q11 (0.15 / 0.09), q08 (0.23 / 0.19), q22 (0.12 / 0.09), q13 (0.92 / 0.88);
+  level: q04, q15. q07 now 0.42 against 0.45.
+- Peak memory (VmHWM over a pass): base 1,693-1,701 MiB, head 1,691-1,695, base PGO 1,686-1,690, head
+  PGO 1,689-1,706; PostgreSQL's container after a pass 1,567 MiB (anon + shmem), pgrust's 1,747-1,771.
 
 ## Executor, round 18 (2026-11-15, agent 238)
 

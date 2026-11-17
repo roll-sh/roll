@@ -1932,10 +1932,6 @@ impl Heap {
         let Some((krow, (ob, ooff))) = self.locate_row(old_key, v) else {
             return (self.insert(new_key, len, xid, cid, &mut InsertMode::single()), false);
         };
-        let r = match self.pages[ob as usize].tup(ooff) {
-            Some(o) => replace((ob, ooff), &o),
-            None => Replace { cmax: 0, xmax: crate::txn::multixact::Xmax { raw: xid, bits: 0 }, carried: Default::default() },
-        };
         // (No pruning here: heap_update leaves that to the scans that read the page.)
         let free = self.pages[ob as usize].heap_free();
         let (nb, same) = if maxalign(len) <= free {
@@ -1949,7 +1945,6 @@ impl Heap {
         let mut t = Self::new_tup(len, xid);
         t.heap_only = hot;
         t.cid = cid;
-        t.set_xmax(r.carried);
         // (The key stays: its row, found above, is the new version's.)
         if !moved {
             t.row = krow;
@@ -1958,7 +1953,10 @@ impl Heap {
         self.set_prev((nb, noff), Some((ob, ooff)));
         let op = &mut self.pages[ob as usize];
         let mut old_row = super::keymap::NO_ROW;
+        let mut carried = crate::txn::multixact::Xmax::NONE;
         op.update_tup(ooff, |o| {
+            let r = replace((ob, ooff), o);
+            carried = r.carried;
             o.cid = r.cmax;
             o.set_xmax(r.xmax);
             o.set_hot_updated(hot);
@@ -1971,6 +1969,10 @@ impl Heap {
         op.set_prunable(xid);
         op.set_all_visible(false, &mut self.visible_pages);
         self.publish_page(ob);
+        // (Lockers of the old version still running lock the new one too.)
+        if carried.raw != 0 {
+            self.pages[nb as usize].update_tup(noff, |t| t.set_xmax(carried));
+        }
         self.disordered = true;
         let row = if moved {
             self.keys.remove(old_key);
