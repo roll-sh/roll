@@ -130,6 +130,33 @@ async fn a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its
 
     assert!(roll(&api, "", &["token", "client", "revoke", client_id]).status.success());
     assert!(!roll(&api, &token, &["db", "list"]).status.success());
+
+    // GitHub Actions as the credential: the step to paste, and the one repository and ref trusted.
+    let made = roll(&api, "", &["token", "client", "create", "ci", "--preset", "read-only", "--github", "acme/web", "--ref", "refs/heads/main"]);
+    let step = String::from_utf8_lossy(&made.stdout);
+    assert!(made.status.success() && step.contains("grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer") && step.contains("::add-mask::"), "{step}");
+    let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
+    assert_eq!(list[0]["trusts"]["subject"], "repo:acme/web:ref:refs/heads/main");
+    let words = String::from_utf8_lossy(&roll(&api, "", &["token", "client", "list"]).stdout).to_string();
+    assert!(words.contains("trusts token.actions.githubusercontent.com: repo:acme/web:ref:refs/heads/main  (never signed in)"), "{words}");
+    assert!(!roll(&api, "", &["token", "client", "create", "x", "--preset", "read-only", "--github", "acme"]).status.success(), "owner/repo");
+    let lab = roll(&api, "", &["token", "client", "create", "lab", "--preset", "read-only", "--gitlab", "acme/platform/api", "--ref", "main"]);
+    assert!(lab.status.success() && String::from_utf8_lossy(&lab.stdout).contains("id_tokens:"), "{lab:?}");
+    let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
+    assert_eq!(list[0]["trusts"]["subject"], "project_path:acme/platform/api:ref_type:branch:ref:main");
+    // Any CI system's: an issuer, a subject, claims; a shared issuer still names one tenant.
+    let bk = roll(&api, "", &["--json", "token", "client", "create", "bk", "--preset", "read-only", "--issuer", "https://agent.buildkite.com", "--subject", "organization:acme:pipeline:deploy:*", "--claim", "build_branch=main"]);
+    assert!(bk.status.success(), "{bk:?}");
+    let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
+    assert_eq!((list[0]["trusts"]["subject"].as_str(), list[0]["trusts"]["claims"]["build_branch"].as_str()), (Some("organization:acme:pipeline:deploy:*"), Some("main")));
+    assert!(!roll(&api, "", &["token", "client", "create", "x", "--preset", "read-only", "--issuer", "https://agent.buildkite.com", "--subject", "*"]).status.success(), "a shared issuer names one tenant");
+    // A client on a secret moves to CI's own identity, keeping its id (the checkup's fix).
+    let moving = json_of(&roll(&api, "", &["--json", "token", "client", "create", "moving", "--preset", "read-only"]));
+    let mid = moving["client_id"].as_str().unwrap();
+    assert!(roll(&api, "", &["token", "client", "rotate", mid, "--github", "acme/api", "--environment", "production"]).status.success());
+    let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
+    let moved = list.as_array().unwrap().iter().find(|c| c["client_id"] == mid).unwrap();
+    assert_eq!((moved["trusts"]["subject"].as_str(), moved["signs_with_key"].as_bool()), (Some("repo:acme/api:environment:production"), Some(false)), "{moved}");
 }
 
 /// `roll login` signs a person's CLI in through the browser: it registers itself, the consent
