@@ -801,7 +801,8 @@ async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
     if prompts {
         agreed["promptsListChanged"] = json!(true);
     }
-    let ack = json!({ "jsonrpc": "2.0", "method": "notifications/subscriptions/acknowledged", "params": { "notifications": agreed } });
+    // Tagged with the subscription like everything on its stream: a client matches the ack by it.
+    let ack = json!({ "jsonrpc": "2.0", "method": "notifications/subscriptions/acknowledged", "params": { "notifications": agreed, "_meta": { "io.modelcontextprotocol/subscriptionId": id } } });
     let grant = match &ctx.principal {
         Principal::Grant(g) => Some(g.id.to_string()),
         Principal::Operator => None,

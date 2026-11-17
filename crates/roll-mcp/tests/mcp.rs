@@ -711,6 +711,7 @@ async fn a_subscription_hears_the_tools_change() {
     };
     let ack = next().await;
     assert_eq!((ack["method"].as_str(), &ack["params"]["notifications"]), (Some("notifications/subscriptions/acknowledged"), &json!({ "toolsListChanged": true })), "only what roll sends");
+    assert_eq!(ack["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"], "listen:1", "a client matches the ack by it");
     let asked = d.tool(&asker, "access_request_access", json!({ "product": "postgres", "action": "read", "for": "15m", "reason": "list the databases" })).await;
     let apr = asked["structuredContent"]["id"].as_str().unwrap_or_else(|| panic!("{asked}")).to_string();
     assert_eq!(d.http(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::OK);

@@ -266,6 +266,11 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     remembered, the token edited. Each carries `_meta["io.modelcontextprotocol/subscriptionId"]`.
     The grant is looked up again every 5 s, never cached; when it stops working, or after an hour,
     the stream answers the listen request (`result: {}`) and closes, and the client listens again.
+    Checked live with the official TypeScript SDK v2 (`live/sdk2/listen.mjs`): its `listChanged`
+    option opens the subscription by itself, and an access request approved mid-session refreshes
+    its tools (9 to 18). That run found two interop bugs, both fixed: the ack must carry the
+    subscription id too (the SDK matches the ack by it), and the SDK sends `notifications/cancelled`
+    without `Mcp-Method` (a notification may leave it out; one present must still match).
   - **MCP Apps** (`roll_mcp::ui`, `io.modelcontextprotocol/ui`, SEP-1865): for a host that
     declares HTML views (`mimeTypes: ["text/html;profile=mcp-app"]`), the read-only tools that
     answer rows (lists, queries, logs, reads, usage) point at `ui://roll/table` (`_meta.ui`). The
