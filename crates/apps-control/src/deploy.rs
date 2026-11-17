@@ -587,13 +587,49 @@ impl Apps {
         let (Some(sources), Some(rev)) = (self.deps.sources.clone(), d.revision.clone()) else { return };
         let (sid, e) = (d.service.clone(), d.environment.clone());
         let Ok((svc, env)) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await else { return };
-        let Source::Repo { repo, .. } = &svc.source else { return };
         let status = crate::integrations::CommitStatus {
             context: format!("roll/apps/{}/{}", svc.name, d.environment),
             state,
             description: what.chars().take(140).collect(),
             target_url: Some(self.url(&env.slug)),
         };
+        // A Git URL service connected to roll's GitHub App: through its installation, a commit
+        // status and a GitHub Deployment of the environment (made when it starts, then its state).
+        if let Source::Git { url, .. } = &svc.source {
+            let Some((app, installation, owner, repo)) = self.github_for(&svc.id, url).await else { return };
+            if let Err(err) = app.status(installation, &owner, &repo, &rev, &status).await {
+                warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a deploy's commit status didn't post");
+            }
+            let did = d.id.clone();
+            let known = self.db(move |s| s.github_deployment(&did)).await.ok().flatten();
+            let github = match known {
+                Some(g) => Some(g),
+                None if state == "pending" => match app.deployment(installation, &owner, &repo, &rev, &d.environment, d.environment == crate::model::PRODUCTION, env.ephemeral).await {
+                    Ok(g) => {
+                        let did = d.id.clone();
+                        let _ = self.db(move |s| s.set_github_deployment(&did, g)).await;
+                        Some(g)
+                    }
+                    Err(err) => {
+                        warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a GitHub Deployment wasn't made");
+                        None
+                    }
+                },
+                None => None,
+            };
+            if let Some(g) = github {
+                let gh_state = match state {
+                    "pending" => "in_progress",
+                    s => s,
+                };
+                let url = (state == "success").then(|| self.url(&env.slug));
+                if let Err(err) = app.deployment_status(installation, &owner, &repo, g, gh_state, url.as_deref(), &status.description).await {
+                    warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a GitHub Deployment's state didn't post");
+                }
+            }
+            return;
+        }
+        let Source::Repo { repo, .. } = &svc.source else { return };
         if let Err(err) = sources.set_status(repo, &rev, &status).await {
             warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a deploy's commit status didn't post");
         }
@@ -1667,6 +1703,14 @@ impl Apps {
                     self.judge_alerts(&l).await;
                 }
             }
+            // roll's GitHub App's events for the services here, every second.
+            if self.github.get().is_some() && !self.github_running.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    this.run_github_events().await;
+                    this.github_running.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
+            }
             if n.is_multiple_of(10) && !self.scaling.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 let this = self.clone();
                 tokio::spawn(async move {
@@ -1721,7 +1765,8 @@ impl Apps {
                         || self.db(move |s| s.environments(&sid)).await.is_ok_and(|envs| envs.iter().any(|e| e.run.get("min_instances").and_then(Value::as_u64).is_some_and(|n| n > 0)));
                     let always = svc.run.kind != RunType::Web || floor;
                     let sid = svc.id.clone();
-                    let pending = self.db(move |s| s.pending_deployments(&sid)).await.map(|p| !p.is_empty()).unwrap_or(false);
+                    // Pending deploys, or the GitHub App's events waiting to run there.
+                    let pending = self.db(move |s| Ok(!s.pending_deployments(&sid)?.is_empty() || s.has_github_events(&sid)?)).await.unwrap_or(false);
                     if !(always || pending) {
                         continue;
                     }

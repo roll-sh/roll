@@ -671,6 +671,15 @@ pub enum AppsCmd {
         #[arg(long)]
         remove: bool,
     },
+    /// Connect a Git URL service on GitHub to roll's GitHub App (the operator's: installations
+    /// span tenants): fetches with its installation's tokens, deploys as commit statuses.
+    /// `--remove` disconnects it.
+    Github {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long)]
+        remove: bool,
+    },
     /// Scale to zero now.
     Sleep {
         #[command(flatten)]
@@ -3117,6 +3126,12 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 let user = username.ok_or_else(|| anyhow::anyhow!("--username, with the password or token on stdin (or --remove)"))?;
                 api.call(reqwest::Method::PUT, &path, Some(json!({ "username": user, "password": secret_from_stdin("the password or token")? }))).await?
             }
+        }
+        AppsCmd::Github { target, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/services/{}/github", enc(&s(&svc["id"])));
+            let method = if remove { reqwest::Method::DELETE } else { reqwest::Method::PUT };
+            api.call(method, &path, None).await?
         }
         AppsCmd::GitLogin { target, username, remove } => {
             let svc = service(api, &target).await?;

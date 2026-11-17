@@ -74,6 +74,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries", get(deliveries))
         .route("/v1/apps/services/{id}/registry", put(put_registry).delete(delete_registry))
         .route("/v1/apps/services/{id}/git-login", put(put_git_login).delete(delete_git_login))
+        .route("/v1/apps/services/{id}/github", put(put_github).delete(delete_github))
         .route("/v1/apps/services/{id}/environments", get(environments))
         .route(env, get(get_env).put(put_env).delete(delete_env))
         .route(&format!("{env}/deploys"), get(deploys).post(create_deploy).layer(DefaultBodyLimit::max(apps.cfg.upload_max)))
@@ -574,6 +575,18 @@ async fn delete_git_login(State(apps): S, Path(id): Path<String>, ext: Extension
     ok(s)
 }
 
+async fn put_github(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    let s = apps.put_github(&id).await?;
+    apps.audit("github.connected", &id, "", actor(&ext), json!({ "repo": s.github.as_ref().map(|g| g.repo.clone()), "installation": s.github.as_ref().map(|g| g.installation) })).await;
+    ok(s)
+}
+
+async fn delete_github(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    let s = apps.delete_github(&id).await?;
+    apps.audit("github.disconnected", &id, "", actor(&ext), json!({})).await;
+    ok(s)
+}
+
 async fn put_registry(State(apps): S, Path(id): Path<String>, ext: Extensions, b: Bytes) -> R {
     let s = apps.put_registry(&id, body(&b)?).await?;
     apps.audit("registry.set", &id, "", actor(&ext), json!({ "server": s.registry.as_ref().map(|r| r.server.clone()) })).await;
@@ -975,6 +988,7 @@ async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, 
     let d = match apps.run_hook(&id, &env, &token, q.image, payload).await? {
         crate::hooks::HookOutcome::Deployed(d) => *d,
         crate::hooks::HookOutcome::Ignored(why) => return ok(json!({ "ignored": why })),
+        crate::hooks::HookOutcome::Plain => unreachable!("run_hook deploys a plain call"),
     };
     // The gate never saw it: who called is in the service's activity.
     let address = ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_string());

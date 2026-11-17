@@ -66,6 +66,22 @@ CREATE TABLE IF NOT EXISTS registry_auth (
     username TEXT NOT NULL,
     sealed TEXT NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS github_events (
+    id TEXT PRIMARY KEY,
+    service TEXT NOT NULL,
+    event TEXT NOT NULL,
+    body TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS github_deployments (
+    deployment TEXT PRIMARY KEY,
+    github INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS git_github (
+    service TEXT PRIMARY KEY,
+    installation INTEGER NOT NULL,
+    repo TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS git_auth (
     service TEXT PRIMARY KEY,
     host TEXT NOT NULL,
@@ -764,7 +780,7 @@ impl Store {
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1791,6 +1807,72 @@ impl Store {
     pub fn git_login_secret(&self, service: &str) -> Result<Option<(GitLogin, String)>> {
         let row: Option<(String, String, String)> = self.db.query_row("SELECT host, username, sealed FROM git_auth WHERE service = ?", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
         row.map(|(host, username, sealed)| Ok((GitLogin { host, username }, self.sealer.open(&format!("git:{service}"), &sealed)?))).transpose()
+    }
+
+    // ── roll's GitHub App on a Git URL service ──
+
+    pub fn set_git_github(&self, service: &str, installation: u64, repo: &str) -> Result<()> {
+        self.db.execute(
+            "INSERT INTO git_github (service, installation, repo) VALUES (?, ?, ?) ON CONFLICT (service) DO UPDATE SET installation = excluded.installation, repo = excluded.repo",
+            params![service, installation as i64, repo],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_git_github(&self, service: &str) -> Result<()> {
+        self.db.execute("DELETE FROM git_github WHERE service = ?", [service])?;
+        Ok(())
+    }
+
+    /// The GitHub Deployment a deployment posted (`report`), so its later states go to it.
+    pub fn set_github_deployment(&self, deployment: &str, github: u64) -> Result<()> {
+        self.db.execute("INSERT INTO github_deployments (deployment, github) VALUES (?, ?) ON CONFLICT (deployment) DO NOTHING", params![deployment, github as i64])?;
+        Ok(())
+    }
+
+    pub fn github_deployment(&self, deployment: &str) -> Result<Option<u64>> {
+        Ok(self.db.query_row("SELECT github FROM github_deployments WHERE deployment = ?", [deployment], |r| r.get::<_, i64>(0)).optional()?.map(|g| g as u64))
+    }
+
+    /// The services connected to `repo` (`owner/name`, any case) through `installation`.
+    pub fn connected_to(&self, installation: u64, repo: &str) -> Result<Vec<String>> {
+        let rows: Vec<(String, String)> = self.db.query("SELECT service, repo FROM git_github WHERE installation = ?", [installation as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.into_iter().filter(|(_, r)| r.eq_ignore_ascii_case(repo)).map(|(s, _)| s).collect())
+    }
+
+    /// An App event queued for a service's owner (`github_events`).
+    pub fn queue_github_event(&self, service: &str, event: &str, body: &str) -> Result<()> {
+        self.db.execute("INSERT INTO github_events (id, service, event, body, created_at) VALUES (?, ?, ?, ?, ?)", params![random(16), service, event, body, self.now()?])?;
+        Ok(())
+    }
+
+    /// The services with App events queued.
+    pub fn github_event_services(&self) -> Result<Vec<String>> {
+        Ok(self.db.query("SELECT DISTINCT service FROM github_events LIMIT 1000", (), |r| r.get(0))?)
+    }
+
+    /// A service's queued App events, oldest first (at most 100).
+    pub fn github_events_of(&self, service: &str) -> Result<Vec<(String, String, String, String)>> {
+        Ok(self.db.query("SELECT id, service, event, body FROM github_events WHERE service = ? ORDER BY created_at, id LIMIT 100", [service], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?)
+    }
+
+    /// Whether a service has App events waiting (the keeper gives it an owner to run them).
+    pub fn has_github_events(&self, service: &str) -> Result<bool> {
+        Ok(self.db.query_row("SELECT 1 FROM github_events WHERE service = ? LIMIT 1", [service], |_| Ok(())).optional()?.is_some())
+    }
+
+    pub fn expire_github_events(&self, before: i64) -> Result<()> {
+        self.db.execute("DELETE FROM github_events WHERE created_at < ?", [before])?;
+        Ok(())
+    }
+
+    /// Claim a queued App event: whether this call took it (the row goes in the same statement).
+    pub fn take_github_event(&self, id: &str) -> Result<bool> {
+        Ok(self.db.execute("DELETE FROM github_events WHERE id = ?", [id])? == 1)
+    }
+
+    pub fn git_github(&self, service: &str) -> Result<Option<GitHubLink>> {
+        Ok(self.db.query_row("SELECT installation, repo FROM git_github WHERE service = ?", [service], |r| Ok(GitHubLink { installation: r.get::<_, i64>(0)? as u64, repo: r.get(1)? })).optional()?)
     }
 
     // ── private environments ──
