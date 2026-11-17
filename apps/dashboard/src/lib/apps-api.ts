@@ -533,6 +533,8 @@ export interface Environment extends EnvironmentSummary {
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
   waiting_for_ci?: string | null;
+  /** `egress` roll: its builds get no secret values. */
+  build_closed?: boolean;
   /** Base images the live deployment was built on that have moved since in their registries. */
   base_updated?: string[];
   /** Paused: nothing runs, wakes, deploys or is scheduled. Absent: not paused. */

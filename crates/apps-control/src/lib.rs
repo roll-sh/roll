@@ -1369,6 +1369,7 @@ impl Apps {
             scaling,
             wait_for_ci: r.wait_for_ci,
             waiting_for_ci,
+            build_closed: r.egress.closed(),
             base_updated: match r.active.clone() {
                 Some(a) => self.db(move |s| s.get_state(&format!("base_moved:{a}"))).await.ok().flatten().and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default(),
                 None => Vec::new(),

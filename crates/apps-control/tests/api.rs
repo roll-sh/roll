@@ -2981,6 +2981,26 @@ async fn a_moved_base_image_is_said_and_built_again() {
     assert!(w.fake.built.lock().last().unwrap().0, "without the cache");
 }
 
+/// A closed environment's build gets none of its secret values (a build has the default network,
+/// so a fork's build step can't send them out), only the rest; its instances still get them all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_environments_build_gets_no_secret_values() {
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let (st, b) = call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"set": {"API_TOKEN": "tok_9f8e7d6c5b", "DATABASE_URL": "postgres://app:tok_9f8e7d6c5b@db/app", "GREETING": "hello-world"}, "seal": ["API_TOKEN"]}))).await;
+    assert!(st.is_success(), "{b}");
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll"}}))).await;
+    assert_eq!((st, e["build_closed"].as_bool()), (StatusCode::OK, Some(true)), "{e}");
+    let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({}))).await;
+    settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    let vars = w.fake.build_vars.lock().last().cloned().unwrap();
+    assert!(vars.contains(&"GREETING".to_string()) && !vars.contains(&"API_TOKEN".to_string()) && !vars.contains(&"DATABASE_URL".to_string()), "{vars:?}");
+}
+
 /// A crowd at a sleeping service wakes one instance; those waiting on a start slower than the
 /// wake timeout get a 503 page that says when to try again, and the retry gets the app.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

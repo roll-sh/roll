@@ -1163,6 +1163,10 @@ pub struct Environment {
     pub wait_for_ci: bool,
     /// The push waiting for its checks, if one is.
     pub waiting_for_ci: Option<String>,
+    /// Its builds get no secret values (`egress` `roll`: a build has the default network, so it
+    /// isn't given what it could send out).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub build_closed: bool,
     /// Base images the live deployment was built on that have moved since in their registries:
     /// a build now would get their fixes.
     #[serde(skip_serializing_if = "Vec::is_empty")]
