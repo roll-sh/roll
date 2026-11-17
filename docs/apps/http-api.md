@@ -86,7 +86,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel` | | `Deployment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollout` | `{action: "advance" \| "all" \| "abort"}` | 202 `{deployment}`; 409 when it isn't waiting | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/restart` | | 202 `Environment` | deploy* |
-| `POST /v1/apps/services/{id}/environments/{env}/cache/purge` | `{ paths? }` (1–100 absolute paths, any query; a trailing `*` is a prefix; none: everything) | `{ purged }`: how many kept answers went (on-demand revalidation, "Public traffic") | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/cache/purge` | `{ paths?, tags? }` (1–100 absolute paths, any query, a trailing `*` a prefix; 1–100 tags its answers carried, any case; neither: everything) | `{ purged }`: how many kept answers went (on-demand revalidation, "Public traffic") | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/instances/{name}/restart` | | `Environment` (a web service's: a fresh instance answers before this one drains; 404 for no such instance, 409 if the fresh one didn't start: this one keeps serving) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/sleep` | | `Environment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/wake` | | `Environment` | write (it starts compute someone pays for; a visitor's request wakes a public environment through the proxy, not this route) |
@@ -680,7 +680,10 @@ the environment's next GET or HEAD of the same path and query (and the headers i
 from the owner's cache, before anything wakes: `X-Roll-Cache: HIT`, `STALE` (fetched again in the
 background), or `MISS` when it was just kept, with `Age`. A request with `Authorization`, a
 deployment's own URL, a gradual rollout and a preview's feedback page never use it. A new live
-deployment empties it, and so does `POST …/cache/purge` (all of it, or some paths).
+deployment empties it, and so does `POST …/cache/purge` (all of it, some paths, or some tags).
+An answer's tags are its `Cache-Tag`, `Netlify-Cache-Tag` and `Vercel-Cache-Tag` (comma-separated)
+and `Surrogate-Key` (space-separated), at most 128, matched in any case; those headers never reach
+a visitor, kept or not.
 
 `POST /_roll/otlp/{id}/{env}/{token}/v1/{traces|logs|metrics}` on the apps listener (any host;
 not the API) takes an environment's traces, log records and metrics from its instances: OTLP/HTTP

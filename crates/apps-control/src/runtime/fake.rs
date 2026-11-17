@@ -5,7 +5,8 @@
 //! variables: `FAKE_UNHEALTHY=1` answers 500 on every path, `FAKE_BOOT_MS` delays its first
 //! answer, `FAKE_SLOW_MS` delays every answer (requests pile up; one still waiting when the instance
 //! stops answers 502, as a killed process's would; `/sleep/<ms>` is one such request), `FAKE_MISSING=<prefix>` answers
-//! 404 for paths under it, `FAKE_CACHE=<value>` answers with it as `Cache-Control`, and counts
+//! 404 for paths under it, `FAKE_CACHE=<value>` answers with it as `Cache-Control` (and `Cache-Tag: <the path's first
+//! segment>, all`), and counts
 //! the requests it answers at `/count`, `FAKE_EXIT=<code>` makes it a
 //! job that exits with that code (cron runs, workers). The fake builder fails a build whose tree
 //! has a file `FAIL_BUILD`, and takes as many milliseconds as a file `SLOW_BUILD` says.
@@ -281,6 +282,10 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent }))).into_response();
             if let Some(c) = cache {
                 r.headers_mut().insert(axum::http::header::CACHE_CONTROL, c);
+                let seg = req.uri().path().trim_start_matches('/').split('/').next().unwrap_or("").to_string();
+                if let Ok(t) = axum::http::HeaderValue::from_str(&format!("{seg}, all")) {
+                    r.headers_mut().insert("cache-tag", t);
+                }
             }
             r
         }

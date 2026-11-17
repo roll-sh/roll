@@ -708,12 +708,15 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
-    /// Drop roll's cached answers (on-demand revalidation): these paths (`/blog/*` for a prefix),
-    /// or everything.
+    /// Drop roll's cached answers (on-demand revalidation): these paths (`/blog/*` for a prefix)
+    /// and those tagged `--tag` (the app's `Cache-Tag` or `Surrogate-Key`), or everything.
     Purge {
         #[command(flatten)]
         target: Target,
         paths: Vec<String>,
+        /// A tag the app's answers carry (repeat for more).
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
     },
     /// Visitors and page views from the access log (no script, no cookie): totals, top pages,
     /// referring sites and countries.
@@ -3359,9 +3362,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Purge { target, paths } => {
+        AppsCmd::Purge { target, paths, tags } => {
             let svc = service(api, &target).await?;
-            let body = if paths.is_empty() { serde_json::json!({}) } else { serde_json::json!({ "paths": paths }) };
+            let mut body = serde_json::json!({});
+            if !paths.is_empty() {
+                body["paths"] = serde_json::json!(paths);
+            }
+            if !tags.is_empty() {
+                body["tags"] = serde_json::json!(tags);
+            }
             api.post(&format!("{}/cache/purge", env_path(&svc, &target.env)), body).await?
         }
         AppsCmd::Github { target, remove } => {
