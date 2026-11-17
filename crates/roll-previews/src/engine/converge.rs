@@ -82,6 +82,95 @@ impl Engine {
         Ok(())
     }
 
+    /// One data resource of a preview brought to what its rules want (branched, reset, masked,
+    /// given credentials): `(whether it was reset, a problem to say)`. The resources of a preview
+    /// are independent, so a converge runs them together.
+    async fn converge_resource(&self, r: &Row, s: &Settings, name: &str, res: ResourceRow, reset_due: bool, asked: &[String]) -> anyhow::Result<(bool, Option<String>)> {
+        let mut reset = false;
+        let key = format!("{}:{}", res.kind.as_str(), res.parent);
+        let b = match self.brancher(res.kind) {
+            Ok(b) => b.clone(),
+            Err(e) => {
+                let msg = e.to_string();
+                self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
+                    x.state = ResourceState::Failed;
+                    x.error = Some(msg.clone());
+                })?;
+                return Ok((false, Some(msg)));
+            }
+        };
+        match &res.r#ref {
+            None => {
+                // As of `data_at` where the product keeps history (structure-only needs none).
+                let at = s.data_at.as_deref().filter(|_| res.mode == Mode::Branch).and_then(|a| crate::settings::data_at_secs(a, self.store.now_ms().unwrap_or(0) / 1000));
+                let past = match at {
+                    Some(at) => b.branch_at(&res.parent, name, res.mode, at).await.map_err(|e| anyhow::anyhow!("branching {key} as of {at}: {e:#}"))?,
+                    None => None,
+                };
+                if at.is_some() && past.is_none() {
+                    self.store.log(&r.id, &format!("{key} keeps no history: branched as of now, not data_at"))?;
+                }
+                let made = match past {
+                    Some(m) => m,
+                    None => b.branch(&res.parent, name, res.mode).await.map_err(|e| anyhow::anyhow!("branching {key}: {e:#}"))?,
+                };
+                // Recorded at once (a crash mustn't lose it), Ready only once it's masked.
+                self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
+                    x.r#ref = Some(made.r#ref.clone());
+                    x.kept = made.kept.clone();
+                    x.state = ResourceState::Pending;
+                    x.error = None;
+                })?;
+                self.store.log(&r.id, &format!("branched {key} as {}", made.r#ref))?;
+                self.store.set_seed_needed(&r.id, true)?;
+                self.mask(&r.id, &b, &key, &made.r#ref, s).await?;
+                self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
+            }
+            Some(branch) if reset_due || asked.iter().any(|a| a == "*" || *a == key) => {
+                self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Resetting)?;
+                let at = s.data_at.as_deref().filter(|_| res.mode == Mode::Branch).and_then(|a| crate::settings::data_at_secs(a, self.store.now_ms().unwrap_or(0) / 1000));
+                let past = match at {
+                    Some(at) => b.reset_at(&res.parent, branch, res.kept.as_deref(), name, res.mode, at).await.map_err(|e| anyhow::anyhow!("resetting {key} as of {at}: {e:#}"))?,
+                    None => None,
+                };
+                let fresh = match past {
+                    Some(f) => f,
+                    None => b.reset(&res.parent, branch, res.kept.as_deref(), name, res.mode).await.map_err(|e| anyhow::anyhow!("resetting {key}: {e:#}"))?,
+                };
+                self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
+                    x.r#ref = Some(fresh.r#ref.clone());
+                    x.kept = fresh.kept.clone();
+                    x.state = ResourceState::Resetting;
+                    x.error = None;
+                    x.bytes = 0;
+                })?;
+                self.store.log(&r.id, &format!("reset {key} from its parent"))?;
+                self.store.set_seed_needed(&r.id, true)?;
+                self.mask(&r.id, &b, &key, &fresh.r#ref, s).await?;
+                self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
+                reset = true;
+            }
+            // Made (or reset) but not finished: masks again, then Ready.
+            Some(branch) if res.state != ResourceState::Ready => {
+                self.mask(&r.id, &b, &key, branch, s).await?;
+                self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
+                    x.state = ResourceState::Ready;
+                    x.error = None;
+                })?;
+            }
+            // Recorded without credentials (from before its product handed any out): get them,
+            // so its services never need the product's own.
+            Some(branch) if res.kept.is_none() => {
+                if let Some(kept) = b.credentials(&res.parent, branch, name).await.map_err(|e| anyhow::anyhow!("credentials for {key}: {e:#}"))? {
+                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.kept = Some(kept.clone()))?;
+                    self.store.log(&r.id, &format!("{key} has credentials of its own now"))?;
+                }
+            }
+            Some(_) => {}
+        }
+        Ok((reset, None))
+    }
+
     /// Bring one active preview to its desired state.
     pub(super) async fn converge(&self, r: &Row) -> anyhow::Result<()> {
         let s = self.store.settings(&r.project_id)?;
@@ -178,89 +267,23 @@ impl Engine {
                 self.store.set_service(&r.id, &svc.name, ServiceState::Sleeping, None, None)?;
             }
         }
-        for res in self.store.resources(&r.id)? {
-            let key = format!("{}:{}", res.kind.as_str(), res.parent);
-            let b = match self.brancher(res.kind) {
-                Ok(b) => b.clone(),
+        // Every resource at once (a Postgres branch doesn't wait for the bucket's): each records its
+        // own progress as it goes, and the first error is the converge's once all are done.
+        let results = futures::future::join_all(self.store.resources(&r.id)?.into_iter().map(|res| self.converge_resource(r, &s, &name, res, reset_due, &asked))).await;
+        let mut first_error = None;
+        for result in results {
+            match result {
+                Ok((reset, problem)) => {
+                    reset_any |= reset;
+                    problems.extend(problem);
+                }
                 Err(e) => {
-                    let msg = e.to_string();
-                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
-                        x.state = ResourceState::Failed;
-                        x.error = Some(msg.clone());
-                    })?;
-                    problems.push(msg);
-                    continue;
+                    first_error.get_or_insert(e);
                 }
-            };
-            match &res.r#ref {
-                None => {
-                    // As of `data_at` where the product keeps history (structure-only needs none).
-                    let at = s.data_at.as_deref().filter(|_| res.mode == Mode::Branch).and_then(|a| crate::settings::data_at_secs(a, self.store.now_ms().unwrap_or(0) / 1000));
-                    let past = match at {
-                        Some(at) => b.branch_at(&res.parent, &name, res.mode, at).await.map_err(|e| anyhow::anyhow!("branching {key} as of {at}: {e:#}"))?,
-                        None => None,
-                    };
-                    if at.is_some() && past.is_none() {
-                        self.store.log(&r.id, &format!("{key} keeps no history: branched as of now, not data_at"))?;
-                    }
-                    let made = match past {
-                        Some(m) => m,
-                        None => b.branch(&res.parent, &name, res.mode).await.map_err(|e| anyhow::anyhow!("branching {key}: {e:#}"))?,
-                    };
-                    // Recorded at once (a crash mustn't lose it), Ready only once it's masked.
-                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
-                        x.r#ref = Some(made.r#ref.clone());
-                        x.kept = made.kept.clone();
-                        x.state = ResourceState::Pending;
-                        x.error = None;
-                    })?;
-                    self.store.log(&r.id, &format!("branched {key} as {}", made.r#ref))?;
-                    self.store.set_seed_needed(&r.id, true)?;
-                    self.mask(&r.id, &b, &key, &made.r#ref, &s).await?;
-                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
-                }
-                Some(branch) if reset_due || asked.iter().any(|a| a == "*" || *a == key) => {
-                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Resetting)?;
-                    let at = s.data_at.as_deref().filter(|_| res.mode == Mode::Branch).and_then(|a| crate::settings::data_at_secs(a, self.store.now_ms().unwrap_or(0) / 1000));
-                    let past = match at {
-                        Some(at) => b.reset_at(&res.parent, branch, res.kept.as_deref(), &name, res.mode, at).await.map_err(|e| anyhow::anyhow!("resetting {key} as of {at}: {e:#}"))?,
-                        None => None,
-                    };
-                    let fresh = match past {
-                        Some(f) => f,
-                        None => b.reset(&res.parent, branch, res.kept.as_deref(), &name, res.mode).await.map_err(|e| anyhow::anyhow!("resetting {key}: {e:#}"))?,
-                    };
-                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
-                        x.r#ref = Some(fresh.r#ref.clone());
-                        x.kept = fresh.kept.clone();
-                        x.state = ResourceState::Resetting;
-                        x.error = None;
-                        x.bytes = 0;
-                    })?;
-                    self.store.log(&r.id, &format!("reset {key} from its parent"))?;
-                    self.store.set_seed_needed(&r.id, true)?;
-                    self.mask(&r.id, &b, &key, &fresh.r#ref, &s).await?;
-                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.state = ResourceState::Ready)?;
-                    reset_any = true;
-                }
-                // Made (or reset) but not finished: masks again, then Ready.
-                Some(branch) if res.state != ResourceState::Ready => {
-                    self.mask(&r.id, &b, &key, branch, &s).await?;
-                    self.store.set_resource(&r.id, res.kind, &res.parent, |x| {
-                        x.state = ResourceState::Ready;
-                        x.error = None;
-                    })?;
-                }
-                // Recorded without credentials (from before its product handed any out): get them,
-                // so its services never need the product's own.
-                Some(branch) if res.kept.is_none() => {
-                    if let Some(kept) = b.credentials(&res.parent, branch, &name).await.map_err(|e| anyhow::anyhow!("credentials for {key}: {e:#}"))? {
-                        self.store.set_resource(&r.id, res.kind, &res.parent, |x| x.kept = Some(kept.clone()))?;
-                        self.store.log(&r.id, &format!("{key} has credentials of its own now"))?;
-                    }
-                }
-                Some(_) => {}
             }
+        }
+        if let Some(e) = first_error {
+            return Err(e);
         }
         if reset_any || reset_due || !asked.is_empty() {
             self.store.update(&r.id, |row| {
