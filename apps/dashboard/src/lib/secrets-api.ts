@@ -218,6 +218,8 @@ export function secretsApi(project: string) {
     outsideDatabases: () => req<OutsideDatabase[]>("GET", `${P}/outside-databases`),
     addOutsideDatabase: (d: { name: string; url: string; roles: [string, string] | []; group?: string; ca?: string }) => req<OutsideDatabase>("POST", `${P}/outside-databases`, d),
     deleteOutsideDatabase: (id: string) => req<null>("DELETE", `${P}/outside-databases/${enc(id)}`),
+    updateOutsideDatabase: (id: string, ch: { name?: string; url?: string; ca?: string }) => req<OutsideDatabase>("PATCH", `${P}/outside-databases/${enc(id)}`, ch),
+    rotateOutsideAdmin: (id: string) => req<OutsideDatabase>("POST", `${P}/outside-databases/${enc(id)}/rotate-admin`),
     /** `format` other than `roll` needs the SIEM's `token` (sealed, never shown again). */
     createSink: (url: string, fromStart = false, format: SinkFormat = "roll", token?: string) =>
       req<Sink & { secret: string }>("POST", `${P}/audit/sinks`, { url, from_start: fromStart, ...(format !== "roll" && { format, token }) }),
