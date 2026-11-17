@@ -2815,9 +2815,10 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
    Infisical and Doppler integrate. Azure never returns a secret variable's value and its update
    rewrites the whole group, so the sync sends every value on each push and refuses a group holding
    secrets it doesn't manage. Unconfirmed against a real organization (the user's call).
-0e. **Four more syncs** (building: `feature/roll-secrets-more-syncs`): Supabase Edge Function
-   secrets, Cloudflare Pages variables, Azure App Configuration and HashiCorp Vault / OpenBao KV v2
-   (the gradual way off Vault), as Infisical syncs to each.
+0e. **Four more syncs** (#229): Supabase Edge Function secrets, Cloudflare Pages variables, Azure
+   App Configuration and HashiCorp Vault / OpenBao KV v2 (the gradual way off Vault), as Infisical
+   syncs to each; a `refuses` hook so a kind can refuse key names (Supabase's reserved prefix).
+   Merges clean with #227. Unconfirmed against the real services (the user's call).
 0d. **A Ruby client** (#212), the same surface as the TypeScript, Go and Python ones, both sealed-box
    vectors opening in it, standard library only, with Rails notes. Writing it found that Python's
    and Go's `Values` printed every value and their `Client` the token (#213 fixes both).
