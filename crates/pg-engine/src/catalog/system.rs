@@ -1797,7 +1797,17 @@ pub fn row_count(table: SysTable, ctx: &ExecCtx) -> Option<usize> {
         PgAttrdef => sum(|r| r.attrdef),
         PgIndex => super::static_rows::rows(PgIndex).len() + sum(|r| r.index),
         IsTables => sum(|r| r.listed) + SysTable::all().count(),
-        IsColumns => sum(|r| r.live) + SysTable::all().map(|s| s.columns().len()).sum::<usize>(),
+        // (The maps count materialized views' columns too, which information_schema.columns
+        // doesn't list.)
+        IsColumns => {
+            let matviews: usize = cat
+                .views
+                .values()
+                .filter(|v| v.materialized)
+                .map(|v| v.storage.as_ref().map_or(v.columns.len(), |st| st.live_columns().count()))
+                .sum();
+            sum(|r| r.live) - matviews + SysTable::all().map(|s| s.columns().len()).sum::<usize>()
+        }
         _ => return None,
     };
     // (Unless another session's DDL committed meanwhile and the statement reads the newer
