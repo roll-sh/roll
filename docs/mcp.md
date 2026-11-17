@@ -822,8 +822,11 @@ waits on a sibling PR reaching main is last.
    admins only by opt-in; and mediums: read-only scope, Unicode look-alikes, revoked connections
    coming back; all fixed). `roll token enterprise`, and the access overview's "Enterprise sign-in"
    panel (trust and stop trusting providers, register apps with the secret shown once, remove them
-   with the count of connections revoked; roll's audience and token endpoint to copy). Next on it:
-   a live check with a real provider's ID-JAG (Okta's Cross App Access sandbox needs an account:
+   with the count of connections revoked; roll's audience and token endpoint to copy). Checked live
+   against a real rolld with accounts (`live/enterprise-live.sh`: a person signed up by email code,
+   a stand-in provider's ID-JAG traded for a token that acts as them over MCP, a replay, another
+   domain and an unverified email refused, a revoked connection ending the token and staying
+   out). Next on it: a live check with a real provider's ID-JAG (Okta's Cross App Access sandbox needs an account:
    the user's call).
 7. **Everyday routes with no tool:** tasks, streams, storage, queues, postgres, Redis and NoSQL have
    theirs (`tool-gaps.py origin/main <product>` lists what's left). What's left is mostly what only
