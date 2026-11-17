@@ -876,8 +876,8 @@ async fn every_event_is_the_same_on_the_stream_and_in_webhooks() {
     assert_eq!(got["change"], id);
     assert_eq!(keys(&got["preview"]), sorted(vec!["state", "url", "postgres", "redis", "error", "created_at"]));
     assert_eq!((got["preview"]["state"].as_str(), got["became"].clone()), (Some("running"), json!(["ready"])));
-    // `became` is what an update reached for the first time at its head: a preview environment
-    // ready once a push, not again when it wakes from sleep.
+    // `became` is what an update reached that the preview wasn't already at, at its head: a
+    // preview environment ready once a push, not again when it wakes from sleep.
     let at = |state: &str, head: &str| -> code_control::model::Preview {
         serde_json::from_value(json!({ "state": "running", "url": null, "postgres": null, "redis": null, "error": null, "created_at": 1,
             "environment": { "id": "pv_1", "slug": "s", "state": state, "services": [], "resources": [], "sleeping_usd_month": 0.0, "active_usd_hour": 0.0, "head": head } }))

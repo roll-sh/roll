@@ -23,7 +23,6 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::Mutex;
-use serde_json::json;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -657,6 +656,7 @@ impl PreviewBackend for Previews {
 mod tests {
     use super::*;
     use crate::config::RollToml;
+    use serde_json::json;
 
     fn previews() -> Arc<Previews> {
         Previews::new(PreviewConfig { port: Some(7070), ..PreviewConfig::default() }, None, Arc::new(crate::docker::Docker))

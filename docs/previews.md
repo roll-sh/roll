@@ -1254,8 +1254,8 @@ type Settings = {
     which a scoped or OAuth token (an agent's) can't give (403). Automations see it too: the `preview` trigger's
     `preview.environment.visual_review.state` field, and the built-in "Tell me when a visual change
     waits for a review" template (a notice linking to the preview, or a Slack step instead). The
-    event's `became` (`ready`, `visual_change`) names what an update reached for the first time at
-    its head, so that template, and "Post a change's preview to Slack when it's ready", fire once a
+    event's `became` (`ready`, `visual_change`) names what an update reached that the preview
+    wasn't already at, at its head, so that template, and "Post a change's preview to Slack when it's ready", fire once a
     push, as Vercel's Slack app posts once a deployment, not at every state, cost or screenshot
     change, nor when a sleeping preview wakes.
     The same session checks what a screen reader can't name (images without alt text, form

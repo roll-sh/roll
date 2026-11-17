@@ -201,7 +201,7 @@ export const CHATOPS_TEMPLATES: AutomationTemplate[] = [
         { type: "code", events: ["preview"], repos: p?.repo ? [p.repo] : [] },
         // The channel is the owner's pick: left empty, so the builder asks for it.
         [step("post", "slack.post", { channel: "", text: "The preview of {{ event.data.change }} in {{ event.data.repo }} is ready: {{ event.data.preview.url }}" })],
-        // `became` names what an update reached for the first time at its head.
+        // `became` names what an update reached that the preview wasn't already at.
         { filters: [{ field: "event.data.became", op: "contains", value: "ready" }] },
       );
     },
@@ -388,7 +388,7 @@ export const TEMPLATES: AutomationTemplate[] = [
             link: "{{ event.data.preview.environment.dashboard_url }}",
           }),
         ],
-        // Once a head: `became` names what an update reached for the first time at its head.
+        // Once a head: `became` names what an update reached that the preview wasn't already at.
         { filters: [{ field: "event.data.became", op: "contains", value: "visual_change" }] },
       );
     },

@@ -96,7 +96,7 @@ fn code_event(kind: &str) -> EventInfo {
         ),
         // A roll previews environment's summary rides along (`PreviewEnvironment`): its visual
         // review is what "tell me when a visual change waits" filters on. `became` holds what the
-        // update reached for the first time at its head (`ready`, `visual_change`): templates
+        // update reached that the preview wasn't already at, at its head (`ready`, `visual_change`): templates
         // filter on it to fire once a push.
         "preview" => (
             &["change", "became", "preview.state", "preview.url", "preview.environment.state", "preview.environment.visual_review.state"],

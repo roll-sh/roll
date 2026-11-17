@@ -891,25 +891,17 @@ impl Db {
             if preview.is_none() {
                 crate::github::set_mark_in(c, &format!("pv-teardown:{id}"), teardown.unwrap_or(""))?;
             }
-            // What this update reached for the first time at its head (`became`): an automation
-            // that posts "the preview is ready" filters on it, so it posts once a push, not at
-            // every state, cost or screenshot change (nor when a sleeping preview wakes).
+            // What this update reached that the stored preview hadn't at its head (`became`): an
+            // automation that posts "the preview is ready" filters on it, so it posts once a push,
+            // not at every state, cost or screenshot change (a sleeping preview counts as up, so
+            // waking isn't new either).
+            let old: Option<Preview> = old.as_deref().and_then(|o| serde_json::from_str(o).ok());
             let mut became: Vec<&str> = Vec::new();
-            for (what, at) in [("ready", preview.and_then(Preview::up_at)), ("visual_change", preview.and_then(Preview::visual_change_at))] {
-                let key = format!("pv-{what}:{id}");
-                match at {
-                    Some(head) => {
-                        let told: Option<String> = c.query_row("SELECT value FROM github_marks WHERE key = ?", [&key], |r| r.get(0)).optional()?;
-                        if told.as_deref() != Some(head) {
-                            crate::github::set_mark_in(c, &key, head)?;
-                            became.push(what);
-                        }
-                    }
-                    // Gone: a preview made again is new again.
-                    None if preview.is_none() => {
-                        c.execute("DELETE FROM github_marks WHERE key = ?", [&key])?;
-                    }
-                    None => {}
+            for (what, at) in [("ready", Preview::up_at as fn(&Preview) -> Option<&str>), ("visual_change", Preview::visual_change_at)] {
+                if let Some(head) = preview.and_then(at)
+                    && old.as_ref().and_then(at) != Some(head)
+                {
+                    became.push(what);
                 }
             }
             let mut p = crate::webhooks::Promises::default();
