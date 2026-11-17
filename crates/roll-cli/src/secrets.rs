@@ -401,8 +401,9 @@ pub enum Secrets {
     },
     /// Open a share's link (or `<id>#<key>`) and print its value; it counts as one of its opens.
     Open { link: String },
-    /// Pushes of an environment to outside platforms (GitHub Actions, Vercel, Cloudflare, AWS
-    /// Parameter Store, webhooks): list, add, run now, remove.
+    /// Pushes of an environment to outside platforms (GitHub Actions, Vercel, Cloudflare, Supabase,
+    /// AWS Parameter Store, Azure App Configuration, HashiCorp Vault, webhooks): list, add, run now,
+    /// remove.
     #[command(subcommand)]
     Syncs(Syncs),
     /// Streams of the audit log to a SIEM: list, add, remove.

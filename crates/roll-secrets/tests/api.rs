@@ -95,6 +95,9 @@ impl SyncTarget for FakeSync {
     fn check(&self, _: &str, _: &Resources, target: &Value) -> roll_secrets::Result<()> {
         target.get("name").map(|_| ()).ok_or_else(|| roll_secrets::Error::BadRequest("target needs a name".into()))
     }
+    fn refuses(&self, name: &str) -> Option<String> {
+        name.starts_with("FAKE_").then(|| format!("{name}: FAKE_ is the platform's"))
+    }
     fn push(&self, _: &Value, p: &Push<'_>) -> roll_secrets::Result<()> {
         let credentials = p.credentials.iter().map(|(k, v)| (format!("credential:{k}"), v.expose().to_string()));
         let values = p.values.iter().map(|(k, v)| (k.clone(), v.expose().to_string())).chain(credentials).collect();
@@ -1243,6 +1246,9 @@ async fn a_sync_pushes_each_change_once_removes_deleted_keys_and_is_audited() {
     // Before it exists: what it would push (names only), its credential kept out.
     let p = api.ok(Method::POST, "/syncs/preview", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" }, "keys": ["DB_URL", "STRIPE_KEY", "TYPO"] }))).await;
     assert_eq!(p, json!({ "names": ["DB_URL", "STRIPE_KEY"], "credentials": ["PLATFORM_TOKEN"], "missing_credentials": [], "unknown_keys": ["TYPO"] }));
+    // A name the platform keeps for itself (Supabase's SUPABASE_) is refused when it's made.
+    let (s, e) = api.call(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "prefix": "FAKE_", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
+    assert_eq!((s, e["error"].as_str()), (StatusCode::BAD_REQUEST, Some("FAKE_DB_URL: FAKE_ is the platform's")));
     let s = api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
     let id = s["id"].as_str().unwrap().to_string();
     assert!(s["signing_secret"].as_str().unwrap().starts_with("whsec_"), "shown once: {s}");

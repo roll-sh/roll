@@ -1747,8 +1747,9 @@ open it.
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
 they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Netlify, Render, Fly.io,
 Railway, Heroku, DigitalOcean App Platform, CircleCI, Bitbucket Pipelines, Terraform Cloud, Cloudflare Workers, AWS Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, a Kubernetes Secret, an endpoint
-of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
-syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
+of the team's own, or a deploy hook that only hears that something changed; also Cloudflare Pages,
+Supabase Edge Functions, Azure App Configuration and a HashiCorp Vault (or OpenBao) KV secret.
+Infisical's "secret syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
 target, and a value edited there is overwritten at the next
 change of that key. Before one is added, `POST …/syncs/preview` (`roll secrets syncs add … --preview`, the form's
 Preview) says what it would push, names only, without calling the platform: its names after `keys`
@@ -1768,6 +1769,8 @@ pub trait SyncTarget: Send + Sync {
     fn credentials(&self, target: &Json) -> Vec<String> { vec![] } // keys holding its token
     // On create and before every push; `resources`: the project's canvas, as (kind, ref).
     fn check(&self, project: &str, resources: &Resources, target: &Json) -> Result<()>;
+    // A name the platform keeps for itself (Supabase's `SUPABASE_`): refused on create and preview.
+    fn refuses(&self, name: &str) -> Option<String> { None }
     // `push`: the values by target name, which names changed, which were removed, the digest,
     // the signing secret, the resolved credentials.
     fn push(&self, target: &Json, push: &Push) -> Result<()>;
@@ -1815,6 +1818,10 @@ last_synced_at, error}`:
 | `google-secret-manager` | `{project, prefix?, service_account_key}` | one Secret Manager secret per key, `<prefix><KEY>`, each change a new version |
 | `azure-key-vault` | `{vault, tenant_id, client_id, client_secret_key}` | one Key Vault secret per key (`_` becomes `-`) |
 | `aws-secrets-manager` | `{region, secret_name: "shop/production", access_key_id_key, secret_access_key_key, kms_key_id?}` | one Secrets Manager secret: the environment's values as a JSON object |
+| `supabase` | `{project_ref, token_key}` | a Supabase project's Edge Function secrets |
+| `cloudflare-pages` | `{account, project, environment: "production" \| "preview", token_key}` | a Pages project's environment variables, as `secret_text` |
+| `azure-app-configuration` | `{store, label?, prefix?, tenant_id, client_id, client_secret_key}` | one App Configuration key-value per key, `<prefix><KEY>` under `label` |
+| `vault-kv` | `{address, mount?, path, namespace?, token_key}`, or `role_id, secret_id_key, approle_mount?` instead of `token_key`; `ca_key?` | one Vault (or OpenBao) KV v2 secret holding the folder's keys |
 
 ### `github`
 
@@ -1830,7 +1837,7 @@ last_synced_at, error}`:
 - GitHub's names are `[A-Za-z_][A-Za-z0-9_]*` and may not start with `GITHUB_`; a key that would is
   an error naming it (rename it or use `keys`/`prefix`).
 
-### Platform credentials (`vercel`, `cloudflare`, `aws-ssm`, `aws-secrets-manager`, `google-secret-manager`, `azure-key-vault`)
+### Platform credentials (`vercel`, `cloudflare`, `aws-ssm`, `aws-secrets-manager`, `google-secret-manager`, `azure-key-vault`, `supabase`, `cloudflare-pages`, `azure-app-configuration`, `vault-kv`)
 
 A platform's own credential is never in the sync. The target names **keys of the sync's own
 environment and folder** that hold it (`token_key`; for AWS `access_key_id_key` and
@@ -1878,6 +1885,77 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   `managed-by=roll-secrets`) or `CreateSecret` (with that tag, and `KmsKeyId` when set); a secret
   that exists without the tag is someone else's, and roll never replaces it. Deleting the sync
   leaves the secret. Same SigV4 by hand (service `secretsmanager`); over 64 KB of JSON is an error.
+
+`supabase`, `cloudflare-pages`, `azure-app-configuration` and `vault-kv` call through rolld's
+guarded client (`roll_net::PublicOnly`, no proxy, no redirects, timeouts, at most 1 MiB of an
+answer read; private addresses only with `ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`, as webhooks). Their
+fixed hosts are `api.supabase.com`, `api.cloudflare.com`, `<store>.azconfig.io` and
+`login.microsoftonline.com`, and every part of the target that goes into a host or a path is
+checked strictly (a store name is 5–50 letters, digits and `-`, so nothing else reaches the host).
+An error carries the status and the vendor's error code where it has one, never an answer.
+
+- **`supabase`**, `{project_ref, token_key}`: a Supabase project's Edge Function secrets, through
+  the Management API with a personal access token (`sbp_…`; fine-grained:
+  `edge_functions_secrets_write`). Changed names are upserted in batches of 100
+  (`POST /v1/projects/{ref}/secrets`, `[{name, value}]`); removed names, the ones this sync pushed
+  before, go in one `DELETE` of the same path with their names. Functions read a new value at once,
+  no redeploy. Supabase keeps `SUPABASE_` for the variables it injects (`SUPABASE_URL`…), so a key
+  that would push as `SUPABASE_…` is refused when the sync is made (and named if one is added later):
+  leave it out with `keys`, or set a `prefix`. Supabase answers errors as a message without a code,
+  so its errors carry the status alone.
+  ```sh
+  roll secrets -e production syncs add supabase --target project_ref=abcdefghijklmnopqrst \
+    --target token_key=SUPABASE_ACCESS_TOKEN
+  ```
+- **`cloudflare-pages`**, `{account, project, environment, token_key}`: a Pages project's
+  environment variables for `production` or `preview` (its two environments), for builds and Pages
+  Functions. One `PATCH /client/v4/accounts/{account}/pages/projects/{project}` per push sets
+  `deployment_configs.{environment}.env_vars`: changed names as `{type: "secret_text", value}`,
+  removed ones (pushed by this sync before) as `null`, which is how Cloudflare deletes a variable;
+  every other variable stays as it is. The token is handled as `cloudflare`'s (a key holding an API
+  token, with Pages Write), and errors carry Cloudflare's error codes. A value is at most 5 KiB. A
+  change reaches the next deployment.
+  ```sh
+  roll secrets -e production syncs add cloudflare-pages --target account=023e105f4ecef8ad9ca31a8372d0c353 \
+    --target project=shop-web --target environment=production --target token_key=CLOUDFLARE_API_TOKEN
+  ```
+- **`azure-app-configuration`**, `{store, label?, prefix?, tenant_id, client_id,
+  client_secret_key}`: one key-value per key in an App Configuration store, named `<prefix><KEY>`
+  (`shop:DB_URL`), under `label` (no label by default). rolld signs in as `azure-key-vault` does
+  (client credentials at `login.microsoftonline.com`), for the scope
+  `https://<store>.azconfig.io/.default`; the app registration needs App Configuration Data Owner on
+  the store. Per changed key: `GET /kv/{key}?label=…`, then `PUT` the value tagged
+  `managed-by=roll-secrets` (API `2023-11-01`); per removed key, `DELETE` it only when it carries
+  the tag. A key-value that exists without the tag is someone else's: roll never writes to it, and
+  a refused read stops the push. A key-value is at most 10 KB. Errors carry App Configuration's
+  problem `type` (`key-locked`) or Entra's `error`. **Values are plain key-values.** App
+  Configuration's own guidance is to keep secrets in Key Vault and reference them from the store
+  (Key Vault references); roll writes the values themselves, which suits configuration and
+  non-critical values read through the store. For secrets, sync to Key Vault with `azure-key-vault`
+  and add references to those secrets in the store.
+- **`vault-kv`**, `{address, mount?, path, namespace?, token_key | role_id + secret_id_key,
+  approle_mount?, ca_key?}`: one secret on a HashiCorp Vault or OpenBao KV v2 mount (`secret` by
+  default) holding the folder's keys, written whole on each push
+  (`POST {address}/v1/{mount}/data/{path}` with `{"data": {…}}`), so a removed key is simply left
+  out of the next version. The address is the team's own server, fetched like a webhook: a public
+  `https://` URL (`PublicOnly`, no redirects), trusting the CA in `ca_key` (PEM, a key of this
+  environment and folder) when the server's certificate isn't publicly trusted. It signs in with a
+  token (`token_key`) or AppRole (`POST /v1/auth/{approle_mount}/login` with `role_id` and the
+  secret id in `secret_id_key`); `namespace` goes as `X-Vault-Namespace` (Vault Enterprise, HCP).
+  Before writing, roll reads the secret's metadata: a new secret is marked with the custom metadata
+  `managed-by=roll-secrets` first, and one that exists without that mark is someone else's, which
+  roll never replaces. The policy it needs: `create`, `update` on `{mount}/data/{path}`, and
+  `read`, `create`, `update` on `{mount}/metadata/{path}`. Vault's errors are messages, so roll's
+  carry the status alone. The synced values come to at most 512 KiB as JSON.
+  This is the way off Vault one service at a time: move a folder's values into roll (`roll secrets
+  import --from vault`), sync them to a path of roll's own, point the service at that path, and
+  later at roll itself (`roll run`, the SDKs) whenever it suits; Vault keeps serving current values
+  until then. A secret Vault's own tooling made is never touched: a sync writes only to its own.
+  ```sh
+  roll secrets -e production syncs add vault-kv --target address=https://vault.example.com:8200 \
+    --target path=shop/production --target role_id=db02de05-fa39-4855-059b-67221c5c2f63 \
+    --target secret_id_key=VAULT_SECRET_ID
+  ```
 
 ### `render`, `netlify`, `fly`, `railway`, `heroku`, `digitalocean`, `circleci`, `bitbucket` and `terraform-cloud`
 
