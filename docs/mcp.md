@@ -768,11 +768,10 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **The merge queue, in turn:** previews #150 (security fix) holds the lock, then secrets #151,
-   then search's #125/#129/#119, then #108 (search agreed; asked secrets about their #68), then
-   #114. #108 released the lock unmerged at 01:35: every part of its gate passed on adf32d147, but
-   each `test:code --docker` rerun hit a Postgres load flake in a crate it doesn't touch (load 64–80;
-   one run lost to the full disk), and a security fix shouldn't wait on that.
+1. **The merge queue, in turn:** search #162/#159, then #108 (asked of search: their #170/#172/#119
+   came after the 01:36 agreement), then secrets #68, then #114; then the branches stacked on #114
+   (two-person approvals, the Terraform resource) open as PRs on main. #108's waiter is unit
+   `roll-mcp-lock108` (PR states on GitHub); its gate runs in the dev worktree.
    - **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
      and `killed_connections_never_lose_or_repeat_acknowledged_writes` (16 threads on one row
      exhaust the 40 conflict re-runs), and code-control's Linear e2e (30 s for the elicitation).
