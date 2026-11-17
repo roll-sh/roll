@@ -35,6 +35,10 @@ impl Registry {
     /// asks for Basic.
     pub async fn digest(&self, image: &str, login: Option<&RegistryLogin>) -> anyhow::Result<String> {
         let r = ImageRef::parse(image);
+        // A registry named by an address is never a private one (a tenant's Dockerfile names it).
+        if self.base.is_none() && url::Url::parse(&format!("https://{}", r.registry)).ok().and_then(|u| u.host_str().map(|h| crate::net::literal_private(h.trim_start_matches('[').trim_end_matches(']')))).unwrap_or(true) {
+            anyhow::bail!("{} isn't a public registry", r.registry);
+        }
         let base = self.base.clone().unwrap_or_else(|| format!("https://{}", r.registry));
         let url = format!("{}/v2/{}/manifests/{}", base.trim_end_matches('/'), r.repo, r.reference);
         let accept = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json";

@@ -91,12 +91,12 @@ impl Apps {
                     }
                     let Some(now) = seen[&image].clone().filter(|n| *n != was) else { continue };
                     moved.push(image.clone());
-                    // Said once per new digest.
-                    let (k, nv) = (format!("base_seen:{active}:{image}"), now.clone());
+                    // Said once per new digest (kept per environment, gone with it).
+                    let (k, nv) = (format!("base_seen:{}/{}:{image}", svc.id, env.name), now.clone());
                     if self.db(move |s| s.get_state(&k)).await.ok().flatten().as_deref() == Some(nv.as_str()) {
                         continue;
                     }
-                    let (k, nv, sid, en, did) = (format!("base_seen:{active}:{image}"), now.clone(), svc.id.clone(), env.name.clone(), active.clone());
+                    let (k, nv, sid, en, did) = (format!("base_seen:{}/{}:{image}", svc.id, env.name), now.clone(), svc.id.clone(), env.name.clone(), active.clone());
                     let data = json!({ "image": image, "was": was, "now": now });
                     let _ = self
                         .db(move |s| {
@@ -114,7 +114,7 @@ impl Apps {
                         }
                     }
                 }
-                let (k, v) = (format!("base_moved:{active}"), serde_json::to_string(&moved).expect("names serialize"));
+                let (k, v) = (format!("base_moved:{}/{}", svc.id, env.name), json!({ "deployment": active, "images": moved }).to_string());
                 let _ = self.db(move |s| s.set_state(&k, &v)).await;
             }
         }
