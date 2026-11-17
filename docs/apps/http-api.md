@@ -31,7 +31,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps` | | `Overview` | read |
 | `POST /v1/apps/plan` | `PlanRequest` | `Plan`; with `roots: true` (a repo or a Git URL, no `root`): `{ roots: { root, provider, framework? }[] }`, the folders up to three levels down that build on their own (a start command, a framework or a Dockerfile: no library package, docs or dependencies), at most 20 | read |
 | `POST /v1/apps/projects/{project}/export` | `{ databases? }` (`{"postgres:<ref>": "db"}`: the names of the databases its services link, as the caller lists them; one not named is named after its ref) | `{ roll_toml, notes }`: its services (source, branch, the run settings that differ from a new service's), the postgres and redis databases they link, variables by name only in its header; read back with the parser `roll up --all` uses before it's answered; 409 for a project with no service | read |
-| `POST /v1/apps/import` | `{ roll_toml }`, `{ compose }` (each at most 1 MiB), `{ repo, revision? }` (that roll code repo's root roll.toml, at its default branch's head unless a revision is named: a "deploy to roll" link), or `{ git, branch? }` (a public Git repository's root roll.toml by URL, at most 64 KiB, at its branch's head; https, no credentials, a public address). From a repo or a Git URL, an app that names only a `root` becomes that repository's source at that folder (a Git URL's following the branch it was read from), not an upload | `ProjectImport` (read, nothing made: checked as `roll up --all` checks it; 400 says what's wrong) | read |
+| `POST /v1/apps/import` | `{ roll_toml }`, `{ compose }`, another platform's file (`{ render }` a Blueprint's render.yaml, `{ fly }` fly.toml, `{ railway }` railway.json or railway.toml, `{ heroku, procfile? }` app.json and its Procfile; read as roll.toml with `notes` on what isn't carried over) (each at most 1 MiB; one at a time), `{ repo, revision? }` (that roll code repo's root roll.toml, at its default branch's head unless a revision is named: a "deploy to roll" link), or `{ git, branch? }` (a public Git repository's root roll.toml by URL, at most 64 KiB, at its branch's head; https, no credentials, a public address). From a repo or a Git URL, an app that names only a `root` becomes that repository's source at that folder (a Git URL's following the branch it was read from), not an upload | `ProjectImport` (read, nothing made: checked as `roll up --all` checks it; 400 says what's wrong) | read |
 | `GET /v1/apps/services?project=` | | `Service[]` | read |
 | `POST /v1/apps/services` | `NewService` | 201 `Service` | deploy* (a repo or image source deploys production at once; write for an upload source) |
 | `GET /v1/apps/projects/{project}/services` | | `Service[]` | read |
@@ -60,8 +60,10 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/changes` | | server-sent events: `ready`, then a `changed` (data `{}`) whenever a deploy moves, an instance wakes, sleeps or crashes, or someone changes the service; the page reads it again (on the owner, in memory; it carries nothing itself) | read |
 | `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }` | `Service` (a private registry's login for an image source; sealed, never returned) | write |
 | `DELETE /v1/apps/services/{id}/registry` | | `Service` | write |
-| `PUT /v1/apps/services/{id}/git-login` | `{ username, password }` (a deploy token, app password or access token as `password`; one line each) | `Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another repository; sealed, never returned) | write |
+| `PUT /v1/apps/services/{id}/git-login` | `{ username, password }` (a deploy token, app password or access token as `password`; one line each), or `{ username, secret }` (the name of the project's secret that holds it, read from its production secrets at each fetch: a rotated token just works, nothing is kept here) | `Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another repository; sealed, never returned) | write |
 | `DELETE /v1/apps/services/{id}/git-login` | | `Service` | write |
+| `PUT /v1/apps/services/{id}/github` | | `Service` (a Git URL service on roll's GitHub App's host connected to the installation that sees its repository: fetches use the installation's short-lived tokens, deploys post commit statuses and GitHub Deployments; 409 without the App or when no installation sees the repository; dropped when the source moves to another repository) | operator only (installations span tenants) |
+| `DELETE /v1/apps/services/{id}/github` | | `Service` | operator only |
 | `GET /v1/apps/services/{id}/environments` | | `Environment[]` | read |
 | `PUT /v1/apps/services/{id}/environments/{env}` | `EnvironmentPut` | `Environment` | deploy*; with `variables_from` also reveal in that environment (it copies its values) |
 | `GET /v1/apps/services/{id}/environments/{env}` | | `Environment` | read |
@@ -82,17 +84,26 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/volume/backups` | | 201 `Backup` (now) | write |
 | `POST /v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore` | | `Backup` (the volume as it was; the environment asleep meanwhile) | delete (it replaces the volume's files) |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel` | | `Deployment` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollout` | `{action: "advance" \| "all" \| "abort"}` | 202 `{deployment}`; 409 when it isn't waiting | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/restart` | | 202 `Environment` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/cache/purge` | `{ paths?, tags? }` (1–100 absolute paths, any query, a trailing `*` a prefix; 1–100 tags its answers carried, any case; neither: everything) | `{ purged }`: how many kept answers went (on-demand revalidation, "Public traffic") | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/instances/{name}/restart` | | `Environment` (a web service's: a fresh instance answers before this one drains; 404 for no such instance, 409 if the fresh one didn't start: this one keeps serving) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/sleep` | | `Environment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/wake` | | `Environment` | write (it starts compute someone pays for; a visitor's request wakes a public environment through the proxy, not this route) |
 | `GET /v1/apps/services/{id}/environments/{env}/variables` | | `Variables` (values masked) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/pending` | | `{ variables: { added, removed, changed } \| null, run: string[], secrets: boolean \| null }` (secrets: the project's secrets changed since, by roll secrets' digest; null without one): what the next deploy changes (names, never values; variables against the snapshot kept at the live deployment's switch, null without one; run: fields the service sets that the live deployment doesn't run with). Links and project secrets move `needs_deploy` too, unnamed | read |
 | `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}`, never a sealed variable (nor a reference that reads one); 403 naming them when some come from roll secrets and roll secrets wouldn't show them to the caller (`SecretSource::may_reveal`) | reveal |
-| `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[], seal?: string[]}` (set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed) | `Variables` | deploy* |
+| `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[], seal?: string[], files?: {[name]: path \| null}}` (set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed. `files`: kept as a file at an absolute path in its instances, not in their environment, from the next deploy (0444; at most 20; not under `/proc`, `/sys` or `/dev`, no `..`; two can't share a path; null puts it back; unsetting a variable drops its file; 400 otherwise; on Fargate the deploy fails for now) | `Variables` | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&before=&instance=&deployment=&stream=&level=&where=&q=&http=&status=&min_ms=&by=` | | `LogLine[]` or SSE; `before` (unix ms) reads back to a time (not followed), `instance`/`deployment`/`stream` narrow it (followed too), `level` keeps lines at that level or worse (a line that says none isn't; 400 for another word), `where` keeps lines whose JSON or logfmt fields say all its terms (`level:error user_id:42`, `key:*`, `-key:value`, `a.b:x`, quoted values; at most 10; 400 for one that isn't `key:value`), `X-Roll-Search-Truncated: 1` when a read back stopped short; `http=1`: the proxy's access log (`stream: "http"`, text `AccessLine`), `status` (`500`, `5xx`, `400-499`), `min_ms` and `by` (one reason, or `any`: every answer roll gave itself) filtering it | read |
 | `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=&format=` | | `Metrics`; `format=prometheus`: the last finished minute as Prometheus text (`roll_apps_requests_per_minute`, `…_errors_per_minute`, `…_latency_ms{quantile}`, `…_cpu_seconds_per_minute`, `…_memory_bytes`, `…_instances`, `…_cold_starts_per_minute`, `…_cold_start_ms`, labelled `service`, `service_id`, `environment`) | read |
-| `GET /v1/apps/services/{id}/environments/{env}/routes?minutes=` | | `RouteStats` (the last 5–60 minutes, default 60): the access log grouped by method and route, id-like segments `:id` and no query; the busiest, the most 5xx and the slowest (5 requests or more), each at most 50 | read |
+| `GET /v1/apps/services/{id}/environments/{env}/routes?minutes=` | | `RouteStats` (with `deployments` and `instances`: the same requests by the deployment and the instance that answered, the busiest 50 of each) (the last 5–60 minutes, default 60): the access log grouped by method and route, id-like segments `:id` and no query; the busiest, the most 5xx and the slowest (5 requests or more), each at most 50 | read |
+| `GET /v1/apps/services/{id}/environments/{env}/errors?minutes=` | | `{ minutes, groups: { fingerprint, kind: "python" \| "java" \| "node" \| "go" \| "line", title, count, first_seen, last_seen, instances, sample }[], scanned, cut }`: the environment's errors from its log (5–10,080 minutes, default 1,440), each instance's stack traces joined from their lines and grouped by their error and first frames (line numbers, addresses and ids taken out), error lines with no trace by their message the same way; the most frequent first, at most 50, `sample` the newest whole (at most 8 KiB); at most the newest 100,000 lines read (`cut`) | read |
+| `GET /v1/apps/services/{id}/environments/{env}/app-metrics?minutes=` | | `{ minutes, step_minutes, series: { name, kind: "gauge" \| "sum" \| "histogram", unit, attrs: {key, value}[], shows: "value" \| "per_second" \| "mean", points: [ms, number][] }[], cut }`: what the app's OpenTelemetry SDK sent as metrics (5–10,080 minutes, default 60), each series (a name and its attributes; at most 50, the busiest first) at most 60 points: a gauge's last value, a cumulative counter's rate a second, a histogram's mean | read |
+| `GET /v1/apps/services/{id}/environments/{env}/vitals?minutes=` | | `{ minutes, samples, metrics: { lcp?, inp?, cls?, fcp?, ttfb?: { p75, rating: "good" \| "needs-improvement" \| "poor", samples } }, routes: { route, samples, metrics }[], cut }`: what visitors' browsers measured with `vitals: true` (the last 60–10,080 minutes, default 1,440), p75s rated by web.dev's thresholds, overall and for the 20 routes with the most page loads | read |
+| `GET /v1/apps/services/{id}/environments/{env}/analytics?minutes=` | | `Analytics` (the last 60–10,080 minutes, default 1,440): visitors and page views from the access log, no script or cookie | read |
+| `POST /v1/apps/services/{id}/environments/{env}/visit` | `{ to }` | `{ url }`: a one-use ticket (a minute) into a sign-in-gated environment for the person signed in, as the URL that opens `to` (a URL at one of its names: its generated hostname or an active custom domain; 400 otherwise, and for an environment without `access.signed_in`); the dashboard's `/dashboard/apps/visit` asks for it and goes on | a person signed in only (403 for a token); rolld's gate lets in only admins until roll apps serves users |
+| `GET /v1/apps/services/{id}/environments/{env}/traces?minutes=&min_ms=` | | `{ minutes, traces: TraceSummary[], cut }`: recent traces (5–10,080 minutes, default 60), newest first, at most 100; `min_ms` keeps the slower ones | read |
+| `GET /v1/apps/services/{id}/environments/{env}/traces/{trace}` | | `{ trace, spans: Span[] }` in start order (the last week's); 404 when none | read |
 | `GET /v1/apps/services/{id}/environments/{env}/usage?days=` | | `Usage` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/runs` | | `CronRun[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/runs` | | 202 `CronRun` (run now) | deploy* |
@@ -200,8 +211,12 @@ type Run = {
   cpu: number;              // vCPU per instance, 0.25–8 (default 0.5)
   memory_mb: number;        // 256–16384 (default 512)
   health_path?: string;     // web: GET it for a 2xx/3xx; none: the port accepting a connection.
-                            // Also checked every 10 s while running: 3 failures in a row replace the instance
+                            // Also checked while running: health_failures in a row replace the instance
   health_timeout_s: number; // default 60
+  health_every_s?: number;  // 2–300: between two checks while running; unset 10
+  health_failures?: number; // 1–10: failed checks in a row that replace an instance; unset 3
+  health_command?: string;  // worker: a shell command in each instance (`sh -c`, Docker's HEALTHCHECK), healthy on exit 0;
+                            // unhealthy is replaced as a crash. Changing it is a deploy (it runs in production)
   suspend_after_s: number;  // default 30; 0 never suspends
   sleep_after_s: number;    // default 600; min_instances > 0 never sleeps below min
   volume?: { mount: string; size_gb: number };
@@ -209,8 +224,9 @@ type Run = {
   /** A gradual rollout (README "Gradual rollouts"): increasing percents 1–99 (at most five; []
    *  switches at once, the default), each for step_s (1–3600, default 120); a step whose 5xx
    *  share reaches error_pct (1–100, default 5) of 20+ requests, and beats the old one's, rolls
-   *  back. Web services only; refused with a volume. */
-  rollout: { steps: number[]; step_s: number; error_pct: number };
+   *  back. Web services only; refused with a volume. manual: each step, once it passes, holds
+   *  its split until a person says (`…/deploys/{dep}/rollout`), still judged while it waits. */
+  rollout: { steps: number[]; step_s: number; error_pct: number; manual?: boolean };
   /** The app speaks HTTP/2 without TLS (a gRPC server): the proxy and health checks use h2c,
    *  `te: trailers` passes, trailers come back. A WebSocket upgrade stays HTTP/1.1. Default false. */
   h2c?: boolean;
@@ -230,6 +246,10 @@ type Run = {
    *  to max_instances), and fewer stay once they'd be under it. 10–100; unset, requests only.
    *  Only what the runtime measures counts (Docker's cgroup; not Fargate, which bills by size). */
   cpu_target?: number;
+  /** And on memory (Render's target memory): the same, against the percent of each instance's
+   *  `memory_mb` in use. 10–100; unset, not on memory. With both, whichever asks for more
+   *  instances decides. Docker only, as cpu_target. */
+  memory_target?: number;
   /** A worker that stops: started again `always` (default), on `on_failure` only (a nonzero
    *  exit or out of memory, up to restart_tries in a row, default 10, 1–100), or `never`; a
    *  clean exit under the last two isn't a crash. What it leaves stopped isn't replaced until a
@@ -251,7 +271,7 @@ type Run = {
   rollback_on_crash?: boolean;
   /** Commands on a schedule on any service: each a job of the live deployment at its due times, skipped while its
    *  last job runs; at most 20; name a-z, 0-9 and - (unique, 32 at most), command 1–2000, timeout_s 1–86400. */
-  schedules?: { name: string; schedule: string; command: string; timezone?: string; timeout_s?: number }[];
+  schedules?: { name: string; schedule: string; command?: string; path?: string /* a web service's path GET'd instead of a command (Vercel's crons): through its own proxy on the owner, past its allow list, firewall, rate limit and access gate, with Authorization: Bearer $CRON_SECRET when the environment has one; a call still out skips the next; a non-2xx/3xx or no answer is cron.failed (data.path, http_status or error); timeout_s default 300 */; timezone?: string; timeout_s?: number }[];
 };
 
 type Service = {
@@ -262,7 +282,8 @@ type Service = {
   build: Build;
   run: Run;
   registry: { server: string; username: string } | null; // a private registry's login (never the password)
-  git_login: { host: string; username: string } | null; // a private Git repository's login (never the password)
+  git_login: { host: string; username: string; secret?: string } | null; // a private Git repository's login (never the password; `secret`: the project secret it's read from)
+  github: { installation: number; repo: string } | null; // connected to roll's GitHub App (`PUT …/github`)
   links: { kind: LinkKind; ref: string }[]; // what it links (no variables): the canvas draws them
   created_at: number;
   environments: EnvironmentSummary[];
@@ -296,21 +317,60 @@ type EnvironmentPut = {
    *  `roll_access_<env>`, then a 302 to the URL without it), else a 401, before anything wakes.
    *  The token is 20–200 of [A-Za-z0-9_-]; only its SHA-256 is stored, and the app never sees
    *  the cookie. null: public again. */
+  /** Private: visitors need `?roll_access=<token>` once (a host-only HttpOnly cookie
+   *  `roll_access_<env>`, then a 302 to the URL without it), else a 401, before anything wakes.
+   *  The token is 20–200 of [A-Za-z0-9_-]; only its SHA-256 is stored, and the app never sees
+   *  the cookie. `signed_in: true` (with or without a token): people signed in to roll who can
+   *  open the project get in. A page load with no session goes to
+   *  `<web_url>/dashboard/apps/visit?service=&env=&to=`, which asks `POST …/visit` as them and
+   *  sends them back to `/__roll/visit?ticket=&to=` on the same host, where the ticket (one use,
+   *  a minute) becomes a host-only HttpOnly cookie `roll_visit_<env>` (12 hours; the app never
+   *  sees it) and a 302 to `to`; anything else is a 401. 409 without the node's `web_url`.
+   *  Changing access ends every session, and a session asks again every 5 minutes whether its
+   *  person may still open the project (a disabled account is turned away). null: public again. */
   /** `bypass_sha256`: the SHA-256 (hex) of an automation's secret (CI's end-to-end tests): a
    *  request with `X-Roll-Preview-Bypass: <secret>` goes in with no cookie or redirect. */
-  access?: { token: string; bypass_sha256?: string } | null;
+  access?: { token?: string; signed_in?: boolean; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables, except its sealed ones (ignored when it exists). */
   variables_from?: string;
   /** A push deploys only once its commit's checks pass (statuses other than roll apps' own):
    *  pending waits (up to an hour; `Environment.waiting_for_ci` names it), a failure skips it.
-   *  A roll code repo's service only (400 otherwise): a Git URL service deploys from its
-   *  workflow after its tests (sdk/apps-github-action) with the environment's branch unset. */
+   *  A roll code repo's service, a Git URL service on roll's GitHub App (`PUT …/github`),
+   *  whose checks are GitHub's check runs and commit statuses, or one on GitLab (gitlab.com, a
+   *  `gitlab.…` host) or Bitbucket with a Git login, whose checks are its commit statuses (its
+   *  pipelines' jobs) read with the login's token (roll's own left out; none at all is waited
+   *  on for a minute, as they may not have started; roll's deploy statuses are posted there
+   *  too); 400 otherwise: another Git
+   *  host's service deploys from its workflow after its tests (sdk/apps-github-action) with
+   *  the environment's branch unset. */
   wait_for_ci?: boolean;
   /** An image service whose image has a tag: deploy when the tag points at a new digest
    *  (checked every 5 minutes on the owner; actor `tag watch`). 400 otherwise. */
   /** Redeploy (the same image, the new values) when the project's secrets change, checked each minute
    *  on the owner against roll secrets' digest; off by default. */
   redeploy_on_secrets?: boolean;
+  /** Its instances send OpenTelemetry traces and metrics to roll: `OTEL_EXPORTER_OTLP_ENDPOINT`
+   *  (this environment's address, a token of its own in it), `OTEL_EXPORTER_OTLP_PROTOCOL`,
+   *  `OTEL_TRACES_EXPORTER=otlp`, `OTEL_METRICS_EXPORTER=otlp`, `OTEL_LOGS_EXPORTER=none` (its own
+   *  `otlp` sends logs too) and `OTEL_SERVICE_NAME` from the next deploy (its own variables win).
+   *  409 where the node has no OTLP address. */
+  traces?: boolean;
+  /** What its code may reach (roll previews' `egress`): `roll` runs its instances, from the next
+   *  deploy, on a network of the project environment's own with no route out (Docker
+   *  `--internal`): roll is reached (its links' relays, the project's services there), nothing
+   *  else. `hosts` (at most 20 names, `*.` for subdomains; never addresses) are still reached on
+   *  443 and 80 through its egress proxy, by `HTTP_PROXY`/`HTTPS_PROXY` (with `NO_PROXY` naming
+   *  roll's own; the app's own variables win), at public addresses only. 400 for hosts with
+   *  `open`; 409 where the node's runtime can't close a network (Fargate). null: `open`. */
+  egress?: { mode: "roll" | "open"; hosts?: string[] } | null;
+  /** Web Vitals: from the next request its HTML page loads (200, uncompressed by asking the app
+   *  for identity) get `<script src="/__roll/vitals.js" defer>` before `</body>` (the page's
+   *  caching stays the app's; its ETag made weak), which measures LCP, INP, CLS, FCP and TTFB in
+   *  the browser and sends one beacon to `POST /__roll/vitals` on the same host when the page is
+   *  hidden (at most 2 KiB; its path kept as a route, bounded numbers; 600 a minute an
+   *  environment, then 429). No cookie, no id; the edge's country is kept. Off: those paths are
+   *  the app's. */
+  vitals?: boolean;
   follow_tag?: boolean;
   /** A preview environment (ephemeral) only, set by roll previews: a visitor who came in through
    *  its access link gets roll previews' feedback button on its pages (`/__roll/feedback.js`
@@ -325,8 +385,12 @@ type EnvironmentPut = {
    *  503 "Paused" page), deploys (409), is scheduled (a cron run is skipped, not made up) or takes
    *  a job (409) until `false`. A push to its branch is logged, not deployed. */
   paused?: boolean;
-  /** `false`: deploys held after a rollback resume (only a rollback holds them). */
-  held?: false;
+  /** `true`: a person holds its deploys (Netlify's locked deploys): pushes, CI waits, deploy hooks
+   *  and tag moves build to `ready` (`no_traffic`; a web service without a volume) for them to
+   *  put live with `POST …/deploys/{dep}/rollback`, which keeps the hold; a service that can't
+   *  run beside the live one isn't deployed (a hook's is a 409). Deploying by hand works as
+   *  ever and doesn't end it. `false`: deploys resume, from this hold or a rollback's. */
+  held?: boolean;
   /** Its own HTML instead of roll's pages, each at most 64 KiB (400 past it or empty); null goes back
    *  to roll's, a field left out stays. */
   pages?: { error?: string | null; maintenance?: string | null };
@@ -344,8 +408,9 @@ type EnvironmentPut = {
    *  `path` exact or a prefix ending in `*`, matched on the path as an app reads it (decoded,
    *  `//` and dot segments resolved); `methods` any of; `user_agent` contained, case aside.
    *  Checked after allow_ips, before the rate limit and any wake; HTTP only. null: none. */
-  firewall?: { action: "allow" | "deny"; path?: string; methods?: string[]; user_agent?: string }[] | null;
+  firewall?: { action: "allow" | "deny" | "limit"; path?: string; methods?: string[]; user_agent?: string; per_minute?: number /* limit's: 1–100000 a client */; burst?: number /* limit's (default a minute's worth) */ }[] | null;
   headers?: { path?: string; set: Record<string, string>; replace?: boolean }[] | null; // at most 20; the app's own header wins unless replace; no framing or x-roll-* names
+  routes?: { path: string; service: string }[] | null; // at most 20: a path (a prefix ends in *) another service of the project answers, by name (not this one; 400 for one the project hasn't), its environment of the same name, the path and query as they came; the first that takes a path decides; checked after this environment's gates, past the target's
   /** Its own size and scale over the service's (min_instances, max_instances, cpu, memory_mb,
    *  concurrency, suspend_after_s, sleep_after_s; any other field is a 400). Each replaces the
    *  service's, null goes back to it; checked with the service's settings as one run. */
@@ -360,26 +425,33 @@ type Environment = EnvironmentSummary & {
   domains: Domain[];
   port: number | null;       // locally, the service's own port (ROLL_APPS_PORTS)
   needs_deploy: boolean;     // variables or settings changed since the active deployment
-  private: boolean;          // its hostnames answer only visitors with its access token
+  private: boolean;          // its hostnames answer only visitors with its access token, or who signed in
+  signed_in?: true;          // people signed in to roll who can open its project get in (access.signed_in)
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
   volume_used?: { bytes: number; at: number }; // how full its volume was when last measured (hourly, on its owner), when it has one
-  schedules?: { name: string; next_run_at: number | null; last: { job: string; status: RunStatus; started_at: number } | null }[]; // run.schedules as they stand: next due (none paused, in a preview or undeployed) and the job each last started
+  schedules?: { name: string; next_run_at: number | null; last: { job: string; status: RunStatus; started_at: number } | null; last_call?: { at: number; status?: number; ms: number; error?: string } /* a path schedule's last call */ }[]; // run.schedules as they stand: next due (none paused, in a preview or undeployed) and the job each last started
   crash_loop: { crashes: number; last_at: number; last_error: string } | null; // 3+ crashes in 10 minutes
-  canary: { deployment: string; share: number } | null; // a gradual rollout under way: the percent of requests the new deployment takes
+  canary: { deployment: string; share: number; waiting?: true } | null; // a gradual rollout under way: the percent of requests the new deployment takes; waiting: a manual rollout's step passed and it waits for a person
   run: { [field: string]: number }; // its own run settings over the service's ({}: the service's)
   hook: boolean;              // it has a deploy hook
   follow_tag: boolean;        // an image service's tag is watched: a new digest behind it deploys
   redeploy_on_secrets: boolean; // the project's secrets changing redeploys it (same image, new values)
+  traces: boolean; // its instances send OpenTelemetry traces to roll
+  vitals: boolean; // its pages measure their Web Vitals for roll (`…/vitals`)
+  egress: { mode: "roll" | "open"; hosts: string[] }; // what its code may reach (roll: roll and the hosts)
+  egress_refused?: { host: string; private?: true }[]; // hosts its egress proxy refused lately, oldest first, at most 20: not listed, or (private) listed but resolving only to private addresses
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
   maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
   paused?: true;              // paused (absent: not)
+  held?: true;                // a person holds its deploys (`PUT … {held: true}`): automation builds to ready, a person puts it live
   held_after?: string;        // deploys held after this rollback: pushes, CI waits, deploy hooks (409) and tag moves aren't put live until a person deploys, redeploys or promotes, or PUTs held: false; a secrets redeploy (the live image again) still runs
   pages?: { error?: string; maintenance?: string }; // its own pages (absent: roll's): error for the 502/503/504 while it can't answer or wake, maintenance while in maintenance
   allow_ips: { cidr: string; description?: string }[]; // only these networks get in through its public names ([]: anyone)
   tcp: string | null; // a TCP service's address, host:port (null until it has its port)
   rate_limit: { per_minute: number; burst: number | null } | null; // each client's requests a minute (null: no limit)
-  firewall: { action: "allow" | "deny"; path?: string; methods?: string[]; user_agent?: string }[]; // its rules, in order
+  firewall: { action: "allow" | "deny" | "limit"; path?: string; methods?: string[]; user_agent?: string; per_minute?: number; burst?: number }[]; // its rules, in order
   headers?: { path?: string; set: Record<string, string>; replace?: boolean }[]; // headers its answers carry (names lower case)
+  routes?: { path: string; service: string }[]; // paths another service of the project answers
   scaling: { backlog: number | null; wanted: number } | null; // a worker following its work: the backlog last read (every 10 s) and the instances it wants
   wait_for_ci: boolean;
   waiting_for_ci: string | null; // the push (sha) waiting for its checks
@@ -485,9 +557,17 @@ type Variables = { vars: { name: string; masked: string; source: "service" | "se
 // setting one that names another service needs `reveal` on it (403), and one naming no service of
 // the project is a 400.
 
-type LogLine = { t: number; stream: "stdout" | "stderr" | "build" | "system"; instance: string | null; deployment: string | null; text: string; level?: "trace" | "debug" | "info" | "warn" | "error" | "fatal" /* what the app's own line says (JSON's level/severity/lvl/log.level, a name or pino's number; logfmt's level=; an upper-case level word among its first three); absent when it says none */ };
+type LogLine = { t: number; stream: "stdout" | "stderr" | "build" | "system"; instance: string | null; deployment: string | null; text: string; level?: "trace" | "debug" | "info" | "warn" | "error" | "fatal" /* what the app's own line says (JSON's level/severity/lvl/log.level, a name or pino's number; logfmt's level=; an upper-case level word among its first three); absent when it says none */; trace?: "start" | "more" /* part of a stack trace (the errors' joining, as the line is written): start on its first line, more on the rest from the same instance and stream; absent otherwise */ };
 
 type RouteStat = { method: string; route: string; requests: number; errors: number /* 5xx */; client_errors: number /* 4xx */; p50_ms: number; p95_ms: number; max_ms: number };
+/** A page view: a browser's page load (`Sec-Fetch-Dest: document`, else `Accept: text/html`) answered 2xx or 304. A visitor: an address and user agent on one day, counted for this answer only (never kept). */
+/** A trace's root span, its duration and its spans' count. */
+type TraceSummary = { trace: string; name: string; service: string; start_ms: number; ms: number; spans: number; error: boolean };
+/** A span (OTLP's, as kept): ids in hex, times in Unix nanoseconds, its string/number/bool attributes. */
+type Span = { trace: string; span: string; parent?: string; name: string; service?: string; start: number; end: number; error?: boolean; attrs?: [string, string][] };
+type Analytics = { minutes: number; step: number /* minutes a point of series stands for */; page_views: number; visitors: number;
+  pages: { path: string; views: number; visitors: number }[]; referrers: { host: string /* the referring site's, never this one's */; views: number }[];
+  countries: { country: string /* the edge's CF-IPCountry */; views: number }[]; series: { t: number; views: number; visitors: number }[]; cut: boolean /* only the newest 200,000 requests read */ };
 type RouteStats = { minutes: number; requests: number; cut: boolean /* only the newest 50,000 requests read */; routes: RouteStat[] };
 
 type Metrics = {
@@ -511,7 +591,7 @@ type Usage = {
 
 /** In the event log, each written in the same transaction as the change it records. Sequence
  *  numbers commit in order with no gaps, so a reader moving past `next` never misses one. Kept 7 days. */
-type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.capacity" /* data.value, threshold, requests, max_instances, concurrency: that share of five minutes' requests found every instance busy at max_instances (notified by default) */ | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" /* data.error: the daily backup failed (notified by default) */ | "volume.full" /* data.used_bytes, size_gb, pct: past 90% of its size, once until it's under 80% (notified by default) */ | "deploy.skipped" /* data.revision, tag: a push whose message said [skip ci] (the timeline only) */ | "alert.resolved" /* data.alert: which alert cleared; sent to targets that get that alert */ | `audit.${string}` /* changes people made: what /activity lists */; service: string; environment: string; deployment: string | null; data: object };
+type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "rollout.waiting" /* data.share: a manual rollout's step passed and it waits for a person (notified by default) */ | "deploy.ready" /* data.revision, url: built and healthy beside the live one (no_traffic, or a hold), waiting for a person to put it live (notified by default) */ | "crash_loop" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.capacity" /* data.value, threshold, requests, max_instances, concurrency: that share of five minutes' requests found every instance busy at max_instances (notified by default) */ | "alert.log" | "error.new" /* data.fingerprint, kind, name: an error (a stack trace or an error line) the environment's log has never had, once ever; its type, never its message (notified by default) */ | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" /* data.error: the daily backup failed (notified by default) */ | "volume.full" /* data.used_bytes, size_gb, pct: past 90% of its size, once until it's under 80% (notified by default) */ | "deploy.skipped" /* data.revision, tag: a push whose message said [skip ci] (the timeline only) */ | "alert.resolved" /* data.alert: which alert cleared; sent to targets that get that alert */ | `audit.${string}` /* changes people made: what /activity lists */; service: string; environment: string; deployment: string | null; data: object };
 /** A webhook's body: { type, at, seq, service, environment, deployment, data, title, text, url },
  *  signed as roll code's webhooks are: X-Roll-Signature-256: sha256=hex(HMAC-SHA256(secret,
  *  X-Roll-Timestamp + "." + body)), the timestamp the send time in Unix seconds (a retry is signed
@@ -549,7 +629,7 @@ type AccessLine = {
 };
 /** A volume's backup: a tar in object storage (`apps/volumes/<service>/<env>/<id>.tar`). */
 type Backup = { id: string; at: number; size: number };
-type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord" | "email"; host: string /* an email target's: "the project's owner" */; events: ("deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.capacity" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" | "volume.full")[];
+type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord" | "email"; host: string /* an email target's: "the project's owner" */; events: ("deploy.failed" | "rollout.waiting" | "deploy.ready" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.capacity" | "alert.log" | "error.new" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" | "volume.full")[];
   environments: string[];  // only these environments' events; empty: every one's
   services: string[];      // only these services' (ids); empty: every one's
   previews: boolean;       // preview (ephemeral) environments' events too (an environment named in `environments` always)
@@ -598,3 +678,22 @@ proxy adds `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host` and `X-Req
 strips `X-Roll-*` request headers. A service that can't wake in `wake_timeout` answers 503 with
 `Retry-After: 5` and a small page; a service with no deployment answers 404 with a page that
 says so.
+
+A 200 whose app lets a shared cache keep it (`CDN-Cache-Control: max-age=N`, else
+`Cache-Control: s-maxage=N`, with `stale-while-revalidate=M` honoured; never with `private`,
+`no-store`, `no-cache`, `Vary: *`, `Set-Cookie`, a body over 1 MiB or of unknown length) answers
+the environment's next GET or HEAD of the same path and query (and the headers it `Vary`s on)
+from the owner's cache, before anything wakes: `X-Roll-Cache: HIT`, `STALE` (fetched again in the
+background), or `MISS` when it was just kept, with `Age`. A request with `Authorization`, a
+deployment's own URL, a gradual rollout and a preview's feedback page never use it. A new live
+deployment empties it, and so does `POST …/cache/purge` (all of it, some paths, or some tags).
+An answer's tags are its `Cache-Tag`, `Netlify-Cache-Tag` and `Vercel-Cache-Tag` (comma-separated)
+and `Surrogate-Key` (space-separated), at most 128, matched in any case; those headers never reach
+a visitor, kept or not.
+
+`POST /_roll/otlp/{id}/{env}/{token}/v1/{traces|logs|metrics}` on the apps listener (any host;
+not the API) takes an environment's traces, log records and metrics from its instances: OTLP/HTTP
+`ExportTraceServiceRequest`, `ExportLogsServiceRequest` or `ExportMetricsServiceRequest`, protobuf
+(`application/x-protobuf`) or JSON (`application/json`), gzip or not, at most 8 MiB; 200 with an
+empty export response. The token in the path is the credential (`traces: true` sets a sealed
+`OTEL_EXPORTER_OTLP_ENDPOINT` to it); any other is a 404.
