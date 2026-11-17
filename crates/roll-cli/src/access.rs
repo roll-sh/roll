@@ -87,7 +87,7 @@ pub enum Token {
     /// their people, and the apps they may sign people in to. Nothing to show them.
     ///
     /// Examples:
-    ///   roll token enterprise trust https://acme.okta.com --name Okta
+    ///   roll token enterprise trust https://acme.okta.com --name Okta --domain acme.com
     ///   roll token enterprise app create Claude --product code,workspace --allow read,write
     Enterprise {
         #[command(subcommand)]
@@ -172,6 +172,12 @@ pub enum EnterpriseCmd {
         /// their roll account.
         #[arg(long = "match", value_parser = ["email", "aud_sub"], default_value = "email")]
         matching: String,
+        /// An email domain it vouches for (acme.com); repeat for more. Email matching needs one.
+        #[arg(long = "domain")]
+        domains: Vec<String>,
+        /// Let it sign in roll's admins too (they act as the operator).
+        #[arg(long)]
+        admins: bool,
     },
     /// Stop trusting an identity provider: no new sign-ins from it.
     Untrust { issuer: String },
@@ -680,9 +686,9 @@ async fn enterprise(api: &Api, json_out: bool, cmd: Option<EnterpriseCmd>) -> an
     let other = |list: Vec<Value>, issuer: &str| -> Vec<Value> { list.into_iter().filter(|i| i["issuer"].as_str().map(|s| s.trim_end_matches('/')) != Some(issuer.trim_end_matches('/'))).collect() };
     let out = match cmd {
         None => current,
-        Some(EnterpriseCmd::Trust { issuer, name, jwks, matching }) => {
+        Some(EnterpriseCmd::Trust { issuer, name, jwks, matching, domains, admins }) => {
             let mut list = other(idps(&current), &issuer);
-            let mut idp = json!({ "issuer": issuer, "matching": matching });
+            let mut idp = json!({ "issuer": issuer, "matching": matching, "domains": domains, "admins": admins });
             if let Some(n) = name {
                 idp["name"] = json!(n);
             }
@@ -725,7 +731,8 @@ async fn enterprise(api: &Api, json_out: bool, cmd: Option<EnterpriseCmd>) -> an
         println!("removed; {} people's connections revoked", out["revoked"]);
     } else {
         for i in idps(&out) {
-            println!("trusts {} ({}; people by {})", s(&i["issuer"]), i["name"].as_str().unwrap_or("-"), s(&i["matching"]));
+            let domains: Vec<&str> = i["domains"].as_array().into_iter().flatten().filter_map(|d| d.as_str()).collect();
+            println!("trusts {} ({}; people by {}{}{})", s(&i["issuer"]), i["name"].as_str().unwrap_or("-"), s(&i["matching"]), if domains.is_empty() { String::new() } else { format!(" at {}", domains.join(", ")) }, if i["admins"] == true { "; admins too" } else { "" });
         }
         for app in out["apps"].as_array().into_iter().flatten() {
             println!("app {}  {}  {}", s(&app["client_id"]), s(&app["name"]), if app["signs_with_key"] == true { "signs with a key" } else { "a secret" });
