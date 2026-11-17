@@ -93,6 +93,9 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   useEffect(() => setRate(rateText), [rateText]);
   const { copied, copy } = useCopy();
   const repo = service.source.kind === "repo";
+  // A Git URL's checks roll can read: through its GitHub App, or GitLab's and Bitbucket's with its Git login.
+  const ciReadable =
+    service.source.kind === "git" && (!!service.github || (!!service.git_login && /^https?:\/\/(gitlab\.|bitbucket\.org\/)/i.test(service.source.url)));
   const busy = runner.busy !== null;
   const branchChanged = branch.trim() !== (env.branch ?? "");
 
@@ -144,7 +147,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </form>
         )}
 
-        {(repo || (service.source.kind === "git" && !!service.github)) && (
+        {(repo || ciReadable) && (
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
             <div>
               <p className="text-[13px] font-medium">Wait for CI</p>
@@ -162,11 +165,11 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </div>
         )}
 
-        {service.source.kind === "git" && !service.github && (
+        {service.source.kind === "git" && !ciReadable && (
           <div className="px-5 py-4">
             <p className="text-[13px] font-medium">Wait for CI</p>
             <p className="mt-1 text-[12px] text-muted">
-              To deploy only after your tests pass, connect the service to roll's GitHub App (Settings) to wait for its checks here, or deploy from the workflow with roll's GitHub
+              To deploy only after your tests pass, connect the service to roll's GitHub App, or give a GitLab or Bitbucket repository a Git login with a token (Settings), to wait for its checks here; or deploy from the workflow with roll's GitHub
               Action (<span className="font-mono">sdk/apps-github-action</span>, after the test job) and clear this environment's branch so a push doesn't deploy first.
             </p>
           </div>

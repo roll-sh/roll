@@ -26,6 +26,7 @@ pub mod scale;
 pub mod registry;
 pub mod config;
 pub mod cron;
+pub mod ci_hosts;
 pub mod deploy;
 pub mod errors;
 pub mod drains;
@@ -1559,12 +1560,13 @@ impl Apps {
         // Only a roll code repo's pushes wait for their commit's checks (its statuses are roll's).
         // A roll code repo's checks are roll's; a Git URL's are GitHub's, read through roll's
         // GitHub App once the service is connected to it.
-        let on_app = match &svc.source {
-            Source::Git { url, .. } => self.github_for(&svc.id, url).await.is_some(),
+        // GitLab's and Bitbucket's with the service's Git login.
+        let readable = match &svc.source {
+            Source::Git { url, .. } => self.github_for(&svc.id, url).await.is_some() || (crate::ci_hosts::host_of(url).is_some() && self.git_remote(&svc.id, url).await.login().is_some()),
             _ => false,
         };
-        if o.get("wait_for_ci") == Some(&Value::Bool(true)) && !matches!(&svc.source, Source::Repo { .. }) && !on_app {
-            return Err(Error::BadRequest("wait_for_ci is for a roll code repo's service, or a Git URL service on roll's GitHub App (PUT …/github): another Git host's checks aren't roll's to read (deploy from the workflow after its tests instead: sdk/apps-github-action, with the environment's branch unset)".into()));
+        if o.get("wait_for_ci") == Some(&Value::Bool(true)) && !matches!(&svc.source, Source::Repo { .. }) && !readable {
+            return Err(Error::BadRequest("wait_for_ci is for a roll code repo's service, a Git URL service on roll's GitHub App (PUT …/github), or one on GitLab or Bitbucket with a Git login: another Git host's checks aren't roll's to read (deploy from the workflow after its tests instead: sdk/apps-github-action, with the environment's branch unset)".into()));
         }
         // A name another environment has is refused before anything is made or changed.
         if let Some(h) = hostname.clone() {
