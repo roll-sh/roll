@@ -1731,7 +1731,7 @@ fn tsvector_stats(tg: &Target, values: &[&Value], width: &dyn Fn(&Value) -> usiz
         inherit: false,
         nullfrac: nullfrac as f32,
         width: (total_width / nonnull_cnt) as i32,
-        distinct: (-1.0 * (1.0 - nullfrac)) as f32,
+        distinct: -(1.0 - nullfrac) as f32,
         slots: Vec::new(),
     };
     let cutoff = 9 * lexeme_no / bucket_width;
