@@ -2306,7 +2306,14 @@ impl Restrictions {
         if !d.is_scylla() {
             self.check_multi_slice_filtering()?;
         }
-        let mut f = RowFilter::default();
+        let mut f = RowFilter {
+            masks: cx
+                .masks
+                .clone()
+                .filter(|m| !m.platform.is_empty())
+                .map(|m| (m, d)),
+            ..RowFilter::default()
+        };
         if self.pk_filtered {
             for (pos, preds) in self.pk.iter().enumerate() {
                 let ci = table.partition_key[pos];
@@ -2523,6 +2530,10 @@ pub enum MultiPred {
 pub struct RowFilter {
     pub preds: Vec<(Target, BoundPred)>,
     pub multi: Vec<(Vec<usize>, Vec<CqlType>, MultiPred)>,
+    /// The read's masks: platform-masked columns are compared masked ([`ReadMasks::filtered`]).
+    ///
+    /// [`ReadMasks::filtered`]: crate::masking::ReadMasks::filtered
+    pub masks: Option<(std::sync::Arc<crate::masking::ReadMasks>, Dialect)>,
 }
 
 impl RowFilter {
@@ -2543,7 +2554,13 @@ impl RowFilter {
                     CqlType::Bigint,
                     Some(Bytes::copy_from_slice(&token.to_be_bytes())),
                 ),
-                Target::Column(i) => (table.columns[*i].ty.clone(), value(*i)),
+                Target::Column(i) => (
+                    table.columns[*i].ty.clone(),
+                    match &self.masks {
+                        Some((m, d)) => m.filtered(*d, *i, value(*i)),
+                        None => value(*i),
+                    },
+                ),
             };
             if !eval_pred(p, &ty, v.as_deref()) {
                 return false;

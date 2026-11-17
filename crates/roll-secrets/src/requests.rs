@@ -365,9 +365,9 @@ impl Secrets {
     }
 
     pub fn review_request(&self, project: &str, slug: &str, id: &str, v: Verdict, caller: &Caller) -> Result<Request> {
-        // Admin where the request changes things (checked per folder below): a folder's own admin
-        // reviews its folder's requests.
-        caller.need(Action::Read, &Scope::env(project, slug))?;
+        // Admin where the request changes things (checked per folder below, before anything about
+        // the request is told): a folder's own admin reviews its folder's requests, without a read
+        // of the whole environment.
         if !["approve", "reject"].contains(&v.verdict.as_str()) {
             return Err(Error::BadRequest("verdict is approve or reject".into()));
         }
@@ -377,15 +377,18 @@ impl Secrets {
         self.db.write(|c| {
             let env = envs::by_slug(c, project, slug)?;
             let r = load(c, &env, id)?;
+            let changed: Vec<ItemDiff> = from_json(&r.items);
+            if changed.is_empty() {
+                caller.need(Action::Admin, &Scope::env(project, slug))?;
+            }
+            for i in &changed {
+                caller.need(Action::Admin, &Scope::at(project, slug, &i.path))?;
+            }
             if !["open", "approved"].contains(&r.state.as_str()) {
                 return Err(Error::Conflict("conflict", format!("{id} is {}", r.state)));
             }
             if r.by == caller.principal {
                 return Err(Error::Forbidden("the author of a request can't review it (an admin can apply it with bypass)".into()));
-            }
-            let changed: Vec<ItemDiff> = from_json(&r.items);
-            for i in &changed {
-                caller.need(Action::Admin, &Scope::at(project, slug, &i.path))?;
             }
             let gates = request_gates(c, &env, &r)?;
             // A folder's admin approves for its folder's gate, never for the environment's.

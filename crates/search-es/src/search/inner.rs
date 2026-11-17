@@ -24,7 +24,8 @@ fn path_of(seg: &search_index::SegmentContext, d: u32, path: &str) -> bool {
 }
 
 /// The `inner_hits` object of one hit.
-pub fn render(qctx: &super::query::QueryCtx, t: &Target, r: &ShardResult, parent: u32, source: Option<&Value>, total_as_int: bool) -> EsResult<Value> {
+/// `parent_id` is the hit's `_id` (its nested hits print it).
+pub fn render(qctx: &super::query::QueryCtx, t: &Target, r: &ShardResult, parent: u32, parent_id: &str, source: Option<&Value>, total_as_int: bool) -> EsResult<Value> {
     // Nested hits' sources are cut out of their root's: under field level security, of the
     // fields the reader may see.
     let visible = match (source, &qctx.table.source_filter) {
@@ -36,7 +37,7 @@ pub fn render(qctx: &super::query::QueryCtx, t: &Target, r: &ShardResult, parent
     for def in &r.inner_hits {
         let mut h = match &def.join {
             Some(j) => super::join::inner_hits(qctx, t, r, parent, def, j)?,
-            None => nested_hits(qctx, t, &r.searcher, parent, def, source, None, total_as_int)?,
+            None => nested_hits(qctx, t, &r.searcher, parent, parent_id, def, source, None, total_as_int)?,
         };
         if total_as_int {
             total_to_int(&mut h);
@@ -66,6 +67,7 @@ fn nested_hits(
     t: &Target,
     searcher: &Searcher,
     parent: u32,
+    parent_id: &str,
     def: &InnerHitsDef,
     source: Option<&Value>,
     scope: Option<u32>,
@@ -92,11 +94,23 @@ fn nested_hits(
             (start, p)
         }
     };
-    let w = searcher.create_weight(&def.query, ScoreMode::Complete).map_err(ie)?;
+    let w = match def.weight.get() {
+        Some(w) => w,
+        None => {
+            let w = searcher.create_weight(&def.query, ScoreMode::Complete).map_err(ie)?;
+            def.weight.get_or_init(|| w)
+        }
+    };
     // A block's nested documents live and die with their root (a hit, so live): every match
-    // in the block counts.
+    // in the block counts. Only the block is iterated, so it leads (Lucene's
+    // `ParentChildrenBlockJoinQuery`): a range reads the block's doc values rather than
+    // collecting the whole segment's points.
     let mut matches: Vec<(u32, f32)> = Vec::new();
-    if let Some(mut s) = w.scorer(seg).map_err(ie)? {
+    let scorer = match w.scorer_supplier(seg).map_err(ie)? {
+        Some(s) => Some(s.get(u64::from(end - start).max(1)).map_err(ie)?),
+        None => None,
+    };
+    if let Some(mut s) = scorer {
         let mut d = s.advance(start);
         while d < end {
             matches.push((d, s.score()));
@@ -120,10 +134,9 @@ fn nested_hits(
     } else {
         matches.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     }
-    let parent_id = {
-        let stored = searcher.stored(parent).map_err(ie)?;
-        super::hits::stored_id(&stored).unwrap_or_default()
-    };
+    let parent_id = parent_id.to_string();
+    // The block's nested paths, read once for every inner hit's `_nested` identity.
+    let block = BlockPaths::read(table, seg, local);
     let fs = match &spec.source {
         Some(v) => crate::fetch::FetchSource::from_value(v)?,
         None => crate::fetch::FetchSource::default(),
@@ -136,7 +149,7 @@ fn nested_hits(
     let mut hits = Vec::new();
     for (i, (d, score)) in matches.iter().enumerate().skip(from).take(size) {
         // The `_nested` identity: every enclosing nested level with its offset in its parent.
-        let identity = nested_identity(table, seg, *d);
+        let identity = block.identity(table, seg, *d);
         let mut h = Map::new();
         h.insert("_index".into(), Value::Str(t.idx.name.clone()));
         h.insert("_id".into(), Value::Str(parent_id.clone()));
@@ -239,7 +252,7 @@ fn nested_hits(
         if !def.children.is_empty() {
             let mut inner = Map::new();
             for c in &def.children {
-                let mut ch = nested_hits(qctx, t, searcher, parent, c, source, Some(*d), total_as_int)?;
+                let mut ch = nested_hits(qctx, t, searcher, parent, &parent_id, c, source, Some(*d), total_as_int)?;
                 if total_as_int {
                     total_to_int(&mut ch);
                 }
@@ -345,24 +358,32 @@ pub struct NestedIdentity {
 
 /// The nested path of a segment doc (`None` for roots).
 fn doc_path(table: &FieldTable, seg: &search_index::SegmentContext, d: u32) -> Option<String> {
+    doc_path_ref(table, seg, d).map(str::to_string)
+}
+
+fn doc_path_ref<'t>(table: &'t FieldTable, seg: &search_index::SegmentContext, d: u32) -> Option<&'t str> {
     if is_root(seg, d) {
         return None;
     }
-    table.nested_paths().find(|o| path_of(seg, d, &o.path)).map(|o| o.path.clone())
+    table.nested_paths().find(|o| path_of(seg, d, &o.path)).map(|o| o.path.as_str())
 }
 
 /// The identity of segment doc `local` when it is a nested document (`None` for roots).
+pub fn nested_identity(table: &FieldTable, seg: &search_index::SegmentContext, local: u32) -> Option<NestedIdentity> {
+    identity_with(table, seg.reader.max_doc(), local, &|d| doc_path_ref(table, seg, d), &|d| is_root(seg, d))
+}
+
+/// [`nested_identity`], reading docs' paths and rootness through `path_at` and `root_at`.
 /// Blocks hold children before their parent, so the parent is the first later doc of the
 /// parent level, and the offset counts earlier siblings back to the block's start.
-pub fn nested_identity(table: &FieldTable, seg: &search_index::SegmentContext, local: u32) -> Option<NestedIdentity> {
-    let path = doc_path(table, seg, local)?;
-    let parent_path = table.objects.get(&path).and_then(|o| o.parent_nested.clone());
-    let max = seg.reader.max_doc();
+fn identity_with<'t>(table: &'t FieldTable, max: u32, local: u32, path_at: &dyn Fn(u32) -> Option<&'t str>, root_at: &dyn Fn(u32) -> bool) -> Option<NestedIdentity> {
+    let path = path_at(local)?;
+    let parent_path = table.objects.get(path).and_then(|o| o.parent_nested.as_deref());
     let mut p = local + 1;
     while p < max {
-        let hit = match &parent_path {
-            None => is_root(seg, p),
-            Some(pp) => path_of(seg, p, pp),
+        let hit = match parent_path {
+            None => root_at(p),
+            Some(pp) => path_at(p) == Some(pp),
         };
         if hit {
             break;
@@ -377,7 +398,7 @@ pub fn nested_identity(table: &FieldTable, seg: &search_index::SegmentContext, l
     let mut x = local;
     while x > 0 {
         x -= 1;
-        match doc_path(table, seg, x) {
+        match path_at(x) {
             Some(xp) if xp == path => offset += 1,
             Some(xp) if xp.starts_with(&deeper) => {}
             _ => break,
@@ -386,12 +407,59 @@ pub fn nested_identity(table: &FieldTable, seg: &search_index::SegmentContext, l
     let (root, mut levels) = match parent_path {
         None => (p, Vec::new()),
         Some(_) => {
-            let up = nested_identity(table, seg, p)?;
+            let up = identity_with(table, max, p, path_at, root_at)?;
             (up.root, up.levels)
         }
     };
-    levels.push((path, offset));
+    levels.push((path.to_string(), offset));
     Some(NestedIdentity { root, levels })
+}
+
+/// The nested path of every doc of a root's block (its nested documents, then the root),
+/// read with one postings walk per nested path instead of a term lookup per doc.
+struct BlockPaths<'t> {
+    start: u32,
+    /// By doc from `start`; the last is the root (`None`).
+    paths: Vec<Option<&'t str>>,
+}
+
+impl<'t> BlockPaths<'t> {
+    fn read(table: &'t FieldTable, seg: &search_index::SegmentContext, root: u32) -> BlockPaths<'t> {
+        let mut start = root;
+        while start > 0 && !is_root(seg, start - 1) {
+            start -= 1;
+        }
+        let mut paths = vec![None; (root - start) as usize + 1];
+        if root > start
+            && let Some(terms) = seg.reader.terms(NESTED_PATH_FIELD)
+        {
+            for o in table.nested_paths() {
+                let Some(st) = terms.seek_exact(o.path.as_bytes()) else { continue };
+                let mut pc = terms.postings(&st, search_codec::PostingsFlags::DOCS);
+                let mut d = pc.advance(start);
+                while d < root {
+                    let slot = &mut paths[(d - start) as usize];
+                    if slot.is_none() {
+                        *slot = Some(o.path.as_str());
+                    }
+                    d = pc.next();
+                }
+            }
+        }
+        BlockPaths { start, paths }
+    }
+
+    fn identity(&self, table: &'t FieldTable, seg: &search_index::SegmentContext, local: u32) -> Option<NestedIdentity> {
+        let root = self.start + self.paths.len() as u32 - 1;
+        let inside = |d: u32| d >= self.start && d <= root;
+        identity_with(
+            table,
+            seg.reader.max_doc(),
+            local,
+            &|d| if inside(d) { self.paths[(d - self.start) as usize] } else { doc_path_ref(table, seg, d) },
+            &|d| if inside(d) { d == root } else { is_root(seg, d) },
+        )
+    }
 }
 
 impl NestedIdentity {
@@ -416,17 +484,17 @@ impl NestedIdentity {
 
     /// The nested object inside the root's `_source`.
     pub fn source_of(&self, root: &Value) -> Option<Value> {
-        let mut cur = root.clone();
+        let mut cur = root;
         let mut prefix = String::new();
+        let mut vals = Vec::new();
         for (path, offset) in &self.levels {
             let rel = if prefix.is_empty() { path.as_str() } else { path.strip_prefix(&prefix).unwrap_or(path) };
-            let Value::Obj(m) = &cur else { return None };
-            let mut vals = Vec::new();
+            let Value::Obj(m) = cur else { return None };
+            vals.clear();
             crate::engine::source::extract_values(m, rel, &mut vals);
-            let next = vals.get(*offset).map(|v| (*v).clone())?;
-            cur = next;
+            cur = vals.get(*offset).copied()?;
             prefix = format!("{path}.");
         }
-        Some(cur)
+        Some(cur.clone())
     }
 }

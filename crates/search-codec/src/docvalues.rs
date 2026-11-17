@@ -959,6 +959,19 @@ fn multi_batch<T: Copy>(
     flat.gather(&mut values[start..], index, value);
 }
 
+/// `get_every` of a field with one value per doc of `set`: the values of `docs` by doc id
+/// when `set` holds every doc and `docs` are in it.
+#[inline]
+fn every_doc(set: &DocSet, flat: &NumericValues, docs: &[u32], values: &mut Vec<i64>) -> bool {
+    if !set.is_all() || docs.iter().fold(0, |m, &d| m.max(d)) >= set.max_doc() {
+        return false;
+    }
+    values.clear();
+    values.extend(docs.iter().map(|&d| i64::from(d)));
+    flat.gather(values, |i| i as u64, |v| v);
+    true
+}
+
 /// Single `i64` per doc.
 #[derive(Clone, Debug)]
 pub struct NumericDocValues {
@@ -1019,6 +1032,13 @@ impl NumericDocValues {
     pub fn get_batch(&self, docs: &[u32], found: &mut Vec<u32>, values: &mut Vec<i64>) {
         let start = batch_ranks(&self.docs, docs, found, values, |r| r as i64);
         self.values.gather(&mut values[start..], |i| i as u64, |v| v);
+    }
+
+    /// The value of each doc of `docs` (any order, repeats allowed) into `values` (replacing
+    /// it) when every doc of the segment has one, gathered by doc id: no doc set walk, found
+    /// docs or positions. `false`, with `values` unspecified, otherwise.
+    pub fn get_every(&self, docs: &[u32], values: &mut Vec<i64>) -> bool {
+        every_doc(&self.docs, &self.values, docs, values)
     }
 
     /// Values of the docs with value number `start..start + out.len()` (in doc order), decoded
@@ -1442,6 +1462,11 @@ impl SortedNumericDocValues {
 
     pub fn skipper(&self) -> Option<DocValuesSkipper> {
         self.skip.clone().map(DocValuesSkipper::new)
+    }
+
+    /// [`NumericDocValues::get_every`] of a single-valued field.
+    pub fn get_every(&self, docs: &[u32], values: &mut Vec<i64>) -> bool {
+        self.addresses.is_none() && every_doc(&self.docs, &self.values, docs, values)
     }
 
     /// Batch lookup: for each doc of `docs` (ascending) with values, appends the doc to

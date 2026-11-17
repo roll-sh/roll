@@ -1832,6 +1832,7 @@ async fn page(
             .cloned()
             .collect(),
         multi: Vec::new(),
+        masks: filter.masks.clone(),
     };
     // An index read paged by index entries (ScyllaDB) decides where pages end; PER PARTITION
     // LIMIT doesn't apply to it.

@@ -1,0 +1,28 @@
+{
+  "plugins_security.health": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/security/access-control/api/",
+      "description": "The Security plugin's health."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_security/health",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        },
+        {
+          "path": "/_opendistro/_security/health",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        }
+      ]
+    },
+    "params": {}
+  }
+}

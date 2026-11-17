@@ -1,0 +1,21 @@
+{
+  "plugins_security.whoami": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/security/access-control/api/",
+      "description": "The request's TLS identity."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_security/whoami",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        }
+      ]
+    },
+    "params": {}
+  }
+}

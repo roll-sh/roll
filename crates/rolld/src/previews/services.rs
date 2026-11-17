@@ -20,12 +20,19 @@ pub struct RollApps {
     api: Api,
     /// (preview, service) → service id, learned at deploy (looked up again after a restart).
     ids: std::sync::Mutex<std::collections::HashMap<(String, String), String>>,
+    /// roll apps takes `feedback` on an environment (roll apps' #26; an older one refuses an
+    /// unknown field): previews' button on its pages.
+    /// The deployment last started per (preview, service), with what it deploys (`key`): a poll
+    /// while it's under way waits on it, and once it's live nothing is started again.
+    started: std::sync::Mutex<std::collections::HashMap<(String, String), (String, String)>>,
+    pub feedback: bool,
 }
 
 impl RollApps {
     pub fn new(api: Api) -> RollApps {
-        RollApps { api, ids: Default::default() }
+        RollApps { api, ids: Default::default(), started: Default::default(), feedback: false }
     }
+
 
     /// The roll apps service `name` of `project`.
     async fn service_in(&self, project: &str, name: &str) -> anyhow::Result<Option<String>> {
@@ -101,6 +108,7 @@ impl roll_previews::ports::Apps for RollApps {
                 .map(|x| roll_previews::ports::CatalogService {
                     name: s(&x["name"]).unwrap_or_default(),
                     repo: (x["source"]["kind"] == "repo").then(|| s(&x["source"]["repo"])).flatten(),
+                    root: s(&x["source"]["root"]).unwrap_or_default(),
                     memory_mb: x["run"]["memory_mb"].as_u64().unwrap_or(512) as u32,
                 })
                 .collect(),
@@ -116,7 +124,11 @@ impl roll_previews::ports::Apps for RollApps {
             Some(hash) => json!({ "token": token, "bypass_sha256": hash }),
             None => json!({ "token": token }),
         });
-        self.api.call(Method::PUT, &path, Some(json!({ "branch": null, "ephemeral": true, "access": access }))).await?;
+        let mut body = json!({ "branch": null, "ephemeral": true, "access": access });
+        if self.feedback {
+            body["feedback"] = json!(t.feedback);
+        }
+        self.api.call(Method::PUT, &path, Some(body)).await?;
         // Every variable the preview sets: the branches' plain names and the project's overrides,
         // and each prefixed link to a branched parent pointed at the branch (a link is roll apps'
         // own variable, which would still reach production).
@@ -125,10 +137,12 @@ impl roll_previews::ports::Apps for RollApps {
         for l in links.as_array().into_iter().flatten() {
             let Some((_, _, vars)) = t.branches.iter().find(|(k, parent, _)| l["kind"] == k.as_str() && l["ref"] == parent.as_str()) else { continue };
             let prefix = l["prefix"].as_str().unwrap_or("");
+            // Every variable the link gives, from the branch: by roll apps' names, and blank for
+            // one the branch has no value for, never production's (a stream's brokers and login,
+            // an OpenSearch login, would reach production's data).
             for name in l["vars"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-                if let Some((_, v)) = vars.iter().find(|(k, _)| name.strip_prefix(prefix) == Some(k.as_str())) {
-                    set.insert(name.to_string(), json!(v));
-                }
+                let plain = name.strip_prefix(prefix).unwrap_or(name);
+                set.insert(name.to_string(), json!(link_value(plain, vars).unwrap_or_default()));
             }
         }
         // What roll set last time and no longer wants (a removed preview variable or project
@@ -139,37 +153,74 @@ impl roll_previews::ports::Apps for RollApps {
         // At the sha already (a reset's new URLs, say): run it again with the variables, no build.
         // Otherwise deploy, keyed so a retry after a crash returns the same deployment.
         let env = self.api.get(&path).await?;
+        // What's deployed, named: the commit and what it's deployed with.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut sorted: Vec<_> = set.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in sorted {
+            for b in k.bytes().chain([0]).chain(v.to_string().into_bytes()).chain([0]) {
+                h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+        let key = format!(
+            "{}@{}@{h:016x}{}{}",
+            t.environment,
+            t.git.as_deref().unwrap_or("image"),
+            if t.access_token.is_some() { "p" } else { "" },
+            if self.feedback && t.feedback { "f" } else { "" }
+        );
+        // The deployment previews last started for exactly this, still under way or live: wait on
+        // it (or it's done). The engine asks again while a deploy is in flight, and a redeploy
+        // that starts another supersedes it each time.
+        let mine = (t.preview.clone(), t.service.clone());
+        let last = self.started.lock().unwrap_or_else(|p| p.into_inner()).get(&mine).cloned();
+        match already(last.as_ref(), &key, &env) {
+            Already::UnderWay => {
+                self.settle(&path, env["latest"].clone()).await?;
+                return Ok(s(&self.api.get(&path).await?["url"]));
+            }
+            Already::Live => return Ok(s(&env["url"])),
+            Already::No => {}
+        }
+        // At the sha already (a reset's new URLs, say): run it again with the variables, no build.
+        // Otherwise deploy, keyed so a retry after a crash returns the same deployment.
         let at_sha = t.git.is_some() && env["active"]["revision"].as_str() == t.git.as_deref();
         let deployment = if at_sha {
-            self.api.post(&format!("{path}/redeploy"), json!({ "message": format!("roll preview {}: new variables", t.preview) })).await?
+            // Keyed too (roll apps takes `Idempotency-Key` on a redeploy): what's deployed and the
+            // deployment it replaces, so a retry after a crash gets the same one, and variables
+            // that come back to an earlier set never get that earlier, superseded, redeploy back.
+            let idem = redeploy_key(&key, &s(&env["active"]["id"]).unwrap_or_default());
+            let body = json!({ "message": format!("roll preview {}: new variables", t.preview) });
+            self.api.call_with(Method::POST, &format!("{path}/redeploy"), Some(body), Some(&idem)).await?
         } else {
             let body = match &t.git {
                 Some(sha) => json!({ "revision": sha, "message": format!("roll preview {}", t.preview) }),
                 None => json!({ "message": format!("roll preview {}", t.preview) }),
             };
-            // The key names what's deployed: the commit and what it's deployed with (a retry
-            // after a crash returns the same deployment; new variables make a new one).
-            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-            let mut sorted: Vec<_> = set.iter().collect();
-            sorted.sort_by(|a, b| a.0.cmp(b.0));
-            for (k, v) in sorted {
-                for b in k.bytes().chain([0]).chain(v.to_string().into_bytes()).chain([0]) {
-                    h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
-                }
-            }
-            let mut key = format!("{}@{}@{h:016x}{}", t.environment, t.git.as_deref().unwrap_or("image"), if t.access_token.is_some() { "p" } else { "" });
+            let mut idem = key.clone();
             // After a failed or canceled deploy, a retry is a new deploy (a registry timeout
             // doesn't fail the preview until the next push); a crash's retry still finds its own.
             if matches!(env["latest"]["status"].as_str(), Some("failed" | "canceled"))
                 && let Some(failed) = s(&env["latest"]["id"])
             {
-                key.push_str(&format!("~{failed}"));
+                idem.push_str(&format!("~{failed}"));
             }
-            self.api.call_with(Method::POST, &format!("{path}/deploys"), Some(body), Some(&key)).await?
+            self.api.call_with(Method::POST, &format!("{path}/deploys"), Some(body), Some(&idem)).await?
         };
+        if let Some(id) = s(&deployment["id"]) {
+            self.started.lock().unwrap_or_else(|p| p.into_inner()).insert(mine, (id, key));
+        }
         self.settle(&path, deployment).await?;
         let env = self.api.get(&path).await?;
         Ok(s(&env["url"]))
+    }
+
+    async fn memory_mb(&self, preview: &str, service: &str) -> Option<u32> {
+        // The live deployment's frozen run: `[app.previews.run]` and the environment's own size
+        // over the service's.
+        let (id, env) = self.find(preview, service).await.ok().flatten()?;
+        let e = self.api.get(&Self::env_path(&id, &env)).await.ok()?;
+        e["active"]["run"]["memory_mb"].as_u64().map(|m| m as u32)
     }
 
     async fn wake(&self, preview: &str, service: &str) -> anyhow::Result<()> {
@@ -189,6 +240,7 @@ impl roll_previews::ports::Apps for RollApps {
             self.api.delete(&Self::env_path(&id, &env)).await?;
         }
         self.ids.lock().unwrap_or_else(|p| p.into_inner()).remove(&(preview.to_string(), service.to_string()));
+        self.started.lock().unwrap_or_else(|p| p.into_inner()).remove(&(preview.to_string(), service.to_string()));
         Ok(())
     }
 
@@ -200,6 +252,46 @@ impl roll_previews::ports::Apps for RollApps {
 
     fn status(&self, _preview: &str, _service: &str) -> Option<roll_previews::ServiceState> {
         None
+    }
+
+    // roll apps' instances don't freeze and have no egress proxy.
+    fn warm(&self, _preview: &str, _service: &str) -> bool {
+        false
+    }
+
+    async fn egress_refused(&self, _preview: &str) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// A roll apps link's variable `name` (its prefix taken off) as a preview's branch gives it:
+/// the branch's own variable of that name, or roll apps' name for one the branch names otherwise
+/// (a bucket's endpoint, a stream's brokers and SASL login, a search cluster's API key or
+/// OpenSearch login, from the branch's `ELASTICSEARCH_URL` and its credentials). `None`: the
+/// branch has nothing for it.
+fn link_value(name: &str, vars: &[(String, String)]) -> Option<String> {
+    let get = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    if let Some(v) = get(name) {
+        return Some(v);
+    }
+    let search = || get("ELASTICSEARCH_URL").and_then(|u| url::Url::parse(&u).ok());
+    let decode = |s: &str| urlencoding::decode(s).map(|c| c.into_owned()).unwrap_or_else(|_| s.to_string());
+    match name {
+        "AWS_ENDPOINT_URL" => get("AWS_ENDPOINT_URL_S3"),
+        "KAFKA_BROKERS" => get("KAFKA_BOOTSTRAP_SERVERS"),
+        "KAFKA_USERNAME" => get("KAFKA_SASL_USERNAME"),
+        "KAFKA_PASSWORD" => get("KAFKA_SASL_PASSWORD"),
+        "OPENSEARCH_URL" => get("ELASTICSEARCH_URL"),
+        "OPENSEARCH_USERNAME" => search().map(|u| decode(u.username())).filter(|u| !u.is_empty()),
+        "OPENSEARCH_PASSWORD" => search().and_then(|u| u.password().map(decode)),
+        // roll search takes `ApiKey base64(<cluster>:<password>)` for a cluster's own login;
+        // a `<user>@<cluster>` login has no key form.
+        "ELASTICSEARCH_API_KEY" => search().and_then(|u| {
+            use base64::Engine as _;
+            let (user, pass) = (decode(u.username()), u.password().map(decode)?);
+            (!user.is_empty() && !user.contains('@')).then(|| base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}")))
+        }),
+        _ => None,
     }
 }
 
@@ -221,6 +313,50 @@ fn variables_patch(before: &Value, mut set: serde_json::Map<String, Value>) -> V
 pub struct Services {
     pub apps: RollApps,
     pub runtime: Arc<roll_previews::runtime::Runtime>,
+    /// Where roll apps' instances can be screenshotted (`None`: they can't, so a project on roll
+    /// apps gets no screenshots and no baseline).
+    pub reach: Option<Arc<dyn Reach>>,
+}
+
+/// Where a roll apps instance can be screenshotted (roll apps' `Apps::reachable`): its container
+/// on this host and the port the app listens on inside it, the instance woken and kept awake
+/// while the answer lives. `None` where there's nothing to join (Fargate).
+#[async_trait]
+pub trait Reach: Send + Sync {
+    async fn reach(&self, service: &str, env: &str) -> anyhow::Result<Option<Reached>>;
+}
+
+/// roll previews' notes for roll apps' feedback button, by the preview's environment name.
+pub struct Notes(pub std::sync::Weak<roll_previews::Engine>);
+
+#[async_trait]
+impl apps_control::integrations::FeedbackNotes for Notes {
+    async fn notes(&self, env: &str, path: &str) -> anyhow::Result<Vec<apps_control::integrations::Note>> {
+        let Some(engine) = self.0.upgrade() else { return Ok(Vec::new()) };
+        Ok(engine
+            .notes_for(env, path)
+            .await?
+            .into_iter()
+            .map(|n| apps_control::integrations::Note { path: n.path, selector: n.selector, note: n.note, by: n.by, at: n.at })
+            .collect())
+    }
+}
+
+/// roll apps' own (`Apps::reachable`): the instance's container and port, its lease held.
+pub struct AppsReach(pub Arc<apps_control::Apps>);
+
+#[async_trait]
+impl Reach for AppsReach {
+    async fn reach(&self, service: &str, env: &str) -> anyhow::Result<Option<Reached>> {
+        Ok(self.0.reachable(service, env).await?.map(|r| Reached { container: r.container.clone(), port: r.port, hold: Box::new(r) }))
+    }
+}
+
+pub struct Reached {
+    pub container: String,
+    pub port: u16,
+    /// Keeps the instance awake until dropped.
+    pub hold: Box<dyn std::any::Any + Send + Sync>,
 }
 
 impl Services {
@@ -235,6 +371,10 @@ impl Services {
 impl roll_previews::ports::Apps for Services {
     async fn catalog(&self, project: &str) -> anyhow::Result<Option<Vec<roll_previews::ports::CatalogService>>> {
         self.apps.catalog(project).await
+    }
+
+    async fn memory_mb(&self, preview: &str, service: &str) -> Option<u32> {
+        self.apps.memory_mb(preview, service).await
     }
 
     async fn deploy(&self, t: &roll_previews::ports::Target) -> anyhow::Result<Option<String>> {
@@ -282,21 +422,105 @@ impl roll_previews::ports::Apps for Services {
         }
     }
 
-    async fn screenshot(&self, preview: &str, service: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        match self.apps.find(preview, service).await? {
-            Some(_) => Ok(None),
-            None => self.runtime.screenshot(preview, service).await,
-        }
+    async fn screenshot(&self, preview: &str, service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
+        let Some((id, env)) = self.apps.find(preview, service).await? else { return self.runtime.screenshot(preview, service, opts).await };
+        // A roll apps instance: the same browser run, in its own network, held awake meanwhile.
+        let Some(reach) = &self.reach else { return Ok(None) };
+        let Some(at) = reach.reach(&id, &env).await? else { return Ok(None) };
+        let shot = self.runtime.screenshot_in(&at.container, at.port, opts).await;
+        drop(at.hold);
+        shot.map(Some)
+    }
+
+    fn screenshots_apps(&self) -> bool {
+        self.reach.is_some()
     }
 
     fn status(&self, preview: &str, service: &str) -> Option<roll_previews::ServiceState> {
         self.runtime.status(preview, service)
     }
+
+    // Frozen is the runtime's: without it a frozen service's dynamic credentials were revoked
+    // while its process kept them (the engine's tend reads it).
+    fn warm(&self, preview: &str, service: &str) -> bool {
+        self.runtime.warm(preview, service)
+    }
+
+    async fn egress_refused(&self, preview: &str) -> Vec<String> {
+        self.runtime.egress_refused(preview).await
+    }
+}
+
+/// What a deploy of `key` finds of the one previews last started (`last`: its id and key).
+#[derive(Debug, PartialEq)]
+enum Already {
+    /// It's the environment's latest, and still going: wait on it.
+    UnderWay,
+    /// It's what the environment runs: nothing to do.
+    Live,
+    /// Something else (another key, a newer deployment, a failed one): start one.
+    No,
+}
+
+/// A redeploy's idempotency key: what it deploys and the deployment it replaces. A crash's retry
+/// gets the same redeploy; variables back to an earlier set (v1 → v2 → v1) a new one, never the
+/// earlier, superseded one.
+fn redeploy_key(key: &str, replaces: &str) -> String {
+    format!("redeploy:{key}:{replaces}")
+}
+
+fn already(last: Option<&(String, String)>, key: &str, env: &Value) -> Already {
+    let Some((id, _)) = last.filter(|(_, k)| k == key) else { return Already::No };
+    let going = matches!(env["latest"]["status"].as_str(), Some("queued" | "building" | "deploying"));
+    if going && env["latest"]["id"].as_str() == Some(id.as_str()) {
+        Already::UnderWay
+    } else if env["active"]["id"].as_str() == Some(id.as_str()) {
+        Already::Live
+    } else {
+        Already::No
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    /// Every variable of a roll apps link to a branched resource comes from the branch, under
+    /// roll apps' names, or is blank: a stream's brokers and login, a bucket's endpoint and a
+    /// search cluster's key or OpenSearch login never stay production's.
+    #[test]
+    fn a_links_variables_come_from_the_branch_or_are_blank() {
+        let v = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
+        let stream = v(&[("KAFKA_BOOTSTRAP_SERVERS", "b:9092"), ("KAFKA_SASL_USERNAME", "pv"), ("KAFKA_SASL_PASSWORD", "s")]);
+        assert_eq!(["KAFKA_BROKERS", "KAFKA_USERNAME", "KAFKA_PASSWORD"].map(|n| super::link_value(n, &stream)), [Some("b:9092".into()), Some("pv".into()), Some("s".into())]);
+        assert_eq!(super::link_value("AWS_ENDPOINT_URL", &v(&[("AWS_ENDPOINT_URL_S3", "http://s3")])).as_deref(), Some("http://s3"));
+        let es = v(&[("ELASTICSEARCH_URL", "https://br-1:p%40ss@search.test")]);
+        assert_eq!(super::link_value("OPENSEARCH_USERNAME", &es).as_deref(), Some("br-1"));
+        assert_eq!(super::link_value("OPENSEARCH_PASSWORD", &es).as_deref(), Some("p@ss"));
+        assert_eq!(super::link_value("ELASTICSEARCH_API_KEY", &es).as_deref(), Some("YnItMTpwQHNz"), "base64(br-1:p@ss)");
+        assert_eq!(super::link_value("ELASTICSEARCH_API_KEY", &v(&[("ELASTICSEARCH_URL", "https://u%40br-1:p@search.test")])), None, "a user@cluster login has no key form");
+        assert_eq!(super::link_value("CASSANDRA_KEYSPACE", &v(&[("CASSANDRA_USERNAME", "pv")])), None, "nothing for it: blank, not production's");
+    }
+
     use super::*;
+
+    /// A poll while previews' own deploy is going waits on it, once it's live it's done, and only
+    /// a different set of variables (or a deployment that replaced it) starts another: one
+    /// deployment per change, not one per poll (26 a run before).
+    #[test]
+    fn a_poll_waits_on_its_own_deploy_and_starts_none_once_it_is_live() {
+        let last = ("dep_2".to_string(), "pv-1@abc@00ff".to_string());
+        let env = |latest: (&str, &str), active: &str| json!({ "latest": { "id": latest.0, "status": latest.1 }, "active": { "id": active } });
+        assert_eq!(already(Some(&last), "pv-1@abc@00ff", &env(("dep_2", "building"), "dep_1")), Already::UnderWay);
+        assert_eq!(already(Some(&last), "pv-1@abc@00ff", &env(("dep_2", "active"), "dep_2")), Already::Live);
+        assert_eq!(already(Some(&last), "pv-1@abc@11ee", &env(("dep_2", "active"), "dep_2")), Already::No, "new variables");
+        assert_eq!(already(Some(&last), "pv-1@abc@00ff", &env(("dep_3", "building"), "dep_2")), Already::Live, "someone else's on top: ours still runs");
+        assert_eq!(already(Some(&last), "pv-1@abc@00ff", &env(("dep_2", "failed"), "dep_1")), Already::No, "it failed: try again");
+        assert_eq!(already(None, "pv-1@abc@00ff", &env(("dep_1", "active"), "dep_1")), Already::No, "after a restart: start, keyed");
+        // v1 (dep_1 live) → v2 → back to v1: that last redeploy isn't the first one again.
+        let (v1, v2) = ("pv-1@abc@00ff", "pv-1@abc@11ee");
+        assert_ne!(redeploy_key(v1, "dep_1"), redeploy_key(v1, "dep_2"));
+        assert_ne!(redeploy_key(v1, "dep_2"), redeploy_key(v2, "dep_2"));
+        assert!(redeploy_key(v1, "dep_123456789abc").len() <= 200, "roll apps' limit");
+    }
 
     /// What roll set and no longer wants goes; what a person set stays; the list follows.
     #[test]

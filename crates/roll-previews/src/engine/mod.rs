@@ -75,6 +75,9 @@ pub struct Config {
     pub interval: Duration,
     /// How often branches' sizes and costs are read again.
     pub usage_every: Duration,
+    /// Where services reach roll's mail catcher (`host:port` as a client on this node writes it;
+    /// containers get it rewritten). `None`: no catcher, and previews' mail fails.
+    pub mail: Option<String>,
 }
 
 impl Default for Config {
@@ -85,6 +88,7 @@ impl Default for Config {
             port: None,
             interval: Duration::from_secs(15),
             usage_every: Duration::from_secs(300),
+            mail: None,
         }
     }
 }
@@ -96,6 +100,29 @@ impl Config {
             (_, Some(p)) => format!(":{p}"),
         };
         format!("{}://{host}.{}{port}", self.scheme, self.domain)
+    }
+}
+
+/// What an engine did since it started: converges and screenshots, and how many failed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub converges: u64,
+    pub converge_failures: u64,
+    pub screenshots: u64,
+    pub screenshot_failures: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct Counters {
+    converges: std::sync::atomic::AtomicU64,
+    converge_failures: std::sync::atomic::AtomicU64,
+    screenshots: std::sync::atomic::AtomicU64,
+    screenshot_failures: std::sync::atomic::AtomicU64,
+}
+
+impl Counters {
+    pub(crate) fn add(c: &std::sync::atomic::AtomicU64) {
+        c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -115,7 +142,18 @@ pub struct Engine {
     usage_read: Mutex<HashMap<String, i64>>,
     /// Previews whose screenshot a converge asked for; taken after the pass (`pass`).
     shots_wanted: Mutex<std::collections::HashSet<String>>,
-    /// One screenshot at a time.
+    /// Previews with a screenshot task queued or running, and whether it was asked again
+    /// meanwhile: never a second one at once (its container's name is the service's, so two
+    /// would refuse each other).
+    shots_running: Mutex<HashMap<String, bool>>,
+    /// Screenshots that failed once at a head (preview, head): tried again once, since the service
+    /// may have been stopped or redeployed underneath, before the head is given up on.
+    shots_failed: Mutex<std::collections::HashSet<(String, String)>>,
+    /// What this node did, for rolld's metrics (`Engine::stats`).
+    counters: Counters,
+    /// The hosts each preview's egress proxy refused that its activity already says.
+    egress_told: Mutex<HashMap<String, std::collections::HashSet<String>>>,
+    /// Screenshots taken at once on this node ([`screenshot_slots`]).
     shooting: Arc<tokio::sync::Semaphore>,
     /// Services a converge just deployed at a change's new head, woken after the pass (`warm`).
     warm_wanted: Mutex<Vec<(String, String)>>,
@@ -177,7 +215,11 @@ impl Engine {
             secrets_told: Mutex::new(HashMap::new()),
             paths_seen: Mutex::new(HashMap::new()),
             shots_wanted: Mutex::new(std::collections::HashSet::new()),
-            shooting: Arc::new(tokio::sync::Semaphore::new(1)),
+            shots_running: Mutex::new(HashMap::new()),
+            shots_failed: Mutex::new(std::collections::HashSet::new()),
+            counters: Counters::default(),
+            shooting: Arc::new(tokio::sync::Semaphore::new(screenshot_slots())),
+            egress_told: Mutex::new(HashMap::new()),
             warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
@@ -213,6 +255,13 @@ impl Engine {
                 drop(e);
             }
         })
+    }
+
+    /// What this node's engine did since it started (rolld publishes the change each minute).
+    pub fn stats(&self) -> Stats {
+        let get = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);
+        let c = &self.counters;
+        Stats { converges: get(&c.converges), converge_failures: get(&c.converge_failures), screenshots: get(&c.screenshots), screenshot_failures: get(&c.screenshot_failures) }
     }
 
     /// Converge soon.
@@ -269,6 +318,8 @@ impl Engine {
             });
         }
         while set.join_next().await.is_some() {}
+        self.tend_leases().await;
+        self.note_refused_egress().await;
         // Services those converges deployed at a new head, woken so their first visit is warm (a
         // few at a time, off the pass).
         let warm: Vec<(String, String)> = std::mem::take(&mut *self.warm_wanted.lock());
@@ -295,21 +346,28 @@ impl Engine {
         // or a first pull of the browser image holds nothing else up.
         let wanted: Vec<String> = self.shots_wanted.lock().drain().collect();
         for id in wanted {
+            // One task per preview at a time: an ask while one is queued or running marks it to
+            // go again once it's done (at whatever head the preview is at then).
+            {
+                let mut running = self.shots_running.lock();
+                if let Some(again) = running.get_mut(&id) {
+                    *again = true;
+                    continue;
+                }
+                running.insert(id.clone(), false);
+            }
             let this = self.clone();
             let gate = self.shooting.clone();
             tokio::spawn(async move {
-                let Ok(_one) = gate.acquire_owned().await else { return };
-                let Ok(r) = this.store.row(&id) else { return };
-                let Ok(s) = this.store.settings(&r.project_id) else { return };
-                // Still wanted: ready, the rules still ask, not taken at this head meanwhile.
-                if r.state != State::Ready || !s.github.screenshot || this.store.screenshot_head(&r.id).ok().flatten().as_deref() == Some(r.build()) {
-                    return;
-                }
-                if this.take_screenshot(&r).await {
-                    // The change and its pull request comment show the new one now, not at the
-                    // preview's next converge.
-                    if let Ok(row) = this.store.row(&id) {
-                        this.report(row).await;
+                loop {
+                    this.screenshot_once(&gate, &id).await;
+                    let mut running = this.shots_running.lock();
+                    match running.get_mut(&id) {
+                        Some(again) if *again => *again = false,
+                        _ => {
+                            running.remove(&id);
+                            break;
+                        }
                     }
                 }
             });
@@ -319,6 +377,22 @@ impl Engine {
 }
 
 impl Engine {
+    /// One screenshot run of a preview, in a slot: if it's still wanted (ready, the rules still
+    /// ask, not taken at this head meanwhile), then the change and its pull request told at once.
+    async fn screenshot_once(&self, gate: &Arc<tokio::sync::Semaphore>, id: &str) {
+        let Ok(_one) = gate.clone().acquire_owned().await else { return };
+        let Ok(r) = self.store.row(id) else { return };
+        let Ok(s) = self.store.settings(&r.project_id) else { return };
+        if r.state != State::Ready || !s.github.screenshot || self.store.screenshot_head(&r.id).ok().flatten().as_deref() == Some(r.build()) {
+            return;
+        }
+        if self.take_screenshot(&r).await
+            && let Ok(row) = self.store.row(id)
+        {
+            self.report(row).await;
+        }
+    }
+
     /// Whether `c` gets a preview: [`wants`], then the path filters on what it touches (unless
     /// its title asked for one). Paths that can't be read count as a match: one change's diff
     /// never stops the project's other previews.
@@ -397,10 +471,14 @@ impl Engine {
         }
     }
 
-    /// The preview's secrets resolved as its code gets them, unresolved keys said once in its
-    /// activity (a check fails on them; a preview starts without them, saying which).
-    pub(super) async fn resolve_secrets(&self, r: &Row, untrusted: bool) -> anyhow::Result<Vec<(String, String)>> {
-        let got = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+    /// The preview's secrets resolved as its code gets them, for `consumer` (a start of a service,
+    /// a job), unresolved keys said once in its activity (a check fails on them; a preview starts
+    /// without them, saying which). The leases of the dynamic credentials among them come back
+    /// too: the caller keeps them while what it starts runs ([`Engine::keep_leases`]) or revokes
+    /// them when it's done.
+    pub(super) async fn resolve_secrets(&self, r: &Row, untrusted: bool, consumer: &str) -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
+        let consumer = format!("preview:{}/{consumer}", env_name(&r.id));
+        let got = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted, &consumer).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
         let mut problems = got.problems.clone();
         problems.sort();
         let new = self.secrets_told.lock().insert(r.id.clone(), problems.clone()).is_none_or(|before| before != problems);
@@ -409,13 +487,135 @@ impl Engine {
             let more = problems.len().saturating_sub(shown.len());
             let _ = self.store.log(&r.id, &format!("secrets that don't resolve: {}{}", shown.join("; "), if more > 0 { format!(" (and {more} more)") } else { String::new() }));
         }
-        Ok(got.values)
+        // A followed key: the branch's value for that field, or blank (never the parent's).
+        let mut values = got.values;
+        if !got.followed.is_empty() {
+            let branches = self.branch_vars(&r.id).await?;
+            for (name, kind, parent, field) in got.followed {
+                let vars = branches.iter().find(|(k, p, _)| *k == kind && *p == parent).map(|(_, _, v)| v.clone()).unwrap_or_default();
+                let value = crate::names::follow(kind, &field, vars);
+                values.retain(|(k, _)| *k != name);
+                values.push((name, value));
+            }
+        }
+        Ok((values, got.leases))
+    }
+
+    /// A start of `service` runs on `leases` now: the previous start's are revoked (that
+    /// container is gone), these renewed while it runs ([`Engine::tend_leases`]).
+    pub(super) async fn keep_leases(&self, r: &Row, service: &str, leases: &[String]) -> anyhow::Result<()> {
+        let now = self.store.now_ms()?;
+        // Until the first renewal says: roll secrets' shortest TTL.
+        self.store.add_leases(&r.id, service, leases, now + LEASE_MIN_MS)?;
+        for old in self.store.leases(Some(&r.id))?.into_iter().filter(|l| l.service == service && !leases.contains(&l.lease)) {
+            self.revoke_lease(&r.project_id, &old).await;
+        }
+        Ok(())
+    }
+
+    /// End a lease, forgetting it once roll secrets has (a failure is tried again next pass).
+    async fn revoke_lease(&self, project: &str, l: &crate::LeaseRow) {
+        match self.secrets.revoke(project, &l.lease).await {
+            Ok(()) => {
+                let _ = self.store.drop_lease(&l.preview, &l.lease);
+            }
+            Err(e) => warn!(preview = %l.preview, lease = %l.lease, error = %e, "previews: revoking a dynamic credential"),
+        }
+    }
+
+    /// What the egress proxies of this node's previews refused since they were last asked: said
+    /// in each preview's activity, a host once.
+    async fn note_refused_egress(&self) {
+        let Ok(rows) = self.store.rows(None) else { return };
+        for r in rows.into_iter().filter(|r| r.desired == Desired::Active) {
+            let Ok(s) = self.store.settings(&r.project_id) else { continue };
+            if s.egress != crate::settings::EgressRule::Roll || s.egress_hosts.is_empty() {
+                continue;
+            }
+            let local = match self.cluster.get() {
+                Some(c) => matches!(c.route_async(&preview_key(&r.id)).await, Ok(roll_cluster::Route::Local(_))),
+                None => true,
+            };
+            if !local {
+                continue;
+            }
+            let fresh: Vec<String> = {
+                let refused = self.apps.egress_refused(&r.id).await;
+                let mut told = self.egress_told.lock();
+                let seen = told.entry(r.id.clone()).or_default();
+                refused.into_iter().filter(|h| seen.insert(h.clone())).collect()
+            };
+            // `<host> private`: listed, but it resolves only to private addresses.
+            let (private, unlisted): (Vec<String>, Vec<String>) = fresh.into_iter().partition(|h| h.ends_with(" private"));
+            if !unlisted.is_empty() {
+                let _ = self.store.log(&r.id, &format!("its code tried to reach {} (not in the project's egress_hosts): refused", unlisted.join(", ")));
+            }
+            if !private.is_empty() {
+                let names: Vec<&str> = private.iter().map(|h| h.trim_end_matches(" private")).collect();
+                let _ = self.store.log(&r.id, &format!("its code tried to reach {}: in egress_hosts, but it resolves only to private addresses (roll's own, the host's or the cloud's): refused", names.join(", ")));
+            }
+        }
+    }
+
+    /// The dynamic credentials this node's previews' services started with: revoked once the
+    /// service isn't running here (asleep, failed, removed, moved to another node), renewed when
+    /// their end is near. One that can't be renewed (revoked, at its longest life) puts its
+    /// service to sleep, so the next request starts it with a new credential, said in the activity.
+    pub(super) async fn tend_leases(&self) {
+        let Ok(all) = self.store.leases(None) else { return };
+        let Ok(now) = self.store.now_ms() else { return };
+        let mut held: HashMap<String, Option<Row>> = HashMap::new();
+        for l in all {
+            if !held.contains_key(&l.preview) {
+                let local = match self.cluster.get() {
+                    Some(c) => matches!(c.route_async(&preview_key(&l.preview)).await, Ok(roll_cluster::Route::Local(_))),
+                    None => true,
+                };
+                held.insert(l.preview.clone(), if local { self.store.row(&l.preview).ok() } else { None });
+            }
+            let Some(Some(r)) = held.get(&l.preview) else { continue };
+            // Frozen counts: its process keeps the credential and is back on the next request.
+            let running = matches!(self.apps.status(&l.preview, &l.service), Some(ServiceState::Running | ServiceState::Deploying)) || self.apps.warm(&l.preview, &l.service);
+            if !running || r.desired == Desired::Deleted {
+                self.revoke_lease(&r.project_id, &l).await;
+                continue;
+            }
+            if l.expires_at - now > LEASE_RENEW_MS {
+                continue;
+            }
+            match self.secrets.renew(&r.project_id, &l.lease).await {
+                Ok(Some(until)) => {
+                    let _ = self.store.set_lease_expiry(&l.preview, &l.lease, until);
+                }
+                Ok(None) => {
+                    let _ = self.store.drop_lease(&l.preview, &l.lease);
+                    let _ = self.store.log(&l.preview, &format!("a dynamic credential {} started with ended and can't be renewed: it sleeps, and starts with a new one on its next request", l.service));
+                    self.apps.sleep(&l.preview, &l.service).await;
+                }
+                Err(e) => warn!(preview = %l.preview, lease = %l.lease, error = %e, "previews: renewing a dynamic credential"),
+            }
+        }
     }
 }
 
 /// How long a deploy may stay "still going" before the preview fails (a build queue that never
 /// moves, say).
 const DEPLOY_WAIT_MS: i64 = 20 * 60_000;
+
+/// How many screenshots a node takes at once: `ROLL_PREVIEWS_SCREENSHOT_SLOTS` (1 to 8), else one
+/// for every 8 cores, 1 to 4 (a run is two containers of 1 CPU and 1 GiB each: Chromium's and
+/// the other browsers').
+fn screenshot_slots() -> usize {
+    let set = std::env::var("ROLL_PREVIEWS_SCREENSHOT_SLOTS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| (1..=8).contains(n));
+    set.unwrap_or_else(|| (std::thread::available_parallelism().map_or(1, |n| n.get()) / 8).clamp(1, 4))
+}
+
+/// roll secrets' shortest lease (a dynamic link's least `ttl_minutes`): what a new lease is taken
+/// to last until its first renewal says.
+const LEASE_MIN_MS: i64 = 15 * 60_000;
+/// How close to its end a lease is renewed (each renewal is in roll secrets' audit log, so not on
+/// every pass).
+const LEASE_RENEW_MS: i64 = 10 * 60_000;
 
 /// How soon a converge comes back to a deploy that wasn't live yet.
 const DEPLOY_POLL_MS: i64 = 10_000;
@@ -447,7 +647,7 @@ const BUDGET_LEVELS: [u32; 2] = [80, 100];
 /// What a service is deployed with (its variables, its access, whether it may read protected
 /// secrets), as a digest (FNV-1a: change detection, not a secret): a change to any redeploys it,
 /// so a service that lost trust drops what it read.
-fn config_fingerprint(vars: &[(String, String)], private: bool, bypass: Option<&str>, trusted: bool) -> String {
+fn config_fingerprint(vars: &[(String, String)], private: bool, bypass: Option<&str>, trusted: bool, feedback: bool) -> String {
     let mut sorted: Vec<&(String, String)> = vars.iter().collect();
     sorted.sort();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -457,7 +657,7 @@ fn config_fingerprint(vars: &[(String, String)], private: bool, bypass: Option<&
             h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
         }
     }
-    format!("{h:016x}{}{}", if private { "p" } else { "" }, if trusted { "t" } else { "" })
+    format!("{h:016x}{}{}{}", if private { "p" } else { "" }, if trusted { "t" } else { "" }, if feedback { "f" } else { "" })
 }
 
 /// Whether a change gets a preview under the project's rules (approval aside).
@@ -473,6 +673,21 @@ fn wants(s: &Settings, c: &ChangeInfo) -> bool {
 
 /// The paths a head changes (`None`: not known).
 type HeadPaths = Option<Arc<Vec<String>>>;
+
+/// The project's variables for a preview of `branch`: `env`, then every `env_for` glob that
+/// matches the branch (a preview with none counts as `*`), in the globs' order.
+pub(super) fn project_env(s: &Settings, branch: Option<&str>) -> Vec<(String, String)> {
+    let branch = branch.unwrap_or("*");
+    let mut env: Vec<(String, String)> = s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (glob, vars) in &s.env_for {
+        if crate::glob::matches(glob, branch) {
+            for (k, v) in vars {
+                set(&mut env, k, v.clone());
+            }
+        }
+    }
+    env
+}
 
 /// Heads whose paths [`Engine::wanted`] keeps.
 const PATHS_KEPT: usize = 4096;
@@ -558,6 +773,7 @@ mod tests {
             labels: Vec::new(),
             trusted: true,
             approved: false,
+            author: String::new(),
             github_pr: None,
         };
         assert!(wants(&s, &ch));
