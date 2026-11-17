@@ -546,6 +546,21 @@ pub struct ScheduleState {
     pub next_run_at: Option<i64>,
     /// The job it last started, and how that went.
     pub last: Option<ScheduleRun>,
+    /// A path schedule's last call, and how it answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_call: Option<ScheduleCall>,
+}
+
+/// A path schedule's call: when, its status (none: it never answered, `error` says why) and how
+/// long it took.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScheduleCall {
+    pub at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    pub ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -572,7 +587,13 @@ pub struct Scheduled {
     pub name: String,
     /// Five fields or `@hourly`, `@daily` … ([`crate::cron::Schedule`]).
     pub schedule: String,
+    /// A command, each due time a job; or (empty) `path`'s.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
+    /// A web service's path each due time GETs instead (Vercel's crons): through its own proxy
+    /// on the owner, `Authorization: Bearer $CRON_SECRET` when the environment has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// The schedule's time zone (IANA; default UTC).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
@@ -768,8 +789,20 @@ impl Run {
                 return bad("schedules' names are unique: a-z, 0-9 and -, at most 32");
             }
             crate::cron::Schedule::parse(&sc.schedule, sc.timezone.as_deref()).map_err(|e| Error::BadRequest(format!("run.schedules.{}: {e}", sc.name)))?;
-            if sc.command.trim().is_empty() || sc.command.len() > 2000 || sc.command.contains('\0') {
-                return bad("schedules' commands are 1–2000 characters");
+            match &sc.path {
+                Some(p) => {
+                    if !sc.command.is_empty() {
+                        return bad("a schedule runs a command or calls a path, not both");
+                    }
+                    if self.kind != RunType::Web || self.tcp {
+                        return bad("a schedule's path is for a web service (it's called over HTTP)");
+                    }
+                    if !p.starts_with('/') || p.len() > 2000 || !p.bytes().all(|b| b.is_ascii_graphic()) {
+                        return bad("a schedule's path is an absolute path, like /api/cron");
+                    }
+                }
+                None if sc.command.trim().is_empty() || sc.command.len() > 2000 || sc.command.contains('\0') => return bad("schedules' commands are 1–2000 characters"),
+                None => {}
             }
             if sc.timeout_s.is_some_and(|t| !(1..=86_400).contains(&t)) {
                 return bad("schedules' timeout_s is 1–86400");
@@ -1109,6 +1142,9 @@ pub struct Environment {
     /// Headers its answers carry ([]: none).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<HeaderRule>,
+    /// Paths another service of the project answers ([]: none).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<Route>,
     /// What its code may reach: anything (`open`), or roll and the listed hosts (`roll`).
     pub egress: Egress,
     /// Hosts its egress proxy refused lately (its code tried them; they aren't listed).
@@ -1148,6 +1184,12 @@ pub struct FirewallRule {
     /// Text the `User-Agent` contains (case aside).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// `limit`'s: each client's requests a minute through this rule, and how many at once
+    /// (default: a minute's worth).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_minute: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1155,6 +1197,8 @@ pub struct FirewallRule {
 pub enum FirewallAction {
     Allow,
     Deny,
+    /// Let in at `per_minute` a client (Vercel's rate-limit rules), a 429 past it.
+    Limit,
 }
 
 /// The most rules an environment has.
@@ -1205,6 +1249,12 @@ impl FirewallRule {
         if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() {
             return bad("a rule matches on a path, methods or a user agent");
         }
+        match (self.action, self.per_minute) {
+            (FirewallAction::Limit, Some(n)) => RateLimit { per_minute: n, burst: self.burst }.check().map_err(|_| Error::BadRequest("firewall: a limit is 1–100000 a minute, its burst 1–100000".into()))?,
+            (FirewallAction::Limit, None) => return bad("a limit rule says per_minute"),
+            _ if self.per_minute.is_some() || self.burst.is_some() => return bad("per_minute and burst are a limit rule's"),
+            _ => {}
+        }
         Ok(self)
     }
 
@@ -1249,6 +1299,42 @@ pub struct HeaderRule {
 
 /// The most header rules an environment has.
 pub const MAX_HEADER_RULES: usize = 20;
+
+/// A path on an environment's domains answered by another service of its project (Vercel's
+/// rewrites to another project, Cloud Run's URL maps): that service's environment of the same
+/// name, the path and query as they came.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Route {
+    /// A path, or a prefix ending in `*` (`/api/*`).
+    pub path: String,
+    /// The other service, by its name in the project.
+    pub service: String,
+}
+
+/// The most routes an environment has.
+pub const MAX_ROUTES: usize = 20;
+
+impl Route {
+    pub fn check(self) -> Result<Route> {
+        let p = &self.path;
+        if !p.starts_with('/') || p.len() > 512 || p.strip_suffix('*').unwrap_or(p).contains('*') || !p.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(Error::BadRequest(format!("routes: {p:?} is a path or a prefix ending in * (/api/*)")));
+        }
+        if self.service.is_empty() || self.service.len() > 64 {
+            return Err(Error::BadRequest("routes: service is another service's name in the project".into()));
+        }
+        Ok(self)
+    }
+
+    /// Whether it takes `path`.
+    pub fn takes(&self, path: &str) -> bool {
+        match self.path.strip_suffix('*') {
+            Some(prefix) => path.starts_with(prefix),
+            None => path == self.path,
+        }
+    }
+}
 
 /// What an environment's code may reach (docs/apps/README.md, "Egress"; roll previews'
 /// `egress`): anything, or only roll (its links, the project's other services there) and

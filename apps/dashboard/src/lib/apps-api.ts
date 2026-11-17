@@ -112,7 +112,10 @@ export interface Run {
 export interface Scheduled {
   name: string;
   schedule: string;
-  command: string;
+  /** A command each due time, or (absent) `path`'s call. */
+  command?: string;
+  /** A web service's path GET'd each due time instead (Vercel's crons), with `Authorization: Bearer $CRON_SECRET`. */
+  path?: string;
   timezone?: string;
   timeout_s?: number;
 }
@@ -277,7 +280,10 @@ export function describePending(p: Pending): string | null {
 }
 
 export interface FirewallRule {
-  action: "allow" | "deny";
+  /** `limit`: let in at `per_minute` a client, a 429 past it. */
+  action: "allow" | "deny" | "limit";
+  per_minute?: number;
+  burst?: number;
   /** A path, or a prefix ending in `*`. */
   path?: string;
   methods?: string[];
@@ -292,8 +298,16 @@ export function parseFirewall(text: string): FirewallRule[] {
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith("#"))
     .map((l) => {
-      const [action, ...rest] = l.split(/\s+/);
-      const rule: FirewallRule = { action: action === "allow" ? "allow" : "deny" };
+      const [action, ...words] = l.split(/\s+/);
+      const rule: FirewallRule = { action: action === "allow" ? "allow" : action === "limit" ? "limit" : "deny" };
+      let rest = words;
+      // `limit N[:BURST] …`
+      if (rule.action === "limit") {
+        const [n, b] = (rest[0] ?? "").split(":");
+        rule.per_minute = Number(n) || 60;
+        if (b) rule.burst = Number(b) || undefined;
+        rest = rest.slice(1);
+      }
       for (let i = 0; i < rest.length; i++) {
         const t = rest[i];
         if (t.startsWith("ua=")) {
@@ -310,7 +324,7 @@ export function parseFirewall(text: string): FirewallRule[] {
 /** The rules as one line each, as `parseFirewall` reads them. */
 export function formatFirewall(rules: FirewallRule[]): string {
   return rules
-    .map((r) => [r.action, r.path, r.methods?.length ? `method=${r.methods.join(",")}` : undefined, r.user_agent ? `ua=${r.user_agent}` : undefined].filter(Boolean).join(" "))
+    .map((r) => [r.action, r.action === "limit" ? `${r.per_minute ?? 60}${r.burst ? `:${r.burst}` : ""}` : undefined, r.path, r.methods?.length ? `method=${r.methods.join(",")}` : undefined, r.user_agent ? `ua=${r.user_agent}` : undefined].filter(Boolean).join(" "))
     .join("\n");
 }
 
@@ -352,6 +366,28 @@ export function parseHeaders(text: string): HeaderRule[] {
 }
 
 /** The rules as one header a line, as `parseHeaders` reads them. */
+/** A path (a prefix ends in `*`) another service of the project answers. */
+export interface RouteRule {
+  path: string;
+  service: string;
+}
+
+/** Routes as lines, `/api/* api`. */
+export function parseRoutes(text: string): RouteRule[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const [path, service = ""] = l.split(/\s+/);
+      return { path, service };
+    });
+}
+
+export function formatRoutes(rules: RouteRule[]): string {
+  return rules.map((r) => `${r.path} ${r.service}`).join("\n");
+}
+
 export function formatHeaders(rules: HeaderRule[]): string {
   return rules.flatMap((r) => Object.entries(r.set).map(([k, v]) => `${r.replace ? "!" : ""}${r.path ? `${r.path} ` : ""}${k}: ${v}`)).join("\n");
 }
@@ -405,6 +441,8 @@ export interface EnvironmentPut {
   /** Its firewall rules, in order (the first match decides); null or [] for none. */
   firewall?: FirewallRule[] | null;
   headers?: HeaderRule[] | null;
+  /** Paths another service of the project answers (its environment of the same name); null or [] for none. */
+  routes?: RouteRule[] | null;
   /** Its own size and scale over the service's; a null field goes back to the service's. */
   run?: Partial<Record<EnvRunField, number | null>>;
 }
@@ -464,7 +502,7 @@ export interface Environment extends EnvironmentSummary {
   /** How full its volume was when last measured (hourly), when it has one. */
   volume_used?: { bytes: number; at: number };
   /** Its schedules as they stand: when each is next due, and the job it last started. */
-  schedules?: { name: string; next_run_at: number | null; last: { job: string; status: Job["status"]; started_at: number } | null }[];
+  schedules?: { name: string; next_run_at: number | null; last: { job: string; status: Job["status"]; started_at: number } | null; last_call?: { at: number; status?: number; ms: number; error?: string } }[];
   /** Its instances keep crashing: three or more in the last ten minutes. */
   crash_loop: { crashes: number; last_at: number; last_error: string } | null;
   /** A gradual rollout under way: the new deployment and the percent of requests it takes. */
@@ -511,6 +549,8 @@ export interface Environment extends EnvironmentSummary {
   firewall?: FirewallRule[];
   /** Headers its answers carry. */
   headers?: HeaderRule[];
+  /** Paths another service of the project answers. */
+  routes?: RouteRule[];
   created_at: number;
 }
 
@@ -619,6 +659,8 @@ export interface LogLine {
   text: string;
   /** The level the app's line says (JSON's `level`/`severity`, logfmt's `level=`, a leading `ERROR`). */
   level?: LogLevel;
+  /** Part of a stack trace: `start` on its first line, `more` on the rest from its instance and stream. */
+  trace?: "start" | "more";
 }
 
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error" | "fatal";
@@ -640,6 +682,18 @@ export interface RouteStat {
   max_ms: number;
 }
 
+/** One deployment's or instance's requests in a `RouteStats` window. */
+export interface SplitStat {
+  deployment?: string;
+  instance?: string;
+  requests: number;
+  errors: number;
+  client_errors: number;
+  p50_ms: number;
+  p95_ms: number;
+  max_ms: number;
+}
+
 export interface RouteStats {
   minutes: number;
   requests: number;
@@ -647,6 +701,10 @@ export interface RouteStats {
   cut: boolean;
   /** The busiest, the most 5xx and the slowest (5 requests or more), each at most 50. */
   routes: RouteStat[];
+  /** The same requests by the deployment that answered (a canary beside the live one), the busiest first. */
+  deployments?: SplitStat[];
+  /** And by the instance that answered. */
+  instances?: SplitStat[];
 }
 
 /** A trace's root span, its duration and its spans' count. */
@@ -789,6 +847,8 @@ export interface NotifyTarget {
 
 export type NotifyEvent =
   | "deploy.failed"
+  | "rollout.waiting"
+  | "deploy.ready"
   | "crash_loop"
   | "deploy.active"
   | "spend.alert"

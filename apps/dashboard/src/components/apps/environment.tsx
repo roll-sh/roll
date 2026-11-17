@@ -1,6 +1,6 @@
 import { Lock, Rocket, Trash2, Unlock } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { appsApi, formatFirewall, formatHeaders, parseAllowList, parseFirewall, parseHeaders, PRODUCTION, shortSha, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
+import { appsApi, formatFirewall, formatHeaders, parseAllowList, parseFirewall, parseHeaders, PRODUCTION, shortSha, type Backup, type Environment, type EnvRunField, type Service, formatRoutes, parseRoutes } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
 import { clock, CPU, MEMORY, mb, since, StateBadge, SureButton, type Runner } from "./shared";
@@ -88,6 +88,9 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   const hdrText = formatHeaders(env.headers ?? []);
   const [hdr, setHdr] = useState(hdrText);
   useEffect(() => setHdr(hdrText), [hdrText]);
+  const routeText = formatRoutes(env.routes ?? []);
+  const [routes, setRoutes] = useState(routeText);
+  useEffect(() => setRoutes(routeText), [routeText]);
   const rateText = env.rate_limit ? String(env.rate_limit.per_minute) : "";
   const [rate, setRate] = useState(rateText);
   useEffect(() => setRate(rateText), [rateText]);
@@ -463,7 +466,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
                 <p className="mt-1 text-[12px] text-muted">
                   {env.firewall?.length
                     ? `${env.firewall.length} ${env.firewall.length === 1 ? "rule" : "rules"}, in order: the first that matches a request decides.`
-                    : "No rules. One a line: deny /admin/*, deny method=DELETE, allow /admin/health, deny ua=BadBot."}
+                    : "No rules. One a line: deny /admin/*, deny method=DELETE, allow /admin/health, deny ua=BadBot, limit 10 /login method=POST (10 a minute a client)."}
                 </p>
               </div>
               <button className={btn} disabled={busy || fw === fwText} onClick={() => runner.run("firewall", () => appsApi.putEnvironment(service.id, env.name, { firewall: parseFirewall(fw) }))}>
@@ -502,6 +505,31 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
               placeholder={"Strict-Transport-Security: max-age=63072000\nX-Frame-Options: DENY"}
               spellCheck={false}
               aria-label="Response headers, one a line"
+              className={`${input} mt-2 w-full font-mono text-[12px]`}
+            />
+          </div>
+        )}
+
+        {service.run.type === "web" && !service.run.tcp && (
+          <div className="px-5 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-[13px] font-medium">Routes to other services</p>
+                <p className="mt-1 text-[12px] text-muted">
+                  One a line, a path and a service of the project: <code className="font-mono">/api/* api</code> sends those paths to its {env.name} environment, as they came. The first that matches decides.
+                </p>
+              </div>
+              <button className={btn} disabled={busy || routes === routeText} onClick={() => runner.run("routes", () => appsApi.putEnvironment(service.id, env.name, { routes: parseRoutes(routes) }))}>
+                Save
+              </button>
+            </div>
+            <textarea
+              value={routes}
+              onChange={(e) => setRoutes(e.target.value)}
+              rows={Math.min(8, Math.max(2, routes.split("\n").length))}
+              placeholder={"/api/* api\n/auth/* auth"}
+              spellCheck={false}
+              aria-label="Routes to other services, one a line"
               className={`${input} mt-2 w-full font-mono text-[12px]`}
             />
           </div>

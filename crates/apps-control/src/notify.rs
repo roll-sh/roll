@@ -18,8 +18,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 19] = [
+pub const EVENTS: [&str; 21] = [
     "deploy.failed",
+    "rollout.waiting",
+    "deploy.ready",
     "error.new",
     "crash_loop",
     "deploy.active",
@@ -39,7 +41,7 @@ pub const EVENTS: [&str; 19] = [
     "volume.backup_failed",
     "volume.full",
 ];
-const DEFAULT_EVENTS: [&str; 16] = ["deploy.failed", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
+const DEFAULT_EVENTS: [&str; 18] = ["deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"];
 /// Whether a target with `events` hears an event: its own kind, or for a resolution, the alert's
 /// (whoever heard an alert hears it clear; there's nothing else to ask for).
 fn wants(events: &[String], kind: &str, data: &Value) -> bool {
@@ -366,6 +368,11 @@ impl Apps {
         match e.kind.as_str() {
             "deploy.failed" => (format!("{what}: deploy failed"), format!("The deploy{rev} failed: {}. The live deployment keeps serving.", e.data["error"].as_str().unwrap_or("no reason given"))),
             "deploy.active" => (format!("{what}: deployed"), format!("A new deployment{rev} is live.")),
+            "rollout.waiting" => (
+                format!("{what}: a rollout waits for you at {}%", e.data["share"]),
+                format!("The deployment{rev} passed its step at {}% of requests and holds there until someone advances it, puts it all live or rolls it back (the service page, or `roll apps rollout`). It still rolls back by itself if it starts failing.", e.data["share"]),
+            ),
+            "deploy.ready" => (format!("{what}: built and waiting to go live"), format!("The deployment{rev} is healthy beside the live one, on its own URL ({}), and waits for a person to put it live.", e.data["url"].as_str().unwrap_or("its deployment URL"))),
             "spend.alert" | "spend.limit" => {
                 let (project, usd, limit) = (e.data["project_name"].as_str().unwrap_or("a project"), e.data["usd"].as_f64().unwrap_or(0.0), e.data["limit_usd"].as_f64().unwrap_or(0.0));
                 if e.kind == "spend.alert" {
@@ -395,9 +402,13 @@ impl Apps {
             }
             "cron.failed" | "job.failed" => {
                 let what_ran = if e.kind == "cron.failed" { "A scheduled run" } else { "A job" };
-                let how = match (e.data["status"].as_str(), e.data["exit_code"].as_i64()) {
-                    (Some("timed_out"), _) => "ran past its timeout".to_string(),
-                    (_, Some(c)) => format!("exited with code {c}"),
+                let how = match (e.data["status"].as_str(), e.data["exit_code"].as_i64(), e.data["path"].as_str()) {
+                    (_, _, Some(p)) => match e.data["http_status"].as_u64() {
+                        Some(c) => format!("calling {p} answered {c}"),
+                        None => format!("calling {p} got no answer: {}", e.data["error"].as_str().unwrap_or("it didn't answer")),
+                    },
+                    (Some("timed_out"), _, _) => "ran past its timeout".to_string(),
+                    (_, Some(c), _) => format!("exited with code {c}"),
                     _ => "didn't start".to_string(),
                 };
                 (format!("{what}: {} failed", if e.kind == "cron.failed" { "cron run" } else { "job" }), format!("{what_ran} {how}."))

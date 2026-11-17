@@ -536,14 +536,18 @@ pub enum AppsCmd {
         cancel: Option<String>,
         /// Run a command on a schedule (Heroku Scheduler): `--schedule NAME --at "0 3 * * *"
         /// --command "node cleanup.js"` adds or replaces it; each due time is a job.
-        #[arg(long, value_name = "NAME", requires_all = ["at", "command"], conflicts_with_all = ["logs", "cancel", "unschedule"])]
+        #[arg(long, value_name = "NAME", requires = "at", conflicts_with_all = ["logs", "cancel", "unschedule"])]
         schedule: Option<String>,
         /// With `--schedule`: five cron fields, or `@hourly`, `@daily` …
         #[arg(long, requires = "schedule")]
         at: Option<String>,
         /// With `--schedule`: the command.
-        #[arg(long, requires = "schedule")]
+        #[arg(long, requires = "schedule", required_unless_present_any = ["path", "logs", "cancel", "unschedule"])]
         command: Option<String>,
+        /// With `--schedule`: a path of a web service to GET instead (Vercel's crons), with
+        /// `Authorization: Bearer $CRON_SECRET` when it has one.
+        #[arg(long, requires = "schedule", conflicts_with = "command")]
+        path: Option<String>,
         /// With `--schedule`: its time zone (IANA; default UTC).
         #[arg(long, requires = "schedule")]
         tz: Option<String>,
@@ -1066,6 +1070,14 @@ pub enum AppsCmd {
         /// Its answers carry no headers of the environment's own again.
         #[arg(long)]
         no_headers: bool,
+        /// A path another service of the project answers, `/api/*=api` (a prefix ends in `*`;
+        /// that service's environment of the same name), repeatable; the list replaces the
+        /// environment's.
+        #[arg(long = "route", value_name = "PATH=SERVICE", conflicts_with = "no_routes")]
+        route: Vec<String>,
+        /// No routes to other services.
+        #[arg(long)]
+        no_routes: bool,
         /// Its own page (an HTML file, at most 64 KiB) for the 502, 503 and 504 visitors get
         /// while the app can't answer or wake (Heroku's error page).
         #[arg(long, value_name = "HTML_FILE")]
@@ -1681,7 +1693,35 @@ fn print_line(l: &Value) {
         Some("system") => "roll".to_string(),
         _ => l["instance"].as_str().map(|i| i.rsplit('-').next().unwrap_or(i).to_string()).unwrap_or_default(),
     };
+    // A stack trace's lines past its first: under it, with no time of their own.
+    if l["trace"] == "more" {
+        println!("{:8} {who:>5} ┆   {}", "", s(&l["text"]));
+        return;
+    }
     println!("{t} {who:>5} │ {}", s(&l["text"]));
+}
+
+/// A read log's lines with each stack trace's lines together, at its first line (another
+/// instance's lines that fell between come after it).
+fn traces_together(lines: &[Value]) -> Vec<&Value> {
+    let mut out: Vec<Vec<&Value>> = Vec::new();
+    let mut open: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+    for l in lines {
+        let k = (s(&l["instance"]), s(&l["stream"]));
+        if l["trace"] == "more"
+            && let Some(&i) = open.get(&k)
+        {
+            out[i].push(l);
+            continue;
+        }
+        if l["trace"] == "start" {
+            open.insert(k, out.len());
+        } else {
+            open.remove(&k);
+        }
+        out.push(vec![l]);
+    }
+    out.into_iter().flatten().collect()
 }
 
 /// Follow a deployment's build and rollout, then say how it ended.
@@ -2247,7 +2287,7 @@ pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&lines)?);
         return Ok(());
     }
-    for line in lines.as_array().into_iter().flatten() {
+    for line in traces_together(lines.as_array().map(Vec::as_slice).unwrap_or_default()) {
         print_line(line);
     }
     Ok(())
@@ -2959,7 +2999,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Jobs { target, logs, follow, cancel, schedule, at, command, tz, unschedule } => {
+        AppsCmd::Jobs { target, logs, follow, cancel, schedule, at, command, path, tz, unschedule } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/jobs", env_path(&svc, &target.env));
             let mut schedules: Vec<Value> = svc["run"]["schedules"].as_array().cloned().unwrap_or_default();
@@ -2971,7 +3011,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 if let Some(name) = schedule {
                     schedules.retain(|x| x["name"] != name.as_str());
-                    let mut one = json!({ "name": name, "schedule": at, "command": command });
+                    let mut one = match &path {
+                        Some(p) => json!({ "name": name, "schedule": at, "path": p }),
+                        None => json!({ "name": name, "schedule": at, "command": command }),
+                    };
                     if let Some(z) = tz {
                         one["timezone"] = json!(z);
                     }
@@ -2980,7 +3023,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 let v = api.call(reqwest::Method::PATCH, &format!("/v1/apps/services/{}", enc(&s(&svc["id"]))), Some(json!({ "run": { "schedules": schedules } }))).await?;
                 if !json_out {
                     for x in v["run"]["schedules"].as_array().into_iter().flatten() {
-                        println!("{:<16} {:<16} {}", s(&x["name"]), s(&x["schedule"]), s(&x["command"]));
+                        let what = x["path"].as_str().map(|p| format!("GET {p}")).unwrap_or_else(|| s(&x["command"]));
+                        println!("{:<16} {:<16} {what}", s(&x["name"]), s(&x["schedule"]));
                     }
                     return Ok(());
                 }
@@ -3801,7 +3845,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, error_page, maintenance_page, roll_pages } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -3869,6 +3913,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("headers".into(), header_rules(&header)?);
             } else if no_headers {
                 body.insert("headers".into(), Value::Null);
+            }
+            if !route.is_empty() {
+                let rs = route
+                    .iter()
+                    .map(|r| r.split_once('=').map(|(p, s)| json!({ "path": p.trim(), "service": s.trim() })).ok_or_else(|| anyhow::anyhow!("--route is PATH=SERVICE, like /api/*=api")))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                body.insert("routes".into(), Value::Array(rs));
+            } else if no_routes {
+                body.insert("routes".into(), Value::Null);
             }
             let mut pages = serde_json::Map::new();
             for (k, f) in [("error", &error_page), ("maintenance", &maintenance_page)] {
@@ -3967,8 +4020,17 @@ pub(crate) fn new_token() -> String {
 /// A firewall rule as typed: `<allow|deny> [/path] [method=A,B] [ua=the rest of the line]`.
 fn firewall_rule(line: &str) -> anyhow::Result<Value> {
     let mut words = line.split_whitespace();
-    let action = words.next().filter(|a| *a == "allow" || *a == "deny").ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow or deny: {line:?}"))?;
+    let action = words.next().filter(|a| ["allow", "deny", "limit"].contains(a)).ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow, deny or limit: {line:?}"))?;
     let mut rule = json!({ "action": action });
+    // `limit N[:BURST] …`: N a minute a client through the rule.
+    if action == "limit" {
+        let rate = words.next().ok_or_else(|| anyhow::anyhow!("limit takes a rate, `limit 10[:20] /login`: {line:?}"))?;
+        let (n, b) = rate.split_once(':').map_or((rate, None), |(n, b)| (n, Some(b)));
+        rule["per_minute"] = json!(n.parse::<u32>().map_err(|_| anyhow::anyhow!("{rate:?} in {line:?}: requests a minute, `10` or `10:20`"))?);
+        if let Some(b) = b {
+            rule["burst"] = json!(b.parse::<u32>().map_err(|_| anyhow::anyhow!("{rate:?} in {line:?}: a burst is a number"))?);
+        }
+    }
     let rest: Vec<&str> = words.collect();
     for (i, w) in rest.iter().enumerate() {
         if let Some(ua) = w.strip_prefix("ua=") {

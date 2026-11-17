@@ -255,6 +255,9 @@ pub struct Apps {
     pub(crate) errors_seen: Mutex<HashMap<String, i64>>,
     /// Manual rollouts waiting for a person, by deployment: what they say, and the wake.
     pub(crate) rollout_waits: Mutex<HashMap<String, deploy::RolloutGate>>,
+    /// Path schedules whose call is still out (`sched:<service>/<env>/<name>`): the next due
+    /// time is skipped, as a command's is while its job runs.
+    pub(crate) calling: Mutex<std::collections::HashSet<String>>,
     /// Each environment's `needs_deploy` as last worked out (it decrypts every variable and asks
     /// each linked product for its own): when, the settings generation and active deployment it
     /// was for, and the answer. Good for a minute, or until either moves.
@@ -381,6 +384,32 @@ pub struct ResolvedVars {
     pub unresolved: Vec<String>,
     /// Never shown again: the environment's own sealed variables, and references that read one.
     pub sealed: BTreeSet<String>,
+    /// Those roll secrets gave (a secret is one whatever its name or tag), and of them those it
+    /// says are plain (`SecretVar::plain`: a linked resource's host, port, user or database),
+    /// which logs may show but for a URL's password.
+    pub from_secrets: BTreeSet<String>,
+    pub plain_secrets: BTreeSet<String>,
+}
+
+impl ResolvedVars {
+    /// What its logs never show ([`logs::Redact`]): sealed and sensitive values, a link's
+    /// credentials (by their names), and the password in any URL that carries one.
+    pub fn secret_values(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (k, v) in &self.vars {
+            let credential = ["PASSWORD", "SECRET", "TOKEN", "API_KEY", "PRIVATE_KEY", "ACCESS_KEY"].iter().any(|w| k.to_ascii_uppercase().contains(w));
+            let source = self.sources.get(k).copied();
+            // What roll secrets gave, unless the service's own variable took the name since.
+            let secret = source == Some("secret") && self.from_secrets.contains(k);
+            if self.sealed.contains(k) || (secret && !self.plain_secrets.contains(k)) || (credential && source == Some("link")) {
+                out.push(v.clone());
+            }
+            if let Some(p) = url::Url::parse(v).ok().and_then(|u| u.password().map(|p| percent_encoding::percent_decode_str(p).decode_utf8_lossy().into_owned())) {
+                out.push(p);
+            }
+        }
+        out
+    }
 }
 
 impl Apps {
@@ -415,6 +444,7 @@ impl Apps {
             vitals_seen: Mutex::new(HashMap::new()),
             errors_seen: Mutex::new(HashMap::new()),
             rollout_waits: Mutex::new(HashMap::new()),
+            calling: Mutex::new(std::collections::HashSet::new()),
             needs: Mutex::new(HashMap::new()),
             settings_gen: std::sync::atomic::AtomicU64::new(0),
             changes: tokio::sync::broadcast::channel(256).0,
@@ -1330,6 +1360,7 @@ impl Apps {
             rate_limit: r.rate_limit,
             firewall: r.firewall.clone(),
             headers: r.headers.clone(),
+            routes: r.routes.clone(),
             egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&closed_network_name(&svc.project, &r.name), &r.egress.hosts) } else { Vec::new() },
             egress: r.egress.clone(),
             scaling,
@@ -1362,7 +1393,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused", "held", "hostname", "traces", "egress", "vitals"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "paused", "held", "hostname", "traces", "egress", "vitals"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1458,6 +1489,27 @@ impl Apps {
                     .collect::<Result<Vec<_>>>()?,
             ),
             Some(_) => return Err(Error::BadRequest(format!("headers is at most {} rules, or null", crate::model::MAX_HEADER_RULES))),
+        };
+        // Paths another service of the project answers: each named service must be there (and
+        // not this one: it would answer itself).
+        let routes = match o.get("routes") {
+            None => None,
+            Some(Value::Null) => Some(Vec::new()),
+            Some(Value::Array(a)) if a.len() <= crate::model::MAX_ROUTES => {
+                let rs = a
+                    .iter()
+                    .map(|r| serde_json::from_value::<crate::model::Route>(r.clone()).map_err(|e| Error::BadRequest(format!("routes: {e}"))).and_then(crate::model::Route::check))
+                    .collect::<Result<Vec<_>>>()?;
+                for r in &rs {
+                    match self.project_service(service, &r.service).await {
+                        Some(id) if id == service => return Err(Error::BadRequest(format!("routes: {} is this service", r.service))),
+                        Some(_) => {}
+                        None => return Err(Error::BadRequest(format!("routes: the project has no service named {}", r.service))),
+                    }
+                }
+                Some(rs)
+            }
+            Some(_) => return Err(Error::BadRequest(format!("routes is at most {} routes, or null", crate::model::MAX_ROUTES))),
         };
         // What its code may reach: `{mode: "roll", hosts?}` closes its network, null or
         // `{mode: "open"}` opens it.
@@ -1696,6 +1748,12 @@ impl Apps {
         if let Some(rules) = headers {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_headers(&sid, &e, &rules)).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(routes) = routes {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_routes(&sid, &e, &routes)).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
         }
@@ -1997,11 +2055,16 @@ impl Apps {
             }
         }
         let mut sensitive = BTreeSet::new();
+        let (mut from_secrets, mut plain_secrets) = (BTreeSet::new(), BTreeSet::new());
         match self.deps.secrets.resolve(&svc.project, &env.name, &svc.id).await {
             Ok(secrets) => {
                 for s in secrets {
                     if s.sensitive {
                         sensitive.insert(s.name.clone());
+                    }
+                    from_secrets.insert(s.name.clone());
+                    if s.plain {
+                        plain_secrets.insert(s.name.clone());
                     }
                     // A linked resource's address, rewritten for the container as apps' own links.
                     let v = if s.linked { self.deps.runtime.reach(&s.value) } else { s.value };
@@ -2023,7 +2086,7 @@ impl Apps {
         // Reference variables, one level deep: against what resolved above, and other services'.
         let unresolved = self.fill_references(svc, &env.name, &mut vars, &mut sealed).await;
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
-        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, sealed })
+        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, sealed, from_secrets, plain_secrets })
     }
 
     /// Fill the `${{ … }}` in the service's own variables ([`refs`]); what named nothing. A
@@ -2738,7 +2801,7 @@ impl Apps {
         let (sid, e) = (live.service.clone(), live.env.clone());
         let (row, traces) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.traces_on(&sid, &e)?))).await?;
         let allow = row.allow_ips.iter().filter_map(|r| r.cidr.parse::<ipnet::IpNet>().ok()).collect();
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, traces, vitals: row.vitals });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }

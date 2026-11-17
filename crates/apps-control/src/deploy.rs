@@ -851,10 +851,13 @@ impl Apps {
             for i in &made {
                 self.deps.runtime.remove(&i.name).await;
             }
-            let did = d.id.clone();
-            self.db(move |s| s.set_status(&did, &[DeployStatus::Deploying], DeployStatus::Ready, None)).await?;
             let short = d.id.strip_prefix("dep_").unwrap_or(&d.id);
-            log.stream(Stream::System).line(format!("ready, not live: its own URL is {}; roll back to it to put it live", self.url(&format!("{short}--{}", env.slug))));
+            let url = self.url(&format!("{short}--{}", env.slug));
+            // Ready, and someone told to put it live (`deploy.ready`), in one write: whoever sees
+            // it ready sees the event too.
+            let (sid, en, did, data) = (svc.id.clone(), env.name.clone(), d.id.clone(), serde_json::json!({ "revision": d.revision, "url": url }));
+            self.db(move |s| s.set_ready(&did, &sid, &en, &data)).await?;
+            log.stream(Stream::System).line(format!("ready, not live: its own URL is {url}; roll back to it to put it live"));
             return Ok(());
         }
         // A gradual rollout needs something to split: the old deployment running and taking
@@ -982,6 +985,10 @@ impl Apps {
             self.rollout_waits.lock().insert(id.to_string(), gate.clone());
             self.changed(service);
             sys.line(format!("canary: held at {share}% until someone advances it, puts it all live or rolls it back"));
+            // Someone has to say: they're told (`rollout.waiting`), once a step.
+            let (sid, en, did) = (service.to_string(), tpl.spec.env.clone(), id.to_string());
+            let data = serde_json::json!({ "share": share });
+            let _ = self.db(move |s| s.add_event("rollout.waiting", &sid, &en, Some(&did), &data)).await;
             let said = loop {
                 if let Some(a) = gate.0.lock().take() {
                     break a;
@@ -1214,7 +1221,10 @@ impl Apps {
         // The variables the build's steps see: the environment's, as its instances will.
         let (sid, e) = (svc.id.clone(), d.environment.clone());
         let env_row = self.db(move |s| s.environment(&sid, &e)).await?;
-        let mut build_env = self.resolve_vars(svc, &env_row, &d.id).await?.vars;
+        let resolved = self.resolve_vars(svc, &env_row, &d.id).await?;
+        // Its secret values never reach the build's log, whatever a step prints.
+        self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
+        let mut build_env = resolved.vars;
         // Per deployment (the cache would never hit) or only for the running app.
         build_env.retain(|(k, _)| k != "ROLL_DEPLOYMENT" && k != "PORT");
         // The commit changes every push: out of the hash and the secrets, or no build would hit
@@ -1284,6 +1294,17 @@ impl Apps {
         // Heroku's release phase: the Procfile's `release:`, when the service has no pre-deploy.
         if run.pre_deploy.is_none() {
             run.pre_deploy = plan.release.clone();
+        }
+        // vercel.json's crons: schedules that call their paths, unless the service already
+        // calls that path (its own schedules win).
+        if run.kind == RunType::Web && !run.tcp {
+            for (i, c) in plan.crons.iter().enumerate() {
+                let name = format!("vercel-{}", i + 1);
+                if run.schedules.len() < 20 && !run.schedules.iter().any(|s| s.path.as_deref() == Some(c.path.as_str()) || s.name == name) {
+                    log.line(format!("plan: vercel.json's cron {} calls {}", c.schedule, c.path));
+                    run.schedules.push(crate::model::Scheduled { name, schedule: c.schedule.clone(), command: String::new(), path: Some(c.path.clone()), timezone: None, timeout_s: None });
+                }
+            }
         }
         // On a builder shared by services, the build reads a copy with its cache mounts
         // namespaced, outside the tree (so no `COPY . .` puts it in the image), next to the
@@ -1355,6 +1376,8 @@ impl Apps {
         let mut probe = svc.clone();
         probe.run.port = run.port;
         let resolved = self.resolve_vars(&probe, env, &dep.id).await?;
+        // Its secret values never reach the environment's log, whoever prints them.
+        self.logs.redact(&format!("env:{}/{}", svc.id, env.name), &dep.id, resolved.secret_values());
         if !resolved.unresolved.is_empty() {
             self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(format!("references that name nothing, left empty: {}", resolved.unresolved.join(", ")));
         }
@@ -2266,9 +2289,9 @@ impl Apps {
             for e in all_envs.iter().filter(|e| e.service == svc.id && e.active.is_some() && !e.ephemeral) {
                 // What the live deployment runs with: roll.toml's `[[app.run.schedules]]` are in
                 // its template, not in the service's settings.
-                let run = match self.lives.lock().get(&crate::env_key(&svc.id, &e.name)).and_then(|l| l.template()) {
-                    Some(t) => t.run.clone(),
-                    None => svc.for_env(e).map(|s| s.run).unwrap_or_else(|_| svc.run.clone()),
+                let (run, secret) = match self.lives.lock().get(&crate::env_key(&svc.id, &e.name)).and_then(|l| l.template()) {
+                    Some(t) => (t.run.clone(), t.spec.vars.iter().find(|(k, _)| k == "CRON_SECRET").map(|(_, v)| v.clone())),
+                    None => (svc.for_env(e).map(|s| s.run).unwrap_or_else(|_| svc.run.clone()), None),
                 };
                 for sc in &run.schedules {
                     let Ok(schedule) = crate::cron::Schedule::parse(&sc.schedule, sc.timezone.as_deref()) else { continue };
@@ -2287,6 +2310,45 @@ impl Apps {
                     let (k, v) = (key.clone(), due.to_string());
                     let _ = self.db(move |s| s.set_state(&k, &v)).await;
                     let log = self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System);
+                    // A path: called through the environment's own proxy, skipped while the last
+                    // call is still out; a failure is `cron.failed`, as a command's is.
+                    if let Some(path) = sc.path.clone() {
+                        if !self.calling.lock().insert(key.clone()) {
+                            log.line(format!("scheduled {}: skipped, its last call to {path} is still out", sc.name));
+                            continue;
+                        }
+                        let host = url::Url::parse(&self.url(&e.slug)).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+                        let (this, sid, en, name, secret) = (self.clone(), svc.id.clone(), e.name.clone(), sc.name.clone(), secret.clone());
+                        let timeout = std::time::Duration::from_secs(sc.timeout_s.unwrap_or(300) as u64);
+                        tokio::spawn(async move {
+                            let began = std::time::Instant::now();
+                            let r = crate::public::call_scheduled(this.clone(), &sid, &en, &host, &path, secret.as_deref(), timeout).await;
+                            this.calling.lock().remove(&key);
+                            let ms = began.elapsed().as_millis() as u64;
+                            let call = match &r {
+                                Ok(s) => crate::model::ScheduleCall { at: code_sql::now_ms(), status: Some(*s), ms, error: None },
+                                Err(e) => crate::model::ScheduleCall { at: code_sql::now_ms(), status: None, ms, error: Some(e.clone()) },
+                            };
+                            let log = this.logs.sink(format!("env:{sid}/{en}"), Stream::System);
+                            match &r {
+                                Ok(s) => log.line(format!("scheduled {name}: GET {path} answered {s} in {ms} ms")),
+                                Err(e) => log.line(format!("scheduled {name}: GET {path}: {e}")),
+                            }
+                            let failed = !matches!(r, Ok(s) if (200..400).contains(&s));
+                            let (k, v) = (format!("sched-call:{sid}/{en}/{name}"), serde_json::to_string(&call).expect("a call serializes"));
+                            let data = serde_json::json!({ "schedule": name, "path": path, "http_status": call.status, "error": call.error });
+                            let _ = this
+                                .db(move |s| {
+                                    s.set_state(&k, &v)?;
+                                    if failed {
+                                        s.add_event("cron.failed", &sid, &en, None, &data)?;
+                                    }
+                                    Ok(())
+                                })
+                                .await;
+                        });
+                        continue;
+                    }
                     // Skipped while the last one it started still runs.
                     let jk = format!("sched-job:{}/{}/{}", svc.id, e.name, sc.name);
                     let j = jk.clone();

@@ -111,6 +111,21 @@ fn vercel_destination(d: &str, rest: Option<&str>) -> Option<String> {
 }
 
 /// `vercel.json`'s redirects, rewrites and headers.
+/// vercel.json's `crons` (`[{path, schedule}]`): at most 20, each an absolute path.
+pub fn vercel_crons(text: &str) -> Vec<crate::Cron> {
+    let Ok(v) = serde_json::from_str::<Value>(text) else { return Vec::new() };
+    v["crons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let (path, schedule) = (c["path"].as_str()?, c["schedule"].as_str()?.trim());
+            (path.starts_with('/') && path.len() <= 2000 && path.bytes().all(|b| b.is_ascii_graphic()) && !schedule.is_empty() && schedule.len() <= 100).then(|| crate::Cron { path: path.into(), schedule: schedule.into() })
+        })
+        .take(20)
+        .collect()
+}
+
 pub fn from_vercel(text: &str) -> Converted {
     let mut out = Converted::default();
     let Ok(v) = serde_json::from_str::<Value>(text) else {
@@ -159,6 +174,12 @@ pub fn from_vercel(text: &str) -> Converted {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vercels_crons_are_paths_on_a_schedule() {
+        let c = vercel_crons(r#"{"crons": [{"path": "/api/cron", "schedule": "0 5 * * *"}, {"path": "relative", "schedule": "@daily"}, {"schedule": "@hourly"}]}"#);
+        assert_eq!(c, [crate::Cron { path: "/api/cron".into(), schedule: "0 5 * * *".into() }], "only absolute paths with a schedule");
+    }
 
     #[test]
     fn vercel_and_netlify_rules_become_redirects_and_headers_lines() {

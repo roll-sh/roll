@@ -186,8 +186,7 @@
             "additionalProperties": false,
             "required": [
               "name",
-              "schedule",
-              "command"
+              "schedule"
             ],
             "properties": {
               "name": {
@@ -200,6 +199,10 @@
               },
               "command": {
                 "type": "string"
+              },
+              "path": {
+                "type": "string",
+                "description": "A web service's path to GET instead of a command (Vercel's crons)."
               },
               "timezone": {
                 "type": "string",

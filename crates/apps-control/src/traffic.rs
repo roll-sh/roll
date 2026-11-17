@@ -36,6 +36,9 @@ impl Apps {
         let (lines, cut) = self.logs.read(&format!("http:{service}/{env}"), |_| true, Some(since), None, MAX_LINES).await;
         let cut = cut || lines.len() >= MAX_LINES;
         let mut groups: HashMap<(String, String), Group> = HashMap::new();
+        // The same requests by the deployment and the instance that answered (Render's
+        // instance breakdown; a canary beside the live one).
+        let (mut by_dep, mut by_inst): (HashMap<String, Group>, HashMap<String, Group>) = (HashMap::new(), HashMap::new());
         let mut total = 0u64;
         // Newest first: the groups kept apart are the latest traffic's, not an old burst's.
         for l in lines.iter().rev() {
@@ -46,11 +49,20 @@ impl Apps {
             if !groups.contains_key(&key) && groups.len() >= MAX_GROUPS {
                 key = ("*".into(), "*".into());
             }
-            let g = groups.entry(key).or_default();
-            g.requests += 1;
-            g.errors += u64::from(status >= 500);
-            g.client_errors += u64::from((400..500).contains(&status));
-            g.ms.push(v["ms"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32);
+            let ms = v["ms"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32;
+            let count = |g: &mut Group| {
+                g.requests += 1;
+                g.errors += u64::from(status >= 500);
+                g.client_errors += u64::from((400..500).contains(&status));
+                g.ms.push(ms);
+            };
+            count(groups.entry(key).or_default());
+            if let Some(d) = v["deployment"].as_str().filter(|d| by_dep.contains_key(*d) || by_dep.len() < MAX_GROUPS) {
+                count(by_dep.entry(d.to_string()).or_default());
+            }
+            if let Some(i) = v["instance"].as_str().filter(|i| *i != "site" && (by_inst.contains_key(*i) || by_inst.len() < MAX_GROUPS)) {
+                count(by_inst.entry(i.to_string()).or_default());
+            }
         }
         let mut rows: Vec<(String, String, Group)> = groups.into_iter().map(|((m, r), g)| (m, r, g)).collect();
         for (_, _, g) in &mut rows {
@@ -74,7 +86,19 @@ impl Apps {
             })
             .collect();
         out.sort_by(|a, b| b["requests"].as_u64().cmp(&a["requests"].as_u64()).then_with(|| a["route"].as_str().cmp(&b["route"].as_str())));
-        Ok(json!({ "minutes": minutes, "requests": total, "cut": cut, "routes": out }))
+        // The busiest first, each split's at most TOP.
+        let split = |m: HashMap<String, Group>, what: &str| -> Vec<Value> {
+            let mut v: Vec<(String, Group)> = m.into_iter().collect();
+            v.sort_by(|a, b| b.1.requests.cmp(&a.1.requests).then_with(|| a.0.cmp(&b.0)));
+            v.into_iter()
+                .take(TOP)
+                .map(|(k, mut g)| {
+                    g.ms.sort_unstable();
+                    json!({ what: k, "requests": g.requests, "errors": g.errors, "client_errors": g.client_errors, "p50_ms": pct(&g, 0.5), "p95_ms": pct(&g, 0.95), "max_ms": g.ms.last().copied().unwrap_or(0) })
+                })
+                .collect()
+        };
+        Ok(json!({ "minutes": minutes, "requests": total, "cut": cut, "routes": out, "deployments": split(by_dep, "deployment"), "instances": split(by_inst, "instance") }))
     }
 }
 
