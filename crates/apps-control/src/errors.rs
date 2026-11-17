@@ -18,7 +18,7 @@ const MAX_GROUPS: usize = 50;
 const FRAMES: usize = 3;
 const MAX_SAMPLE: usize = 8 << 10;
 /// The most lines one trace joins.
-const MAX_TRACE_LINES: usize = 200;
+pub(crate) const MAX_TRACE_LINES: usize = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -56,7 +56,7 @@ fn js_error(s: &str) -> bool {
 }
 
 /// The trace a line starts, if it starts one.
-fn starts(text: &str) -> Option<Kind> {
+pub(crate) fn starts(text: &str) -> Option<Kind> {
     let t = text.trim_end();
     if t.starts_with("Traceback (most recent call last):") {
         return Some(Kind::Python);
@@ -75,7 +75,7 @@ fn starts(text: &str) -> Option<Kind> {
 }
 
 /// Whether a line goes on the trace being read (Python's last line, its error, ends it: `Some(true)`).
-fn continues(kind: Kind, text: &str, lines: usize) -> Option<bool> {
+pub(crate) fn continues(kind: Kind, text: &str, lines: usize) -> Option<bool> {
     let t = text.trim_end();
     match kind {
         Kind::Python if t.starts_with(' ') || t.starts_with('\t') => Some(false),
@@ -333,7 +333,7 @@ mod tests {
         texts
             .iter()
             .enumerate()
-            .map(|(i, (inst, t))| LogLine { t: i as i64, stream: Stream::Stderr, instance: Some(inst.to_string()), deployment: None, text: t.to_string(), level: crate::logs::level_of(t) })
+            .map(|(i, (inst, t))| LogLine { t: i as i64, stream: Stream::Stderr, instance: Some(inst.to_string()), deployment: None, text: t.to_string(), level: crate::logs::level_of(t), trace: None })
             .collect()
     }
 

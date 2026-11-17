@@ -45,6 +45,18 @@ pub struct LogLine {
     /// `ERROR`): read once as it's written; absent when it says none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<Level>,
+    /// Part of a stack trace in the app's output (`errors::occurrences`' joining, as it's
+    /// written): `start` on its first line, `more` on the rest from the same instance and stream,
+    /// so a view shows the trace as one entry however other instances' lines fall between.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<Trace>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Trace {
+    Start,
+    More,
 }
 
 /// A line's level, least to most severe (Cloud Run's severities, folded).
@@ -130,6 +142,9 @@ impl Log {
     }
 }
 
+/// A log, an instance and a stream: where a trace is open.
+type TraceKey = (Arc<str>, Option<Arc<str>>, u8);
+
 /// Where the log tap sends `(log key, line)`.
 pub type Tap = tokio::sync::mpsc::Sender<(Arc<str>, LogLine)>;
 
@@ -142,11 +157,13 @@ pub struct LogHub {
     /// Whether some drain asks for request (`http:`) and build (`build:`) lines.
     tap_http: std::sync::atomic::AtomicBool,
     tap_build: std::sync::atomic::AtomicBool,
+    /// The traces open in each log's instance and stream: their kind and lines so far.
+    traces: Mutex<HashMap<TraceKey, (crate::errors::Kind, usize)>>,
 }
 
 impl LogHub {
     pub fn new(objects: Option<Objects>) -> Arc<LogHub> {
-        Arc::new(LogHub { logs: Mutex::new(HashMap::new()), objects, tap: Mutex::new(None), tap_http: Default::default(), tap_build: Default::default() })
+        Arc::new(LogHub { logs: Mutex::new(HashMap::new()), objects, tap: Mutex::new(None), tap_http: Default::default(), tap_build: Default::default(), traces: Mutex::new(HashMap::new()) })
     }
 
     /// Every runtime line from now on, `(log key, line)`, at most `capacity` waiting.
@@ -164,6 +181,35 @@ impl LogHub {
 
     pub fn sink(self: &Arc<Self>, key: impl Into<String>, stream: Stream) -> LogSink {
         LogSink { hub: self.clone(), key: Arc::from(key.into()), stream, instance: None, deployment: None, redact: None }
+    }
+
+    /// Whether an app's line starts a stack trace, goes on with the one open in its instance and
+    /// stream, or neither (which closes any open there).
+    fn trace_of(&self, key: &Arc<str>, instance: &Option<Arc<str>>, stream: Stream, text: &str) -> Option<Trace> {
+        let k = (key.clone(), instance.clone(), stream as u8);
+        let mut open = self.traces.lock();
+        if let Some((kind, n)) = open.get(&k).copied() {
+            match crate::errors::continues(kind, text, n) {
+                Some(end) if n < crate::errors::MAX_TRACE_LINES => {
+                    if end {
+                        open.remove(&k);
+                    } else {
+                        open.insert(k, (kind, n + 1));
+                    }
+                    return Some(Trace::More);
+                }
+                _ => {
+                    open.remove(&k);
+                }
+            }
+        }
+        let kind = crate::errors::starts(text)?;
+        // Instances that ended mid-trace leave theirs open: bounded, whatever comes.
+        if open.len() >= 10_000 {
+            open.clear();
+        }
+        open.insert(k, (kind, 1));
+        Some(Trace::Start)
     }
 
     fn push(&self, key: &str, line: LogLine) {
@@ -313,7 +359,7 @@ impl LogHub {
                     if l.dropped > 0 {
                         let t = lines.last().map_or_else(code_sql::now_ms, |x| x.t);
                         let text = format!("… {} lines dropped: more than {} MiB of output in a few seconds", l.dropped, UNFLUSHED_MAX >> 20);
-                        lines.push(LogLine { t, stream: Stream::System, instance: None, deployment: None, text, level: Some(Level::Warn) });
+                        lines.push(LogLine { t, stream: Stream::System, instance: None, deployment: None, text, level: Some(Level::Warn), trace: None });
                     }
                     l.unflushed_bytes = 0;
                     l.dropped = 0;
@@ -423,6 +469,8 @@ impl LogSink {
             text.truncate(cut);
             text.push('…');
         }
+        let app = matches!(self.stream, Stream::Stdout | Stream::Stderr);
+        let trace = if app { self.hub.trace_of(&self.key, &self.instance, self.stream, &text) } else { None };
         self.hub.push(
             &self.key,
             LogLine {
@@ -431,7 +479,8 @@ impl LogSink {
                 instance: self.instance.as_deref().map(str::to_string),
                 deployment: self.deployment.as_deref().map(str::to_string),
                 // The app's own lines say their level; roll's and the access log don't.
-                level: matches!(self.stream, Stream::Stdout | Stream::Stderr).then(|| level_of(&text)).flatten(),
+                level: app.then(|| level_of(&text)).flatten(),
+                trace,
                 text,
             },
         );
@@ -486,6 +535,23 @@ pub async fn pump(mut r: impl tokio::io::AsyncRead + Unpin, sink: LogSink) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A trace's lines are marked as one however another instance's lines fall between them,
+    /// and the first line that doesn't go on ends it.
+    #[tokio::test]
+    async fn a_stack_traces_lines_are_marked_as_one_trace() {
+        let hub = LogHub::new(None);
+        let base = hub.sink("env:svc_x/production", Stream::Stderr);
+        let (a, b) = (base.instance("a", "d"), base.instance("b", "d"));
+        a.line("Traceback (most recent call last):");
+        b.line("GET / 200");
+        a.line("  File \"/app/x.py\", line 3, in f");
+        a.line("ZeroDivisionError: division by zero");
+        a.line("after");
+        let marks: Vec<(String, Option<Trace>)> = hub.tail("env:svc_x/production", 10, None).await.into_iter().map(|l| (l.text, l.trace)).collect();
+        let want = [Some(Trace::Start), None, Some(Trace::More), Some(Trace::More), None];
+        assert_eq!(marks.iter().map(|(_, t)| *t).collect::<Vec<_>>(), want, "{marks:?}");
+    }
 
     #[tokio::test]
     async fn a_search_finds_lines_in_stored_chunks_and_in_memory_in_order() {

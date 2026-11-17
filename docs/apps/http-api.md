@@ -555,7 +555,7 @@ type Variables = { vars: { name: string; masked: string; source: "service" | "se
 // setting one that names another service needs `reveal` on it (403), and one naming no service of
 // the project is a 400.
 
-type LogLine = { t: number; stream: "stdout" | "stderr" | "build" | "system"; instance: string | null; deployment: string | null; text: string; level?: "trace" | "debug" | "info" | "warn" | "error" | "fatal" /* what the app's own line says (JSON's level/severity/lvl/log.level, a name or pino's number; logfmt's level=; an upper-case level word among its first three); absent when it says none */ };
+type LogLine = { t: number; stream: "stdout" | "stderr" | "build" | "system"; instance: string | null; deployment: string | null; text: string; level?: "trace" | "debug" | "info" | "warn" | "error" | "fatal" /* what the app's own line says (JSON's level/severity/lvl/log.level, a name or pino's number; logfmt's level=; an upper-case level word among its first three); absent when it says none */; trace?: "start" | "more" /* part of a stack trace (the errors' joining, as the line is written): start on its first line, more on the rest from the same instance and stream; absent otherwise */ };
 
 type RouteStat = { method: string; route: string; requests: number; errors: number /* 5xx */; client_errors: number /* 4xx */; p50_ms: number; p95_ms: number; max_ms: number };
 /** A page view: a browser's page load (`Sec-Fetch-Dest: document`, else `Accept: text/html`) answered 2xx or 304. A visitor: an address and user agent on one day, counted for this answer only (never kept). */
