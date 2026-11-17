@@ -1632,10 +1632,13 @@ Ranked by what a person notices first. Done so far:
 3. **A preview's search branch with a data-only key, as production's link has**
    (`feature/roll-previews-search-keys`, stacked on #123; gated after #123 lands): code that
    needs more than production's link fails in its preview too.
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
-   backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
-   its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
-   idle preview's branch is evicted to object storage after an hour.
+4. **Cheap Postgres branches without reflinks** (ext4 hosts like ai-server): a branch is a full
+   copy of the data directory until it has idled an hour (then a ~4 MB base backup); XFS shares
+   blocks. Needs either a pg-storage page server (lazy pages from a base backup plus WAL) or
+   pg-engine as the branch store (immutable files and a manifest: a branch is a manifest copy).
+   Neither is planned (the Postgres strategy session, 2026-11-17); previews' side wouldn't change
+   (`POST /v1/projects/{p}/branches`, `app_connection_uri`). Not blocking: the fleet's volumes
+   are XFS.
 5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
    to a work item from Linear gets its preview's link and visual review posted there, as an
    automation template on the `preview` trigger.
