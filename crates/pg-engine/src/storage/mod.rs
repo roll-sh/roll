@@ -507,17 +507,30 @@ impl PinSlot {
     }
 }
 
-/// The newest store format this build reads: its files' (`sst::FORMAT`), and 3 for a
-/// manifest naming dead-entry sets (`SstMeta::dv`), which builds before them would read
-/// past (their files' dead entries as live). A manifest says 3 while it names one.
-pub const STORE_FORMAT: u32 = 3;
+/// The bytes a block holds decompressed, as `bulk_range` counts them, per byte it takes in its
+/// file: what its count of 16 kB blocks made of TPC-H SF1's (2,046 MB of format 1 blocks in 561
+/// MB of format 2 files) before blocks were of several sizes.
+const BULK_RATIO: u64 = 4;
+
+/// The newest store format this build reads: its files' (`sst::FORMAT`), 3 for a manifest
+/// naming dead-entry sets (`SstMeta::dv`), which builds before them would read past (their
+/// files' dead entries as live), and 4 for one naming a file with a dictionary
+/// (`sst::FORMAT_DICT`), whose blocks builds before it can't decompress. A manifest says 3
+/// or 4 while it names one.
+pub const STORE_FORMAT: u32 = sst::FORMAT_DICT;
+const DEAD_FORMAT: u32 = 3;
 
 /// Replace the manifest durably. The directory is fsynced first: the SSTs it names were
 /// renamed into it, and a power cut may otherwise keep the manifest's rename without theirs
 /// (renames are only ordered by a directory fsync between them; PostgreSQL's durable_rename).
 fn write_manifest(dir: &Path, m: &Manifest) -> Result<()> {
     let dead = m.l1.iter().chain(&m.l0).any(|s| s.dv.is_some());
-    let format = if dead { STORE_FORMAT } else { m.format.min(sst::FORMAT) };
+    let dict = m.l1.iter().chain(&m.l0).any(|s| s.dict);
+    let format = match (dict, dead) {
+        (true, _) => sst::FORMAT_DICT,
+        (false, true) => DEAD_FORMAT,
+        (false, false) => m.format.min(sst::FORMAT),
+    };
     let data = if format == m.format {
         serde_json::to_vec(m)
     } else {
@@ -722,10 +735,19 @@ impl Store {
 
     /// Compression policy for fresh runs that may become store files unchanged.
     /// A writer of one of the store's files (of `StoreOptions::format`), compressed as its
-    /// files are when `compress`.
+    /// files are when `compress`: L1's form (format 2's small blocks with a dictionary).
     fn sst_writer(&self, id: u64, compress: bool) -> Result<SstWriter> {
         let codec = if compress && self.opts.compress { sst::Codec::Zstd } else { sst::Codec::None };
         SstWriter::create_with(&self.dir, id, codec, self.opts.format >= 2)
+    }
+
+    /// `sst_writer` for an L0 file (a flush, an ingested commit): its blocks as before small
+    /// blocks and dictionaries (`SstWriter::plain_blocks`), as a compaction to L1 writes them
+    /// again.
+    fn l0_writer(&self, id: u64, compress: bool) -> Result<SstWriter> {
+        let mut w = self.sst_writer(id, compress)?;
+        w.plain_blocks();
+        Ok(w)
     }
 
     pub(crate) fn compress(&self) -> bool {
@@ -865,8 +887,8 @@ impl Store {
     }
 
     /// Whether reading all of [start, end) is a bulk read: its files' blocks over that
-    /// range (decompressed, about `BLOCK_TARGET` each) are more than a quarter of the block
-    /// cache, PostgreSQL's rule for a sequential scan's ring (GetAccessStrategy's
+    /// range (decompressed, about `BULK_RATIO` times their stored bytes) are more than a
+    /// quarter of the block cache, PostgreSQL's rule for a sequential scan's ring (GetAccessStrategy's
     /// BAS_BULKREAD for relations over NBuffers / 4). Such a read goes through
     /// `bulk_read`, so a full scan of a big table doesn't push out everything else.
     pub fn bulk_range(&self, start: &[u8], end: &[u8]) -> bool {
@@ -875,15 +897,15 @@ impl Store {
             Frozen::Sst(s) => Some(s),
             Frozen::Mem(_) => None,
         }));
-        let mut blocks = 0usize;
+        let mut bytes = 0u64;
         for s in ssts {
             if s.meta.last_key.as_slice() < start || s.meta.first_key.as_slice() >= end {
                 continue;
             }
             let (a, b) = (s.find_block(start), s.find_block(end).min(s.block_count().saturating_sub(1)));
-            blocks += b.saturating_sub(a) + 1;
+            bytes += s.stored_bytes(a, b);
         }
-        blocks.saturating_mul(sst::BLOCK_TARGET) > self.opts.cache.capacity_bytes() / 4
+        bytes.saturating_mul(BULK_RATIO) > self.opts.cache.capacity_bytes() as u64 / 4
     }
 
     /// Watch `table` (the first 4 bytes of its keys): until a commit writes one of its keys
@@ -1584,7 +1606,7 @@ impl Store {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // (Uncompressed: the commit waits for this file, and compaction, in the background,
         // compresses it when it moves to L1.)
-        let mut w = self.sst_writer(id, false)?;
+        let mut w = self.l0_writer(id, false)?;
         w.expect_keys(keys + extra.len());
         let mut key = Vec::new();
         let mut markers: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
@@ -1952,7 +1974,7 @@ impl Store {
                 }
             };
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let mut w = self.sst_writer(id, true)?;
+            let mut w = self.l0_writer(id, true)?;
             let mut discarded = self.discard.filter();
             for e in mem.map.iter() {
                 if !discarded.drops(user_key(e.key())) {
@@ -4557,7 +4579,9 @@ mod tests {
             let got = s.get(&key(i), t1).unwrap();
             assert_eq!(got.is_some(), !(gone1(i) || i % 4 == 0), "{i}");
         }
-        assert_eq!(format(dir.path()), 3);
+        // (4: its files have dictionaries; a store whose files have none says 3 while it names a
+        // set, 2 once it names none.)
+        assert_eq!(format(dir.path()), sst::FORMAT_DICT);
         // Reopened: the sets read from their files.
         s.close().unwrap();
         drop(s);
@@ -4593,7 +4617,7 @@ mod tests {
         s.compact().unwrap();
         assert!(s.view().l1.iter().all(|f| f.meta.dv.is_none() && f.meta.dead == 0), "{:?}", s.view().l1.iter().map(|f| (f.meta.id, f.meta.dv, f.meta.entries, f.meta.dead)).collect::<Vec<_>>());
         assert_eq!(sets(), 0);
-        assert_eq!(format(dir.path()), 2);
+        assert_eq!(format(dir.path()), sst::FORMAT_DICT);
         let mut want = want;
         want.iter_mut().find(|(k, _)| *k == key(3)).unwrap().1 = val(3, 7);
         assert_eq!(rows(&s, s.visible_ts()), want);
@@ -4837,7 +4861,7 @@ mod tests {
     fn file_formats(s: &Store) -> ((usize, usize), (usize, usize)) {
         let v = s.view();
         let count = |fs: &[Arc<SstReader>]| {
-            let two = fs.iter().filter(|f| f.format() == sst::FORMAT).count();
+            let two = fs.iter().filter(|f| f.format() >= sst::FORMAT).count();
             (fs.len() - two, two)
         };
         (count(&v.l0), count(&v.l1))

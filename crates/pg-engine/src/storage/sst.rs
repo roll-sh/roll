@@ -37,12 +37,38 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const MAGIC: u64 = 0x726f_6c6c_7373_7431; // "rollsst1"
 /// Format 2's magic: builds before it read any other as a bad footer and refuse the store.
 const MAGIC2: u64 = 0x726f_6c6c_7373_7432; // "rollsst2"
+/// Where format 1's blocks end (their bytes), and format 2's before it took `ROW_BLOCK` and
+/// `INDEX_BLOCK`.
 pub(crate) const BLOCK_TARGET: usize = 16 * 1024;
+/// Where a format 2 block of a table's rows ends, in the bytes format 1 would take for its
+/// entries (`SstWriter::raw1`). A read that misses the block cache decompresses a whole block
+/// for the entry it wants: a heap fetch of an index scan over a table bigger than the cache
+/// (TPC-H's at 256 MB) did so for 16 kB, 40-60% of q07's, q09's and q17's CPU. Half of it,
+/// with the file's dictionary (`DICT_BYTES`), costs a scan no more decompression a byte than
+/// 16 kB without one (8 kB: 2,089 ns a kB, 16 kB: 2,632), while 4 kB costs scans 8% more a
+/// byte and four times the blocks: HANDOFF "Store blocks and caches".
+const ROW_BLOCK: usize = 8 << 10;
+/// `ROW_BLOCK` for a secondary index's entries, which are read by probes of a key or a short
+/// range (a nested loop's inner index scan) more than whole.
+const INDEX_BLOCK: usize = 4 << 10;
+/// A format 2 file's zstd dictionary (`finalize_dict`): about this many bytes of its first
+/// `DICT_SAMPLE` bytes of blocks with their statistics. Small blocks compress as well as
+/// 16 kB ones did without it (TPC-H SF1's 8 kB / 4 kB blocks 553 MB of block bytes against
+/// 547), and decompress faster a byte (the entropy tables are the dictionary's, not built per
+/// block).
+const DICT_BYTES: usize = 16 << 10;
+const DICT_SAMPLE: usize = 256 << 10;
 const FOOTER_LEN: usize = 48;
 const FOOTER2_LEN: usize = 56;
-/// The newest file format this build reads, and what it writes the store's files in (a
-/// transaction's runs are format 1: `SstWriter::create_run`).
+/// Format 4's footer: format 2's after the dictionary's offset and length.
+const FOOTER4_LEN: usize = 72;
+/// The format this build writes the store's files in (a transaction's runs are format 1:
+/// `SstWriter::create_run`), but for those with a dictionary (`FORMAT_DICT`).
 pub const FORMAT: u32 = 2;
+/// Format 2's blocks compressed with a zstd dictionary the file holds (codec 3), the
+/// dictionary between the blocks and the index, where format 4's footer says (`SstMeta::
+/// dict`). The newest file format this build reads.
+pub const FORMAT_DICT: u32 = 4;
 /// Format 2's block trailer after the restart arrays: version, entries, restarts, common, flags.
 const TRAILER: usize = 8 + 4 + 4 + 2 + 1;
 
@@ -201,6 +227,9 @@ pub struct SstMeta {
     /// How many entries that set holds.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub dead: u64,
+    /// Its blocks are compressed with a zstd dictionary it holds (format 4, `FORMAT_DICT`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dict: bool,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -431,6 +460,9 @@ pub struct SstWriter {
     /// entries.
     b2: Block2,
     rlog: u8,
+    /// Where a block ends: past this many bytes as format 1 counts them (`raw1`); none:
+    /// `BLOCK_TARGET` for format 1, `ROW_BLOCK` or `INDEX_BLOCK` for format 2.
+    block_target: Option<usize>,
     /// The bytes the block would take in format 1 (where format 2's blocks end too: a block
     /// holds the entries it held in format 1, and the cache holds it as it did).
     raw1: usize,
@@ -455,7 +487,19 @@ pub struct SstWriter {
     tagged: bool,
     /// Deletions added (`SstMeta::deletes`).
     deletes: u64,
+    /// Compress its blocks with a zstd dictionary of about `.0` bytes trained from its first
+    /// `.1` bytes of blocks (`set_dict`): the blocks before it are held back (`held`: body,
+    /// last key, entries) until it is made.
+    dict: Option<(usize, usize)>,
+    held: Vec<(Vec<u8>, Vec<u8>, u32)>,
+    held_bytes: usize,
+    /// The dictionary and a compressor with it (or none, when training found none: plain
+    /// zstd blocks).
+    zdict: Option<Option<(Vec<u8>, zstd::bulk::Compressor<'static>)>>,
 }
+
+/// A file with fewer bytes of blocks than this gets no dictionary (its blocks are plain zstd).
+const DICT_MIN_SAMPLE: usize = 64 << 10;
 
 /// Format 2's block as `SstWriter` makes it: the values (after the entries when it is done),
 /// each restart's whole key, where its entry and value start, the block's version (its first
@@ -505,7 +549,21 @@ impl SstWriter {
         let codec = if compress { Codec::Zstd } else { Codec::None };
         let mut w = Self::create_with(dir, id, codec, true)?;
         w.sync = false;
+        w.plain_blocks();
         Ok(w)
+    }
+
+    /// Blocks as format 2 wrote them before small blocks and dictionaries: ending at
+    /// `BLOCK_TARGET`, compressed without a dictionary. For files written on a statement's path
+    /// or short-lived (a transaction's runs, flushes to L0): compressing against a dictionary
+    /// takes twice the match-finding time (`ZSTD_compressBlock_fast_dictMatchState`: COPY in
+    /// +4.5% of its instructions, INSERT ... SELECT +5.8%), and they are written again in the
+    /// bottom level's form when a compaction or a clean close moves them to L1.
+    pub(crate) fn plain_blocks(&mut self) {
+        if self.entries == 0 {
+            self.block_target = Some(BLOCK_TARGET);
+            self.dict = None;
+        }
     }
 
     /// `create_run` as builds before format 2 runs wrote it: format 1, each value tagged
@@ -524,6 +582,19 @@ impl SstWriter {
     pub(crate) fn restart_log(&mut self, rlog: u8) {
         assert!(self.entries == 0 && (1..=8).contains(&rlog));
         self.rlog = rlog;
+    }
+
+    /// End blocks past `n` bytes as format 1 counts them (by default `BLOCK_TARGET` for format
+    /// 1, `ROW_BLOCK` / `INDEX_BLOCK` for format 2).
+    #[cfg(test)]
+    pub(crate) fn set_block_target(&mut self, n: usize) {
+        self.block_target = Some(n);
+    }
+
+    /// Its blocks compressed without a dictionary (format 2), as builds before format 4 wrote.
+    #[cfg(test)]
+    pub(crate) fn no_dict(&mut self) {
+        self.dict = None;
     }
 
     /// Size the bloom filter for about `n` user keys now (a big ingested commit's: 8 bytes
@@ -563,6 +634,7 @@ impl SstWriter {
             zc: None,
             b2: Block2::default(),
             rlog: RLOG,
+            block_target: None,
             raw1: 0,
             hashes: Vec::new(),
             last_user_hash: None,
@@ -577,7 +649,21 @@ impl SstWriter {
             bloom: None,
             tagged: false,
             deletes: 0,
+            dict: (v2 && codec == Codec::Zstd).then_some((DICT_BYTES, DICT_SAMPLE)),
+            held: Vec::new(),
+            held_bytes: 0,
+            zdict: None,
         })
+    }
+
+    /// Compress its blocks with a zstd dictionary of about `size` bytes trained from its first
+    /// `sample` bytes of blocks (format 4; a format 2 zstd writer only, before its first
+    /// block).
+    #[cfg(test)]
+    pub(crate) fn set_dict(&mut self, size: usize, sample: usize) {
+        if self.v2 && self.codec == Codec::Zstd && self.entries == 0 {
+            self.dict = Some((size, sample));
+        }
     }
 
     pub fn entries(&self) -> u64 {
@@ -585,7 +671,8 @@ impl SstWriter {
     }
 
     pub fn approx_size(&self) -> u64 {
-        self.offset + (self.block.len() + self.b2.vals.len()) as u64
+        // (Blocks held back for a dictionary: about a third of their bytes once compressed.)
+        self.offset + (self.block.len() + self.b2.vals.len() + self.held_bytes / 3) as u64
     }
 
     /// The block's bytes so far as format 1 counts them (`raw1`).
@@ -616,7 +703,8 @@ impl SstWriter {
         self.min_ts = self.min_ts.min(ts);
         self.max_ts = self.max_ts.max(ts);
         let h = if self.v2 { hash64_2(user_key(key)) } else { hash64(user_key(key)) };
-        self.rows |= !index_entry(user_key(key));
+        let index = index_entry(user_key(key));
+        self.rows |= !index;
         if self.last_user_hash != Some(h) {
             match &mut self.bloom {
                 Some((b, m)) => bloom_set(b, *m, h),
@@ -624,7 +712,13 @@ impl SstWriter {
             }
             self.last_user_hash = Some(h);
         }
-        if self.block_bytes1() >= BLOCK_TARGET {
+        let target = match self.block_target {
+            Some(t) => t,
+            None if !self.v2 => BLOCK_TARGET,
+            None if index => INDEX_BLOCK,
+            None => ROW_BLOCK,
+        };
+        if self.block_bytes1() >= target {
             self.finish_block()?;
         }
         Ok(())
@@ -729,18 +823,66 @@ impl SstWriter {
             return Ok(());
         }
         let raw = if self.v2 { self.body2() } else { std::mem::take(&mut self.block) };
+        let n = self.block_entries as u32;
+        self.block_entries = 0;
+        self.raw1 = 0;
+        if let (Some((_, sample)), None) = (self.dict, &self.zdict) {
+            self.held_bytes += raw.len();
+            self.held.push((raw, self.prev_key.clone(), n));
+            self.block = Vec::with_capacity(BLOCK_TARGET + 1024);
+            if self.held_bytes >= sample {
+                self.train()?;
+            }
+            return Ok(());
+        }
+        let last = self.prev_key.clone();
+        self.write_block(&raw, last, n)?;
+        self.block = raw;
+        self.block.clear();
+        Ok(())
+    }
+
+    /// The dictionary trained from the blocks held back (`held`), then those written with it.
+    fn train(&mut self) -> Result<()> {
+        let (size, _) = self.dict.expect("a dictionary asked for");
+        let made = if self.held_bytes < DICT_MIN_SAMPLE || self.held.len() < 8 {
+            None
+        } else {
+            let samples: Vec<&[u8]> = self.held.iter().map(|h| h.0.as_slice()).collect();
+            finalize_dict(&samples, size)
+        };
+        self.zdict = Some(match made {
+            Some(d) => {
+                let c = zstd::bulk::Compressor::with_dictionary(ZSTD_LEVEL, &d).map_err(|e| internal(format!("zstd: {e}")))?;
+                Some((d, c))
+            }
+            None => None,
+        });
+        for (raw, last, n) in std::mem::take(&mut self.held) {
+            self.write_block(&raw, last, n)?;
+        }
+        self.held_bytes = 0;
+        Ok(())
+    }
+
+    /// A finished block's body compressed (or not) and written, with its index entry.
+    fn write_block(&mut self, raw: &[u8], last: Vec<u8>, n: u32) -> Result<()> {
         let mut data = Vec::with_capacity(raw.len() + 9);
         let zstd_err = |e: std::io::Error| internal(format!("zstd: {e}"));
         let packed = match self.codec {
             Codec::None => None,
+            Codec::Zstd if matches!(self.zdict, Some(Some(_))) => {
+                let (_, zc) = self.zdict.as_mut().and_then(|z| z.as_mut()).expect("a dictionary");
+                Some((3, zc.compress(raw).map_err(zstd_err)?))
+            }
             Codec::Zstd => {
                 if self.zc.is_none() {
                     self.zc = Some(zstd::bulk::Compressor::new(if self.v2 { ZSTD_LEVEL } else { 1 }).map_err(zstd_err)?);
                 }
                 let zc = self.zc.as_mut().expect("a zstd context");
-                Some((1, zc.compress(&raw).map_err(zstd_err)?))
+                Some((1, zc.compress(raw).map_err(zstd_err)?))
             }
-            Codec::Lz4 => Some((2, lz4_flex::block::compress(&raw))),
+            Codec::Lz4 => Some((2, lz4_flex::block::compress(raw))),
         };
         match packed {
             Some((tag, c)) if c.len() < raw.len() * 7 / 8 => {
@@ -750,24 +892,33 @@ impl SstWriter {
             }
             _ => {
                 data.push(0);
-                data.extend_from_slice(&raw);
+                data.extend_from_slice(raw);
             }
         }
         let crc = crc32fast::hash(&data);
         data.extend_from_slice(&crc.to_le_bytes());
         self.out.write_all(&data)?;
-        self.index
-            .push((self.prev_key.clone(), self.offset, data.len() as u32, self.block_entries as u32));
+        self.index.push((last, self.offset, data.len() as u32, n));
         self.offset += data.len() as u64;
-        self.block = raw;
-        self.block.clear();
-        self.block_entries = 0;
-        self.raw1 = 0;
         Ok(())
     }
 
     pub fn finish(mut self) -> Result<SstMeta> {
         self.finish_block()?;
+        if self.dict.is_some() && self.zdict.is_none() {
+            self.train()?;
+        }
+        // (Format 4: the dictionary after the blocks, with its crc32.)
+        let dict = match self.zdict.take() {
+            Some(Some((mut d, _))) => {
+                let at = self.offset;
+                d.extend_from_slice(&crc32fast::hash(&d).to_le_bytes());
+                self.out.write_all(&d)?;
+                self.offset += d.len() as u64;
+                Some((at, d.len() as u64))
+            }
+            _ => None,
+        };
         let mut index = Vec::new();
         put_varint(&mut index, self.index.len() as u64);
         for (k, off, len, n) in &self.index {
@@ -803,9 +954,17 @@ impl SstWriter {
         self.out.write_all(&bloom)?;
         self.offset += bloom.len() as u64;
 
-        let mut footer = Vec::with_capacity(FOOTER2_LEN);
-        let tail: &[u64] = if self.v2 { &[FORMAT as u64, MAGIC2] } else { &[MAGIC] };
-        for v in [index_off, index.len() as u64, bloom_off, bloom.len() as u64, self.entries].iter().chain(tail) {
+        let mut footer = Vec::with_capacity(FOOTER4_LEN);
+        let tail: &[u64] = match (self.v2, dict) {
+            (false, _) => &[MAGIC],
+            (true, None) => &[FORMAT as u64, MAGIC2],
+            (true, Some(_)) => &[FORMAT_DICT as u64, MAGIC2],
+        };
+        let head: &[u64] = match dict {
+            Some((at, n)) => &[at, n],
+            None => &[],
+        };
+        for v in head.iter().chain(&[index_off, index.len() as u64, bloom_off, bloom.len() as u64, self.entries]).chain(tail) {
             footer.extend_from_slice(&v.to_le_bytes());
         }
         self.out.write_all(&footer)?;
@@ -835,6 +994,7 @@ impl SstWriter {
             deletes: self.deletes,
             dv: None,
             dead: 0,
+            dict: dict.is_some(),
         })
     }
 
@@ -864,6 +1024,8 @@ pub struct SstReader {
     /// A newer reader of the file has another dead-entry set: this one's file goes when it
     /// does (the sst file stays).
     dead_obsolete: AtomicBool,
+    /// The dictionary its codec 3 blocks were compressed with (format 4).
+    ddict: Option<zstd::dict::DecoderDictionary<'static>>,
 }
 
 /// The longest key `Block::run_rows` makes in a buffer of its own (a table's row keys are 12 to
@@ -1489,7 +1651,7 @@ impl Block {
     /// A format 2 block as it was decompressed (`SstWriter::body2`): its entries and values
     /// are the compact form already, the restarts read from its end, the last key from the
     /// file's block index.
-    fn load(raw: Bytes, last_key: &[u8]) -> Result<Block> {
+    fn load(raw: &[u8], last_key: &[u8]) -> Result<Block> {
         let bad = || internal("bad sst block");
         let n = raw.len();
         let t = raw.get(n.checked_sub(TRAILER).ok_or_else(bad)?..).ok_or_else(bad)?;
@@ -1529,6 +1691,7 @@ impl Block {
     /// Check a decompressed block of the file's format and write it in the compact form,
     /// with a whole key at every `RESTART`th entry (files written before restarts were
     /// share a prefix there).
+    #[cfg(test)]
     fn decode(raw: Bytes) -> Result<Block> {
         Block::decode_with(&raw, None, RLOG)
     }
@@ -1767,6 +1930,97 @@ fn relink(raw: &[u8], ts: u64) -> Result<Bytes> {
     Ok(Bytes::from(out))
 }
 
+/// A zstd dictionary for blocks like `samples` (at least one): about `size` bytes of their
+/// content (an even share from the middle of each) with the entropy tables of their
+/// statistics at `ZSTD_LEVEL` (`ZDICT_finalizeDictionary`: no search for the best content,
+/// a compression of the samples' worth of time).
+pub(crate) fn finalize_dict(samples: &[&[u8]], size: usize) -> Option<Vec<u8>> {
+    use zstd::zstd_safe::zstd_sys;
+    let per = (size / samples.len().max(1)).max(64);
+    let mut content = Vec::with_capacity(size + per);
+    let (mut flat, mut sizes) = (Vec::new(), Vec::with_capacity(samples.len()));
+    for s in samples {
+        if content.len() < size {
+            let n = per.min(s.len());
+            let at = (s.len() - n) / 2;
+            content.extend_from_slice(&s[at..at + n]);
+        }
+        flat.extend_from_slice(s);
+        sizes.push(s.len());
+    }
+    let mut out = vec![0u8; content.len() + (16 << 10)];
+    let params = zstd_sys::ZDICT_params_t { compressionLevel: ZSTD_LEVEL, notificationLevel: 0, dictID: 0 };
+    // SAFETY: every pointer is to a live buffer of the length passed with it; `sizes` sums
+    // to `flat`'s length.
+    let r = unsafe {
+        zstd_sys::ZDICT_finalizeDictionary(
+            out.as_mut_ptr().cast(),
+            out.len(),
+            content.as_ptr().cast(),
+            content.len(),
+            flat.as_ptr().cast(),
+            sizes.as_ptr(),
+            sizes.len() as u32,
+            params,
+        )
+    };
+    // SAFETY: a plain query of a return code.
+    if unsafe { zstd_sys::ZDICT_isError(r) } != 0 {
+        return None;
+    }
+    out.truncate(r);
+    Some(out)
+}
+
+/// What reading a block from its file takes besides the block it makes: the bytes read, a buffer
+/// they are decompressed into and a zstd context, kept from read to read (`SCRATCH`) rather
+/// than allocated for each (a 6-16 kB buffer of each and a 92 kB context a miss: the buffers'
+/// sizes are the cached blocks', so freed among them in the allocator's pages they held pages
+/// the cache's blocks only partly filled). The context remembers the dictionary it last used
+/// (by address): zstd decodes a block whose context last had another dictionary as "cold",
+/// prefetching the dictionary's content and tables and through its slower prefetching sequence
+/// decoder (`ZSTD_decompressSequencesLong`, 39% of TPC-H q09's cycles at 256 MB with one
+/// context a thread, as a heap fetch's blocks come from file after file); a context that last
+/// had it decodes it "hot". At most `SCRATCH_KEPT` are kept, the least recently returned
+/// dropped first (a context about 92 kB, buffers up to `SCRATCH_BYTES` each): a query's reads
+/// go from file to file (a join's probes, a parallel scan's workers), and a pool that handed
+/// out its newest context for another dictionary undid the warmest one (a fifth of TPC-H
+/// q02's cycles at 256 MB in the cold decoder).
+struct Scratch {
+    dict: usize,
+    dctx: zstd::zstd_safe::DCtx<'static>,
+    read: Vec<u8>,
+    out: Vec<u8>,
+}
+static SCRATCH: parking_lot::Mutex<Vec<Scratch>> = parking_lot::Mutex::new(Vec::new());
+const SCRATCH_KEPT: usize = 32;
+const SCRATCH_BYTES: usize = 256 << 10;
+
+/// A kept `Scratch` whose context last used dictionary `dict` (0: none), the most recently
+/// returned of them; else a new one (the kept ones keep their dictionaries).
+fn scratch(dict: usize) -> Scratch {
+    let taken = {
+        let mut kept = SCRATCH.lock();
+        kept.iter().rposition(|s| s.dict == dict).map(|i| kept.remove(i))
+    };
+    taken.unwrap_or_else(|| Scratch { dict: 0, dctx: zstd::zstd_safe::DCtx::create(), read: Vec::new(), out: Vec::new() })
+}
+
+/// `s` kept (the least recently returned dropped past `SCRATCH_KEPT`).
+fn keep(mut s: Scratch) {
+    for b in [&mut s.read, &mut s.out] {
+        if b.capacity() > SCRATCH_BYTES {
+            *b = Vec::new();
+        }
+    }
+    let dropped = {
+        let mut kept = SCRATCH.lock();
+        kept.push(s);
+        (kept.len() > SCRATCH_KEPT).then(|| kept.remove(0))
+    };
+    drop(dropped);
+}
+
 impl SstReader {
     pub fn open(dir: &Path, meta: SstMeta, cache: Arc<BlockCache>) -> Result<SstReader> {
         let path = sst_path(dir, meta.id);
@@ -1775,27 +2029,46 @@ impl SstReader {
         if len < FOOTER_LEN as u64 {
             return Err(internal(format!("sst {} is truncated", path.display())));
         }
-        let mut footer = [0u8; FOOTER2_LEN];
-        let at = len.saturating_sub(FOOTER2_LEN as u64);
+        let mut footer = [0u8; FOOTER4_LEN];
+        let at = len.saturating_sub(FOOTER4_LEN as u64);
         let got = (len - at) as usize;
-        file.read_exact_at(&mut footer[FOOTER2_LEN - got..], at)?;
-        let word_at = |i: usize| u64::from_le_bytes(footer[i * 8..i * 8 + 8].try_into().unwrap());
-        // (Format 1's six words are the last six; format 2's seven end with its format and magic.)
-        let v2 = match word_at(6) {
-            MAGIC => false,
-            MAGIC2 if got == FOOTER2_LEN => {
-                let format = word_at(5);
-                if format > FORMAT as u64 {
+        file.read_exact_at(&mut footer[FOOTER4_LEN - got..], at)?;
+        // (The footer's words counted from its end: the magic is `back(0)`.)
+        let back = |i: usize| u64::from_le_bytes(footer[FOOTER4_LEN - 8 * i - 8..FOOTER4_LEN - 8 * i].try_into().unwrap());
+        // (Format 1's six words are the last six; format 2's seven end with its format and
+        // magic; format 4's nine start with its dictionary's offset and length.)
+        let (v2, dict) = match back(0) {
+            MAGIC => (false, None),
+            MAGIC2 if got >= FOOTER2_LEN => match back(1) {
+                f if f > FORMAT_DICT as u64 => {
                     return Err(internal(format!(
-                        "sst {} is of storage format {format}, newer than this build reads ({FORMAT})",
+                        "sst {} is of storage format {f}, newer than this build reads ({FORMAT_DICT})",
                         path.display()
                     )));
                 }
-                true
-            }
+                f if f == FORMAT_DICT as u64 && got == FOOTER4_LEN => (true, Some((back(8), back(7)))),
+                f if f == FORMAT as u64 => (true, None),
+                _ => return Err(internal(format!("sst {} has a bad footer", path.display()))),
+            },
             _ => return Err(internal(format!("sst {} has a bad footer", path.display()))),
         };
-        let f = |i: usize| word_at(i + if v2 { 0 } else { 1 });
+        // (index offset, length, bloom offset, length: the first four of format 2's seven.)
+        let f = |i: usize| back(if v2 { 6 - i } else { 5 - i });
+        let ddict = match dict {
+            None => None,
+            Some((off, n)) => {
+                let mut d = vec![0u8; n as usize];
+                file.read_exact_at(&mut d, off)?;
+                let Some(c) = d.len().checked_sub(4) else { return Err(internal(format!("sst {} has a bad footer", path.display()))) };
+                if crc32fast::hash(&d[..c]).to_le_bytes() != d[c..] {
+                    return Err(crate::error::Error::new(
+                        crate::error::code::DATA_CORRUPTED,
+                        format!("checksum mismatch in {} dictionary", path.display()),
+                    ));
+                }
+                Some(zstd::dict::DecoderDictionary::copy(&d[..c]))
+            }
+        };
         let mut index_buf = vec![0u8; f(1) as usize];
         file.read_exact_at(&mut index_buf, f(0))?;
         let mut bloom = vec![0u8; f(3) as usize];
@@ -1858,6 +2131,7 @@ impl SstReader {
             dead,
             dead_obsolete: AtomicBool::new(false),
             retag: None,
+            ddict,
         })
     }
 
@@ -1935,7 +2209,19 @@ impl SstReader {
 
     /// The file's format (`FORMAT` or 1).
     pub fn format(&self) -> u32 {
-        if self.v2 { FORMAT } else { 1 }
+        match (self.v2, &self.ddict) {
+            (false, _) => 1,
+            (true, None) => FORMAT,
+            (true, Some(_)) => FORMAT_DICT,
+        }
+    }
+
+    /// The bytes blocks `a..=b` take in the file.
+    pub fn stored_bytes(&self, a: usize, b: usize) -> u64 {
+        match (self.index.at.get(a), self.index.at.get(b)) {
+            (Some(x), Some(y)) if a <= b => y.0 + y.1 as u64 - x.0,
+            _ => 0,
+        }
     }
 
     pub fn block_count(&self) -> usize {
@@ -2021,29 +2307,7 @@ impl SstReader {
     /// Block `i` as the file holds it, its dead entries too (they are in their places: what
     /// `DeadSet` counts), read from the file without the cache.
     pub fn raw_block(&self, i: usize) -> Result<Block> {
-        let (off, len) = &self.index.at[i];
-        let mut buf = vec![0u8; *len as usize];
-        self.file.read_exact_at(&mut buf, *off)?;
-        if buf.len() < 5 {
-            return Err(internal("sst block too short"));
-        }
-        let crc_pos = buf.len() - 4;
-        let crc = u32::from_le_bytes(buf[crc_pos..].try_into().unwrap());
-        if crc32fast::hash(&buf[..crc_pos]) != crc {
-            return Err(crate::error::Error::new(
-                crate::error::code::DATA_CORRUPTED,
-                format!("checksum mismatch in {} block {i}", self.path.display()),
-            ));
-        }
-        // (A compressed block's raw length; a raw block's first bytes, unused.)
-        let n = u32::from_le_bytes(buf[1..5].try_into().unwrap()) as usize;
-        let raw: Bytes = match buf[0] {
-            0 => Bytes::from(buf).slice(1..crc_pos),
-            1 => Bytes::from(zstd::bulk::decompress(&buf[5..crc_pos], n).map_err(|e| internal(format!("zstd: {e}")))?),
-            2 if self.v2 => Bytes::from(lz4_flex::block::decompress(&buf[5..crc_pos], n).map_err(|e| internal(format!("lz4: {e}")))?),
-            _ => return Err(internal("unknown block compression")),
-        };
-        match self.meta.commit_ts {
+        self.with_body(i, |raw| match self.meta.commit_ts {
             _ if self.v2 => {
                 let mut b = Block::load(raw, self.index.key(i))?;
                 // (A linked run of format 2: one version for every key, the block's, which
@@ -2056,9 +2320,78 @@ impl SstReader {
                     None => b,
                 })
             }
-            Some(ts) => Block::decode_linked(&raw, ts),
-            None => Block::decode(raw),
+            Some(ts) => Block::decode_linked(raw, ts),
+            None => Block::decode_with(raw, None, RLOG),
+        })
+    }
+
+    /// Block `i`'s body as stored, checked (its crc) and decompressed.
+    #[cfg(test)]
+    pub(crate) fn body(&self, i: usize) -> Result<Vec<u8>> {
+        self.with_body(i, |b| Ok(b.to_vec()))
+    }
+
+    /// `f` of block `i`'s body as stored, checked (its crc) and decompressed, in a kept
+    /// `Scratch`'s buffers.
+    fn with_body<R>(&self, i: usize, f: impl FnOnce(&[u8]) -> Result<R>) -> Result<R> {
+        let key = self.ddict.as_ref().map_or(0, |d| std::ptr::from_ref(d) as usize);
+        let mut s = scratch(key);
+        let r = self.body_in(i, &mut s, f);
+        keep(s);
+        r
+    }
+
+    fn body_in<R>(&self, i: usize, s: &mut Scratch, f: impl FnOnce(&[u8]) -> Result<R>) -> Result<R> {
+        let (off, len) = self.index.at[i];
+        let len = len as usize;
+        if s.read.len() < len {
+            s.read.resize(len, 0);
         }
+        let buf = &mut s.read[..len];
+        self.file.read_exact_at(buf, off)?;
+        if len < 5 {
+            return Err(internal("sst block too short"));
+        }
+        let crc_pos = len - 4;
+        let crc = u32::from_le_bytes(buf[crc_pos..].try_into().unwrap());
+        if crc32fast::hash(&buf[..crc_pos]) != crc {
+            return Err(crate::error::Error::new(
+                crate::error::code::DATA_CORRUPTED,
+                format!("checksum mismatch in {} block {i}", self.path.display()),
+            ));
+        }
+        // (A compressed block's raw length; a raw block's first bytes, unused.)
+        let n = u32::from_le_bytes(buf[1..5].try_into().unwrap()) as usize;
+        let src = &buf[5..crc_pos];
+        let zstd_err = |e: usize| internal(format!("zstd: {}", zstd::zstd_safe::get_error_name(e)));
+        match (buf[0], &self.ddict) {
+            (0, _) => return f(&buf[1..crc_pos]),
+            (1, _) => {
+                s.out.clear();
+                s.out.reserve(n);
+                // (Its dictionary, if it had one, is no longer the context's.)
+                s.dict = 0;
+                s.dctx.decompress(&mut s.out, src).map_err(zstd_err)?;
+            }
+            (2, _) if self.v2 => {
+                s.out.clear();
+                s.out.resize(n, 0);
+                let got = lz4_flex::block::decompress_into(src, &mut s.out).map_err(|e| internal(format!("lz4: {e}")))?;
+                s.out.truncate(got);
+            }
+            (3, Some(d)) => {
+                s.out.clear();
+                s.out.reserve(n);
+                let r = s.dctx.decompress_using_ddict(&mut s.out, src, d.as_ddict());
+                s.dict = std::ptr::from_ref(d) as usize;
+                r.map_err(zstd_err)?;
+            }
+            _ => return Err(internal("unknown block compression")),
+        }
+        if s.out.len() != n {
+            return Err(internal("bad sst block"));
+        }
+        f(&s.out)
     }
 }
 
@@ -2542,6 +2875,8 @@ mod tests {
         let cache = BlockCache::new(64 << 20);
         let write = |id: u64, codec: Codec, v2: bool| {
             let mut w = SstWriter::create_with(dir.path(), id, codec, v2).unwrap();
+            // (Format 1's block ends: `ROW_BLOCK` and `INDEX_BLOCK` end format 2's sooner.)
+            w.set_block_target(BLOCK_TARGET);
             for (k, v) in &ents {
                 w.add(k, v.as_deref()).unwrap();
             }
@@ -2551,7 +2886,7 @@ mod tests {
         assert_eq!(one.format(), 1);
         for (id, codec) in [(2, Codec::None), (3, Codec::Zstd), (4, Codec::Lz4)] {
             let two = write(id, codec, true);
-            assert_eq!(two.format(), FORMAT);
+            assert_eq!(two.format(), if codec == Codec::Zstd { FORMAT_DICT } else { FORMAT });
             assert_eq!(two.first_block_compressed().unwrap(), codec != Codec::None);
             let mut all = Vec::new();
             for i in 0..two.block_count() {
@@ -2583,6 +2918,7 @@ mod tests {
             }
             // (A block of another restart interval reads the same: it says which it has.)
             let mut w = SstWriter::create_with(dir.path(), 10 + id, codec, true).unwrap();
+            w.set_block_target(BLOCK_TARGET);
             w.restart_log(2);
             for (k, v) in &ents {
                 w.add(k, v.as_deref()).unwrap();
@@ -2613,6 +2949,59 @@ mod tests {
         }
     }
 
+    /// A file whose blocks are compressed with a dictionary it holds (format 4) reads as one
+    /// without it (format 2), block for block, whether the blocks before the dictionary was
+    /// made are few or all; a file with too few blocks to train one has none (format 2); a
+    /// damaged dictionary is refused at open (XX001).
+    #[test]
+    fn dictionary_blocks_read_as_plain_ones() {
+        let ents = mixed_entries();
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BlockCache::new(64 << 20);
+        let write = |id: u64, dict: Option<(usize, usize)>, n: usize| {
+            let mut w = SstWriter::create_with(dir.path(), id, Codec::Zstd, true).unwrap();
+            match dict {
+                Some((size, sample)) => w.set_dict(size, sample),
+                None => w.no_dict(),
+            }
+            for (k, v) in &ents[..n] {
+                w.add(k, v.as_deref()).unwrap();
+            }
+            SstReader::open(dir.path(), w.finish().unwrap(), cache.clone()).unwrap()
+        };
+        let plain = write(1, None, ents.len());
+        for (id, sample) in [(2, 256 << 10), (3, 1 << 30)] {
+            let d = write(id, Some((8 << 10, sample)), ents.len());
+            assert!(d.meta.dict);
+            assert_eq!(d.format(), FORMAT_DICT);
+            assert_eq!(d.block_count(), plain.block_count());
+            for i in 0..d.block_count() {
+                let (a, b) = (plain.block_with(i, false).unwrap(), d.block_with(i, false).unwrap());
+                assert_eq!((&a.data[..], &a.restarts, &a.rvals, &a.last_key), (&b.data[..], &b.restarts, &b.rvals, &b.last_key), "block {i}");
+            }
+            for (k, v) in ents.iter().step_by(7) {
+                let b = d.block_with(d.find_block(k), false).unwrap();
+                let mut pos = BlockPos::default();
+                b.seek(k, &mut pos);
+                assert_eq!((pos.key(), b.value_ref(&pos)), (k.as_slice(), v.as_deref()));
+            }
+        }
+        let small = write(4, Some((8 << 10, 1 << 20)), 200);
+        assert!(!small.meta.dict);
+        assert_eq!(small.format(), FORMAT);
+        // A flipped byte of the dictionary (the bytes before the index).
+        let d = write(5, Some((8 << 10, 256 << 10)), ents.len());
+        let meta = d.meta.clone();
+        let at = d.index.at.last().map(|(o, l)| o + *l as u64).unwrap() + 100;
+        drop(d);
+        let f = std::fs::OpenOptions::new().read(true).write(true).open(sst_path(dir.path(), 5)).unwrap();
+        let mut b = [0u8; 1];
+        f.read_exact_at(&mut b, at).unwrap();
+        f.write_all_at(&[b[0] ^ 0x10], at).unwrap();
+        let e = SstReader::open(dir.path(), meta, cache.clone()).err().expect("refused");
+        assert!(e.message.contains("checksum mismatch") && e.message.contains("dictionary"), "{}", e.message);
+    }
+
     /// A file read with a dead-entry set reads as one written without those entries: blocks
     /// with every entry dead, none, some; a seek of each key finds the first live entry at or
     /// past it; the set read back from its file (a damaged one refused) and deleted with the
@@ -2634,7 +3023,7 @@ mod tests {
             w.add(k, v.as_deref()).unwrap();
         }
         let f = SstReader::open(dir.path(), w.finish().unwrap(), cache.clone()).unwrap();
-        assert_eq!(f.format() == FORMAT, v2);
+        assert_eq!(f.format() >= FORMAT, v2);
         let (mut dead, mut live, mut seed) = (DeadSet::default(), Vec::new(), 5u64);
         for b in 0..f.block_count() {
             for (i, e) in entries_of(&f.raw_block(b).unwrap()).into_iter().enumerate() {
@@ -2729,10 +3118,15 @@ mod tests {
         let path = sst_path(dir.path(), 1);
         let mut b = std::fs::read(&path).unwrap();
         let n = b.len();
-        b[n - 16..n - 8].copy_from_slice(&(FORMAT as u64 + 1).to_le_bytes());
+        b[n - 16..n - 8].copy_from_slice(&(FORMAT_DICT as u64 + 1).to_le_bytes());
         std::fs::write(&path, &b).unwrap();
         let e = SstReader::open(dir.path(), meta.clone(), cache.clone()).err().unwrap();
-        assert!(e.message.contains(&format!("storage format {}, newer than this build reads ({FORMAT})", FORMAT + 1)), "{}", e.message);
+        assert!(e.message.contains(&format!("storage format {}, newer than this build reads ({FORMAT_DICT})", FORMAT_DICT + 1)), "{}", e.message);
+        // (Format 3 is a store's, never a file's.)
+        b[n - 16..n - 8].copy_from_slice(&3u64.to_le_bytes());
+        std::fs::write(&path, &b).unwrap();
+        let e = SstReader::open(dir.path(), meta.clone(), cache.clone()).err().unwrap();
+        assert!(e.message.contains("bad footer"), "{}", e.message);
         b[n - 1] ^= 1;
         std::fs::write(&path, &b).unwrap();
         let e = SstReader::open(dir.path(), meta, cache).err().unwrap();
