@@ -114,6 +114,7 @@ impl roll_previews::ports::Secrets for Secrets {
                     Some((f["name"].as_str()?.to_string(), kind, f["parent"].as_str()?.to_string(), f["field"].as_str()?.to_string()))
                 })
                 .collect(),
+            plain: v["plain"].as_array().into_iter().flatten().filter_map(|k| k.as_str()).map(str::to_string).collect(),
         })
     }
 
