@@ -8,6 +8,8 @@
 //!   `deleting`, until its data is gone; lookups don't see it. On a fleet every change to a
 //!   cluster is made on its owner (`crate::cluster::on_owner`), which applies it to the loaded
 //!   cluster itself: no node has to follow the catalog.
+//!   A cluster has an `owner`: the signed-in person (`usr_…`) who made it, or none for the
+//!   operator's and admins' (and every cluster made before owners). A branch keeps its parent's.
 //! - `usage`: one row per metering interval of a *loaded* cluster: loaded seconds, the
 //!   estimated resident bytes, requests. An idle cluster adds no rows.
 //! - `storage`: a change log of each cluster's stored bytes. Storage accrues while a cluster
@@ -61,6 +63,12 @@ pub struct SearchCluster {
     /// lists show without asking the cluster's lease.
     #[serde(skip)]
     pub loaded_on: Option<String>,
+    /// When a sleeping cluster's next background job is due (ms; its node wakes it then).
+    #[serde(skip)]
+    pub wake_at: Option<i64>,
+    /// The signed-in person (`usr_…`) whose cluster it is; `None` for the operator's and admins'.
+    /// Set on create, kept by branches, never changed.
+    pub owner: Option<String>,
 }
 
 /// One metering interval of a loaded cluster.
@@ -111,10 +119,10 @@ CREATE INDEX IF NOT EXISTS search_storage_cluster ON search_storage (cluster_id,
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes";
+                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, loaded_on, own_bytes";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at";
 
 fn row(r: &Row) -> code_sql::Result<SearchCluster> {
     Ok(SearchCluster {
@@ -134,8 +142,10 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         indices: r.get(13)?,
         docs: r.get(14)?,
         stored_bytes: r.get(15)?,
-        loaded_on: r.get(16)?,
-        own_bytes: r.get(17)?,
+        owner: r.get(16)?,
+        loaded_on: r.get(17)?,
+        own_bytes: r.get(18)?,
+        wake_at: r.get(19)?,
     })
 }
 
@@ -170,6 +180,9 @@ impl Store {
         db.add_column("search_clusters", "loaded_on", "TEXT")?;
         db.add_column("search_clusters", "own_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("search_clusters", "wake_at", "INTEGER")?;
+        // Clusters made before owners stay the operator's (none).
+        db.add_column("search_clusters", "owner", "TEXT")?;
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_owner ON search_clusters (owner, created_at)")?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
         Ok(Self { db })
@@ -179,7 +192,7 @@ impl Store {
     pub async fn insert(&self, c: &SearchCluster) -> anyhow::Result<bool> {
         let r = self.db.write(|x| {
             x.execute(
-                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"),
+                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"),
                 params![
                     c.id,
                     c.name,
@@ -196,7 +209,8 @@ impl Store {
                     c.password_rotated_at,
                     c.indices,
                     c.docs,
-                    c.stored_bytes
+                    c.stored_bytes,
+                    c.owner
                 ],
             )
         });
@@ -227,6 +241,14 @@ impl Store {
         })?)
     }
 
+    /// Whose cluster `id_or_name` is, synchronously (rolld's workspace owners): `None` when there
+    /// is no such cluster, `Some(None)` for the operator's.
+    pub fn owner_of(&self, id_or_name: &str) -> anyhow::Result<Option<Option<String>>> {
+        Ok(self.db.read(|x| {
+            x.query_row("SELECT owner FROM search_clusters WHERE (id = ?1 OR name = ?1) AND deleting = 0 ORDER BY id = ?1 DESC LIMIT 1", params![id_or_name], |r| r.get(0)).optional()
+        })?)
+    }
+
     async fn one(&self, filter: &str, arg: &str) -> anyhow::Result<Option<SearchCluster>> {
         Ok(self.db.read(|x| x.query_row(&format!("SELECT {READ_COLS} FROM search_clusters WHERE {filter} = ?1 AND deleting = 0"), params![arg], row).optional())?)
     }
@@ -250,6 +272,11 @@ impl Store {
 
     pub async fn list(&self) -> anyhow::Result<Vec<SearchCluster>> {
         self.many("", None).await
+    }
+
+    /// The clusters of the signed-in person `owner`.
+    pub async fn list_owned(&self, owner: &str) -> anyhow::Result<Vec<SearchCluster>> {
+        self.many("AND owner = ?1", Some(owner)).await
     }
 
     /// Clusters that never unload (`idle_timeout_s` 0), through a partial index: what every node
@@ -408,6 +435,8 @@ mod tests {
             stored_bytes: 0,
             own_bytes: 0,
             loaded_on: None,
+            wake_at: None,
+            owner: None,
         }
     }
 
@@ -423,6 +452,16 @@ mod tests {
         child.created_at = 2;
         assert!(s.insert(&child).await.unwrap());
         assert_eq!(s.children("srch_a").await.unwrap().len(), 1);
+        let mut mine = cluster("srch_m", "mine");
+        mine.owner = Some("usr_a".into());
+        mine.created_at = 3;
+        assert!(s.insert(&mine).await.unwrap());
+        assert_eq!(s.list_owned("usr_a").await.unwrap().iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["srch_m"]);
+        assert!(s.list_owned("usr_b").await.unwrap().is_empty());
+        assert_eq!(s.owner_of("mine").unwrap(), Some(Some("usr_a".into())));
+        assert_eq!(s.owner_of("srch_a").unwrap(), Some(None));
+        assert_eq!(s.owner_of("nope").unwrap(), None);
+        s.delete("srch_m").await.unwrap();
         let mut c = s.get("srch_a").await.unwrap().unwrap();
         c.flavor = "opensearch".into();
         c.password = "new".into();
@@ -505,13 +544,20 @@ mod tests {
                  PRAGMA user_version = 3;",
             )
             .unwrap();
-            conn.execute(&format!("INSERT INTO search_clusters ({COLS}) VALUES ('srch_o', 'old', 'local', 'elasticsearch', 'pw', 300, 64, 100, 1, NULL, NULL, 1, NULL, 0, 0, 0)"), []).unwrap();
+            conn.execute(
+                "INSERT INTO search_clusters (id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
+                 parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes) \
+                 VALUES ('srch_o', 'old', 'local', 'elasticsearch', 'pw', 300, 64, 100, 1, NULL, NULL, 1, NULL, 0, 0, 0)",
+                [],
+            )
+            .unwrap();
         }
         if std::env::var(code_sql::TEST_DATABASE_ENV).is_ok_and(|v| !v.is_empty()) {
             return;
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.by_name("old").await.unwrap().unwrap().id, "srch_o");
+        let old = s.by_name("old").await.unwrap().unwrap();
+        assert_eq!((old.id.as_str(), old.owner.as_deref()), ("srch_o", None), "an earlier cluster is the operator's");
         s.delete("srch_o").await.unwrap();
         all(&s).await;
         let _ = std::fs::remove_dir_all(&dir);

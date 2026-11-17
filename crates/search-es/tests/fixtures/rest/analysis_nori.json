@@ -1,0 +1,661 @@
+{
+  "description" : "analysis-nori: decompound modes, punctuation and spaces, user dictionary, part-of-speech and reading attributes in explain, numbers, the analyzer, settings errors",
+  "steps" : [
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : {
+          "type" : "nori_tokenizer",
+          "decompound_mode" : "mixed"
+        },
+        "text" : "가거도항 가곡역에서 세종시청까지"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "가거도항",
+            "start_offset" : 0,
+            "end_offset" : 4,
+            "type" : "word",
+            "position" : 0,
+            "positionLength" : 2
+          },
+          {
+            "token" : "가거도",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "항",
+            "start_offset" : 3,
+            "end_offset" : 4,
+            "type" : "word",
+            "position" : 1
+          },
+          {
+            "token" : "가곡역",
+            "start_offset" : 5,
+            "end_offset" : 8,
+            "type" : "word",
+            "position" : 2,
+            "positionLength" : 2
+          },
+          {
+            "token" : "가곡",
+            "start_offset" : 5,
+            "end_offset" : 7,
+            "type" : "word",
+            "position" : 2
+          },
+          {
+            "token" : "역",
+            "start_offset" : 7,
+            "end_offset" : 8,
+            "type" : "word",
+            "position" : 3
+          },
+          {
+            "token" : "에서",
+            "start_offset" : 8,
+            "end_offset" : 10,
+            "type" : "word",
+            "position" : 4
+          },
+          {
+            "token" : "세종",
+            "start_offset" : 11,
+            "end_offset" : 13,
+            "type" : "word",
+            "position" : 5
+          },
+          {
+            "token" : "시청",
+            "start_offset" : 13,
+            "end_offset" : 15,
+            "type" : "word",
+            "position" : 6
+          },
+          {
+            "token" : "까지",
+            "start_offset" : 15,
+            "end_offset" : 17,
+            "type" : "word",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : {
+          "type" : "nori_tokenizer",
+          "decompound_mode" : "none",
+          "discard_punctuation" : false
+        },
+        "text" : "뿌리가  깊은 나무, 3.5!"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "뿌리",
+            "start_offset" : 0,
+            "end_offset" : 2,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "가",
+            "start_offset" : 2,
+            "end_offset" : 3,
+            "type" : "word",
+            "position" : 1
+          },
+          {
+            "token" : " ",
+            "start_offset" : 3,
+            "end_offset" : 4,
+            "type" : "word",
+            "position" : 2
+          },
+          {
+            "token" : " ",
+            "start_offset" : 4,
+            "end_offset" : 5,
+            "type" : "word",
+            "position" : 3
+          },
+          {
+            "token" : "깊",
+            "start_offset" : 5,
+            "end_offset" : 6,
+            "type" : "word",
+            "position" : 4
+          },
+          {
+            "token" : "은",
+            "start_offset" : 6,
+            "end_offset" : 7,
+            "type" : "word",
+            "position" : 5
+          },
+          {
+            "token" : " ",
+            "start_offset" : 7,
+            "end_offset" : 8,
+            "type" : "word",
+            "position" : 6
+          },
+          {
+            "token" : "나무",
+            "start_offset" : 8,
+            "end_offset" : 10,
+            "type" : "word",
+            "position" : 7
+          },
+          {
+            "token" : ",",
+            "start_offset" : 10,
+            "end_offset" : 11,
+            "type" : "word",
+            "position" : 8
+          },
+          {
+            "token" : " ",
+            "start_offset" : 11,
+            "end_offset" : 12,
+            "type" : "word",
+            "position" : 9
+          },
+          {
+            "token" : "3",
+            "start_offset" : 12,
+            "end_offset" : 13,
+            "type" : "word",
+            "position" : 10
+          },
+          {
+            "token" : ".",
+            "start_offset" : 13,
+            "end_offset" : 14,
+            "type" : "word",
+            "position" : 11
+          },
+          {
+            "token" : "5",
+            "start_offset" : 14,
+            "end_offset" : 15,
+            "type" : "word",
+            "position" : 12
+          },
+          {
+            "token" : "!",
+            "start_offset" : 15,
+            "end_offset" : 16,
+            "type" : "word",
+            "position" : 13
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : {
+          "type" : "nori_tokenizer",
+          "user_dictionary_rules" : [
+            "세종시 세종 시",
+            "c++"
+          ]
+        },
+        "text" : "세종시 c++ 프로그래밍"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "세종",
+            "start_offset" : 0,
+            "end_offset" : 2,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "시",
+            "start_offset" : 2,
+            "end_offset" : 3,
+            "type" : "word",
+            "position" : 1
+          },
+          {
+            "token" : "c++",
+            "start_offset" : 4,
+            "end_offset" : 7,
+            "type" : "word",
+            "position" : 2
+          },
+          {
+            "token" : "프로그래밍",
+            "start_offset" : 8,
+            "end_offset" : 13,
+            "type" : "word",
+            "position" : 3
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "nori_tokenizer",
+        "filter" : [
+          "nori_part_of_speech",
+          "nori_readingform"
+        ],
+        "text" : "鄕歌를 읽었다",
+        "explain" : true
+      },
+      "status" : 200,
+      "response" : {
+        "detail" : {
+          "custom_analyzer" : true,
+          "charfilters" : [ ],
+          "tokenizer" : {
+            "name" : "nori_tokenizer",
+            "tokens" : [
+              {
+                "token" : "鄕歌",
+                "start_offset" : 0,
+                "end_offset" : 2,
+                "type" : "word",
+                "position" : 0,
+                "bytes" : "[e9 84 95 e6 ad 8c]",
+                "leftPOS" : "NNG(General Noun)",
+                "morphemes" : null,
+                "posType" : "MORPHEME",
+                "positionLength" : 1,
+                "reading" : "향가",
+                "rightPOS" : "NNG(General Noun)",
+                "termFrequency" : 1
+              },
+              {
+                "token" : "를",
+                "start_offset" : 2,
+                "end_offset" : 3,
+                "type" : "word",
+                "position" : 1,
+                "bytes" : "[eb a5 bc]",
+                "leftPOS" : "JKO(Object case marker)",
+                "morphemes" : null,
+                "posType" : "MORPHEME",
+                "positionLength" : 1,
+                "reading" : null,
+                "rightPOS" : "JKO(Object case marker)",
+                "termFrequency" : 1
+              },
+              {
+                "token" : "읽",
+                "start_offset" : 4,
+                "end_offset" : 5,
+                "type" : "word",
+                "position" : 2,
+                "bytes" : "[ec 9d bd]",
+                "leftPOS" : "VV(Verb)",
+                "morphemes" : null,
+                "posType" : "MORPHEME",
+                "positionLength" : 1,
+                "reading" : null,
+                "rightPOS" : "VV(Verb)",
+                "termFrequency" : 1
+              },
+              {
+                "token" : "었",
+                "start_offset" : 5,
+                "end_offset" : 6,
+                "type" : "word",
+                "position" : 3,
+                "bytes" : "[ec 97 88]",
+                "leftPOS" : "EP(Pre-final ending)",
+                "morphemes" : null,
+                "posType" : "MORPHEME",
+                "positionLength" : 1,
+                "reading" : null,
+                "rightPOS" : "EP(Pre-final ending)",
+                "termFrequency" : 1
+              },
+              {
+                "token" : "다",
+                "start_offset" : 6,
+                "end_offset" : 7,
+                "type" : "word",
+                "position" : 4,
+                "bytes" : "[eb 8b a4]",
+                "leftPOS" : "EC(Connective ending)",
+                "morphemes" : null,
+                "posType" : "MORPHEME",
+                "positionLength" : 1,
+                "reading" : null,
+                "rightPOS" : "EC(Connective ending)",
+                "termFrequency" : 1
+              }
+            ]
+          },
+          "tokenfilters" : [
+            {
+              "name" : "nori_part_of_speech",
+              "tokens" : [
+                {
+                  "token" : "鄕歌",
+                  "start_offset" : 0,
+                  "end_offset" : 2,
+                  "type" : "word",
+                  "position" : 0,
+                  "bytes" : "[e9 84 95 e6 ad 8c]",
+                  "leftPOS" : "NNG(General Noun)",
+                  "morphemes" : null,
+                  "posType" : "MORPHEME",
+                  "positionLength" : 1,
+                  "reading" : "향가",
+                  "rightPOS" : "NNG(General Noun)",
+                  "termFrequency" : 1
+                },
+                {
+                  "token" : "읽",
+                  "start_offset" : 4,
+                  "end_offset" : 5,
+                  "type" : "word",
+                  "position" : 2,
+                  "bytes" : "[ec 9d bd]",
+                  "leftPOS" : "VV(Verb)",
+                  "morphemes" : null,
+                  "posType" : "MORPHEME",
+                  "positionLength" : 1,
+                  "reading" : null,
+                  "rightPOS" : "VV(Verb)",
+                  "termFrequency" : 1
+                }
+              ]
+            },
+            {
+              "name" : "nori_readingform",
+              "tokens" : [
+                {
+                  "token" : "향가",
+                  "start_offset" : 0,
+                  "end_offset" : 2,
+                  "type" : "word",
+                  "position" : 0,
+                  "bytes" : "[ed 96 a5 ea b0 80]",
+                  "leftPOS" : "NNG(General Noun)",
+                  "morphemes" : null,
+                  "posType" : "MORPHEME",
+                  "positionLength" : 1,
+                  "reading" : "향가",
+                  "rightPOS" : "NNG(General Noun)",
+                  "termFrequency" : 1
+                },
+                {
+                  "token" : "읽",
+                  "start_offset" : 4,
+                  "end_offset" : 5,
+                  "type" : "word",
+                  "position" : 2,
+                  "bytes" : "[ec 9d bd]",
+                  "leftPOS" : "VV(Verb)",
+                  "morphemes" : null,
+                  "posType" : "MORPHEME",
+                  "positionLength" : 1,
+                  "reading" : null,
+                  "rightPOS" : "VV(Verb)",
+                  "termFrequency" : 1
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : {
+          "type" : "nori_tokenizer",
+          "discard_punctuation" : false
+        },
+        "filter" : [
+          {
+            "type" : "nori_part_of_speech",
+            "stoptags" : [
+              "SP"
+            ]
+          },
+          "nori_number"
+        ],
+        "text" : "십만이천오백과 ３.２천 즉시 와"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "102500",
+            "start_offset" : 0,
+            "end_offset" : 6,
+            "type" : "word",
+            "position" : 0
+          },
+          {
+            "token" : "과",
+            "start_offset" : 6,
+            "end_offset" : 7,
+            "type" : "word",
+            "position" : 1
+          },
+          {
+            "token" : "3200",
+            "start_offset" : 8,
+            "end_offset" : 12,
+            "type" : "word",
+            "position" : 3
+          },
+          {
+            "token" : "즉시",
+            "start_offset" : 13,
+            "end_offset" : 15,
+            "type" : "word",
+            "position" : 5
+          },
+          {
+            "token" : "5",
+            "start_offset" : 16,
+            "end_offset" : 17,
+            "type" : "word",
+            "position" : 6
+          },
+          {
+            "token" : "아",
+            "start_offset" : 16,
+            "end_offset" : 17,
+            "type" : "word",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-ko",
+      "body" : {
+        "settings" : {
+          "analysis" : {
+            "analyzer" : {
+              "a" : {
+                "type" : "nori",
+                "decompound_mode" : "mixed",
+                "stoptags" : [
+                  "NNG",
+                  "JX"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-ko"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-ko/_analyze",
+      "body" : {
+        "analyzer" : "a",
+        "text" : "뿌리가 깊은 나무는 바람에 아니 뮐세 가곡역"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "가",
+            "start_offset" : 2,
+            "end_offset" : 3,
+            "type" : "word",
+            "position" : 1
+          },
+          {
+            "token" : "깊",
+            "start_offset" : 4,
+            "end_offset" : 5,
+            "type" : "word",
+            "position" : 2
+          },
+          {
+            "token" : "은",
+            "start_offset" : 5,
+            "end_offset" : 6,
+            "type" : "word",
+            "position" : 3
+          },
+          {
+            "token" : "에",
+            "start_offset" : 13,
+            "end_offset" : 14,
+            "type" : "word",
+            "position" : 7
+          },
+          {
+            "token" : "아니",
+            "start_offset" : 15,
+            "end_offset" : 17,
+            "type" : "word",
+            "position" : 8
+          },
+          {
+            "token" : "뮐세",
+            "start_offset" : 18,
+            "end_offset" : 20,
+            "type" : "word",
+            "position" : 9
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "DELETE /esm-ko",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : {
+          "type" : "nori_tokenizer",
+          "user_dictionary_rules" : [
+            "세종",
+            "세종"
+          ]
+        },
+        "text" : "세종시"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Found duplicate term [세종] in user dictionary at line [2]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Found duplicate term [세종] in user dictionary at line [2]"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "nori_tokenizer",
+        "filter" : [
+          {
+            "type" : "nori_part_of_speech",
+            "stoptags" : [
+              "XX"
+            ]
+          }
+        ],
+        "text" : "가"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No enum constant org.apache.lucene.analysis.ko.POS.Tag.XX"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No enum constant org.apache.lucene.analysis.ko.POS.Tag.XX"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

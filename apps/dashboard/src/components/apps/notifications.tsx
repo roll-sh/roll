@@ -13,6 +13,7 @@ const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "alert.memory", label: "Memory alert" },
   { value: "alert.errors", label: "5xx alert" },
   { value: "alert.latency", label: "Latency alert" },
+  { value: "alert.capacity", label: "At capacity" },
   { value: "alert.log", label: "Log alert" },
   { value: "cron.failed", label: "Cron run failed" },
   { value: "job.failed", label: "Job failed" },
@@ -36,7 +37,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   const [targets, setTargets] = useState<NotifyTarget[] | null>(null);
   const [kind, setKind] = useState<NotifyTarget["kind"]>("slack");
   const [url, setUrl] = useState("");
-  const [events, setEvents] = useState<NotifyEvent[]>(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
+  const [events, setEvents] = useState<NotifyEvent[]>(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
   const [envs, setEnvs] = useState("");
   const [previews, setPreviews] = useState(false);
   // Only some of the project's services (none chosen: every one).

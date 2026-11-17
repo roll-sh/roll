@@ -54,6 +54,8 @@ fn loopback_args(api: u16) -> Vec<String> {
         "--proxy", "--redis", "--redis-http", "--kafka", "--s3", "--storage-api",
         "--queues-amqp", "--queues-management", "--queues-stomp", "--queues-web-stomp", "--queues-mqtt", "--queues-web-mqtt", "--queues-stream", "--queues-http",
         "--nosql-cql", "--nosql-cql-shard-aware", "--nosql-rest", "--nosql-alternator", "--search-http",
+        // The apps listener too: a local rolld on its default 7080 would fail the test otherwise.
+        "--apps-listen",
     ] {
         args.extend([flag.to_string(), format!("127.0.0.1:{}", free_port())]);
     }
