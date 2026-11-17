@@ -583,10 +583,10 @@ impl Runtime for Fake {
 
     async fn egress_proxy(&self, network: &str, _service: &str, hosts: &[String]) -> anyhow::Result<String> {
         self.proxies.lock().push((network.to_string(), hosts.to_vec()));
-        Ok(super::egress::proxy_url(hosts))
+        Ok(super::egress::proxy_url(network, hosts))
     }
 
-    fn egress_refused(&self, _hosts: &[String]) -> Vec<super::egress::Refused> {
+    fn egress_refused(&self, _network: &str, _hosts: &[String]) -> Vec<super::egress::Refused> {
         self.refused.lock().clone()
     }
 

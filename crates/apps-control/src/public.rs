@@ -387,6 +387,8 @@ async fn check_access(apps: &Arc<Apps>, service: &str, env: &str, req: &mut Requ
         if let Some(t) = take_cookie(req, &name)
             && apps.visitor(service, env, &t).await.is_some()
         {
+            // In: the environment's shared token (a link they also came in by) stays roll's.
+            take_cookie(req, &format!("roll_access_{env}"));
             return None;
         }
         if access.token_hash.is_none() {
@@ -484,6 +486,8 @@ async fn land_visit(apps: &Arc<Apps>, service: &str, env: &str, query: &str) -> 
             to = crate::visit::local_path(&decode(v));
         }
     }
+    // Where it goes, checked before the ticket is used.
+    let Ok(location) = HeaderValue::from_str(&to) else { return page(StatusCode::BAD_REQUEST, "Bad address", "This sign-in link isn't one.") };
     let Some(session) = (match ticket {
         Some(t) => apps.open_visit(service, env, &t).await,
         None => None,
@@ -493,11 +497,10 @@ async fn land_visit(apps: &Arc<Apps>, service: &str, env: &str, query: &str) -> 
     let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
     let cookie = format!("{}={session}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}", crate::visit::cookie(env), crate::visit::SESSION_S);
     let mut r = StatusCode::FOUND.into_response();
-    if let (Ok(l), Ok(c)) = (HeaderValue::from_str(&to), HeaderValue::from_str(&cookie)) {
-        r.headers_mut().insert(header::LOCATION, l);
-        r.headers_mut().insert(header::SET_COOKIE, c);
-        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    }
+    let Ok(c) = HeaderValue::from_str(&cookie) else { return page(StatusCode::INTERNAL_SERVER_ERROR, "Try again", "The sign-in couldn't be finished.") };
+    r.headers_mut().insert(header::LOCATION, location);
+    r.headers_mut().insert(header::SET_COOKIE, c);
+    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     r
 }
 
