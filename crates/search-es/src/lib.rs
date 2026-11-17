@@ -39,6 +39,8 @@ pub mod seal;
 pub mod search_source;
 pub mod stack;
 pub mod tasks;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod thread_pool;
 pub mod time;
 pub mod tsds;

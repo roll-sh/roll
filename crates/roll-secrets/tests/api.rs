@@ -21,6 +21,8 @@ struct Fake {
     live_keys: Mutex<Vec<String>>,
     /// The product doesn't answer.
     down: std::sync::atomic::AtomicBool,
+    /// Every resource it was asked to read or issue for, in order.
+    asked: Mutex<Vec<String>>,
 }
 
 impl LinkProvider for Fake {
@@ -39,12 +41,14 @@ impl LinkProvider for Fake {
         &[("url", Mode::Live), ("access_key_id", Mode::Managed), ("secret_access_key", Mode::Managed)]
     }
     fn read(&self, r#ref: &str, _: &str, _: &Link) -> roll_secrets::Result<Secret> {
+        self.asked.lock().unwrap().push(r#ref.to_string());
         if self.down.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(roll_secrets::Error::Link("bucket: timed out".into()));
         }
         Ok(Secret::new(format!("s3://{ref}?pw={}", self.password.lock().unwrap())))
     }
-    fn issue(&self, _: &str, _: &str, _: &Link, _: &str, _: Option<u64>) -> roll_secrets::Result<Issued> {
+    fn issue(&self, r#ref: &str, _: &str, _: &Link, _: &str, _: Option<u64>) -> roll_secrets::Result<Issued> {
+        self.asked.lock().unwrap().push(r#ref.to_string());
         let mut n = self.issued.lock().unwrap();
         *n += 1;
         let id = format!("AK{n}");
@@ -284,6 +288,10 @@ impl roll_secrets::kms::ProjectKms for FakeKms {
 #[derive(Default)]
 struct FakeSts {
     pinned: Mutex<Option<String>>,
+    /// The `sub` a role trusting roll's issuer pins (or, unpinned, any of roll's projects).
+    web_pinned: Mutex<Option<String>>,
+    /// STS throttling every call (a failure to ask, not a refusal).
+    throttled: Mutex<bool>,
     sessions: Mutex<u32>,
     /// IAM user `legacy-ci`'s access key ids, and how many were ever made.
     keys: Mutex<(Vec<String>, u32)>,
@@ -291,6 +299,9 @@ struct FakeSts {
 
 impl roll_secrets::aws::Sts for FakeSts {
     fn assume(&self, role_arn: &str, external_id: &str, _session: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+        if *self.throttled.lock().unwrap() {
+            return Err("Throttling".into());
+        }
         if role_arn != "arn:aws:iam::123456789012:role/roll" || self.pinned.lock().unwrap().as_deref().is_some_and(|p| p != external_id) {
             return Err("AccessDenied".into());
         }
@@ -302,6 +313,19 @@ impl roll_secrets::aws::Sts for FakeSts {
             session_token: Secret::new(format!("token-{n}")),
             expires_at: i64::from(seconds) * 1000,
         })
+    }
+    /// As AWS checks a web identity: the token's audience, and the subject the trust pins.
+    fn assume_web_identity(&self, role_arn: &str, token: &str, _session: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+        use base64::Engine;
+        let payload = token.split('.').nth(1).ok_or("InvalidIdentityToken")?;
+        let claims: Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).map_err(|_| "InvalidIdentityToken")?).map_err(|_| "InvalidIdentityToken")?;
+        let sub_ok = self.web_pinned.lock().unwrap().as_deref().is_none_or(|p| claims["sub"] == p);
+        if role_arn != "arn:aws:iam::123456789012:role/roll-oidc" || claims["aud"] != "sts.amazonaws.com" || claims["iss"] != ISSUER_URL || !sub_ok {
+            return Err("AccessDenied".into());
+        }
+        let mut n = self.sessions.lock().unwrap();
+        *n += 1;
+        Ok(roll_secrets::aws::Session { access_key_id: Secret::new(format!("ASIA{n}")), secret_access_key: Secret::new(format!("secret-{n}")), session_token: Secret::new(format!("token-{n}")), expires_at: i64::from(seconds) * 1000 })
     }
     fn iam_keys(&self, role_arn: &str, external_id: &str, user: &str) -> Result<Vec<String>, String> {
         self.assume(role_arn, external_id, "iam", 900)?;
@@ -691,6 +715,79 @@ async fn ephemeral_environments_inherit_their_base_and_go_by_label_or_expiry() {
     assert_eq!(api.values("pv-1", "/").await["values"], json!({ "API": "https://staging-2", "DATABASE_URL": "postgres://pv-1b" }));
     let (s, e) = api.call(Method::PUT, "/environments/pv-1", Some(json!({ "base": "production" }))).await;
     assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("mismatch")));
+}
+
+#[tokio::test]
+async fn a_preview_never_gets_a_value_of_a_resource_it_branched() {
+    let api = Api::new().await;
+    for r in ["assets", "logs"] {
+        api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/{r}", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    }
+    let link = |r: &str, field: &str, mode: &str| json!({ "kind": "bucket", "ref": r, "field": field, "mode": mode });
+    api.ok(
+        Method::POST,
+        "/environments/staging/changes",
+        Some(json!({ "ops": [
+            { "op": "set", "key": "BUCKET_URL", "link": link("assets", "url", "live") },
+            { "op": "set", "key": "AWS_SECRET_ACCESS_KEY", "link": link("assets", "secret_access_key", "managed") },
+            { "op": "set", "key": "TEMP_KEY", "link": link("assets", "access_key_id", "dynamic") },
+            { "op": "set", "key": "LOGS_URL", "link": link("logs", "url", "live") },
+        ] })),
+    )
+    .await;
+    api.fake.asked.lock().unwrap().clear();
+    // roll previews ensures pv-1 over staging, naming what it branched; a key of its own reaching
+    // a followed one by reference doesn't resolve either.
+    let ensure = |branches: Option<Value>| {
+        let mut b = json!({ "base": "staging", "labels": { "preview": "pv-1" }, "secrets": [{ "op": "set", "key": "MIRROR", "value": "${BUCKET_URL}" }], "replace": true });
+        if let Some(l) = branches {
+            b["branches"] = l;
+        }
+        b
+    };
+    let assets = json!([{ "kind": "bucket", "parent": "assets" }]);
+    let made = api.ok(Method::PUT, "/environments/pv-1", Some(ensure(Some(assets.clone())))).await;
+    assert_eq!(made["environment"]["branches"], assets);
+    let followed = json!([
+        { "name": "AWS_SECRET_ACCESS_KEY", "kind": "bucket", "parent": "assets", "field": "secret_access_key" },
+        { "name": "BUCKET_URL", "kind": "bucket", "parent": "assets", "field": "url" },
+        { "name": "TEMP_KEY", "kind": "bucket", "parent": "assets", "field": "access_key_id" },
+    ]);
+    let v = api.values("pv-1", "/").await;
+    assert_eq!((v["values"]["LOGS_URL"].as_str(), v["values"].as_object().unwrap().len()), (Some("s3://logs?pw=0"), 2), "LOGS_URL and MIRROR: {v}");
+    assert_eq!((v["followed"].clone(), v["problems"][0]["key"].as_str()), (followed.clone(), Some("MIRROR")));
+    let r = api.ok(Method::POST, "/environments/pv-1/resolve", Some(json!({ "consumer": "preview:pv-1/web", "untrusted": true }))).await;
+    assert_eq!((r["followed"].clone(), r["values"].get("BUCKET_URL"), r["leases"].clone()), (followed.clone(), None, json!([])));
+    let sk = [7u8; 32];
+    let sealed = api.ok(Method::POST, "/environments/pv-1/resolve", Some(json!({ "consumer": "preview:pv-1/web", "seal_to": roll_secrets::crypto::public_key(&sk) }))).await;
+    assert_eq!((sealed["followed"].clone(), sealed["leases"].clone()), (followed, json!([])), "named in the clear, nothing issued");
+    let (_, text) = api.call(Method::GET, "/environments/pv-1/values?format=dotenv", None).await;
+    assert!(text.as_str().unwrap().contains("LOGS_URL=") && !text.as_str().unwrap().contains("BUCKET_URL=") && !text.as_str().unwrap().contains("s3://assets"), "{text}");
+    let digest = api.ok(Method::GET, "/environments/pv-1/digest", None).await["digest"].clone();
+    api.secrets.forget_live_fingerprints();
+    assert_eq!(api.ok(Method::GET, "/environments/pv-1/digest", None).await["digest"], digest);
+    let (s, e) = api.call(Method::GET, "/environments/pv-1/secrets/BUCKET_URL/value", None).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("followed")));
+    assert!(api.fake.asked.lock().unwrap().iter().all(|r| r == "logs"), "the parent was never asked: {:?}", api.fake.asked.lock().unwrap());
+
+    // An ensure without the field keeps the list; a standard environment has none.
+    api.ok(Method::PUT, "/environments/pv-1", Some(ensure(None))).await;
+    assert_eq!(api.ok(Method::GET, "/environments/pv-1", None).await["branches"], assets);
+    let (s, _) = api.call(Method::PUT, "/environments/staging", Some(json!({ "branches": [] }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    // Nobody else changes the list: adding changes what previews fills, removing would hand the
+    // preview's code the parent's values. The same list, or none, is fine.
+    let t = api.token(json!({ "name": "ci", "actions": ["read", "reveal", "write"] }));
+    let both = json!([{ "kind": "bucket", "parent": "assets" }, { "kind": "bucket", "parent": "logs" }]);
+    let (s, _) = api.req(Method::PUT, "/environments/pv-1", Some(ensure(Some(both.clone()))), Some(&t)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = api.req(Method::PUT, "/environments/pv-2", Some(ensure(Some(both))), Some(&t)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = api.req(Method::PUT, "/environments/pv-1", Some(ensure(Some(json!([])))), Some(&t)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = api.req(Method::PUT, "/environments/pv-1", Some(ensure(Some(assets.clone()))), Some(&t)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(api.values("pv-1", "/").await["values"].get("BUCKET_URL").is_none(), "still followed");
 }
 
 #[tokio::test]
@@ -2183,6 +2280,11 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
 async fn an_aws_role_gives_each_lease_a_short_lived_session() {
     let api = Api::new().await;
     let role = json!({ "name": "deploy", "role_arn": "arn:aws:iam::123456789012:role/roll" });
+    // A probe STS fails to answer (throttled) proves nothing: nothing is registered.
+    *api.sts.throttled.lock().unwrap() = true;
+    let (s, e) = api.call(Method::POST, "/aws-roles", Some(role.clone())).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("couldn't check"), "{e}");
+    *api.sts.throttled.lock().unwrap() = false;
     // A role whose trust policy takes any ExternalId (another customer's that trusts roll, say)
     // is refused: it must pin this project's.
     let (s, e) = api.call(Method::POST, "/aws-roles", Some(role.clone())).await;
@@ -2209,6 +2311,25 @@ async fn an_aws_role_gives_each_lease_a_short_lived_session() {
     assert_eq!(s, StatusCode::BAD_REQUEST);
     // A role keys still link to stays.
     assert_eq!(api.call(Method::DELETE, &format!("/aws-roles/{id}"), None).await.0, StatusCode::CONFLICT);
+
+    // A role that trusts roll's issuer instead: no AWS credential of roll's, the same decoy check
+    // (its trust must pin this project's subject), and sessions through AssumeRoleWithWebIdentity.
+    let oidc = json!({ "name": "deploy-oidc", "role_arn": "arn:aws:iam::123456789012:role/roll-oidc", "trust": "oidc" });
+    let (s, e) = api.call(Method::POST, "/aws-roles", Some(oidc.clone())).await;
+    assert!(s == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains(&format!("sub = roll-secrets:{}", api.project)), "{e}");
+    *api.sts.web_pinned.lock().unwrap() = Some(format!("roll-secrets:{}", api.project));
+    let made = api.ok(Method::POST, "/aws-roles", Some(oidc)).await;
+    assert_eq!(made["trust"], "oidc");
+    api.ok(Method::PUT, "/environments/staging/secrets/AWS_SESSION_TOKEN", Some(json!({ "link": { "kind": "aws", "ref": made["id"], "field": "session_token", "mode": "dynamic" } }))).await;
+    let before = *api.sts.sessions.lock().unwrap();
+    let v = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "app:web" }))).await;
+    assert!(v["values"]["AWS_SESSION_TOKEN"].as_str().unwrap().starts_with("token-") && *api.sts.sessions.lock().unwrap() == before + 1, "{v}");
+    // Edited in place: a new ARN is proved as a new role is, and nothing changes when it isn't.
+    let role_path = format!("/aws-roles/{}", made["id"].as_str().unwrap());
+    let (s, _) = api.call(Method::PATCH, &role_path, Some(json!({ "role_arn": "arn:aws:iam::123456789012:role/gone" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "an ARN roll can't assume");
+    let renamed = api.ok(Method::PATCH, &role_path, Some(json!({ "name": "deploy-web" }))).await;
+    assert_eq!((renamed["name"].as_str(), renamed["role_arn"].as_str()), (Some("deploy-web"), Some("arn:aws:iam::123456789012:role/roll-oidc")));
 }
 
 #[tokio::test]
@@ -2219,6 +2340,14 @@ async fn an_iam_users_access_keys_take_turns() {
     let (s, _) = api.call(Method::POST, "/aws-users", Some(json!({ "name": "ci", "role": role["id"], "user": "nobody" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "a user the role can't see is refused");
     let user = api.ok(Method::POST, "/aws-users", Some(json!({ "name": "ci", "role": role["id"], "user": "legacy-ci" }))).await;
+    // Its rotation moves to another ExternalId role, proved by listing its keys there; a role that
+    // trusts roll's issuer can't take IAM users, and one that has them can't switch to it.
+    let other = api.ok(Method::POST, "/aws-roles", Some(json!({ "name": "keys-2", "role_arn": "arn:aws:iam::123456789012:role/roll" }))).await;
+    let moved = api.ok(Method::PATCH, &format!("/aws-users/{}", user["id"].as_str().unwrap()), Some(json!({ "role": other["id"] }))).await;
+    assert_eq!(moved["role"], other["id"]);
+    let (s, _) = api.call(Method::PATCH, &format!("/aws-roles/{}", other["id"].as_str().unwrap()), Some(json!({ "trust": "oidc" }))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "its IAM user needs ExternalId trust");
+    api.ok(Method::PATCH, &format!("/aws-users/{}", user["id"].as_str().unwrap()), Some(json!({ "role": role["id"] }))).await;
     let link = |field: &str| json!({ "kind": "aws_iam_user", "ref": user["id"], "field": field, "mode": "managed" });
     api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "AWS_ACCESS_KEY_ID", "link": link("access_key_id") }, { "op": "set", "key": "AWS_SECRET_ACCESS_KEY", "link": link("secret_access_key") }] }))).await;
     let key = || async { api.values("production", "/").await["values"]["AWS_ACCESS_KEY_ID"].as_str().unwrap().to_string() };
