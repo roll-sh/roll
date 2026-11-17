@@ -111,6 +111,9 @@ mod tests {
             memory_mb: 1,
             health_path: Some("/".into()),
             health_timeout_s: 1,
+            health_every_s: Some(2),
+            health_failures: Some(1),
+            health_command: Some("a".into()),
             suspend_after_s: 1,
             sleep_after_s: 1,
             volume: Some(Volume { mount: "/data".into(), size_gb: 1 }),
@@ -121,12 +124,13 @@ mod tests {
             public: false,
             drain_s: Some(1),
             cpu_target: Some(1),
+            memory_target: Some(1),
             restart: Restart::Never,
             restart_tries: Some(1),
             affinity: true,
             tcp: true,
             rollback_on_crash: true,
-            schedules: vec![crate::model::Scheduled { name: "a".into(), schedule: "@daily".into(), command: "x".into(), timezone: None, timeout_s: None }],
+            schedules: vec![crate::model::Scheduled { name: "a".into(), schedule: "@daily".into(), command: "x".into(), path: None, timezone: None, timeout_s: None }],
         };
         let keys: std::collections::BTreeSet<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().filter(|k| *k != "volume").cloned().collect();
         let file: std::collections::BTreeSet<String> = apps_build::app::RUN_KEYS.iter().map(|k| k.to_string()).collect();

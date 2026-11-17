@@ -19,8 +19,10 @@ mod java;
 mod node;
 pub mod packages;
 mod php;
+pub mod imports;
 pub mod project;
 mod python;
+pub mod site_configs;
 mod ruby;
 mod static_site;
 #[cfg(test)]
@@ -72,6 +74,11 @@ pub struct Overrides {
     /// is the stage's build argument, so a changed value rebuilds what read it.
     #[serde(skip)]
     pub build_env: Vec<String>,
+    /// Of `build_env`, those kept as files (`files` on the variables): a name and its absolute
+    /// path. Each step mounts them there (`--mount=type=secret,target=…`: an `.npmrc`, a
+    /// registry's login) instead of in its environment, and still never in a layer.
+    #[serde(skip)]
+    pub build_files: Vec<(String, String)>,
     /// The Procfile's process this service runs (`web`, `worker`): its command is the start
     /// command when nothing above names one. None reads no Procfile.
     #[serde(skip)]
@@ -114,6 +121,16 @@ pub struct Plan {
     /// service sets none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<String>,
+    /// vercel.json's `crons`: paths the service calls on a schedule ([`site_configs::vercel_crons`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crons: Vec<Cron>,
+}
+
+/// A path called on a schedule (vercel.json's `crons`).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Cron {
+    pub path: String,
+    pub schedule: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -229,6 +246,22 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         p.release = Some(cmd.clone());
         p.notes.push(format!("pre-deploy: the Procfile's release: {cmd}"));
     }
+    // A static site's functions (Netlify's, Vercel's `api/`) never run: said, not dropped silently.
+    if p.start.as_deref() == Some(static_site::START) {
+        for (dir, what, route) in [("netlify/functions", "Netlify Functions", "/.netlify/functions/*"), ("netlify/edge-functions", "Netlify Edge Functions", "the paths they answer"), ("api", "Vercel functions", "/api/*")] {
+            let n = tree.list(dir).iter().filter(|f| [".js", ".mjs", ".cjs", ".ts", ".mts", ".py", ".go"].iter().any(|e| f.ends_with(e)) || f.ends_with('/')).count();
+            if n > 0 {
+                p.notes.push(format!("{dir}/ has {n} {what}, which a static site doesn't run: put them in a web service and route {route} to it (the environment's routes)"));
+            }
+        }
+    }
+    // Vercel's crons, whatever builds it (a Next.js app's usually).
+    if let Some(text) = tree.read("vercel.json").and_then(|b| String::from_utf8(b).ok()) {
+        for c in site_configs::vercel_crons(&text) {
+            p.notes.push(format!("vercel.json's cron: {} calls {}", c.schedule, c.path));
+            p.crons.push(c);
+        }
+    }
     for (store, why) in uses(tree) {
         p.uses.push(store);
         p.notes.push(format!("{why}: it uses {}", store.label()));
@@ -327,6 +360,7 @@ impl Overrides {
             spa: self.spa,
             packages: self.packages.clone(),
             build_env: self.build_env.clone(),
+            build_files: self.build_files.clone(),
             process: self.process.clone(),
         }
     }
@@ -341,6 +375,8 @@ pub(crate) struct Commands<'a> {
     pub custom_install: bool,
     /// [`Overrides::build_env`].
     pub env: &'a [String],
+    /// [`Overrides::build_files`].
+    pub files: &'a [(String, String)],
 }
 
 type Render = Box<dyn FnOnce(&Commands<'_>) -> String>;
@@ -376,6 +412,7 @@ impl Draft {
             start: start.as_deref(),
             custom_install: o.install.is_some(),
             env: &o.build_env,
+            files: &o.build_files,
         });
         Plan {
             provider: self.provider,
@@ -390,6 +427,7 @@ impl Draft {
             spa: false,
             uses: Vec::new(),
             release: None,
+            crons: Vec::new(),
         }
     }
 }

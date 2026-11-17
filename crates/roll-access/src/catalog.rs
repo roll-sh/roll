@@ -133,6 +133,12 @@ fn apps_patch_lends(b: &Value) -> Vec<Lent> {
     out
 }
 
+/// A search cluster made as a branch of `parent` (a body field, unlike `…/{id}/branches`): it
+/// copies the parent's indices, so it needs what branching there does, `write` on the parent.
+fn search_parent(b: &Value) -> Vec<Lent> {
+    b.get("parent").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Write }).into_iter().collect()
+}
+
 /// What an apps link's kind is, as a rule names it: its product and the resource kind its ids are.
 pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
     Some(match kind {
@@ -282,6 +288,8 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
+    ("/v1/apps/services/{id}/environments/{env}/visit", "a browser session in a sign-in-gated environment is a signed-in person's (rolld's gate sees their session), never a token's"),
+    ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
 ];
 
 pub fn rows() -> &'static [Row] {
@@ -732,10 +740,11 @@ fn apps_create_action(b: &Value) -> Action {
 /// A service's run settings that change only how much of it runs and how it's watched: its size,
 /// scale, health checks, timers, alerts, rollout and restarts. Every other run key decides what
 /// production runs, when, or who reaches it (start, pre-deploy, schedule, schedules and their
-/// timezone and retries, kind, port, volume, public, tcp, and `rollback_on_crash`, which has roll
+/// timezone and retries, kind, port, volume, public, tcp, a worker's `health_command`, which runs
+/// in its instances, and `rollback_on_crash`, which has roll
 /// put an older deployment live by itself), and so does any key apps adds later until it's listed
 /// here: a new setting is never a quiet way into production.
-const APPS_WRITE_RUN: [&str; 18] = [
+const APPS_WRITE_RUN: [&str; 21] = [
     "min_instances",
     "max_instances",
     "concurrency",
@@ -743,6 +752,8 @@ const APPS_WRITE_RUN: [&str; 18] = [
     "memory_mb",
     "health_path",
     "health_timeout_s",
+    "health_every_s",
+    "health_failures",
     "suspend_after_s",
     "sleep_after_s",
     "alerts",
@@ -750,6 +761,7 @@ const APPS_WRITE_RUN: [&str; 18] = [
     "scale",
     "drain_s",
     "cpu_target",
+    "memory_target",
     "restart",
     "restart_tries",
     "affinity",
@@ -1085,7 +1097,7 @@ static ROWS: &[Row] = &[
     // ── search (feature/roll-search) ──
     row("GET", "/v1/search", "search", R, Tgt::AnyGrant),
     row("GET", "/v1/search/clusters", "search", R, list("id")).reveals(SEARCH_SECRETS),
-    row("POST", "/v1/search/clusters", "search", W, create("search", "id")).reveals(SEARCH_SECRETS),
+    row("POST", "/v1/search/clusters", "search", W, create("search", "id")).reveals(SEARCH_SECRETS).lends(Lend::Each(search_parent)),
     row("GET", "/v1/search/clusters/{id}", "search", R, one(PG, "cluster")).reveals(SEARCH_SECRETS),
     row("PATCH", "/v1/search/clusters/{id}", "search", ADMIN, one(PG, "cluster")).reveals(SEARCH_SECRETS),
     row("DELETE", "/v1/search/clusters/{id}", "search", D, one(PG, "cluster")),
