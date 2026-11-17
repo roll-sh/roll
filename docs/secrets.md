@@ -2804,7 +2804,10 @@ outside roll, on #132) and #166 (a gateway into private networks, on #132).
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
-2. **Landing the stacks together where it saves a lock cycle** (#128 on #105, #124 on #102, #95 on
+2. **Keeping the queue level with main** (done 2026-11-17 for all fifteen that conflicted, each
+   pushed on its own checks; #76 now also marks syncs when a product's own route changes a
+   credential, as #74 put that in `source_changed`). **Landing the stacks together where it saves a
+   lock cycle** (#128 on #105, #124 on #102, #95 on
    #79, #117 on #121, #136 on #132), and the Spring integration's first CI run (#128).
 3. **ACME on project CAs** (#144), as Vault's PKI and step-ca serve it: cert-manager, certbot,
    Caddy and lego get certificates from a project's CA with no roll client (lego and certbot checked
