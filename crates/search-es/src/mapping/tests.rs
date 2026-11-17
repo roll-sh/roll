@@ -203,3 +203,18 @@ fn an_updateable_synonym_analyzer_only_searches() {
     let e = for_update(&existing, &update, &ctx).expect_err("a mapping update is refused too");
     check_error("update", e, &refused);
 }
+
+#[test]
+fn a_stored_index_time_updateable_analyzer_still_loads() {
+    // roll accepted such mappings before it refused them as Elasticsearch does: an index stored
+    // with one must still load (with its cluster), only new and changed mappings are refused.
+    let stored = parse(
+        br#"{"settings":{"index":{"analysis":{"filter":{"s":{"type":"synonym_graph","synonyms_set":"products","updateable":"true"}},
+             "analyzer":{"a":{"tokenizer":"standard","filter":["lowercase","s"]}}}}},
+             "mappings":{"properties":{"t":{"type":"text","analyzer":"a"}}}}"#,
+    )
+    .unwrap()
+    .unwrap();
+    let m = crate::meta::IndexMeta::from_json("old", &stored).expect("a stored mapping loads");
+    assert!(!m.mapping.is_empty());
+}
