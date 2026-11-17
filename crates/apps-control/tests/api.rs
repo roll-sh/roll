@@ -324,7 +324,7 @@ async fn traces_sent_by_instances_read_back() {
     let (st, e) = call(&w.api, "PUT", &env, Some(json!({"traces": true}))).await;
     assert_eq!((st, &e["traces"]), (StatusCode::OK, &json!(true)), "{e}");
     let (_, vars) = call(&w.api, "GET", &format!("{env}/variables/values"), None).await;
-    assert_eq!((vars["OTEL_SERVICE_NAME"].as_str(), vars["OTEL_EXPORTER_OTLP_PROTOCOL"].as_str(), vars["OTEL_METRICS_EXPORTER"].as_str()), (Some("api"), Some("http/protobuf"), Some("none")), "{vars}");
+    assert_eq!((vars["OTEL_SERVICE_NAME"].as_str(), vars["OTEL_EXPORTER_OTLP_PROTOCOL"].as_str(), vars["OTEL_METRICS_EXPORTER"].as_str()), (Some("api"), Some("http/protobuf"), Some("otlp")), "{vars}");
     // Its token is a credential: sealed, never in an answer (the instances still get it).
     assert!(vars.get("OTEL_EXPORTER_OTLP_ENDPOINT").is_none(), "{vars}");
     let (_, listed) = call(&w.api, "GET", &format!("{env}/variables"), None).await;
@@ -370,6 +370,25 @@ async fn traces_sent_by_instances_read_back() {
     let proxy = spans.iter().find(|s| s["service"] == "roll" && s["name"] == "GET /items/:id").unwrap_or_else(|| panic!("{one}"));
     assert_eq!((proxy["parent"].as_str(), proxy["span"].as_str()), (Some("00f067aa0ba902b7"), seen.split('-').nth(2)), "{one}");
     assert!(spans.iter().any(|s| s["name"] == "roll wake" && s["parent"] == proxy["span"]), "a cold start's wait: {one}");
+    // Logs into the environment's own log (its level and trace id readable there), metrics as
+    // series: a counter's rate a second.
+    let logs = json!({ "resourceLogs": [{ "resource": { "attributes": [{ "key": "service.name", "value": { "stringValue": "api" } }] }, "scopeLogs": [{ "logRecords": [
+        { "timeUnixNano": "1700000000000000000", "severityNumber": 17, "body": { "stringValue": "payment failed" }, "traceId": t, "spanId": root, "attributes": [{ "key": "order", "value": { "intValue": "42" } }] },
+    ] }] }] });
+    let otlp = |signal: &str, body: Value| post(format!("/_roll/otlp/{id}/production/{token}/v1/{signal}"), body);
+    assert_eq!(otlp("logs", logs).await.0, StatusCode::OK);
+    let (_, lines) = call(&w.api, "GET", &format!("{env}/logs?level=error&tail=20"), None).await;
+    let line: Value = lines.as_array().unwrap().iter().filter_map(|l| serde_json::from_str::<Value>(l["text"].as_str()?).ok()).find(|l| l["msg"] == "payment failed").unwrap_or_else(|| panic!("{lines}"));
+    assert_eq!((line["trace_id"].as_str(), line["order"].as_str()), (Some(t.as_str()), Some("42")), "{line}");
+    let now = code_sql::now_ms() as u64 * 1_000_000;
+    let counter = |n: u64, at: u64| json!({ "resourceMetrics": [{ "scopeMetrics": [{ "metrics": [{ "name": "http.requests", "unit": "1", "sum": { "aggregationTemporality": 2, "isMonotonic": true, "dataPoints": [{ "asInt": n.to_string(), "timeUnixNano": at.to_string() }] } }] }] }] });
+    assert_eq!(otlp("metrics", counter(100, now - 120_000_000_000)).await.0, StatusCode::OK);
+    assert_eq!(otlp("metrics", counter(160, now - 60_000_000_000)).await.0, StatusCode::OK);
+    assert_eq!(otlp("profiles", json!({})).await.0, StatusCode::NOT_FOUND);
+    let (_, m) = call(&w.api, "GET", &format!("{env}/app-metrics?minutes=30"), None).await;
+    let s = &m["series"][0];
+    assert_eq!((s["name"].as_str(), s["shows"].as_str()), (Some("http.requests"), Some("per_second")), "{m}");
+    assert_eq!(s["points"].as_array().and_then(|p| p.last()).map(|p| p[1].clone()), Some(json!(1.0)), "60 more in 60 s: {m}");
     call(&w.api, "PUT", &env, Some(json!({"traces": false}))).await;
     let (_, vars) = call(&w.api, "GET", &format!("{env}/variables/values"), None).await;
     assert!(vars.get("OTEL_SERVICE_NAME").is_none(), "{vars}");

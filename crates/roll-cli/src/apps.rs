@@ -709,6 +709,14 @@ pub enum AppsCmd {
         #[arg(long, default_value_t = 1440)]
         minutes: i64,
     },
+    /// The app's own metrics its OpenTelemetry SDK sent (its environment's Traces switch on):
+    /// each series' latest point (a gauge's value, a counter's rate a second, a histogram's mean).
+    AppMetrics {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, default_value_t = 60)]
+        minutes: i64,
+    },
     /// How fast its pages are for real visitors (its environment's Web Vitals on, `roll apps env
     /// --vitals true`): each metric's p75 and rating, and the busiest routes'.
     Vitals {
@@ -3202,6 +3210,26 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             a
+        }
+        AppsCmd::AppMetrics { target, minutes } => {
+            let svc = service(api, &target).await?;
+            let v = api.get(&format!("{}/app-metrics?minutes={minutes}", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                let series = v["series"].as_array().cloned().unwrap_or_default();
+                if series.is_empty() {
+                    println!("no metrics from the app in the last {minutes} minutes (traces on, and an OpenTelemetry SDK with a metrics reader)");
+                }
+                for sr in &series {
+                    let attrs: Vec<String> = sr["attrs"].as_array().into_iter().flatten().map(|a| format!("{}={}", s(&a["key"]), s(&a["value"]))).collect();
+                    let last = sr["points"].as_array().and_then(|p| p.last()).and_then(|p| p[1].as_f64());
+                    let unit = Some(s(&sr["unit"])).filter(|u| !u.is_empty() && u != "1").map(|u| format!(" {u}")).unwrap_or_default();
+                    let per = if sr["shows"] == "per_second" { "/s" } else { "" };
+                    let shown = last.map(|v| format!("{v:.3}{unit}{per}")).unwrap_or_else(|| "–".into());
+                    println!("  {:<40} {:<24} {}", s(&sr["name"]), attrs.join(" "), shown);
+                }
+                return Ok(());
+            }
+            v
         }
         AppsCmd::Vitals { target, minutes } => {
             let svc = service(api, &target).await?;

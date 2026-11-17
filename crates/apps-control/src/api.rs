@@ -104,6 +104,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/analytics"), get(analytics))
         .route(&format!("{env}/visit"), post(visit))
         .route(&format!("{env}/vitals"), get(vitals))
+        .route(&format!("{env}/app-metrics"), get(app_metrics))
         .route(&format!("{env}/traces"), get(traces))
         .route(&format!("{env}/traces/{{trace}}"), get(trace))
         .route(&format!("{env}/usage"), get(usage))
@@ -1112,6 +1113,10 @@ async fn traces(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q
 #[derive(Deserialize)]
 struct VitalsQuery {
     minutes: Option<i64>,
+}
+
+async fn app_metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
+    ok(apps.app_metrics(&id, &env, q.minutes.unwrap_or(60)).await?)
 }
 
 async fn vitals(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {

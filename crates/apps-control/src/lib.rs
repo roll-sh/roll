@@ -1934,8 +1934,10 @@ impl Apps {
                 vars.insert("OTEL_EXPORTER_OTLP_ENDPOINT".into(), (self.deps.runtime.reach(&url), "roll"));
                 vars.insert("OTEL_EXPORTER_OTLP_PROTOCOL".into(), ("http/protobuf".into(), "roll"));
                 vars.insert("OTEL_TRACES_EXPORTER".into(), ("otlp".into(), "roll"));
-                // Only traces are taken: an SDK's metrics and logs exporters stay quiet.
-                vars.insert("OTEL_METRICS_EXPORTER".into(), ("none".into(), "roll"));
+                // Traces and metrics go to roll; logs only when the app says so
+                // (`OTEL_LOGS_EXPORTER=otlp` of its own): most apps also print them, and the
+                // environment's log would hold each twice.
+                vars.insert("OTEL_METRICS_EXPORTER".into(), ("otlp".into(), "roll"));
                 vars.insert("OTEL_LOGS_EXPORTER".into(), ("none".into(), "roll"));
                 vars.insert("OTEL_SERVICE_NAME".into(), (svc.name.clone(), "roll"));
                 // Its token is a credential: never shown, as a sealed variable.

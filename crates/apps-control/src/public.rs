@@ -52,8 +52,9 @@ pub const OTLP: &str = "/_roll/otlp/";
 /// response.
 async fn otlp(apps: Arc<Apps>, req: Request) -> Response {
     let parts: Vec<String> = req.uri().path()[OTLP.len()..].split('/').map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()).collect();
-    let [id, env, token, v1, traces] = parts.as_slice() else { return (StatusCode::NOT_FOUND, "").into_response() };
-    if req.method() != axum::http::Method::POST || v1 != "v1" || traces != "traces" || !id.starts_with("svc_") {
+    let [id, env, token, v1, signal] = parts.as_slice() else { return (StatusCode::NOT_FOUND, "").into_response() };
+    let Some(signal) = crate::traces::Signal::of(signal) else { return (StatusCode::NOT_FOUND, "").into_response() };
+    if req.method() != axum::http::Method::POST || v1 != "v1" || !id.starts_with("svc_") {
         return (StatusCode::NOT_FOUND, "").into_response();
     }
     let (id, env, token) = (id.clone(), env.clone(), token.clone());
@@ -69,9 +70,9 @@ async fn otlp(apps: Arc<Apps>, req: Request) -> Response {
             let gzip = req.headers().get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).is_some_and(|c| c.eq_ignore_ascii_case("gzip"));
             let body = match axum::body::to_bytes(req.into_body(), 8 << 20).await {
                 Ok(b) => b,
-                Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "traces are at most 8 MiB a request").into_response(),
+                Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "an export is at most 8 MiB").into_response(),
             };
-            match apps.ingest_traces(&id, &env, &token, json, gzip, &body).await {
+            match apps.ingest_otlp(&id, &env, &token, signal, json, gzip, &body).await {
                 Ok(_) if json => (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], "{}").into_response(),
                 Ok(_) => (StatusCode::OK, [(header::CONTENT_TYPE, "application/x-protobuf")], bytes::Bytes::new()).into_response(),
                 Err(e) => e.into_response(),

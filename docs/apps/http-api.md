@@ -96,6 +96,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&before=&instance=&deployment=&stream=&level=&where=&q=&http=&status=&min_ms=&by=` | | `LogLine[]` or SSE; `before` (unix ms) reads back to a time (not followed), `instance`/`deployment`/`stream` narrow it (followed too), `level` keeps lines at that level or worse (a line that says none isn't; 400 for another word), `where` keeps lines whose JSON or logfmt fields say all its terms (`level:error user_id:42`, `key:*`, `-key:value`, `a.b:x`, quoted values; at most 10; 400 for one that isn't `key:value`), `X-Roll-Search-Truncated: 1` when a read back stopped short; `http=1`: the proxy's access log (`stream: "http"`, text `AccessLine`), `status` (`500`, `5xx`, `400-499`), `min_ms` and `by` (one reason, or `any`: every answer roll gave itself) filtering it | read |
 | `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=&format=` | | `Metrics`; `format=prometheus`: the last finished minute as Prometheus text (`roll_apps_requests_per_minute`, `…_errors_per_minute`, `…_latency_ms{quantile}`, `…_cpu_seconds_per_minute`, `…_memory_bytes`, `…_instances`, `…_cold_starts_per_minute`, `…_cold_start_ms`, labelled `service`, `service_id`, `environment`) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/routes?minutes=` | | `RouteStats` (the last 5–60 minutes, default 60): the access log grouped by method and route, id-like segments `:id` and no query; the busiest, the most 5xx and the slowest (5 requests or more), each at most 50 | read |
+| `GET /v1/apps/services/{id}/environments/{env}/app-metrics?minutes=` | | `{ minutes, step_minutes, series: { name, kind: "gauge" \| "sum" \| "histogram", unit, attrs: {key, value}[], shows: "value" \| "per_second" \| "mean", points: [ms, number][] }[], cut }`: what the app's OpenTelemetry SDK sent as metrics (5–10,080 minutes, default 60), each series (a name and its attributes; at most 50, the busiest first) at most 60 points: a gauge's last value, a cumulative counter's rate a second, a histogram's mean | read |
 | `GET /v1/apps/services/{id}/environments/{env}/vitals?minutes=` | | `{ minutes, samples, metrics: { lcp?, inp?, cls?, fcp?, ttfb?: { p75, rating: "good" \| "needs-improvement" \| "poor", samples } }, routes: { route, samples, metrics }[], cut }`: what visitors' browsers measured with `vitals: true` (the last 60–10,080 minutes, default 1,440), p75s rated by web.dev's thresholds, overall and for the 20 routes with the most page loads | read |
 | `GET /v1/apps/services/{id}/environments/{env}/analytics?minutes=` | | `Analytics` (the last 60–10,080 minutes, default 1,440): visitors and page views from the access log, no script or cookie | read |
 | `POST /v1/apps/services/{id}/environments/{env}/visit` | `{ to }` | `{ url }`: a one-use ticket (a minute) into a sign-in-gated environment for the person signed in, as the URL that opens `to` (a URL at one of its names: its generated hostname or an active custom domain; 400 otherwise, and for an environment without `access.signed_in`); the dashboard's `/dashboard/apps/visit` asks for it and goes on | a person signed in only (403 for a token); rolld's gate lets in only admins until roll apps serves users |
@@ -331,9 +332,10 @@ type EnvironmentPut = {
   /** Redeploy (the same image, the new values) when the project's secrets change, checked each minute
    *  on the owner against roll secrets' digest; off by default. */
   redeploy_on_secrets?: boolean;
-  /** Its instances send OpenTelemetry traces to roll: `OTEL_EXPORTER_OTLP_ENDPOINT` (this
-   *  environment's address, a token of its own in it), `OTEL_EXPORTER_OTLP_PROTOCOL`,
-   *  `OTEL_TRACES_EXPORTER` and `OTEL_SERVICE_NAME` from the next deploy (its own variables win).
+  /** Its instances send OpenTelemetry traces and metrics to roll: `OTEL_EXPORTER_OTLP_ENDPOINT`
+   *  (this environment's address, a token of its own in it), `OTEL_EXPORTER_OTLP_PROTOCOL`,
+   *  `OTEL_TRACES_EXPORTER=otlp`, `OTEL_METRICS_EXPORTER=otlp`, `OTEL_LOGS_EXPORTER=none` (its own
+   *  `otlp` sends logs too) and `OTEL_SERVICE_NAME` from the next deploy (its own variables win).
    *  409 where the node has no OTLP address. */
   traces?: boolean;
   /** What its code may reach (roll previews' `egress`): `roll` runs its instances, from the next
@@ -662,8 +664,9 @@ background), or `MISS` when it was just kept, with `Age`. A request with `Author
 deployment's own URL, a gradual rollout and a preview's feedback page never use it. A new live
 deployment empties it, and so does `POST …/cache/purge` (all of it, or some paths).
 
-`POST /_roll/otlp/{id}/{env}/{token}/v1/traces` on the apps listener (any host; not the API) takes
-an environment's traces from its instances: OTLP/HTTP `ExportTraceServiceRequest`, protobuf
+`POST /_roll/otlp/{id}/{env}/{token}/v1/{traces|logs|metrics}` on the apps listener (any host;
+not the API) takes an environment's traces, log records and metrics from its instances: OTLP/HTTP
+`ExportTraceServiceRequest`, `ExportLogsServiceRequest` or `ExportMetricsServiceRequest`, protobuf
 (`application/x-protobuf`) or JSON (`application/json`), gzip or not, at most 8 MiB; 200 with an
 empty export response. The token in the path is the credential (`traces: true` sets a sealed
 `OTEL_EXPORTER_OTLP_ENDPOINT` to it); any other is a 404.

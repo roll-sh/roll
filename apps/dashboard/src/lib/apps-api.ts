@@ -664,6 +664,24 @@ export interface Span {
 }
 
 /** Visitors and page views from the access log (no script, no cookie). */
+/** One series of the app's own metrics (OpenTelemetry, traces on): a name and its attributes. */
+export interface AppSeries {
+  name: string;
+  kind: "gauge" | "sum" | "histogram";
+  unit: string;
+  attrs: { key: string; value: string }[];
+  /** What the points are: a gauge's value, a counter's rate a second, a histogram's mean. */
+  shows: "value" | "per_second" | "mean";
+  /** [unix ms, value] a bucket. */
+  points: [number, number][];
+}
+export interface AppMetrics {
+  minutes: number;
+  step_minutes: number;
+  series: AppSeries[];
+  cut: boolean;
+}
+
 /** A Web Vital's 75th percentile, rated by web.dev's thresholds. */
 export interface Vital {
   p75: number;
@@ -1002,6 +1020,7 @@ export const appsApi = {
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
   analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),
   vitals: (id: string, e: string, minutes = 1440) => call<Vitals>("GET", `${env(id, e)}/vitals${qs({ minutes })}`),
+  appMetrics: (id: string, e: string, minutes = 60) => call<AppMetrics>("GET", `${env(id, e)}/app-metrics${qs({ minutes })}`),
   traces: (id: string, e: string, minutes = 60) => call<{ minutes: number; traces: TraceSummary[]; cut: boolean }>("GET", `${env(id, e)}/traces${qs({ minutes })}`),
   trace: (id: string, e: string, trace: string) => call<{ trace: string; spans: Span[] }>("GET", `${env(id, e)}/traces/${enc(trace)}`),
   usage: (id: string, e: string, days = 30) => call<Usage>("GET", `${env(id, e)}/usage${qs({ days })}`),
