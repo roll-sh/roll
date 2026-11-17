@@ -179,6 +179,13 @@ CREATE TABLE IF NOT EXISTS bypass (
     hash TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS note_crops (
+    preview_id TEXT NOT NULL,
+    note_id TEXT NOT NULL,
+    png TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (preview_id, note_id)
+);
 CREATE TABLE IF NOT EXISTS leases (
     preview_id TEXT NOT NULL,
     service TEXT NOT NULL,
@@ -189,8 +196,87 @@ CREATE TABLE IF NOT EXISTS leases (
 );
 ";
 
+/// [`Store::set_page_shots`]'s rows, prepared: path, PNG, errors, the one before, change, report.
+type PageShotRow = (String, String, i64, Option<(String, String)>, Option<i64>, Option<String>);
+
+fn write_page_shots(c: &Conn<'_>, id: &str, head: &str, rows: &[PageShotRow], wanted: &[String]) -> Result<()> {
+    for (path, png, errors, before, change_bp, report) in rows {
+        match before {
+            Some((prev_head, prev_png)) => c.execute(
+                "INSERT INTO page_shots (preview_id, path, head, png, prev_head, prev_png, change_bp, errors, report) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, prev_head = excluded.prev_head, prev_png = excluded.prev_png, \
+                 change_bp = excluded.change_bp, errors = excluded.errors, base_bp = NULL, report = excluded.report, against = NULL",
+                params![id, path, head, png, prev_head, prev_png, change_bp, errors, report],
+            )?,
+            None => c.execute(
+                "INSERT INTO page_shots (preview_id, path, head, png, errors, report) VALUES (?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, errors = excluded.errors, base_bp = NULL, report = excluded.report, against = NULL",
+                params![id, path, head, png, errors, report],
+            )?,
+        };
+    }
+    let paths: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
+    for gone in paths.iter().filter(|p| !wanted.contains(p)) {
+        c.execute("DELETE FROM page_shots WHERE preview_id = ? AND path = ?", [id, gone.as_str()])?;
+    }
+    Ok(())
+}
+
+type ReportCols<'a> = (&'a Option<String>, &'a Option<String>, Option<&'a str>, &'a Option<String>, &'a Option<String>);
+
+fn write_page_report(c: &Conn<'_>, id: &str, (health, a11y, text, links, api): ReportCols<'_>) -> Result<()> {
+    c.execute("UPDATE screenshots SET health = ?, a11y = ?, text = ?, links = ?, api = ? WHERE preview_id = ?", params![health, a11y, text, links, api, id])?;
+    Ok(())
+}
+
+/// [`Store::set_screenshot`]'s row, prepared.
+struct ScreenshotRow {
+    b64: String,
+    now: i64,
+    phone_b64: Option<String>,
+    speed: Option<String>,
+    before: Option<(String, String, Option<String>, Option<String>)>,
+    change_bp: Option<i64>,
+    phone_change_bp: Option<i64>,
+}
+
+fn write_screenshot(c: &Conn<'_>, id: &str, head: &str, row: &ScreenshotRow) -> Result<()> {
+    let ScreenshotRow { b64, now, phone_b64, speed, before, change_bp, phone_change_bp } = row;
+    let now = *now;
+    match &before {
+        Some((prev_head, prev_png, prev_speed, prev_phone)) => c.execute(
+            "INSERT INTO screenshots (preview_id, head, png, at, tried, prev_head, prev_png, change_bp, speed, prev_speed, phone_png, prev_phone_png, phone_change_bp) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried, \
+             prev_head = excluded.prev_head, prev_png = excluded.prev_png, change_bp = excluded.change_bp, speed = excluded.speed, prev_speed = excluded.prev_speed, \
+             phone_png = excluded.phone_png, prev_phone_png = excluded.prev_phone_png, phone_change_bp = excluded.phone_change_bp",
+            params![id, head, b64, now, head, prev_head, prev_png, change_bp, speed, prev_speed, phone_b64, prev_phone, phone_change_bp],
+        )?,
+        // A first one, or the same head again: what came before stays.
+        None => c.execute(
+            "INSERT INTO screenshots (preview_id, head, png, at, tried, speed, phone_png) VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried, speed = excluded.speed, \
+             phone_png = excluded.phone_png",
+            params![id, head, b64, now, head, speed, phone_b64],
+        )?,
+    };
+    Ok(())
+}
+
 /// How long a screenshot link (in a pull request comment) works after the screenshot was taken.
 pub const SCREENSHOT_LINK_MS: i64 = 30 * 24 * 3_600_000;
+
+/// A note's id (its review's) as links carry it.
+pub fn note_id_ok(note: &str) -> bool {
+    !note.is_empty() && note.len() <= 64 && note.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// The largest crop of a note's element kept (a PNG).
+pub const CROP_MAX: usize = 512 << 10;
+/// The most crops kept per preview.
+pub const CROPS_KEPT: usize = 50;
+/// The most notes cropped in one screenshot run.
+pub const CROPS_PER_RUN: usize = 10;
 
 /// The newest activity lines kept per preview.
 pub const ACTIVITY_KEEP: i64 = 200;
@@ -513,6 +599,9 @@ impl Store {
         if !db.has_column("previews", "vars")? {
             db.add_column("previews", "vars", "TEXT")?;
         }
+        if !db.has_column("services", "shot_key")? {
+            db.add_column("services", "shot_key", "TEXT")?;
+        }
         for col in ["kept_until", "goes_at"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "INTEGER")?;
@@ -594,6 +683,29 @@ impl Store {
     /// A service's deploy fingerprint (what it was deployed with: variables, access).
     pub fn service_config(&self, id: &str, name: &str) -> Result<Option<String>> {
         Ok(self.db.read(|c| c.query_row("SELECT config FROM services WHERE preview_id = ? AND name = ?", [id, name], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
+    }
+
+    /// What a service ran when its pages were last taken (its revision, what it's deployed with,
+    /// the data's last reset): the same again means its pages can't have changed.
+    pub fn service_shot_key(&self, id: &str, name: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT shot_key FROM services WHERE preview_id = ? AND name = ?", [id, name], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
+    }
+
+    pub fn set_service_shot_key(&self, id: &str, name: &str, key: &str) -> Result<()> {
+        self.db.write(|c| c.execute("UPDATE services SET shot_key = ? WHERE preview_id = ? AND name = ?", params![key, id, name]).map(drop))?;
+        Ok(())
+    }
+
+    /// A page as it was last kept (its picture, what went wrong while it loaded, its checks), to
+    /// keep again at a new head.
+    pub fn kept_page(&self, id: &str, path: &str) -> Result<Option<crate::ports::PageShot>> {
+        use base64::Engine as _;
+        let row: Option<(String, i64, Option<String>)> = self.db.read(|c| c.query_row("SELECT png, errors, report FROM page_shots WHERE preview_id = ? AND path = ?", [id, path], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?;
+        Ok(row.and_then(|(b64, errors, report)| {
+            let png = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+            let report = report.and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default();
+            Some(crate::ports::PageShot { path: path.to_string(), png, errors: errors.max(0) as u32, report })
+        }))
     }
 
     /// The revision a service last passed its health check at.
@@ -765,7 +877,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1101,6 +1213,12 @@ impl Store {
     }
 
     pub fn set_screenshot(&self, id: &str, head: &str, png: &[u8], speed: Option<&crate::PageSpeed>, phone: Option<&[u8]>) -> Result<()> {
+        let row = self.prepare_screenshot(id, head, png, speed, phone)?;
+        self.db.write(|c| write_screenshot(c, id, head, &row))
+    }
+
+    /// What [`Store::set_screenshot`] writes, read and compared first (outside the write).
+    fn prepare_screenshot(&self, id: &str, head: &str, png: &[u8], speed: Option<&crate::PageSpeed>, phone: Option<&[u8]>) -> Result<ScreenshotRow> {
         use base64::Engine as _;
         let b64e = base64::engine::general_purpose::STANDARD;
         let (b64, now) = (b64e.encode(png), self.now_ms()?);
@@ -1119,26 +1237,7 @@ impl Store {
         };
         let change_bp = before.as_ref().and_then(|(_, p, _, _)| changed(Some(p), Some(png)));
         let phone_change_bp = before.as_ref().and_then(|(_, _, _, pp)| changed(pp.as_ref(), phone));
-        self.db.write(|c| {
-            match &before {
-                Some((prev_head, prev_png, prev_speed, prev_phone)) => c.execute(
-                    "INSERT INTO screenshots (preview_id, head, png, at, tried, prev_head, prev_png, change_bp, speed, prev_speed, phone_png, prev_phone_png, phone_change_bp) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-                     ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried, \
-                     prev_head = excluded.prev_head, prev_png = excluded.prev_png, change_bp = excluded.change_bp, speed = excluded.speed, prev_speed = excluded.prev_speed, \
-                     phone_png = excluded.phone_png, prev_phone_png = excluded.prev_phone_png, phone_change_bp = excluded.phone_change_bp",
-                    params![id, head, b64, now, head, prev_head, prev_png, change_bp, speed, prev_speed, phone_b64, prev_phone, phone_change_bp],
-                )?,
-                // A first one, or the same head again: what came before stays.
-                None => c.execute(
-                    "INSERT INTO screenshots (preview_id, head, png, at, tried, speed, phone_png) VALUES (?, ?, ?, ?, ?, ?, ?) \
-                     ON CONFLICT (preview_id) DO UPDATE SET head = excluded.head, png = excluded.png, at = excluded.at, tried = excluded.tried, speed = excluded.speed, \
-                     phone_png = excluded.phone_png",
-                    params![id, head, b64, now, head, speed, phone_b64],
-                )?,
-            };
-            Ok::<_, Error>(())
-        })
+        Ok(ScreenshotRow { b64, now, phone_b64, speed, before, change_bp, phone_change_bp })
     }
 
     /// What went wrong while the latest screenshot's page loaded (after `set_screenshot`).
@@ -1147,8 +1246,7 @@ impl Store {
         let a11y = a11y.and_then(|a| serde_json::to_string(a).ok());
         let links = links.and_then(|l| serde_json::to_string(l).ok());
         let api = api.map(|ops| ops.join("\n"));
-        self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE screenshots SET health = ?, a11y = ?, text = ?, links = ?, api = ? WHERE preview_id = ?", params![health, a11y, text, links, api, id])?))?;
-        Ok(())
+        self.db.write(|c| write_page_report(c, id, (&health, &a11y, text, &links, &api)))
     }
 
     pub fn page_a11y(&self, id: &str) -> Result<Option<crate::PageA11y>> {
@@ -1376,6 +1474,12 @@ impl Store {
     /// Keep the other pages a screenshot at `head` took (`github.pages`), each with the one it
     /// replaces at another head and how much changed; pages no longer in `wanted` go.
     pub fn set_page_shots(&self, id: &str, head: &str, pages: &[crate::ports::PageShot], wanted: &[String]) -> Result<()> {
+        let rows = self.prepare_page_shots(id, head, pages)?;
+        self.db.write(|c| write_page_shots(c, id, head, &rows, wanted))
+    }
+
+    /// What [`Store::set_page_shots`] writes, read and compared first (outside the write).
+    fn prepare_page_shots(&self, id: &str, head: &str, pages: &[crate::ports::PageShot]) -> Result<Vec<PageShotRow>> {
         use base64::Engine as _;
         let b64e = base64::engine::general_purpose::STANDARD;
         let mut rows = Vec::new();
@@ -1386,27 +1490,25 @@ impl Store {
             let report = serde_json::to_string(&p.report).ok();
             rows.push((p.path.clone(), b64e.encode(&p.png), p.errors as i64, before, change_bp, report));
         }
+        Ok(rows)
+    }
+
+    /// A screenshot run kept whole, in one transaction: the first page's picture, its checks and
+    /// the other pages. Anything comparing against it (a change against main's baseline, main's
+    /// baseline against waiting changes) sees all of it or none: kept in three writes, a
+    /// comparison could see the picture before its checks and pages (screenshots run side by
+    /// side) and keep that half for good.
+    pub fn keep_shot(&self, id: &str, head: &str, shot: &crate::ports::Shot, pages: &[crate::ports::PageShot], wanted: &[String]) -> Result<()> {
+        let row = self.prepare_screenshot(id, head, &shot.png, shot.speed.as_ref(), shot.phone.as_deref())?;
+        let page_rows = self.prepare_page_shots(id, head, pages)?;
+        let health = shot.health.as_ref().and_then(|h| serde_json::to_string(h).ok());
+        let a11y = shot.a11y.as_ref().and_then(|a| serde_json::to_string(a).ok());
+        let links = shot.links.as_ref().and_then(|l| serde_json::to_string(l).ok());
+        let api = shot.api.as_ref().map(|ops| ops.join("\n"));
         self.db.write(|c| {
-            for (path, png, errors, before, change_bp, report) in &rows {
-                match before {
-                    Some((prev_head, prev_png)) => c.execute(
-                        "INSERT INTO page_shots (preview_id, path, head, png, prev_head, prev_png, change_bp, errors, report) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
-                         ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, prev_head = excluded.prev_head, prev_png = excluded.prev_png, \
-                         change_bp = excluded.change_bp, errors = excluded.errors, base_bp = NULL, report = excluded.report, against = NULL",
-                        params![id, path, head, png, prev_head, prev_png, change_bp, errors, report],
-                    )?,
-                    None => c.execute(
-                        "INSERT INTO page_shots (preview_id, path, head, png, errors, report) VALUES (?, ?, ?, ?, ?, ?) \
-                         ON CONFLICT (preview_id, path) DO UPDATE SET head = excluded.head, png = excluded.png, errors = excluded.errors, base_bp = NULL, report = excluded.report, against = NULL",
-                        params![id, path, head, png, errors, report],
-                    )?,
-                };
-            }
-            let paths: Vec<String> = c.query("SELECT path FROM page_shots WHERE preview_id = ?", [id], |r| r.get(0))?;
-            for gone in paths.iter().filter(|p| !wanted.contains(p)) {
-                c.execute("DELETE FROM page_shots WHERE preview_id = ? AND path = ?", [id, gone.as_str()])?;
-            }
-            Ok::<_, Error>(())
+            write_screenshot(c, id, head, &row)?;
+            write_page_report(c, id, (&health, &a11y, shot.text.as_deref(), &links, &api))?;
+            write_page_shots(c, id, head, &page_rows, wanted)
         })
     }
 
@@ -1696,6 +1798,14 @@ impl Store {
         self.link(id, Some("diff=base"))
     }
 
+    /// The same for a note's crop (`note=<id>`): its own signature per note.
+    pub fn note_crop_link(&self, id: &str, note: &str) -> Result<Option<(i64, String)>> {
+        if !note_id_ok(note) {
+            return Ok(None);
+        }
+        self.link(id, Some(&format!("note={note}")))
+    }
+
     fn link(&self, id: &str, variant: Option<&str>) -> Result<Option<(i64, String)>> {
         match self.screenshot_at(id)? {
             Some(at) => self.link_at(id, at, variant).map(Some),
@@ -1859,6 +1969,41 @@ impl Store {
             }
             Ok::<_, Error>(old.into_iter().map(|rev| format!("{service}@{rev}")).collect())
         })
+    }
+
+    // ── note crops: a picture of each note's element, cropped by a screenshot run ──
+
+    /// Keep a note's crop (a PNG of at most [`CROP_MAX`] bytes; a bigger one is dropped), at
+    /// most [`CROPS_KEPT`] a preview (the oldest go).
+    pub fn set_note_crop(&self, id: &str, note: &str, png: &[u8]) -> Result<()> {
+        if png.len() > CROP_MAX || !png.starts_with(b"\x89PNG") {
+            return Ok(());
+        }
+        use base64::Engine as _;
+        let now = self.now_ms()?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO note_crops (preview_id, note_id, png, at) VALUES (?, ?, ?, ?) ON CONFLICT (preview_id, note_id) DO UPDATE SET png = excluded.png, at = excluded.at",
+                params![id, note, b64, now],
+            )?;
+            c.execute(
+                "DELETE FROM note_crops WHERE preview_id = ? AND note_id NOT IN (SELECT note_id FROM note_crops WHERE preview_id = ? ORDER BY at DESC, note_id LIMIT ?)",
+                params![id, id, CROPS_KEPT as i64],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The notes of `id` that have a crop.
+    pub fn cropped_notes(&self, id: &str) -> Result<std::collections::HashSet<String>> {
+        Ok(self.db.read(|c| c.query("SELECT note_id FROM note_crops WHERE preview_id = ?", [id], |r| r.get(0)))?.into_iter().collect())
+    }
+
+    pub fn note_crop(&self, id: &str, note: &str) -> Result<Option<Vec<u8>>> {
+        use base64::Engine as _;
+        let row: Option<String> = self.db.read(|c| c.query_row("SELECT png FROM note_crops WHERE preview_id = ? AND note_id = ?", [id, note], |r| r.get(0)).optional())?;
+        Ok(row.and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok()))
     }
 
     // ── leases: the dynamic credentials a service started with (roll secrets'; ids only) ──
@@ -2099,6 +2244,7 @@ impl Store {
             page_a11y,
             screenshot_link,
             diff_link,
+            notes: Vec::new(),
             last_reset_at: r.last_reset_at,
             last_active_at: r.last_active_at,
             expires_at: r.expires_at,

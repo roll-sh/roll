@@ -175,6 +175,17 @@ pub struct Shot {
     pub links: Option<crate::PageLinks>,
     /// The service's API operations (`GET /users/{id}`, sorted), from its OpenAPI document.
     pub api: Option<Vec<String>>,
+    /// The notes' elements it cropped ([`ShotOptions::crops`]), by note: PNGs of at most
+    /// [`crate::store::CROP_MAX`] bytes. A note whose element wasn't found is left out.
+    pub crops: Vec<(String, Vec<u8>)>,
+}
+
+/// A note's element to crop in a screenshot run: its page and its selector, both checked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CropAsk {
+    pub note: String,
+    pub path: String,
+    pub selector: String,
 }
 
 /// What a screenshot run takes: the project's other pages, and what it blanks first.
@@ -190,6 +201,9 @@ pub struct ShotOptions {
     pub states: Vec<crate::settings::StateRule>,
     /// More browsers the first page is taken in (`github.browsers`): `browser:<name>` pages.
     pub browsers: Vec<String>,
+    /// The open notes' elements to crop in the first service's run (Vercel's comments show what
+    /// they're about), at most [`crate::store::CROPS_PER_RUN`].
+    pub crops: Vec<CropAsk>,
 }
 
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.
@@ -294,6 +308,12 @@ pub struct Target {
     /// The feedback button on its pages (the project's `feedback`, a change's preview, link
     /// access): a backend that serves the pages itself (roll apps) adds it as the runtime does.
     pub feedback: bool,
+    /// What the service's code may reach (the project's `egress`): with `roll`, the runtime runs
+    /// it on the preview's own network with no route out.
+    pub egress: crate::settings::EgressRule,
+    /// With `egress` `roll`: the hosts outside roll it may still reach, through the preview's
+    /// egress proxy.
+    pub egress_hosts: Vec<String>,
 }
 
 /// A deploy the backend accepted that hasn't finished (a build, a rollout): the converge leaves
@@ -404,6 +424,13 @@ pub trait Apps: Send + Sync {
     }
     /// What it's doing on this node (`None`: never started here).
     fn status(&self, preview: &str, service: &str) -> Option<ServiceState>;
+    /// Asleep but frozen, not stopped (the runtime's warm window): its process, and whatever
+    /// credentials it holds, come back on the next request. No default: a backend that wraps
+    /// another must pass it on (a frozen service's leases were revoked when one didn't).
+    fn warm(&self, preview: &str, service: &str) -> bool;
+    /// The hosts the preview's egress proxy refused lately (its project's `egress_hosts` don't
+    /// list them), each once. No default, as `warm`.
+    async fn egress_refused(&self, preview: &str) -> Vec<String>;
 }
 
 /// A project's secrets, per environment (roll secrets; docs/secrets.md).
@@ -414,7 +441,10 @@ pub trait Secrets: Send + Sync {
     /// allows production and the change is trusted). It expires by itself `expires_at` (ms) at the
     /// latest, so a teardown that never happened leaves nothing for long; each converge pushes
     /// that out.
-    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], trusted: bool, expires_at: i64) -> anyhow::Result<()>;
+    /// `branches`: what the preview branched (`(kind, parent)`): a link of the environment (or its
+    /// base) to one of those parents isn't resolved but comes back in [`Resolved::followed`].
+    #[allow(clippy::too_many_arguments)]
+    async fn ensure(&self, project: &str, env: &str, base: &str, vars: &[(String, String)], trusted: bool, expires_at: i64, branches: &[(Kind, String)]) -> anyhow::Result<()>;
     /// Every variable of `env`, inherited ones included, for `consumer` (a start of one service,
     /// a job): a dynamic link issues it a fresh credential under a lease ([`Resolved::leases`]),
     /// which the caller renews while it runs and revokes when it stops.
@@ -442,6 +472,9 @@ pub struct Resolved {
     pub problems: Vec<String>,
     /// The leases of the dynamic credentials among `values`.
     pub leases: Vec<String>,
+    /// Keys of links to a parent the preview branched, which roll secrets resolved nothing for:
+    /// `(name, kind, parent, field)`. The engine sets each from the branch ([`crate::names::follow`]).
+    pub followed: Vec<(String, Kind, String, String)>,
 }
 
 /// Until roll secrets lands: no environments, so services get the project's overrides and the
@@ -450,7 +483,7 @@ pub struct NoSecrets;
 
 #[async_trait]
 impl Secrets for NoSecrets {
-    async fn ensure(&self, _: &str, _: &str, _: &str, _: &[(String, String)], _: bool, _: i64) -> anyhow::Result<()> {
+    async fn ensure(&self, _: &str, _: &str, _: &str, _: &[(String, String)], _: bool, _: i64, _: &[(Kind, String)]) -> anyhow::Result<()> {
         Ok(())
     }
 

@@ -439,9 +439,12 @@ async fn a_cron_service_runs_on_the_node_that_takes_it_over() {
     dead.apps.deps.cluster.fault_kill();
     let left = &f.nodes[0];
     let mut env = Value::Null;
+    // Taken over: the lease, the schedule, and the dead owner's run failed (the takeover's
+    // resume does that a moment after the lease; a run started before it would be skipped).
+    let orphan_failed = |runs: &Value| runs.as_array().is_some_and(|a| a.iter().any(|r| r["id"] == orphan.id.as_str() && r["status"] == "failed"));
     for _ in 0..300 {
         env = call(&left.api, "GET", &base, None).await.1;
-        if left.apps.deps.cluster.owns(&key) && env["next_run_at"].is_i64() {
+        if left.apps.deps.cluster.owns(&key) && env["next_run_at"].is_i64() && orphan_failed(&call(&left.api, "GET", &format!("{base}/runs"), None).await.1) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

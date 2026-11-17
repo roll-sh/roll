@@ -56,6 +56,11 @@ pub trait Sources: Send + Sync {
     }
     /// Whether a path that differs between `from` and `to` matches one of `patterns`
     /// (gitignore-style, from the repo's root). A source that can't tell says yes.
+    /// Whether any of `paths` matches any of `patterns` (gitignore-style: roll code's matcher, so
+    /// a watch path means the same for a repo and a Git URL). Yes when it can't tell.
+    fn any_path_matches(&self, _patterns: &[String], _paths: &[String]) -> bool {
+        true
+    }
     async fn touches(&self, _repo: &str, _from: &str, _to: &str, _patterns: &[String]) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -118,6 +123,12 @@ pub trait SecretSource: Send + Sync {
     async fn digest(&self, _project: &str, _env: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
+    /// The project's `env` made in the store if it's missing (an apps environment named
+    /// something roll secrets doesn't start with, `qa`), so its secrets have somewhere to go.
+    /// Idempotent; never called for a preview's (previews make those, with their base).
+    async fn ensure(&self, _project: &str, _env: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// What's been said about a preview's page (roll previews' notes: docs/previews.md, "Feedback on
@@ -138,6 +149,52 @@ pub trait FeedbackNotes: Send + Sync {
     /// `env` (`pv-<id>`)'s notes on `path`, oldest first; none for a name that isn't a live
     /// preview's.
     async fn notes(&self, env: &str, path: &str) -> anyhow::Result<Vec<Note>>;
+}
+
+/// A push to a Git URL service's repository, to a branch none of its environments follows: roll
+/// previews makes (or moves, or tears down) that branch's preview. Checked against the
+/// repository before it's handed on: `sha` is where the branch is now, and a deletion is a branch
+/// the repository no longer has, so a hook's body alone can't name another commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitPush {
+    /// The service (`svc_…`).
+    pub service: String,
+    pub url: String,
+    pub branch: String,
+    /// None: the branch was deleted.
+    pub sha: Option<String>,
+    /// The pushed commit's message, as the push said it (`[skip ci]` is the receiver's to read).
+    pub message: String,
+    /// A pull request's (or merge request's) push, opening or closing: `branch` is its own for a
+    /// same-repository one, `pull/<number>` for a fork's.
+    pub pull: Option<GitPull>,
+}
+
+/// The pull request a [`GitPush`] is for. `sha` was checked against its head ref (a fork's
+/// `refs/pull/N/head`, GitLab's `refs/merge-requests/N/head`; a same-repository one's branch).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitPull {
+    pub number: u64,
+    /// As the event says it: untrusted text.
+    pub title: String,
+    /// Its page, made from the service's own URL and the number (never the event's link).
+    pub url: String,
+    /// From another repository (head and base repository ids differ): its code is untrusted.
+    pub fork: bool,
+}
+
+/// Where pushes to branches roll apps doesn't follow go (rolld fills it with roll previews).
+/// Unset: they're ignored.
+#[async_trait]
+pub trait GitPushes: Send + Sync {
+    /// Called once per delivery (a redelivery, or a second environment's hook, calls it again:
+    /// idempotent on `sha`). Quick: record it and return, the hook is waiting.
+    async fn pushed(&self, push: GitPush);
+    /// Whether it reads [`GitPush::pull`]. Until it says so, no pull request is handed on: one
+    /// that dropped `pull` would take a fork's head for a branch's and trust it.
+    fn takes_pulls(&self) -> bool {
+        false
+    }
 }
 
 /// Email to a person through their account (rolld fills it with roll-accounts' mailer). Unset or

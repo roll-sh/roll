@@ -101,7 +101,7 @@
         },
         "alerts": {
           "type": "object",
-          "description": "Alert thresholds (memory_pct, error_pct, p95_ms, log_match, log_count)."
+          "description": "Alert thresholds (memory_pct, error_pct, p95_ms, capacity_pct, log_match, log_count)."
         },
         "rollout": {
           "type": "object",

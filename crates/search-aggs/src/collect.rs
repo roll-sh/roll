@@ -525,6 +525,31 @@ impl Subs {
         Ok(())
     }
 
+    /// [`push`](Self::push) of each `(docs[i], ords[i], scores[i])` (`scores` empty: none were
+    /// read), flushing at the same points, a slice at a time.
+    pub fn push_many(&mut self, docs: &[u32], ords: &[u32], scores: &[f32]) -> Result<()> {
+        let score = |i: usize| scores.get(i).copied().unwrap_or(f32::NAN);
+        let mut i = 0;
+        while i < docs.len() {
+            let take = (BATCH - self.docs.len().min(BATCH)).clamp(1, docs.len() - i);
+            if let Some(d) = self.deferred.as_mut() {
+                for j in i..i + take {
+                    d.record(docs[j], ords[j], score(j))?;
+                }
+            }
+            self.docs.extend_from_slice(&docs[i..i + take]);
+            self.ords.extend_from_slice(&ords[i..i + take]);
+            if self.needs_scores {
+                self.scores.extend((i..i + take).map(score));
+            }
+            i += take;
+            if self.docs.len() >= BATCH {
+                self.flush()?;
+            }
+        }
+        Ok(())
+    }
+
     /// Hands queued pairs to the sub-aggregations.
     pub fn flush(&mut self) -> Result<()> {
         if self.docs.is_empty() {
@@ -885,26 +910,24 @@ impl Collector for AggCollector {
         for n in &mut self.nodes {
             n.agg.set_segment(seg)?;
         }
-        let done = !self.nodes.is_empty() && self.nodes.iter().all(|n| n.agg.segment_done());
-        Ok(Box::new(TopLeaf { c: self, done }))
+        // Every aggregator took the segment from its statistics: none of its docs are wanted
+        // (Elasticsearch's `CollectionTerminatedException` from `getLeafCollector`), so a
+        // `MultiCollector` drops this leaf and the segment ends once the others are done too.
+        if !self.nodes.is_empty() && self.nodes.iter().all(|n| n.agg.segment_done()) {
+            for n in &mut self.nodes {
+                n.agg.finish_segment()?;
+            }
+            return Err(search_index::Error::CollectionTerminated);
+        }
+        Ok(Box::new(TopLeaf { c: self }))
     }
 }
 
 struct TopLeaf<'a> {
     c: &'a mut AggCollector,
-    /// Every aggregator took the segment from its statistics.
-    done: bool,
 }
 
 impl LeafCollector for TopLeaf<'_> {
-    fn skips(&self) -> bool {
-        self.done
-    }
-
-    fn competitive_from(&mut self, doc: u32) -> u32 {
-        if self.done { search_codec::NO_MORE_DOCS } else { doc }
-    }
-
     #[inline]
     fn collect(&mut self, doc: u32, scorer: &mut dyn Scorable) -> search_index::Result<()> {
         self.c.docs.push(doc);

@@ -1,0 +1,1247 @@
+{
+  "description" : "Vectors kept out of the stored _source (index.mapping.exclude_source_vectors): realtime and refreshed gets, search hits, fields, script fields and runtime fields, top_hits, the knn lookup builder, update, update by query, reindex, clone, and an index that keeps them",
+  "steps" : [
+    {
+      "req" : "PUT /es-docs-sv",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "refresh_interval" : -1
+        },
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 3,
+              "similarity" : "cosine"
+            },
+            "noidx" : {
+              "type" : "dense_vector",
+              "dims" : 3,
+              "index" : false
+            },
+            "o" : {
+              "properties" : {
+                "w" : {
+                  "type" : "dense_vector",
+                  "dims" : 3,
+                  "element_type" : "byte"
+                }
+              }
+            },
+            "p" : {
+              "properties" : {
+                "b" : {
+                  "type" : "dense_vector",
+                  "dims" : 16,
+                  "element_type" : "bit"
+                }
+              }
+            },
+            "s" : {
+              "properties" : {
+                "sp" : {
+                  "type" : "sparse_vector"
+                }
+              }
+            },
+            "n" : {
+              "type" : "nested",
+              "properties" : {
+                "w" : {
+                  "type" : "dense_vector",
+                  "dims" : 2
+                }
+              }
+            },
+            "t" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-sv"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-sv/_doc/1",
+      "body" : {
+        "t" : "a",
+        "v" : [
+          1.5,
+          2.5,
+          3.5
+        ],
+        "noidx" : [
+          1.0E-8,
+          123456.789,
+          -0.5
+        ],
+        "o" : [
+          {
+            "x" : 1
+          },
+          {
+            "w" : [
+              1,
+              -2,
+              127
+            ],
+            "y" : 2
+          }
+        ],
+        "p" : {
+          "b" : "0aff",
+          "c" : 1
+        },
+        "s" : {
+          "sp" : {
+            "zz" : 0.123456789,
+            "aa" : 3.14159
+          },
+          "k" : 1
+        },
+        "n" : [
+          {
+            "w" : [
+              1,
+              2
+            ],
+            "k" : 1
+          },
+          {
+            "k" : 2
+          }
+        ],
+        "z" : 1.5
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-sv",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "GET /es-docs-sv/_doc/1?_source_exclude_vectors=false",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-sv",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "t" : "a",
+          "noidx" : [
+            1.0E-8,
+            123456.789,
+            -0.5
+          ],
+          "o" : [
+            {
+              "x" : 1,
+              "w" : [
+                1,
+                -2,
+                127
+              ]
+            },
+            {
+              "y" : 2
+            }
+          ],
+          "p" : {
+            "c" : 1,
+            "b" : [
+              10,
+              -1
+            ]
+          },
+          "s" : {
+            "k" : 1,
+            "sp" : {
+              "aa" : 3.140625,
+              "zz" : 0.123291016
+            }
+          },
+          "n" : [
+            {
+              "k" : 1,
+              "w" : [
+                1.0,
+                2.0
+              ]
+            },
+            {
+              "k" : 2
+            }
+          ],
+          "z" : 1.5,
+          "v" : [
+            1.5,
+            2.4999998,
+            3.5
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-sv/_refresh",
+      "status" : 200,
+      "response" : {
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        }
+      }
+    },
+    {
+      "req" : "PUT /es-docs-sv/_doc/2?refresh=true",
+      "body" : {
+        "t" : "b",
+        "v" : null,
+        "o" : {
+          "w" : [
+            3,
+            2,
+            1
+          ]
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-sv",
+        "_id" : "2",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 1,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "GET /es-docs-sv/_doc/1",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-sv",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "t" : "a",
+          "o" : [
+            {
+              "x" : 1
+            },
+            {
+              "y" : 2
+            }
+          ],
+          "p" : {
+            "c" : 1
+          },
+          "s" : {
+            "k" : 1
+          },
+          "n" : [
+            {
+              "k" : 1
+            },
+            {
+              "k" : 2
+            }
+          ],
+          "z" : 1.5
+        }
+      }
+    },
+    {
+      "req" : "GET /es-docs-sv/_doc/1?_source_exclude_vectors=false",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-sv",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "t" : "a",
+          "noidx" : [
+            1.0E-8,
+            123456.789,
+            -0.5
+          ],
+          "o" : [
+            {
+              "x" : 1,
+              "w" : [
+                1,
+                -2,
+                127
+              ]
+            },
+            {
+              "y" : 2
+            }
+          ],
+          "p" : {
+            "c" : 1,
+            "b" : [
+              10,
+              -1
+            ]
+          },
+          "s" : {
+            "k" : 1,
+            "sp" : {
+              "aa" : 3.140625,
+              "zz" : 0.123291016
+            }
+          },
+          "n" : [
+            {
+              "k" : 1,
+              "w" : [
+                1.0,
+                2.0
+              ]
+            },
+            {
+              "k" : 2
+            }
+          ],
+          "z" : 1.5,
+          "v" : [
+            1.5,
+            2.4999998,
+            3.5
+          ]
+        }
+      }
+    },
+    {
+      "req" : "GET /es-docs-sv/_source/1?_source_includes=v,o",
+      "status" : 200,
+      "response" : {
+        "v" : [
+          1.5,
+          2.4999998,
+          3.5
+        ],
+        "o" : [
+          {
+            "x" : 1,
+            "w" : [
+              1,
+              -2,
+              127
+            ]
+          },
+          {
+            "y" : 2
+          }
+        ]
+      }
+    },
+    {
+      "req" : "GET /es-docs-sv/_doc/2?_source_exclude_vectors=false",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-sv",
+        "_id" : "2",
+        "_version" : 1,
+        "_seq_no" : 1,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "t" : "b",
+          "o" : {
+            "w" : [
+              3,
+              2,
+              1
+            ]
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-sv/_search",
+      "body" : {
+        "_source" : {
+          "exclude_vectors" : false
+        },
+        "sort" : [
+          "t"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 11,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-sv",
+              "_id" : "1",
+              "_score" : null,
+              "_source" : {
+                "t" : "a",
+                "noidx" : [
+                  1.0E-8,
+                  123456.789,
+                  -0.5
+                ],
+                "o" : [
+                  {
+                    "x" : 1,
+                    "w" : [
+                      1,
+                      -2,
+                      127
+                    ]
+                  },
+                  {
+                    "y" : 2
+                  }
+                ],
+                "p" : {
+                  "c" : 1,
+                  "b" : [
+                    10,
+                    -1
+                  ]
+                },
+                "s" : {
+                  "k" : 1,
+                  "sp" : {
+                    "aa" : 3.140625,
+                    "zz" : 0.123291016
+                  }
+                },
+                "n" : [
+                  {
+                    "k" : 1,
+                    "w" : [
+                      1.0,
+                      2.0
+                    ]
+                  },
+                  {
+                    "k" : 2
+                  }
+                ],
+                "z" : 1.5,
+                "v" : [
+                  1.5,
+                  2.4999998,
+                  3.5
+                ]
+              },
+              "sort" : [
+                "a"
+              ]
+            },
+            {
+              "_index" : "es-docs-sv",
+              "_id" : "2",
+              "_score" : null,
+              "_source" : {
+                "t" : "b",
+                "o" : {
+                  "w" : [
+                    3,
+                    2,
+                    1
+                  ]
+                }
+              },
+              "sort" : [
+                "b"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-sv/_search",
+      "body" : {
+        "_source" : [
+          "o",
+          "t"
+        ],
+        "fields" : [
+          "v"
+        ],
+        "sort" : [
+          "t"
+        ],
+        "script_fields" : {
+          "sv" : {
+            "script" : "params._source.v"
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 15,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-sv",
+              "_id" : "1",
+              "_score" : null,
+              "_source" : {
+                "t" : "a",
+                "o" : [
+                  {
+                    "x" : 1,
+                    "w" : [
+                      1,
+                      -2,
+                      127
+                    ]
+                  },
+                  {
+                    "y" : 2
+                  }
+                ]
+              },
+              "fields" : {
+                "sv" : [
+                  1.5,
+                  2.4999998,
+                  3.5
+                ],
+                "v" : [
+                  1.5,
+                  2.4999998,
+                  3.5
+                ]
+              },
+              "sort" : [
+                "a"
+              ]
+            },
+            {
+              "_index" : "es-docs-sv",
+              "_id" : "2",
+              "_score" : null,
+              "_source" : {
+                "t" : "b",
+                "o" : {
+                  "w" : [
+                    3,
+                    2,
+                    1
+                  ]
+                }
+              },
+              "fields" : {
+                "sv" : [
+                  null
+                ]
+              },
+              "sort" : [
+                "b"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-sv/_search",
+      "body" : {
+        "_source" : false,
+        "sort" : [
+          "t"
+        ],
+        "runtime_mappings" : {
+          "rv" : {
+            "type" : "keyword",
+            "script" : "emit(String.valueOf(params._source.v))"
+          }
+        },
+        "fields" : [
+          "rv"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 9,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "es-docs-sv",
+              "_id" : "1",
+              "_score" : null,
+              "fields" : {
+                "rv" : [
+                  "null"
+                ]
+              },
+              "sort" : [
+                "a"
+              ]
+            },
+            {
+              "_index" : "es-docs-sv",
+              "_id" : "2",
+              "_score" : null,
+              "fields" : {
+                "rv" : [
+                  "null"
+                ]
+              },
+              "sort" : [
+                "b"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-sv/_search",
+      "body" : {
+        "size" : 0,
+        "aggs" : {
+          "top" : {
+            "top_hits" : {
+              "sort" : [
+                "t"
+              ],
+              "size" : 1,
+              "_source" : {
+                "exclude_vectors" : false,
+                "includes" : [
+                  "v",
+                  "t"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 8,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [ ]
+        },
+        "aggregations" : {
+          "top" : {
+            "hits" : {
+              "total" : {
+                "value" : 2,
+                "relation" : "eq"
+              },
+              "max_score" : null,
+              "hits" : [
+                {
+                  "_index" : "es-docs-sv",
+                  "_id" : "1",
+                  "_score" : null,
+                  "_source" : {
+                    "t" : "a",
+                    "v" : [
+                      1.5,
+                      2.4999998,
+                      3.5
+                    ]
+                  },
+                  "sort" : [
+                    "a"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-sv/_search",
+      "body" : {
+        "_source" : false,
+        "knn" : {
+          "field" : "v",
+          "k" : 1,
+          "num_candidates" : 10,
+          "query_vector_builder" : {
+            "lookup" : {
+              "index" : "es-docs-sv",
+              "id" : "1",
+              "path" : "v"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 18,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "es-docs-sv",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-sv/_update/1",
+      "body" : {
+        "doc" : {
+          "t" : "c"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-sv",
+        "_id" : "1",
+        "_version" : 2,
+        "result" : "updated",
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 2,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "POST /es-docs-sv/_update/1?refresh=true",
+      "body" : {
+        "script" : {
+          "source" : "ctx._source.t = String.valueOf(ctx._source.v)"
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-sv",
+        "_id" : "1",
+        "_version" : 3,
+        "result" : "updated",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 3,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "GET /es-docs-sv/_doc/1?_source_exclude_vectors=false",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-sv",
+        "_id" : "1",
+        "_version" : 3,
+        "_seq_no" : 3,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "t" : "[1.5, 2.4999998, 3.5]",
+          "noidx" : [
+            1.0E-8,
+            123456.789,
+            -0.5
+          ],
+          "o" : [
+            {
+              "x" : 1,
+              "w" : [
+                1,
+                -2,
+                127
+              ]
+            },
+            {
+              "y" : 2
+            }
+          ],
+          "p" : {
+            "c" : 1,
+            "b" : [
+              10,
+              -1
+            ]
+          },
+          "s" : {
+            "k" : 1,
+            "sp" : {
+              "aa" : 3.140625,
+              "zz" : 0.123291016
+            }
+          },
+          "n" : [
+            {
+              "k" : 1,
+              "w" : [
+                1.0,
+                2.0
+              ]
+            },
+            {
+              "k" : 2
+            }
+          ],
+          "z" : 1.5,
+          "v" : [
+            1.5,
+            2.4999998,
+            3.5
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /es-docs-sv/_update_by_query?refresh=true",
+      "body" : {
+        "query" : {
+          "ids" : {
+            "values" : [
+              "1"
+            ]
+          }
+        },
+        "script" : {
+          "source" : "ctx._source.u = 1"
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 145,
+        "timed_out" : false,
+        "total" : 1,
+        "updated" : 1,
+        "deleted" : 0,
+        "batches" : 1,
+        "version_conflicts" : 0,
+        "noops" : 0,
+        "retries" : {
+          "bulk" : 0,
+          "search" : 0
+        },
+        "throttled_millis" : 0,
+        "requests_per_second" : -1.0,
+        "throttled_until_millis" : 0,
+        "failures" : [ ]
+      }
+    },
+    {
+      "req" : "GET /es-docs-sv/_doc/1?_source_exclude_vectors=false",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-sv",
+        "_id" : "1",
+        "_version" : 4,
+        "_seq_no" : 4,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "p" : {
+            "c" : 1,
+            "b" : [
+              10,
+              -1
+            ]
+          },
+          "s" : {
+            "k" : 1,
+            "sp" : {
+              "aa" : 3.140625,
+              "zz" : 0.123291016
+            }
+          },
+          "t" : "[1.5, 2.4999998, 3.5]",
+          "u" : 1,
+          "z" : 1.5,
+          "noidx" : [
+            1.0E-8,
+            123456.789,
+            -0.5
+          ],
+          "n" : [
+            {
+              "k" : 1,
+              "w" : [
+                1.0,
+                2.0
+              ]
+            },
+            {
+              "k" : 2
+            }
+          ],
+          "o" : [
+            {
+              "x" : 1,
+              "w" : [
+                1,
+                -2,
+                127
+              ]
+            },
+            {
+              "y" : 2
+            }
+          ],
+          "v" : [
+            1.5,
+            2.4999998,
+            3.5
+          ]
+        }
+      }
+    },
+    {
+      "req" : "POST /_reindex?refresh=true",
+      "body" : {
+        "source" : {
+          "index" : "es-docs-sv"
+        },
+        "dest" : {
+          "index" : "es-docs-sv-dst"
+        }
+      },
+      "mask" : [
+        "took"
+      ],
+      "status" : 200,
+      "response" : {
+        "took" : 256,
+        "timed_out" : false,
+        "total" : 2,
+        "updated" : 0,
+        "created" : 2,
+        "deleted" : 0,
+        "batches" : 1,
+        "version_conflicts" : 0,
+        "noops" : 0,
+        "retries" : {
+          "bulk" : 0,
+          "search" : 0
+        },
+        "throttled_millis" : 0,
+        "requests_per_second" : -1.0,
+        "throttled_until_millis" : 0,
+        "failures" : [ ]
+      }
+    },
+    {
+      "req" : "GET /es-docs-sv-dst/_doc/1?_source_exclude_vectors=false",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-sv-dst",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 1,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "p" : {
+            "c" : 1,
+            "b" : [
+              10,
+              -1
+            ]
+          },
+          "s" : {
+            "k" : 1,
+            "sp" : {
+              "aa" : 3.140625,
+              "zz" : 0.123291016
+            }
+          },
+          "t" : "[1.5, 2.4999998, 3.5]",
+          "u" : 1,
+          "z" : 1.5,
+          "noidx" : [
+            1.0E-8,
+            123456.789,
+            -0.5
+          ],
+          "n" : [
+            {
+              "k" : 1,
+              "w" : [
+                1.0,
+                2.0
+              ]
+            },
+            {
+              "k" : 2
+            }
+          ],
+          "o" : [
+            {
+              "x" : 1,
+              "w" : [
+                1,
+                -2,
+                127
+              ]
+            },
+            {
+              "y" : 2
+            }
+          ],
+          "v" : [
+            1.5,
+            2.4999998,
+            3.5
+          ]
+        }
+      }
+    },
+    {
+      "req" : "PUT /es-docs-sv/_settings",
+      "body" : {
+        "index.blocks.write" : true
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /es-docs-sv/_clone/es-docs-sv-clone?wait_for_active_shards=1",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-sv-clone"
+      }
+    },
+    {
+      "req" : "GET /es-docs-sv-clone/_doc/1?_source_exclude_vectors=false",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-sv-clone",
+        "_id" : "1",
+        "_version" : 4,
+        "_seq_no" : 4,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "p" : {
+            "c" : 1,
+            "b" : [
+              10,
+              -1
+            ]
+          },
+          "s" : {
+            "k" : 1,
+            "sp" : {
+              "aa" : 3.140625,
+              "zz" : 0.123291016
+            }
+          },
+          "t" : "[1.5, 2.4999998, 3.5]",
+          "u" : 1,
+          "z" : 1.5,
+          "noidx" : [
+            1.0E-8,
+            123456.789,
+            -0.5
+          ],
+          "n" : [
+            {
+              "k" : 1,
+              "w" : [
+                1.0,
+                2.0
+              ]
+            },
+            {
+              "k" : 2
+            }
+          ],
+          "o" : [
+            {
+              "x" : 1,
+              "w" : [
+                1,
+                -2,
+                127
+              ]
+            },
+            {
+              "y" : 2
+            }
+          ],
+          "v" : [
+            1.5,
+            2.4999998,
+            3.5
+          ]
+        }
+      }
+    },
+    {
+      "req" : "PUT /es-docs-sv-keep",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1,
+          "index.mapping.exclude_source_vectors" : false
+        },
+        "mappings" : {
+          "properties" : {
+            "v" : {
+              "type" : "dense_vector",
+              "dims" : 3,
+              "similarity" : "cosine"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "es-docs-sv-keep"
+      }
+    },
+    {
+      "req" : "PUT /es-docs-sv-keep/_doc/1?refresh=true",
+      "body" : {
+        "v" : [
+          1.5,
+          2.5,
+          3.5
+        ],
+        "t" : "a"
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "es-docs-sv-keep",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      }
+    },
+    {
+      "req" : "GET /es-docs-sv-keep/_doc/1",
+      "status" : 200,
+      "response" : {
+        "_index" : "es-docs-sv-keep",
+        "_id" : "1",
+        "_version" : 1,
+        "_seq_no" : 0,
+        "_primary_term" : 1,
+        "found" : true,
+        "_source" : {
+          "v" : [
+            1.5,
+            2.5,
+            3.5
+          ],
+          "t" : "a"
+        }
+      }
+    }
+  ]
+}

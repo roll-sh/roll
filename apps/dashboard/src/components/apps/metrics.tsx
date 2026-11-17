@@ -44,13 +44,16 @@ const RANGES = [
   { minutes: 60, label: "hour", short: "1h" },
   { minutes: 24 * 60, label: "day", short: "24h" },
   { minutes: 7 * 24 * 60, label: "week", short: "7d" },
+  // Past a week rolld answers a point an hour (its hourly rollups, kept 90 days).
+  { minutes: 30 * 24 * 60, label: "30 days", short: "30d" },
+  { minutes: 90 * 24 * 60, label: "90 days", short: "90d" },
 ] as const;
 type Range = (typeof RANGES)[number];
 
 /** At most this many points a chart: a week of minutes in 28-minute buckets. */
 const MAX_POINTS = 360;
 
-const COUNTS = ["requests", "errors", "cold_starts", "egress_bytes"] as const;
+const COUNTS = ["requests", "errors", "cold_starts", "egress_bytes", "over_capacity"] as const;
 const PEAKS = ["p50_ms", "p95_ms", "p99_ms", "cpu", "memory_bytes", "instances", "cold_start_ms"] as const;
 
 /** `m` in buckets of `size` minutes (each named by its first): counts summed, the rest their peak. */
@@ -253,14 +256,16 @@ function Routes({ stats }: { stats: RouteStats }) {
 }
 
 /** Requests, errors, latency, CPU, memory, instances and cold starts over the last hour, day or week. */
-export function MetricsTab({ service, env, memoryMb }: { service: string; env: string; /** Its memory limit, MB. */ memoryMb?: number }) {
+export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: string; env: string; /** Its memory limit, MB. */ memoryMb?: number; /** The most instances it scales to. */ maxInstances?: number }) {
   const [range, setRange] = useState<Range>(RANGES[0]);
   const [raw, setM] = useState<MetricsData | null>(null);
   const [deploys, setDeploys] = useState<Deployment[]>([]);
   const [routes, setRoutes] = useState<RouteStats | null>(null);
   const size = raw ? Math.max(1, Math.ceil(raw.minutes.length / MAX_POINTS)) : 1;
   const m = useMemo(() => (raw ? bucketed(raw, size) : null), [raw, size]);
-  const per = size === 1 ? "min" : `${size} min`;
+  // Minutes a point stands for: rolld's step (an hour past a week) times the buckets here.
+  const span = size * (raw?.step ?? 1);
+  const per = span === 1 ? "min" : span === 60 ? "hour" : span % 60 === 0 ? `${span / 60} h` : `${span} min`;
   const [error, setError] = useState<string | null>(null);
   const [table, setTable] = useState(false);
   const { copied, copy } = useCopy();
@@ -322,11 +327,18 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
       { title: "CPU (cores)", agg: "peak" as Agg, series: [{ label: "cpu", values: m.cpu, color: ink }], format: cores, summary: `peak ${cores(peak(m.cpu))} cores` },
       { title: "Memory", agg: "peak" as Agg, series: [{ label: "memory", values: m.memory_bytes, color: ink }], format: (v: number) => formatBytes(v), summary: `peak ${formatBytes(peak(m.memory_bytes))}${memoryMb ? ` of ${formatBytes(memoryMb * 1024 * 1024)}` : ""}`, limit: memoryMb ? memoryMb * 1024 * 1024 : undefined },
       { title: `Egress / ${per}`, agg: "total" as Agg, series: [{ label: "egress", values: m.egress_bytes ?? m.minutes.map(() => 0), color: ink }], format: (v: number) => formatBytes(v), summary: `${formatBytes(sum(m.egress_bytes ?? []))} answered in the ${range.label}` },
-      { title: "Instances", agg: "peak" as Agg, series: [{ label: "instances", values: m.instances, color: ink }], format: count, summary: `peak ${peak(m.instances)}` },
+      { title: "Instances", agg: "peak" as Agg, series: [{ label: "instances", values: m.instances, color: ink }], format: count, summary: `peak ${peak(m.instances)}${maxInstances ? ` of ${maxInstances}` : ""}`, limit: maxInstances },
+      {
+        title: `Over capacity / ${per}`,
+        agg: "total" as Agg,
+        series: [{ label: "over capacity", values: m.over_capacity ?? m.minutes.map(() => 0), color: ink }],
+        format: count,
+        summary: sum(m.over_capacity ?? []) ? `${sum(m.over_capacity ?? [])} requests found every instance busy: raise max instances or concurrency` : `none: there was always room under max instances`,
+      },
       { title: `Cold starts / ${per}`, agg: "total" as Agg, series: [{ label: "cold starts", values: m.cold_starts, color: ink }], format: count, summary: `${sum(m.cold_starts)} in the ${range.label}` },
       { title: "Cold start time", agg: "peak" as Agg, series: [{ label: "cold start", values: m.cold_start_ms, color: ink }], format: formatMs, summary: `slowest ${formatMs(peak(m.cold_start_ms))}` },
     ];
-  }, [m, range, per, memoryMb]);
+  }, [m, range, per, memoryMb, maxInstances]);
 
   if (error && !m) return <p className="text-[13px] text-danger">Metrics didn't load: {error}</p>;
   if (!m) return <p className="text-[13px] text-subtle"><span className="shimmer">Loading metrics…</span></p>;
@@ -335,7 +347,7 @@ export function MetricsTab({ service, env, memoryMb }: { service: string; env: s
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-[12px] text-subtle">
-          {size === 1 ? "Per minute" : `Per ${size} minutes`}, the last {range.label}. Asleep minutes are zeros: nothing ran.
+          {span === 1 ? "Per minute" : span === 60 ? "Per hour" : span % 60 === 0 ? `Per ${span / 60} hours` : `Per ${span} minutes`}, the last {range.label}. Asleep minutes are zeros: nothing ran.
         </p>
         <div className="flex items-center gap-2">
           <div className="flex rounded-lg border border-line p-0.5" role="radiogroup" aria-label="Range">
