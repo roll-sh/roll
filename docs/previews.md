@@ -497,8 +497,12 @@ previews' code may reach:
   is to run its code, not a read of what it sends out. With open egress, an approved fork could
   post the values it resolved (staging's, since an untrusted preview never gets a protected
   environment's) anywhere. This mirrors roll secrets' split, where untrusted gets less. Asked
-  for by the roll secrets thread (2026-11-17). On roll apps it holds once apps' #143 is on main,
-  as `"roll"` does.
+  for by the roll secrets thread (2026-11-17). It holds for its services and for its seed,
+  release and teardown jobs: each runs on the preview's own network, with the listed hosts
+  through its egress proxy (an adversarial review found the jobs ran on Docker's default bridge).
+  On roll apps it holds for the instance (apps' #143). A roll apps build isn't held to it: the
+  build sees the environment's variables on an open network. So a fork's head on a Git URL service
+  under Roll only isn't approved to run until roll apps builds closed environments that way.
 
 Under `"roll"`, a preview's services resolve names through Docker's embedded DNS with
 TEST-NET-1 (`192.0.2.1`, never routed) as its upstream. The network's own names (`roll-egress`,

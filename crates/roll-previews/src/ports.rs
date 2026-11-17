@@ -384,6 +384,10 @@ pub struct SeedJob {
     pub revision: String,
     pub seed: crate::settings::Seed,
     pub env: Vec<(String, String)>,
+    /// What its code may reach, as the preview's services (`Settings::egress_for`): a fork's
+    /// migrations run with its branched data, so they're held to it too.
+    pub egress: crate::settings::EgressRule,
+    pub egress_hosts: Vec<String>,
 }
 
 /// A service in a project's catalog (roll apps): a repo's (built at a revision) or an image's.

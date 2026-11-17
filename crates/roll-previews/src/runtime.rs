@@ -33,7 +33,8 @@ pub trait Trees: Send + Sync {
     async fn prepare(&self, iso: &dyn Isolation, job: &Job, repo: &str, revision: &str) -> anyhow::Result<()>;
     /// Run a check-like job on a revision's tree (seeds): a pooled work tree, leased while the
     /// job's container is made.
-    async fn run(&self, iso: &Arc<dyn Isolation>, spec: &code_preview::config::CheckSpec, repo: &str, revision: &str, env: &[(String, String)]) -> anyhow::Result<code_preview::runner::RunOutput>;
+    /// On `network` (the preview's own) when one is given.
+    async fn run(&self, iso: &Arc<dyn Isolation>, spec: &code_preview::config::CheckSpec, repo: &str, revision: &str, env: &[(String, String)], network: Option<code_preview::isolation::Network>) -> anyhow::Result<code_preview::runner::RunOutput>;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1321,7 +1322,21 @@ impl Runtime {
             // A seed's variables come from the preview (`job.env`), not a secrets environment.
             secrets: None,
         };
-        let out = self.trees.run(&self.iso, &spec, &job.repo, &job.revision, &env).await?;
+        // Held to what the preview's services reach: on its own network under Roll only, the
+        // listed hosts through its egress proxy (a fork's migrations can't post its data out).
+        let mut env = env;
+        let network = if job.egress == crate::settings::EgressRule::Roll && docker { Some(preview_network(&job.preview).await?) } else { None };
+        if let Some(n) = network.as_ref().filter(|_| !job.egress_hosts.is_empty()) {
+            self.egress_proxy(&job.preview, &n.name, &job.egress_hosts).await?;
+            let proxy = format!("http://{EGRESS_ALIAS}:3128");
+            for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+                env.push((k.into(), proxy.clone()));
+            }
+            for k in ["NO_PROXY", "no_proxy"] {
+                env.push((k.into(), "host.docker.internal,localhost,127.0.0.1".into()));
+            }
+        }
+        let out = self.trees.run(&self.iso, &spec, &job.repo, &job.revision, &env, network).await?;
         match out.result {
             Outcome::Exited(code) => Ok((code, out.log)),
             Outcome::TimedOut => Ok((124, format!("timed out after {}s\n{}", job.seed.timeout_s, out.log))),

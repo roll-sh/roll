@@ -878,7 +878,15 @@ impl Engine {
         set(&mut env, "ROLL_PREVIEW", r.id.clone());
         set(&mut env, "ROLL_REPO", r.repo.clone());
         set(&mut env, "ROLL_CHANGESET", r.build().to_string());
-        let run = crate::ports::SeedJob { preview: r.id.clone(), repo: r.repo.clone(), revision: r.build().to_string(), seed: job.clone(), env };
+        let run = crate::ports::SeedJob {
+            preview: r.id.clone(),
+            repo: r.repo.clone(),
+            revision: r.build().to_string(),
+            seed: job.clone(),
+            env,
+            egress: s.egress_for(r.trusted),
+            egress_hosts: s.egress_hosts.clone(),
+        };
         self.store.log(&r.id, &format!("{what}: {}", job.run.lines().next().unwrap_or("")))?;
         let ran = self.apps.seed(&run).await;
         for l in &leases {

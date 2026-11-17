@@ -55,7 +55,7 @@ async fn a_change_gets_a_full_preview_that_follows_pushes_and_goes_when_it_lands
 
 #[tokio::test]
 async fn a_fork_waits_for_approval_and_a_failed_step_is_retried() {
-    let e = env(json!({ "enabled": true, "resources": { "redis:rdb_cache": "skip" } }));
+    let e = env(json!({ "enabled": true, "resources": { "redis:rdb_cache": "skip" }, "seed": { "image": "node:22", "run": "npm run seed" } }));
     e.code.open(ChangeInfo { trusted: false, ..change("chg_f", 3) });
     e.engine.pass().await.unwrap();
     let p = e.code.last_report("chg_f");
@@ -79,6 +79,8 @@ async fn a_fork_waits_for_approval_and_a_failed_step_is_retried() {
     // previews reach anything (`egress_forks`).
     let egress = e.apps.egress.lock().clone();
     assert!(!egress.is_empty() && egress.values().all(|x| *x == roll_previews::settings::EgressRule::Roll), "{egress:?}");
+    let jobs = e.apps.seed_egress.lock().clone();
+    assert!(!jobs.is_empty() && jobs.iter().all(|x| *x == roll_previews::settings::EgressRule::Roll), "its seed too: {jobs:?}");
     assert_eq!(p.reaches, roll_previews::settings::EgressRule::Roll, "and it says so");
 
     // A new push un-approves it: its services stop and it waits again.

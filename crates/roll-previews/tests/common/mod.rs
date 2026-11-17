@@ -207,6 +207,8 @@ pub struct FakeApps {
     /// The variables each service was last deployed with.
     pub vars: Mutex<HashMap<(String, String), Vars>>,
     pub removed: Mutex<Vec<(String, String)>>,
+    /// What each seed or release job was run able to reach.
+    pub seed_egress: Mutex<Vec<roll_previews::settings::EgressRule>>,
     /// What each service was deployed able to reach.
     pub egress: Mutex<HashMap<(String, String), roll_previews::settings::EgressRule>>,
     /// Seeds run (their DATABASE_URL), and the exit code the next ones give.
@@ -296,6 +298,7 @@ impl Apps for FakeApps {
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
         let db = job.env.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap_or_default();
         self.seeds.lock().push(db);
+        self.seed_egress.lock().push(job.egress);
         let at_rev = self.deployed.lock().values().filter(|r| **r == job.revision).count();
         self.runs.lock().push((job.seed.run.clone(), job.revision.clone(), at_rev));
         Ok((self.seed_exit.load(Ordering::SeqCst), "seed output".into()))
