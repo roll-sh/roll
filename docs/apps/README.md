@@ -1181,16 +1181,14 @@ it). Both carry the exit code.
 A secret value never reaches a log (GitHub Actions' masking, Netlify's secret scanning): every
 line written to an environment's log, a build's and a job's (the app's output, a build step's,
 OTLP log records, roll's own lines) has the environment's sealed variables, every value roll
-secrets gives it (a secret is one whatever its name or tag; a linked resource's address from
-there as a link's), its links' credentials (by name: `PASSWORD`, `SECRET`, `TOKEN`, `API_KEY` …)
+secrets gives it (a secret is one whatever its name or tag, but for the linked fields it says
+are plain: a host, a port, a user, a database), its links' credentials (by name: `PASSWORD`, `SECRET`, `TOKEN`, `API_KEY` …)
 and the password in any URL variable taken out as `***` before it's kept, followed, stored or
 drained (`logs::Redact`, one Aho–Corasick pass a line, set as each deployment is made and kept for
 the eight before it). A value under six characters is left, and so is each line of a multi-line
 value under that; a value split across lines by the app isn't found. Unsealed variables are
 shown in Variables anyway and aren't hidden. Not yet: a static site's exported files aren't
-scanned for them (Netlify fails a build that would ship one), and a linked resource's field
-renamed to a name that doesn't say it's a credential (`DB_PASS`) is shown until roll secrets
-says which linked fields are plain (its `plain` list, coming). `logs.rs::secret_values_are_taken_out_of_a_logs_lines`
+scanned for them (Netlify fails a build that would ship one). `logs.rs::secret_values_are_taken_out_of_a_logs_lines`
 and `api.rs::a_sealed_value_never_reaches_the_log`.
 
 ## Variables as files

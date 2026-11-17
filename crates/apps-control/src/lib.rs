@@ -384,10 +384,11 @@ pub struct ResolvedVars {
     pub unresolved: Vec<String>,
     /// Never shown again: the environment's own sealed variables, and references that read one.
     pub sealed: BTreeSet<String>,
-    /// Those roll secrets gave (a secret is one whatever its name or tag), and of them its
-    /// linked resources' (an address: hidden as a link's are, by name and a URL's password).
+    /// Those roll secrets gave (a secret is one whatever its name or tag), and of them those it
+    /// says are plain (`SecretVar::plain`: a linked resource's host, port, user or database),
+    /// which logs may show but for a URL's password.
     pub from_secrets: BTreeSet<String>,
-    pub linked_secrets: BTreeSet<String>,
+    pub plain_secrets: BTreeSet<String>,
 }
 
 impl ResolvedVars {
@@ -400,8 +401,7 @@ impl ResolvedVars {
             let source = self.sources.get(k).copied();
             // What roll secrets gave, unless the service's own variable took the name since.
             let secret = source == Some("secret") && self.from_secrets.contains(k);
-            let linked = source == Some("link") || (source == Some("secret") && self.linked_secrets.contains(k));
-            if self.sealed.contains(k) || (secret && !self.linked_secrets.contains(k)) || (credential && linked) {
+            if self.sealed.contains(k) || (secret && !self.plain_secrets.contains(k)) || (credential && source == Some("link")) {
                 out.push(v.clone());
             }
             if let Some(p) = url::Url::parse(v).ok().and_then(|u| u.password().map(|p| percent_encoding::percent_decode_str(p).decode_utf8_lossy().into_owned())) {
@@ -2055,7 +2055,7 @@ impl Apps {
             }
         }
         let mut sensitive = BTreeSet::new();
-        let (mut from_secrets, mut linked_secrets) = (BTreeSet::new(), BTreeSet::new());
+        let (mut from_secrets, mut plain_secrets) = (BTreeSet::new(), BTreeSet::new());
         match self.deps.secrets.resolve(&svc.project, &env.name, &svc.id).await {
             Ok(secrets) => {
                 for s in secrets {
@@ -2063,8 +2063,8 @@ impl Apps {
                         sensitive.insert(s.name.clone());
                     }
                     from_secrets.insert(s.name.clone());
-                    if s.linked {
-                        linked_secrets.insert(s.name.clone());
+                    if s.plain {
+                        plain_secrets.insert(s.name.clone());
                     }
                     // A linked resource's address, rewritten for the container as apps' own links.
                     let v = if s.linked { self.deps.runtime.reach(&s.value) } else { s.value };
@@ -2086,7 +2086,7 @@ impl Apps {
         // Reference variables, one level deep: against what resolved above, and other services'.
         let unresolved = self.fill_references(svc, &env.name, &mut vars, &mut sealed).await;
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
-        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, sealed, from_secrets, linked_secrets })
+        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, sealed, from_secrets, plain_secrets })
     }
 
     /// Fill the `${{ … }}` in the service's own variables ([`refs`]); what named nothing. A
