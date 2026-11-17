@@ -68,6 +68,12 @@ export interface Run {
   memory_mb: number;
   health_path?: string;
   health_timeout_s: number;
+  /** Seconds between two health checks while running (2–300; unset 10). */
+  health_every_s?: number;
+  /** Failed checks in a row that replace an instance (1–10; unset 3). */
+  health_failures?: number;
+  /** A worker's health check: a shell command in its instance, healthy on exit 0. */
+  health_command?: string;
   /** A replaced instance's time to finish: its requests, then SIGTERM, SIGKILL when it's up (1–300; unset 30). */
   drain_s?: number;
   /** A web service also scales on CPU: another instance while they average over this percent for a minute (10–100). */

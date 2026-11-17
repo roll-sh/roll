@@ -461,6 +461,18 @@ pub struct Run {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health_path: Option<String>,
     pub health_timeout_s: u32,
+    /// Seconds between two health checks of a running instance (its `health_path`, or a
+    /// worker's `health_command`); none: the node's (10).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_every_s: Option<u32>,
+    /// Failed health checks in a row that replace an instance; none: the node's (3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_failures: Option<u32>,
+    /// A worker's health check (Docker's `HEALTHCHECK CMD`, Kubernetes' exec probe): a shell
+    /// command run in its instance (`sh -c`), healthy on exit 0, so a consumer that hangs with
+    /// its process up is replaced. It runs code in production, so changing it is a deploy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_command: Option<String>,
     pub suspend_after_s: u32,
     pub sleep_after_s: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -712,6 +724,9 @@ impl Default for Run {
             memory_mb: 512,
             health_path: None,
             health_timeout_s: 60,
+            health_every_s: None,
+            health_failures: None,
+            health_command: None,
             suspend_after_s: 30,
             sleep_after_s: 600,
             volume: None,
@@ -799,6 +814,20 @@ impl Run {
         }
         if !(1..=900).contains(&self.health_timeout_s) {
             return bad("health_timeout_s is 1–900");
+        }
+        if self.health_every_s.is_some_and(|s| !(2..=300).contains(&s)) {
+            return bad("health_every_s is 2–300");
+        }
+        if self.health_failures.is_some_and(|n| !(1..=10).contains(&n)) {
+            return bad("health_failures is 1–10");
+        }
+        if let Some(c) = &self.health_command {
+            if self.kind != RunType::Worker {
+                return bad("health_command is for a worker (a web service's health is its health_path)");
+            }
+            if c.trim().is_empty() || c.len() > 1000 || c.contains('\0') {
+                return bad("health_command is a command of at most 1000 characters");
+            }
         }
         if self.drain_s.is_some_and(|d| !(1..=300).contains(&d)) {
             return bad("drain_s is 1–300");

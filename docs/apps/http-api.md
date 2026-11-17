@@ -211,8 +211,12 @@ type Run = {
   cpu: number;              // vCPU per instance, 0.25–8 (default 0.5)
   memory_mb: number;        // 256–16384 (default 512)
   health_path?: string;     // web: GET it for a 2xx/3xx; none: the port accepting a connection.
-                            // Also checked every 10 s while running: 3 failures in a row replace the instance
+                            // Also checked while running: health_failures in a row replace the instance
   health_timeout_s: number; // default 60
+  health_every_s?: number;  // 2–300: between two checks while running; unset 10
+  health_failures?: number; // 1–10: failed checks in a row that replace an instance; unset 3
+  health_command?: string;  // worker: a shell command in each instance (`sh -c`, Docker's HEALTHCHECK), healthy on exit 0;
+                            // unhealthy is replaced as a crash. Changing it is a deploy (it runs in production)
   suspend_after_s: number;  // default 30; 0 never suspends
   sleep_after_s: number;    // default 600; min_instances > 0 never sleeps below min
   volume?: { mount: string; size_gb: number };

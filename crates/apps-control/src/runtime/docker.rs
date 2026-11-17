@@ -247,6 +247,21 @@ impl Docker {
         if let Some((vol, mount)) = &spec.volume {
             args.extend(["--volume".into(), format!("{vol}:{mount}")]);
         }
+        if let Some(h) = &spec.health {
+            let s = |d: Duration| format!("{}ms", d.as_millis());
+            args.extend([
+                "--health-cmd".into(),
+                h.command.clone(),
+                "--health-interval".into(),
+                s(h.every),
+                "--health-timeout".into(),
+                s(h.every.min(Duration::from_secs(30))),
+                "--health-retries".into(),
+                h.failures.to_string(),
+                "--health-start-period".into(),
+                s(h.start),
+            ]);
+        }
         // The env file: KEY=VALUE lines; docker reads values verbatim (no quoting), so values
         // with a newline can't go this way.
         tokio::fs::create_dir_all(&self.scratch).await?;
@@ -740,6 +755,13 @@ impl Runtime for Docker {
         docker(&["inspect", "-f", "{{.State.Running}}", name]).await.is_ok_and(|s| s == "true")
     }
 
+    async fn unhealthy(&self, name: &str) -> bool {
+        if let Some(e) = &self.engine {
+            return e.inspect(name).await.is_ok_and(|i| i.health.as_deref() == Some("unhealthy"));
+        }
+        docker(&["inspect", "-f", "{{if .State.Health}}{{.State.Health.Status}}{{end}}", name]).await.is_ok_and(|s| s == "unhealthy")
+    }
+
     async fn exited(&self, name: &str) -> Option<super::Exit> {
         let i = self.engine.as_ref()?.inspect(name).await.ok()?;
         (!i.running).then_some(super::Exit { code: i.exit_code, oom: i.oom_killed })
@@ -1092,8 +1114,24 @@ fn engine_config(spec: &InstanceSpec, host_port: Option<u16>, host_gateway: Opti
         config["Entrypoint"] = json!(["sh"]);
         config["Cmd"] = json!(["-c", cmd]);
     }
+    if let Some(h) = &spec.health {
+        config["Healthcheck"] = health_config(h);
+    }
     config["HostConfig"] = host;
     Ok(config)
+}
+
+/// Docker's health check for a worker's `health_command` (nanoseconds; a check may take as long
+/// as the interval, at most 30 s).
+fn health_config(h: &super::HealthCheck) -> serde_json::Value {
+    let ns = |d: Duration| d.as_nanos() as i64;
+    serde_json::json!({
+        "Test": ["CMD-SHELL", h.command],
+        "Interval": ns(h.every),
+        "Timeout": ns(h.every.min(Duration::from_secs(30))),
+        "Retries": h.failures,
+        "StartPeriod": ns(h.start),
+    })
 }
 
 async fn write_private(path: &std::path::Path, data: &[u8]) -> anyhow::Result<()> {
@@ -1299,6 +1337,7 @@ mod tests {
             idle_stop_s: None,
             registry: None,
             files: vec![],
+            health: None,
         };
         let c = engine_config(&spec, Some(41234), Some("host-gateway")).unwrap();
         assert_eq!(c["Env"][0], format!("TLS_KEY={pem}"));

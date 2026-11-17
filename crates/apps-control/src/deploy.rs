@@ -1422,6 +1422,12 @@ impl Apps {
             idle_stop_s: (run.kind == RunType::Web && run.min_instances == 0).then(|| run.sleep_after_s.max(60) + 300),
             registry,
             files,
+            health: run.health_command.as_ref().filter(|_| run.kind == RunType::Worker).map(|c| crate::runtime::HealthCheck {
+                command: c.clone(),
+                every: Duration::from_secs(run.health_every_s.unwrap_or(10) as u64),
+                failures: run.health_failures.unwrap_or(3),
+                start: Duration::from_secs(run.health_timeout_s as u64),
+            }),
         };
         let spa = dep.plan.as_ref().is_some_and(|p| p["spa"] == true);
         // A static plan whose files were exported answers from them, with no instance.

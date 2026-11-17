@@ -53,6 +53,8 @@ pub struct Inspect {
     pub closed: Option<std::net::SocketAddr>,
     /// The (first) network it's on.
     pub network: Option<String>,
+    /// Its health check's verdict (`starting`, `healthy`, `unhealthy`), when it has one.
+    pub health: Option<String>,
 }
 
 impl Engine {
@@ -325,6 +327,13 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
         oom_killed: bool,
         #[serde(rename = "Pid", default)]
         pid: u32,
+        #[serde(rename = "Health", default)]
+        health: Option<Health>,
+    }
+    #[derive(Deserialize)]
+    struct Health {
+        #[serde(rename = "Status", default)]
+        status: String,
     }
     #[derive(Deserialize)]
     struct Host {
@@ -347,7 +356,8 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
     let gateways = networks.iter().filter_map(|e| e.gateway.parse().ok()).collect();
     let closed = labels.get("sh.roll.apps.closed").and_then(|p| p.parse::<u16>().ok()).and_then(|p| Some(std::net::SocketAddr::new(networks.iter().find_map(|e| e.ip.parse().ok())?, p)));
     let pid = (c.state.running && c.state.pid > 0).then_some(c.state.pid);
-    Ok(Inspect { id: c.id, running: c.state.running, host_port, cpu_nanos, exit_code: c.state.exit_code, oom_killed: c.state.oom_killed, pid, gateways, exposed, closed, network })
+    let health = c.state.health.map(|h| h.status).filter(|s| !s.is_empty());
+    Ok(Inspect { id: c.id, running: c.state.running, host_port, cpu_nanos, exit_code: c.state.exit_code, oom_killed: c.state.oom_killed, pid, gateways, exposed, closed, network, health })
 }
 
 /// Splits Docker's multiplexed log stream (a container without a TTY): frames of an 8-byte header
@@ -398,7 +408,7 @@ mod tests {
     #[test]
     fn inspect_reads_id_state_and_the_published_port() {
         let body = br#"{"Id":"abc","State":{"Running":true},"HostConfig":{"PortBindings":{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"41234"}]}}}"#;
-        assert_eq!(parse_inspect(body).unwrap(), Inspect { id: "abc".into(), running: true, host_port: Some(41234), cpu_nanos: None, exit_code: None, oom_killed: false, pid: None, gateways: vec![], exposed: None, closed: None, network: None });
+        assert_eq!(parse_inspect(body).unwrap(), Inspect { id: "abc".into(), running: true, host_port: Some(41234), cpu_nanos: None, exit_code: None, oom_killed: false, pid: None, gateways: vec![], exposed: None, closed: None, network: None, health: None });
         let oom = br#"{"Id":"o","State":{"Running":false,"ExitCode":137,"OOMKilled":true},"HostConfig":{}}"#;
         let i = parse_inspect(oom).unwrap();
         assert_eq!((i.exit_code, i.oom_killed), (Some(137), true));

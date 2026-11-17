@@ -298,6 +298,16 @@ pub enum AppsCmd {
         /// How long a new instance has to pass its health check at a deploy.
         #[arg(long, value_name = "SECONDS")]
         health_timeout: Option<u32>,
+        /// Seconds between two health checks while running (2–300; 0: the default, 10).
+        #[arg(long, value_name = "SECONDS")]
+        health_every: Option<u32>,
+        /// Failed health checks in a row that replace an instance (1–10; 0: the default, 3).
+        #[arg(long, value_name = "N")]
+        health_failures: Option<u32>,
+        /// A worker's health check: a shell command in its instance, healthy on exit 0; `none`
+        /// removes it.
+        #[arg(long, value_name = "COMMAND")]
+        health_command: Option<String>,
         /// Alert when an instance's memory stays at this share of its limit for five minutes (0
         /// off).
         #[arg(long, value_name = "PERCENT")]
@@ -2432,7 +2442,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, rollout, rollout_step, rollout_errors, rollout_manual, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, rollout, rollout_step, rollout_errors, rollout_manual, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() {
@@ -2546,6 +2556,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("pre_deploy", text(pre_deploy)),
                 ("health_path", text(health)),
                 ("health_timeout_s", health_timeout.map(Value::from)),
+                ("health_every_s", health_every.map(|n| if n == 0 { Value::Null } else { Value::from(n) })),
+                ("health_failures", health_failures.map(|n| if n == 0 { Value::Null } else { Value::from(n) })),
+                ("health_command", text(health_command)),
                 ("alerts", alerts),
                 ("schedule", schedule.map(Value::from)),
                 ("timezone", timezone.map(Value::from)),

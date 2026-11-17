@@ -734,10 +734,11 @@ fn apps_create_action(b: &Value) -> Action {
 /// A service's run settings that change only how much of it runs and how it's watched: its size,
 /// scale, health checks, timers, alerts, rollout and restarts. Every other run key decides what
 /// production runs, when, or who reaches it (start, pre-deploy, schedule, schedules and their
-/// timezone and retries, kind, port, volume, public, tcp, and `rollback_on_crash`, which has roll
+/// timezone and retries, kind, port, volume, public, tcp, a worker's `health_command`, which runs
+/// in its instances, and `rollback_on_crash`, which has roll
 /// put an older deployment live by itself), and so does any key apps adds later until it's listed
 /// here: a new setting is never a quiet way into production.
-const APPS_WRITE_RUN: [&str; 19] = [
+const APPS_WRITE_RUN: [&str; 21] = [
     "min_instances",
     "max_instances",
     "concurrency",
@@ -745,6 +746,8 @@ const APPS_WRITE_RUN: [&str; 19] = [
     "memory_mb",
     "health_path",
     "health_timeout_s",
+    "health_every_s",
+    "health_failures",
     "suspend_after_s",
     "sleep_after_s",
     "alerts",
