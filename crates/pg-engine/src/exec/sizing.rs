@@ -191,7 +191,7 @@ pub struct RelFiles {
     /// the first since the database was opened).
     dropped: HashSet<u32>,
     /// Their heaps' estimated sizes.
-    estimated: HashMap<u32, EstHeap>,
+    estimated: FastMap<u32, EstHeap>,
     /// Their btree indexes' leaves, summarized (`btest`), by index.
     est_btrees: FastMap<u32, btest::BtEst>,
     /// What the store holds of their estimates (`estkeep`), and tables whose records go.
@@ -706,9 +706,15 @@ fn option(opts: &[String], name: &str) -> Option<String> {
     })
 }
 
-/// A table's fillfactor (percent).
+/// A table's fillfactor (percent). (Read per row a load writes: `option`'s value without
+/// its copy.)
 pub fn heap_fillfactor(t: &Table) -> usize {
-    option(&t.options, "fillfactor")
+    t.options
+        .iter()
+        .find_map(|o| {
+            let (k, v) = o.split_once('=')?;
+            k.trim().eq_ignore_ascii_case("fillfactor").then(|| v.trim().trim_matches('\''))
+        })
         .and_then(|v| v.parse().ok())
         .unwrap_or(100)
 }
