@@ -15,14 +15,6 @@ pub const SHOT: &str = "/internal/previews/apps-shot";
 /// The most of a holder's answer that's read: the pages' PNGs, as base64.
 const ANSWER_BYTES: usize = 256 << 20;
 
-/// What a holder is asked: the service, its environment, and the run's options.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Ask {
-    service: String,
-    env: String,
-    opts: ShotOptions,
-}
-
 /// Takes a screenshot of a roll apps instance that runs on this node (`None`: there's nothing
 /// to join here, Fargate).
 #[async_trait::async_trait]
@@ -38,9 +30,13 @@ pub fn internal_router(local: Arc<dyn Shoot>, cluster: Arc<Cluster>) -> axum::Ro
         .layer(axum::middleware::from_fn_with_state(cluster, roll_cluster::accept_forwarded))
 }
 
-async fn shot(axum::extract::State(local): axum::extract::State<Arc<dyn Shoot>>, axum::Json(ask): axum::Json<Ask>) -> axum::response::Response {
+/// What a holder is asked: `{service, env, opts}`.
+async fn shot(axum::extract::State(local): axum::extract::State<Arc<dyn Shoot>>, axum::Json(ask): axum::Json<serde_json::Value>) -> axum::response::Response {
     use axum::response::IntoResponse;
-    match local.shoot(&ask.service, &ask.env, &ask.opts).await {
+    let (Some(service), Some(env), Ok(opts)) = (ask["service"].as_str(), ask["env"].as_str(), serde_json::from_value::<ShotOptions>(ask["opts"].clone())) else {
+        return (axum::http::StatusCode::BAD_REQUEST, "expected {service, env, opts}").into_response();
+    };
+    match local.shoot(service, env, &opts).await {
         Ok(shot) => axum::Json(shot).into_response(),
         Err(e) => (axum::http::StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     }
@@ -58,7 +54,7 @@ pub async fn shoot(cluster: Option<&Arc<Cluster>>, local: &dyn Shoot, service: &
 }
 
 async fn on(cluster: &Cluster, holder: &Node, service: &str, env: &str, opts: &ShotOptions) -> anyhow::Result<Option<Shot>> {
-    let body = serde_json::to_vec(&Ask { service: service.into(), env: env.into(), opts: opts.clone() })?;
+    let body = serde_json::to_vec(&serde_json::json!({ "service": service, "env": env, "opts": opts }))?;
     let req = axum::http::Request::builder()
         .method(axum::http::Method::POST)
         .uri(SHOT)
