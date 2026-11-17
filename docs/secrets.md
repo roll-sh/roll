@@ -2826,6 +2826,11 @@ outside roll, on #132) and #166 (a gateway into private networks, on #132).
    (Elasticsearch 9.5.5, OpenSearch 3.9.0, Cassandra 5.0.9, ScyllaDB 2026.3.3). Cassandra's
    credentials cache let a dropped role in for ~1.6 s, so a lease's end sets a password nobody knows
    first. Next: OpenSearch's narrower permission set, and Couchbase and Oracle (Vault has both).
+4c. **MongoDB Atlas through its Admin API** (building: `feature/roll-secrets-mongodb-atlas`, on
+   #136): Atlas refuses `createUser`/`updateUser` on dedicated clusters, so the MongoDB engine can't
+   rotate an Atlas login although "Databases outside roll" lists Atlas. An Atlas project registered
+   by an organization service account, users taking turns and a user per lease through the Admin
+   API (Vault's MongoDB Atlas plugin), and the docs corrected.
 5. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
    backup schedules, rotation windows, directories, Snowflake accounts, ACME bindings): the
    resources once their routes are on main, the tools with roll MCP.
