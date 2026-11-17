@@ -11,5 +11,9 @@ describe("typed keys", () => {
     const region = { key: "REGION", path: "/", comment: "", pattern: "[a-z]{2}-[a-z]+-[0-9]" };
     expect(misfit(region, "Europe")).toBe("REGION must match [a-z]{2}-[a-z]+-[0-9]");
     expect(misfit(region, "eu-west-1")).toBeNull();
+    // RFC 6238's SHA1 test seed, in base32.
+    const otp = { key: "REGISTRY_TOTP", path: "/", comment: "", type: "totp" as const };
+    expect(misfit(otp, "gezd gnbv gy3t qojq gezd gnbv gy3t qojq")).toBeNull();
+    expect(misfit(otp, "otpauth://totp/ci?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=9")).toBe("REGISTRY_TOTP must be a TOTP seed (an otpauth://totp/ URI or base32): digits must be 6–8");
   });
 });

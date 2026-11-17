@@ -1206,6 +1206,8 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/review", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    // A TOTP key's current code is a credential: reveal, never the prefix's read.
+    row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/totp", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions/{v}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // What hands out more than the request itself: syncs (they push values
     // elsewhere), audit sinks and required keys are admin; a share link of a value reveals it.
@@ -1557,7 +1559,7 @@ mod tests {
         let f = find("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", "x").unwrap();
         assert_eq!(f.row.action("GET", &[], None), Action::Reveal);
         // Every route that answers secret values is reveal.
-        for r in ["values", "secrets/{name}/value", "secrets/{name}/versions/{v}/value", "requests/{id}/values"] {
+        for r in ["values", "secrets/{name}/value", "secrets/{name}/totp", "secrets/{name}/versions/{v}/value", "requests/{id}/values"] {
             let route = format!("/v1/secrets/projects/{{project}}/environments/{{env}}/{r}");
             let f = by_path("GET", &route.replace('{', "x").replace('}', "")).unwrap();
             assert_eq!(f.row.action("GET", &[], None), Action::Reveal, "{route}");

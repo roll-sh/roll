@@ -248,7 +248,7 @@ function Notify({ env, onError }: { env: Environment; onError: (e: string) => vo
 }
 
 /** How long old values stay readable: the sweeper destroys older versions' values after that (never a current one). */
-const TYPE_LABEL: Record<KeyType, string> = { url: "URL", int: "integer", port: "port", bool: "boolean", json: "JSON", email: "email" };
+const TYPE_LABEL: Record<KeyType, string> = { url: "URL", int: "integer", port: "port", bool: "boolean", json: "JSON", email: "email", totp: "TOTP seed" };
 
 /** Keys every standard environment must set, each with what its value must be (typed keys). */
 function RequiredKeys({ onError }: { onError: (e: string) => void }) {

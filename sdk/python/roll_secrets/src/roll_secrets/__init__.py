@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
+import hmac as _hmac
 import json
 import os
 import threading
@@ -24,7 +26,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-__all__ = ["Client", "Values", "Problem", "SecretsError", "login", "from_env", "generate_key", "public_key", "open_sealed"]
+__all__ = ["Client", "Values", "Problem", "SecretsError", "Totp", "totp_at", "login", "from_env", "generate_key", "public_key", "open_sealed"]
 
 
 class SecretsError(Exception):
@@ -214,6 +216,12 @@ class Client:
         """Moves whenever ``env``'s values under ``path`` would; reads no value."""
         return self._call("GET", self._env(env) + "/digest" + _q(path))["digest"]
 
+    def totp(self, env: str, key: str, path: str = "") -> "Totp":
+        """The current one-time code of ``env``'s TOTP key ``key`` (docs/secrets.md, "TOTP keys").
+        It needs reveal, as reading the seed does, and is audited without the code."""
+        d = self._call("GET", self._env(env) + "/secrets/" + urllib.parse.quote(key, safe="") + "/totp" + _q(path))
+        return Totp(code=d["code"], expires_at=d["expires_at"], period=d["period"])
+
     def transit(self, name: str) -> "Transit":
         """The project's encryption key ``name`` (docs/secrets.md, "Encryption keys"): data is
         encrypted, signed and HMACed by roll, and the key never leaves it."""
@@ -270,6 +278,58 @@ class Client:
                         self.renew(lease)
                     except Exception as e:  # noqa: BLE001
                         fail(e)
+
+
+@dataclass(frozen=True)
+class Totp:
+    """A TOTP key's code and when it stops being valid (``expires_at`` in ms since the epoch: the
+    end of its step). The code is a credential: don't log it."""
+
+    code: str = field(repr=False)
+    expires_at: int
+    period: int
+
+
+_TOTP_ALGORITHMS = {"SHA1": hashlib.sha1, "SHA256": hashlib.sha256, "SHA512": hashlib.sha512}
+
+
+def totp_at(seed: str, at: Optional[float] = None) -> Totp:
+    """The code of ``seed`` (an ``otpauth://totp/`` URI or bare base32: SHA1, 6 digits, 30 s) at
+    ``at`` (Unix seconds; now by default), as the server computes it (RFC 6238): for a seed a sealed
+    resolve already gave. Errors never quote the seed."""
+    seed = seed.strip()
+    alg, digits, period, raw = "SHA1", 6, 30, seed
+    if seed[:10].lower() == "otpauth://":
+        if seed[:15].lower() != "otpauth://totp/":
+            raise ValueError("an otpauth URI must be otpauth://totp/… (HOTP isn't supported)")
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(seed).query)
+        raw = (q.get("secret") or [""])[0]
+        if not raw:
+            raise ValueError("an otpauth URI needs ?secret=")
+        alg = (q.get("algorithm") or ["SHA1"])[0].upper()
+        if alg not in _TOTP_ALGORITHMS:
+            raise ValueError("algorithm must be SHA1, SHA256 or SHA512")
+        try:
+            digits = int((q.get("digits") or ["6"])[0])
+            period = int((q.get("period") or ["30"])[0])
+        except ValueError:
+            raise ValueError("digits and period are numbers") from None
+        if not 6 <= digits <= 8:
+            raise ValueError("digits must be 6–8")
+        if not 15 <= period <= 120:
+            raise ValueError("period must be 15–120 seconds")
+    raw = raw.replace(" ", "").upper().rstrip("=")
+    try:
+        secret = base64.b32decode(raw + "=" * (-len(raw) % 8))
+    except (ValueError, TypeError):
+        raise ValueError("a TOTP seed is an otpauth://totp/ URI or base32") from None
+    if not 10 <= len(secret) <= 128:
+        raise ValueError("a TOTP secret is 16–205 base32 characters (80–1024 bits)")
+    unix = int(time.time() if at is None else at)
+    h = _hmac.new(secret, (unix // period).to_bytes(8, "big"), _TOTP_ALGORITHMS[alg]).digest()
+    o = h[-1] & 0x0F
+    n = (int.from_bytes(h[o : o + 4], "big") & 0x7FFFFFFF) % 10**digits
+    return Totp(code=str(n).zfill(digits), expires_at=(unix // period + 1) * period * 1000, period=period)
 
 
 class Transit:

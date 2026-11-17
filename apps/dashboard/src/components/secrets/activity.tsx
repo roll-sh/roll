@@ -9,7 +9,7 @@ type Kind = "all" | "changes" | "reads" | "requests" | "syncs" | "alerts";
 const KIND_OF = (action: string): Exclude<Kind, "all"> | "other" =>
   action === "secrets.alert"
     ? "alerts"
-    : action.startsWith("secrets.reveal") || action === "secrets.export" || action === "secrets.resolve" || action === "request.reveal" || action.startsWith("share.")
+    : action.startsWith("secrets.reveal") || action === "secrets.export" || action === "secrets.resolve" || action === "secrets.totp" || action === "request.reveal" || action.startsWith("share.")
     ? "reads"
     : action.startsWith("request.")
       ? "requests"

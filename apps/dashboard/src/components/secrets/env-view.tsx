@@ -23,7 +23,7 @@ import { BulkBar } from "./bulk";
 import { LinkDialog } from "./link-dialog";
 import { ApprovalOffer, RequestsPanel, type Pending } from "./requests";
 import { secretsHref, useSecrets } from "./secrets-page";
-import { ago, button, Chip, CommentMark, dangerButton, ErrorNote, errorText, ExpiryMark, field, ghost, iconButton, label, LinkChip, PersonalMark, primary, RefMark, Reveal, saveText, sized, SourceMark, Teach, until, useLoad, Warnings } from "./ui";
+import { ago, button, Chip, CommentMark, dangerButton, ErrorNote, errorText, ExpiryMark, field, ghost, iconButton, label, LinkChip, PersonalMark, primary, RefMark, Reveal, saveText, TotpCode, sized, SourceMark, Teach, until, useLoad, Warnings } from "./ui";
 
 /** One environment: its folder's secrets (inline edit, reveal, add, delete, overrides), requests and history. */
 export function EnvView({ env }: { env: Environment }) {
@@ -530,10 +530,11 @@ function SecretRow({
   /** Says what was copied. */
   onCopied: (text: string) => void;
 }) {
-  const { api, project, resourceName } = useSecrets();
+  const { api, project, resourceName, required } = useSecrets();
   const [editing, setEditing] = useState<null | EditMode>(null);
   const [confirming, setConfirming] = useState(false);
   const row = useRef<HTMLDivElement>(null);
+  const totp = required.some((r) => r.key === s.key && r.path === s.path && r.type === "totp");
   const own = s.source.kind === "own";
   const personal = s.type === "personal";
 
@@ -590,7 +591,10 @@ function SecretRow({
               <Lock className="size-3" /> sensitive, never shown
             </span>
           ) : (
-            <Reveal className="flex-1" load={() => api.value(env.slug, s.key, path)} />
+            <>
+              <Reveal className="flex-1" load={() => api.value(env.slug, s.key, path)} />
+              {totp && <TotpCode load={() => api.totp(env.slug, s.key, path)} />}
+            </>
           )}
         </div>
         <div role="cell" className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted @max-4xl:hidden">

@@ -51,6 +51,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{E}/secrets"), get(secrets))
         .route(K, get(secret).put(set_secret).delete(delete_secret))
         .route(&format!("{K}/value"), get(reveal))
+        .route(&format!("{K}/totp"), get(totp))
         .route(&format!("{K}/versions"), get(versions))
         .route(&format!("{K}/versions/{{version}}/value"), get(version_value))
         .route(&format!("{K}/rotate"), post(rotate))
@@ -478,6 +479,12 @@ async fn reveal(State(s): S, Who(c): Who, Path((project, env, key)): Path<(Strin
     Ok(secret_response(ok(json!({ "value": value, "problems": problems }))))
 }
 
+/// A TOTP key's current code (docs/secrets.md, "TOTP keys").
+async fn totp(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q) -> crate::Result<Response> {
+    let code = blocking(s, move |s| s.totp(&project, &env, &path_of(&q), &key, &c)).await?;
+    Ok(secret_response(ok(code)))
+}
+
 async fn versions(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q) -> crate::Result<Response> {
     let kind = kind_of(&q)?;
     Ok(ok(blocking(s, move |s| s.versions(&project, &env, &path_of(&q), &key, kind, &c)).await?))
@@ -525,7 +532,10 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
         // so a write landing after it is a change. Asked for, since it costs about a read.
         // A conditional read (`If-None-Match`, a cache revalidating): unchanged is a 304 that
         // decrypts nothing, issues nothing and writes no audit row.
-        let etag = if_none_match(&headers);
+        // `codes=1` (`roll run --totp-codes`): `<KEY>_CODE` beside each TOTP key. A code moves
+        // without the digest, so such a read is never a 304.
+        let codes = flag(&q, "codes", false);
+        let etag = if_none_match(&headers).filter(|_| !codes);
         let want = flag(&q, "digest", false) || etag.is_some();
         let dynamic = flag(&q, "dynamic", true);
         if let Some(tag) = etag.clone() {
@@ -537,7 +547,10 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
         blocking(s, move |s| {
             let path = path_of(&q);
             let digest = if want { s.digest(&project, &env, &path, &c).ok() } else { None };
-            let v = s.values_for(&project, &env, &path, resolve, None, dynamic, &c)?;
+            let mut v = s.values_for(&project, &env, &path, resolve, None, dynamic, &c)?;
+            if codes {
+                s.add_codes(&project, &path, &mut v)?;
+            }
             if strict && !v.problems.is_empty() {
                 // Nothing is answered, so nothing this read issued may outlive it.
                 for lease in &v.leases {
@@ -610,6 +623,9 @@ struct ResolveBody {
     /// credential; such keys are left out and named in `dynamic`.
     #[serde(default = "yes")]
     dynamic: bool,
+    /// `true`: `<KEY>_CODE` beside each TOTP key, the one-time code when the values were read.
+    #[serde(default)]
+    codes: bool,
 }
 
 fn yes() -> bool {
@@ -626,10 +642,14 @@ async fn resolve(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
     }
     let path = r.path.unwrap_or_else(|| "/".into());
     let (p, e, cons) = (project.clone(), env.clone(), consumer.clone());
-    let (untrusted, dynamic) = (r.untrusted, r.dynamic);
+    let (untrusted, dynamic, codes) = (r.untrusted, r.dynamic, r.codes);
     let v = blocking(s, move |s| {
         let c = if untrusted { s.untrusted(&p, &c)? } else { c };
-        s.values_for(&p, &e, &path, true, Some(&cons), dynamic, &c)
+        let mut v = s.values_for(&p, &e, &path, true, Some(&cons), dynamic, &c)?;
+        if codes {
+            s.add_codes(&p, &path, &mut v)?;
+        }
+        Ok::<_, Error>(v)
     })
     .await?;
     let out = match r.seal_to {

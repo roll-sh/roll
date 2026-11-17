@@ -448,9 +448,17 @@ impl Secrets {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         let narrowed = self.caller_for(project, slug, caller)?;
-        let caller = &narrowed;
+        let (v, problems, leases) = self.reveal_entry(project, slug, &path, key, resolve, &narrowed)?;
+        self.audit_now(project, &narrowed, "secrets.reveal", Some(slug), Some(&path), &[key.to_string()], &format!("revealed {key}{}", lease_note(&leases)));
+        Ok((v, problems))
+    }
+
+    /// One secret's value for a reveal-like read, unaudited (the caller audits it): `caller` is
+    /// already narrowed ([`Secrets::caller_for`]) and `path` normalized. A sensitive key is a
+    /// runtime's only. Also answers the leases the read issued.
+    pub(crate) fn reveal_entry(&self, project: &str, slug: &str, path: &str, key: &str, resolve: bool, caller: &Caller) -> Result<(Value, Vec<Problem>, Vec<String>)> {
         let dek = self.project(project)?;
-        let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
+        let entries = self.view(project, slug, path, caller, false, Action::Reveal)?;
         let e = entries.iter().find(|e| e.row.key == key).ok_or_else(|| Error::NotFound(format!("no secret {key} in {slug}:{path}")))?;
         if names::sensitive(&e.row.tags) && !caller.runtime {
             return Err(Error::Forbidden(format!("{key} is sensitive: its value reaches only roll's runtimes and syncs, never a person or a token")));
@@ -461,8 +469,7 @@ impl Secrets {
         }
         let (v, problem) = r.entry(e);
         let leases = r.finish(slug)?;
-        self.audit_now(project, caller, "secrets.reveal", Some(slug), Some(&path), &[key.to_string()], &format!("revealed {key}{}", lease_note(&leases)));
-        Ok((v, problem.into_iter().map(|p| Problem { key: key.into(), problem: p }).collect()))
+        Ok((v, problem.into_iter().map(|p| Problem { key: key.into(), problem: p }).collect(), leases))
     }
 
     /// Every effective value of a folder (`…/values`, `roll run`, an app's start). Audited as
@@ -967,7 +974,7 @@ impl Secrets {
     }
 }
 
-fn lease_note(leases: &[String]) -> String {
+pub(crate) fn lease_note(leases: &[String]) -> String {
     match leases.len() {
         0 => String::new(),
         n => format!(" ({} issued)", crate::write::plural(n, "lease")),

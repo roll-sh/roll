@@ -1983,6 +1983,51 @@ async fn a_sensitive_keys_value_reaches_only_roll_s_runtimes() {
 }
 
 #[tokio::test]
+async fn a_totp_key_hands_out_its_current_code_to_whoever_may_reveal_it() {
+    let api = Api::new().await;
+    // RFC 6238's own SHA1 test seed (`12345678901234567890`, base32), 8 digits.
+    const SEED: &str = "otpauth://totp/roll:ci?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8";
+    api.ok(Method::PUT, "/required", Some(json!([{ "key": "REGISTRY_TOTP", "type": "totp" }]))).await;
+    // A malformed seed is refused by its rule, never echoed.
+    let (s, e) = api.call(Method::PUT, "/environments/production/secrets/REGISTRY_TOTP", Some(json!({ "value": "otpauth://totp/roll:ci?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=9" }))).await;
+    assert_eq!((s, e["error"].as_str()), (StatusCode::BAD_REQUEST, Some("REGISTRY_TOTP must be a TOTP seed (an otpauth://totp/ URI or base32): digits must be 6–8")));
+    api.set("production", "REGISTRY_TOTP", SEED).await;
+    api.set("production", "PLAIN", "not-a-seed").await;
+
+    // The code for the step that ends at `expires_at`, as RFC 6238 computes it.
+    let t = roll_secrets::totp::parse(SEED).unwrap();
+    assert_eq!(t.code_at(59).as_str(), "94287082", "RFC 6238, Appendix B");
+    let c = api.ok(Method::GET, "/environments/production/secrets/REGISTRY_TOTP/totp", None).await;
+    let expires = c["expires_at"].as_i64().unwrap();
+    assert!(expires > code_sql::now_ms() && expires <= code_sql::now_ms() + 30_000, "{expires}");
+    let code = c["code"].as_str().unwrap().to_string();
+    assert_eq!(code, t.code_at(expires as u64 / 1000 - 30).as_str());
+    assert_eq!(api.call(Method::GET, "/environments/production/secrets/PLAIN/totp", None).await.0, StatusCode::BAD_REQUEST);
+
+    // It's a credential: `reveal` on the folder, as a reveal; `read` alone isn't enough.
+    let read = api.token(json!({ "environments": ["production"], "paths": ["/"], "actions": ["read"] }));
+    assert_eq!(api.req(Method::GET, "/environments/production/secrets/REGISTRY_TOTP/totp", None, Some(&read)).await.0, StatusCode::FORBIDDEN);
+    let reveal = api.token(json!({ "environments": ["production"], "paths": ["/"], "actions": ["read", "reveal"] }));
+    let (s, c) = api.req(Method::GET, "/environments/production/secrets/REGISTRY_TOTP/totp", None, Some(&reveal)).await;
+    assert!(s == StatusCode::OK && c["code"].as_str().is_some_and(|c| c.len() == 8), "{s} {c}");
+
+    // A read that asks for codes gets `<KEY>_CODE` beside the seed (`roll run --totp-codes`).
+    let v = api.ok(Method::GET, "/environments/production/values?codes=1", None).await;
+    assert!(v["values"]["REGISTRY_TOTP_CODE"].as_str().is_some_and(|c| c.len() == 8) && v["values"].get("PLAIN_CODE").is_none(), "{v}");
+    assert!(api.values("production", "/").await["values"].get("REGISTRY_TOTP_CODE").is_none());
+
+    // Audited as `secrets.totp`, the code nowhere in it.
+    let audit = api.ok(Method::GET, "/audit?action=secrets.totp", None).await;
+    let rows = audit.as_array().unwrap();
+    assert!(rows.len() == 2 && rows.iter().all(|r| r["summary"] == "made a one-time code of REGISTRY_TOTP" && r["keys"] == json!(["REGISTRY_TOTP"])), "{audit}");
+    for r in rows {
+        let mut r = r.clone();
+        r.as_object_mut().unwrap().retain(|k, _| !["id", "at", "seq"].contains(&k.as_str()));
+        assert!(!r.to_string().contains(&code), "{r}");
+    }
+}
+
+#[tokio::test]
 async fn an_encryption_key_encrypts_for_apps_and_never_leaves_roll() {
     use base64::Engine;
     let b64 = |s: &[u8]| base64::engine::general_purpose::STANDARD.encode(s);
