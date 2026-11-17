@@ -1614,55 +1614,30 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A Git URL service's preview reported to its repository** (Vercel's deployment status and
-   comment on the pull request): a roll code repo's previews reach GitHub through roll code; a
-   Git URL service's reach only roll. Agreed with the apps thread: a Git URL service on github.com
-   connects through roll's GitHub App (`Service.github: { installation, repo }`, operator-only, an
-   installation already connected to the same owner). Previews' `GitReport` then posts
-   `roll/preview` with `Code::github_commit_status` and the pull request's comment with
-   `Code::github_comment` (an upsert by id), the installation read from the service, never the
-   event; the service's `git_login` is never used to write. Waits on apps' #120.
-2. **Egress rules for previews hosted on roll apps** (agreed with the apps thread, #2 in its
-   `## Next`): `"roll"` and `egress_hosts` cover only services roll's runtime runs (#135 says so
-   in the Rules dialog). roll apps runs a `pv-` environment's instance on an `--internal` network
-   of its own with `hosts` through `egress.js` (#137's private-address check), and a per-task
-   security group with no outbound rule on Fargate; previews then sends
-   `PUT …/environments/pv-… {egress: {mode, hosts}}` and checks it live in
-   `scripts/preview-apps.sh` (1.1.1.1 unreachable, a listed host through the proxy).
-3. **A preview's search branch with a data-only key, as production's link has**
-   (`feature/roll-previews-search-keys`, stacked on #123; gated after #123 lands): code that
-   needs more than production's link fails in its preview too.
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
-   backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
-   its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
-   idle preview's branch is evicted to object storage after an hour.
-5. **The preview on the change's Linear issue** (Vercel's Linear integration): a change linked
-   to a work item from Linear gets its preview's link and visual review posted there, as an
-   automation template on the `preview` trigger.
-   It needs roll to remember which issue a change was made for (Linear's side only attaches it
-   today): the agents thread's `linear.attach` could record the link.
-6. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node
-   they're done (`Reach` = roll apps' `Apps::reachable`; `scripts/preview-apps.sh`: the apps
-   service screenshotted in its instance's network, main's baseline on roll apps, the feedback
-   button on its environment). On a fleet an instance runs on its service's holder, and Fargate
-   has no container to join: previews' own internal screenshot route, run on the holder through
-   `cluster.dispatch(&apps_control::lease_key(service), …)` (the apps thread's advice), joins the
-   instance where `reachable` answers (Docker) and else loads the environment's URL through its
-   access link, in the browser container. Ranked lower: the cloud fleet runs instances on
-   Fargate, where neither `reachable` nor rolld's Docker screenshot works (a browser task of its
-   own, with the cloud thread).
-7. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
-   Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
-   minutes even with the parent's history reporting `end` past it, where pg-control's own test
-   (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
-   old; the live script will check it once this is understood.
-8. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
-   daemon left containers) failed a wake with "the container name is already in use". A remove
-   that dropped the service's entry before stopping it could start a second container under the
-   name (fixed), and a preview's services starting at once each made its egress proxy under the
-   one name (fixed 2026-11-16: one make at a time per preview); if it comes back, log both
-   starts' container ids.
+- 2026-11-16/17, merged: allowed hosts and their private-address check (#107, #137, #184), Git URL
+  branch and pull-request previews (#116), link variables from the branch (#123), secrets links to
+  a branched parent (#150, #160 with roll secrets #151, #175). In review: Linear (#118), the
+  search data key (#153), a working day's freeze window (#174, measured: no database cost), a
+  note's picture on the change page (#111), the Rules dialog's roll apps note (#135).
 
+1. **A Git URL service's preview reported to its repository, rolld's side** (after apps' #138):
+   previews' side and rolld's `GitReport` are built (branch `feature/roll-previews-git-report2`,
+   compiled against #138); the PR follows #116 and #138 on main, with a live check against a fake
+   GitHub (roll code's test hub) posting `roll/preview` and the pull request comment.
+2. **Egress rules for previews hosted on roll apps** (apps' #143): previews' adapter is wired on
+   #143 (reviewed); after it merges, the live check in `scripts/preview-apps.sh` with
+   `egress: "roll"`: 1.1.1.1 unreachable from the pv- instance, a listed host through the proxy,
+   a refused one in the activity.
+3. **Screenshots of roll apps' services on the fleet**: one node is done. A multi-node Docker
+   fleet needs previews' own internal screenshot route on the service's holder
+   (`cluster.dispatch(&apps_control::lease_key(service), …)`); the cloud fleet runs Fargate,
+   where it's a browser task of its own, with the cloud thread. Low while the fleet is Fargate.
+4. **Cheap Postgres branches without reflinks** (ext4 hosts like ai-server): a page server or
+   pg-engine as the branch store; neither planned (the Postgres strategy session, 2026-11-17);
+   not blocking (the fleet's volumes are XFS).
+5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: a cold start on a Docker name conflict**: a preview's services each making its egress
+   proxy under one name was fixed (#137); if it comes back, log both starts' container ids.
 
 Looked at and kept: previews' copy of a preview's variables in its roll apps environment, next
 to the `pv-` secrets environment roll apps reads itself (#31's `ForApps`). roll apps reads
