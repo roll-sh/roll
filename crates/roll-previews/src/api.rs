@@ -25,6 +25,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/refresh", post(refresh))
         .route("/v1/previews/{id}/keep", post(keep))
         .route("/v1/previews/{id}/visual/accept", post(accept_visual))
+        .route("/v1/previews/{id}/approve", post(approve))
         .route("/v1/previews/{id}/env", get(vars).put(put_vars))
         .route("/v1/previews/{id}/shares", get(shares).post(share))
         .route("/v1/previews/{id}/shares/{share}", axum::routing::delete(unshare))
@@ -243,6 +244,27 @@ async fn accept_visual(AxState(e): S, Path(id): Path<String>, who: Option<axum::
         (None, None) => ("operator".into(), true),
     };
     e.accept_visual(&id, &by, behind.as_deref(), person, seen.as_deref(), path.as_deref()).await.map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApproveBody {
+    /// The head that was looked at (`head`): refused (409) when the pull request moved on.
+    head: String,
+}
+
+/// A writer lets one head of a fork's pull request on a Git URL service run.
+async fn approve(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, grant: Option<axum::Extension<roll_auth::Grant>>, b: Bytes) -> crate::Result<Json<Preview>> {
+    check_id(&id)?;
+    let ApproveBody { head } = body(&b)?;
+    // A person's call (or the operator's), never a token's: an automation reading the pull
+    // request's own text mustn't release a fork's code.
+    let by = match (who, grant) {
+        (_, Some(_)) => return Err(Error::Forbidden("approving a fork's code to run is a person's call: sign in, not a token".into())),
+        (Some(axum::Extension(u)), None) => u.handle,
+        (None, None) => "operator".into(),
+    };
+    blocking(e, move |e| e.approve(&id, &head, &by)).await.map(Json)
 }
 
 #[derive(Deserialize)]

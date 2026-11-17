@@ -6,6 +6,7 @@ import {
   CLIENT_TOOL_LIMIT,
   CLIENT_WHERE,
   CLIENTS,
+  installLink,
   describeRule,
   expiringSoon,
   grantMatches,
@@ -59,7 +60,7 @@ export function AccessOverview() {
         {me?.kind === "operator" && <PolicyPanel />}
         {me?.kind === "user" && (
           <p className="text-[12px] text-muted">
-            Your tokens and connections act as you: they reach what your account does (roll code, agents and your projects), never
+            Your tokens and connections act as you: they reach what your account does (roll code, agents, your projects and your search clusters), never
             more, and their approvals come to you.
           </p>
         )}
@@ -121,6 +122,8 @@ export function ConnectPanel({ token }: { token?: string }) {
   const over = limit && cost.tools > limit.tools;
   const url = withToolsets(mcpUrl(), picked, { readonly, search, lockdown });
   const cfg = mcpConfig(client, url, token);
+  // One click for the clients that take a link, only without a token (OAuth signs it in).
+  const install = token ? null : installLink(client, url);
   return (
     <Panel
       title={
@@ -203,6 +206,11 @@ export function ConnectPanel({ token }: { token?: string }) {
             <CopyButton id={`cfg-${client}`} text={cfg.text} copied={copied} onCopy={copy} />
           </span>
         </div>
+        {install && (
+          <a href={install.href} className={`${primary} inline-flex`}>
+            {install.label}
+          </a>
+        )}
         {!token && (
           <p className="text-[12px] text-subtle">
             With OAuth you choose what the client may do when it connects, and can narrow or revoke it here. For CI or a client
