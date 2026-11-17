@@ -311,6 +311,43 @@ async fn image_service(w: &World, name: &str, run: Value) -> (Value, Value) {
     (svc, d)
 }
 
+/// Visitors and page views from the access log: page loads only (not an API's calls), a visitor
+/// an address and browser a day, the referring site's host (never its own), the edge's country.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn analytics_count_page_views_and_visitors() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "site", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let h = host(&svc["environments"][0]["url"]);
+    let visit = |path: &'static str, ua: &'static str, html: bool, referer: Option<String>| {
+        let mut r = Request::builder().uri(path).header("host", h.clone()).header("user-agent", ua).header("cf-ipcountry", "DE");
+        r = r.header("accept", if html { "text/html,application/xhtml+xml" } else { "application/json" });
+        if let Some(rf) = referer {
+            r = r.header("referer", rf);
+        }
+        let req = r.body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move { public.oneshot(req).await.unwrap().status() }
+    };
+    assert_eq!(visit("/", "browser-a", true, Some("https://news.example.com/item?id=1".into())).await, StatusCode::OK);
+    visit("/", "browser-a", true, None).await;
+    visit("/about", "browser-a", true, Some(format!("http://{h}/"))).await;
+    visit("/", "browser-b", true, Some("https://www.news.example.com/".into())).await;
+    visit("/api/items", "browser-b", false, None).await;
+    let mut a = Value::Null;
+    for _ in 0..100 {
+        a = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/analytics?minutes=60"), None).await.1;
+        if a["page_views"] == 4 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!((a["page_views"].as_u64(), a["visitors"].as_u64()), (Some(4), Some(2)), "{a}");
+    assert_eq!(a["pages"][0], json!({"path": "/", "views": 3, "visitors": 2}), "{a}");
+    assert_eq!(a["referrers"], json!([{"host": "news.example.com", "views": 2}]), "its own host isn't a referrer: {a}");
+    assert_eq!(a["countries"], json!([{"country": "DE", "views": 4}]), "{a}");
+}
+
 /// An answer its app lets a shared cache keep (`s-maxage`) is answered from the owner's cache
 /// until it's stale, without reaching the app; another query is another answer, a request with
 /// `Authorization` never reads it, and a new live deployment empties it.

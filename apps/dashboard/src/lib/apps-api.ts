@@ -615,6 +615,23 @@ export interface RouteStats {
   routes: RouteStat[];
 }
 
+/** Visitors and page views from the access log (no script, no cookie). */
+export interface Analytics {
+  minutes: number;
+  /** Minutes a point of `series` stands for. */
+  step: number;
+  page_views: number;
+  /** An address and browser a day, counted for this answer only. */
+  visitors: number;
+  pages: { path: string; views: number; visitors: number }[];
+  /** Referring sites' hosts (never the site's own). */
+  referrers: { host: string; views: number }[];
+  /** The edge's country codes (Cloudflare's), where it said one. */
+  countries: { country: string; views: number }[];
+  series: { t: number; views: number; visitors: number }[];
+  cut: boolean;
+}
+
 export interface Metrics {
   /** Minutes a point stands for: 1, or 60 past a week. */
   step?: number;
@@ -917,6 +934,7 @@ export const appsApi = {
   metrics: (id: string, e: string, minutes = 60) => call<Metrics>("GET", `${env(id, e)}/metrics${qs({ minutes })}`),
   /** Errors and latency by route over the last `minutes` (5–60). */
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
+  analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),
   usage: (id: string, e: string, days = 30) => call<Usage>("GET", `${env(id, e)}/usage${qs({ days })}`),
 
   runs: (id: string, e: string) => call<CronRun[]>("GET", `${env(id, e)}/runs`),

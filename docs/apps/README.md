@@ -1474,6 +1474,19 @@ A file sent as it is takes one byte range (`Range: bytes=…`, `Accept-Ranges: b
 plays a site's video and a download resumes: a 206 with `Content-Range`, a 416 past the end,
 and the whole file for several ranges or an `If-Range` that names another version.
 
+## Visitors
+
+Visitors and page views (Vercel's Web Analytics, Netlify's, Plausible's way: no script to add, no
+cookie, nothing kept about a person) come from the access log the proxy already writes:
+`GET …/environments/{env}/analytics?minutes=` (an hour to a week, default a day), `roll apps
+analytics`, and the Metrics tab's Visitors panel. A page view is a browser's page load
+(`Sec-Fetch-Dest: document`, else `Accept: text/html`) answered 2xx or 304, cached answers
+included; an API's calls aren't. A visitor is an address and user agent on one day, counted in
+memory for the answer and never stored. The access line gains `page`, `ref` (the referring site's
+host when it's another site: never the referrer's path, which can carry tokens) and `country`
+(the edge's `CF-IPCountry`, on the fleet). Top pages, referrers and countries come with a series
+(5-minute, hourly or 6-hourly points). An answer reads at most the newest 200,000 requests (`cut`).
+
 ## Caching answers
 
 A web service's answers can be kept and answered by roll (Vercel's CDN with `s-maxage` and
@@ -2308,9 +2321,9 @@ put items 1–11 first. A second review that day (after #78, against the same si
 2. **Search links in roll.toml**: once roll search's #100 is on main, `[databases]` takes
    `kind = "search"` (apps-build's `DB_KINDS`), so a project file declares a search link and
    `roll apps export` writes it instead of naming it in its notes.
-3. **Visitor analytics and traces** (Vercel's Web Analytics and Observability, Netlify's, Cloud Run's
-   Cloud Trace): page views, referrers and countries from the access log already kept (no script
-   to add), then an OTLP endpoint per environment with spans kept in roll search.
+3. **Traces** (Vercel's Observability, Cloud Run's Cloud Trace, Heroku's OpenTelemetry): an
+   OTLP endpoint per environment (`OTEL_EXPORTER_OTLP_ENDPOINT` set for the app), spans kept in
+   roll search and shown with the access log's request ids. Visitor analytics are done.
 4. **A Git login from roll secrets** (no roll code needed for GitHub): `git_login` reading a
    project secret, so secrets' #73 per-lease installation tokens from the project's own GitHub
    App (or a rotated deploy token) are fetched fresh at each use.
