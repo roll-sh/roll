@@ -1547,3 +1547,111 @@ async fn a_link_credential_uses_the_data_and_is_revoked() {
 fn host_of(url: &str) -> String {
     reqwest::Url::parse(url).unwrap().host_str().unwrap_or_default().to_string()
 }
+
+/// Deleted clusters are kept for the node's window (`deleted_retention`, 7 days): gone from the
+/// list and the REST port at once, with their name free, listed under `?deleted=true`, and
+/// restorable by their owner (or the operator) with their data, settings, owner and password;
+/// under another name when someone took theirs.
+#[tokio::test]
+async fn deleted_clusters_restore_within_their_window() {
+    let e = env().await;
+    let (s, c) = e.call_as("ann", reqwest::Method::POST, "/v1/search/clusters", Some(json!({"name": "keep", "max_in_flight": 8}))).await;
+    assert_eq!(s, 200, "{c}");
+    let id = c["id"].as_str().unwrap().to_string();
+    let (_, pw) = creds(&c);
+    let (s, v) = e.es("keep", &pw, reqwest::Method::PUT, "/notes/_doc/1?refresh=true", Some(json!({"text": "kept"}))).await;
+    assert_eq!(s, 201, "{v}");
+    let path = format!("/v1/search/clusters/{id}");
+    let delete = || e.call_as("ann", reqwest::Method::DELETE, &path, None);
+    let deleted = |who: &'static str| {
+        let e = &e;
+        async move {
+            let (s, v) = e.call_as(who, reqwest::Method::GET, "/v1/search/clusters?deleted=true", None).await;
+            assert_eq!(s, 200, "{v}");
+            v.as_array().unwrap().clone()
+        }
+    };
+
+    // Deleted: gone from the list and the REST port, listed as deleted with its purge date.
+    assert_eq!(delete().await.0, 200);
+    let (_, list) = e.call_as("ann", reqwest::Method::GET, "/v1/search/clusters", None).await;
+    assert!(list.as_array().unwrap().is_empty(), "{list}");
+    assert_eq!(e.es("keep", &pw, reqwest::Method::GET, "/", None).await.0, 401);
+    let gone = deleted("ann").await;
+    assert_eq!((gone.len(), gone[0]["id"].as_str(), gone[0]["name"].as_str()), (1, Some(id.as_str()), Some("keep")), "{gone:?}");
+    let (at, purge) = (gone[0]["deleted_at"].as_i64().unwrap(), gone[0]["purge_at"].as_i64().unwrap());
+    assert_eq!(purge - at, 7 * 86_400);
+    assert!(gone[0].get("password").is_none());
+    // Someone else neither sees nor restores it.
+    assert!(deleted("bob").await.is_empty());
+    let (s, _) = e.call_as("bob", reqwest::Method::POST, &format!("/v1/search/clusters/{id}/restore"), Some(json!({}))).await;
+    assert_eq!(s, 404);
+
+    // Restored under its own name: its data, settings, owner and password are back.
+    let (s, r) = e.call_as("ann", reqwest::Method::POST, &format!("/v1/search/clusters/{id}/restore"), None).await;
+    assert_eq!(s, 200, "{r}");
+    assert_eq!((r["id"].as_str(), r["name"].as_str(), r["owner"].as_str(), r["max_in_flight"].as_i64()), (Some(id.as_str()), Some("keep"), Some("usr_ann"), Some(8)), "{r}");
+    assert!(r.get("password").is_none());
+    let (s, v) = e.es("keep", &pw, reqwest::Method::GET, "/notes/_doc/1", None).await;
+    assert_eq!((s, v["_source"]["text"].as_str()), (200, Some("kept")), "{v}");
+    assert!(deleted("ann").await.is_empty());
+    let (s, _) = e.call_as("ann", reqwest::Method::POST, &format!("/v1/search/clusters/{id}/restore"), None).await;
+    assert_eq!(s, 404, "a live cluster has nothing to restore");
+
+    // Deleted again, and someone takes the name: restoring under it is a conflict, under
+    // another name it works, with the same password and the new name as the user.
+    assert_eq!(delete().await.0, 200);
+    let (s, other) = e.call_as("bob", reqwest::Method::POST, "/v1/search/clusters", Some(json!({"name": "keep"}))).await;
+    assert_eq!(s, 200, "{other}");
+    let (s, v) = e.call_as("ann", reqwest::Method::POST, &format!("/v1/search/clusters/{id}/restore"), None).await;
+    assert_eq!(s, 409, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("\"name\""), "{v}");
+    let (s, r) = e.call_as("ann", reqwest::Method::POST, &format!("/v1/search/clusters/{id}/restore"), Some(json!({"name": "keep-2"}))).await;
+    assert_eq!(s, 200, "{r}");
+    assert_eq!((r["name"].as_str(), r["username"].as_str()), (Some("keep-2"), Some("keep-2")), "{r}");
+    let (s, v) = e.es("keep-2", &pw, reqwest::Method::GET, "/notes/_doc/1", None).await;
+    assert_eq!((s, v["_source"]["text"].as_str()), (200, Some("kept")), "{v}");
+    // Bob's cluster of that name is his own, empty one.
+    let (bu, bp) = creds(&other);
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::GET, "/_mapping", None).await;
+    assert_eq!((s, index_names(&v)), (200, Vec::<String>::new()));
+    e.control.shutdown().await.unwrap();
+}
+
+/// After the window the sweep purges a deleted cluster's kept storage as a delete without a
+/// window does, and its row; a branch of it keeps the data it shares, through garbage
+/// collection too.
+#[tokio::test]
+async fn the_sweep_purges_after_the_window_and_branches_keep_their_data() {
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "swept"})).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let (user, pw) = creds(&c);
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/notes/_doc/1?refresh=true", Some(json!({"text": "shared"}))).await;
+    assert_eq!(s, 201, "{v}");
+    let b = e.post("/v1/search/clusters/swept/branches", json!({"name": "swept-b"})).await;
+    let (bu, bp) = creds(&b);
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("/v1/search/clusters/{id}"), None).await;
+    assert_eq!(s, 200);
+    let kept = || async {
+        e.objects.list("search/c").await.unwrap().into_iter().filter(|(k, _)| k.contains("/deleted_")).count()
+    };
+    assert!(kept().await > 0, "the deleted cluster's storage is kept");
+
+    let now = search_control::control::now();
+    assert_eq!(e.control.purge_deleted(now).await.unwrap(), 0, "inside the window nothing is purged");
+    assert_eq!(e.control.purge_deleted(now + 8 * 86_400).await.unwrap(), 1);
+    assert_eq!(kept().await, 0, "its kept storage is gone");
+    assert!(e.get("/v1/search/clusters?deleted=true").await.as_array().unwrap().is_empty());
+    let (s, _) = e.call(reqwest::Method::POST, &format!("/v1/search/clusters/{id}/restore"), None).await;
+    assert_eq!(s, 404);
+
+    // The branch reads the segments it shares from storage, before and after garbage collection.
+    for _ in 0..2 {
+        assert!(e.post("/v1/search/clusters/swept-b/unload", json!({})).await["unloaded"].as_bool().unwrap());
+        e.control.data.collect_garbage(Duration::ZERO).await.unwrap();
+        let (s, v) = e.es(&bu, &bp, reqwest::Method::GET, "/notes/_doc/1", None).await;
+        assert_eq!((s, v["_source"]["text"].as_str()), (200, Some("shared")), "{v}");
+    }
+    e.control.shutdown().await.unwrap();
+}

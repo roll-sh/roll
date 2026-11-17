@@ -204,6 +204,41 @@ writes a new generation and the other keeps reading its own. Point-in-time
 branches (`at`) replay the parent's WAL up to that time into new segments for the child. Garbage
 collection deletes a segment object only when no manifest of any cluster references it.
 
+## Deleting and restoring
+
+A cluster's storage is keyed by its name (`search/c/<name>/`), and a deleted cluster's name is
+free at once, so a delete moves the storage aside (`search-control` `Control::delete`):
+
+1. **Delete.** The cluster is hidden, locked out and unloaded (flushed) as before. Its storage
+   is branched to a name no cluster can have, `deleted_<id>_<random>` (new commit points naming
+   the same segments, plus its pins and state; nothing is copied). Then, in one catalog
+   transaction, its row becomes deleted: `name` takes the kept name (which frees the real one),
+   with `deleted_name`, `deleted_at` and `purge_at` (`--search-deleted-retention-days`, 7). Then
+   the commit points under the old name are removed. The row flip is the commit point: before it
+   the cluster still exists and the copy is removed; after it, leftovers under the old name only
+   keep the name from being reused (`check_free`). With a window of 0 the delete is today's:
+   storage and row go at once.
+2. **Meanwhile** the row and its storage log stay, so the kept bytes are billed as storage;
+   lookups, lists, wakes and the always-on loop see only live rows. Branches keep working: they
+   name segments, not the parent.
+3. **Restore** (`POST …/{id}/restore`) claims the row in one transaction (`claim`, `claimed_at`)
+   and reserves the name it restores to in `name`, so no create takes it meanwhile; it fails
+   with 409 when another cluster has it. It branches the kept copy back to the name, flips the
+   row live (only if its claim still holds), then removes the kept copy. Under another name the
+   password and API keys stay: the name is only the user, the key id's suffix and the host label.
+   A restored cluster's point-in-time history starts at the restore (`restored_at`).
+4. **Purge.** After `purge_at` a sweep (every 10 minutes; on a fleet one node at a time,
+   `singleton:search-purge`, as garbage collection is placed) claims each due row the same way,
+   removes the kept copy with `Store::delete_cluster` (commit points, state and pins; segments
+   only through garbage collection, which keeps whatever a branch's manifests name), then the
+   row and its usage, only if its claim still holds.
+
+Restore and purge never run on one cluster at once: each needs the claim, taken by a
+conditional update in a serializable catalog transaction shared by every node, and each
+finishes only while its claim holds. A claim lapses after 15 minutes (its node died); a
+restore that crashed after reserving a name leaves storage only under that name, which the next
+restore or the purge removes.
+
 ## Multi-tenancy and authentication
 
 A request finds its cluster by, in order: Basic auth username (`<cluster>` with the cluster's
@@ -246,9 +281,9 @@ are kept as hashes, never sealed.
   once, so every cluster has it without a write, a branch sees its parent's snapshots there, and
   an idle cluster costs nothing more (no policy of its own: a tenant's SLM policy wakes the
   cluster only when due). It shows as an `s3` repository with client `roll`, a client no tenant
-  can name, and can't be changed or unregistered. A deleted cluster's snapshots go with it, as
-  its data does: no API could reach them, and backups meant to outlive a cluster go to an `s3`
-  repository in the tenant's own bucket.
+  can name, and can't be changed or unregistered. A deleted cluster's snapshots are kept with
+  its data for the restore window and go with it at the purge ([Deleting and restoring](#deleting-and-restoring));
+  backups meant to outlive a cluster go to an `s3` repository in the tenant's own bucket.
 - **`s3` repositories** (`search-es` `api/snapshots/s3.rs`, client `s3.rs`) keep everything in
   the tenant's bucket under `<base_path>/roll/`: the repository data at each generation
   (`index-N`, written only if absent, so two clusters never commit the same generation), and per
@@ -299,8 +334,9 @@ applies: every cluster is this node's.
 - **Catalog**: the shared system database (`ROLL_SYSTEM_DATABASE`, schema `search`), through
   `code-sql` like the other products' catalogs; `search.db` (SQLite) on one node.
 - **Background work** on owners: metering of loaded clusters; garbage collection of unreferenced
-  objects on one node (`singleton:search-gc`); always-on clusters taken by the node they're placed
-  on.
+  objects on one node (`singleton:search-gc`), and the purge of deleted clusters whose window
+  ended on one node (`singleton:search-purge`); always-on clusters taken by the node they're
+  placed on. A deleted cluster has no owner: its restore runs on whichever node gets the call.
 - **Drains** (SIGTERM, deploys, Spot): roll-cluster hands every lease off; each cluster flushes and
   unloads as its guard ends, and the next request loads it on its new owner from its manifests and
   the WAL after them.

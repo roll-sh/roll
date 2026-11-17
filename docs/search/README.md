@@ -31,6 +31,7 @@ pnpm dev                                # dashboard: /dashboard/search
 | `--search-proxy-protocol`                          | off               | PROXY protocol headers (behind an NLB or HAProxy) |
 | `--search-history` (`ROLL_SEARCH_HISTORY`)         | `86400`           | point-in-time branching window, seconds (0: off) |
 | `--search-gc-interval`                             | `3600`            | garbage collection of unreferenced objects (0: off; one node per bucket) |
+| `--search-deleted-retention-days` (`ROLL_SEARCH_DELETED_RETENTION_DAYS`) | `7` | days a deleted cluster can be restored, its storage billed meanwhile (0: deleted at once) |
 | `--search-test-features`                           | off               | publish Elasticsearch's test features (YAML suites through `--cluster-hook`; test deployments only) |
 | `--no-search`, `--search-only`                     |                   | shorthands for `ROLL_PRODUCTS` without search, or with only search |
 | `--search-public-url` (`ROLL_SEARCH_PUBLIC_URL`)   |                   | the front clients use (a load balancer): cluster URLs name it |
@@ -58,6 +59,8 @@ roll search clusters branch app app-yesterday --at 1d    # as of a day ago
 roll search clusters indices app
 roll search clusters usage app                           # cost vs Elastic Cloud / Amazon OpenSearch
 roll search clusters password app | unload app | delete app | url app | show app | list
+roll search clusters list --deleted                      # deleted in the last 7 days, with purge dates
+roll search clusters restore srch_… [--name app-2]       # back as it was (under another name if app is taken)
 roll search index create app books '{"mappings":{"properties":{"title":{"type":"text"}}}}'
 roll search docs put app books 1 '{"title":"dune"}' --refresh
 roll search index bulk app books @books.ndjson --refresh
@@ -80,7 +83,7 @@ roll search inference list app | test app emb "some text" | delete app emb
 
 A cluster's name is its identity: the Basic auth user, the host label under `--search-domain`,
 `cluster_name` in `GET /`. Names are DNS labels (lowercase letters, digits, `-`) and can't
-change. Clients authenticate with Basic auth (`<name>:<password>`, or any user at the cluster's
+change, except by restoring a deleted cluster under another name when its own was taken. Clients authenticate with Basic auth (`<name>:<password>`, or any user at the cluster's
 own host), `Authorization: ApiKey base64(<name>:<password>)` or
 `Authorization: Bearer <name>_<password>`.
 
@@ -119,11 +122,12 @@ them (`api::Caller`):
 | method | path | |
 | ------ | ---- | - |
 | GET | `/v1/search` | version, endpoint, defaults, pricing; for the operator and admins also `storage`, `loaded` clusters and the `cache` |
-| GET | `/v1/search/clusters` | list (a person: their own) |
+| GET | `/v1/search/clusters` | list (a person: their own); `?deleted=true`: recently deleted clusters kept for restoring, newest first, with `deleted_at` and `purge_at` (Unix seconds), the name each had and its last figures (`stored_bytes` is still billed) |
 | POST | `/v1/search/clusters` | create `{name, flavor?, parent?, at?, idle_timeout_s?, max_in_flight?, max_body_mb?, destructive_requires_name?}`; answers with `url`, `username`, `password` (once) and `id` — the shape `search-yaml run --cluster-hook` expects; `owner` is the signed-in person who isn't an admin, and a branch's is its parent's |
 | GET | `/v1/search/clusters/{id or name}` | settings, `status` (`loaded` with live index count and requests in flight, and live `docs` once every index is open, or `asleep` with `wakes_at`, unix seconds, when a background job is due to wake it), last metered `indices`/`docs`/`stored_bytes` and `own_bytes` (what a branch references that its parent's latest commit points don't; all of `stored_bytes` for a cluster that isn't a branch), `url`, `branches` |
 | PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`; the idle timeout, body limit and `max_in_flight` apply at once (also to a cluster that is waking up); a new flavor or `destructive_requires_name` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
-| DELETE | `/v1/search/clusters/{id}` | waits for running requests and for a wake in progress (which is locked out and unloaded, never left serving); branches keep working |
+| DELETE | `/v1/search/clusters/{id}` | waits for running requests and for a wake in progress (which is locked out and unloaded, never left serving); the cluster leaves the list, its REST endpoint answers as for a missing cluster and its name is free at once, but its storage is kept for `--search-deleted-retention-days` (7) and billed as storage, for `restore` (0 days: removed at once); branches keep working |
+| POST | `/v1/search/clusters/{id}/restore` | a deleted cluster (by its id) back as it was within its window: data, snapshots, settings, owner, password and API keys; under its own name, else 409 and `{"name": "…"}` restores it under another (the new name is its Basic auth user, API key id suffix and host label; the password stays). Scoped like every per-cluster route (owner, admins, the operator); 404 once purged |
 | GET, POST | `/v1/search/clusters/{id}/branches` | list; branch `{name, at?}` (`at`: Unix seconds within `--search-history`) |
 | POST | `/v1/search/clusters/{id}/password` | rotate; the new password is in the answer, once. From the answer on, the old one fails, also on a cluster that was waking up |
 | POST | `/v1/search/clusters/{id}/unload` | sleep now (`{"unloaded": false}` while requests run) |
@@ -206,7 +210,8 @@ its document count is the engine's (unflushed writes included); otherwise it com
 commit points. Both count Lucene documents (nested ones included), as `_stats` does, so the figure
 doesn't jump when the cluster unloads. Stored bytes are re-read from the cluster's commit points after every load and
 unload and every 10 minutes while loaded; storage accrues from a change log, so a sleeping
-cluster adds no rows. Prices are AWS list prices in `crates/search-control/src/pricing.rs`, each
+cluster adds no rows. A deleted cluster kept for restoring keeps its last size in the log, so its
+storage is billed until it is purged, when its rows go. Prices are AWS list prices in `crates/search-control/src/pricing.rs`, each
 with its source.
 
 ## Tests

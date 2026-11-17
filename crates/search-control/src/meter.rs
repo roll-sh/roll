@@ -299,6 +299,7 @@ mod tests {
                 loaded_on: None,
                 wake_at: None,
                 owner: None,
+                restored_at: None,
             })
             .await
             .unwrap();
