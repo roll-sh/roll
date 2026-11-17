@@ -40,7 +40,10 @@ cargo test -p roll-cli --test apps
 cargo test -p roll-edge --lib --test custom_domains
 cargo build -p rolld -p roll-cli
 if [[ $docker == 1 ]]; then
-  ROLL_APPS_DOCKER=1 cargo test -p apps-control --test docker -- --nocapture
+  # Three at a time: each test makes its own project's networks, and a host whose other projects
+  # hold most of Docker's address pools refuses the rest ("all predefined address pools have been
+  # fully subnetted") when all 19 make theirs at once.
+  ROLL_APPS_DOCKER=1 cargo test -p apps-control --test docker -- --nocapture --test-threads=3
   # HTTP-01 from Pebble (Let's Encrypt's test CA) against the edge's plain-HTTP listener.
   ROLL_APPS_DOCKER=1 cargo test -p roll-edge --test custom_domains
 fi

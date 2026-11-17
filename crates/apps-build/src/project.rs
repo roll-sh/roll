@@ -263,7 +263,7 @@ pub const COMPOSE_NODES: usize = 100_000;
 
 /// Its nodes counted as a reader would see them (aliases replayed), without building any:
 /// an error past [`COMPOSE_NODES`].
-fn count_nodes(text: &str) -> Result<(), ProjectError> {
+pub(crate) fn count_nodes(text: &str) -> Result<(), ProjectError> {
     use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
     use std::cell::Cell;
     #[derive(Clone, Copy)]
