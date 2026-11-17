@@ -12,12 +12,13 @@ pub const UNUSED_DAYS: i64 = 30;
 /// One thing to look at, most serious first by kind.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Finding {
-    /// `pending`, `unapproved`, `everything`, `never_expires`, `unused`, `narrower` or `roams`.
+    /// `pending`, `unapproved`, `everything`, `never_expires`, `secret_client`, `unused`,
+    /// `narrower` or `roams`.
     pub kind: &'static str,
     /// In words, for the person.
     pub why: String,
-    /// What fixes it: `tighten`, `expire`, `revoke`, `limit_addresses`, or `approve` (an admin's
-    /// decision on a person's pending token).
+    /// What fixes it: `tighten`, `expire`, `revoke`, `limit_addresses`, `rotate_client` (to a key
+    /// or CI's own identity), or `approve` (an admin's decision on a person's pending token).
     pub fix: &'static str,
 }
 
@@ -26,6 +27,15 @@ pub struct Finding {
 pub struct Seen {
     pub networks: i64,
     pub narrower: bool,
+    /// For a machine client's grant: how it signs in and when it last did.
+    pub machine: Option<Machine>,
+}
+
+/// A machine client, as the checkup sees it.
+pub struct Machine {
+    /// It signs in with a secret (not a key, not CI's own identity).
+    pub secret: bool,
+    pub last_sign_in: Option<i64>,
 }
 
 /// A grant's findings, most serious first; none for one that isn't live.
@@ -49,7 +59,14 @@ pub fn findings(g: &Grant, seen: &Seen, now: i64) -> Vec<Finding> {
     if g.expires_at.is_none() {
         out.push(Finding { kind: "never_expires", why: "it never expires".into(), fix: "expire" });
     }
-    let last = g.last_used_at.unwrap_or(g.created_at);
+    // A machine client that keeps nothing secret in CI is the goal (GitHub nudges secrets toward
+    // OIDC the same way).
+    if seen.machine.as_ref().is_some_and(|m| m.secret) {
+        out.push(Finding { kind: "secret_client", why: "it's a machine client that signs in with a secret: a key it signs with, or CI's own identity, keeps nothing secret in CI".into(), fix: "rotate_client" });
+    }
+    // A machine client's sign-ins are use too (its token may only be held, for later steps).
+    let signed_in = seen.machine.as_ref().and_then(|m| m.last_sign_in);
+    let last = g.last_used_at.max(signed_in).unwrap_or(g.created_at);
     if now - last > UNUSED_DAYS * day {
         let since = if g.last_used_at.is_some() { "made no request" } else { "never made a request" };
         out.push(Finding { kind: "unused", why: format!("it {since} in {} days", (now - last) / day), fix: "revoke" });
