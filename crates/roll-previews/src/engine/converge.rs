@@ -1164,7 +1164,8 @@ impl Engine {
             body.target_url = None;
         }
         let Ok((last_status, comment_id, last_hash)) = self.store.git_report(&p.id) else { return };
-        if let Some(state) = &body.state {
+        // The project's own switches, as for a roll code change's (`github.status`, `.comment`).
+        if let Some(state) = body.state.as_ref().filter(|_| s.github.status) {
             let key = format!("{}:{state}:{}", p.head, body.description);
             if last_status.as_deref() != Some(key.as_str()) {
                 match gr.status(service, &p.head, state, &body.description, body.target_url.as_deref()).await {
@@ -1177,11 +1178,17 @@ impl Engine {
             }
         }
         let Ok(Some(pull)) = self.store.git_pull(&p.id) else { return };
+        if !s.github.comment {
+            return;
+        }
+        // Its repository, as roll apps named it in the pull request's page: the comment's number
+        // and id are that repository's, whatever the service is connected to later.
+        let Some(repo) = pull_repo(&pull.url) else { return };
         let hash = format!("{:016x}", body.comment.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, x| (h ^ x as u64).wrapping_mul(0x0100_0000_01b3)));
         if last_hash.as_deref() == Some(hash.as_str()) {
             return;
         }
-        match gr.comment(service, pull.number as u64, &body.comment, comment_id.map(|i| i as u64)).await {
+        match gr.comment(service, &repo, pull.number as u64, &body.comment, comment_id.map(|i| i as u64)).await {
             Ok(Some(id)) => {
                 let _ = self.store.set_git_report(&p.id, None, Some((id as i64, &hash)));
             }
@@ -1190,4 +1197,12 @@ impl Engine {
         }
     }
 
+}
+
+/// `owner/name` of a pull request's page (`https://<host>/<owner>/<name>/pull/<n>`).
+fn pull_repo(url: &str) -> Option<String> {
+    let path = url.split_once("://")?.1.split_once('/')?.1;
+    let mut parts = path.split('/');
+    let (owner, name, kind) = (parts.next()?, parts.next()?, parts.next()?);
+    (kind == "pull" && !owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}"))
 }

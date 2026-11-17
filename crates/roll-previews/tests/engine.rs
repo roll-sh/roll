@@ -1228,6 +1228,15 @@ async fn a_git_url_preview_reports_its_status_and_pull_request_comment() {
     let fork = gr.statuses.lock().iter().rev().find(|s| s.1 == "f1").cloned().unwrap();
     assert_eq!(fork.2, "pending");
     assert!(fork.3.contains("approve") && !fork.4.as_deref().unwrap_or("").contains("shop."), "waits for a writer, no service link: {fork:?}");
+    // The project turns them off (`github.status`, `.comment`): nothing, as for a roll code change.
+    let off = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "github": { "status": false, "comment": false } })).unwrap();
+    e.engine.store.put_settings(&e.project, &off).unwrap();
+    let (n, c) = (gr.statuses.lock().len(), gr.comments.lock().len());
+    e.engine.git_push(&push("feat/cart", "a3", 3, false)).await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!((gr.statuses.lock().len(), gr.comments.lock().len()), (n, c), "the project's switches hold");
+    let on = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "github": { "status": true, "comment": true } })).unwrap();
+    e.engine.store.put_settings(&e.project, &on).unwrap();
     // Not connected: nothing.
     gr.connected.store(false, std::sync::atomic::Ordering::SeqCst);
     let n = gr.statuses.lock().len();

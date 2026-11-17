@@ -266,8 +266,10 @@ pub struct GitReportBody {
 pub trait GitReport: Send + Sync {
     /// The commit status `roll/preview` on `sha`.
     async fn status(&self, service: &str, sha: &str, state: &str, description: &str, target_url: Option<&str>) -> anyhow::Result<bool>;
-    /// Pull request `number`'s comment, `existing` edited in place (made again if it's gone): its id.
-    async fn comment(&self, service: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>>;
+    /// Pull request `number` of `repo` (`owner/name`)'s comment, `existing` edited in place (made
+    /// again if it's gone): its id. Nothing (`None`) when the service is connected to another
+    /// repository now: a number and a comment id are that repository's.
+    async fn comment(&self, service: &str, repo: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>>;
 }
 
 /// A pull request of a Git URL service's repository, as roll apps hands it on.

@@ -438,8 +438,12 @@ impl roll_previews::ports::GitReport for GitReport {
         Ok(true)
     }
 
-    async fn comment(&self, service: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>> {
+    async fn comment(&self, service: &str, pull_repo: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>> {
         let Some((installation, owner, repo)) = self.connection(service).await? else { return Ok(None) };
+        // Connected to another repository since (its source moved): this number isn't its.
+        if !format!("{owner}/{repo}").eq_ignore_ascii_case(pull_repo) {
+            return Ok(None);
+        }
         self.code.github_comment(installation, &owner, &repo, number, body, existing).await.map(Some).map_err(|e| anyhow::anyhow!("{e}"))
     }
 }

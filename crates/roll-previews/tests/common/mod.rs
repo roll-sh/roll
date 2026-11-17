@@ -382,7 +382,7 @@ impl roll_previews::ports::GitReport for FakeGitReport {
         self.statuses.lock().push((service.into(), sha.into(), state.into(), description.into(), target_url.map(Into::into)));
         Ok(true)
     }
-    async fn comment(&self, _service: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>> {
+    async fn comment(&self, _service: &str, _repo: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>> {
         if !self.connected.load(Ordering::SeqCst) {
             return Ok(None);
         }
