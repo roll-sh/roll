@@ -71,13 +71,11 @@ impl EnvSource for Engine {
         let untrusted = !(s.secrets.allow_production && r.trusted);
         let (secrets, leases) = self.resolve_secrets(&r, untrusted, service).await?;
         self.keep_leases(&r, service, &leases).await?;
-        for (k, v) in secrets {
-            set(&mut env, &k, v);
-        }
-        for (k, v) in project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(preview)?) {
-            set(&mut env, &k, v);
-        }
-        for (k, v) in self.resource_env(preview).await? {
+        let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(preview)?).collect();
+        let branches = self.resource_env(preview).await?;
+        // Its logs hide what this start is given (its dynamic credentials included).
+        self.add_masks(preview, masks::secret_values(&secrets, &own, &branches));
+        for (k, v) in secrets.into_iter().chain(own).chain(branches) {
             set(&mut env, &k, v);
         }
         if s.mail == crate::settings::MailRule::Catch {

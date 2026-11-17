@@ -872,6 +872,11 @@ impl Engine {
         let untrusted = !(s.secrets.allow_production && r.trusted);
         // Its dynamic credentials last as long as the job does.
         let (mut env, leases) = self.resolve_secrets(r, untrusted, what).await?;
+        // Its output becomes the preview's error (a teardown's, the pull request's comment): what
+        // it was given is masked there, as checks' output is.
+        let own: Vec<(String, String)> = project_env(s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
+        let hide = super::masks::secret_values(&env, &own, vars);
+        self.add_masks(&r.id, hide.clone());
         for (k, v) in vars {
             set(&mut env, k, v.clone());
         }
@@ -886,9 +891,9 @@ impl Engine {
                 warn!(preview = %r.id, lease = %l, error = %e, "previews: revoking a job's dynamic credential (it expires by itself)");
             }
         }
-        let (code, tail) = ran.map_err(|e| anyhow::anyhow!("{what}: {e:#}"))?;
+        let (code, tail) = ran.map_err(|e| anyhow::anyhow!("{what}: {}", code_preview::runner::mask(&format!("{e:#}"), &hide)))?;
         if code != 0 {
-            anyhow::bail!("the {what} command failed with exit code {code}\n\n{}", tail.trim_end());
+            anyhow::bail!("the {what} command failed with exit code {code}\n\n{}", code_preview::runner::mask(tail.trim_end(), &hide));
         }
         Ok(())
     }
@@ -1053,6 +1058,7 @@ impl Engine {
         self.usage_read.lock().remove(&r.id);
         self.secrets_told.lock().remove(&r.id);
         self.egress_told.lock().remove(&r.id);
+        self.forget_masks(&r.id);
         info!(preview = %r.id, "previews: deleted");
         Ok(())
     }

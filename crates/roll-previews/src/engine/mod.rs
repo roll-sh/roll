@@ -155,6 +155,8 @@ pub struct Engine {
     counters: Counters,
     /// The hosts each preview's egress proxy refused that its activity already says.
     egress_told: Mutex<HashMap<String, std::collections::HashSet<String>>>,
+    /// What each preview's output mustn't show (`masks.rs`).
+    log_masks: Mutex<HashMap<String, masks::Masks>>,
     /// Screenshots taken at once on this node ([`screenshot_slots`]).
     shooting: Arc<tokio::sync::Semaphore>,
     /// Services a converge just deployed at a change's new head, woken after the pass (`warm`).
@@ -222,6 +224,7 @@ impl Engine {
             counters: Counters::default(),
             shooting: Arc::new(tokio::sync::Semaphore::new(screenshot_slots())),
             egress_told: Mutex::new(HashMap::new()),
+            log_masks: Mutex::new(HashMap::new()),
             warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),
             passing: tokio::sync::Mutex::new(()),
@@ -760,6 +763,7 @@ fn short(rev: &str) -> &str {
 mod converge;
 mod discover;
 mod env;
+mod masks;
 mod requests;
 
 #[cfg(test)]
