@@ -1044,3 +1044,41 @@ async fn a_closed_environment_reaches_nothing_but_its_listed_hosts() {
     }
     assert!(docker(&["network", "inspect", &closed]).await.is_err(), "the closed network and its proxy's relay went with the service");
 }
+
+/// A closed environment (egress `roll`) keeps its network sandbox: asleep, another service on its
+/// network reaches it by name and the waker hands the call to the app, at the sandbox's address;
+/// a public request wakes it too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_environments_private_caller_wakes_it() {
+    use apps_control::runtime::docker::docker;
+    let Some(w) = docker_world_netns(Some(true)).await else { return };
+    let (id, host) = deploy_container(&w, "shut").await;
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll"}})), "application/json", None).await.0, StatusCode::OK);
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({})), "application/json", None).await;
+    let dep = r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+    for _ in 0..1200 {
+        let (_, x) = call(&w.api, "GET", &format!("{env}/deploys/{dep}"), None, "application/json", None).await;
+        if x["status"] == "active" {
+            break;
+        }
+        assert!(!["failed", "canceled"].contains(&x["status"].as_str().unwrap_or("")), "{x}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, svc) = call(&w.api, "GET", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    let port = svc["run"]["port"].as_u64().unwrap_or(8080);
+    let net = apps_control::closed_network_name(&w.project, "production");
+    assert_eq!(get(&w.public, &host).await.0, StatusCode::OK, "served at its sandbox's address");
+    let live = w.apps.live(&id, "production");
+    live.sleep().await;
+    let caller = format!("roll-apps-test-caller-{}", &id[4..]);
+    docker(&["run", "-d", "--name", &caller, "--network", &net, "busybox:1.37", "sleep", "600"]).await.unwrap();
+    let body = docker(&["exec", &caller, "wget", "-q", "-O-", "-T", "30", &format!("http://shut:{port}/")]).await;
+    let _ = docker(&["rm", "-f", &caller]).await;
+    assert!(body.as_deref().is_ok_and(|b| b.contains("<h1>cold</h1>")), "the waker took the call: {body:?}");
+    live.sleep().await;
+    assert_eq!(get(&w.public, &host).await.0, StatusCode::OK, "a public request wakes it too");
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    let _ = docker(&["network", "rm", &net]).await;
+    w.apps.shutdown().await;
+}
