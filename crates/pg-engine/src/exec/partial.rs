@@ -572,6 +572,8 @@ struct RunScratch {
     acc: Vec<i128>,
     cnt: Vec<i64>,
     best: Vec<u32>,
+    /// By slot: its rows in the batch.
+    rows: Vec<i64>,
     /// New groups by their key's bytes (`batch_key`, or a words key's), and the groups.
     newk: hashbrown::HashMap<Box<[u8]>, u32, super::fasthash::FastState>,
     newg: Vec<NewGroup>,
@@ -1427,10 +1429,16 @@ impl<'a> Partials<'a> {
         run.cnt.resize(nslots * na, 0);
         run.best.clear();
         run.best.resize(nslots * na, u32::MAX);
+        // (Each slot's rows, counted once: count(*)'s, and a lane's without NULLs.)
+        run.rows.clear();
+        run.rows.resize(nslots, 0);
+        for &s in &run.slots {
+            run.rows[s as usize] += 1;
+        }
         for (i, arg) in plan.args.iter().enumerate() {
             let (acc, cnt) = (&mut run.acc, &mut run.cnt);
             match arg {
-                AggArg::Star => run.slots.iter().for_each(|&s| cnt[s as usize * na + i] += 1),
+                AggArg::Star => (0..nslots).for_each(|s| cnt[s * na + i] = run.rows[s]),
                 AggArg::Count(c) => {
                     if let Some(col) = &b.cols[*c] {
                         for (&s, &r) in run.slots.iter().zip(live) {
@@ -1445,13 +1453,20 @@ impl<'a> Partials<'a> {
                     best_rows(col, st.max, &run.slots, live, na, i, &mut run.best);
                 }
                 AggArg::Num(_) => {
+                    // (An argument an aggregate before took already (sum and avg of one
+                    // column): its sums and counts copied.)
+                    if let Some(i0) = (0..i).find(|&i0| matches!(plan.args[i0], AggArg::Num(_)) && lanes.same(i0, i)) {
+                        for s in 0..nslots {
+                            (acc[s * na + i], cnt[s * na + i]) = (acc[s * na + i0], cnt[s * na + i0]);
+                        }
+                        continue;
+                    }
                     let l = lanes.arg(i);
                     if l.nulls.is_empty() {
                         for (&s, &v) in run.slots.iter().zip(&l.v) {
-                            let j = s as usize * na + i;
-                            acc[j] += v;
-                            cnt[j] += 1;
+                            acc[s as usize * na + i] += v;
                         }
+                        (0..nslots).for_each(|s| cnt[s * na + i] = run.rows[s]);
                     } else {
                         for ((&s, &v), &null) in run.slots.iter().zip(&l.v).zip(&l.nulls) {
                             let j = s as usize * na + i;

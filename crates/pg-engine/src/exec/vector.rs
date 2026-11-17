@@ -794,6 +794,11 @@ impl Lanes {
         Lanes { nodes, roots, out: Vec::new() }
     }
 
+    /// Whether aggregate arguments `i` and `j` are one lane (one expression).
+    pub fn same(&self, i: usize, j: usize) -> bool {
+        self.roots[i].is_some() && self.roots[i] == self.roots[j]
+    }
+
     /// Aggregate argument `i`'s lane (`eval`'s).
     pub fn arg(&self, i: usize) -> &Lane {
         &self.out[self.roots[i].expect("a numeric argument")]
