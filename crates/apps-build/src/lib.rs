@@ -74,6 +74,11 @@ pub struct Overrides {
     /// is the stage's build argument, so a changed value rebuilds what read it.
     #[serde(skip)]
     pub build_env: Vec<String>,
+    /// Of `build_env`, those kept as files (`files` on the variables): a name and its absolute
+    /// path. Each step mounts them there (`--mount=type=secret,target=…`: an `.npmrc`, a
+    /// registry's login) instead of in its environment, and still never in a layer.
+    #[serde(skip)]
+    pub build_files: Vec<(String, String)>,
     /// The Procfile's process this service runs (`web`, `worker`): its command is the start
     /// command when nothing above names one. None reads no Procfile.
     #[serde(skip)]
@@ -329,6 +334,7 @@ impl Overrides {
             spa: self.spa,
             packages: self.packages.clone(),
             build_env: self.build_env.clone(),
+            build_files: self.build_files.clone(),
             process: self.process.clone(),
         }
     }
@@ -343,6 +349,8 @@ pub(crate) struct Commands<'a> {
     pub custom_install: bool,
     /// [`Overrides::build_env`].
     pub env: &'a [String],
+    /// [`Overrides::build_files`].
+    pub files: &'a [(String, String)],
 }
 
 type Render = Box<dyn FnOnce(&Commands<'_>) -> String>;
@@ -378,6 +386,7 @@ impl Draft {
             start: start.as_deref(),
             custom_install: o.install.is_some(),
             env: &o.build_env,
+            files: &o.build_files,
         });
         Plan {
             provider: self.provider,
