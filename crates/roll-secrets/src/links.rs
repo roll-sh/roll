@@ -247,19 +247,19 @@ impl crate::Secrets {
             })
             .collect();
         if let Some(provider) = self.links.0.get(crate::aws::KIND) {
-            out.extend(self.aws_role_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::aws::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+            out.extend(self.aws_role_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::aws::KIND.into(), r#ref: id.clone(), name, fields: provider.fields_for(&id) }));
         }
         if let Some(provider) = self.links.0.get(crate::iam::KIND) {
-            out.extend(self.aws_user_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::iam::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+            out.extend(self.aws_user_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::iam::KIND.into(), r#ref: id.clone(), name, fields: provider.fields_for(&id) }));
         }
         if let Some(provider) = self.links.0.get(crate::rotators::KIND) {
-            out.extend(self.rotator_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::rotators::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+            out.extend(self.rotator_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::rotators::KIND.into(), r#ref: id.clone(), name, fields: provider.fields_for(&id) }));
         }
         if let Some(provider) = self.links.0.get(crate::outside::KIND) {
-            out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::outside::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+            out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::outside::KIND.into(), r#ref: id.clone(), name, fields: provider.fields_for(&id) }));
         }
         if let Some(provider) = self.links.0.get(crate::directories::KIND) {
-            out.extend(self.directory_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::directories::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+            out.extend(self.directory_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::directories::KIND.into(), r#ref: id.clone(), name, fields: provider.fields_for(&id) }));
         }
         if let Some(provider) = self.links.0.get(crate::snowflake::KIND) {
             out.extend(self.snowflake_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::snowflake::KIND.into(), fields: provider.fields_for(&id), r#ref: id, name }));
@@ -269,14 +269,14 @@ impl crate::Secrets {
         }
         for (kind, id, name) in self.cloud_refs(project)? {
             if let Some(provider) = self.links.0.get(kind.as_str()) {
-                out.push(Target { kind, r#ref: id, name, fields: provider.fields().to_vec() });
+                out.push(Target { kind, r#ref: id.clone(), name, fields: provider.fields_for(&id) });
             }
         }
         if let Some(provider) = self.links.0.get(crate::pki::KIND) {
-            out.extend(self.ca_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::pki::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+            out.extend(self.ca_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::pki::KIND.into(), r#ref: id.clone(), name, fields: provider.fields_for(&id) }));
         }
         if let Some(provider) = self.links.0.get(crate::ssh::KIND) {
-            out.extend(self.ssh_ca_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::ssh::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+            out.extend(self.ssh_ca_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::ssh::KIND.into(), r#ref: id.clone(), name, fields: provider.fields_for(&id) }));
         }
         Ok(out)
     }
