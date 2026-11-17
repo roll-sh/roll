@@ -869,8 +869,17 @@ waits on a sibling PR reaching main is last.
    ChatGPT need a public HTTPS rolld and the user's account (the review pack's decisions);
    MCPJam's inspector (3.18) asks for an MCPJam account first.
 
-6. **Enterprise-managed authorization** (SEP-990): a company IdP's ID-JAG traded for a roll
-   token. It needs accounts' SSO first.
+6. **Enterprise-managed authorization (SEP-990): built** on `feature/roll-mcp-enterprise` (on #114;
+   a PR on main after #114). A company's identity provider vouches for a person to an app (the
+   IETF's ID-JAG, Okta's Cross App Access): the operator trusts providers (issuer, keys, the email
+   domains each vouches for, whether it may sign admins in) and registers apps (a secret or key,
+   rules); the app's `jwt-bearer` sign-in with an `oauth-id-jag+jwt` assertion gets an hour's token
+   on the person's own connection. Reviewed by an agent (one high: an unverified or any-domain email
+   could take an account, admins included; fixed with verified emails in the provider's domains and
+   admins only by opt-in; and mediums: read-only scope, Unicode look-alikes, revoked connections
+   coming back; all fixed). `roll token enterprise`. Next on it: the dashboard's panel, and a live
+   check with a real provider's ID-JAG (Okta's Cross App Access sandbox needs an account: the
+   user's call).
 7. **Everyday routes with no tool:** tasks, streams, storage, queues, postgres, Redis and NoSQL have
    theirs (`tool-gaps.py origin/main <product>` lists what's left). What's left is mostly what only
    an operator does by hand: keys, passwords, accounts, IAM, roles, CDN, migrations, evict and
@@ -881,7 +890,10 @@ waits on a sibling PR reaching main is last.
    roll, so mostly members' text).
 9. **`apps_purge_cache`** once apps' #139 is on main: a sibling of `apps_restart` for
    `POST …/environments/{env}/cache/purge {paths?, tags?}` (tags from apps' #183) (deploy in production, write elsewhere, by
-   the environment's prefix row).
+   the environment's prefix row). Likewise `secrets_totp` once secrets' #194 is on main: `GET
+   …/environments/{env}/secrets/{key}/totp` (`{code, expires_at, period}`), with the reveal tools
+   (its row is reveal, audited as `secrets.totp`); its description says a code lives a period, so
+   fetch again past `expires_at` (an approval that waited may hand back one about to expire).
 10. **More tools that wait:** `apps_wait_deploy` is in #108. Rechecked on main (05:50): Postgres
    branch backups and restores answer once done (nothing to wait on); search's reindexes are
    Elasticsearch's own `_tasks` behind the operator's request route. Branch backups and search reindexes
@@ -900,6 +912,15 @@ waits on a sibling PR reaching main is last.
    `/v1/access/leaks/github`.
 13. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
+14. **Step-up authorization (SEP-835), once clients do it:** a refused call could answer `403`
+   `WWW-Authenticate: Bearer error="insufficient_scope", scope=…` so the client reopens roll's
+   consent screen for the refused rule (as the refusal's widen link proposes it now). Not yet: today
+   it would take the refusal's explanation and `access_request_access` away from the main clients,
+   which don't step up (Claude Code's 403 path is open as anthropics/claude-code#44652, Codex's as
+   openai/codex#20518; ChatGPT reads `_meta["mcp/www_authenticate"]` on an in-band error). roll's
+   unit is a rule chosen at consent, not a scope, so the challenge's scope would name the rule
+   (`roll:add:<product>:<action>…`) for the consent screen to propose, never grant by itself.
+   Recheck those issues each pass.
 
 Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset (see Toolsets: it would drop tools from connections that use them; search mode is opt-in); a connection narrowed to one project (Supabase's `project_ref`): their
 tokens are account-wide; a roll token's rules already name projects, and the builder's presets
