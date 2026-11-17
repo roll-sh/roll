@@ -3363,7 +3363,13 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       are not started.
 - **Executor, round 19: the workers' lookups a batch of outer rows at a time, numerics encoded
   without allocating** (agent 244; BENCH.md "Executor, round 19"). Base `61414bc58` (origin's
-  head with agent 238's values prefetch, `065d6e6b7`), head `eae0f8e2a` (rebased since, without changes, on agent 245's storage round 2).
+  head with agent 238's values prefetch, `065d6e6b7`), head `eae0f8e2a` (rebased since, without changes, on agent 245's storage round 2). Lane C, all three
+  servers at max_parallel_workers_per_gather 2, max_parallel_workers 8 and a 2 GB cache, five
+  interleaved rounds the same afternoon: TPC-H SF1 PGO 9.95 (base) -> 9.84 s (head) against
+  PostgreSQL's 15.29 and pgrust's 9.90 (CPU 26.34 -> 25.66 s against 39.20 and 15.94); plain dist
+  12.01 -> 11.84 s (CPU 31.91 -> 31.03). Roll's total is now under pgrust's with PGO. Still slower
+  than PostgreSQL (PGO head): q02 0.39 / 0.24, q20 0.29 / 0.15, q11 0.15 / 0.09, q08 0.23 / 0.19,
+  q22 0.12 / 0.09, q13 0.92 / 0.88; q07 is now ahead (0.42 / 0.45).
   - **A lookup stage takes 64 outer rows at a time** (`pipe::run_stages` holds them per stage,
     `pipe::lookup_batch`, `Lookup::batch`, `entry_spans`, `Lookup::multi_get`): a parallel
     worker's nested-loop inner index scans (inner and left joins: q07's orders by o_custkey
@@ -3453,6 +3459,9 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     golden (3) and parallel_scan (13) also pass with `--profile verify-checked` (debug
     assertions: the multi-get's keys strictly ascending). No new test: the results and their order are the old path's (parallel_scan
     compares the workers' lookups with the serial plan; every TPC-H hash is PostgreSQL's).
+  - Lane A's point reads: not measured. Neither change is on a point read's path: the batch is
+    the workers' lookup stage (`PointReader::get_sorted` and `get_with` unchanged), and
+    `encode_value`'s numeric arm runs when a row with a numeric is written.
   - Left (largest first): q13's probe and partial aggregation as one batch kernel; q02's joined
     rows made once (the nested loop building the Hash's narrowed row); the allocation class
     (16% of roll's samples against PostgreSQL's 6.5: rows as `Vec<Value>` per row in the row
