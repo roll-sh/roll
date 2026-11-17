@@ -179,6 +179,14 @@ CREATE TABLE IF NOT EXISTS bypass (
     hash TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS git_pulls (
+    preview_id TEXT PRIMARY KEY,
+    number INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    fork INTEGER NOT NULL,
+    approved_head TEXT,
+    approved_by TEXT
+);
 CREATE TABLE IF NOT EXISTS note_crops (
     preview_id TEXT NOT NULL,
     note_id TEXT NOT NULL,
@@ -877,7 +885,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -2006,6 +2014,49 @@ impl Store {
         Ok(row.and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok()))
     }
 
+    // ── git_pulls: the pull request a Git URL service's preview is of (roll apps' `GitPull`) ──
+
+    /// The pull request a preview is of: its number, link and whether it's from a fork, as roll
+    /// apps last said. A new head of a fork clears the approval (it was for one head).
+    pub fn set_git_pull(&self, id: &str, number: i64, url: &str, fork: bool, head: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO git_pulls (preview_id, number, url, fork) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (preview_id) DO UPDATE SET number = excluded.number, url = excluded.url, fork = excluded.fork",
+                params![id, number, url, fork],
+            )?;
+            c.execute("UPDATE git_pulls SET approved_head = NULL, approved_by = NULL WHERE preview_id = ?1 AND approved_head IS NOT ?2", params![id, head])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    pub fn git_pull(&self, id: &str) -> Result<Option<crate::GitPullView>> {
+        Ok(self.db.read(|c| {
+            c.query_row("SELECT number, url, fork, approved_head, approved_by FROM git_pulls WHERE preview_id = ?", [id], |r| {
+                Ok(crate::GitPullView { number: r.get(0)?, url: r.get(1)?, fork: r.get(2)?, approved_head: r.get(3)?, approved_by: r.get(4)? })
+            })
+            .optional()
+        })?)
+    }
+
+    /// A writer let this head of a fork's pull request run. Only the head the preview is at:
+    /// anything else is a conflict (it moved since the person looked).
+    pub fn approve_git_pull(&self, id: &str, head: &str, by: &str) -> Result<()> {
+        self.db.write(|c| {
+            let at: Option<String> = c.query_row("SELECT head FROM previews WHERE id = ?", [id], |r| r.get(0)).optional()?;
+            match at {
+                None => return Err(Error::NotFound(format!("no preview {id}"))),
+                Some(h) if h != head => return Err(Error::Conflict(format!("the pull request moved on to {}: approve that head", &h[..12.min(h.len())]))),
+                Some(_) => {}
+            }
+            let n = c.execute("UPDATE git_pulls SET approved_head = ?2, approved_by = ?3 WHERE preview_id = ?1 AND fork = 1", params![id, head, by])?;
+            if n == 0 {
+                return Err(Error::Conflict("only a pull request from a fork waits for an approval".into()));
+            }
+            Ok(())
+        })
+    }
+
     // ── leases: the dynamic credentials a service started with (roll secrets'; ids only) ──
 
     /// Lease ids a start of `service` was given, each thought to end `expires_at` (ms) until a
@@ -2148,6 +2199,7 @@ impl Store {
         let share_url = url.as_deref().map(share);
         let (schema_changes, schema_risks, release) = self.release_facts(&r.id)?;
         let kept_until = self.kept_until(&r.id)?;
+        let pull = self.git_pull(&r.id)?;
         let goes_at = self.goes_at(&r.id)?;
         // The screenshot row in one read, without its images.
         let f = self.shot_facts(&r.id)?;
@@ -2230,6 +2282,7 @@ impl Store {
             schema_changes,
             release,
             kept_until,
+            pull,
             goes_at,
             earlier,
             screenshot_at,

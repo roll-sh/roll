@@ -200,7 +200,8 @@ fn prepare_one(t: &Target, ctx: &mut crate::mapping::MappingCtx, id: &str, routi
     // Plain documents of a plain mapping go from bytes to fields directly (`document::fast`);
     // the rest (and every failure) through the general parser.
     let (parsed, stored) = match t.plan.as_ref().and_then(|plan| Some((plan.parse(source)?, plan.source))) {
-        Some((parsed, src)) => (parsed, (src == crate::document::fast::SourcePlan::Keep).then(|| source.clone())),
+        // The fast plan never serves synthetic `_source`: no `_ignored_source` entries.
+        Some((parsed, src)) => (parsed, write::StoredDoc { source: (src == crate::document::fast::SourcePlan::Keep).then(|| source.clone()), ignored_source: Vec::new() }),
         None => {
             let value = parse_doc(source).ok()?;
             ctx.join_routing = Some(routing.is_some());
@@ -216,11 +217,11 @@ fn prepare_one(t: &Target, ctx: &mut crate::mapping::MappingCtx, id: &str, routi
                     _ => {}
                 }
             }
-            let stored = write::stored_source(idx, &table, source, &value);
+            let stored = write::stored_doc(idx, &table, source, &value, crate::xcontent::XContentType::Json);
             (parsed, stored)
         }
     };
-    let meta = DocMeta { id, routing, source: stored, tsid: None };
+    let meta = DocMeta { id, routing, source: stored.source, ignored_source: stored.ignored_source, tsid: None };
     let doc = convert::to_indexable(&table, &parsed, &meta).ok()?;
     let shard_id = crate::meta::routing::shard_for(idx, id, routing);
     let shard = engine.shard(shard_id).clone();

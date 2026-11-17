@@ -142,6 +142,160 @@ impl Engine {
         Ok((self.store.view(row)?, made))
     }
 
+    /// A push to a branch of a Git URL service on roll apps ([`crate::ports::GitPush`]): in each
+    /// project whose canvas holds the service, the branch's preview is made (its rules allowing:
+    /// previews on, the branch matching `branches`, no `[skip preview]`, room under
+    /// `max_previews`), moved to the pushed sha, or deleted with its branch. The service's
+    /// previews are the repo `git:<service>` with the branch: the same push twice changes
+    /// nothing. Only the repository's writers move its branches, so these previews are trusted.
+    ///
+    /// A pull request ([`crate::ports::GitPull`]) names the preview by its title and links it.
+    /// A same-repo one is its branch's preview; a fork's (`pull/<n>`) is untrusted (secrets
+    /// resolve untrusted) and runs only at the head a writer approved ([`Engine::approve`]);
+    /// a close deletes it. A row is never made trusted again by a later push.
+    pub async fn git_push(&self, p: &crate::ports::GitPush) -> Result<()> {
+        let repo = format!("git:{}", p.service);
+        let fork = p.pull.as_ref().is_some_and(|pl| pl.fork);
+        // The pull request's title as plain words: no control characters, at most 200 characters.
+        // Invisible formatting (bidi overrides, zero-width marks) too: the title sits by Approve.
+        let invisible = |c: char| c.is_control() || matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}');
+        let pull_title = p.pull.as_ref().map(|pl| pl.title.chars().map(|c| if invisible(c) { ' ' } else { c }).take(200).collect::<String>().trim().to_string());
+        let projects: Vec<roll_workspace::Project> = self
+            .workspace
+            .list(roll_workspace::Scope::All)?
+            .into_iter()
+            // Anyone may put any service on their own canvas: only a project that stands for it
+            // (`Workspace::trusts`) gets its pushes (its branches, titles and commits).
+            .filter(|pr| pr.resources.iter().any(|r| r.kind == roll_workspace::Kind::Service && r.r#ref == p.service) && self.workspace.trusts(pr, roll_workspace::Kind::Service, &p.service))
+            .collect();
+        for project in projects {
+            let rows = self.store.rows(Some(&project.id))?;
+            // A fork's pull request's preview is its number's (never a writer's branch that happens
+            // to be named `pull/7`); a branch's is the branch's that no fork's pull request holds.
+            let fork_of = |r: &Row| self.store.git_pull(&r.id).ok().flatten().filter(|g| g.fork).map(|g| g.number);
+            let existing = rows
+                .iter()
+                .find(|r| {
+                    r.change_id.is_none()
+                        && r.repo == repo
+                        && r.desired == Desired::Active
+                        && match p.pull.as_ref().filter(|pl| pl.fork) {
+                            Some(pl) => fork_of(r) == Some(pl.number as i64),
+                            None => r.branch.as_deref() == Some(p.branch.as_str()) && fork_of(r).is_none(),
+                        }
+                })
+                .cloned();
+            match (&p.sha, existing) {
+                (None, Some(r)) => {
+                    let why = match &p.pull {
+                        Some(pl) => format!("its pull request #{} closed", pl.number),
+                        None => format!("its branch {} was deleted", p.branch),
+                    };
+                    self.mark_deleted(&r.id, &why)?;
+                }
+                (None, None) => {}
+                (Some(sha), Some(r)) => {
+                    if let Some(pl) = &p.pull {
+                        self.store.set_git_pull(&r.id, pl.number as i64, https_only(&pl.url), pl.fork, sha)?;
+                    }
+                    let title = pull_title.clone().filter(|t| !t.is_empty() && *t != r.title);
+                    if r.head != *sha || title.is_some() || (fork && r.trusted) {
+                        let now = self.store.now_ms()?;
+                        self.store.update(&r.id, |x| {
+                            if let Some(t) = &title {
+                                x.title = t.clone();
+                            }
+                            x.trusted = x.trusted && !fork;
+                            if x.head != *sha {
+                                x.head = sha.clone();
+                                x.last_active_at = now;
+                                x.next_at = 0;
+                                if matches!(x.state, State::Ready | State::Sleeping | State::Failed) {
+                                    x.state = State::Updating;
+                                }
+                            }
+                        })?;
+                        if r.head != *sha {
+                            self.store.log(&r.id, &format!("{} pushed: {}", p.branch, short(sha)))?;
+                        }
+                    }
+                }
+                (Some(sha), None) => {
+                    let s = self.store.settings(&project.id)?;
+                    let skip = [Some(p.message.as_str()), pull_title.as_deref()].into_iter().flatten().any(|t| t.to_ascii_lowercase().contains("[skip preview]"));
+                    if !s.enabled || skip || !crate::glob::any(&s.branches, &p.branch) {
+                        continue;
+                    }
+                    // A fork's pull request waiting for approval holds a place too: anyone can open
+                    // them, and none may grow the list past `max_previews`.
+                    let busy = rows.iter().filter(|r| r.desired == Desired::Active && !r.is_baseline() && !(r.state == State::Queued || (r.state == State::AwaitingApproval && !fork))).count();
+                    if busy >= s.max_previews as usize {
+                        continue;
+                    }
+                    let now = self.store.now_ms()?;
+                    let name = p.url.rsplit('/').next().unwrap_or(&p.service).trim_end_matches(".git");
+                    let n = New {
+                        project_id: project.id.clone(),
+                        key: match &p.pull {
+                            Some(pl) if pl.fork => format!("pr{}", pl.number),
+                            _ => p.branch.clone(),
+                        },
+                        project_name: project.name.clone(),
+                        repo: repo.clone(),
+                        change_id: None,
+                        branch: Some(p.branch.clone()),
+                        number: None,
+                        title: pull_title.clone().filter(|t| !t.is_empty()).unwrap_or_else(|| format!("{name}@{}", p.branch)),
+                        github_pr: None,
+                        head: sha.clone(),
+                        trusted: !fork,
+                        state: if fork { State::AwaitingApproval } else { State::Creating },
+                        expires_at: Some(now + s.ttl_hours as i64 * 3_600_000),
+                        created_by: format!("git:{}", p.service),
+                    };
+                    let (row, _) = self.store.create(&n)?;
+                    if let Some(pl) = &p.pull {
+                        self.store.set_git_pull(&row.id, pl.number as i64, https_only(&pl.url), pl.fork, sha)?;
+                    }
+                    if fork {
+                        self.store.log(&row.id, &format!("pull request #{} is from a fork: it runs once a writer approves {}", p.pull.as_ref().map_or(0, |pl| pl.number), short(sha)))?;
+                    }
+                }
+            }
+        }
+        self.kick();
+        Ok(())
+    }
+
+    /// Whether a preview with no roll code change may run its head: a Git URL service's fork's
+    /// pull request only at the head a writer approved; everything else (trusted) always.
+    pub(super) fn git_head_may_run(&self, r: &Row) -> Result<bool> {
+        if r.trusted {
+            return Ok(true);
+        }
+        Ok(self.store.git_pull(&r.id)?.and_then(|g| g.approved_head).as_deref() == Some(r.head.as_str()))
+    }
+
+    /// `POST …/approve {head}`: a writer lets this head of a fork's pull request run (roll
+    /// code's `approve-run` for a Git URL service's preview). Only the head the preview is at; the
+    /// next push waits again.
+    pub fn approve(&self, id: &str, head: &str, by: &str) -> Result<Preview> {
+        // Roll only doesn't reach roll apps yet (its egress, the apps thread's): a fork's code
+        // there would run with branched data and the open internet, so it isn't released.
+        let row = self.store.row(id)?;
+        if row.repo.starts_with("git:") && self.store.settings(&row.project_id)?.egress == crate::settings::EgressRule::Roll {
+            return Err(Error::Conflict("this project limits what previews may reach (Roll only), which doesn't cover services hosted on roll apps yet: a fork's code isn't approved to run there".into()));
+        }
+        self.store.approve_git_pull(id, head, by)?;
+        self.store.log(id, &format!("{} approved by {by}", short(head)))?;
+        let r = self.store.update(id, |row| {
+            row.next_at = 0;
+            row.attempts = 0;
+        })?;
+        self.kick();
+        self.store.view(r)
+    }
+
     /// Delete a preview. A change's preview stays deleted until the change's next push.
     pub fn delete(&self, id: &str) -> Result<Preview> {
         let row = self.store.row(id)?;
@@ -439,6 +593,12 @@ pub fn resume_at(before: &[String], now: &[String]) -> Option<usize> {
     (k..=now.len()).find(|&p| &now[p - k..p] == tail)
 }
 
+/// A pull request's link as the sheet may show it: `https://` only (`""` otherwise), so a link
+/// can't run script.
+fn https_only(url: &str) -> &str {
+    if url.starts_with("https://") && !url.chars().any(char::is_whitespace) { url } else { "" }
+}
+
 #[cfg(test)]
 mod tests {
     /// A followed log that's polled passes each line on once: what's new after the lines it
@@ -453,3 +613,4 @@ mod tests {
         assert_eq!(super::resume_at(&v(&["a"]), &v(&["q", "r"])), None, "moved past everything seen: a gap");
     }
 }
+
