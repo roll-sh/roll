@@ -364,6 +364,11 @@ FORK_ID=${FORK%%|*}
 [ "$(api GET "/v1/previews/$FORK_ID" | jq_ "any(s.get('deployed') for s in d['services'])")" = False ] || { echo "nothing of a fork's should be deployed before an approval: $(api GET "/v1/previews/$FORK_ID" | jq_ "[(s['name'], s.get('deployed')) for s in d['services']]")"; exit 1; }
 STALE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$FORK_ID/approve" -H 'content-type: application/json' -d '{"head":"0000000000000000000000000000000000000000"}')
 [ "$STALE" = 409 ] || { echo "approving another head should be refused: $STALE"; exit 1; }
+# A fork's preview reaches roll only by default (egress_forks), and roll apps' build of its head
+# isn't held to that: not approved until the project opens forks' egress.
+HELD=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$FORK_ID/approve" -H 'content-type: application/json' -d "{\"head\":\"$CART\"}")
+[ "$HELD" = 409 ] || { echo "a fork's head on roll apps should wait while forks reach roll only: $HELD"; exit 1; }
+api PUT "/v1/previews/projects/$PRJ/settings" '{"egress_forks":"open"}' >/dev/null
 api POST "/v1/previews/$FORK_ID/approve" "{\"head\":\"$CART\"}" >/dev/null
 for _ in $(seq 1 600); do
   [ "$(api GET "/v1/previews/$FORK_ID" | jq_ "d['state']")" = ready ] && break

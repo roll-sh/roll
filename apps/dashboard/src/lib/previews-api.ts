@@ -94,6 +94,8 @@ export interface Preview {
   release?: { head: string; ms: number; before_ms: number | null } | null;
   /** Kept past its TTL until then (epoch ms). */
   kept_until?: number | null;
+  /** What its code may reach: a fork's preview is `roll` by default though the project's reach anything (`egress_forks`). */
+  reaches?: "open" | "roll";
   /** The pull request a Git URL service's preview is of (roll apps' push hook). A fork's runs only at `approved_head`. */
   pull?: { number: number; url: string; fork: boolean; approved_head: string | null; approved_by: string | null };
   /** When it goes (its TTL, or a keep, running out), once that's close (a day ahead). */
@@ -341,8 +343,10 @@ export interface PreviewSettings {
   mail?: "catch" | "deliver";
   /** What its services' code may reach: `open` (default) anything; `roll` only roll's own products (a network with no route out). */
   egress?: "open" | "roll";
-  /** With `egress: "roll"`: hosts outside roll its code may still reach (`api.stripe.com`, `*.sentry.io`), through a proxy that refuses anything else. */
+  /** With `egress: "roll"` (or `egress_forks: "roll"`, for forks): hosts outside roll its code may still reach (`api.stripe.com`, `*.sentry.io`), through a proxy that refuses anything else. */
   egress_hosts?: string[];
+  /** What a fork's preview (an untrusted head a writer approved) may reach when `egress` is `open`: `roll` (default) or `open`. */
+  egress_forks?: "open" | "roll";
   /** Branch the data as of a point in time where the product keeps history: `-24h`, `-30m`, `-7d`, or an RFC 3339 time (30 days back at most). */
   data_at?: string | null;
   /** A feedback button on its pages for people who came in through roll (link access). */

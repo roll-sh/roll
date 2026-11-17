@@ -225,6 +225,9 @@ pub struct Preview {
     pub release: Option<ReleaseRun>,
     /// Kept past its TTL until then (`POST …/keep`); a landed or closed change still ends it.
     pub kept_until: Option<i64>,
+    /// What its code may reach (`Settings::egress_for`): a fork's is `roll` by default though the
+    /// project's previews reach anything, so a call outside roll failing is explained on it.
+    pub reaches: crate::settings::EgressRule,
     /// The pull request a Git URL service's preview is of (roll apps' push hook): `None` for a
     /// branch's and for roll code's (theirs is `number`/`github_pr`).
     #[serde(skip_serializing_if = "Option::is_none")]

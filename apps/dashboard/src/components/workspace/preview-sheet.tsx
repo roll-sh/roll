@@ -167,6 +167,11 @@ export function PreviewSheet({
                 {p.pull.fork && p.pull.approved_by ? ` · from a fork, ${p.head.slice(0, 12)} approved by ${p.pull.approved_by}` : ""}
               </p>
             )}
+            {!p.trusted && p.reaches === "roll" && (
+              <p className="mb-3 text-[11.5px] text-muted">
+                Reaches roll only: a pull request from a fork can't call anything outside roll but the project&apos;s allowed hosts, so a call to an outside API fails here. The project&apos;s rules can open it (A fork&apos;s preview reaches: Anything).
+              </p>
+            )}
             <VerdictStrip p={p} />
             <span data-section="services" />
             <Label>Services</Label>

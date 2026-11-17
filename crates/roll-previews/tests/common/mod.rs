@@ -209,6 +209,10 @@ pub struct FakeApps {
     pub removed: Mutex<Vec<(String, String)>>,
     /// What every service's log holds.
     pub log: Mutex<Vec<String>>,
+    /// What each seed or release job was run able to reach.
+    pub seed_egress: Mutex<Vec<roll_previews::settings::EgressRule>>,
+    /// What each service was deployed able to reach.
+    pub egress: Mutex<HashMap<(String, String), roll_previews::settings::EgressRule>>,
     /// Seeds run (their DATABASE_URL), and the exit code the next ones give.
     pub seeds: Mutex<Vec<String>>,
     pub seed_exit: std::sync::atomic::AtomicI32,
@@ -264,6 +268,7 @@ impl Apps for FakeApps {
         self.deployed.lock().insert((t.preview.clone(), t.service.clone()), t.revision.clone());
         self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
         self.feedback.lock().insert((t.preview.clone(), t.service.clone()), t.feedback);
+        self.egress.lock().insert((t.preview.clone(), t.service.clone()), t.egress);
         Ok(None)
     }
     async fn catalog(&self, _project: &str) -> anyhow::Result<Option<Vec<roll_previews::ports::CatalogService>>> {
@@ -297,6 +302,7 @@ impl Apps for FakeApps {
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
         let db = job.env.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap_or_default();
         self.seeds.lock().push(db);
+        self.seed_egress.lock().push(job.egress);
         let at_rev = self.deployed.lock().values().filter(|r| **r == job.revision).count();
         self.runs.lock().push((job.seed.run.clone(), job.revision.clone(), at_rev));
         // A job that prints what it was given.

@@ -55,7 +55,7 @@ async fn a_change_gets_a_full_preview_that_follows_pushes_and_goes_when_it_lands
 
 #[tokio::test]
 async fn a_fork_waits_for_approval_and_a_failed_step_is_retried() {
-    let e = env(json!({ "enabled": true, "resources": { "redis:rdb_cache": "skip" } }));
+    let e = env(json!({ "enabled": true, "resources": { "redis:rdb_cache": "skip" }, "seed": { "image": "node:22", "run": "npm run seed" } }));
     e.code.open(ChangeInfo { trusted: false, ..change("chg_f", 3) });
     e.engine.pass().await.unwrap();
     let p = e.code.last_report("chg_f");
@@ -75,6 +75,13 @@ async fn a_fork_waits_for_approval_and_a_failed_step_is_retried() {
     let p = e.engine.store.preview(&p.id).unwrap();
     assert_eq!(p.state, State::Ready, "{p:?}");
     assert_eq!(p.resources.len(), 1, "redis is skipped by the project's rules");
+    // Approved to run, not read for what it sends out: roll only, though the project's own
+    // previews reach anything (`egress_forks`).
+    let egress = e.apps.egress.lock().clone();
+    assert!(!egress.is_empty() && egress.values().all(|x| *x == roll_previews::settings::EgressRule::Roll), "{egress:?}");
+    let jobs = e.apps.seed_egress.lock().clone();
+    assert!(!jobs.is_empty() && jobs.iter().all(|x| *x == roll_previews::settings::EgressRule::Roll), "its seed too: {jobs:?}");
+    assert_eq!(p.reaches, roll_previews::settings::EgressRule::Roll, "and it says so");
 
     // A new push un-approves it: its services stop and it waits again.
     e.code.edit("chg_f", |c| {
@@ -1111,7 +1118,9 @@ async fn a_git_url_services_branch_push_makes_its_preview() {
 /// the next push waits again, and closing the pull request deletes it.
 #[tokio::test]
 async fn a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head() {
-    let e = env(json!({ "enabled": true }));
+    // A fork's head on roll apps runs only where the project opened forks' egress (roll apps'
+    // build isn't held to Roll only).
+    let e = env(json!({ "enabled": true, "egress_forks": "open" }));
     e.ws.place(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Service, "svc_shop", 0.0, 0.0).unwrap();
     *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "shop".into(), repo: Some("git:svc_shop".into()), root: String::new(), memory_mb: 256 }]);
     let push = |sha: Option<&str>| roll_previews::ports::GitPush {

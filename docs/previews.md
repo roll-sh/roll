@@ -501,6 +501,25 @@ previews' code may reach:
 - `egress: "open"` (the default, as before): anything.
 - `egress: "roll"`: only roll's own products (the preview's branches) and roll's proxy in front
   of it. Nothing on the internet.
+- `egress_forks`: what a fork's preview reaches when `egress` is `"open"`. It's `"roll"` by
+  default, with `egress_hosts` still allowed through the proxy; `"open"` lets it reach what the
+  project's own previews do. A fork's head runs only once a writer approves it, but an approval
+  is to run its code, not a read of what it sends out. With open egress, an approved fork could
+  post the values it resolved (staging's, since an untrusted preview never gets a protected
+  environment's) anywhere. This mirrors roll secrets' split, where untrusted gets less. Asked
+  for by the roll secrets thread (2026-11-17). It holds for its services and for its seed,
+  release and teardown jobs: each runs on the preview's own network, with the listed hosts
+  through its egress proxy (an adversarial review found the jobs ran on Docker's default bridge).
+  On roll apps it holds for the instance (apps' #143). A roll apps build isn't held to it: the
+  build sees the environment's variables on an open network. So a fork's head on a Git URL service
+  under Roll only isn't approved to run until roll apps builds closed environments that way.
+
+Under `"roll"`, a preview's services resolve names through Docker's embedded DNS with
+TEST-NET-1 (`192.0.2.1`, never routed) as its upstream. The network's own names (`roll-egress`,
+the other services) resolve, and an outside name (`<secret>.attacker.example`) is forwarded
+nowhere it could be read, whatever the Docker version. From version 26, Docker doesn't forward
+from an internal network; before that, it did, from the host. The egress proxy checks a name
+against `egress_hosts` before it resolves it.
 
 **Decision (2026-11-16): enforce it on the node, with a Docker internal network per preview.**
 A preview whose project chooses `"roll"` gets its own network made with `--internal`, which has
@@ -1050,7 +1069,8 @@ type Settings = {
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
   egress: "open" | "roll";            // what its services' code may reach: anything ("open"), or only roll's products on a network with no route out (see "Egress")
-  egress_hosts?: string[];            // with "roll": hosts outside roll still reachable through its egress proxy (api.stripe.com, *.sentry.io; at most 20)
+  egress_hosts?: string[];            // with "roll" (or egress_forks "roll", for forks): hosts outside roll still reachable through its egress proxy (api.stripe.com, *.sentry.io; at most 20)
+  egress_forks: "roll" | "open";      // what a fork's preview reaches when egress is "open" (default "roll")
   warm: boolean;                      // wake the change's services as soon as a new head is deployed (true)
   env_for: Record<string, Record<string, string>>; // branch glob → variables, over env, under a preview's own ({})
   seed: Job | null;                   // once on fresh data
