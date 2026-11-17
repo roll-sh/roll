@@ -326,6 +326,48 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     assert!(b.api_unread && b.api.is_none(), "{b:?}");
 }
 
+/// A preview's output is read by anyone who can read the preview, and its code (a fork's too) can
+/// print what it was given: its services' logs, its jobs' output and what its page said in a
+/// screenshot run (the pull request's comment) show a secret's value as `***` (as checks'
+/// summaries do; a branch's credentials too, `masks.rs`).
+#[tokio::test]
+async fn a_previews_logs_and_job_output_hide_its_secrets() {
+    let e = env(json!({ "enabled": true, "seed": { "image": "node:22", "run": "node seed.js" }, "github": { "screenshot": true } }));
+    e.secrets.values.lock().push(("STRIPE_KEY".into(), "sk_test_51Hx9".into()));
+    let mut png = Vec::new();
+    image::RgbaImage::new(4, 4).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    *e.apps.shot.lock() = Some(png);
+    *e.apps.page_says.lock() = Some("Stripe rejected sk_test_51Hx9".into());
+    e.apps.seed_exit.store(3, Ordering::SeqCst);
+    e.code.open(change("chg_m", 9));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_m").unwrap().unwrap();
+    let error = p.error.clone().unwrap_or_default();
+    assert!(error.contains("seed output, STRIPE_KEY=***") && !error.contains("sk_test_51Hx9"), "{error}");
+    e.apps.seed_exit.store(0, Ordering::SeqCst);
+    e.engine.store.update(&p.id, |r| r.next_at = 0).unwrap();
+    e.engine.pass().await.unwrap();
+    *e.apps.log.lock() = vec!["listening on :3000".into(), "charging with sk_test_51Hx9".into()];
+    let (_, lines) = e.engine.logs(&p.id, None, 10).await.unwrap();
+    assert_eq!(lines, ["listening on :3000", "charging with ***"]);
+    // Followed too (the dashboard's live logs, `roll preview logs -f`).
+    let (_, mut rx) = e.engine.follow(&p.id, None, 10).await.unwrap();
+    let mut followed = Vec::new();
+    while followed.len() < 2 {
+        followed.push(tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap());
+    }
+    assert_eq!(followed, ["listening on :3000", "charging with ***"]);
+    let mut said = None;
+    for _ in 0..400 {
+        said = e.engine.store.page_health(&p.id).unwrap().and_then(|h| h.first_error);
+        if said.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(said.as_deref(), Some("Stripe rejected ***"));
+}
+
 #[tokio::test]
 async fn the_seed_runs_once_on_fresh_data_before_services_deploy() {
     let e = env(json!({ "enabled": true, "seed": { "image": "postgres:18-alpine", "run": "psql \"$DATABASE_URL\" -f seed/anonymise.sql" } }));
