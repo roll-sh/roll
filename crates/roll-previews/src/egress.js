@@ -29,6 +29,8 @@ const privateIp = (ip) => {
   // Teredo (2001::/32) carries an IPv4 address of its own: never a destination.
   if (s[0] === 0x2001 && s[1] === 0) return true;
   if (s.every((x) => x === 0) || (s.slice(0, 7).every((x) => x === 0) && s[7] === 1)) return true;
+  // IPv4-compatible (`::a.b.c.d`, deprecated but routed by some stacks): the address it embeds.
+  if (s.slice(0, 6).every((x) => x === 0)) return private4(v4(s[6], s[7]));
   return (s[0] & 0xff00) === 0xff00 || (s[0] & 0xfe00) === 0xfc00 || (s[0] & 0xffc0) === 0xfe80 || (s[0] === 0x2001 && s[1] === 0xdb8);
 };
 // An IPv6 address's eight groups (`::` filled in, a dotted IPv4 tail as two groups).
