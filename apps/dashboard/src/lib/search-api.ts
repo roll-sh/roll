@@ -53,6 +53,9 @@ export interface SearchInfo {
   deleted_retention_s: number;
   defaults: SearchDefaults;
   pricing: SearchPricing;
+  /** A signed-in person's (not an admin's): how many clusters, and always-on ones, they may own
+   * (0: no cap). Past one, a create, branch or switch to always-on answers 409 saying so. */
+  caps?: { clusters: number; always_on: number };
   /** The operator's (and admins') only: where the node keeps its data, and its node-wide figures. */
   storage?: string;
   loaded?: number;

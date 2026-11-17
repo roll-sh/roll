@@ -112,7 +112,11 @@ function Overview({ info, clusters }: { info: SearchInfo; clusters: SearchCluste
     <div className="mt-6">
       <Stats
         items={[
-          { label: "Clusters", value: clusters.length, hint: `${loaded.length} loaded · ${clusters.length - loaded.length} asleep` },
+          {
+            label: "Clusters",
+            value: clusters.length,
+            hint: `${info.caps?.clusters ? `of ${info.caps.clusters} · ` : ""}${loaded.length} loaded · ${clusters.length - loaded.length} asleep`,
+          },
           { label: "Indices", value: formatCount(indices), hint: `${formatCount(docs)} documents` },
           {
             label: "Stored",

@@ -27,7 +27,7 @@
 
 use crate::meter::{Meter, MeterHooks, engine_figures, index_figures, now_ms};
 use crate::pricing::{Cost, Pricing};
-use crate::store::{DeletedCluster, SearchCluster, Store, UsageTotals};
+use crate::store::{Caps, DeletedCluster, Inserted, Over, SearchCluster, Store, UsageTotals};
 pub use crate::wake::SqlCatalog;
 use crate::wake::{ControlHooks, GuardedStores, LOAD_WAIT, Wakes};
 use base64::Engine;
@@ -125,6 +125,9 @@ pub struct SearchConfig {
     /// Elastic Cloud): an `s3` repository on roll's own object storage, so `_snapshot` and
     /// snapshot lifecycle policies work without registering one. `None`: no default repository.
     pub default_repository: Option<String>,
+    /// What a signed-in person who isn't an admin may own (rolld:
+    /// `--search-max-clusters-per-person`, `--search-max-always-on-per-person`; 0: no cap).
+    pub person_caps: Caps,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -173,6 +176,7 @@ impl SearchConfig {
             pricing: Pricing::default(),
             sealer: None,
             default_repository: Some("found-snapshots".into()),
+            person_caps: Caps { clusters: 50, always_on: 2 },
         }
     }
 }
@@ -241,6 +245,18 @@ fn random_string(n: usize) -> String {
     let mut bytes = vec![0u8; n];
     getrandom::fill(&mut bytes).expect("os randomness");
     bytes.iter().map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char).collect()
+}
+
+/// The 409 for a write past a person's cap: the cap, their count, and how it's raised.
+fn over(o: Over) -> ControlError {
+    ControlError::Conflict(match o {
+        Over::Clusters { cap, count } => format!(
+            "you have {count} search clusters (branches included) and a person may have {cap}: delete one, or the operator can raise the cap with --search-max-clusters-per-person"
+        ),
+        Over::AlwaysOn { cap, count } => format!(
+            "you have {count} always-on search clusters (idle_timeout_s 0) and a person may have {cap}: a cluster that sleeps when idle (idle_timeout_s above 0) doesn't count, or the operator can raise the cap with --search-max-always-on-per-person"
+        ),
+    })
 }
 
 pub fn new_id() -> String {
@@ -642,12 +658,17 @@ impl Control {
         Ok(())
     }
 
-    async fn insert(&self, c: &SearchCluster) -> Result<()> {
-        if self.store.insert(c).await? {
-            Ok(())
-        } else {
-            Err(ControlError::Conflict(format!("a search cluster named {} already exists", c.name)))
+    async fn insert(&self, c: &SearchCluster, caps: Caps) -> Result<()> {
+        match self.store.insert(c, caps).await? {
+            Inserted::Yes => Ok(()),
+            Inserted::Taken => Err(ControlError::Conflict(format!("a search cluster named {} already exists", c.name))),
+            Inserted::Over(o) => Err(over(o)),
         }
+    }
+
+    /// Saves a cluster's settings, checking `caps` in the same transaction.
+    async fn save(&self, c: &SearchCluster, caps: Caps) -> Result<()> {
+        self.store.update(c, caps).await?.map_err(over)
     }
 
     fn fresh(&self, name: &str) -> SearchCluster {
@@ -678,12 +699,13 @@ impl Control {
     }
 
     /// A new, empty cluster, `owner`'s (a signed-in person's `usr_…`; `None`: the operator's).
-    /// Nothing is written to object storage until it is first used.
-    pub async fn create(&self, name: &str, o: ClusterOptions, owner: Option<&str>) -> Result<SearchCluster> {
+    /// Past one of `caps` for the owner it is refused (409). Nothing is written to object storage
+    /// until it is first used.
+    pub async fn create(&self, name: &str, o: ClusterOptions, owner: Option<&str>, caps: Caps) -> Result<SearchCluster> {
         let c = Self::apply(SearchCluster { owner: owner.map(str::to_string), ..self.fresh(name) }, o);
         self.check(&c)?;
         self.check_free(name).await?;
-        self.insert(&c).await?;
+        self.insert(&c, caps).await?;
         self.store.set_stats(&c.id, c.created_at, 0, 0, 0).await?;
         self.open_always_on(&c).await;
         Ok(c)
@@ -734,10 +756,10 @@ impl Control {
     /// A new cluster with `parent`'s indices, as they are now or as they were at `at` (Unix
     /// seconds, within the history window). Instant: the branch's commit points name the
     /// parent's segments, nothing is copied. Settings and the owner come from the parent (settings
-    /// unless given). In a
+    /// unless given), and the branch counts toward the owner's `caps`. In a
     /// fleet, call it on the node holding the parent (the API forwards there): a loaded parent
     /// is committed first, so the branch sees every acknowledged write.
-    pub async fn branch(&self, parent: &str, name: &str, at: Option<i64>, o: ClusterOptions) -> Result<SearchCluster> {
+    pub async fn branch(&self, parent: &str, name: &str, at: Option<i64>, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
         let p = self.get(parent).await?;
         let now = now();
         if let Some(t) = at {
@@ -776,8 +798,9 @@ impl Control {
                 }
             }
         }
-        if let Err(e) = self.insert(&c).await {
-            // Lost a race for the name: don't leave the branch's objects behind.
+        if let Err(e) = self.insert(&c, caps).await {
+            // Lost a race for the name, or the owner is at a cap: don't leave the branch's
+            // objects behind.
             if let Err(e2) = self.data.delete_cluster(&c.name).await {
                 tracing::warn!(cluster = c.name, error = %e2, "removing an orphaned branch failed");
             }
@@ -820,13 +843,14 @@ impl Control {
     /// Changes settings. Credentials, limits (`max_in_flight` included) and the idle timeout
     /// apply at once, also to a cluster that is waking up. A new flavor (dialect) or
     /// `destructive_requires_name` default needs a reload: the cluster is unloaded now if no
-    /// request runs, or as soon as none does; until then it keeps its current ones.
-    pub async fn update(&self, id: &str, o: ClusterOptions) -> Result<SearchCluster> {
+    /// request runs, or as soon as none does; until then it keeps its current ones. Making the
+    /// cluster always-on past the owner's `caps.always_on` is refused (409).
+    pub async fn update(&self, id: &str, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
         let c = {
             let _g = self.specs.lock().await;
             let c = Self::apply(self.get(id).await?, o);
             self.check(&c)?;
-            self.store.update(&c).await?;
+            self.save(&c, caps).await?;
             self.apply_spec(&c.name).await;
             c
         };
@@ -846,7 +870,7 @@ impl Control {
             let mut c = self.get(id).await?;
             c.password = random_string(32);
             c.password_rotated_at = Some(now());
-            self.store.update(&c).await?;
+            self.save(&c, Caps::NONE).await?;
             self.apply_spec(&c.name).await;
             c
         };
@@ -1122,7 +1146,7 @@ impl Control {
     ///
     /// Under another name the password and API keys stay; clients use the new name as the
     /// Basic auth user, in an API key's id (`<key id>@<name>`) and as the host label.
-    pub async fn restore(&self, id: &str, name: Option<&str>) -> Result<SearchCluster> {
+    pub async fn restore(&self, id: &str, name: Option<&str>, caps: Caps) -> Result<SearchCluster> {
         let d = self.get_deleted(id).await?;
         let target = name.unwrap_or(&d.cluster.name).to_string();
         if !valid_name(&target) {
@@ -1144,7 +1168,7 @@ impl Control {
             crate::store::Claim::Busy => return Err(ControlError::Conflict(format!("deleted search cluster {id} is being restored or purged; retry"))),
             crate::store::Claim::Gone => return Err(ControlError::NotFound(format!("no deleted search cluster {id}"))),
         };
-        match self.restore_claimed(&d, &target, &reserved, &claim).await {
+        match self.restore_claimed(&d, &target, &reserved, &claim, caps).await {
             Ok(c) => Ok(c),
             Err(e) => {
                 if let Err(e2) = self.store.release_claim(&d.cluster.id, &claim).await {
@@ -1155,7 +1179,7 @@ impl Control {
         }
     }
 
-    async fn restore_claimed(&self, d: &DeletedCluster, target: &str, reserved: &str, claim: &str) -> Result<SearchCluster> {
+    async fn restore_claimed(&self, d: &DeletedCluster, target: &str, reserved: &str, claim: &str, caps: Caps) -> Result<SearchCluster> {
         // Storage under the reserved name can only be an earlier, crashed restore's: the name
         // was this row's since then, and was free of storage before.
         if reserved == target {
@@ -1170,10 +1194,18 @@ impl Control {
             let _ = self.data.delete_cluster(target).await;
             return Err(ControlError::Internal(e));
         }
-        if !self.store.finish_restore(&d.cluster.id, claim, now()).await? {
-            // The claim went stale and a purge took it.
-            let _ = self.data.delete_cluster(target).await;
-            return Err(ControlError::Conflict(format!("deleted search cluster {} was purged while restoring", d.cluster.id)));
+        match self.store.finish_restore(&d.cluster.id, claim, now(), caps).await? {
+            Ok(true) => {}
+            Ok(false) => {
+                // The claim went stale and a purge took it.
+                let _ = self.data.delete_cluster(target).await;
+                return Err(ControlError::Conflict(format!("deleted search cluster {} was purged while restoring", d.cluster.id)));
+            }
+            Err(o) => {
+                // The owner is at a cap: the cluster stays deleted (its kept copy is untouched).
+                let _ = self.data.delete_cluster(target).await;
+                return Err(over(o));
+            }
         }
         if had_data && let Err(e) = self.data.delete_cluster(&d.stored_as).await {
             tracing::warn!(cluster = target, kept = d.stored_as, error = %e, "removing a restored search cluster's kept copy failed");

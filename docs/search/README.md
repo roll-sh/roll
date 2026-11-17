@@ -33,6 +33,8 @@ pnpm dev                                # dashboard: /dashboard/search
 | `--search-gc-interval`                             | `3600`            | garbage collection of unreferenced objects (0: off; one node per bucket) |
 | `--search-deleted-retention-days` (`ROLL_SEARCH_DELETED_RETENTION_DAYS`) | `7` | days a deleted cluster can be restored, its storage billed meanwhile (0: deleted at once) |
 | `--search-test-features`                           | off               | publish Elasticsearch's test features (YAML suites through `--cluster-hook`; test deployments only) |
+| `--search-max-clusters-per-person` (`ROLL_SEARCH_MAX_CLUSTERS_PER_PERSON`) | `50` | clusters a signed-in person may own, branches included (0: no cap; the operator and admins aren't capped) |
+| `--search-max-always-on-per-person` (`ROLL_SEARCH_MAX_ALWAYS_ON_PER_PERSON`) | `2` | of those, always-on ones (`idle_timeout_s` 0) (0: no cap) |
 | `--no-search`, `--search-only`                     |                   | shorthands for `ROLL_PRODUCTS` without search, or with only search |
 | `--search-public-url` (`ROLL_SEARCH_PUBLIC_URL`)   |                   | the front clients use (a load balancer): cluster URLs name it |
 
@@ -106,8 +108,20 @@ them (`api::Caller`):
   `/v1/search/clusters/{id}/…` route about another's, and from a create whose `parent` is
   another's. The check reads the owner from the catalog after resolving the cluster, before a
   fleet forwards the call to the cluster's owner node and again there (behind its own gate).
-- `GET /v1/search` gives a person versions, endpoint, defaults, history window and pricing, but
-  not where the node keeps its data (`storage`) or its node-wide figures (`loaded`, `cache`).
+- A person may own at most `--search-max-clusters-per-person` clusters (default 50) and, of
+  those, `--search-max-always-on-per-person` always-on ones (`idle_timeout_s` 0; default 2); 0 is
+  no cap. Branches count toward their owner (the parent's), whoever cuts them; clusters with no
+  owner count toward nobody. Past a cap a person's create or branch, or a `PATCH` that makes one
+  of their clusters always-on, answers 409 naming the cap, their count and the flag that raises
+  it (for always-on: a cluster that sleeps when idle doesn't count). The operator and admins
+  aren't capped, also when they cut a branch of a person's cluster. The count is
+  `list_owned`'s, made in the insert's or update's own catalog transaction (SQLite's single
+  writer; on a fleet Postgres `SERIALIZABLE`, which re-runs one of two racing creates), so two
+  creates at the cap can't both pass. Lowering a cap removes nothing: a person over it keeps their
+  clusters and can change an always-on one's other settings, but adds no more.
+- `GET /v1/search` gives a person versions, endpoint, defaults, history window, pricing and their
+  `caps` (`{clusters, always_on}`), but not where the node keeps its data (`storage`) or its
+  node-wide figures (`loaded`, `cache`).
 - A person's own token (docs/permissions.md, "Users' own tokens") acts as them: it reaches search
   (`search` is in `USER_REACH`) and sees only their clusters, narrowed again by its rules.
 - A person's workspace project stands only for their own clusters (`Workspace::trusts`: rolld's
@@ -117,11 +131,12 @@ them (`api::Caller`):
   default repository are rolld's flags (`--search-*`), not routes. A cluster's data plane is
   unchanged: the REST port with the cluster's own credentials, which give what any tenant gets.
 
-`crates/search-control/tests/control.rs` `people_see_only_their_own_clusters` covers it.
+`crates/search-control/tests/control.rs` `people_see_only_their_own_clusters` and
+`people_are_held_to_their_cluster_caps` cover it.
 
 | method | path | |
 | ------ | ---- | - |
-| GET | `/v1/search` | version, endpoint, defaults, pricing; for the operator and admins also `storage`, `loaded` clusters and the `cache` |
+| GET | `/v1/search` | version, endpoint, defaults, pricing; for a person their `caps`; for the operator and admins also `storage`, `loaded` clusters and the `cache` |
 | GET | `/v1/search/clusters` | list (a person: their own); `?deleted=true`: recently deleted clusters kept for restoring, newest first, with `deleted_at` and `purge_at` (Unix seconds), the name each had and its last figures (`stored_bytes` is still billed) |
 | POST | `/v1/search/clusters` | create `{name, flavor?, parent?, at?, idle_timeout_s?, max_in_flight?, max_body_mb?, destructive_requires_name?}`; answers with `url`, `username`, `password` (once) and `id` — the shape `search-yaml run --cluster-hook` expects; `owner` is the signed-in person who isn't an admin, and a branch's is its parent's |
 | GET | `/v1/search/clusters/{id or name}` | settings, `status` (`loaded` with live index count and requests in flight, and live `docs` once every index is open, or `asleep` with `wakes_at`, unix seconds, when a background job is due to wake it), last metered `indices`/`docs`/`stored_bytes` and `own_bytes` (what a branch references that its parent's latest commit points don't; all of `stored_bytes` for a cluster that isn't a branch), `url`, `branches` |

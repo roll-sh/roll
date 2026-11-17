@@ -1,7 +1,7 @@
 //! Control-plane HTTP API for roll search (`/v1/search/...`), merged into rolld's API.
 //!
 //! Errors are `{"error": "..."}` with 400 (invalid), 404 (no such cluster), 409 (name taken,
-//! busy), 413 (a console request over the cluster's body limit) or 500, like the other control
+//! busy, past a person's cap), 413 (a console request over the cluster's body limit) or 500, like the other control
 //! planes. A cluster's password appears only in the
 //! responses that create it (create, branch) or change it (rotate). Creating a cluster answers
 //! in the shape `search-yaml run --cluster-hook` expects (`url`, `username`, `password`, `id`).
@@ -10,14 +10,15 @@
 //! search scopes them ([`Caller`], docs/accounts.md "Phase 2"): the operator and admins see every
 //! cluster; anyone else sees, creates and branches only their own (`SearchCluster::owner`), and
 //! every `/v1/search/clusters/{id}/…` call about another's answers 404, as for a cluster that
-//! doesn't exist. A person's own token reaches search as them (roll-access hands it on with
+//! doesn't exist. A person's creates, branches and switches to always-on are held to the node's
+//! per-person caps (`SearchConfig::person_caps`), counted in the write's own transaction. A person's own token reaches search as them (roll-access hands it on with
 //! `SignedIn`, without `Operator`). On a fleet, calls about one cluster run on its owner
 //! (`crate::cluster::on_owner`), and so does creating a branch (on its parent's owner); the
 //! check is made from the catalog before the call is forwarded and again on the owner, behind
 //! its own gate.
 
 use crate::control::{ClusterOptions, ConsoleRequest, ConsoleResponse, Control, ControlError, Usage};
-use crate::store::SearchCluster;
+use crate::store::{Caps, SearchCluster};
 use axum::body::Body;
 use axum::extract::{FromRequestParts, Path, Query, Request, State};
 use axum::http::{Extensions, HeaderMap, Method, StatusCode, request::Parts};
@@ -110,6 +111,15 @@ impl Caller {
         }
     }
 
+    /// The caps the caller's creates, branches and settings are held to: the node's per-person
+    /// ones for a person (counted toward the cluster's owner), none for the operator and admins.
+    fn caps(&self, c: &Control) -> Caps {
+        match self {
+            Caller::All => Caps::NONE,
+            Caller::Person(_) => c.cfg.person_caps,
+        }
+    }
+
     /// The owner a cluster the caller creates gets.
     fn owner(&self) -> Option<&str> {
         match self {
@@ -196,6 +206,11 @@ async fn info(State(c): State<AppState>, caller: Caller) -> Json<Value> {
         "defaults": c.cfg.defaults,
         "pricing": c.cfg.pricing,
     });
+    let caps = caller.caps(&c);
+    if caps != Caps::NONE {
+        // What the person may own (0: no cap), for "3 of 50 clusters".
+        v["caps"] = json!({ "clusters": caps.clusters, "always_on": caps.always_on });
+    }
     if caller == Caller::All {
         let stats = c.data.stats();
         v["storage"] = json!(c.objects().description);
@@ -293,13 +308,13 @@ struct RestoreReq {
 }
 
 /// `POST /v1/search/clusters/{id}/restore`: a deleted cluster back as it was, within its window.
-async fn restore(State(c): State<AppState>, Path(id): Path<String>, body: bytes::Bytes) -> ApiResult<ClusterView> {
+async fn restore(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, body: bytes::Bytes) -> ApiResult<ClusterView> {
     let r: RestoreReq = if body.iter().all(u8::is_ascii_whitespace) {
         RestoreReq::default()
     } else {
         serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?
     };
-    let d = c.restore(&id, r.name.as_deref()).await?;
+    let d = c.restore(&id, r.name.as_deref(), caller.caps(&c)).await?;
     Ok(Json(view(&c, d, false).await?))
 }
 
@@ -324,10 +339,10 @@ async fn create(State(c): State<AppState>, caller: Caller, method: Method, heade
             if let Some(resp) = forward(&c, &parent.name, method, "/v1/search/clusters", &headers, body.clone()).await {
                 return Ok(resp);
             }
-            c.branch(p, &r.name, r.at, r.opts).await?
+            c.branch(p, &r.name, r.at, r.opts, caller.caps(&c)).await?
         }
         None if r.at.is_some() => return Err(ControlError::Invalid("at needs a parent".into())),
-        None => c.create(&r.name, r.opts, caller.owner()).await?,
+        None => c.create(&r.name, r.opts, caller.owner(), caller.caps(&c)).await?,
     };
     Ok(Json(view(&c, d, true).await?).into_response())
 }
@@ -337,8 +352,8 @@ async fn show(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Cl
     Ok(Json(view(&c, d, false).await?))
 }
 
-async fn update(State(c): State<AppState>, Path(id): Path<String>, Json(o): Json<ClusterOptions>) -> ApiResult<ClusterView> {
-    let d = c.update(&id, o).await?;
+async fn update(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, Json(o): Json<ClusterOptions>) -> ApiResult<ClusterView> {
+    let d = c.update(&id, o, caller.caps(&c)).await?;
     Ok(Json(view(&c, d, false).await?))
 }
 
@@ -357,13 +372,13 @@ struct BranchReq {
     opts: ClusterOptions,
 }
 
-async fn branch(State(c): State<AppState>, Path(id): Path<String>, method: Method, headers: HeaderMap, body: bytes::Bytes) -> Result<Response, ControlError> {
+async fn branch(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, method: Method, headers: HeaderMap, body: bytes::Bytes) -> Result<Response, ControlError> {
     let r: BranchReq = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
     let parent = c.get(&id).await?;
     if let Some(resp) = forward(&c, &parent.name, method, &format!("/v1/search/clusters/{id}/branches"), &headers, body.clone()).await {
         return Ok(resp);
     }
-    let d = c.branch(&id, &r.name, r.at, r.opts).await?;
+    let d = c.branch(&id, &r.name, r.at, r.opts, caller.caps(&c)).await?;
     Ok(Json(view(&c, d, true).await?).into_response())
 }
 
