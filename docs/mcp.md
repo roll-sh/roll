@@ -259,6 +259,13 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     `ttlMs: 60000` and `cacheScope: "private"`: a token's tools are its own, and its rules can
     change.
   - Approvals are Multi Round-Trip Requests (see Approvals).
+  - `subscriptions/listen` (SEP-2575) is an open stream: first
+    `notifications/subscriptions/acknowledged` with what roll will send of what was asked
+    (`toolsListChanged`, `promptsListChanged`), then `notifications/tools/list_changed` (and the
+    prompts one) whenever the connection's tools change: an access request approved, a rule
+    remembered, the token edited. Each carries `_meta["io.modelcontextprotocol/subscriptionId"]`.
+    The grant is looked up again every 5 s, never cached; when it stops working, or after an hour,
+    the stream answers the listen request (`result: {}`) and closes, and the client listens again.
   - **MCP Apps** (`roll_mcp::ui`, `io.modelcontextprotocol/ui`, SEP-1865): for a host that
     declares HTML views (`mimeTypes: ["text/html;profile=mcp-app"]`), the read-only tools that
     answer rows (lists, queries, logs, reads, usage) point at `ui://roll/table` (`_meta.ui`). The

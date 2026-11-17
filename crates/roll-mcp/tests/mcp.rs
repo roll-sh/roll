@@ -670,3 +670,50 @@ async fn a_persons_token_page_shows_only_their_reach() {
     assert!(tools.contains(&"workspace_list_projects"), "{tools:?}");
     assert!(!tools.iter().any(|t| t.starts_with("postgres_")), "a person's token never reaches Postgres: {tools:?}");
 }
+
+/// 2026-07-28's `subscriptions/listen` (SEP-2575): the stream starts with the acknowledgement of
+/// what roll will send, then says when the connection's tools change (an access request approved),
+/// tagged with the subscription's id.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subscription_hears_the_tools_change() {
+    let d = Daemon::new();
+    let asker = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }])).await;
+    let meta = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "t", "version": "1" }, "io.modelcontextprotocol/clientCapabilities": {} });
+    let listen = json!({ "jsonrpc": "2.0", "id": "listen:1", "method": "subscriptions/listen", "params": { "_meta": meta, "notifications": { "toolsListChanged": true, "resourcesListChanged": true } } });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/mcp")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2026-07-28")
+        .header("mcp-method", "subscriptions/listen")
+        .header("authorization", format!("Bearer {asker}"))
+        .body(Body::from(listen.to_string()))
+        .unwrap();
+    let mut body = d.router.clone().oneshot(req).await.unwrap().into_body();
+    let mut buf = String::new();
+    // The next JSON-RPC message on the stream (keep-alive comments skipped), within 15 s.
+    let mut next = async move || -> Value {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if let Some(i) = buf.find("\n\n") {
+                let event: String = buf.drain(..i + 2).collect();
+                if let Some(data) = event.lines().find_map(|l| l.strip_prefix("data: ").or_else(|| l.strip_prefix("data:"))) {
+                    return serde_json::from_str(data).unwrap();
+                }
+                continue;
+            }
+            let frame = tokio::time::timeout_at(deadline, body.frame()).await.expect("a message within 15 s").unwrap_or_else(|| panic!("the stream ended: {buf}")).unwrap();
+            if let Ok(data) = frame.into_data() {
+                buf.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+    };
+    let ack = next().await;
+    assert_eq!((ack["method"].as_str(), &ack["params"]["notifications"]), (Some("notifications/subscriptions/acknowledged"), &json!({ "toolsListChanged": true })), "only what roll sends");
+    let asked = d.tool(&asker, "access_request_access", json!({ "product": "postgres", "action": "read", "for": "15m", "reason": "list the databases" })).await;
+    let apr = asked["structuredContent"]["id"].as_str().unwrap_or_else(|| panic!("{asked}")).to_string();
+    assert_eq!(d.http(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::OK);
+    let changed = next().await;
+    assert_eq!((changed["method"].as_str(), &changed["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]), (Some("notifications/tools/list_changed"), &json!("listen:1")), "{changed}");
+}

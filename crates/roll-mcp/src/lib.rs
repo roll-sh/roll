@@ -397,6 +397,10 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
+    // 2026-07-28's long-lived channel for list changes (SEP-2575): an open stream of its own.
+    if !batch && messages.len() == 1 && messages[0]["method"] == "subscriptions/listen" {
+        return listen(ctx, &messages[0]).await;
+    }
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
     let mut resp = if progress.is_some() {
         let stream = progress_stream(Box::pin(async move { process(&ctx, messages).await }), progress, PROGRESS_EVERY)
@@ -542,6 +546,27 @@ struct Ctx {
 }
 
 impl Ctx {
+    /// The same request's view, as a grant is now (a subscription looks again while it's open).
+    fn as_now(&self, g: roll_auth::Grant) -> Ctx {
+        Ctx {
+            m: self.m.clone(),
+            headers: self.headers.clone(),
+            principal: Principal::Grant(g),
+            ip: self.ip,
+            as_user: self.as_user,
+            url_elicitation: self.url_elicitation,
+            modern: self.modern,
+            toolsets: self.toolsets.clone(),
+            readonly: self.readonly,
+            search: self.search,
+            lockdown: self.lockdown,
+            tasks: self.tasks,
+            ui: self.ui,
+            client: self.client.clone(),
+            names: Default::default(),
+        }
+    }
+
     /// Whether the caller might use a tool for this product and these actions at all, and asked
     /// for its toolset.
     fn may(&self, product: &str, actions: &[Action]) -> bool {
@@ -756,6 +781,98 @@ async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, String> {
 }
 
 /// The names of the tools this connection is offered (what prompts may use).
+/// How often an open subscription looks at its grant again, and how long one stays open.
+const LISTEN_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+const LISTEN_FOR: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// `subscriptions/listen` (MCP 2026-07-28, SEP-2575): an open stream that starts with
+/// `notifications/subscriptions/acknowledged` (only what was asked and roll sends: tool and prompt
+/// list changes) and says when the connection's tools change: an access request approved, a rule
+/// remembered, the token edited. The grant is looked up again every few seconds, never cached;
+/// once it stops working the stream ends. A connection with the operator's token never changes.
+async fn listen(ctx: Arc<Ctx>, msg: &Value) -> Response {
+    let id = msg.get("id").cloned().unwrap_or(Value::Null);
+    let asked = &msg["params"]["notifications"];
+    let (tools, prompts) = (asked["toolsListChanged"] == true, asked["promptsListChanged"] == true);
+    let mut agreed = json!({});
+    if tools {
+        agreed["toolsListChanged"] = json!(true);
+    }
+    if prompts {
+        agreed["promptsListChanged"] = json!(true);
+    }
+    let ack = json!({ "jsonrpc": "2.0", "method": "notifications/subscriptions/acknowledged", "params": { "notifications": agreed } });
+    let grant = match &ctx.principal {
+        Principal::Grant(g) => Some(g.id.to_string()),
+        Principal::Operator => None,
+    };
+    let access = ctx.m.config.access.clone();
+    let deadline = tokio::time::Instant::now() + LISTEN_FOR;
+    // The tools it's offered as the grant is now (`None`: it no longer works).
+    let now = move |ctx: Arc<Ctx>, grant: String, access: Option<Arc<roll_access::Access>>| async move {
+        let a = access?;
+        let g = tokio::task::spawn_blocking(move || roll_auth::Grants::grant(&*a, &grant)).await.ok()??;
+        Some(tool_names(&ctx.as_now(g)))
+    };
+    struct State {
+        ctx: Arc<Ctx>,
+        last: Option<Vec<String>>,
+        queue: Vec<Value>,
+        done: bool,
+    }
+    // What it's offered as it subscribes: a change from here on is told.
+    let last = match &grant {
+        Some(g) => now(ctx.clone(), g.clone(), access.clone()).await,
+        None => Some(Vec::new()),
+    };
+    let start = State { ctx, last, queue: vec![ack], done: false };
+    let stream = futures::stream::unfold(start, move |mut s| {
+        let (id, grant, access) = (id.clone(), grant.clone(), access.clone());
+        async move {
+            loop {
+                if !s.queue.is_empty() {
+                    let next = s.queue.remove(0);
+                    return Some((next, s));
+                }
+                if s.done {
+                    return None;
+                }
+                let names = match &grant {
+                    Some(g) => now(s.ctx.clone(), g.clone(), access.clone()).await,
+                    None => s.last.clone().or(Some(Vec::new())),
+                };
+                let over = tokio::time::Instant::now() >= deadline;
+                match names {
+                    // Ended by roll: the token stopped working, or the hour is up. A result first, so
+                    // the client knows to listen again if it still can.
+                    None => {}
+                    Some(_) if over => {}
+                    Some(names) => {
+                        if s.last.as_ref().is_some_and(|l| *l != names) {
+                            let meta = json!({ "io.modelcontextprotocol/subscriptionId": id });
+                            if tools {
+                                s.queue.push(json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed", "params": { "_meta": meta } }));
+                            }
+                            if prompts {
+                                s.queue.push(json!({ "jsonrpc": "2.0", "method": "notifications/prompts/list_changed", "params": { "_meta": meta } }));
+                            }
+                        }
+                        s.last = Some(names);
+                        if s.queue.is_empty() {
+                            tokio::time::sleep(LISTEN_EVERY).await;
+                        }
+                        continue;
+                    }
+                }
+                s.done = true;
+                s.queue.push(json!({ "jsonrpc": "2.0", "id": id, "result": {} }));
+            }
+        }
+    })
+    .map(|v| Ok::<_, std::convert::Infallible>(Event::default().event("message").data(v.to_string())));
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE)).into_response()
+}
+
 fn tool_names(ctx: &Ctx) -> Vec<String> {
     ctx.names.get_or_init(|| ctx.tools().iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()).clone()
 }
