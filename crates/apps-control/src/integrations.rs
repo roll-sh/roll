@@ -217,6 +217,10 @@ pub trait GitHubApp: Send + Sync {
     /// That deployment's state (`in_progress`, `success`, `failure`), with where it answers.
     #[allow(clippy::too_many_arguments)]
     async fn deployment_status(&self, installation: u64, owner: &str, repo: &str, deployment: u64, state: &str, url: Option<&str>, description: &str) -> anyhow::Result<()>;
+    /// What a commit's checks on GitHub say (roll's own left out), for `wait_for_ci`.
+    async fn ci(&self, _installation: u64, _owner: &str, _repo: &str, _sha: &str) -> anyhow::Result<Ci> {
+        Ok(Ci::None)
+    }
 }
 
 /// Whether a person may still open a project's environments (rolld answers from roll-accounts:

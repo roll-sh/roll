@@ -1109,6 +1109,14 @@ newer push takes its place, as it would supersede the deploy; `Environment.waiti
 it), is settled by the landing follower every couple of seconds, and is dropped after an hour. A
 failed one isn't deployed, which the environment's log says.
 
+A Git URL service on roll's GitHub App (`PUT …/github`) waits the same way (Railway's "Wait for
+CI" on GitHub): its pushes, from the App, its hook or the watch, go into the wait, whose checks
+are GitHub's check runs and commit statuses for the commit, read through the installation
+(`Code::github_ci`), roll's own (its App's check runs, `roll/…` statuses) left out. GitHub's
+checks may not exist yet when the push arrives, so none at all is waited on for a minute before
+it counts as none. `api.rs::a_git_url_service_connects_to_rolls_github_app` pushes through the
+App with `wait_for_ci`: waiting while checks run, deployed once they pass, dropped when one fails.
+
 ## Audit trail
 
 Every change someone makes to a service is an event in the event log, `audit.<what>` with the
@@ -2538,9 +2546,9 @@ put items 1–11 first. A second review that day (after #78, against the same si
    doesn't follow and every pull request (`GitPush`, `GitPull`), each checked against the
    repository's refs; previews builds the environments, comments and gates forks behind a
    writer's approval (its side is the previews thread's, stacked on this).
-2. **Wait for CI and statuses on Git URL services**: check runs read through the GitHub App, GitLab
-   and Bitbucket statuses through the Git login (through `PublicOnly`), so `wait_for_ci` and commit
-   statuses work beyond roll code repos.
+2. **Wait for CI and statuses on GitLab and Bitbucket**: their pipelines' statuses read (and
+   roll's deploy statuses posted) through the service's Git login, through `PublicOnly`; GitHub's
+   is done through roll's GitHub App.
 3. **Imports from other platforms** (Render's Heroku migration, Railway's and Koyeb's): `render.yaml`,
    `fly.toml`, `railway.json`/`.toml` and `app.json`+Procfile converted to roll.toml beside the
    Compose converter.

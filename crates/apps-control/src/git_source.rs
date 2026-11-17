@@ -69,6 +69,10 @@ impl crate::Apps {
                     continue;
                 }
                 let subject = message.lines().next().unwrap_or("").chars().take(500).collect::<String>();
+                if env.wait_for_ci {
+                    let _ = self.wait_for_git_ci(&svc, &env.name, &sha, &subject, "git watch").await;
+                    continue;
+                }
                 let body = hold.body(serde_json::json!({ "revision": sha, "message": if subject.is_empty() { format!("new commit on {branch}: {}", &sha[..12]) } else { subject } }));
                 let by = crate::model::By { trigger: crate::model::Trigger::Push, actor: Some("git watch".into()) };
                 // Keyed by the commit: two nodes' watches (a takeover mid-pass) make one deploy.

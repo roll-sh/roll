@@ -1907,10 +1907,35 @@ impl Apps {
         if ephemeral { crate::config::preview_defaults(run, file.as_ref()).0 } else { run }
     }
 
+    /// What a commit's checks say: roll code's for a repo service, GitHub's (through roll's
+    /// GitHub App) for a Git URL service connected to it. Anything else has none to read.
+    pub(crate) async fn ci_of(self: &Arc<Self>, svc: &ServiceRow, sha: &str) -> anyhow::Result<crate::integrations::Ci> {
+        match &svc.source {
+            Source::Repo { repo, .. } => match self.deps.sources.clone() {
+                Some(sources) => sources.ci(repo, sha).await,
+                None => anyhow::bail!("roll code isn't on this node"),
+            },
+            Source::Git { url, .. } => match self.github_for(&svc.id, url).await {
+                Some((app, installation, owner, repo)) => app.ci(installation, &owner, &repo, sha).await,
+                None => anyhow::bail!("this Git URL service isn't on roll's GitHub App, so its checks can't be read"),
+            },
+            _ => Ok(crate::integrations::Ci::None),
+        }
+    }
+
+    /// A Git URL push to an environment that waits for CI: it waits (its checks are read until
+    /// they pass, fail or an hour goes by; GitHub's may not exist yet when the push arrives, so
+    /// none is waited on for a minute too).
+    pub(crate) async fn wait_for_git_ci(self: &Arc<Self>, svc: &ServiceRow, env: &str, sha: &str, message: &str, actor: &str) -> Result<()> {
+        let w = crate::store::CiWait { service: svc.id.clone(), env: env.to_string(), landing: 0, sha: sha.to_string(), message: message.to_string(), author: Some(actor.to_string()) };
+        self.db(move |s| s.wait_for_ci(&w)).await?;
+        self.logs.sink(format!("env:{}/{env}", svc.id), Stream::System).line(format!("push {} waits for its checks", &sha[..sha.len().min(12)]));
+        Ok(())
+    }
+
     /// Pushes waiting for their checks: deployed once they pass (or there are none), dropped when
     /// one fails or after an hour, each said in its environment's log.
     pub async fn settle_ci_waits(self: &Arc<Self>) {
-        let Some(sources) = self.deps.sources.clone() else { return };
         let Ok(waits) = self.db(|s| s.ci_waits()).await else { return };
         let now = code_sql::now_ms();
         for (w, since) in waits {
@@ -1924,10 +1949,12 @@ impl Apps {
                 let _ = self.db(move |s| s.end_ci_wait(&sid, &e, l)).await;
                 continue;
             };
-            let Source::Repo { repo, .. } = &svc.source else { continue };
+            let git = matches!(svc.source, Source::Git { .. });
             let log = self.logs.sink(format!("env:{}/{}", w.service, w.env), Stream::System);
             let sha = &w.sha[..w.sha.len().min(12)];
-            let done = match sources.ci(repo, &w.sha).await {
+            let done = match self.ci_of(&svc, &w.sha).await {
+                // GitHub's checks may not have started when the push came: a minute for them to.
+                Ok(crate::integrations::Ci::None) if git && now - since < 60_000 => false,
                 Ok(crate::integrations::Ci::Pending) if now - since > 3_600_000 => {
                     log.line(format!("push {sha} not deployed: its checks didn't finish within an hour"));
                     true
@@ -1951,8 +1978,9 @@ impl Apps {
                     }
                     log.line(format!("push {sha}'s checks passed: {}", if matches!(hold, Held::Ready) { "built and held for a person to put live" } else { "deploying" }));
                     let body = hold.body(serde_json::json!({ "revision": w.sha, "message": w.message }));
-                    let by = By { trigger: Trigger::Push, actor: w.author.as_ref().map(|a| format!("git:{a}")) };
-                    self.deploy(&w.service, &w.env, body, by, None, Some(&format!("landing:{}", w.landing))).await.is_ok()
+                    let by = By { trigger: Trigger::Push, actor: w.author.as_ref().map(|a| if git { a.clone() } else { format!("git:{a}") }) };
+                    let key = if git { format!("git:{}:{}", w.env, w.sha) } else { format!("landing:{}", w.landing) };
+                    self.deploy(&w.service, &w.env, body, by, None, Some(&key)).await.is_ok()
                 }
             };
             if done {
