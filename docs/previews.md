@@ -1317,7 +1317,9 @@ type Settings = {
     expiry is 30 days after it was taken) and works only while the preview is live and public,
     so a project that turns private takes its old comments' images down at once.
     It wakes the service once per push, so it's off by default.
-- **Dashboard**: a Previews tab on each project, with the list, status, cost, logs, and open,
+- **Dashboard**: a Previews tab on each project, with the list (a filter once there are four or
+  more: every word against title, branch, slug, repo or `#number`, and All, Needs you, Failed,
+  Awake, Asleep with their counts; `lib/preview-filter.ts`), status, cost, logs, and open,
   sleep, wake, reset and delete actions, plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
 - **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|settings|usage|bypass|wait`.
