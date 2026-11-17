@@ -22,7 +22,8 @@ const revoke = vi.fn(async (_id: string) => ({}));
 vi.mock("@/lib/access-api", async (orig) => ({
   ...(await orig<typeof import("@/lib/access-api")>()),
   accessApi: {
-    toolsetCosts: async () => ({ products: [] }),
+    // Every product on: past VS Code's and Cursor's limits.
+    toolsetCosts: async () => ({ products: [{ product: "postgres", tools: 200, read_only: 80, context_tokens: 20000 }, { product: "access", tools: 5, read_only: 3, context_tokens: 400 }], search: { tools: 3, read_only: 2, context_tokens: 900 } }),
     tokens: async () => [],
     me: async () => ({ kind: "operator", locked: true }),
     checkup: async () => checkup,
@@ -49,6 +50,11 @@ describe("the access page", () => {
     await userEvent.click(within(panel as HTMLElement).getByRole("button", { name: "Revoke" }));
     await waitFor(() => expect(revoke).toHaveBeenCalledWith("tok_old"));
 
+    // A client that can't take the whole list starts in search mode; one that can doesn't.
+    await userEvent.click(await screen.findByRole("tab", { name: "VS Code" }));
+    await waitFor(() => expect(screen.getAllByText(/tools=search/).length).toBeGreaterThan(0));
+    await userEvent.click(screen.getByRole("tab", { name: "Claude Code" }));
+    await waitFor(() => expect(screen.queryAllByText(/tools=search/)).toHaveLength(0));
     await userEvent.click(await screen.findByRole("button", { name: "Redis" }));
     expect(screen.getAllByText(/\/v1\/mcp\?toolsets=redis/).length).toBeGreaterThan(0);
   });

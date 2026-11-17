@@ -152,6 +152,13 @@ fn rank<'a>(pool: &[&'a Value], query: &[String]) -> Vec<(f64, &'a Value)> {
             if !query.is_empty() && query.iter().all(|q| d.has(0, q) == 1.0) {
                 s *= 1.5;
             }
+            // Of two names holding the query, the one it covers more of: `apps_deploy` before
+            // `apps_cancel_deploy` for "deploy my app".
+            let name = &d.fields[0];
+            if !name.is_empty() {
+                let covered = name.iter().filter(|w| query.iter().any(|q| *w == q || (q.len() >= 4 && w.len() >= 4 && (w.starts_with(q.as_str()) || q.starts_with(w.as_str()))))).count();
+                s *= 1.0 + 0.5 * covered as f64 / name.len() as f64;
+            }
             (s, d.tool)
         })
         .filter(|(s, _)| *s > 0.0)
@@ -261,5 +268,57 @@ mod tests {
         let names: Vec<&str> = shown.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["access_check", FIND, RUN_READ, RUN]);
         assert_eq!(listed(&all[..1]).len(), 1, "nothing to find, nothing listed but access");
+    }
+}
+
+/// Search mode works only if `roll_find_tools` puts the tool a person means first: these are
+/// queries an agent sends, across every product, against the real catalogue (roll code's tools
+/// are another crate's). A new tool that takes one of these over needs a title that says what it's
+/// for, not a lower bar here.
+#[cfg(test)]
+mod finds {
+    #[test]
+    fn everyday_queries_find_their_tool_first() {
+        let all: Vec<serde_json::Value> = crate::tools::all().iter().map(crate::tools::Tool::definition).collect();
+        let wrong: Vec<String> = [
+            ("create a postgres branch", "postgres_create_branch"),
+            ("run a sql query", "postgres_query"),
+            ("change data with sql", "postgres_execute"),
+            ("explain a query plan", "postgres_explain"),
+            ("slow queries", "postgres_slow_queries"),
+            ("delete a redis database", "redis_delete_database"),
+            ("upload a file to a bucket", "storage_write_object"),
+            ("presign a url", "storage_presign"),
+            ("delete objects under a prefix", "storage_delete_objects"),
+            ("deploy my app", "apps_deploy"),
+            ("roll back a deployment", "apps_rollback"),
+            ("set an environment variable", "apps_set_variables"),
+            ("app logs", "apps_logs"),
+            ("restart my service", "apps_restart"),
+            ("add a log drain", "apps_add_drain"),
+            ("notify slack on deploy", "apps_add_notification"),
+            ("read a secret", "secrets_reveal"),
+            ("encrypt with a key", "secrets_transit_encrypt"),
+            ("an old version of a secret", "secrets_version_value"),
+            ("produce to a kafka topic", "streams_produce"),
+            ("read records from a topic", "streams_read"),
+            ("publish a message to a queue", "queues_publish"),
+            ("pause a schedule", "tasks_pause_schedule"),
+            ("send an event", "tasks_send_event"),
+            ("wait for a run", "tasks_wait_run"),
+            ("create an index", "search_create_index"),
+            ("cql query", "nosql_cql"),
+            ("nosql activity", "nosql_activity"),
+            ("share a preview", "previews_share"),
+            ("create a workspace project", "workspace_create_project"),
+        ]
+        .iter()
+        .filter_map(|(q, want)| {
+            let r = super::find(&all, &serde_json::json!({ "query": q, "limit": 3 }));
+            let got: Vec<&str> = r["structuredContent"]["tools"].as_array().map(|a| a.iter().filter_map(|t| t["name"].as_str()).collect()).unwrap_or_default();
+            (got.first() != Some(want)).then(|| format!("{q:?}: wanted {want}, got {got:?}"))
+        })
+        .collect();
+        assert!(wrong.is_empty(), "roll_find_tools ranks these wrong:\n{}", wrong.join("\n"));
     }
 }

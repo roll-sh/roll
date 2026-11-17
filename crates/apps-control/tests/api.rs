@@ -101,7 +101,10 @@ impl Sources for FakeCode {
     }
     async fn touches(&self, _repo: &str, _from: &str, to: &str, patterns: &[String]) -> anyhow::Result<bool> {
         let changed = self.pushed.lock().get(to).cloned().unwrap_or_default();
-        Ok(changed.iter().any(|f| patterns.iter().any(|p| f.starts_with(p.trim_end_matches("**")))))
+        Ok(self.any_path_matches(patterns, &changed))
+    }
+    fn any_path_matches(&self, patterns: &[String], paths: &[String]) -> bool {
+        paths.iter().any(|f| patterns.iter().any(|p| f.starts_with(p.trim_end_matches("**"))))
     }
 }
 
@@ -139,10 +142,11 @@ impl apps_control::integrations::DomainTls for FakeTls {
 }
 
 /// Two Postgres projects a service can link, `main` and `orders`, whose variables are read
-/// fresh; and a Redis database, `cache`, that makes each link a key of its own.
+/// fresh; and a search cluster, `logs`, that makes each link an API key of its own (in rolld:
+/// roll secrets' search provider, through search's keys route).
 struct FakeResources;
 
-/// What the fake made and revoked for `cache` links, in order.
+/// What the fake made and revoked for `logs` links, in order.
 static MINTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 #[async_trait]
@@ -155,7 +159,7 @@ impl apps_control::integrations::Resources for FakeResources {
     }
 
     async fn link(&self, kind: apps_control::model::LinkKind, r#ref: &str, service: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
-        if (kind.as_str(), r#ref) != ("redis", "cache") {
+        if (kind.as_str(), r#ref) != ("search", "logs") {
             return Ok(None);
         }
         // A provider takes a moment: two requests at once both get here.
@@ -163,11 +167,12 @@ impl apps_control::integrations::Resources for FakeResources {
         let mut m = MINTED.lock();
         let key = format!("key{}", m.len());
         m.push(format!("link {service} {key}"));
-        Ok(Some(apps_control::integrations::Minted { vars: vec![("REDIS_URL".into(), format!("redis://{key}@cache.roll.test:6379"))], kept: key }))
+        let vars = vec![("ELASTICSEARCH_URL".into(), "https://logs.search.roll.test".into()), ("ELASTICSEARCH_API_KEY".into(), format!("{key}-secret"))];
+        Ok(Some(apps_control::integrations::Minted { vars, kept: format!("key:{key}") }))
     }
 
     async fn unlink(&self, _kind: apps_control::model::LinkKind, _ref: &str, kept: &str) -> anyhow::Result<()> {
-        MINTED.lock().push(format!("unlink {kept}"));
+        MINTED.lock().push(format!("unlink {}", kept.trim_start_matches("key:")));
         Ok(())
     }
 
@@ -912,21 +917,34 @@ async fn a_link_puts_its_variables_in_the_instances() {
     let (_, l) = call(&w.api, "PUT", &format!("{links}/postgres/orders"), Some(json!({"prefix": "ORDERS"}))).await;
     assert_eq!(l["vars"], json!(["ORDERS_DATABASE_URL"]), "{l}");
     assert_eq!(call(&w.api, "PUT", &format!("{links}/postgres/nope"), Some(json!({}))).await.0, StatusCode::BAD_REQUEST);
+    // A preview (an ephemeral environment) gets no resource's production variables: roll
+    // previews sets the branched ones itself.
+    let pv = format!("/v1/apps/services/{id}/environments/pv-1");
+    call(&w.api, "PUT", &pv, Some(json!({"ephemeral": true}))).await;
+    let (_, v) = call(&w.api, "GET", &format!("{pv}/variables/values"), None).await;
+    assert!(v.get("DATABASE_URL").is_none() && v.get("ORDERS_DATABASE_URL").is_none(), "{v}");
+    let (_, v) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/variables/values"), None).await;
+    assert!(v["DATABASE_URL"].is_string(), "{v}");
+    call(&w.api, "DELETE", &pv, None).await;
     // A link that makes credentials of its own makes them once: setting it again keeps them.
-    let (st, l) = call(&w.api, "PUT", &format!("{links}/redis/cache"), Some(json!({}))).await;
-    assert_eq!((st, &l["vars"]), (StatusCode::OK, &json!(["REDIS_URL"])), "{l}");
-    call(&w.api, "PUT", &format!("{links}/redis/cache"), Some(json!({}))).await;
+    let (st, l) = call(&w.api, "PUT", &format!("{links}/search/logs"), Some(json!({}))).await;
+    assert_eq!((st, &l["vars"]), (StatusCode::OK, &json!(["ELASTICSEARCH_URL", "ELASTICSEARCH_API_KEY"])), "{l}");
+    let (_, l) = call(&w.api, "PUT", &format!("{links}/search/logs"), Some(json!({"prefix": "LOGS"}))).await;
+    assert_eq!(l["vars"], json!(["LOGS_ELASTICSEARCH_URL", "LOGS_ELASTICSEARCH_API_KEY"]), "{l}");
     assert_eq!(*MINTED.lock(), [format!("link {id} key0")]);
+    // Kept sealed: never in the database in the clear.
+    let raw = [std::fs::read(w.apps.cfg.home.join("apps.db")).unwrap(), std::fs::read(w.apps.cfg.home.join("apps.db-wal")).unwrap_or_default()].concat();
+    assert!(!raw.windows(11).any(|x| x == b"key0-secret"));
     let base = format!("/v1/apps/services/{id}/environments/production");
-    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "DATABASE_URL,ORDERS_DATABASE_URL,REDIS_URL"}}))).await;
+    call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_ECHO": "DATABASE_URL,ORDERS_DATABASE_URL,LOGS_ELASTICSEARCH_API_KEY"}}))).await;
     let (_, r) = call(&w.api, "POST", &format!("{base}/redeploy"), Some(json!({}))).await;
     settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
     let (st, body) = visit_deployment(&w, &host(&svc["environments"][0]["url"]), r["id"].as_str().unwrap()).await;
     assert_eq!(st, StatusCode::OK, "{body}");
-    assert_eq!(body["vars"], json!({"DATABASE_URL": "postgres://app:pw@db.roll.test:5432/main", "ORDERS_DATABASE_URL": "postgres://app:pw@db.roll.test:5432/orders", "REDIS_URL": "redis://key0@cache.roll.test:6379"}));
+    assert_eq!(body["vars"], json!({"DATABASE_URL": "postgres://app:pw@db.roll.test:5432/main", "ORDERS_DATABASE_URL": "postgres://app:pw@db.roll.test:5432/orders", "LOGS_ELASTICSEARCH_API_KEY": "key0-secret"}));
     // Unlinking revokes them, and so does deleting the service.
-    assert_eq!(call(&w.api, "DELETE", &format!("{links}/redis/cache"), None).await.0, StatusCode::NO_CONTENT);
-    call(&w.api, "PUT", &format!("{links}/redis/cache"), Some(json!({}))).await;
+    assert_eq!(call(&w.api, "DELETE", &format!("{links}/search/logs"), None).await.0, StatusCode::NO_CONTENT);
+    call(&w.api, "PUT", &format!("{links}/search/logs"), Some(json!({}))).await;
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
     assert_eq!(*MINTED.lock(), [format!("link {id} key0"), "unlink key0".into(), format!("link {id} key2"), "unlink key2".into()]);
     // Linked when it's made, the first deploy has them; a link that doesn't resolve makes nothing.
@@ -941,7 +959,7 @@ async fn a_link_puts_its_variables_in_the_instances() {
     // Two requests making one link at once: one credential stays, the other is revoked.
     let (racer, _) = image_service(&w, "racer", json!({"port": 80})).await;
     let rid = racer["id"].as_str().unwrap().to_string();
-    let path = format!("/v1/apps/services/{rid}/links/redis/cache");
+    let path = format!("/v1/apps/services/{rid}/links/search/logs");
     let before = MINTED.lock().len();
     let (a, b) = tokio::join!(call(&w.api, "PUT", &path, Some(json!({}))), call(&w.api, "PUT", &path, Some(json!({}))));
     assert_eq!((a.0, b.0), (StatusCode::OK, StatusCode::OK));
@@ -3689,11 +3707,36 @@ async fn a_repos_roll_toml_is_read_for_a_deploy_link() {
 struct GitHost {
     objects: Mutex<std::collections::HashMap<code_git::ObjectId, code_git::Object>>,
     main: Mutex<Option<code_git::ObjectId>>,
+    /// Other branches, by name.
+    branches: Mutex<std::collections::BTreeMap<String, code_git::ObjectId>>,
+    /// A private repository's login: reads need it.
+    login: Mutex<Option<(String, String)>>,
+    /// Pull requests' heads (`refs/pull/N/head`), by number.
+    pulls: Mutex<std::collections::BTreeMap<u64, code_git::ObjectId>>,
+}
+
+/// roll previews' side of a Git URL's pushes: what it was handed.
+#[derive(Default)]
+struct FakePushes(Mutex<Vec<apps_control::integrations::GitPush>>);
+
+#[async_trait]
+impl apps_control::integrations::GitPushes for FakePushes {
+    async fn pushed(&self, push: apps_control::integrations::GitPush) {
+        self.0.lock().push(push);
+    }
+    fn takes_pulls(&self) -> bool {
+        true
+    }
 }
 
 impl GitHost {
     /// A commit of these files (one directory) on main, after the last one.
     fn commit(&self, files: &[(&str, &str)]) -> String {
+        self.commit_saying(files, "change")
+    }
+
+    /// A commit with this message.
+    fn commit_saying(&self, files: &[(&str, &str)], message: &str) -> String {
         use code_git::{Kind, Object, mode};
         let mut objects = self.objects.lock();
         let mut tree = Vec::new();
@@ -3710,7 +3753,7 @@ impl GitHost {
         if let Some(p) = *self.main.lock() {
             c.push_str(&format!("parent {p}\n"));
         }
-        c.push_str("author a <a@example.com> 1700000000 +0000\ncommitter a <a@example.com> 1700000000 +0000\n\nchange\n");
+        c.push_str(&format!("author a <a@example.com> 1700000000 +0000\ncommitter a <a@example.com> 1700000000 +0000\n\n{message}\n"));
         let commit = Object::new(Kind::Commit, c.into_bytes());
         let id = commit.id;
         objects.insert(tree.id, tree);
@@ -3722,14 +3765,19 @@ impl GitHost {
 
 #[async_trait]
 impl code_git::GitBackend for GitHost {
-    async fn authorize(&self, _repo: &str, _c: Option<&code_git::Credentials>, access: code_git::Access) -> code_git::GitResult<Option<String>> {
+    async fn authorize(&self, _repo: &str, c: Option<&code_git::Credentials>, access: code_git::Access) -> code_git::GitResult<Option<String>> {
         match access {
-            code_git::Access::Read => Ok(None),
+            code_git::Access::Read => match &*self.login.lock() {
+                Some((u, p)) if c.is_none_or(|c| (&c.username, &c.password) != (u, p)) => Err(code_git::GitError::Unauthorized),
+                _ => Ok(None),
+            },
             code_git::Access::Write => Err(code_git::GitError::Unauthorized),
         }
     }
     async fn refs(&self, _repo: &str) -> code_git::GitResult<code_git::RefList> {
-        let refs = self.main.lock().iter().map(|oid| code_git::Ref { name: "refs/heads/main".into(), oid: *oid, peeled: None }).collect();
+        let mut refs: Vec<code_git::Ref> = self.main.lock().iter().map(|oid| code_git::Ref { name: "refs/heads/main".into(), oid: *oid, peeled: None }).collect();
+        refs.extend(self.branches.lock().iter().map(|(b, oid)| code_git::Ref { name: format!("refs/heads/{b}"), oid: *oid, peeled: None }));
+        refs.extend(self.pulls.lock().iter().map(|(n, oid)| code_git::Ref { name: format!("refs/pull/{n}/head"), oid: *oid, peeled: None }));
         Ok(code_git::RefList { head: Some("refs/heads/main".into()), refs })
     }
     async fn read_object(&self, _repo: &str, oid: &code_git::ObjectId) -> code_git::GitResult<Option<code_git::Object>> {
@@ -3775,16 +3823,182 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     // once however often it's delivered; another branch and GitHub's ping deploy nothing.
     let (_, h) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/hook"), None).await;
     let hook = h["path"].as_str().unwrap().to_string();
-    let third = git.commit(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v3")]);
+    let third = git.commit_saying(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v3")], "fix the header\n\nlonger text");
     let push = json!({ "ref": "refs/heads/main", "after": third, "head_commit": { "message": "fix the header\n\nlonger text" } });
     let (st, d3) = call(&w.api, "POST", &hook, Some(push.clone())).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{d3}");
     assert_eq!((d3["revision"].as_str(), d3["message"].as_str(), d3["trigger"].as_str()), (Some(third.as_str()), Some("fix the header"), Some("push")), "{d3}");
     assert_eq!(call(&w.api, "POST", &hook, Some(push)).await.1["id"], d3["id"], "a redelivery is the same deploy");
     let (st, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": third }))).await;
-    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("follows main"), "{v}");
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("no environment follows it"), "{v}");
     assert_eq!(call(&w.api, "POST", &hook, Some(json!({ "zen": "Keep it logically awesome.", "hook_id": 1 }))).await.1["ignored"], "pong");
     assert_eq!(settled(&w, &id, "production", d3["id"].as_str().unwrap()).await["status"], "active");
+    // What a repository sends that isn't a branch push deploys nothing: a tag, another event,
+    // a body that isn't a push. GitHub's default form encoding is read as its JSON is.
+    let raw = |ct: &'static str, event: Option<&'static str>, body: String| {
+        let mut r = Request::builder().method("POST").uri(hook.clone()).header("content-type", ct);
+        if let Some(e) = event {
+            r = r.header("x-github-event", e);
+        }
+        r.body(Body::from(body)).unwrap()
+    };
+    let answer = |r: Request<Body>| {
+        let api = w.api.clone();
+        async move {
+            let resp = api.oneshot(r).await.unwrap();
+            let st = resp.status();
+            (st, serde_json::from_slice::<Value>(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap_or(Value::Null))
+        }
+    };
+    let (st, v) = answer(raw("application/json", Some("push"), json!({ "ref": "refs/tags/v1", "after": third }).to_string())).await;
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("not a branch"), "{v}");
+    let (st, v) = answer(raw("application/json", Some("issues"), json!({ "action": "opened" }).to_string())).await;
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("isn't a push"), "{v}");
+    let (st, v) = answer(raw("application/json", None, json!({ "star": true }).to_string())).await;
+    assert!(st == StatusCode::OK && v["ignored"] == "not a push", "{v}");
+    let fourth = git.commit(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v4")]);
+    let form = format!("payload={}", url::form_urlencoded::byte_serialize(json!({ "ref": "refs/heads/main", "after": fourth, "head_commit": { "message": "form encoded" } }).to_string().as_bytes()).collect::<String>());
+    let (st, d4) = answer(raw("application/x-www-form-urlencoded", Some("push"), form)).await;
+    assert_eq!((st, d4["revision"].as_str()), (StatusCode::ACCEPTED, Some(fourth.as_str())), "{d4}");
+    settled(&w, &id, "production", d4["id"].as_str().unwrap()).await;
+    // The watch reads a commit's message as the hook does: `[skip ci]` isn't deployed.
+    git.commit_saying(&[("README.md", "docs")], "docs only [skip ci]");
+    assert!(w.apps.watch_git().await.is_empty(), "its message says [skip ci]");
+    // Watch paths: a commit that changes none of them (the live commit's tree against its) isn't
+    // deployed, by the watch or the hook; one that does is.
+    let (st, v) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"build": {"watch": ["server.js"]}}))).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let pkg = ("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#);
+    let docs = git.commit(&[pkg, ("server.js", "require('http') // v4"), ("README.md", "more docs")]);
+    assert!(w.apps.watch_git().await.is_empty(), "only README.md changed");
+    let (st, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/main", "after": docs }))).await;
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("watches"), "{v}");
+    let code = git.commit(&[pkg, ("server.js", "require('http') // v5"), ("README.md", "more docs")]);
+    let started = w.apps.watch_git().await;
+    assert_eq!(started.len(), 1, "server.js changed");
+    assert_eq!(settled(&w, &id, "production", &started[0]).await["revision"].as_str(), Some(code.as_str()));
+    // With roll previews on the node, a push to a branch no environment follows is handed to it,
+    // once the repository says the branch is there (or gone, for a deletion): a body naming
+    // another commit hands nothing on.
+    let pushes = Arc::new(FakePushes::default());
+    w.apps.set_git_pushes(pushes.clone());
+    git.branches.lock().insert("feature".into(), code.parse().unwrap());
+    let (st, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": code, "head_commit": { "message": "try it" } }))).await;
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("roll previews"), "{v}");
+    let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": first }))).await;
+    assert!(v["ignored"].as_str().unwrap().contains("the repository has it at"), "{v}");
+    let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/gone", "after": "0".repeat(40), "deleted": true }))).await;
+    assert!(v["ignored"].as_str().unwrap().contains("its preview goes"), "{v}");
+    let got: Vec<_> = pushes.0.lock().iter().map(|p| (p.service.clone(), p.url.clone(), p.branch.clone(), p.sha.clone(), p.message.clone())).collect();
+    assert_eq!(got, vec![(id.clone(), url.clone(), "feature".into(), Some(code.clone()), "try it".into()), (id.clone(), url.clone(), "gone".into(), None, String::new())]);
+    // main is production's: deployed by apps as before, never handed on.
+    let (st, _) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/main", "after": code }))).await;
+    assert!(st.is_success() && pushes.0.lock().len() == 2);
+    // A body naming an older commit (a leaked URL, or a delivery a newer push overtook) deploys
+    // nothing: only where the branch is now does.
+    let (st, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/main", "after": first }))).await;
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("only its head deploys"), "{v}");
+    // roll.toml's watch paths at the pushed commit (over the service's), and a Bitbucket push
+    // that moves two branches: main deploys here, feature goes to previews.
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"build": {"watch": null}}))).await;
+    let toml = ("roll.toml", "[app]\nwatch = [\"api.js\"]\n");
+    let readme = git.commit(&[pkg, ("server.js", "require('http') // v5"), ("README.md", "even more docs"), toml]);
+    let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/main", "after": readme }))).await;
+    assert!(v["ignored"].as_str().unwrap().contains("api.js"), "roll.toml's watch: {v}");
+    let api = git.commit_saying(&[pkg, ("server.js", "require('http') // v5"), ("README.md", "even more docs"), toml, ("api.js", "x")], "add the api");
+    let bitbucket = json!({ "push": { "changes": [
+        { "new": { "type": "branch", "name": "main", "target": { "hash": api, "message": "add the api" } } },
+        { "new": { "type": "branch", "name": "feature", "target": { "hash": code, "message": "try it" } } },
+    ] } });
+    let (st, d) = call(&w.api, "POST", &hook, Some(bitbucket)).await;
+    assert_eq!((st, d["revision"].as_str(), d["message"].as_str()), (StatusCode::ACCEPTED, Some(api.as_str()), Some("add the api")), "{d}");
+    assert_eq!(pushes.0.lock().len(), 3, "feature went to previews too");
+    // One webhook for every environment: a push to the branch staging follows, posted to
+    // production's hook, deploys staging.
+    let (st, v) = call(&w.api, "PUT", &format!("/v1/apps/services/{id}/environments/staging"), Some(json!({"branch": "feature"}))).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, d) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": code, "head_commit": { "message": "try it on staging" } }))).await;
+    assert_eq!((st, d["environment"].as_str(), d["revision"].as_str()), (StatusCode::ACCEPTED, Some("staging"), Some(code.as_str())), "{d}");
+    assert_eq!(pushes.0.lock().len(), 3, "a followed branch isn't a preview's");
+    // The commit's own message decides `[skip ci]`, not the body's.
+    let skip = git.commit_saying(&[pkg, ("server.js", "require('http') // v6"), ("README.md", "even more docs"), toml, ("api.js", "y")], "wip [skip ci]");
+    let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/main", "after": skip, "head_commit": { "message": "ship it" } }))).await;
+    assert!(v["ignored"].as_str().unwrap().contains("[skip ci]"), "{v}");
+    // Pull requests go to previews with their number, title and page: a same-repository one on
+    // its branch, a fork's as `pull/N` once `refs/pull/N/head` agrees, a close with no commit.
+    let pr = |action: &str, n: u64, branch: &str, sha: &str, head_repo: u64| {
+        json!({ "action": action, "number": n, "pull_request": { "number": n, "title": "Try it", "head": { "ref": branch, "sha": sha, "repo": { "id": head_repo } }, "base": { "repo": { "id": 1 } } } }).to_string()
+    };
+    // One from a branch an environment follows (staging's) is that environment's, not a preview.
+    let (_, v) = answer(raw("application/json", Some("pull_request"), pr("opened", 6, "feature", &code, 1))).await;
+    assert!(v["ignored"].as_str().unwrap().contains("an environment's branch"), "{v}");
+    git.branches.lock().insert("topic".into(), code.parse().unwrap());
+    let (st, v) = answer(raw("application/json", Some("pull_request"), pr("opened", 7, "topic", &code, 1))).await;
+    assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("handed to roll previews"), "{v}");
+    git.pulls.lock().insert(8, first.parse().unwrap());
+    let (_, v) = answer(raw("application/json", Some("pull_request"), pr("synchronize", 8, "main", &code, 2))).await;
+    assert!(v["ignored"].as_str().unwrap().contains("refs/pull/8/head at"), "a fork's head that isn't refs/pull/8/head: {v}");
+    answer(raw("application/json", Some("pull_request"), pr("synchronize", 8, "main", &first, 2))).await;
+    answer(raw("application/json", Some("pull_request"), pr("closed", 8, "main", &first, 2))).await;
+    let got: Vec<_> = pushes.0.lock()[3..].iter().map(|p| (p.branch.clone(), p.sha.clone(), p.pull.as_ref().map(|q| (q.number, q.fork, q.url.clone(), q.title.clone())))).collect();
+    let page = |n: u64| format!("{url}/pull/{n}");
+    assert_eq!(got, vec![
+        ("topic".to_string(), Some(code.clone()), Some((7, false, page(7), "Try it".to_string()))),
+        ("pull/8".to_string(), Some(first.clone()), Some((8, true, page(8), "Try it".to_string()))),
+        ("pull/8".to_string(), None, Some((8, true, page(8), "Try it".to_string()))),
+    ]);
+    // GitLab's merge request: its own event and fields, its page under `/-/merge_requests/`.
+    let mr = json!({ "object_kind": "merge_request", "object_attributes": { "iid": 3, "title": "Try it on GitLab", "action": "open", "source_branch": "topic", "source_project_id": 5, "target_project_id": 5, "last_commit": { "id": code } } }).to_string();
+    let r = Request::builder().method("POST").uri(hook.clone()).header("content-type", "application/json").header("x-gitlab-event", "Merge Request Hook").body(Body::from(mr)).unwrap();
+    let (_, v) = answer(r).await;
+    assert!(v["ignored"].as_str().unwrap().contains("handed to roll previews"), "{v}");
+    let last = pushes.0.lock().last().cloned().unwrap();
+    assert_eq!((last.branch.as_str(), last.pull.map(|p| (p.number, p.fork, p.url))), ("topic", Some((3, false, format!("{url}/-/merge_requests/3")))));
+}
+
+/// A private repository on any Git host: the service's own login (sealed, never returned, sent
+/// only to the URL's host) is what its branch check, deploys and the watch fetch with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_private_git_url_fetches_with_its_login() {
+    let w = world().await;
+    let git = Arc::new(GitHost::default());
+    *git.login.lock() = Some(("deploy".into(), "glpat-sekret-token".into()));
+    let pkg = ("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#);
+    let first = git.commit(&[pkg, ("server.js", "require('http')")]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}/git/acme/private");
+    let app = code_git::router(git.clone(), code_git::ServerConfig::default());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let body = |login: Value| json!({ "project": w.project, "name": "private", "source": {"kind": "git", "url": url}, "git_login": login });
+    let (st, v) = call(&w.api, "POST", "/v1/apps/services", Some(body(Value::Null))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "no login: {v}");
+    let (st, v) = call(&w.api, "POST", "/v1/apps/services", Some(body(json!({"username": "deploy", "password": "wrong"})))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "a wrong one: {v}");
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(body(json!({"username": "deploy", "password": "glpat-sekret-token"})))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    assert_eq!(svc["git_login"], json!({"host": format!("127.0.0.1:{port}"), "username": "deploy"}));
+    assert!(!svc.to_string().contains("sekret"));
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d1 = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!((d1["status"].as_str(), d1["revision"].as_str()), (Some("active"), Some(first.as_str())), "{d1}");
+    let raw = [std::fs::read(w.apps.cfg.home.join("apps.db")).unwrap(), std::fs::read(w.apps.cfg.home.join("apps.db-wal")).unwrap_or_default()].concat();
+    assert!(!raw.windows(6).any(|x| x == b"sekret"), "sealed at rest");
+    // The watch fetches with it too.
+    let second = git.commit(&[pkg, ("server.js", "require('http') // v2")]);
+    let started = w.apps.watch_git().await;
+    assert_eq!(started.len(), 1);
+    assert_eq!(settled(&w, &id, "production", &started[0]).await["revision"].as_str(), Some(second.as_str()));
+    // Another repository never gets it, on the same host either: moving the source drops it.
+    let (_, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"source": {"kind": "git", "url": format!("http://127.0.0.1:{port}/git/acme/other")}}))).await;
+    assert_eq!(s["git_login"], Value::Null, "{s}");
+    call(&w.api, "PUT", &format!("/v1/apps/services/{id}/git-login"), Some(json!({"username": "deploy", "password": "glpat-sekret-token"}))).await;
+    // Nor another host.
+    let (_, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"source": {"kind": "git", "url": format!("http://localhost:{port}/git/acme/private")}}))).await;
+    assert_eq!(s["git_login"], Value::Null, "{s}");
+    let (st, s) = call(&w.api, "PUT", &format!("/v1/apps/services/{id}/git-login"), Some(json!({"username": "deploy", "password": "glpat-sekret-token"}))).await;
+    assert_eq!((st, s["git_login"]["host"].as_str()), (StatusCode::OK, Some(format!("localhost:{port}").as_str())), "{s}");
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}/git-login"), None).await.1["git_login"], Value::Null);
 }
 
 /// The dashboard's starter templates (apps/dashboard/src/lib/templates) read as the import reads

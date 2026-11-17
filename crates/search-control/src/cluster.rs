@@ -12,7 +12,8 @@
 //!   the holders of one tenure.
 //! - **Requests** for a cluster run on its owner ([`dispatch`]): here, or forwarded to the owner's
 //!   `/internal/search/rest/…` ([`REST_FORWARDED`]) and served there as if they had come in on its
-//!   own REST port.
+//!   own REST port. The control plane's own requests to a cluster (a link's credential, which
+//!   rolld's apps glue asks any node for) go the same way ([`to_owner`]).
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -170,16 +171,13 @@ pub(crate) async fn release_idle(control: Weak<crate::Control>) {
     }
 }
 
-/// Runs a `/v1/search/clusters/{id}/…` call on the cluster's owner (a cluster's settings,
-/// credentials, indices and console reach it where it's loaded); other calls run here.
-pub(crate) async fn on_owner(c: Arc<crate::Control>, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+/// Runs a `/v1/search/clusters/{id}/…` call about cluster `name` on its owner (a cluster's
+/// settings, credentials, indices and console reach it where it's loaded); here off a fleet. The
+/// API resolves the cluster and checks the caller first (`crate::api`).
+pub(crate) async fn on_owner(c: &crate::Control, name: &str, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
     let Some(cluster) = c.cluster_leases().map(|l| l.cluster().clone()) else { return next.run(req).await };
-    let id = req.uri().path().strip_prefix("/v1/search/clusters/").and_then(|r| r.split('/').next()).filter(|s| !s.is_empty()).map(str::to_string);
-    let Some(id) = id.and_then(|id| urlencoding::decode(&id).ok().map(|s| s.into_owned())) else { return next.run(req).await };
-    // An unknown cluster is answered here (404).
-    let Ok(d) = c.get(&id).await else { return next.run(req).await };
     cluster
-        .dispatch(&key(&d.name), req, |req, guard| async move {
+        .dispatch(&key(name), req, |req, guard| async move {
             let r = next.run(req).await;
             drop(guard);
             r
@@ -251,6 +249,27 @@ async fn rest(c: Arc<crate::Control>, req: axum::extract::Request) -> axum::resp
 
 /// Bodies up to this size are kept so a request can be sent again while its cluster moves.
 const REPLAY_BYTES: usize = 4 << 20;
+
+/// The most of an owner's answer [`to_owner`] reads (Elasticsearch's `http.max_content_length`).
+const ANSWER_BYTES: usize = 100 << 20;
+
+/// Sends one of the control plane's own REST requests about cluster `name` to the cluster's owner
+/// when that's another node of the fleet, as that node's REST front would take it (`None`: serve
+/// it here, where it's owned or nobody's).
+pub(crate) async fn to_owner(c: &crate::Control, name: &str, req: &search_es::EsRequest) -> Option<search_es::EsResponse> {
+    let cluster = c.cluster_leases()?.cluster().clone();
+    let Ok(Route::Forward(owner)) = cluster.route_async(&key(name)).await else { return None };
+    let mut r = axum::http::Request::builder().method(req.method.as_str()).uri(format!("{REST_FORWARDED}{}", req.uri));
+    for (k, v) in &req.headers {
+        r = r.header(k, v);
+    }
+    let r = r.body(axum::body::Body::from(req.body.clone())).ok()?;
+    let resp = cluster.forward(&owner, r, 0).await;
+    let status = resp.status().as_u16();
+    let headers = resp.headers().iter().filter_map(|(k, v)| Some((k.to_string(), v.to_str().ok()?.to_string()))).collect();
+    let body = axum::body::to_bytes(resp.into_body(), ANSWER_BYTES).await.unwrap_or_default();
+    Some(search_es::EsResponse { status, headers, body, head: false })
+}
 
 async fn send(cluster: &Cluster, key: &str, mut req: axum::extract::Request, forwarded: axum::http::Uri, original: axum::http::Uri, node: Arc<search_server::Node>) -> axum::response::Response {
     req.extensions_mut().insert(axum::extract::OriginalUri(forwarded.clone()));

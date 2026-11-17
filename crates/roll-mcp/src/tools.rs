@@ -66,6 +66,10 @@ pub struct Tool {
     /// The `sql` argument as the route gets it (`EXPLAIN (FORMAT JSON) <sql>`).
     pub wrap: Option<fn(&str) -> String>,
     pub hint: Hint,
+    /// For a tool that waits for something (a run, a decision) up to a request's limit: whether
+    /// its answer says the wait is over. As an MCP task, an answer that isn't is asked again, so
+    /// the task waits as long as it takes (tasks::run).
+    pub until: Option<fn(&Value) -> bool>,
 }
 
 pub enum Built {
@@ -261,7 +265,17 @@ const IDEMPOTENCY: P = P { name: "idempotency_key", ty: Ty::Str, at: At::Header(
 const IN_PROJECT: P = P { name: "workspace_project", ty: Ty::Str, at: At::Header("x-roll-project"), required: false, desc: "Workspace project (prj_…) to put the new resource in" };
 
 const fn t(name: &'static str, title: &'static str, description: &'static str, product: &'static str, method: &'static str, path: &'static str, params: &'static [P]) -> Tool {
-    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto }
+    Tool { name, title, description, product, method, path, params, fixed: None, wrap: None, hint: Hint::Auto, until: None }
+}
+
+/// A tasks run that's over (`completed`, `failed` or `canceled`).
+fn run_over(v: &Value) -> bool {
+    matches!(v["status"].as_str(), Some("completed" | "failed" | "canceled"))
+}
+
+/// An approval a person decided (or that expired): anything but `pending`.
+fn decided(v: &Value) -> bool {
+    v["state"].as_str().is_some_and(|s| s != "pending")
 }
 
 impl Tool {
@@ -275,6 +289,10 @@ impl Tool {
     }
     const fn destructive(mut self) -> Tool {
         self.hint = Hint::Destructive;
+        self
+    }
+    const fn until(mut self, f: fn(&Value) -> bool) -> Tool {
+        self.until = Some(f);
         self
     }
 }
@@ -375,7 +393,7 @@ const SERVICE: P = req("service", "App service id");
 static TOOLS: &[Tool] = &[
     // ── access ──
     t("access_whoami", "Who am I", "The connection's identity: the operator, or the token or OAuth connection and the rules it has.", "access", "GET", "/v1/access", &[]),
-    t("access_wait_approval", "Wait for an approval", "Wait (up to 55 s) for a person to decide an approval this connection asked for; then call the original tool again with approval.", "access", "GET", "/v1/access/approvals/{approval_id}", &[req("approval_id", "The approval id (apr_…)"), q("wait", Ty::Int, "Seconds to wait (at most 55; default 55)")]),
+    t("access_wait_approval", "Wait for an approval", "Wait (up to 55 s) for a person to decide an approval this connection asked for; then call the original tool again with approval.", "access", "GET", "/v1/access/approvals/{approval_id}", &[req("approval_id", "The approval id (apr_…)"), q("wait", Ty::Int, "Seconds to wait (at most 55; default 55)")]).until(decided),
     t(
         "access_check",
         "Check before acting",
@@ -474,7 +492,7 @@ static TOOLS: &[Tool] = &[
     t("storage_read_object", "Read an object", "An object's content: text as is, anything else as base64.", "storage", "GET", "/v1/storage/buckets/{bucket}/download", &[BUCKET, qreq("key", "Object key"), q("version_id", Ty::Str, "A version")]),
     t(
         "storage_write_object",
-        "Write an object",
+        "Upload an object to a bucket",
         "Upload an object (replacing the key): content as text, or content_b64.",
         "storage",
         "PUT",
@@ -651,7 +669,7 @@ static TOOLS: &[Tool] = &[
     t("tasks_pause_function", "Pause a function", "Start no new runs of a function (running ones carry on).", "tasks", "POST", "/v1/tasks/functions/{id}/pause", &[req("id", "Function id")]),
     t("tasks_resume_function", "Resume a function", "Start runs of a paused function again.", "tasks", "POST", "/v1/tasks/functions/{id}/resume", &[req("id", "Function id")]),
     t("tasks_cancel_function_runs", "Cancel a function's runs", "Stop every running run of a function, or those an expression matches.", "tasks", "POST", "/v1/tasks/functions/{id}/cancel", &[req("id", "Function id"), b("if", Ty::Str, "Only runs this matches, e.g. event.data.user == \"u1\"")]),
-    t("tasks_wait_run", "Wait for a run", "A run once it finishes, or as it is when the timeout passes.", "tasks", "GET", "/v1/tasks/runs/{id}/wait", &[req("id", "Run id (run_…)"), q("timeout", Ty::Str, "e.g. 30s (the default), at most a few minutes")]),
+    t("tasks_wait_run", "Wait for a run", "A run once it finishes, or as it is when the timeout passes.", "tasks", "GET", "/v1/tasks/runs/{id}/wait", &[req("id", "Run id (run_…)"), q("timeout", Ty::Str, "e.g. 30s (the default), at most a few minutes")]).until(run_over),
     t("tasks_get_schedule", "Get a schedule", "A schedule, its next run and what it publishes.", "tasks", "GET", "/v1/tasks/schedules/{id}", &[req("id", "Schedule id")]),
     t(
         "tasks_update_schedule",
@@ -717,7 +735,7 @@ static TOOLS: &[Tool] = &[
     // ── secrets (roll secrets) ──
     t("secrets_list_environments", "List environments", "A project's secret environments.", "secrets", "GET", "/v1/secrets/projects/{project}/environments", &[SECRET_PROJECT]),
     t("secrets_list", "List secrets", "Secret names and metadata in an environment (never values).", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets", &[SECRET_PROJECT, ENV, q("path", Ty::Str, "Folder, e.g. /api")]),
-    t("secrets_reveal", "Reveal a secret", "A secret's value. A key tagged sensitive is never returned to anyone (403): only running services get it, so don't retry or look for it another way.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
+    t("secrets_reveal", "Read a secret's value", "Read a secret's value. A key tagged sensitive is never returned to anyone (403): only running services get it, so don't retry or look for it another way.", "secrets", "GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder")]),
     t("secrets_set", "Set a secret", "Create or change a secret's value. Give if_version (the version you read) so a change someone made meanwhile isn't overwritten: then it's a 409 stale, and you read it again.", "secrets", "PUT", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), breq("value", Ty::Str, "The value"), q("path", Ty::Str, "Folder"), b("if_version", Ty::Int, "Only if it's still this version (0: only if it doesn't exist)")]),
     t("secrets_delete", "Delete a secret", "Delete a secret (if_version: only if it's still the version you read).", "secrets", "DELETE", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}", &[SECRET_PROJECT, ENV, req("name", "Secret name"), q("path", Ty::Str, "Folder"), q("if_version", Ty::Int, "Only if it's still this version")]),
     t("secrets_list_aws_roles", "List AWS roles", "A project's registered AWS roles, which dynamic AWS keys are made from (registering one is the project admin's, in the dashboard).", "secrets", "GET", "/v1/secrets/projects/{project}/aws-roles", &[req("project", "Workspace project")]),
@@ -845,7 +863,7 @@ static TOOLS: &[Tool] = &[
     t("apps_sleep", "Sleep", "Stop an environment's instances until a request or apps_wake wakes them.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/sleep", &[SERVICE, ENV]),
     t("apps_wake", "Wake", "Start a sleeping environment's instances.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/wake", &[SERVICE, ENV]),
     t("apps_usage", "Service usage", "An environment's usage and cost per day.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/usage", &[SERVICE, ENV, q("days", Ty::Int, "Days back")]),
-    t("apps_restart", "Restart", "Restart an environment's instances.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/restart", &[SERVICE, ENV]),
+    t("apps_restart", "Restart a service", "Restart an environment's instances.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/restart", &[SERVICE, ENV]),
     t("apps_restart_instance", "Restart one instance", "Replace one instance of a web service (a fresh one answers before this one drains; if it doesn't start, this one keeps serving). Instance names are in apps_get_environment. Production is a \"deploy\" action.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/instances/{name}/restart", &[SERVICE, ENV, req("name", "Instance id (instances[].id in apps_get_environment)")]),
     t("apps_redeploy", "Redeploy", "Deploy what's running again with the current settings and variables (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/redeploy", &[SERVICE, ENV, b("message", Ty::Str, "Why")]),
     t(
@@ -858,6 +876,9 @@ static TOOLS: &[Tool] = &[
         &[SERVICE, ENV, breq("command", Ty::Str, "The command line"), b("timeout_s", Ty::Int, "Seconds before it's stopped")],
     ),
     t("apps_job_logs", "Job logs", "A job's output (it ends with the job).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/logs", &[SERVICE, ENV, req("job", "Job id"), q("tail", Ty::Int, "Last lines")]),
+    t("apps_list_jobs", "List jobs", "An environment's one-off jobs, newest first: command, status, exit code, when.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs", &[SERVICE, ENV]),
+    t("apps_get_job", "Get a job", "One job: its status, exit code and timing; poll it until it ends, then read apps_job_logs.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs/{job}", &[SERVICE, ENV, req("job", "Job id")]),
+    t("apps_cancel_job", "Cancel a job", "Stop a running job (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/cancel", &[SERVICE, ENV, req("job", "Job id")]),
     t("apps_events", "App events", "What happened to services (deploys going live or failing, crash loops, failed cron runs and jobs, memory, error and latency alerts, and audit.* changes to settings, variables, domains and links), in order after a cursor.", "apps", "GET", "/v1/apps/events", &[q("after", Ty::Int, "The last answer's next"), q("limit", Ty::Int, "At most this many")]),
     t("apps_list_variables", "List variables", "An environment's variables, values masked. A sealed variable is never readable again by anyone (only the running service gets it): set a new value or delete it, never look for the old one.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/variables", &[SERVICE, ENV]),
     t(
@@ -895,8 +916,8 @@ static TOOLS: &[Tool] = &[
     t("apps_list_notifications", "List notifications", "Where a project's deploy, crash and preview events are sent (webhook, Slack, Discord, email; the URL's host only).", "apps", "GET", "/v1/apps/projects/{project}/notifications", &[req("project", "Workspace project")]),
     t(
         "apps_add_notification",
-        "Add a notification",
-        "Send a project's events somewhere: a webhook, Slack, Discord or email address (the URL is stored sealed and never shown again).",
+        "Notify Slack, Discord, email or a webhook",
+        "Notify a webhook, Slack, Discord or an email address of a project's events (the URL is stored sealed and never shown again).",
         "apps",
         "POST",
         "/v1/apps/projects/{project}/notifications",
@@ -921,7 +942,7 @@ static TOOLS: &[Tool] = &[
     t("apps_test_drain", "Test a log drain", "Send one signed test line now (not retried): whether it arrived.", "apps", "POST", "/v1/apps/projects/{project}/drains/{did}/test", &[req("project", "Workspace project"), req("did", "Drain id")]),
     t("apps_pending", "What the next deploy changes", "Before deploying: which variables (names, never values), run settings and project secrets the next deploy changes against what's live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/pending", &[SERVICE, ENV]),
     t("apps_deploy_commits", "A deploy's commits", "The commits a deploy brings over the one live before it, newest first (at most 50).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/commits", &[SERVICE, ENV, req("deploy", "Deploy id")]),
-    t("apps_rollback", "Roll back", "Roll an environment back to an earlier deploy, with the variables it went live with (keep_variables: true keeps today's).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback", &[SERVICE, ENV, req("deploy", "Deploy id"), b("keep_variables", Ty::Bool, "Keep the variables as they are now")]),
+    t("apps_rollback", "Roll back a deployment", "Roll an environment back to an earlier deploy, with the variables it went live with (keep_variables: true keeps today's).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}/rollback", &[SERVICE, ENV, req("deploy", "Deploy id"), b("keep_variables", Ty::Bool, "Keep the variables as they are now")]),
     t("apps_rollback_previous", "Roll back to the last deploy", "Put back the deploy that was live before this one, with its variables (keep_variables: true keeps today's).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/rollback", &[SERVICE, ENV, b("keep_variables", Ty::Bool, "Keep the variables as they are now")]),
     t("apps_logs", "Service logs", "Recent logs of a service's environment, or with http its requests (method, path, status, ms): the quickest way to find failing or slow ones.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/logs", &[
         SERVICE,

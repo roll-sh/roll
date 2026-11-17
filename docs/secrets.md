@@ -58,12 +58,12 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    roll secrets promote --from staging --to production STRIPE_KEY
    roll secrets envs protect production --approvals 1
    ```
-6. **CI and services** get a scoped token for one project, some environments, some folders and
-   only the actions they need, with an expiry:
+6. **CI and services** get a roll token (roll-access's, docs/permissions.md) with one rule on the
+   project: some environments, some folders and only the actions they need, with an expiry:
 
    ```
    roll secrets tokens create ci --for-env staging --action read --action reveal --ttl-days 90
-   ROLL_TOKEN=rlst_… roll run -e staging -- make test
+   ROLL_TOKEN=rlt_… roll run -e staging -- make test
    ```
 
    Or push an environment out with a **sync** (GitHub Actions secrets, a sealed webhook, a deploy
@@ -81,6 +81,10 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    const keys = generateKeyPair();
    const env = secrets.open(await secrets.resolve("production", { consumer: "app:web", sealTo: keys.publicKey }), keys.secretKey);
    const stop = secrets.watch("staging", { onChange: (v) => reconfigure(v.values) });
+
+   // A process that reads values per request keeps them a while: within the TTL from memory,
+   // then a conditional read that costs a 304 (nothing read, issued or audited) while unchanged.
+   const cached = createClient({ api: process.env.ROLL_API_URL!, token: process.env.ROLL_TOKEN!, cacheTtlMs: 30_000 });
 
    // An encryption key (below, "Encryption keys"): the key stays in roll.
    const cards = secrets.transit("cards");
@@ -131,8 +135,17 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
   project's secrets, made through `POST /v1/access/tokens` as the dashboard's New token. Its
   secret is in the state (sensitive). Any change replaces it, and destroying it revokes it.
 - **`data.roll_secrets_values`** is an environment's resolved values, for another provider.
+- **Without values in the state** (Terraform 1.10 and 1.11+), as Vault's and AWS' providers allow:
+  - **`ephemeral "roll_secrets_values"`** reads an environment for one run, never into the plan or
+    the state; it feeds another provider's configuration or a write-only argument. Strict: a key
+    that doesn't resolve fails the run. With `dynamic = true` a dynamic link issues a credential for
+    the run, and closing the run revokes its lease.
+  - **`value_wo`** on `roll_secret` writes a value write-only: it's sent and never kept, and
+    `value_wo_version` is bumped to write a new one (Terraform can't see a write-only value
+    change). Such a value isn't read back, so a change made outside Terraform isn't seen.
 
-Values land in Terraform's state, as with every provider: keep the state as private as the values.
+`value` and the data source still land in Terraform's state, as with every provider: keep that
+state as private as the values, or use the two above.
 ## GitHub Actions
 `sdk/github-action` puts an environment into a job, as Doppler's and Infisical's actions do:
 ```yaml
@@ -359,12 +372,33 @@ environment is a first-class kind, built to be cheap:
 - One call creates the environment together with its first secrets and links. roll previews
   writes its branched resources' addresses (the preview's Postgres branch, its Redis branch) as
   plain values: a branch is the preview's own resource, not a link to a parent on the canvas.
+- **Links to what the preview branched aren't followed.** An ephemeral environment carries
+  **branches**, `[{kind, parent}]`: the resources its preview branched (`{"kind": "postgres",
+  "parent": "pg_staging"}`). A key it reads, from its base or anywhere else (a reference, an import),
+  whose link names `(kind, ref)` with `ref` a branch's `parent` never resolves there: roll secrets
+  doesn't ask the product, issues nothing, takes no lease and decrypts no managed credential, in
+  any mode (`live`, `managed`, `dynamic`, a role's fields too). The key is left out of the values
+  and named in the answer's `followed`, `[{name, kind, parent, field}]` (`field`: the provider
+  field it's linked to, `url`, `password`, `role_url`…), and roll previews sets each from its
+  branch by field, blanking one its branch has no value for. So a preview's code, a fork's
+  included, never gets staging's database password through the base. A value of the
+  environment's own that references a followed key doesn't resolve either (a problem). This holds
+  for every read that returns values or tells of them (`…/values` and its formats, `…/resolve`
+  sealed or not, a key's reveal, a sync, roll apps' resolve, `…/digest` and the watches, caches,
+  External Secrets Operator, the operator and the CSI provider that read through these): a
+  followed key's part of the digest is fixed, so its parent rotating moves nothing and isn't
+  asked. Ensure sets the list with `branches`: given, it replaces the list; absent, it keeps it. A
+  standard environment refuses it (400). Only roll previews changes it (the operator, as its
+  adapter calls the API, or its in-process consumer `roll:previews`; 403 `forbidden` otherwise):
+  an added entry changes what previews must fill, and a removed one would hand the preview's code
+  the parent's values. An ensure that gives the same list, or none, needs nothing more. A backup keeps the list, and a
+  restore that can't set it doesn't restore the environment.
 - It is hidden from the overview grid's columns (the grid shows a "Previews" count instead), is
   never a promotion target, and can't be protected. Its slug is any free slug (`pr-117`).
 - **Ensuring one** is a single idempotent call, `PUT …/environments/{env}` with what it should be
   (`{base?, kind?, name?, labels?, expires_at? | ttl_minutes?, trusted?, path?, secrets?: Op[],
-  replace?}`). If the environment is missing, it's created (201). Otherwise its labels, expiry and
-  name are brought to what's given, and `secrets` are applied to its own keys at `path` as one
+  replace?, branches?}`). If the environment is missing, it's created (201). Otherwise its labels,
+  expiry, name and branches are brought to what's given, and `secrets` are applied to its own keys at `path` as one
   change, with `replace` also deleting the folder's other own keys (never a linked or personal
   one). An unchanged value is no change, so ensuring what's there records nothing (`change: null`).
   Its kind, base and trust aren't changed in place: 409 `mismatch`, delete it and ensure it again.
@@ -373,6 +407,54 @@ environment is a first-class kind, built to be cheap:
   runs a change's code, so reading it never reaches a protected environment (its base, an import, a
   reference), whoever reads it. A preview of a same-repo change in a project that allows it is made
   trusted; a fork's never is. `Environment.trusted` says which.
+
+#### For roll previews: branches and `followed`
+
+Each converge's ensure names what the preview branched, from the base's links (`ref` is the
+parent's id as the link names it):
+
+```json
+PUT /v1/secrets/projects/prj_1/environments/pv-42
+{
+  "base": "staging",
+  "labels": { "preview": "pv-42" },
+  "ttl_minutes": 1440,
+  "trusted": false,
+  "secrets": [{ "op": "set", "key": "DATABASE_URL", "value": "postgres://…pv-42…" }],
+  "replace": true,
+  "branches": [
+    { "kind": "postgres", "parent": "pg_staging" },
+    { "kind": "bucket", "parent": "assets" }
+  ]
+}
+```
+
+A resolve then leaves every key linked to those parents out of `values` (none of them was read or
+issued) and names it:
+
+```json
+POST /v1/secrets/projects/prj_1/environments/pv-42/resolve
+{ "path": "/", "consumer": "preview:pv-42/web", "untrusted": true, "dynamic": false }
+
+{
+  "values": { "API_URL": "https://staging.example.com", "DATABASE_URL": "postgres://…pv-42…" },
+  "problems": [],
+  "leases": [],
+  "dynamic": [],
+  "linked": [],
+  "withheld": [],
+  "sensitive": [],
+  "followed": [
+    { "name": "PGHOST", "kind": "postgres", "parent": "pg_staging", "field": "host" },
+    { "name": "PGPASSWORD", "kind": "postgres", "parent": "pg_staging", "field": "password" },
+    { "name": "S3_SECRET", "kind": "bucket", "parent": "assets", "field": "secret_access_key" }
+  ]
+}
+```
+
+Previews sets each `name` from its branch's `field` (blank where the branch has none). A sealed
+resolve carries the same `followed` beside the box, in the clear. An own key (`DATABASE_URL`
+above) wins over the base's as always, so a key previews already writes isn't followed.
 
 ### Folders
 
@@ -679,6 +761,14 @@ trait in `crates/roll-secrets/src/links.rs`, implemented in `crates/rolld/src/se
 the product's own HTTP API in process. `roll-secrets` has no list of kinds: a product makes its
 resources linkable by registering a provider. That is how roll search, roll apps and future
 products join without changes here.
+
+A live link's value changes however its credential does: roll rotating it, a password reset or
+restore through the product, `ALTER ROLE` over SQL. Watches, syncs, roll apps' redeploys and
+conditional reads follow the folder's digest, so the digest counts each live value's keyed
+fingerprint as the product answers, read at most every 10 seconds (only the fingerprint is kept,
+never the value). It moves at once, on every node, when roll rotates the credential and when a
+product's own password, reset or restore route succeeds (rolld tells roll secrets:
+`Secrets::source_changed`).
 
 ```rust
 pub trait LinkProvider: Send + Sync {
@@ -2149,17 +2239,20 @@ It is the operator (`Everything`), a roll-access grant (`GrantGrants`, for `rlt_
 `rlo_…` OAuth connections: `ask` inside the product is a no), or one of the project's own tokens.
 
 Secrets accepts the operator (`roll_auth::Operator`, or any request when rolld has no operator
-token), signed-in people on their own projects (below), roll-access's grants, and its own **scoped tokens** (`rlst_…`, created under `…/tokens`) for one project, a list of
-environments (or all), a list of path prefixes (or all), the actions above and an optional expiry.
-A token can be pinned to client addresses (`allowed_ips`: up to 20 addresses or CIDRs, IPv4 or
-IPv6): from anywhere else it's refused (403), checked on every request against the connection's
-peer address (or `X-Forwarded-For` where rolld trusts it), as Infisical's trusted IPs and Doppler's
-IP restrictions do. An identity can be pinned the same way: a login from elsewhere is refused, and
-the token it gets carries the same list. `roll secrets tokens create … --allow-ip 203.0.113.0/24`.
-Tokens are stored as SHA-256 hashes, looked up on every request and never cached. roll-access's
-scoped tokens (`rlt_…`) and OAuth connections (`rlo_…`) reach secrets too: rolld's gate classifies
-the request, and secrets asks the same `Grant` for every second check (`GrantGrants`). The `rlst_`
-tokens are to become roll-access's (Next).
+token), signed-in people on their own projects (below), and roll-access's grants: there is one
+permission system (docs/permissions.md). A token for CI or a service is a roll token (`rlt_…`)
+with one rule on the project's secrets (environments or all, folder prefixes or all, the actions
+above), an optional expiry and client addresses (up to 20 addresses or CIDRs; from anywhere else
+it's refused), made through `POST /v1/access/tokens`: `roll secrets tokens create … --allow-ip
+203.0.113.0/24`, or the project's Access tab, which lists them from `GET
+/v1/access/tokens?product=secrets&resource=<project>` (one at a time: the list also holds tokens
+made in the access builder, so nothing here revokes them in bulk). roll-access stores them hashed,
+looks them up on every request and never caches them; OAuth connections (`rlo_…`) reach secrets
+the same way. rolld's gate classifies each request, and secrets asks the same `Grant` for every
+second check (`GrantGrants`); a read of the project as a whole (its environments' names, health,
+findings) takes part for a rule limited to some environments or folders, answering only what it
+reaches. An identity can be pinned to client addresses too: a login from elsewhere is refused, and
+the token it gets carries the same list.
 
 #### People (signed-in accounts)
 
@@ -2226,7 +2319,7 @@ on Postgres. The audit is read once per project and filtered in memory (it was a
 ### Workload identities (OIDC)
 
 A CI job or a cluster logs in with its own short-lived OpenID Connect token instead of holding a
-`rlst_` token, as Infisical's OIDC auth, Doppler's identities and Vault's JWT auth do: nothing
+long-lived token, as Infisical's OIDC auth, Doppler's identities and Vault's JWT auth do: nothing
 long-lived sits in a CI system's settings, and a leaked log or fork can't reuse a login past its
 minutes.
 
@@ -2272,10 +2365,13 @@ minutes.
   checks the signature against the issuer's keys (RS256 or ES256; its discovery document's
   `jwks_uri`, fetched over the guarded client: HTTPS, public addresses, no redirects, bounded reads;
   cached an hour, fetched again early for a new key id, kept a day if the issuer is down), `iss`,
-  `aud`, `exp` and `nbf` (60 s leeway), the subject and the claims, then mints an `rlst_` token
-  with the identity's scope for its TTL. The token is looked up on every request like any other;
-  its principal is `identity:<id>`, so the audit log names the identity, and the login itself is
-  `identity.login` with the token's `sub`. Deleting the identity revokes every token it gave out.
+  `aud`, `exp` and `nbf` (60 s leeway), the subject and the claims; then roll-access mints a
+  `workload` token (`Access::mint_workload`: the identity's scope and client addresses for its
+  TTL, owned by whoever made the identity, refused once they can't sign in; 409 past 1,000 live
+  per owner). The token is looked up on every request like any other; secrets remembers which
+  login got it (`identity_logins`), so its requests are `identity:<id>` in the audit log, and the
+  login itself is `identity.login` with the token's `sub` and its id. Deleting the identity
+  revokes every token it gave out.
   An OIDC token can be exchanged more than once while it lives (as with Vault): each login is
   audited.
 - **The CLI.** With `ROLL_IDENTITY=idn_…` and no `ROLL_TOKEN`, `roll secrets …` and `roll run` log
@@ -2434,7 +2530,7 @@ isn't in the workspace is 404.
 | `DELETE /environments?label=k=v` | | `{deleted: string[]}` (ephemeral only) |
 | `PUT /environments/order` | `{order: slug[]}` | `Environment[]` |
 | `GET /environments/{env}` | | `Environment` |
-| `PUT /environments/{env}` | `Ensure` | 201 or 200 `{environment, created, change}` (409 `mismatch`) |
+| `PUT /environments/{env}` | `Ensure` | 201 or 200 `{environment, created, change}` (409 `mismatch`; `branches` on a standard environment is a 400, an addition by anyone but roll previews or the operator a 403) |
 | `PATCH /environments/{env}` | `{slug?, name?, expires_at?, max_age_days?}` | `Environment` |
 | `DELETE /environments/{env}?confirm=` | | 204 |
 | `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?, notify_url?}` | `Environment` |
@@ -2461,11 +2557,11 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/secrets/{key}/versions/{v}/value?path=&type=` | | `{value}` |
 | `POST /environments/{env}/secrets/{key}/rotate?path=` | | `Applied` |
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
-| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`) |
+| `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`); with `digest=1` or `If-None-Match` an `ETag` (the digest), and `If-None-Match` with the digest still current is a 304 that decrypts and issues nothing, and writes one `secrets.revalidate` row a day per caller and folder (so health and insights still see the folder read) (never for a folder holding a dynamic credential unless `dynamic=false`: a lease ends without moving the digest) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, projects it's shared with, folders that import it, readers in 30 days |
-| `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would) |
-| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` (`dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`) |
+| `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would; a live link counts its value's keyed fingerprint as the product answers, read at most every 10 s, and at once when roll rotates it or the product's own password, reset or restore route changes it) |
+| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked, followed}` (`dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`; a key linked to a resource the ephemeral environment branched is left out and named in `followed`, in the clear beside a sealed box: names only) |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
 | `POST /environments/{env}/diff` | `{dotenv} \| {json}, path?` | `{added, changed, same, missing, references, linked}`: a local copy against the folder by fingerprint, names only (`reveal`, audited) |
@@ -2483,11 +2579,8 @@ isn't in the workspace is 404.
 | `POST /environments/{env}/requests/{id}/close` | | `Request` |
 | `GET /links` | | `LinkTarget[]` |
 | `GET /leases` | | `Lease[]` |
-| `DELETE /leases/{id}` | | 204 |
-| `POST /leases/{id}/renew` | `{ttl_minutes?}` | `Lease` (`reveal` on its environment) |
-| `GET /tokens` | | `Token[]` |
-| `POST /tokens` | `NewToken` | 201 `Token & {token}` (shown once) |
-| `DELETE /tokens/{id}` | | 204 |
+| `DELETE /leases/{id}` | | 204 (whoever may delete there, or the caller it was issued to while it may still reveal there; 403 for another's) |
+| `POST /leases/{id}/renew` | `{ttl_minutes?}` | `Lease` (as ending one: `delete` there, or the caller it was issued to with `reveal`) |
 | `GET /identities` | | `Identity[]` (admin) |
 | `POST /identities` | `NewIdentity` | 201 `Identity` |
 | `DELETE /identities/{id}` | | 204 (its tokens revoked) |
@@ -2583,12 +2676,16 @@ type Environment = {
   base: string | null; labels: Record<string, string>; expires_at: number | null;
   protected: boolean; approvals: number; approvers: string[]; created_at: number; secrets: number;
   max_age_days: number | null; notify: string | null; trusted: boolean; // trusted: an ephemeral one that may read a protected base
+  branches?: Branch[]; // an ephemeral one's branched resources (absent: none)
 };
-type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean }; // PUT /environments/{env}
+type Branch = { kind: string; parent: string }; // a resource a preview branched: links to it aren't followed
+type Followed = { name: string; kind: string; parent: string; field: string }; // a key left out for roll previews to set from its branch
+type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean }; // PUT /environments/{env}; branches: replaces the list, absent keeps it
 type NewEnvironment = {
   slug: string; name?: string; kind?: "standard" | "ephemeral"; base?: string; labels?: Record<string, string>;
   expires_at?: number; ttl_minutes?: number; secrets?: Op[]; // ephemeral: created in one call with its overrides
   trusted?: boolean; // ephemeral: may read a protected base (admin on it)
+  branches?: Branch[]; // ephemeral: the resources its preview branched (roll previews or the operator)
 };
 type Folder = { path: string; name: string; secrets: number; folders: number };
 type Import = { project?: string; environment: string; path: string }; // project: another project's shared folder
@@ -2613,8 +2710,8 @@ type Change = { seq: number; environment: string; path: string; message: string;
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; withheld: string[]; sensitive: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; digest?: string }; // digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; withheld: string[]; sensitive: string[]; followed: Followed[] }; // followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; followed: Followed[]; digest?: string }; // digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
 type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };
