@@ -980,6 +980,9 @@ async fn links_read_live_values_issue_managed_credentials_rotate_and_lease_dynam
     let v = api.values("production", "/").await["values"].clone();
     assert_eq!((v["AWS_ACCESS_KEY_ID"].as_str(), v["AWS_SECRET_ACCESS_KEY"].as_str()), (Some("AK2"), Some("sk-2")));
     assert_eq!(*api.fake.live_keys.lock().unwrap(), ["AK1", "AK2"]);
+    // Of the linked keys, only the one whose field isn't a credential is plain (a log may show it).
+    let all = api.values("production", "/").await;
+    assert_eq!(all["plain"], json!(["AWS_ACCESS_KEY_ID"]), "{all}");
     let leases = api.ok(Method::GET, "/leases", None).await;
     assert_eq!(leases[0]["kind"], "retired");
     api.ok(Method::DELETE, &format!("/leases/{}", leases[0]["id"].as_str().unwrap()), None).await;
