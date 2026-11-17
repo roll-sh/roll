@@ -4,7 +4,7 @@
 
 use crate::access::{Action, Caller, Scope};
 use crate::crypto::{Dek, value_aad};
-use crate::envs::{self, EnvRow, Kind};
+use crate::envs::{self, Branch, EnvRow, Kind};
 use crate::links::{Link, Mode};
 use crate::refs::{self, Part};
 use crate::write::{Item, ItemAction, SecretType};
@@ -148,6 +148,32 @@ pub struct Values {
     /// Keys whose value comes from a link to a resource (any mode): a consumer that reaches
     /// resources another way (a container on a private network) knows which addresses to rewrite.
     pub linked: Vec<String>,
+    /// Keys linked to a resource the ephemeral environment's preview branched: left out of
+    /// `values` (no value of the parent's leaves roll secrets), for roll previews to set from its
+    /// branch by `field`.
+    pub followed: Vec<Followed>,
+}
+
+/// A key left out because it links a resource the environment's preview branched.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct Followed {
+    /// The variable as the answer would have named it.
+    pub name: String,
+    pub kind: String,
+    /// The branched resource (the link's `ref`).
+    pub parent: String,
+    /// The provider field the key is linked to (`url`, `password`, `role_url`…).
+    pub field: String,
+}
+
+/// Whether `l` names one of `branches`' parents: its value is the parent's, never the preview's.
+fn follows(branches: &[Branch], l: &Link) -> bool {
+    branches.iter().any(|b| b.kind == l.kind && b.parent == l.r#ref)
+}
+
+/// What a followed key answers instead of a value, where one was asked for.
+fn followed_problem(l: &Link) -> String {
+    format!("links {} {}, which this preview branched: roll previews sets it from its branch", l.kind, l.r#ref)
 }
 
 #[derive(Debug, Serialize)]
@@ -429,7 +455,10 @@ impl Secrets {
         if names::sensitive(&e.row.tags) && !caller.runtime {
             return Err(Error::Forbidden(format!("{key} is sensitive: its value reaches only roll's runtimes and syncs, never a person or a token")));
         }
-        let mut r = Resolver::new(self, project, &dek, caller, resolve, &caller.principal);
+        let mut r = Resolver::new(self, project, slug, &dek, caller, resolve, &caller.principal)?;
+        if let Some(l) = r.followed(e) {
+            return Err(Error::Conflict("followed", format!("{key} {}", followed_problem(&l))));
+        }
         let (v, problem) = r.entry(e);
         let leases = r.finish(slug)?;
         self.audit_now(project, caller, "secrets.reveal", Some(slug), Some(&path), &[key.to_string()], &format!("revealed {key}{}", lease_note(&leases)));
@@ -454,7 +483,7 @@ impl Secrets {
         let dek = self.project(project)?;
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let who = consumer.unwrap_or(&caller.principal).to_string();
-        let mut r = Resolver::new(self, project, &dek, caller, resolve, &who);
+        let mut r = Resolver::new(self, project, slug, &dek, caller, resolve, &who)?;
         // Code nobody vetted (a check, a sandbox, an untrusted preview) never gets a dynamic
         // credential, whatever it asks: a GitHub App token, an AWS session or a database login
         // would act for the project until its lease ends.
@@ -467,7 +496,14 @@ impl Secrets {
         let mut sensitive = vec![];
         // Set, but not in this answer (withheld, or dynamic under `dynamic=false`): not missing.
         let mut left_out = vec![];
+        let mut followed = vec![];
         for e in &entries {
+            // First: nothing of the parent's is read, issued or decrypted for it.
+            if let Some(l) = r.followed(e) {
+                followed.push(Followed { name: e.row.key.clone(), kind: l.kind, parent: l.r#ref, field: l.field });
+                left_out.push(e.row.key.clone());
+                continue;
+            }
             if names::sensitive(&e.row.tags) && !caller.runtime {
                 withheld.push(e.row.key.clone());
                 left_out.push(e.row.key.clone());
@@ -502,9 +538,10 @@ impl Secrets {
             None => format!("exported {}{}", crate::write::plural(keys.len(), "value"), lease_note(&leases)),
         };
         self.audit_now(project, caller, action, Some(slug), Some(&path), &keys, &summary);
-        let dynamic = entries.iter().filter(|e| e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic)).map(|e| e.row.key.clone()).collect();
-        let linked = entries.iter().filter(|e| e.row.link.is_some()).map(|e| e.row.key.clone()).collect();
-        Ok(Values { values, problems, leases, dynamic, linked, withheld, sensitive })
+        let ours = |e: &&Entry| !followed.iter().any(|f| f.name == e.row.key);
+        let dynamic = entries.iter().filter(ours).filter(|e| e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic)).map(|e| e.row.key.clone()).collect();
+        let linked = entries.iter().filter(ours).filter(|e| e.row.link.is_some()).map(|e| e.row.key.clone()).collect();
+        Ok(Values { values, problems, leases, dynamic, linked, withheld, sensitive, followed })
     }
 
     /// A folder's own values as they were after change `seq` (or at time `at`): what was stored
@@ -515,19 +552,20 @@ impl Secrets {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
-        let (seq, state) = self.db.read(|c| {
+        let (seq, state, branches) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             let seq = match (seq, at) {
                 (Some(s), None) => s,
                 (None, Some(at)) => c.query_row("SELECT COALESCE(MAX(seq), 0) FROM changes WHERE project_id = ? AND at <= ?", params![project, at], |r| r.get(0))?,
                 _ => return Err(Error::BadRequest("seq (a change) or at (a time), one of them".into())),
             };
-            Ok::<_, Error>((seq, crate::write::state_at(c, &env.id, seq)?))
+            Ok::<_, Error>((seq, crate::write::state_at(c, &env.id, seq)?, env.branches))
         })?;
         let mut values = BTreeMap::new();
         let mut problems = vec![];
         let mut linked = vec![];
         let mut withheld = vec![];
+        let mut followed = vec![];
         // Keys sensitive now: none of their versions shows, however old.
         let now_sensitive: std::collections::HashSet<String> = if caller.runtime {
             Default::default()
@@ -541,6 +579,11 @@ impl Secrets {
                 continue;
             }
             let link: Option<Link> = v.link.as_deref().and_then(|l| serde_json::from_str(l).ok());
+            // A managed link's stored value was the parent's then too.
+            if let Some(l) = link.as_ref().filter(|l| follows(&branches, l)) {
+                followed.push(Followed { name: v.key, kind: l.kind.clone(), parent: l.r#ref.clone(), field: l.field.clone() });
+                continue;
+            }
             if link.is_some() {
                 linked.push(v.key.clone());
             }
@@ -559,7 +602,7 @@ impl Secrets {
         }
         let keys: Vec<String> = values.keys().cloned().collect();
         self.audit_now(project, caller, "secrets.export", Some(slug), Some(&path), &keys, &format!("exported {} as of change #{seq}", crate::write::plural(keys.len(), "value")));
-        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, withheld, sensitive: vec![] }))
+        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, withheld, sensitive: vec![], followed }))
     }
 
     /// A digest of a folder's effective secrets (keys, where they come from, versions,
@@ -584,6 +627,7 @@ impl Secrets {
         let caller = &narrowed;
         self.project(project)?;
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
+        let branches = self.db.read(|c| envs::by_slug(c, project, slug))?.branches;
         let dek = self.project(project)?;
         let mut h = Sha256::new();
         let dynamic = std::cell::Cell::new(false);
@@ -594,6 +638,12 @@ impl Secrets {
         // No stored value's fingerprint: a digest is readable without reveal, and a version moves
         // with every value. A live value's goes into the hash, which tells nothing of it.
         let stamp = |h: &mut Sha256, e: &Entry| {
+            // A followed key is the same stamp each read: its parent is never asked, issued for or
+            // counted (its rotations are no change to the preview).
+            if e.row.link.as_ref().is_some_and(|l| follows(&branches, l)) {
+                h.update(format!("{}\0{}\0{}\0{}\0{}\0followed\n", e.row.key, e.env, e.row.id, e.row.version, e.row.link.as_ref().map(json).unwrap_or_default()));
+                return;
+            }
             let live = e.row.link.as_ref().filter(|l| l.mode == Mode::Live);
             if e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
                 dynamic.set(true);
@@ -951,14 +1001,25 @@ pub(crate) struct Resolver<'a> {
     /// Refuse dynamic links instead of issuing (syncs: a short-lived credential would expire at
     /// the target; readers that ask for `dynamic=false`).
     pub no_dynamic: bool,
+    /// The read environment's branched resources: a link to one is never followed, however it's
+    /// reached (asked for, by reference, through an import or the base).
+    branches: Vec<Branch>,
 }
 
 impl<'a> Resolver<'a> {
-    pub fn new(s: &'a Secrets, project: &'a str, dek: &'a Dek, caller: &'a Caller, resolve: bool, consumer: &str) -> Self {
+    /// A resolve of `slug`'s values: what it branched comes from it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(s: &'a Secrets, project: &'a str, slug: &str, dek: &'a Dek, caller: &'a Caller, resolve: bool, consumer: &str) -> Result<Self> {
         // Code nobody vetted never gets a dynamic credential, whichever read it makes (values, a
         // resolve, one key's reveal).
         let no_dynamic = caller.grants.untrusted();
-        Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], tainted: Default::default(), members: None, issued: BTreeMap::new(), no_dynamic, deks: HashMap::new() }
+        let branches = s.db.read(|c| envs::by_slug(c, project, slug))?.branches;
+        Ok(Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], tainted: Default::default(), members: None, issued: BTreeMap::new(), no_dynamic, deks: HashMap::new(), branches })
+    }
+
+    /// `e`'s link, when it names a resource the read environment branched.
+    pub(crate) fn followed(&self, e: &Entry) -> Option<Link> {
+        e.row.link.as_ref().filter(|l| follows(&self.branches, l)).cloned()
     }
 
     fn env(&mut self, slug: &str) -> Option<EnvRow> {
@@ -986,6 +1047,10 @@ impl<'a> Resolver<'a> {
     /// An entry's value and the first problem resolving it (the value then keeps the
     /// unresolved reference's text).
     pub fn entry(&mut self, e: &Entry) -> (Value, Option<String>) {
+        // Every value goes through here: a followed link is neither read, issued nor decrypted.
+        if let Some(l) = self.followed(e) {
+            return (Value::default(), Some(followed_problem(&l)));
+        }
         // By the environment's id, not its slug: a folder another project shares may have the same
         // slug and path as one of this project's.
         let id = format!("{}:{}:{}", e.row.env_id, e.row.path, e.row.key);

@@ -318,6 +318,12 @@ impl HighlightTerms {
                     self.out.spans.push(node.clone());
                 }
             }
+            // A runtime field's terms apply to other fields only without `require_field_match`.
+            fn runtime_field(&mut self, _name: &str, m: TermMatcher) {
+                if self.fields.is_none() {
+                    self.out.multi.push(m);
+                }
+            }
         }
         let mut v = V { fields, out: HighlightTerms::default() };
         query.visit(&mut v);
