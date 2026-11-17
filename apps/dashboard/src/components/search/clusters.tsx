@@ -32,7 +32,8 @@ export function SearchClusters() {
         </div>
         {info && (
           <p className="font-mono text-[11px] text-subtle">
-            elasticsearch {info.version} · opensearch {info.opensearch_version} · {info.region} · {info.storage}
+            elasticsearch {info.version} · opensearch {info.opensearch_version} · {info.region}
+            {info.storage && ` · ${info.storage}`}
           </p>
         )}
       </div>
@@ -101,7 +102,11 @@ function Overview({ info, clusters }: { info: SearchInfo; clusters: SearchCluste
         items={[
           { label: "Clusters", value: clusters.length, hint: `${loaded.length} loaded · ${clusters.length - loaded.length} asleep` },
           { label: "Indices", value: formatCount(indices), hint: `${formatCount(docs)} documents` },
-          { label: "Stored", value: formatBytes(stored), hint: `cache ${formatBytes(info.cache.used_bytes)} of ${formatBytes(info.cache.budget_bytes)}` },
+          {
+            label: "Stored",
+            value: formatBytes(stored),
+            hint: info.cache ? `cache ${formatBytes(info.cache.used_bytes)} of ${formatBytes(info.cache.budget_bytes)}` : "in object storage",
+          },
           { label: "Endpoint", value: info.domain ? `*.${info.domain}` : info.http, hint: info.tls ? "HTTPS" : "HTTP" },
         ]}
       />

@@ -534,8 +534,14 @@ impl Engine {
                 let seen = told.entry(r.id.clone()).or_default();
                 refused.into_iter().filter(|h| seen.insert(h.clone())).collect()
             };
-            if !fresh.is_empty() {
-                let _ = self.store.log(&r.id, &format!("its code tried to reach {} (not in the project's egress_hosts): refused", fresh.join(", ")));
+            // `<host> private`: listed, but it resolves only to private addresses.
+            let (private, unlisted): (Vec<String>, Vec<String>) = fresh.into_iter().partition(|h| h.ends_with(" private"));
+            if !unlisted.is_empty() {
+                let _ = self.store.log(&r.id, &format!("its code tried to reach {} (not in the project's egress_hosts): refused", unlisted.join(", ")));
+            }
+            if !private.is_empty() {
+                let names: Vec<&str> = private.iter().map(|h| h.trim_end_matches(" private")).collect();
+                let _ = self.store.log(&r.id, &format!("its code tried to reach {}: in egress_hosts, but it resolves only to private addresses (roll's own, the host's or the cloud's): refused", names.join(", ")));
             }
         }
     }

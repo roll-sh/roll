@@ -40,9 +40,9 @@ cleanup() {
 trap cleanup EXIT
 if curl -s -o /dev/null --max-time 1 "http://$API/v1/info"; then echo "something answers on $API" >&2; exit 1; fi
 rm -rf "$H" && mkdir -p "$H"
-export ROLL_HOME=$H ROLL_API=$API ROLL_PROXY=127.0.0.1:${PORTS}432 ROLL_REDIS=127.0.0.1:${PORTS}380 ROLL_REDIS_HTTP=127.0.0.1:${PORTS}081 \
+export ROLL_HOME=$H ROLL_API=$API ROLL_PROXY=127.0.0.1:${PORTS}432 ROLL_REDIS=127.0.0.1:${PORTS}380 ROLL_REDIS_HTTP=127.0.0.1:${PORTS}081 ROLL_KAFKA=127.0.0.1:${PORTS}092 \
   ROLL_APPS_LISTEN=127.0.0.1:${PORTS}080 ROLL_APPS_DOMAIN=apps.localhost ROLL_CODE_PREVIEW_DOMAIN=preview.localhost \
-  ROLL_PRODUCTS=code,redis,apps ROLL_APPS_ALLOW_PRIVATE=1 RUST_LOG=${RUST_LOG:-info}
+  ROLL_PRODUCTS=code,redis,streams,apps ROLL_APPS_ALLOW_PRIVATE=1 RUST_LOG=${RUST_LOG:-info}
 unset ROLL_ADMIN_TOKEN ROLL_CODE_TOKEN
 nice -n 10 "$BIN" >"$H/rolld.log" 2>&1 &
 PID=$!
@@ -62,10 +62,13 @@ PY
 )
 api POST /v1/code/repos/acme/web/land "$BODY_INIT" >/dev/null
 REDIS=$(api POST /v1/redis/databases '{"name":"cache"}' | jq_ "d['id']")
+STREAM=$(api POST /v1/streams '{"name":"clicks"}' | jq_ "d['id']")
 PRJ=$(api POST /v1/workspace/projects '{"name":"shop"}' | jq_ "d['id']")
-for r in "repo/acme%2Fweb" "redis/$REDIS"; do api PUT "/v1/workspace/projects/$PRJ/resources/$r" '{"x":0,"y":0}' >/dev/null; done
+for r in "repo/acme%2Fweb" "redis/$REDIS" "stream/$STREAM"; do api PUT "/v1/workspace/projects/$PRJ/resources/$r" '{"x":0,"y":0}' >/dev/null; done
 SVCJ=$(api POST "/v1/apps/projects/$PRJ/services" '{"name":"web","source":{"kind":"repo","repo":"acme/web"},"run":{"type":"web","port":8000}}')
 SVC=$(echo "$SVCJ" | jq_ "d['id']")
+# A stream linked to it: production's link gets a SASL user of its own (KAFKA_BROKERS, …).
+api PUT "/v1/apps/services/$SVC/links/stream/$STREAM" '{}' >/dev/null
 say "service $SVC"
 api PUT "/v1/previews/projects/$PRJ/settings" '{"enabled":true,"access":"public"}' >/dev/null
 
@@ -97,6 +100,14 @@ for _ in $(seq 1 600); do
 done
 T2=$(now_ms)
 VARS=$(api GET "/v1/apps/services/$SVC/environments/$ENV/variables" | jq_ "[v['name'] for v in d['vars']]")
+# The stream link's variables on the preview's environment are the branch's, under roll apps'
+# names: its brokers and its own SASL user, never production's link's.
+PV_VALUES=$(api GET "/v1/apps/services/$SVC/environments/$ENV/variables/values")
+BRANCH_ENV=$(api GET "/v1/previews/$PV/connect" | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(next((b['vars'] for b in d['branches'] if b['kind'] == 'stream'), {})))")
+KAFKA_PV=$(echo "$PV_VALUES" | jq_ "d.get('KAFKA_USERNAME', '')")
+KAFKA_BRANCH=$(echo "$BRANCH_ENV" | jq_ "d.get('KAFKA_SASL_USERNAME', '')")
+[ -n "$KAFKA_PV" ] && [ "$KAFKA_PV" = "$KAFKA_BRANCH" ] || { echo "the stream link's KAFKA_USERNAME should be the branch's ($KAFKA_BRANCH), not '$KAFKA_PV'"; echo "$PV_VALUES" | jq_ "sorted(k for k in d if k.startswith('KAFKA'))"; echo "$BRANCH_ENV" | head -c 600; exit 1; }
+[ "$(echo "$PV_VALUES" | jq_ "d.get('KAFKA_BROKERS', '')")" = "$(echo "$BRANCH_ENV" | jq_ "d.get('KAFKA_BOOTSTRAP_SERVERS', '')")" ] || { echo "the stream link's KAFKA_BROKERS should be the branch's"; exit 1; }
 # Its mail goes to roll's catcher, as on roll's own runtime (and providers' keys are replaced).
 case "$VARS" in *"'SMTP_URL'"*"'SMTP_USER'"*) ;; *) echo "a pv- environment should get roll's SMTP: $VARS"; exit 1;; esac
 case "$VARS" in *"'SENDGRID_API_KEY'"*) ;; *) echo "a pv- environment should get the providers' keys replaced: $VARS"; exit 1;; esac
@@ -375,6 +386,7 @@ cat <<EOF
 | X-Robots-Tag on the pv- environment's page | $APPS_ROBOTS |
 | Body / the Redis host the service saw / the preview's Redis branch | $BODY / $WHERE / $BRANCH |
 | Variables on the environment | $VARS |
+| A stream link's KAFKA_USERNAME on the pv- environment | the branch's SASL user ($KAFKA_PV), not production's link's |
 | A preview's own variable on roll apps | $UNSET |
 | Promoted to production (the preview's image, no build): production serves / took / expecting another deployment | $PROD_AFTER / $((T6 - T5)) ms / HTTP $STALE |
 | After landing: previews left / the environment | $N / HTTP $GONE |
