@@ -157,7 +157,16 @@ pub fn create(def: &AggDef, spec: &AutoDateHistogramSpec, ctx: &mut BindCtx<'_>)
         };
         Box::new(crate::filter_rewrite::FilterRewrite::date(ctx, &vs, buckets, !subs.is_empty(), usize::MAX))
     });
-    Ok(Box::new(AutoAgg {
+    // `date` fields under a query the points answer: `FromSingle`'s buckets counted from the
+    // points tree when its rounding is certain (count_from_points).
+    let counted = match vs.field.as_ref() {
+        Some(f) if f.type_name == "date" => {
+            let last = date_buckets(&roundings[n - 1].rounding);
+            crate::filter_rewrite::FilterRewrite::counting(ctx, &vs, last, !subs.is_empty()).and_then(|fr| count_from_points(&fr, ctx.searcher.segments(), &roundings, spec.buckets as i64))
+        }
+        _ => None,
+    };
+    let mut agg = Box::new(AutoAgg {
         vs,
         has_values,
         reader: None,
@@ -184,7 +193,92 @@ pub fn create(def: &AggDef, spec: &AutoDateHistogramSpec, ctx: &mut BindCtx<'_>)
         prep: None,
         slot_ords: Vec::new(),
         batch: Default::default(),
-    }))
+        points_counted: counted.is_some(),
+    });
+    if let Some((idx, buckets)) = counted {
+        agg.single.idx = idx;
+        for (key, n) in buckets {
+            let (ord, _) = agg.ords.add(0, key as u64);
+            agg.counts.resize(agg.counts.len().max(ord as usize + 1), 0);
+            agg.counts[ord as usize] += n;
+        }
+        agg.tracker.ensure(agg.counts.len() * 8 + agg.ords.ram_bytes())?;
+    }
+    Ok(agg)
+}
+
+/// A counting rewrite's buckets: `count_from_points` builds its own ranges, so these only
+/// pass `FilterRewrite::counting`'s checks (UTC, no offset).
+fn date_buckets(rounding: &Rounding) -> crate::filter_rewrite::DateBuckets {
+    crate::filter_rewrite::DateBuckets { rounding: rounding.clone(), hard: (None, None), after: None, nanos: false, auto: Vec::new(), target: 1 }
+}
+
+/// `FromSingle`'s shard result (its rounding index and buckets) counted from the points tree,
+/// or `None` when it has to be collected.
+///
+/// `FromSingle` moves to the next rounding while a new bucket leaves more buckets than
+/// `target × maxInner` or keys spanning more than `target × maxRough` (its min and max keys
+/// are kept as rounded when first seen, so they mix roundings). With `lo` and `hi` the
+/// smallest and largest matching values, its final keys span at least `round(hi) −
+/// (next(round(lo)) − 1)` and at most `hi − round(lo)` under rounding `j`. So rounding `j`
+/// certainly fails when it has too many buckets or the shortest span is too long, and
+/// certainly holds when neither the buckets nor the longest span are too many: the answer is
+/// the first rounding that doesn't certainly fail, provided it certainly holds (anything in
+/// between depends on the order documents were collected in, so it's collected). Only the
+/// roundings whose span might fit are counted, in at most `target × maxInner` ranges or so.
+fn count_from_points(fr: &crate::filter_rewrite::FilterRewrite, segs: &[SegmentContext], roundings: &[RoundingInfo], target: i64) -> Option<(usize, Vec<(i64, u64)>)> {
+    if !segs.iter().all(|s| fr.countable(s)) {
+        return None;
+    }
+    let Some((qlo, qhi)) = fr.bounds()? else { return Some((0, Vec::new())) };
+    let lo = segs.iter().filter_map(|s| fr.extreme(s, qlo, qhi, false)).min();
+    let hi = segs.iter().filter_map(|s| fr.extreme(s, qlo, qhi, true)).max();
+    let (Some(lo), Some(hi)) = (lo, hi) else { return Some((0, Vec::new())) };
+    let last = roundings.len() - 1;
+    // `[lower, upper)` ranges of rounding `r`'s buckets from `lo` to `hi`, clipped to them.
+    let ranges = |r: &Rounding| -> Option<Vec<(i64, i64)>> {
+        let mut keys = vec![r.round(lo)];
+        loop {
+            let next = r.next_rounding_value(*keys.last().expect("one key"));
+            if next > hi || next <= *keys.last().expect("one key") {
+                break;
+            }
+            keys.push(next);
+            if keys.len() > MAX_BUCKETS as usize {
+                return None;
+            }
+        }
+        let n = keys.len();
+        Some((0..n).map(|i| (if i == 0 { lo } else { keys[i] }, if i + 1 == n { hi.saturating_add(1) } else { keys[i + 1] })).collect())
+    };
+    let count = |ranges: &[(i64, i64)]| -> Vec<u64> {
+        let mut total = vec![0u64; ranges.len()];
+        for s in segs {
+            for (t, n) in total.iter_mut().zip(fr.count_ranges(s, ranges)) {
+                *t += n;
+            }
+        }
+        total
+    };
+    for (j, info) in roundings.iter().enumerate() {
+        let r = &info.rounding;
+        let (max_buckets, max_span) = (target * info.max_inner() as i64, target * info.max_rough_millis());
+        let first = r.round(lo);
+        if j < last && r.round(hi).saturating_sub(r.next_rounding_value(first).saturating_sub(1)) > max_span {
+            continue;
+        }
+        let ranges = ranges(r)?;
+        let counts = count(&ranges);
+        let buckets: Vec<(i64, u64)> = ranges.iter().zip(counts).filter(|(_, n)| *n > 0).map(|(&(l, _), n)| (r.round(l), n)).collect();
+        if j == last {
+            return Some((j, buckets));
+        }
+        if buckets.len() as i64 > max_buckets {
+            continue;
+        }
+        return (hi.saturating_sub(first) <= max_span).then_some((j, buckets));
+    }
+    None
 }
 
 /// `FromSingle` state.
@@ -246,6 +340,9 @@ struct AutoAgg {
     /// ordinals are rebuilt.
     slot_ords: Vec<u32>,
     batch: crate::values::NumBatch,
+    /// Every bucket was counted from the points tree at bind (count_from_points): no
+    /// document is collected.
+    points_counted: bool,
 }
 
 impl AutoAgg {
@@ -542,7 +639,14 @@ impl Aggregator for AutoAgg {
         }
         o
     }
+    fn segment_done(&self) -> bool {
+        self.points_counted
+    }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
+        if self.points_counted {
+            self.reader = None;
+            return self.subs.set_segment(seg);
+        }
         if let Some(Some(r)) = self.os.as_deref_mut() {
             r.try_segment(seg);
         }

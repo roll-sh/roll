@@ -1,0 +1,262 @@
+[
+ {
+  "service": "anthropic",
+  "name": "Anthropic",
+  "task_types": [
+   "completion",
+   "chat_completion"
+  ],
+  "configurations": {
+   "max_tokens": {
+    "description": "The maximum number of tokens to generate before stopping.",
+    "label": "Max Tokens",
+    "required": true,
+    "sensitive": false,
+    "updatable": false,
+    "type": "int",
+    "supported_task_types": [
+     "completion",
+     "chat_completion"
+    ]
+   },
+   "api_key": {
+    "description": "API Key for the provider you're connecting to.",
+    "label": "API Key",
+    "required": true,
+    "sensitive": true,
+    "updatable": true,
+    "type": "str",
+    "supported_task_types": [
+     "completion",
+     "chat_completion"
+    ]
+   },
+   "rate_limit.requests_per_minute": {
+    "description": "By default, the anthropic service sets the number of requests allowed per minute to 50.",
+    "label": "Rate Limit",
+    "required": false,
+    "sensitive": false,
+    "updatable": false,
+    "type": "int",
+    "supported_task_types": [
+     "completion",
+     "chat_completion"
+    ]
+   },
+   "model_id": {
+    "description": "The name of the model to use for the inference task.",
+    "label": "Model ID",
+    "required": true,
+    "sensitive": false,
+    "updatable": false,
+    "type": "str",
+    "supported_task_types": [
+     "completion",
+     "chat_completion"
+    ]
+   }
+  }
+ },
+ {
+  "service": "cohere",
+  "name": "Cohere",
+  "task_types": [
+   "text_embedding",
+   "rerank",
+   "completion"
+  ],
+  "configurations": {
+   "api_key": {
+    "description": "API Key for the provider you're connecting to.",
+    "label": "API Key",
+    "required": true,
+    "sensitive": true,
+    "updatable": true,
+    "type": "str",
+    "supported_task_types": [
+     "text_embedding",
+     "rerank",
+     "completion"
+    ]
+   },
+   "rate_limit.requests_per_minute": {
+    "description": "Minimize the number of rate limit errors.",
+    "label": "Rate Limit",
+    "required": false,
+    "sensitive": false,
+    "updatable": false,
+    "type": "int",
+    "supported_task_types": [
+     "text_embedding",
+     "rerank",
+     "completion"
+    ]
+   },
+   "model_id": {
+    "description": "The name of the model to use for the inference task.",
+    "label": "Model ID",
+    "required": true,
+    "sensitive": false,
+    "updatable": false,
+    "type": "str",
+    "supported_task_types": [
+     "text_embedding",
+     "rerank",
+     "completion"
+    ]
+   }
+  }
+ },
+ {
+  "service": "elasticsearch",
+  "name": "Elasticsearch",
+  "task_types": [
+   "text_embedding",
+   "sparse_embedding",
+   "rerank"
+  ],
+  "configurations": {
+   "num_allocations": {
+    "default_value": 1,
+    "description": "The total number of allocations this model is assigned across machine learning nodes.",
+    "label": "Number Allocations",
+    "required": true,
+    "sensitive": false,
+    "updatable": true,
+    "type": "int",
+    "supported_task_types": [
+     "text_embedding",
+     "sparse_embedding",
+     "rerank"
+    ]
+   },
+   "num_threads": {
+    "default_value": 2,
+    "description": "Sets the number of threads used by each model allocation during inference.",
+    "label": "Number Threads",
+    "required": true,
+    "sensitive": false,
+    "updatable": false,
+    "type": "int",
+    "supported_task_types": [
+     "text_embedding",
+     "sparse_embedding",
+     "rerank"
+    ]
+   },
+   "model_id": {
+    "description": "The name of the model to use for the inference task.",
+    "label": "Model ID",
+    "required": true,
+    "sensitive": false,
+    "updatable": false,
+    "type": "str",
+    "supported_task_types": [
+     "text_embedding",
+     "sparse_embedding",
+     "rerank"
+    ]
+   }
+  }
+ },
+ {
+  "service": "openai",
+  "name": "OpenAI",
+  "task_types": [
+   "text_embedding",
+   "completion",
+   "chat_completion"
+  ],
+  "configurations": {
+   "headers": {
+    "description": "Custom headers to include in the requests to OpenAI.",
+    "label": "Custom Headers",
+    "required": false,
+    "sensitive": false,
+    "updatable": true,
+    "type": "map",
+    "supported_task_types": [
+     "text_embedding",
+     "completion",
+     "chat_completion"
+    ]
+   },
+   "api_key": {
+    "description": "The OpenAI API authentication key. For more details about generating OpenAI API keys, refer to the https://platform.openai.com/account/api-keys.",
+    "label": "API Key",
+    "required": true,
+    "sensitive": true,
+    "updatable": true,
+    "type": "str",
+    "supported_task_types": [
+     "text_embedding",
+     "completion",
+     "chat_completion"
+    ]
+   },
+   "organization_id": {
+    "description": "The unique identifier of your organization.",
+    "label": "Organization ID",
+    "required": false,
+    "sensitive": false,
+    "updatable": false,
+    "type": "str",
+    "supported_task_types": [
+     "text_embedding",
+     "completion",
+     "chat_completion"
+    ]
+   },
+   "rate_limit.requests_per_minute": {
+    "description": "Default number of requests allowed per minute. For text_embedding and embedding it is 3000. For completion and chat_completion it is 500.",
+    "label": "Rate Limit",
+    "required": false,
+    "sensitive": false,
+    "updatable": false,
+    "type": "int",
+    "supported_task_types": [
+     "text_embedding",
+     "completion",
+     "chat_completion"
+    ]
+   },
+   "model_id": {
+    "description": "The name of the model to use for the inference task.",
+    "label": "Model ID",
+    "required": true,
+    "sensitive": false,
+    "updatable": false,
+    "type": "str",
+    "supported_task_types": [
+     "text_embedding",
+     "completion",
+     "chat_completion"
+    ]
+   },
+   "url": {
+    "description": "The absolute URL of the external service to send requests to.",
+    "label": "URL",
+    "required": false,
+    "sensitive": false,
+    "updatable": false,
+    "type": "str",
+    "supported_task_types": [
+     "text_embedding",
+     "completion",
+     "chat_completion"
+    ]
+   },
+   "dimensions": {
+    "description": "The number of dimensions the resulting embeddings should have. For more information refer to https://platform.openai.com/docs/api-reference/embeddings/create#embeddings-create-dimensions.",
+    "label": "Dimensions",
+    "required": false,
+    "sensitive": false,
+    "updatable": false,
+    "type": "int",
+    "supported_task_types": [
+     "text_embedding"
+    ]
+   }
+  }
+ }
+]
