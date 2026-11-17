@@ -58,6 +58,8 @@ export function describe(e: AppEvent): string {
       const what = { "alert.memory": "memory", "alert.errors": "5xx answers", "alert.latency": "p95 latency", "alert.capacity": "requests over capacity", "alert.log": `lines matching ${String(d.pattern ?? "")}` }[e.kind];
       return `alerted: ${what} at ${String(d.value ?? d.count ?? "")}${unit} (the alert is at ${String(d.threshold ?? "")}${unit})${where}`;
     }
+    case "error.new":
+      return `saw a new error${where}: ${String(d.name ?? "an error")}`;
     case "alert.resolved":
       return `cleared the ${String(d.alert ?? "alert.").slice(6)} alert${where}`;
     case "domain.active":

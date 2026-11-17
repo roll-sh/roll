@@ -788,6 +788,7 @@ export type NotifyEvent =
   | "alert.latency"
   | "alert.capacity"
   | "alert.log"
+  | "error.new"
   | "cron.failed"
   | "job.failed"
   | "domain.active"

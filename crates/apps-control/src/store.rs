@@ -232,6 +232,16 @@ CREATE TABLE IF NOT EXISTS variables (
     PRIMARY KEY (service, env, name)
 ) WITHOUT ROWID;
 -- An environment's variables kept as files in its instances (their absolute paths).
+-- Every error an environment has had (`errors::note_new_errors`), by fingerprint: the first time
+-- one is seen is its `error.new` event.
+CREATE TABLE IF NOT EXISTS error_groups (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    name TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    PRIMARY KEY (service, env, fingerprint)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS variable_files (
     service TEXT NOT NULL,
     env TEXT NOT NULL,
@@ -825,7 +835,7 @@ impl Store {
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -940,7 +950,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "domains", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             c.execute(
@@ -1862,6 +1872,11 @@ impl Store {
         let sealed = self.sealer.seal(&format!("trace:{service}:{env}"), &format!("rlx_{}", random(32)));
         self.db.execute("INSERT INTO trace_ingest (service, env, sealed) VALUES (?, ?, ?) ON CONFLICT (service, env) DO NOTHING", params![service, env, sealed])?;
         Ok(())
+    }
+
+    /// An error seen: whether it's the first time the environment has had it.
+    pub fn remember_error(&self, service: &str, env: &str, fingerprint: &str, name: &str, at: i64) -> Result<bool> {
+        Ok(self.db.execute("INSERT INTO error_groups (service, env, fingerprint, name, first_seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, env, fingerprint) DO NOTHING", params![service, env, fingerprint, name, at])? > 0)
     }
 
     /// The environment's variables kept as files: name → path.

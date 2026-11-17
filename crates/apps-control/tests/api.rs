@@ -546,6 +546,43 @@ async fn errors_group_from_the_environments_log() {
     assert_eq!((e["groups"][1]["kind"].as_str(), e["groups"][1]["title"].as_str()), (Some("line"), Some("payment 17 failed")), "{e}");
 }
 
+/// A new error tells someone: the first time a fingerprint appears it's an `error.new` event
+/// (its type, never its message), once ever; another error is another.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_error_is_an_event_once() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let live = w.apps.live(&id, "production");
+    let log = w.apps.logs.sink(format!("env:{id}/production"), apps_control::logs::Stream::Stderr).instance("roll-apps-x-0", "dep_x");
+    let trace = |err: &str| ["Traceback (most recent call last):".to_string(), "  File \"/app/pay.py\", line 9, in charge".into(), format!("{err}: card 4242424242424242 declined")];
+    let news = || async {
+        call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "error.new").cloned().collect::<Vec<_>>()
+    };
+    w.apps.note_new_errors(&live).await;
+    for l in trace("ValueError") {
+        log.line(l);
+    }
+    w.apps.note_new_errors(&live).await;
+    let first = news().await;
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert_eq!(first[0]["data"]["name"], "ValueError");
+    assert!(!first[0].to_string().contains("4242"), "never the message: {}", first[0]);
+    // The same error again: no second event, even as if this process had restarted.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    for l in trace("ValueError") {
+        log.line(l);
+    }
+    w.apps.note_new_errors(&live).await;
+    assert_eq!(news().await.len(), 1);
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    for l in trace("KeyError") {
+        log.line(l);
+    }
+    w.apps.note_new_errors(&live).await;
+    assert_eq!(news().await.len(), 2);
+}
+
 /// Secret files (Render's): a variable kept as a file is out of the instance's environment and
 /// in its files at its path; paths are checked; null puts it back, and unsetting it drops both.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2254,7 +2291,7 @@ async fn a_failed_deploy_is_sent_to_the_projects_targets_signed_and_retried() {
     let (st, hook) = call(&w.api, "POST", &base, Some(json!({"url": format!("http://{ok_at}/hook")}))).await;
     assert_eq!(st, StatusCode::CREATED, "{hook}");
     let secret = hook["secret"].as_str().unwrap().to_string();
-    assert_eq!(hook["events"], json!(["deploy.failed", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
+    assert_eq!(hook["events"], json!(["deploy.failed", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]), "the default events");
     let (_, down) = call(&w.api, "POST", &base, Some(json!({"kind": "webhook", "url": format!("http://{bad_at}/x"), "events": ["deploy.failed"]}))).await;
     let (_, list) = call(&w.api, "GET", &base, None).await;
     assert!(!list.to_string().contains(&secret) && !list.to_string().contains("/hook"), "neither the secret nor the URL comes back: {list}");
