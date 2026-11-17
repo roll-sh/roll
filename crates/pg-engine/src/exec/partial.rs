@@ -1310,6 +1310,8 @@ impl<'a> Partials<'a> {
         if let Some(l) = self.spec.words.clone() {
             use std::hash::BuildHasher;
             let nk = 1 + l.keys.len();
+            // (The row before's key and group: a sorted input's rows come a group at a time.)
+            let mut prev: (Vec<u64>, u32) = (Vec::new(), u32::MAX);
             for &r in live {
                 let r = r as usize;
                 self.wkey.clear();
@@ -1324,6 +1326,10 @@ impl<'a> Partials<'a> {
                     let Some(w) = col.value(b, r, ty).ok().and_then(|v| k.word(&v)) else { return false };
                     self.wkey.push(w);
                 }
+                if prev.1 != u32::MAX && prev.0 == self.wkey {
+                    run.gids.push(prev.1);
+                    continue;
+                }
                 let h = self.hasher.hash_one(&self.wkey[..]);
                 let (words, key) = (&self.words, &self.wkey[..]);
                 let g = match self.wtable.find(h, |&g| words[g as usize * l.stride..][..nk] == *key) {
@@ -1336,6 +1342,8 @@ impl<'a> Partials<'a> {
                         })
                     }
                 };
+                prev.0.clone_from(&self.wkey);
+                prev.1 = g;
                 run.gids.push(g);
             }
             return true;

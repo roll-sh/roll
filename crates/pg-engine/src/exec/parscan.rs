@@ -696,14 +696,22 @@ impl<'c> Reader<'c> {
 /// index-only scan's, the entry key standing in for the row). A fill (`FillRows`): the rows
 /// go into the scan's batch by reference, so the batch kernels take them as a table's.
 pub struct IndexChunk {
-    pub entries: Box<dyn Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>> + Send>,
+    entries: Entries,
     pub fetch: Option<(Arc<crate::storage::Store>, u64)>,
     /// An entry's error, after the rows of the entries before it went out.
     err: Option<Error>,
     done: bool,
     /// The fetch's scratch: the entries, a dense range's rows.
-    ents: Vec<(Vec<u8>, bytes::Bytes)>,
+    ents: RowBatch,
     rows: RowBatch,
+}
+
+/// Where a chunk's entries come from.
+enum Entries {
+    /// An index's entries (its key, the row's data key as the value), a batch at a time.
+    Scan(Box<TxnScan>),
+    /// The rows' data keys, `keys[run]`.
+    Keys(Arc<[Vec<u8>]>, std::ops::Range<usize>),
 }
 
 /// Index entries a chunk's rows are fetched for at a time.
@@ -711,57 +719,71 @@ const FETCH: usize = 256;
 
 impl IndexChunk {
     pub fn new(entries: TxnScan, fetch: Option<(Arc<crate::storage::Store>, u64)>) -> IndexChunk {
-        IndexChunk { entries: Box::new(entries), fetch, err: None, done: false, ents: Vec::new(), rows: RowBatch::default() }
+        IndexChunk::with(Entries::Scan(Box::new(entries)), fetch)
     }
 
     /// The rows stored under `keys[run]` (in that order; the invisible ones left out).
     pub fn keyed(keys: Arc<[Vec<u8>]>, run: std::ops::Range<usize>, fetch: (Arc<crate::storage::Store>, u64)) -> IndexChunk {
-        let entries = run.map(move |i| Ok((Vec::new(), bytes::Bytes::copy_from_slice(&keys[i]))));
-        IndexChunk { entries: Box::new(entries), fetch: Some(fetch), err: None, done: false, ents: Vec::new(), rows: RowBatch::default() }
+        IndexChunk::with(Entries::Keys(keys, run), Some(fetch))
+    }
+
+    fn with(entries: Entries, fetch: Option<(Arc<crate::storage::Store>, u64)>) -> IndexChunk {
+        IndexChunk { entries, fetch, err: None, done: false, ents: RowBatch::default(), rows: RowBatch::default() }
     }
 
     /// The rows of the next `FETCH` entries into `b`, in the entries' order.
     fn fetch_into(&mut self, b: &mut RowBatch) -> Result<()> {
-        let ents = &mut self.ents;
+        let IndexChunk { entries, fetch, err, done, ents, rows } = self;
         ents.clear();
-        while ents.len() < FETCH {
-            match self.entries.next() {
-                Some(Ok(e)) => ents.push(e),
-                Some(Err(e)) => {
-                    self.done = true;
-                    self.err = Some(e);
-                    break;
+        // (Each entry's data key, in the entries' order.)
+        let ds: Vec<&[u8]> = match entries {
+            Entries::Scan(scan) => {
+                while ents.len() < FETCH {
+                    let n = ents.len();
+                    if let Err(e) = scan.fill_batch(ents, FETCH - n) {
+                        *done = true;
+                        *err = Some(e);
+                        break;
+                    }
+                    if ents.len() == n {
+                        *done = true;
+                        break;
+                    }
                 }
-                None => {
-                    self.done = true;
-                    break;
-                }
+                (0..ents.len()).map(|i| ents.get(i).1).collect()
             }
-        }
-        match &self.fetch {
+            Entries::Keys(keys, run) => {
+                let end = (run.start + FETCH).min(run.end);
+                let ds = keys[run.start..end].iter().map(|k| &k[..]).collect();
+                run.start = end;
+                *done = run.start >= run.end;
+                ds
+            }
+        };
+        match &*fetch {
             None => {
                 // (Rows an index-only scan makes from its entries, as `index_row` counts.)
                 super::scan::ROWS_FROM_INDEX_ENTRIES.fetch_add(ents.len() as u64, std::sync::atomic::Ordering::Relaxed);
-                for (k, d) in ents.iter() {
+                for i in 0..ents.len() {
+                    let (k, d) = ents.get(i);
                     b.push_copy(d, k);
                 }
             }
-            Some((store, ts)) if !ents.is_empty() => {
-                let mut keys: Vec<&[u8]> = ents.iter().map(|(_, d)| &d[..]).collect();
+            Some((store, ts)) if !ds.is_empty() => {
+                let mut keys = ds.clone();
                 keys.sort_unstable();
                 keys.dedup();
                 // (`keys` sorted and without duplicates: an entry's row is at its key's
                 // place, found by a search.)
-                let rows = &mut self.rows;
                 rows.clear();
                 match dense_rows(store, &keys, *ts, rows) {
                     Err(e) => {
-                        self.done = true;
+                        *done = true;
                         return Err(e);
                     }
                     Ok(Some(at)) => {
-                        for (_, d) in ents.iter() {
-                            if let Ok(j) = keys.binary_search(&&d[..])
+                        for d in &ds {
+                            if let Ok(j) = keys.binary_search(d)
                                 && let Some(i) = at[j]
                             {
                                 match rows.value_in(i as usize) {
@@ -772,9 +794,9 @@ impl IndexChunk {
                         }
                     }
                     Ok(None) => {
-                        let got = store.get_versions(&keys, *ts).inspect_err(|_| self.done = true)?;
-                        for (_, d) in ents.iter() {
-                            if let Ok(j) = keys.binary_search(&&d[..])
+                        let got = store.get_versions(&keys, *ts).inspect_err(|_| *done = true)?;
+                        for d in &ds {
+                            if let Ok(j) = keys.binary_search(d)
                                 && let Some((_, Some(v))) = &got[j]
                             {
                                 b.push(d, v.clone());
