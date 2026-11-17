@@ -5180,7 +5180,7 @@ impl ScanNode {
         };
         let scans = bounds
             .windows(2)
-            .map(|w| super::parscan::chunk(IndexChunk::new(txn.scan_snap(&w[0], &w[1], &snap), fetch.clone()), bulk).into())
+            .map(|w| super::parscan::fill_source(IndexChunk::new(txn.scan_snap(&w[0], &w[1], &snap), fetch.clone()), bulk))
             .collect();
         drop(txn);
         // (The index has an entry: initplans its filter reads first run now, `initplans_put_in`.)
@@ -5261,7 +5261,7 @@ impl ScanNode {
         let per = keys.len().div_ceil(ParScan::chunks(workers)).max(1);
         let scans = (0..keys.len())
             .step_by(per)
-            .map(|i| super::parscan::Source::Rows(Box::new(IndexChunk::keyed(keys.clone(), i..(i + per).min(keys.len()), fetch.clone()))))
+            .map(|i| super::parscan::Source::Rows(Box::new(super::parscan::FillIter::new(IndexChunk::keyed(keys.clone(), i..(i + per).min(keys.len()), fetch.clone())))))
             .collect();
         let d = Decode {
             need: self.need.as_deref().map(Arc::from),
