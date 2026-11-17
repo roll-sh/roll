@@ -482,7 +482,9 @@ pub trait Secrets: Send + Sync {
     /// which the caller renews while it runs and revokes when it stops.
     /// `untrusted`: nothing of a protected environment resolves (directly, by reference, by
     /// import or through the base): what the preview's code reads is its own overrides and links.
-    async fn resolve(&self, project: &str, env: &str, untrusted: bool, consumer: &str) -> anyhow::Result<Resolved>;
+    /// `dynamic: false`: no dynamic credential is issued at all (those keys are left out), for a
+    /// read that starts nothing (masking a preview's logs).
+    async fn resolve(&self, project: &str, env: &str, untrusted: bool, dynamic: bool, consumer: &str) -> anyhow::Result<Resolved>;
     /// The links of environment `env` (its own and what it inherits or imports): `(key, kind,
     /// resource, field)`, with no values (nothing resolved, no lease).
     async fn links(&self, _project: &str, _env: &str) -> anyhow::Result<Vec<(String, Kind, String, String)>> {
@@ -524,7 +526,7 @@ impl Secrets for NoSecrets {
         Ok(())
     }
 
-    async fn resolve(&self, _: &str, _: &str, _: bool, _: &str) -> anyhow::Result<Resolved> {
+    async fn resolve(&self, _: &str, _: &str, _: bool, _: bool, _: &str) -> anyhow::Result<Resolved> {
         Ok(Resolved::default())
     }
 

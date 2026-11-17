@@ -207,6 +207,8 @@ pub struct FakeApps {
     /// The variables each service was last deployed with.
     pub vars: Mutex<HashMap<(String, String), Vars>>,
     pub removed: Mutex<Vec<(String, String)>>,
+    /// What every service's log holds.
+    pub log: Mutex<Vec<String>>,
     /// Seeds run (their DATABASE_URL), and the exit code the next ones give.
     pub seeds: Mutex<Vec<String>>,
     pub seed_exit: std::sync::atomic::AtomicI32,
@@ -288,14 +290,16 @@ impl Apps for FakeApps {
         Ok(())
     }
     async fn logs(&self, _: &str, _: &str, _: usize) -> Vec<String> {
-        Vec::new()
+        self.log.lock().clone()
     }
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
         let db = job.env.iter().find(|(k, _)| k == "DATABASE_URL").map(|(_, v)| v.clone()).unwrap_or_default();
         self.seeds.lock().push(db);
         let at_rev = self.deployed.lock().values().filter(|r| **r == job.revision).count();
         self.runs.lock().push((job.seed.run.clone(), job.revision.clone(), at_rev));
-        Ok((self.seed_exit.load(Ordering::SeqCst), "seed output".into()))
+        // A job that prints what it was given.
+        let printed: Vec<String> = job.env.iter().filter(|(k, _)| k == "STRIPE_KEY").map(|(k, v)| format!(", {k}={v}")).collect();
+        Ok((self.seed_exit.load(Ordering::SeqCst), format!("seed output{}", printed.concat())))
     }
     async fn screenshot(&self, preview: &str, service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
         let Some(png) = self.shot.lock().clone() else { return Ok(None) };
@@ -345,6 +349,8 @@ pub struct FakeSecrets {
     /// The base's links (`links`), and what each ensure set as the environment's own keys.
     pub links: Mutex<Vec<(String, Kind, String, String)>>,
     pub own: Mutex<Vec<(String, String)>>,
+    /// Values every resolve answers (static secrets).
+    pub values: Mutex<Vec<(String, String)>>,
 }
 
 #[async_trait]
@@ -355,13 +361,15 @@ impl roll_previews::ports::Secrets for FakeSecrets {
         *self.own.lock() = vars.to_vec();
         Ok(())
     }
-    async fn resolve(&self, _: &str, _: &str, _: bool, _: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
+    async fn resolve(&self, _: &str, _: &str, _: bool, dynamic: bool, _: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
         let followed = self.followed.lock().clone();
-        if !self.dynamic.load(Ordering::SeqCst) {
-            return Ok(roll_previews::ports::Resolved { followed, ..Default::default() });
+        let values = self.values.lock().clone();
+        if !dynamic || !self.dynamic.load(Ordering::SeqCst) {
+            return Ok(roll_previews::ports::Resolved { followed, values, ..Default::default() });
         }
         let n = self.issued.fetch_add(1, Ordering::SeqCst) + 1;
-        Ok(roll_previews::ports::Resolved { values: vec![("DB_PASSWORD".into(), format!("pw-{n}"))], problems: Vec::new(), leases: vec![format!("lease-{n}")], followed })
+        let values = values.into_iter().chain([("DB_PASSWORD".into(), format!("pw-{n}"))]).collect();
+        Ok(roll_previews::ports::Resolved { values, problems: Vec::new(), leases: vec![format!("lease-{n}")], followed })
     }
     async fn links(&self, _: &str, _: &str) -> anyhow::Result<Vec<(String, Kind, String, String)>> {
         Ok(self.links.lock().clone())

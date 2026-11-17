@@ -336,12 +336,16 @@ const SET_BY_ROLL: &str = "ROLL_PREVIEW_SET";
 
 /// roll apps' variables `PATCH` for a preview environment whose values are `before`: `set`, the
 /// names roll set last time (its `SET_BY_ROLL`) and no longer wants unset, and the new list.
+/// Every value roll sets is sealed (the branches' credentials, the project's overrides, the
+/// preview's own variables): roll apps hides sealed values in its logs and never returns them
+/// (previews' own `…/env` is where they're revealed). Sealing is one-way, so sending it again is
+/// harmless.
 fn variables_patch(before: &Value, mut set: serde_json::Map<String, Value>) -> Value {
     let prev = before[SET_BY_ROLL].as_str().unwrap_or("");
     let unset: Vec<&str> = prev.split(',').map(str::trim).filter(|n| !n.is_empty() && *n != SET_BY_ROLL && !set.contains_key(*n)).collect();
     let names: Vec<String> = set.keys().cloned().collect();
     set.insert(SET_BY_ROLL.into(), json!(names.join(",")));
-    json!({ "set": set, "unset": unset })
+    json!({ "set": set, "unset": unset, "seal": names })
 }
 
 
@@ -582,7 +586,8 @@ mod tests {
         assert!(redeploy_key(v1, "dep_123456789abc").len() <= 200, "roll apps' limit");
     }
 
-    /// What roll set and no longer wants goes; what a person set stays; the list follows.
+    /// What roll set and no longer wants goes; what a person set stays; the list follows; what
+    /// roll sets is sealed.
     #[test]
     fn a_removed_variable_is_unset_and_a_persons_own_kept() {
         let before = json!({ "ROLL_PREVIEW_SET": "FEATURE,DATABASE_URL", "FEATURE": "on", "DATABASE_URL": "x", "MINE": "set by hand" });
@@ -590,6 +595,8 @@ mod tests {
         let patch = variables_patch(&before, set);
         assert_eq!(patch["unset"], json!(["FEATURE"]));
         assert_eq!(patch["set"], json!({ "DATABASE_URL": "y", "ROLL_PREVIEW_SET": "DATABASE_URL" }));
+        // Sealed (roll apps' logs hide it, its API never returns it), but not the list of names.
+        assert_eq!(patch["seal"], json!(["DATABASE_URL"]));
         // A first deploy (nothing recorded): nothing unset.
         let first = variables_patch(&Value::Null, [("A".to_string(), json!("1"))].into_iter().collect());
         assert_eq!((first["unset"].clone(), first["set"]["ROLL_PREVIEW_SET"].clone()), (json!([]), json!("A")));

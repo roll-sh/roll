@@ -342,6 +342,11 @@ impl Engine {
         // What it branched: roll secrets resolves nothing of those parents' (`followed`).
         let branched: Vec<(Kind, String)> = self.store.resources(&r.id)?.into_iter().map(|x| (x.kind, x.parent)).collect();
         self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, trusted, expires_at, &branched).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // Its logs' masks follow what it's given now: these values at once (roll apps' instances
+        // get them without a start here), roll secrets' read again at the next logs read.
+        let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
+        self.add_masks(&r.id, super::masks::secret_values(&[], &own, &vars));
+        self.stale_masks(&r.id);
 
         // 3b. The project's seed, once on fresh data, before anything serves it.
         if let Some(seed) = &s.seed
@@ -871,7 +876,12 @@ impl Engine {
     async fn run_job(&self, r: &Row, s: &Settings, vars: &[(String, String)], what: &str, job: &crate::settings::Seed) -> anyhow::Result<()> {
         let untrusted = !(s.secrets.allow_production && r.trusted);
         // Its dynamic credentials last as long as the job does.
-        let (mut env, leases) = self.resolve_secrets(r, untrusted, what).await?;
+        let (mut env, leases) = self.resolve_secrets(r, untrusted, true, what).await?;
+        // Its output becomes the preview's error (a teardown's, the pull request's comment): what
+        // it was given is masked there, as checks' output is.
+        let own: Vec<(String, String)> = project_env(s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
+        let hide = super::masks::secret_values(&env, &own, vars);
+        self.add_masks(&r.id, hide.clone());
         for (k, v) in vars {
             set(&mut env, k, v.clone());
         }
@@ -886,9 +896,9 @@ impl Engine {
                 warn!(preview = %r.id, lease = %l, error = %e, "previews: revoking a job's dynamic credential (it expires by itself)");
             }
         }
-        let (code, tail) = ran.map_err(|e| anyhow::anyhow!("{what}: {e:#}"))?;
+        let (code, tail) = ran.map_err(|e| anyhow::anyhow!("{what}: {}", code_preview::runner::mask(&format!("{e:#}"), &hide)))?;
         if code != 0 {
-            anyhow::bail!("the {what} command failed with exit code {code}\n\n{}", tail.trim_end());
+            anyhow::bail!("the {what} command failed with exit code {code}\n\n{}", code_preview::runner::mask(tail.trim_end(), &hide));
         }
         Ok(())
     }
@@ -1053,6 +1063,7 @@ impl Engine {
         self.usage_read.lock().remove(&r.id);
         self.secrets_told.lock().remove(&r.id);
         self.egress_told.lock().remove(&r.id);
+        self.forget_masks(&r.id);
         info!(preview = %r.id, "previews: deleted");
         Ok(())
     }
