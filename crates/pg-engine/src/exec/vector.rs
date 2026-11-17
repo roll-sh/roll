@@ -253,13 +253,8 @@ fn text_at<'b>(c: &Col, b: &'b ColBatch, r: usize, bp: bool) -> Option<&'b [u8]>
     if !matches!(c.data, ColData::Bytes(_)) {
         return None;
     }
-    let mut x = c.bytes(b, r);
-    if bp {
-        while let [rest @ .., b' '] = x {
-            x = rest;
-        }
-    }
-    Some(x)
+    let x = c.bytes(b, r);
+    Some(if bp { crate::storage::cols::trim_spaces(x) } else { x })
 }
 
 /// What `truthy` makes of a call's value.
@@ -289,6 +284,137 @@ fn scaled_cmp(x: i128, sx: u32, y: i128, sy: u32) -> Option<Ordering> {
     let s = sx.max(sy);
     let pow = |n: u32| 10i128.checked_pow(n);
     Some(x.checked_mul(pow(s - sx)?)?.cmp(&y.checked_mul(pow(s - sy)?)?))
+}
+
+/// A comparison's outcome for each ordering (by `ord`: less, equal, greater): `test` called
+/// once a batch, not once a row.
+#[inline]
+fn outcomes(test: &fn(Ordering) -> bool) -> [Tri; 4] {
+    let t = |o| if test(o) { Tri::T } else { Tri::F };
+    [t(Ordering::Less), t(Ordering::Equal), t(Ordering::Greater), Tri::Out]
+}
+
+/// An ordering's place in `outcomes`.
+#[inline(always)]
+fn ord(o: Ordering) -> usize {
+    (o as i8 + 1) as usize & 3
+}
+
+/// `VB::NumCmp` of a numeric or integer column and a constant (either side) a column at a
+/// time, as the general loop gives it: a NULL N, rows of the constant's scale (or that
+/// scale's, the constant rescaled once) compared as integers, other scales by `scaled_cmp`,
+/// `Out` past an i128. False: not that shape, nothing written.
+fn num_cmp_col_const(test: &fn(Ordering) -> bool, args: &[VN; 2], b: &ColBatch, sel: &[u32], out: &mut [Tri]) -> bool {
+    let (col, k, col_first) = match args {
+        [VN::Col(c), VN::Const(k)] => (*c, *k, true),
+        [VN::Const(k), VN::Col(c)] => (*c, *k, false),
+        _ => return false,
+    };
+    let Some(c) = col_at(b, col) else { return false };
+    if !matches!(c.data, ColData::Num(_) | ColData::I32(_) | ColData::I64(_)) {
+        return false;
+    }
+    let Some((k, sk)) = k else {
+        fill(sel, out, Tri::N);
+        return true;
+    };
+    let mut o = outcomes(test);
+    if !col_first {
+        o.swap(0, 2);
+    }
+    // (The constant at the scale `ks` (None: not one there), for rows of that scale.)
+    let rescaled = |s: u32| if s >= sk { 10i128.checked_pow(s - sk).and_then(|p| k.checked_mul(p)) } else { None };
+    let mut at = (sk, Some(k));
+    let mut each = |x: i128, sx: u32| {
+        if sx != at.0 {
+            at = (sx, rescaled(sx));
+        }
+        match at.1 {
+            Some(k) => o[ord(x.cmp(&k))],
+            None => match scaled_cmp(x, sx, k, sk) {
+                Some(x) => o[ord(x)],
+                None => Tri::Out,
+            },
+        }
+    };
+    match &c.data {
+        ColData::Num(v) => {
+            for &r in sel {
+                let r = r as usize;
+                if c.nulls[r] {
+                    out[r] = Tri::N;
+                } else {
+                    let (x, sx) = v[r];
+                    out[r] = each(x, sx);
+                }
+            }
+        }
+        ColData::I32(v) => {
+            for &r in sel {
+                let r = r as usize;
+                if c.nulls[r] {
+                    out[r] = Tri::N;
+                } else {
+                    out[r] = each(v[r] as i128, 0);
+                }
+            }
+        }
+        ColData::I64(v) => {
+            for &r in sel {
+                let r = r as usize;
+                if c.nulls[r] {
+                    out[r] = Tri::N;
+                } else {
+                    out[r] = each(v[r] as i128, 0);
+                }
+            }
+        }
+        _ => unreachable!("checked above"),
+    }
+    true
+}
+
+/// `VB::Instant` a column at a time: each side a date column's days (as instants where `ts`)
+/// or a constant, compared as integers. False: a side isn't a decoded date column, nothing
+/// written (the general loop then).
+fn instant_fast(test: &fn(Ordering) -> bool, args: &[Inst; 2], ts: bool, b: &ColBatch, sel: &[u32], out: &mut [Tri]) -> bool {
+    enum Side<'b> {
+        Col(&'b [i32], &'b [bool]),
+        K(Option<i64>),
+    }
+    let side = |a: &Inst| match a {
+        Inst::Const(k) => Some(Side::K(*k)),
+        Inst::Date(i) => match col_at(b, *i) {
+            Some(Col { data: ColData::Date(v), nulls, .. }) => Some(Side::Col(v, nulls)),
+            _ => None,
+        },
+    };
+    let (Some(x), Some(y)) = (side(&args[0]), side(&args[1])) else { return false };
+    let o = outcomes(test);
+    let at = |d: i32| if ts { crate::sql::func::ops::date_instant(d) } else { d as i64 };
+    match (x, y) {
+        (Side::K(None), _) | (_, Side::K(None)) => fill(sel, out, Tri::N),
+        (Side::Col(v, n), Side::K(Some(k))) => {
+            for &r in sel {
+                let r = r as usize;
+                out[r] = if n[r] { Tri::N } else { o[ord(at(v[r]).cmp(&k))] };
+            }
+        }
+        (Side::K(Some(k)), Side::Col(v, n)) => {
+            for &r in sel {
+                let r = r as usize;
+                out[r] = if n[r] { Tri::N } else { o[ord(k.cmp(&at(v[r])))] };
+            }
+        }
+        (Side::Col(v, n), Side::Col(w, m)) => {
+            for &r in sel {
+                let r = r as usize;
+                out[r] = if n[r] || m[r] { Tri::N } else { o[ord(at(v[r]).cmp(&at(w[r])))] };
+            }
+        }
+        (Side::K(Some(x)), Side::K(Some(y))) => fill(sel, out, o[ord(x.cmp(&y))]),
+    }
+    true
 }
 
 impl VB {
@@ -446,6 +572,9 @@ impl VB {
                 }
             }
             VB::NumCmp { test, args } => {
+                if num_cmp_col_const(test, args, b, sel, out) {
+                    return;
+                }
                 let mut x = vec![None; b.len];
                 let mut y = vec![None; b.len];
                 args[0].eval(b, sel, &mut x);
@@ -537,6 +666,9 @@ impl VB {
                 }
             }
             VB::Instant { test, args, ts } => {
+                if instant_fast(test, args, *ts, b, sel, out) {
+                    return;
+                }
                 for &r in sel {
                     let r = r as usize;
                     out[r] = match (args[0].at(b, r, *ts), args[1].at(b, r, *ts)) {
@@ -699,6 +831,15 @@ impl Lanes {
     }
 }
 
+/// A bound on the magnitudes of `v`: at least the largest, at most twice it plus one (each
+/// value, a negative one's magnitude less one, OR-ed together, plus one): one pass without a
+/// compare per value.
+#[inline]
+fn bound_of(v: &[i128]) -> u128 {
+    let m = v.iter().fold(0u128, |m, &x| m | (x ^ (x >> 127)) as u128);
+    if v.is_empty() { 0 } else { m + 1 }
+}
+
 /// Node `node`'s lane into `o` (its operands' in `done`); false: none.
 fn node_lane(node: LNode, done: &[Lane], o: &mut Lane, b: &ColBatch, live: &[u32]) -> bool {
     o.konst = None;
@@ -722,9 +863,23 @@ fn node_lane(node: LNode, done: &[Lane], o: &mut Lane, b: &ColBatch, live: &[u32
             match &c.data {
                 ColData::I32(x) => o.v.extend(live.iter().map(|&r| x[r as usize] as i128)),
                 ColData::I64(x) => o.v.extend(live.iter().map(|&r| x[r as usize] as i128)),
+                // (One scale, every row's: a product's scale is its operands' sum, so rows of
+                // other scales would give it another.)
+                ColData::Num(x) if nulls.is_empty() => {
+                    let s = live.first().map_or(0, |&r| x[r as usize].1);
+                    // (Every row's scale xor the first's: 0 when they are all one.)
+                    let mut other = 0;
+                    o.v.extend(live.iter().map(|&r| {
+                        let (n, ns) = x[r as usize];
+                        other |= ns ^ s;
+                        n
+                    }));
+                    if other != 0 {
+                        return false;
+                    }
+                    o.scale = s;
+                }
                 ColData::Num(x) => {
-                    // (One scale, every row's: a product's scale is its operands' sum, so
-                    // rows of other scales would give it another.)
                     let mut s = None;
                     for (p, &r) in live.iter().enumerate() {
                         let (n, ns) = x[r as usize];
@@ -741,7 +896,7 @@ fn node_lane(node: LNode, done: &[Lane], o: &mut Lane, b: &ColBatch, live: &[u32
                 }
                 _ => return false,
             }
-            o.bound = o.v.iter().fold(0, |m, x| m.max(x.unsigned_abs()));
+            o.bound = bound_of(&o.v);
             true
         }
         LNode::Op(op, x, y) => {

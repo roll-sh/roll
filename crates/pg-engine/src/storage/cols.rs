@@ -150,6 +150,25 @@ impl Col {
     }
 }
 
+/// `x` without its trailing spaces (bpchar's comparison), eight bytes at a time: the
+/// spaces at a word's end counted from its leading zero bits once xor-ed with spaces.
+#[inline]
+pub fn trim_spaces(x: &[u8]) -> &[u8] {
+    const SPACES: u64 = 0x2020_2020_2020_2020;
+    let mut n = x.len();
+    while n >= 8 {
+        let w = u64::from_le_bytes(x[n - 8..n].try_into().unwrap()) ^ SPACES;
+        if w != 0 {
+            return &x[..n - (w.leading_zeros() / 8) as usize];
+        }
+        n -= 8;
+    }
+    while n > 0 && x[n - 1] == b' ' {
+        n -= 1;
+    }
+    &x[..n]
+}
+
 /// The stored row's encoded values, after its header.
 #[inline]
 fn row_values(bytes: &[u8]) -> Option<&[u8]> {
@@ -275,7 +294,7 @@ fn put_typed(col: &mut Col, r: usize, own: &mut Vec<u8>, data: &[u8], pos: &mut 
 
 /// `row::skip_value_fast` with numerics and short strings stepped over in place too.
 #[inline(always)]
-fn skip(data: &[u8], pos: &mut usize) -> Result<()> {
+pub(crate) fn skip(data: &[u8], pos: &mut usize) -> Result<()> {
     let p = *pos;
     let n = match data.get(p) {
         Some(&tag::INT4 | &tag::DATE | &tag::FLOAT4) => 4,
@@ -296,6 +315,222 @@ fn skip(data: &[u8], pos: &mut usize) -> Result<()> {
     }
     *pos = p + 1 + n;
     Ok(())
+}
+
+/// A step of a row's walk by the columns' declared types (`walk_plan`, `walk_row`): values of
+/// columns not needed stepped over, or a needed column's value written into its slot. A
+/// value the step doesn't expect (another tag, a numeric's scale or length past a byte, a
+/// string of 128 bytes or more, a string outside a block buffer) stops the walk, and the row
+/// goes the general way (`decode_cols`).
+enum Step<'a> {
+    /// `count` values of tag `tag` and `len` bytes after it (or NULLs) stepped over.
+    Fixed { tag: u8, len: u8, count: u16 },
+    /// `count` numerics stepped over.
+    Nums(u16),
+    /// `count` strings (text, bytea) stepped over.
+    Strs(u16),
+    /// `count` booleans stepped over.
+    Bools(u16),
+    /// A value of another type stepped over (`skip`).
+    Any,
+    /// int4 or date (`tag`).
+    I32 { tag: u8, v: &'a mut [i32], nulls: &'a mut [bool] },
+    I16 { v: &'a mut [i32], nulls: &'a mut [bool] },
+    I64 { v: &'a mut [i64], nulls: &'a mut [bool] },
+    F64 { v: &'a mut [f64], nulls: &'a mut [bool] },
+    F32 { v: &'a mut [f64], nulls: &'a mut [bool] },
+    Bool { v: &'a mut [bool], nulls: &'a mut [bool] },
+    Num { v: &'a mut [(i128, u32)], nulls: &'a mut [bool] },
+    /// A string (`tag` text or bytea) left in its block buffer.
+    Bytes { tag: u8, v: &'a mut [(u32, u32, u32)], nulls: &'a mut [bool] },
+}
+
+impl Step<'_> {
+    /// Row `r`'s slot back to a default and not NULL (the general walk writes it again).
+    #[cold]
+    fn reset(&mut self, r: usize) {
+        match self {
+            Step::I32 { v, nulls, .. } | Step::I16 { v, nulls } => (v[r], nulls[r]) = (0, false),
+            Step::I64 { v, nulls } => (v[r], nulls[r]) = (0, false),
+            Step::F64 { v, nulls } | Step::F32 { v, nulls } => (v[r], nulls[r]) = (0.0, false),
+            Step::Bool { v, nulls } => (v[r], nulls[r]) = (false, false),
+            Step::Num { v, nulls } => (v[r], nulls[r]) = ((0, 0), false),
+            Step::Bytes { v, nulls, .. } => (v[r], nulls[r]) = ((0, 0, 0), false),
+            Step::Fixed { .. } | Step::Nums(_) | Step::Strs(_) | Step::Bools(_) | Step::Any => {}
+        }
+    }
+}
+
+/// The typed walk of columns `0..cols.len()` (`decode_cols`' slots made, None: not needed),
+/// and whether it takes a string (rows then need their block buffer). None: a needed column
+/// of a type the walk doesn't write (`ColData::Values`).
+fn walk_plan<'a>(cols: &'a mut [Option<Col>], types: &[DataType]) -> Option<(Vec<Step<'a>>, bool)> {
+    let mut out: Vec<Step<'a>> = Vec::with_capacity(cols.len());
+    let mut strs = false;
+    for (c, slot) in cols.iter_mut().enumerate() {
+        let Some(Col { data, nulls, .. }) = slot else {
+            let fixed = match types.get(c)? {
+                DataType::Int2 => Some((tag::INT2, 2)),
+                DataType::Int4 => Some((tag::INT4, 4)),
+                DataType::Date => Some((tag::DATE, 4)),
+                DataType::Float4 => Some((tag::FLOAT4, 4)),
+                DataType::Int8 => Some((tag::INT8, 8)),
+                DataType::Float8 => Some((tag::FLOAT8, 8)),
+                DataType::Timestamp(_) => Some((tag::TIMESTAMP, 8)),
+                DataType::Timestamptz(_) => Some((tag::TIMESTAMPTZ, 8)),
+                _ => None,
+            };
+            let st = match (fixed, types.get(c)?) {
+                (Some((tag, len)), _) => Step::Fixed { tag, len, count: 1 },
+                (None, DataType::Numeric(_)) => Step::Nums(1),
+                (None, DataType::Text | DataType::Varchar(_) | DataType::Bpchar(_) | DataType::Name | DataType::Bytea) => Step::Strs(1),
+                (None, DataType::Bool) => Step::Bools(1),
+                _ => Step::Any,
+            };
+            // (Runs of one kind stepped over as one step.)
+            match (out.last_mut(), &st) {
+                (Some(Step::Fixed { tag, len, count }), Step::Fixed { tag: t, len: l, .. }) if tag == t && len == l && *count < u16::MAX => *count += 1,
+                (Some(Step::Nums(n)), Step::Nums(_)) | (Some(Step::Strs(n)), Step::Strs(_)) | (Some(Step::Bools(n)), Step::Bools(_)) if *n < u16::MAX => *n += 1,
+                _ => out.push(st),
+            }
+            continue;
+        };
+        let (nulls, ty) = (&mut nulls[..], types.get(c)?);
+        let (int2, f4, bytea) = (matches!(ty, DataType::Int2), matches!(ty, DataType::Float4), matches!(ty, DataType::Bytea));
+        out.push(match data {
+            ColData::I32(v) => match int2 {
+                true => Step::I16 { v, nulls },
+                false => Step::I32 { tag: tag::INT4, v, nulls },
+            },
+            ColData::Date(v) => Step::I32 { tag: tag::DATE, v, nulls },
+            ColData::I64(v) => Step::I64 { v, nulls },
+            ColData::F64(v) => match f4 {
+                true => Step::F32 { v, nulls },
+                false => Step::F64 { v, nulls },
+            },
+            ColData::Bool(v) => Step::Bool { v, nulls },
+            ColData::Num(v) => Step::Num { v, nulls },
+            ColData::Bytes(v) => {
+                strs = true;
+                Step::Bytes { tag: if bytea { tag::BYTEA } else { tag::TEXT }, v, nulls }
+            }
+            ColData::Values(_) => return None,
+        });
+    }
+    Some((out, strs))
+}
+
+/// Row `r` (its stored bytes `bytes`; in block buffer `buf` at `at`, or None) walked by
+/// `steps` (`walk_plan`'s for columns `0..upto`); false: the row isn't one the walk takes
+/// (stored out of line, without some of the columns, a value it doesn't expect): the slots
+/// it wrote are reset by the caller and the general walk does the row.
+#[inline]
+fn walk_row(steps: &mut [Step<'_>], r: usize, bytes: &[u8], buf: Option<(u32, usize)>, upto: usize) -> bool {
+    if !matches!(bytes.first(), Some(&(ROW_HEADER | ROW_HEADER_TID))) {
+        return false;
+    }
+    let Some(data) = row_values(bytes) else { return false };
+    let base = bytes.len() - data.len();
+    let mut pos = match data.first() {
+        Some(&n) if n < 0x80 && n as usize >= upto => 1,
+        _ => return false,
+    };
+    // (A NULL's tag alone; a value of another tag stops the walk.)
+    macro_rules! null_or {
+        ($nulls:expr) => {{
+            if data.get(pos) != Some(&tag::NULL) {
+                return false;
+            }
+            $nulls[r] = true;
+            pos += 1;
+        }};
+    }
+    macro_rules! fixed {
+        ($v:expr, $nulls:expr, $tag:expr, $ty:ty, $n:expr, $conv:expr) => {{
+            match data.get(pos..pos + 1 + $n) {
+                Some(x) if x[0] == $tag => {
+                    $v[r] = $conv(<$ty>::from_le_bytes(x[1..].try_into().unwrap()));
+                    pos += 1 + $n;
+                }
+                _ => null_or!($nulls),
+            }
+        }};
+    }
+    for st in steps.iter_mut() {
+        match st {
+            Step::Fixed { tag, len, count } => {
+                let w = 1 + *len as usize;
+                for _ in 0..*count {
+                    match data.get(pos) {
+                        Some(t) if t == tag => pos += w,
+                        Some(&tag::NULL) => pos += 1,
+                        _ => return false,
+                    }
+                }
+            }
+            Step::Nums(count) => {
+                for _ in 0..*count {
+                    match (data.get(pos), data.get(pos + 1), data.get(pos + 2)) {
+                        (Some(&tag::NUMERIC), Some(&sc), Some(&n)) if sc < 0x80 && n < 0x80 => pos += 3 + n as usize,
+                        (Some(&tag::NULL), ..) => pos += 1,
+                        _ => return false,
+                    }
+                }
+            }
+            Step::Strs(count) => {
+                for _ in 0..*count {
+                    match (data.get(pos), data.get(pos + 1)) {
+                        (Some(&(tag::TEXT | tag::BYTEA)), Some(&l)) if l < 0x80 => pos += 2 + l as usize,
+                        (Some(&tag::NULL), _) => pos += 1,
+                        _ => return false,
+                    }
+                }
+            }
+            Step::Bools(count) => {
+                for _ in 0..*count {
+                    match data.get(pos) {
+                        Some(&(tag::TRUE | tag::FALSE | tag::NULL)) => pos += 1,
+                        _ => return false,
+                    }
+                }
+            }
+            Step::Any => {
+                if skip(data, &mut pos).is_err() {
+                    return false;
+                }
+            }
+            Step::I32 { tag, v, nulls } => fixed!(v, nulls, *tag, i32, 4, |x| x),
+            Step::I16 { v, nulls } => fixed!(v, nulls, tag::INT2, i16, 2, |x: i16| x as i32),
+            Step::I64 { v, nulls } => fixed!(v, nulls, tag::INT8, i64, 8, |x| x),
+            Step::F64 { v, nulls } => fixed!(v, nulls, tag::FLOAT8, f64, 8, |x| x),
+            Step::F32 { v, nulls } => fixed!(v, nulls, tag::FLOAT4, f32, 4, |x: f32| x as f64),
+            Step::Bool { v, nulls } => match data.get(pos) {
+                Some(&t @ (tag::TRUE | tag::FALSE)) => {
+                    v[r] = t == tag::TRUE;
+                    pos += 1;
+                }
+                _ => null_or!(nulls),
+            },
+            Step::Num { v, nulls } => match (data.get(pos), data.get(pos + 1), data.get(pos + 2)) {
+                (Some(&tag::NUMERIC), Some(&sc), Some(&n)) if sc < 0x80 && n < 0x80 && pos + 3 + n as usize <= data.len() => {
+                    let Some(x) = num_bytes(data, pos + 3, n as usize) else { return false };
+                    v[r] = (x, sc as u32);
+                    pos += 3 + n as usize;
+                }
+                _ => null_or!(nulls),
+            },
+            Step::Bytes { tag, v, nulls } => match (data.get(pos), data.get(pos + 1), buf) {
+                (Some(t), Some(&l), Some((b, at))) if t == tag && l < 0x80 && pos + 2 + l as usize <= data.len() => {
+                    let s = (at + base + pos + 2) as u32;
+                    v[r] = (b, s, s + l as u32);
+                    pos += 2 + l as usize;
+                }
+                _ => null_or!(nulls),
+            },
+        }
+    }
+    // (A skipped value past the row's end: the general walk raises it.)
+    pos <= data.len()
 }
 
 /// Rows `rows` of `batch` as columns into `out`: the columns `need` marks, decoded as
@@ -338,10 +573,37 @@ pub fn decode_cols(
     // each once while consecutive rows share it.)
     out.bufs.push(Bytes::new());
     let upto = need.iter().take(ncols).rposition(|b| *b).map_or(0, |c| c + 1);
-    // (The batch's parts borrowed apart: the loop keeps them in registers.)
+    // (The batch's parts borrowed apart: the loops keep them in registers.)
     let ColBatch { cols, bufs, ext: exts, own, .. } = out;
     let cols = &mut cols[..upto];
-    for (r, i) in rows.enumerate() {
+    // (Rows the typed walk didn't take, in order: the general walk's.)
+    let mut left: Vec<u32> = Vec::new();
+    let all_left = match walk_plan(cols, types) {
+        Some((mut steps, strs)) => {
+            for (r, i) in rows.clone().enumerate() {
+                let (bytes, inbuf) = batch.value_in(i);
+                let buf = match (strs, inbuf) {
+                    (true, Some((b, at))) => {
+                        let last = bufs.last().unwrap();
+                        if bufs.len() == 1 || last.as_ptr() != b.as_ptr() || last.len() != b.len() {
+                            bufs.push(b.clone());
+                        }
+                        Some(((bufs.len() - 1) as u32, at))
+                    }
+                    _ => None,
+                };
+                if !walk_row(&mut steps, r, bytes, buf, upto) {
+                    for st in steps.iter_mut() {
+                        st.reset(r);
+                    }
+                    left.push(r as u32);
+                }
+            }
+            false
+        }
+        None => true,
+    };
+    let mut row = |r: usize, i: usize| -> Result<()> {
         let (bytes, inbuf) = batch.value_in(i);
         let ext = matches!(bytes.first(), Some(&(ROW_HEADER_EXT | ROW_HEADER_TID_EXT)));
         if ext {
@@ -395,6 +657,16 @@ pub fn decode_cols(
             };
             col.nulls[r] = v.is_null();
             col.odd.push((r as u32, v));
+        }
+        Ok(())
+    };
+    if all_left {
+        for (r, i) in rows.enumerate() {
+            row(r, i)?;
+        }
+    } else {
+        for r in left {
+            row(r as usize, rows.start + r as usize)?;
         }
     }
     bufs[0] = Bytes::from(std::mem::take(own));
@@ -497,5 +769,162 @@ mod tests {
                 assert_eq!(format!("{:?}", col.value(&out, i, &types[0]).unwrap()), format!("{:?}", num(v)), "{v} last={last}");
             }
         }
+    }
+
+    /// The typed walk (and the rows it leaves to the general walk: NULLs, long strings,
+    /// numerics past a word or another tag, rows outside a block buffer or without their
+    /// last columns, values of types it steps over by tag) gives what `decode_row` gives,
+    /// for masks taking and skipping every column.
+    #[test]
+    fn typed_walk_matches_decoded_rows() {
+        let types = [
+            DataType::Int4,
+            DataType::Numeric(-1),
+            DataType::Text,
+            DataType::Date,
+            DataType::Int8,
+            DataType::Numeric(-1),
+            DataType::Bpchar(-1),
+            DataType::Float8,
+            DataType::Int2,
+            DataType::Bool,
+            DataType::Interval(-1),
+            DataType::Bytea,
+            DataType::Float4,
+            DataType::Timestamp(-1),
+        ];
+        let num = |s: String| Value::numeric(Numeric::parse_pg(&s).unwrap());
+        let mut rows = Vec::new();
+        for i in 0..400i64 {
+            let null = |k: i64| i % k == 0;
+            let mut r = vec![
+                if null(17) { Value::Null } else { Value::Int4((i * 7919 - 1000) as i32) },
+                if null(13) { Value::Null } else { num(format!("{}{}.{}", if i % 2 == 0 { "-" } else { "" }, "9".repeat((i % 25) as usize + 1), i % 100)) },
+                if null(11) { Value::Null } else { Value::Text("x".repeat((i * 37 % 200) as usize).into()) },
+                Value::Date(i as i32 - 150),
+                if null(19) { Value::Null } else { Value::Int8(i * 1_000_000_007) },
+                if null(7) { Value::Null } else { num(format!("{}.{}", i, "0".repeat((i % 4) as usize))) },
+                Value::Text(["ab ", "c  ", "   "][(i % 3) as usize].into()),
+                if i % 23 == 0 { Value::Int4(5) } else { Value::Float8(i as f64 / 3.0) },
+                Value::Int2((i % 300) as i16),
+                if null(5) { Value::Null } else { Value::Bool(i % 3 == 0) },
+                if null(3) { Value::Null } else { Value::Interval(crate::types::Interval { months: i as i32, days: 1, micros: 7 }) },
+                if null(29) { Value::Null } else { Value::bytea(vec![i as u8; (i % 140) as usize]) },
+                Value::Float4(i as f32 * 0.5),
+                Value::Timestamp(i * 86_400_000_000),
+            ];
+            // (Rows stored before the last columns were added.)
+            if i % 31 == 0 {
+                r.truncate(9);
+            }
+            rows.push(r);
+        }
+        let missing: Vec<Value> = (0..types.len()).map(|c| if c == 12 { Value::Float4(1.5) } else { Value::Null }).collect();
+        let mut block = Vec::new();
+        let mut spans = Vec::new();
+        for (i, r) in rows.iter().enumerate() {
+            let mut b = vec![if i % 2 == 0 { row::ROW_HEADER } else { row::ROW_HEADER_TID }, 5];
+            if i % 2 == 1 {
+                b.extend([3, 0x81, 1]);
+            }
+            b.extend(row::encode_row(r));
+            spans.push((block.len(), b.len()));
+            block.extend(b);
+        }
+        let block = Bytes::from(block);
+        let mut batch = RowBatch::default();
+        for (i, (o, l)) in spans.iter().enumerate() {
+            if i % 10 == 9 {
+                batch.push_copy(b"k", &block[*o..o + l]);
+            } else {
+                batch.push_in(b"k", &block, *o, *l);
+            }
+        }
+        for mask in [u32::MAX, 0b10_0100_1001_0010, 0b00_0000_1010, 0b01_0010_0100, 0b00_1000_0000, 0b00_0010_0000, 0b10_1000_0000_1000, 0b01_0000_0000_0001] {
+            let need: Vec<bool> = (0..types.len()).map(|c| mask >> c & 1 == 1).collect();
+            let mut out = ColBatch::default();
+            // (Twice into one batch: slots kept from batch to batch.)
+            for _ in 0..2 {
+                decode_cols(&batch, 0..batch.len(), &need, &types, &missing, &mut out).unwrap();
+            }
+            for (i, r) in rows.iter().enumerate() {
+                for (c, ty) in types.iter().enumerate() {
+                    if let Some(col) = &out.cols[c] {
+                        let want = r.get(c).cloned().unwrap_or_else(|| missing[c].clone());
+                        assert_eq!(format!("{:?}", col.value(&out, i, ty).unwrap()), format!("{want:?}"), "mask {mask:b} row {i} col {c}");
+                        if want.is_null() {
+                            assert!(col.nulls[i], "mask {mask:b} row {i} col {c}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `trim_spaces` is a byte-at-a-time trim of trailing spaces, for every length and count
+    /// of spaces (spaces inside kept, a tab not a space).
+    #[test]
+    fn trim_spaces_of_every_length() {
+        for len in 0..40usize {
+            for sp in 0..=len {
+                for inner in *b"a \t" {
+                    let mut x = vec![b'x'; len - sp];
+                    if let Some(m) = x.get_mut((len - sp) / 2) {
+                        *m = inner;
+                    }
+                    x.extend(std::iter::repeat_n(b' ', sp));
+                    let mut want = &x[..];
+                    while let [rest @ .., b' '] = want {
+                        want = rest;
+                    }
+                    assert_eq!(trim_spaces(&x), want, "{x:?}");
+                }
+            }
+        }
+    }
+
+    /// Decode cost on lineitem-shaped rows (TPC-H q06's and q01's columns), for perf stat:
+    /// `A251_REPS=<n> cargo test --profile verify --lib storage::cols::tests::decode_cost -- --ignored`.
+    #[test]
+    #[ignore]
+    fn decode_cost() {
+        let reps: usize = std::env::var("A251_REPS").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+        let num = |x: i64| Value::numeric(Numeric::from_parts(crate::types::decint::DecInt::from(x as i128), 2));
+        let types = [
+            DataType::Int4, DataType::Int4, DataType::Int4, DataType::Int4,
+            DataType::Numeric(983046), DataType::Numeric(983046), DataType::Numeric(983046), DataType::Numeric(983046),
+            DataType::Bpchar(-1), DataType::Bpchar(-1), DataType::Date, DataType::Date, DataType::Date,
+            DataType::Bpchar(-1), DataType::Bpchar(-1), DataType::Varchar(-1),
+        ];
+        let mut block = Vec::new();
+        let mut spans = Vec::new();
+        for i in 0..2048i64 {
+            let r = vec![
+                Value::Int4(i as i32 * 7), Value::Int4(i as i32 * 13 % 200000), Value::Int4(i as i32 % 10000), Value::Int4((i % 7) as i32),
+                num((i % 50 + 1) * 100), num(90000 + i * 37 % 10_000_000), num(i % 11), num(i % 9),
+                Value::Text(["A", "N", "R"][(i % 3) as usize].into()), Value::Text(["F", "O"][(i % 2) as usize].into()),
+                Value::Date(8000 + (i % 2500) as i32), Value::Date(8030 + (i % 2500) as i32), Value::Date(8010 + (i % 2500) as i32),
+                Value::Text("DELIVER IN PERSON        ".into()), Value::Text("TRUCK     ".into()), Value::Text("final requests sleep furiously".into()),
+            ];
+            let mut b = vec![row::ROW_HEADER, 5];
+            b.extend(row::encode_row(&r));
+            spans.push((block.len(), b.len()));
+            block.extend(b);
+        }
+        let block = Bytes::from(block);
+        let mut batch = RowBatch::default();
+        for (o, l) in &spans {
+            batch.push_in(b"k", &block, *o, *l);
+        }
+        let missing = vec![Value::Null; types.len()];
+        let q06: Vec<bool> = (0..16).map(|c| matches!(c, 4 | 5 | 6 | 10)).collect();
+        let q01: Vec<bool> = (0..16).map(|c| (4..=10).contains(&c)).collect();
+        let mut out = ColBatch::default();
+        let t = std::time::Instant::now();
+        for _ in 0..reps {
+            decode_cols(&batch, 0..batch.len(), &q06, &types, &missing, &mut out).unwrap();
+            decode_cols(&batch, 0..batch.len(), &q01, &types, &missing, &mut out).unwrap();
+        }
+        eprintln!("decode_cost: {:.1} ns a row (q06 + q01 masks)", t.elapsed().as_nanos() as f64 / (reps * 2 * 2048).max(1) as f64);
     }
 }

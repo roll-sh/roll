@@ -527,9 +527,21 @@ impl<'a> Pre<'a> {
 
     /// What each row of `rows` comes to (`fate`), into `skip` (`Reader::next_row_with`).
     fn mark(&mut self, b: &RowBatch, rows: std::ops::Range<usize>, skip: &mut Vec<u8>) {
+        use super::vector::Tri;
         self.decode(b, rows.clone());
         skip.clear();
-        skip.extend((0..rows.len()).map(|r| self.fate(r)));
+        match self.probe {
+            // (`fate` without a probe: one pass over the outcomes.)
+            None => {
+                let pass = if self.plan.filter.is_some() { PASSED } else { ROW };
+                skip.extend(self.odd.iter().zip(&self.tri).map(|(&odd, &t)| match (odd, t) {
+                    (true, _) | (false, Tri::Out) => ROW,
+                    (false, Tri::F | Tri::N) => DROP,
+                    (false, Tri::T) => pass,
+                }));
+            }
+            Some(_) => skip.extend((0..rows.len()).map(|r| self.fate(r))),
+        }
         let n = skip.iter().filter(|s| **s == DROP).count();
         self.off = !self.worth(rows.len(), n as u64);
     }
@@ -626,9 +638,11 @@ impl<'c> Reader<'c> {
                     let fate = self.skip[i - self.skip_from];
                     *passed = fate == PASSED;
                     if fate == DROP {
-                        self.batch.advance();
-                        self.left -= 1;
-                        *skipped += 1;
+                        // (The run of dropped rows from here passed over at once.)
+                        let k = self.skip[i - self.skip_from..].iter().take(self.left).take_while(|f| **f == DROP).count();
+                        self.batch.set_pos(i + k);
+                        self.left -= k;
+                        *skipped += k as u32;
                         if self.left == 0 {
                             return None;
                         }
@@ -955,14 +969,14 @@ impl LazyBuf {
     /// The stored row `bytes` (under `key`) to be read in place: where its columns start,
     /// nothing decoded yet.
     pub(super) fn read<'a>(&'a mut self, d: &'a Decode, key: &'a [u8], bytes: &'a [u8]) -> Result<Lazy<'a>> {
-        use crate::storage::{row::skip_value, sst::get_varint};
+        use crate::storage::{cols::skip, sst::get_varint};
         let data = super::scan::row_data(bytes)?;
         let mut pos = 0;
         let n = get_varint(data, &mut pos)? as usize;
         for (i, off) in self.offs.iter_mut().enumerate() {
             if i < n {
                 *off = pos as u32;
-                skip_value(data, &mut pos)?;
+                skip(data, &mut pos)?;
             } else {
                 *off = u32::MAX;
             }

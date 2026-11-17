@@ -1204,9 +1204,7 @@ impl<'a> Partials<'a> {
                 D::Bytes(_) => {
                     let mut t = col.bytes(b, r);
                     if *trim {
-                        while let [rest @ .., b' '] = t {
-                            t = rest;
-                        }
+                        t = crate::storage::cols::trim_spaces(t);
                     }
                     put(&[8, u8::try_from(t.len()).ok()?])?;
                     put(t)?
@@ -1660,9 +1658,7 @@ impl<'a> Partials<'a> {
                 D::Bytes(_) => {
                     let mut t = col.bytes(b, r);
                     if *trim {
-                        while let [rest @ .., b' '] = t {
-                            t = rest;
-                        }
+                        t = crate::storage::cols::trim_spaces(t);
                     }
                     k.push(8);
                     k.extend((t.len() as u32).to_le_bytes());

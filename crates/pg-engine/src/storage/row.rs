@@ -937,7 +937,7 @@ pub fn decode_row_need_spare(b: &[u8], need: &[bool], spare: usize) -> Result<Ve
         if want {
             row.push(decode_value(b, &mut pos)?);
         } else {
-            skip_value(b, &mut pos)?;
+            skip_value_fast(b, &mut pos)?;
             row.push(Value::Null);
         }
     }
@@ -958,7 +958,7 @@ pub fn decode_cols(b: &[u8], cols: &[u32], out: &mut Vec<Value>) -> Result<usize
             break;
         }
         while at < c {
-            skip_value(b, &mut pos)?;
+            skip_value_fast(b, &mut pos)?;
             at += 1;
         }
         out.push(decode_value(b, &mut pos)?);

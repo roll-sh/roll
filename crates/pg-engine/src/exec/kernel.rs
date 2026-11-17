@@ -266,9 +266,7 @@ impl StoredCmps {
                         continue;
                     };
                     if *bp {
-                        while let [rest @ .., b' '] = x {
-                            x = rest;
-                        }
+                        x = crate::storage::cols::trim_spaces(x);
                     }
                     x.cmp(y)
                 }
