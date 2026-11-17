@@ -126,6 +126,33 @@ pub struct Plan {
     pub crons: Vec<Cron>,
 }
 
+/// The images a Dockerfile builds on (its `FROM`s), for watching them move: not its own stages,
+/// `scratch`, ones already pinned by digest or named with a build argument; at most 10.
+pub fn base_images(dockerfile: &str) -> Vec<String> {
+    let (mut stages, mut out) = (Vec::<String>::new(), Vec::<String>::new());
+    let joined = dockerfile.replace("\\\r\n", " ").replace("\\\n", " ");
+    for line in joined.lines() {
+        let mut w = line.split_whitespace();
+        if !w.next().is_some_and(|k| k.eq_ignore_ascii_case("FROM")) {
+            continue;
+        }
+        let Some(image) = w.find(|t| !t.starts_with("--")) else { continue };
+        let lower = image.to_ascii_lowercase();
+        // A stage named before it is one of its own, not an image.
+        let own = stages.contains(&lower);
+        if let (Some(as_), Some(name)) = (w.next(), w.next())
+            && as_.eq_ignore_ascii_case("AS")
+        {
+            stages.push(name.to_ascii_lowercase());
+        }
+        if own || lower == "scratch" || image.contains('@') || image.contains('$') || out.iter().any(|o| o == image) || out.len() >= 10 {
+            continue;
+        }
+        out.push(image.to_string());
+    }
+    out
+}
+
 /// A path called on a schedule (vercel.json's `crons`).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Cron {

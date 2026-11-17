@@ -410,6 +410,10 @@ pub enum AppsCmd {
         /// before it (`true`), or stays (`false`).
         #[arg(long)]
         rollback_on_crash: Option<bool>,
+        /// Build the same revision again, without the cache, when one of its base images moves
+        /// in its registry (`true`), or only say so (`false`).
+        #[arg(long)]
+        rebuild_on_base: Option<bool>,
     },
     /// A copy of the service in its project (Railway's Duplicate): its source, build and run
     /// settings, links and production's own variables. Sealed variables are never shown, so
@@ -2482,7 +2486,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, rollout, rollout_step, rollout_errors, rollout_manual, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, rollout, rollout_step, rollout_errors, rollout_manual, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash, rebuild_on_base } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
             let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() {
@@ -2620,6 +2624,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("affinity", affinity.map(Value::from)),
                 ("tcp", tcp.map(Value::from)),
                 ("rollback_on_crash", rollback_on_crash.map(Value::from)),
+                ("rebuild_on_base", rebuild_on_base.map(Value::from)),
                 ("scale", match scale.as_deref() {
                     None => None,
                     Some("none") => Some(Value::Null),

@@ -173,6 +173,10 @@
           "type": "boolean",
           "description": "Raw TCP, not HTTP."
         },
+        "rebuild_on_base": {
+          "type": "boolean",
+          "description": "Build again (same revision, no cache) when a base image moves."
+        },
         "rollback_on_crash": {
           "type": "boolean",
           "description": "Roll back when a new deployment crash-loops."

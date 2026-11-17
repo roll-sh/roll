@@ -2951,6 +2951,36 @@ async fn a_route_sends_a_path_to_another_service() {
     }
 }
 
+/// A built service keeps the digests of the images it builds on; one that moves in its registry
+/// is said once (the environment's `base_updated`, `deploy.base_updated`), and with
+/// `rebuild_on_base` the same revision is built again without the cache.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_moved_base_image_is_said_and_built_again() {
+    let w = world().await;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let d1 = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let base = d1["plan"]["bases"][0]["image"].as_str().unwrap_or_else(|| panic!("{d1}")).to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    assert!(w.apps.watch_bases().await.is_empty());
+    assert!(call(&w.api, "GET", &env, None).await.1.get("base_updated").is_none(), "nothing moved yet");
+    w.fake.move_tag(&base, &format!("sha256:{}", "1".repeat(64)));
+    assert!(w.apps.watch_bases().await.is_empty(), "said, not built: rebuild_on_base is off");
+    w.apps.watch_bases().await;
+    assert_eq!(call(&w.api, "GET", &env, None).await.1["base_updated"], json!([base]));
+    let events = call(&w.api, "GET", "/v1/apps/events?after=0", None).await.1;
+    assert_eq!(events["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "deploy.base_updated").count(), 1, "once per new digest: {events}");
+    let (st, _) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"rebuild_on_base": true}}))).await;
+    assert!(st.is_success());
+    w.fake.move_tag(&base, &format!("sha256:{}", "2".repeat(64)));
+    let started = w.apps.watch_bases().await;
+    assert_eq!(started.len(), 1, "built again");
+    let d = settled(&w, &id, "production", &started[0]).await;
+    assert_eq!((d["revision"].clone(), d["status"].as_str()), (d1["revision"].clone(), Some("active")), "the same revision: {d}");
+    assert!(w.fake.built.lock().last().unwrap().0, "without the cache");
+}
+
 /// A crowd at a sleeping service wakes one instance; those waiting on a start slower than the
 /// wake timeout get a 503 page that says when to try again, and the retry gets the app.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

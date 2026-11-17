@@ -532,6 +532,11 @@ pub struct Run {
     /// at-once deploy. Never a rollback's own: no two in a row.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rollback_on_crash: bool,
+    /// A built service's live deployment is built again, from the same revision and without the
+    /// cache, when one of its base images moves in its registry (Railway's automatic security
+    /// patches). Without it the environment only says so (`base_updated`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rebuild_on_base: bool,
     /// Commands on a schedule, each a job of the live deployment at its due times (Heroku
     /// Scheduler, Vercel crons): any service's, without a cron service of its own.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -765,6 +770,7 @@ impl Default for Run {
             affinity: false,
             tcp: false,
             rollback_on_crash: false,
+            rebuild_on_base: false,
             schedules: Vec::new(),
         }
     }
@@ -1157,6 +1163,10 @@ pub struct Environment {
     pub wait_for_ci: bool,
     /// The push waiting for its checks, if one is.
     pub waiting_for_ci: Option<String>,
+    /// Base images the live deployment was built on that have moved since in their registries:
+    /// a build now would get their fixes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub base_updated: Vec<String>,
     pub created_at: i64,
 }
 
