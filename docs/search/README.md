@@ -32,6 +32,8 @@ pnpm dev                                # dashboard: /dashboard/search
 | `--search-history` (`ROLL_SEARCH_HISTORY`)         | `86400`           | point-in-time branching window, seconds (0: off) |
 | `--search-gc-interval`                             | `3600`            | garbage collection of unreferenced objects (0: off; one node per bucket) |
 | `--search-test-features`                           | off               | publish Elasticsearch's test features (YAML suites through `--cluster-hook`; test deployments only) |
+| `--search-max-clusters-per-person` (`ROLL_SEARCH_MAX_CLUSTERS_PER_PERSON`) | `50` | clusters a signed-in person may own, branches included (0: no cap; the operator and admins aren't capped) |
+| `--search-max-always-on-per-person` (`ROLL_SEARCH_MAX_ALWAYS_ON_PER_PERSON`) | `2` | of those, always-on ones (`idle_timeout_s` 0) (0: no cap) |
 | `--no-search`, `--search-only`                     |                   | shorthands for `ROLL_PRODUCTS` without search, or with only search |
 | `--search-public-url` (`ROLL_SEARCH_PUBLIC_URL`)   |                   | the front clients use (a load balancer): cluster URLs name it |
 
@@ -103,8 +105,20 @@ them (`api::Caller`):
   `/v1/search/clusters/{id}/…` route about another's, and from a create whose `parent` is
   another's. The check reads the owner from the catalog after resolving the cluster, before a
   fleet forwards the call to the cluster's owner node and again there (behind its own gate).
-- `GET /v1/search` gives a person versions, endpoint, defaults, history window and pricing, but
-  not where the node keeps its data (`storage`) or its node-wide figures (`loaded`, `cache`).
+- A person may own at most `--search-max-clusters-per-person` clusters (default 50) and, of
+  those, `--search-max-always-on-per-person` always-on ones (`idle_timeout_s` 0; default 2); 0 is
+  no cap. Branches count toward their owner (the parent's), whoever cuts them; clusters with no
+  owner count toward nobody. Past a cap a person's create or branch, or a `PATCH` that makes one
+  of their clusters always-on, answers 409 naming the cap, their count and the flag that raises
+  it (for always-on: a cluster that sleeps when idle doesn't count). The operator and admins
+  aren't capped, also when they cut a branch of a person's cluster. The count is
+  `list_owned`'s, made in the insert's or update's own catalog transaction (SQLite's single
+  writer; on a fleet Postgres `SERIALIZABLE`, which re-runs one of two racing creates), so two
+  creates at the cap can't both pass. Lowering a cap removes nothing: a person over it keeps their
+  clusters and can change an always-on one's other settings, but adds no more.
+- `GET /v1/search` gives a person versions, endpoint, defaults, history window, pricing and their
+  `caps` (`{clusters, always_on}`), but not where the node keeps its data (`storage`) or its
+  node-wide figures (`loaded`, `cache`).
 - A person's own token (docs/permissions.md, "Users' own tokens") acts as them: it reaches search
   (`search` is in `USER_REACH`) and sees only their clusters, narrowed again by its rules.
 - A person's workspace project stands only for their own clusters (`Workspace::trusts`: rolld's
@@ -114,11 +128,12 @@ them (`api::Caller`):
   default repository are rolld's flags (`--search-*`), not routes. A cluster's data plane is
   unchanged: the REST port with the cluster's own credentials, which give what any tenant gets.
 
-`crates/search-control/tests/control.rs` `people_see_only_their_own_clusters` covers it.
+`crates/search-control/tests/control.rs` `people_see_only_their_own_clusters` and
+`people_are_held_to_their_cluster_caps` cover it.
 
 | method | path | |
 | ------ | ---- | - |
-| GET | `/v1/search` | version, endpoint, defaults, pricing; for the operator and admins also `storage`, `loaded` clusters and the `cache` |
+| GET | `/v1/search` | version, endpoint, defaults, pricing; for a person their `caps`; for the operator and admins also `storage`, `loaded` clusters and the `cache` |
 | GET | `/v1/search/clusters` | list (a person: their own) |
 | POST | `/v1/search/clusters` | create `{name, flavor?, parent?, at?, idle_timeout_s?, max_in_flight?, max_body_mb?, destructive_requires_name?}`; answers with `url`, `username`, `password` (once) and `id` — the shape `search-yaml run --cluster-hook` expects; `owner` is the signed-in person who isn't an admin, and a branch's is its parent's |
 | GET | `/v1/search/clusters/{id or name}` | settings, `status` (`loaded` with live index count and requests in flight, and live `docs` once every index is open, or `asleep` with `wakes_at`, unix seconds, when a background job is due to wake it), last metered `indices`/`docs`/`stored_bytes` and `own_bytes` (what a branch references that its parent's latest commit points don't; all of `stored_bytes` for a cluster that isn't a branch), `url`, `branches` |
@@ -193,6 +208,18 @@ clusters appear in workspace projects (the `search` resource kind). A person who
 sees their own clusters, and the Search page leaves out the storage location and the cache, which
 `GET /v1/search` doesn't give them.
 
+The Playground tab compares two configurations of one query on an index or data stream, side by
+side (`lib/search-playground.ts`): keyword (`multi_match` over the mapping's text fields), semantic
+(`semantic` on a `semantic_text` field, or `knn` on a `dense_vector` field with the query embedded
+first through a text-embedding endpoint, because roll's `knn` doesn't resolve
+`query_vector_builder.text_embedding`), hybrid (an `rrf` or weighted `linear` retriever over both),
+or a raw body with `{{query}}`. Each hit shows its rank, score, `_id`, highlighted passages (the
+`semantic` highlighter's chunks for `semantic_text`), how it moved between A and B, and an Explain
+tree (`_explain`; a `semantic` query, which `_explain` can't rewrite, is explained by a `_search`
+limited to that id; a hybrid hit shows each part). Either side copies as curl, Python or JavaScript
+with the key from `$ROLL_SEARCH_API_KEY` (OpenSearch-flavor clusters: OpenSearch's clients and
+`$OPENSEARCH_USERNAME`/`$OPENSEARCH_PASSWORD`).
+
 ## Metering and pricing
 
 Every 60 s the control plane accounts each loaded cluster's loaded time exactly (load and unload
@@ -246,7 +273,7 @@ Measured on the tree merged with `main` (2026-11-12), on ai-server (a shared 18-
 | Elasticsearch 9.5.5 YAML REST suite (`test/free` + clients-tests) | **3,810 of 3,905 pass**, 0 fail, 95 skipped; 0 regressions against the baseline |
 | OpenSearch 3.9.0 YAML REST suite | **1,455 of 1,506 pass**, 0 fail, 51 skipped |
 | OpenSearch SQL plugin's PPL suite | **204 of 204** |
-| extended suites (67 module, plugin and x-pack suites, each on its test cluster's settings) | **5,074 of the 5,541 tests that pass on Elasticsearch** (6,349 in all); 45 suites at 100% (EQL 39 of 39, ent-search 371 of 371, ES\|QL 549 of 549, KQL 34 of 34, `otel-data` 68 of 68, SLM 8 of 8, searchable snapshots 13 of 13, transforms 108 of 108, watcher 89 of 89, `watcher-security` 9 of 9), runtime fields 247 of 248, `logsdb` 225 of 234; round 6 passed 3,463. Largest gaps: x-pack `platinum` (1,064 of 1,412: rollup 52 of 52, security 100 of 101), downsampling (58 of 59) |
+| extended suites (67 module, plugin and x-pack suites, each on its test cluster's settings) | **5,083 of the 5,541 tests that pass on Elasticsearch** (6,349 in all); 46 suites at 100% (EQL 39 of 39, ent-search 371 of 371, ES\|QL 549 of 549, KQL 34 of 34, `otel-data` 68 of 68, SLM 8 of 8, searchable snapshots 13 of 13, transforms 108 of 108, watcher 89 of 89, `watcher-security` 9 of 9), runtime fields 248 of 248, `logsdb` 233 of 234; round 6 passed 3,463. Largest gaps: x-pack `platinum` (1,064 of 1,412: rollup 52 of 52, security 100 of 101), downsampling (58 of 59) |
 | differential suite against Elasticsearch 9.5.5 (seed 1, 60 random workloads) | 2,325 of 2,333 steps equal (99.7%); the 8 others are 2 known differences (soft-delete tombstones in phrase-suggester and term statistics), none new or open; 69 replayed fixtures equal |
 | client matrix (unmodified official clients in Docker) | **11 of 11**: Python, JavaScript, Java, Go, Ruby and PHP clients, the OpenSearch Python and JavaScript clients, django-elasticsearch-dsl, Laravel Scout, and searchkick's own suite (540 runs, 0 failures) |
 | x-pack REST fixtures (`search-es/tests/xpack_fixtures.rs`) | 1,097 of 1,097 steps equal Elasticsearch |
@@ -530,4 +557,20 @@ Ranked; the top item is in progress. Updated as work lands (the watchdog reads t
    disabled user, fails the run without running anything. Elasticsearch keeps running these jobs
    (checked on 9.5.5); compatibility.md has the difference and what each job type does. The
    dashboard's file import keeps exact numbers and ids and reads files with bounded memory (#103).
-   The next review follows per-user access (#127): it changes who may reach what.
+   The review of per-person access (#127) found one hole, now closed. A scoped token allowed to
+   create clusters in a project could create one with a `parent` outside that project. The new
+   cluster is a branch, so the token could read any cluster's indices. That create now also needs
+   `write` on the parent, as `…/{id}/branches` does. The rest holds:
+   - Every `/v1/search/clusters/{id}/…` call checks the owner. It does so before the fleet
+     forwards it, and again on the owner node, behind its gate.
+   - Another person's cluster answers the same 404 as a missing one.
+   - A cluster's credentials and keys name that cluster only. Remote clusters reach only the
+     cluster itself, and reindex from a remote is off: the whitelist is empty.
+   - `fs` and `url` repositories need `path.repo`, which rolld doesn't set.
+   - A person's canvas reaches only their own clusters (`Workspace::trusts`), on every read and
+     issue.
+
+   A create, or a branch whose name is taken, answers 409, so a person learns that a cluster of
+   that name exists. That is accepted: names are host labels (`<name>.search.…`), global like S3
+   bucket names, and the 409 shows nothing else about the cluster. Left, low: a person's
+   `GET …/{id}` shows the node id their cluster is loaded on (`status.node`).

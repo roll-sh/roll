@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, presetFor, presetRules, publicJwk, rulesOf, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
+import { installLink, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, presetFor, presetRules, publicJwk, rulesOf, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -147,5 +147,18 @@ describe("machine clients", () => {
       "-----BEGIN PUBLIC KEY-----\r\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0CXl01/W8B09OrWXFui602a0TapW\r\nrUnzlc/PDXFBLWXU0czXjt63cFk2Zkq8vPXit79F07TIc2OQ08izssxVEg==\r\n-----END PUBLIC KEY-----";
     expect(publicJwk(ec)).toEqual({ jwk: { kty: "EC", crv: "P-256", x: "0CXl01_W8B09OrWXFui602a0TapWrUnzlc_PDXFBLWU", y: "1NHM147et3BZNmZKvLz14re_RdO0yHNjkNPIs7LMVRI" } });
     expect(publicJwk("-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEI…\n-----END PRIVATE KEY-----")).toHaveProperty("problem");
+  });
+});
+
+describe("one-click installs", () => {
+  it("links Cursor and VS Code to the server's URL alone, and nothing else", () => {
+    const url = "https://api.roll.example/v1/mcp?tools=search";
+    const cursor = installLink("cursor", url)!;
+    const config = new URL(cursor.href).searchParams.get("config")!;
+    expect(cursor.href.startsWith("cursor://anysphere.cursor-deeplink/mcp/install?name=roll&")).toBe(true);
+    expect(JSON.parse(atob(config))).toEqual({ url });
+    const vscode = installLink("vscode", url)!;
+    expect(JSON.parse(decodeURIComponent(vscode.href.slice("vscode:mcp/install?".length)))).toEqual({ name: "roll", type: "http", url });
+    expect(installLink("claude-code", url)).toBeNull();
   });
 });
