@@ -349,6 +349,9 @@ default) with the project's `env` overrides and the branched resources' URLs on 
   branch has none for is blank (a NoSQL HTTP token, Kafka client properties). The roll secrets
   thread follows with the exact fix: a link to a branched parent isn't resolved at all and comes
   back as `followed`, its name filled from the branch even under a custom prefix.
+  The base's links to a branched parent (its list: links, no values, nothing resolved) are
+  also set from the branch as the environment's own keys before each ensure, so roll apps, which
+  resolves a preview's environment itself, gets the branch's value under a renamed link too.
   `a_branchs_values_go_by_the_names_a_link_to_its_parent_would_use`.
 - **Protected values stay out of preview code.** A preview resolves its secrets as `untrusted`
   (roll secrets' flag): nothing of a protected environment resolves, whether directly, by

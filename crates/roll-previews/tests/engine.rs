@@ -1035,6 +1035,14 @@ async fn a_secrets_link_to_a_branched_parent_gives_the_branch() {
     let get = |k: &str| vars.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.clone());
     assert_eq!(get("STAGING_DB"), Some(format!("fake://{}", pg.r#ref.clone().unwrap())), "the branch's, under the link's name");
     assert_eq!(get("STAGING_TOKEN").as_deref(), Some(""), "nothing for that field: blank");
+    // And as the environment's own key, from the base's links (nothing resolved): what roll
+    // apps reads when it resolves the environment itself.
+    *e.secrets.links.lock() = vec![("STAGING_PG_URL".into(), Kind::Postgres, pg.parent.clone(), "url".into()), ("OTHER".into(), Kind::Postgres, "pg_elsewhere".into(), "url".into())];
+    e.engine.refresh(&p.id).unwrap();
+    e.engine.pass().await.unwrap();
+    let own = e.secrets.own.lock().clone();
+    assert_eq!(own.iter().find(|(k, _)| k == "STAGING_PG_URL").map(|(_, v)| v.clone()), Some(format!("fake://{}", pg.r#ref.clone().unwrap())), "the branch's, as its own key");
+    assert!(!own.iter().any(|(k, _)| k == "OTHER"), "a link to a parent it didn't branch is left to roll secrets");
 }
 
 #[tokio::test]

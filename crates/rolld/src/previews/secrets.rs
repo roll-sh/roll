@@ -114,6 +114,23 @@ impl roll_previews::ports::Secrets for Secrets {
         })
     }
 
+    async fn links(&self, project: &str, env: &str) -> anyhow::Result<Vec<(String, roll_previews::Kind, String, String)>> {
+        let v = match self.0.get(&format!("/v1/secrets/projects/{}/environments/{}/secrets?path=/", seg(project), seg(env))).await {
+            Ok(v) => v,
+            Err(e) if is_404(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        Ok(v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| {
+                let l = &s["link"];
+                let kind = roll_previews::Kind::parse(l["kind"].as_str()?).ok()?;
+                Some((s["key"].as_str()?.to_string(), kind, l["ref"].as_str()?.to_string(), l["field"].as_str()?.to_string()))
+            })
+            .collect())
+    }
+
     async fn renew(&self, project: &str, lease: &str) -> anyhow::Result<Option<i64>> {
         match self.0.post(&format!("/v1/secrets/projects/{}/leases/{}/renew", seg(project), seg(lease)), json!({})).await {
             Ok(v) => Ok(v["expires_at"].as_i64()),

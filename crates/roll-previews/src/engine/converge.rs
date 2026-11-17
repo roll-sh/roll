@@ -307,8 +307,20 @@ impl Engine {
             }
             anyhow::bail!("this preview may not inherit the production environment {:?}", s.secrets.base);
         }
-        let vars = self.preview_vars(r, &s).await?;
+        let mut vars = self.preview_vars(r, &s).await?;
         let branches = self.branch_vars(&r.id).await?;
+        // A link of the base to a parent the preview branched, under a name of its own
+        // (`STAGING_PGPASS`): set from the branch as the environment's own key, so whoever
+        // resolves it (roll apps too, which reads the environment itself) gets the branch's value,
+        // never the parent's. Read from the base's list (links, no values): nothing resolved.
+        for (key, kind, parent, field) in self.secrets.links(&r.project_id, &s.secrets.base).await.unwrap_or_default() {
+            if vars.iter().any(|(k, _)| *k == key) {
+                continue;
+            }
+            if let Some((_, _, own)) = branches.iter().find(|(k, p, _)| *k == kind && *p == parent) {
+                vars.push((key, crate::names::follow(kind, &field, own.clone())));
+            }
+        }
         let (access_token, bypass) = match self.store.access(&r.id)? {
             Some(crate::store::Access { token: t, required: true, bypass }) if !t.is_empty() => (Some(t), bypass),
             _ => (None, None),
