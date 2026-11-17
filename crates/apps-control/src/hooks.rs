@@ -71,11 +71,13 @@ impl Apps {
             }
             body["image"] = json!(img.trim());
         }
-        // A hook is automation: after a rollback, what it would deploy waits for a person.
-        if let Some(r) = self.held(service, env).await {
-            return Err(crate::Error::Conflict(format!("deploys are held after the rollback {r}: resume them (or deploy) first")));
+        // A hook is automation: held, what it would deploy waits for a person (built to `ready`
+        // where it can be, else refused).
+        let hold = self.hold_for(service, env).await;
+        if let crate::deploy::Held::Skip(why) = &hold {
+            return Err(crate::Error::Conflict(format!("{why}: resume them (or deploy) first")));
         }
-        self.deploy(service, env, body, By { trigger: Trigger::Api, actor: Some("deploy hook".into()) }, None, None).await.map(|d| HookOutcome::Deployed(Box::new(d)))
+        self.deploy(service, env, hold.body(body), By { trigger: Trigger::Api, actor: Some("deploy hook".into()) }, None, None).await.map(|d| HookOutcome::Deployed(Box::new(d)))
     }
 
     /// A repository's event for a Git URL service (its hook's, or roll's GitHub App's, verified
@@ -158,8 +160,9 @@ impl Apps {
                             said.push(format!("{} is paused", e.name));
                             continue;
                         }
-                        if let Some(r) = &e.held_by {
-                            said.push(format!("{}'s deploys are held after the rollback {r}", e.name));
+                        let hold = crate::deploy::hold_of(svc, e);
+                        if let crate::deploy::Held::Skip(why) = &hold {
+                            said.push(format!("{}: {why}", e.name));
                             continue;
                         }
                         if let Some(why) = self.git_push_skip(svc, e, &sha, &message, file.as_ref()).await {
@@ -167,7 +170,7 @@ impl Apps {
                             continue;
                         }
                         let first = message.lines().next().unwrap_or("").chars().take(500).collect::<String>();
-                        let body = json!({ "revision": sha, "message": if first.is_empty() { format!("push to {}", p.branch) } else { first } });
+                        let body = hold.body(json!({ "revision": sha, "message": if first.is_empty() { format!("push to {}", p.branch) } else { first } }));
                         let by = By { trigger: Trigger::Push, actor: Some(actor.into()) };
                         match self.deploy(service, &e.name, body, by, None, Some(&format!("git:{}:{sha}", e.name))).await {
                             Ok(d) => deployed.push(d),

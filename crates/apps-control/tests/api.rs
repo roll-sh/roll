@@ -3796,7 +3796,7 @@ async fn a_rollback_keeps_the_services_volume() {
 }
 
 /// After a rollback (Vercel's Instant Rollback) a push isn't put live: deploys are held until a
-/// person deploys or resumes them.
+/// person deploys or resumes them. A person's own hold builds pushes to ready instead.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_rollback_holds_the_next_push_until_deploys_resume() {
     let w = world().await;
@@ -3823,7 +3823,24 @@ async fn a_rollback_holds_the_next_push_until_deploys_resume() {
     assert_eq!(st, StatusCode::OK, "{env}");
     assert!(env.get("held_after").is_none(), "{env}");
     w.code.push("d4d4d4d4d4d4", "fourth", &[("server.js", "// v4")]);
-    get_until(&w.api, &format!("{base}/deploys"), |d| d.as_array().is_some_and(|a| a.iter().any(|x| x["revision"] == "d4d4d4d4d4d4"))).await;
+    let fourth = get_until(&w.api, &format!("{base}/deploys"), |d| d.as_array().is_some_and(|a| a.iter().any(|x| x["revision"] == "d4d4d4d4d4d4"))).await;
+    let fourth = fourth.as_array().unwrap().iter().find(|x| x["revision"] == "d4d4d4d4d4d4").unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &id, "production", &fourth).await["status"], "active");
+    // A person's own hold (Netlify's locked deploys): a push builds to ready beside what's live,
+    // putting it live keeps the hold, and only `held: false` ends it.
+    let (_, env) = call(&w.api, "PUT", &base, Some(json!({ "held": true }))).await;
+    assert_eq!((env["held"].as_bool(), env.get("held_after")), (Some(true), None), "{env}");
+    w.code.push("e5e5e5e5e5e5", "fifth", &[("server.js", "// v5")]);
+    let fifth = get_until(&w.api, &format!("{base}/deploys"), |d| d.as_array().is_some_and(|a| a.iter().any(|x| x["revision"] == "e5e5e5e5e5e5"))).await;
+    let fifth = fifth.as_array().unwrap().iter().find(|x| x["revision"] == "e5e5e5e5e5e5").unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(settled(&w, &id, "production", &fifth).await["status"], "ready", "built, not live");
+    assert_eq!(call(&w.api, "GET", &base, None).await.1["active"]["id"], fourth.as_str());
+    let (_, live) = call(&w.api, "POST", &format!("{base}/deploys/{fifth}/rollback"), Some(json!({"keep_variables": true}))).await;
+    assert_eq!(settled(&w, &id, "production", live["id"].as_str().unwrap()).await["status"], "active");
+    let (_, env) = call(&w.api, "GET", &base, None).await;
+    assert_eq!((env["held"].as_bool(), env.get("held_after")), (Some(true), None), "still the person's hold: {env}");
+    let (_, env) = call(&w.api, "PUT", &base, Some(json!({ "held": false }))).await;
+    assert!(env.get("held").is_none(), "{env}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

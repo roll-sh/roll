@@ -218,6 +218,20 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
 
         <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
           <div>
+            <p className="text-[13px] font-medium">Hold deploys</p>
+            <p className="mt-1 text-[12px] text-muted">
+              {env.held
+                ? "Pushes, deploy hooks and tag moves build without going live; you put one live from Deployments."
+                : "Release on your own schedule: pushes still build, and wait for you to put them live."}
+            </p>
+          </div>
+          <button className={btn} disabled={busy} aria-pressed={!!env.held} onClick={() => runner.run("hold", () => appsApi.putEnvironment(service.id, env.name, { held: !env.held }))}>
+            {env.held ? "Resume deploys" : "Hold deploys"}
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <div>
             <p className="text-[13px] font-medium">Web Vitals</p>
             <p className="mt-1 text-[12px] text-muted">
               {env.vitals
