@@ -1528,6 +1528,15 @@ pub fn num_op(imp: super::FnImpl) -> Option<crate::exec::kernel::NumOp> {
         .map(|(_, o)| o)
 }
 
+/// The integer operator `imp` is (+, −, ×, %), for `exec::kernel::K::Int`.
+pub fn int_op(imp: super::FnImpl) -> Option<crate::exec::kernel::IntOp> {
+    use crate::exec::kernel::IntOp;
+    [(int_add as super::FnImpl, IntOp::Add), (int_sub, IntOp::Sub), (int_mul, IntOp::Mul), (int_mod, IntOp::Mod)]
+        .into_iter()
+        .find(|(f, _)| std::ptr::fn_addr_eq(*f, imp))
+        .map(|(_, o)| o)
+}
+
 /// The comparison `imp` is (=, <>, <, <=, >, >=), as the test of an ordering it makes
 /// (`exec::kernel` compares numerics as exact numbers).
 pub fn cmp_op(imp: super::FnImpl) -> Option<fn(Ordering) -> bool> {

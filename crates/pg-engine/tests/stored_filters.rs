@@ -80,6 +80,15 @@ fn stored_comparisons_match_evaluation() {
         ("e COLLATE und_ci <> 'x7'", false),
         ("c COLLATE und_ci = 'C1'", false),
         ("e IS NULL", false),
+        // (An integer operator over a column and a constant, compared: the column's stored
+        // number through the operator, `IntOp::apply`.)
+        ("a % 4 = 1", true),
+        ("1 = a % 4", true),
+        ("a + 1 > 2990", true),
+        ("10 - a <= -2985", true),
+        ("a * 3 < 30", true),
+        ("a % 7 = 0 AND e > 'x2'", true),
+        ("a % (a - a + 4) = 1", false),
     ];
     let mut paths = Vec::new();
     for (f, fast) in filters {
@@ -103,6 +112,22 @@ fn stored_comparisons_match_evaluation() {
         rows(&mut s, "SELECT count(*) FROM w WHERE e COLLATE und_ci = 'X7'"),
         rows(&mut s, "SELECT count(*) FROM w WHERE lower(e) = 'x7'")
     );
+    // Where an integer operator raises an error, the filter still does: a zero divisor, a
+    // result out of its type's range; int8's minimum % -1 is 0.
+    for (q, code) in [
+        ("SELECT count(*) FROM w WHERE a % 0 = 1", pg_engine::error::code::DIVISION_BY_ZERO),
+        ("SELECT count(*) FROM w WHERE a * 2147483647 > 0", pg_engine::error::code::NUMERIC_VALUE_OUT_OF_RANGE),
+        ("SELECT count(*) FROM w WHERE a + 2147483000 > 0", pg_engine::error::code::NUMERIC_VALUE_OUT_OF_RANGE),
+    ] {
+        let e = pg_engine::exec::parscan::without_serial_inline(|| s.query(q)).unwrap_err();
+        assert_eq!(e.code, code, "{q}: {e:?}");
+    }
+    s.query("CREATE TABLE i8 (x int8, y int2)").unwrap();
+    s.query("INSERT INTO i8 VALUES (-9223372036854775808, -32768), (7, 3), (NULL, 1)").unwrap();
+    assert_eq!(rows(&mut s, "SELECT count(*) FROM i8 WHERE x % -1 = 0"), "[[Int8(2)]]");
+    assert_eq!(rows(&mut s, "SELECT count(*) FROM i8 WHERE y % 2 = 0"), "[[Int8(1)]]");
+    let e = pg_engine::exec::parscan::without_serial_inline(|| s.query("SELECT count(*) FROM i8 WHERE y * 2::int2 < 0")).unwrap_err();
+    assert_eq!(e.code, pg_engine::error::code::NUMERIC_VALUE_OUT_OF_RANGE, "smallint out of range: {e:?}");
     s.query("CREATE TABLE unbounded (c bpchar)").unwrap();
     s.query("INSERT INTO unbounded SELECT c FROM w").unwrap();
     let before = STORED_CMPS_SCANS.load(Relaxed);

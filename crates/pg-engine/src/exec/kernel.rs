@@ -40,6 +40,15 @@ pub enum K {
         f: PureFn,
         args: Box<[K; 2]>,
     },
+    /// integer + − × % (`IntOp`) of integer types: computed exactly where both operands are
+    /// numbers (`num`: a column read in place is never made a value), the result in its
+    /// type's range; `f` otherwise (NULL, a zero divisor, an overflow: `eval` reports it).
+    Int {
+        op: IntOp,
+        f: PureFn,
+        args: Box<[K; 2]>,
+        ret: DataType,
+    },
     /// A cast that reads no session setting (`cast_pure`): a length coercion, a string type
     /// to another, a number to another, a date to a timestamp.
     Cast(Box<K>, Box<(DataType, DataType)>, bool),
@@ -67,6 +76,56 @@ pub enum NumOp {
     Add,
     Sub,
     Mul,
+}
+
+/// An integer operator a kernel computes without making values (`K::Int`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum IntOp {
+    Add,
+    Sub,
+    Mul,
+    Mod,
+}
+
+impl IntOp {
+    /// `x op y` of integers (scale 0) as PostgreSQL computes it into `ret` (int2, int4 or
+    /// int8): None where it raises an error (a result past the type's range, a zero
+    /// divisor) or an operand isn't an integer. (`%` in 64 bits, as int8mod: an i128
+    /// remainder is a library call; int8 minimum % -1 is 0.)
+    #[inline]
+    pub fn apply(self, (x, sx): (i128, u32), (y, sy): (i128, u32), ret: &DataType) -> Option<i128> {
+        if sx != 0 || sy != 0 {
+            return None;
+        }
+        let r = match self {
+            IntOp::Add => x.checked_add(y)?,
+            IntOp::Sub => x.checked_sub(y)?,
+            IntOp::Mul => x.checked_mul(y)?,
+            IntOp::Mod => {
+                let (x, y) = (i64::try_from(x).ok()?, i64::try_from(y).ok()?);
+                if y == 0 {
+                    return None;
+                }
+                x.wrapping_rem(y) as i128
+            }
+        };
+        let fits = match ret {
+            DataType::Int2 => i16::try_from(r).is_ok(),
+            DataType::Int4 => i32::try_from(r).is_ok(),
+            DataType::Int8 => i64::try_from(r).is_ok(),
+            _ => false,
+        };
+        fits.then_some(r)
+    }
+}
+
+/// An integer `r` (`IntOp::apply`'s, in `ret`'s range) as a value of type `ret`.
+fn int_value(r: i128, ret: &DataType) -> Value {
+    match ret {
+        DataType::Int2 => Value::Int2(r as i16),
+        DataType::Int4 => Value::Int4(r as i32),
+        _ => Value::Int8(r as i64),
+    }
 }
 
 /// A numeric (or integer) value as an exact unscaled i128 and its scale (None: another
@@ -179,6 +238,10 @@ pub struct StoredCmps {
     /// (column, the constant, the operator's test, whether the column is its first
     /// argument).
     cmps: Vec<(usize, Against, fn(std::cmp::Ordering) -> bool, bool)>,
+    /// Per comparison, the integer operator its column goes through first (`id % 4 = 1`):
+    /// the operator, its constant operand, whether the column is that one's first operand,
+    /// the result type.
+    ops: Vec<Option<(IntOp, (i128, u32), bool, DataType)>>,
     /// The columns walked: up to the last one compared.
     upto: usize,
 }
@@ -196,10 +259,26 @@ pub static STORED_CMPS_SCANS: crate::counter::Counter = crate::counter::Counter:
 
 impl StoredCmps {
     pub fn of(k: &K) -> Option<StoredCmps> {
+        // (A column, or an integer operator over a column and a constant.)
+        let col = |k: &K| match k {
+            K::Col(i) => Some((*i, None)),
+            K::Int { op, args, ret, .. } => match &**args {
+                [K::Col(i), K::Const(c)] => Some((*i, Some((*op, small_num(c)?, true, ret.clone())))),
+                [K::Const(c), K::Col(i)] => Some((*i, Some((*op, small_num(c)?, false, ret.clone())))),
+                _ => None,
+            },
+            _ => None,
+        };
         let one = |k: &K| match k {
             K::NumCmp { test, args, .. } => match &**args {
-                [K::Col(i), K::Const(c)] => Some((*i, Against::Num(small_num(c)?), *test, true)),
-                [K::Const(c), K::Col(i)] => Some((*i, Against::Num(small_num(c)?), *test, false)),
+                [c, K::Const(v)] => {
+                    let (i, op) = col(c)?;
+                    Some(((i, Against::Num(small_num(v)?), *test, true), op))
+                }
+                [K::Const(v), c] => {
+                    let (i, op) = col(c)?;
+                    Some(((i, Against::Num(small_num(v)?), *test, false), op))
+                }
                 _ => None,
             },
             K::Call { f, args, .. } => {
@@ -210,22 +289,23 @@ impl StoredCmps {
                     _ => None,
                 };
                 match &**args {
-                    [K::Col(i), K::Const(c)] => Some((*i, text(c)?, test, true)),
-                    [K::Const(c), K::Col(i)] => Some((*i, text(c)?, test, false)),
+                    [K::Col(i), K::Const(c)] => Some(((*i, text(c)?, test, true), None)),
+                    [K::Const(c), K::Col(i)] => Some(((*i, text(c)?, test, false), None)),
                     _ => None,
                 }
             }
             _ => None,
         };
-        let mut cmps: Vec<_> = match k {
+        let mut both: Vec<_> = match k {
             K::And(ks) => ks.iter().map(one).collect::<Option<_>>()?,
             k => vec![one(k)?],
         };
         // (Pure comparisons: their order changes nothing.)
-        cmps.sort_by_key(|c| c.0);
+        both.sort_by_key(|c| c.0.0);
+        let (cmps, ops): (Vec<_>, Vec<_>) = both.into_iter().unzip();
         let upto = cmps.iter().map(|c| c.0 + 1).max()?;
         STORED_CMPS_SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Some(StoredCmps { cmps, upto })
+        Some(StoredCmps { cmps, ops, upto })
     }
 
     /// Whether the stored row's values `data` (after its header) pass (None: leave it to
@@ -239,7 +319,7 @@ impl StoredCmps {
         }
         // (The comparisons in column order: the columns walked once.)
         let (mut col, mut pass) = (0, true);
-        for (i, against, test, col_first) in &self.cmps {
+        for ((i, against, test, col_first), op) in self.cmps.iter().zip(&self.ops) {
             while col < *i {
                 skip_value_fast(data, &mut pos).ok()?;
                 col += 1;
@@ -248,10 +328,15 @@ impl StoredCmps {
             // a value one of them can't decide leaves the row to the kernel.)
             let o = match against {
                 Against::Num((y, sy)) => {
-                    let Some((x, sx)) = peek_num(data, pos)? else {
+                    let Some(mut v) = peek_num(data, pos)? else {
                         pass = false;
                         continue;
                     };
+                    if let Some((op, c, first, ret)) = op {
+                        let (a, b) = if *first { (v, *c) } else { (*c, v) };
+                        v = (op.apply(a, b, ret)?, 0);
+                    }
+                    let (x, sx) = v;
                     if sx == *sy {
                         x.cmp(y)
                     } else {
@@ -347,6 +432,20 @@ fn compile_node(e: &Expr) -> Option<K> {
                 op,
                 f: pure_call(def, ty)?,
                 args: Box::new([compile(&args[0])?, compile(&args[1])?]),
+            }
+        }
+        Expr::Call(def, args, ty)
+            if args.len() == 2
+                && def.strict
+                && matches!(ty, DataType::Int2 | DataType::Int4 | DataType::Int8)
+                && args.iter().all(|a| matches!(a.ty(), DataType::Int2 | DataType::Int4 | DataType::Int8))
+                && let Some(op) = crate::sql::func::ops::int_op(def.imp) =>
+        {
+            K::Int {
+                op,
+                f: pure_call(def, ty)?,
+                args: Box::new([compile(&args[0])?, compile(&args[1])?]),
+                ret: ty.clone(),
             }
         }
         // (Integers too: a column read in place compares without being made a value.)
@@ -476,6 +575,14 @@ impl K {
         match self {
             K::Col(i) => row.num(*i),
             K::Const(v) => leaf(v),
+            K::Int { op, args, ret, .. } => {
+                // (Both operands before a NULL one: the call is strict.)
+                let (a, b) = (args[0].num(row)?, args[1].num(row)?);
+                let (Some(x), Some(y)) = (a, b) else {
+                    return Some(None);
+                };
+                Some(Some((op.apply(x, y, ret)?, 0)))
+            }
             K::Num { op, args, .. } => {
                 // (Both operands before a NULL one: the call is strict.)
                 let (a, b) = (args[0].num(row)?, args[1].num(row)?);
@@ -525,6 +632,18 @@ impl K {
                     return None;
                 }
                 f(x, y, &DataType::NUMERIC).ok()?
+            }
+            K::Int { f, args, ret, .. } => {
+                if let Some(r) = self.num(row) {
+                    return Some(r.map_or(Value::Null, |(v, _)| int_value(v, ret)));
+                }
+                let (mut t0, mut t1) = (Value::Null, Value::Null);
+                let x = args[0].arg(row, &mut t0)?;
+                let y = args[1].arg(row, &mut t1)?;
+                if x.is_null() || y.is_null() {
+                    return Some(Value::Null);
+                }
+                f(x, y, ret).ok()?
             }
             K::Col(i) => row.col(*i)?.clone(),
             K::Const(v) => v.clone(),
