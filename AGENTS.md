@@ -341,8 +341,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     is its client (change both together). `crates/roll-secrets` is the store, crypto and router
     (`/v1/secrets`); `crates/rolld/src/secrets.rs` mounts it and implements the link providers;
     `roll secrets …` and `roll run` are `crates/roll-cli/src/secrets.rs`. Runtime clients:
-    `packages/secrets` (TypeScript), `sdk/go/secrets` (Go, standard library only) and
-    `sdk/python/roll_secrets` (Python, `cryptography` only for sealed resolves); keep their
+    `packages/secrets` (TypeScript), `sdk/go/secrets` (Go, standard library only),
+    `sdk/python/roll_secrets` (Python, `cryptography` only for sealed resolves) and
+    `sdk/ruby/roll_secrets` (Ruby, standard library only); keep their
     surfaces the same, and the sealed box test vector from the TypeScript one opening in the others.
     The Terraform provider is `sdk/terraform-provider-roll` (`TF_ACC=1 go test ./...` drives it
     against a fake rolld).
