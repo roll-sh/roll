@@ -329,9 +329,12 @@ type EnvironmentPut = {
   variables_from?: string;
   /** A push deploys only once its commit's checks pass (statuses other than roll apps' own):
    *  pending waits (up to an hour; `Environment.waiting_for_ci` names it), a failure skips it.
-   *  A roll code repo's service, or a Git URL service on roll's GitHub App (`PUT …/github`),
-   *  whose checks are GitHub's check runs and commit statuses (roll's own left out; none at all
-   *  is waited on for a minute, as they may not have started); 400 otherwise: another Git
+   *  A roll code repo's service, a Git URL service on roll's GitHub App (`PUT …/github`),
+   *  whose checks are GitHub's check runs and commit statuses, or one on GitLab (gitlab.com, a
+   *  `gitlab.…` host) or Bitbucket with a Git login, whose checks are its commit statuses (its
+   *  pipelines' jobs) read with the login's token (roll's own left out; none at all is waited
+   *  on for a minute, as they may not have started; roll's deploy statuses are posted there
+   *  too); 400 otherwise: another Git
    *  host's service deploys from its workflow after its tests (sdk/apps-github-action) with
    *  the environment's branch unset. */
   wait_for_ci?: boolean;

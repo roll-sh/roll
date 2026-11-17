@@ -129,6 +129,11 @@ impl<'a> Remote<'a> {
         Remote { client: client(allow_private), url, auth: login.map(|(username, password)| code_git::Credentials { username, password, vouched: false }) }
     }
 
+    /// The login it fetches with (a username and a token), if it has one.
+    pub fn login(&self) -> Option<(&str, &str)> {
+        self.auth.as_ref().map(|c| (c.username.as_str(), c.password.as_str()))
+    }
+
     /// A public repository's (a plan, an import, a template): no login.
     pub fn public(allow_private: bool, url: &'a str) -> Self {
         Self::new(allow_private, url, None)

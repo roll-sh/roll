@@ -599,7 +599,7 @@ impl Apps {
     /// Railway's and Vercel's GitHub deployments. Best effort: a status that doesn't post is a
     /// warning, never a failed deploy.
     async fn report(self: &Arc<Self>, d: &Deployment, state: &'static str, what: &str) {
-        let (Some(sources), Some(rev)) = (self.deps.sources.clone(), d.revision.clone()) else { return };
+        let Some(rev) = d.revision.clone() else { return };
         let (sid, e) = (d.service.clone(), d.environment.clone());
         let Ok((svc, env)) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await else { return };
         let status = crate::integrations::CommitStatus {
@@ -611,7 +611,16 @@ impl Apps {
         // A Git URL service connected to roll's GitHub App: through its installation, a commit
         // status and a GitHub Deployment of the environment (made when it starts, then its state).
         if let Source::Git { url, .. } = &svc.source {
-            let Some((app, installation, owner, repo)) = self.github_for(&svc.id, url).await else { return };
+            let Some((app, installation, owner, repo)) = self.github_for(&svc.id, url).await else {
+                // GitLab or Bitbucket, with its Git login: the same status there.
+                let remote = self.git_remote(&svc.id, url).await;
+                if let (Some(host), Some(login)) = (crate::ci_hosts::host_of(url), remote.login())
+                    && let Err(err) = crate::ci_hosts::post(self.cfg.allow_private, &host, login, &rev, &status).await
+                {
+                    warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a deploy's commit status didn't post");
+                }
+                return;
+            };
             if let Err(err) = app.status(installation, &owner, &repo, &rev, &status).await {
                 warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a deploy's commit status didn't post");
             }
@@ -644,7 +653,7 @@ impl Apps {
             }
             return;
         }
-        let Source::Repo { repo, .. } = &svc.source else { return };
+        let (Source::Repo { repo, .. }, Some(sources)) = (&svc.source, self.deps.sources.clone()) else { return };
         if let Err(err) = sources.set_status(repo, &rev, &status).await {
             warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a deploy's commit status didn't post");
         }
@@ -1915,10 +1924,17 @@ impl Apps {
                 Some(sources) => sources.ci(repo, sha).await,
                 None => anyhow::bail!("roll code isn't on this node"),
             },
-            Source::Git { url, .. } => match self.github_for(&svc.id, url).await {
-                Some((app, installation, owner, repo)) => app.ci(installation, &owner, &repo, sha).await,
-                None => anyhow::bail!("this Git URL service isn't on roll's GitHub App, so its checks can't be read"),
-            },
+            Source::Git { url, .. } => {
+                if let Some((app, installation, owner, repo)) = self.github_for(&svc.id, url).await {
+                    return app.ci(installation, &owner, &repo, sha).await;
+                }
+                // GitLab's or Bitbucket's statuses, with its Git login's token.
+                let remote = self.git_remote(&svc.id, url).await;
+                match (crate::ci_hosts::host_of(url), remote.login()) {
+                    (Some(host), Some(login)) => crate::ci_hosts::read(self.cfg.allow_private, &host, login, sha).await,
+                    _ => anyhow::bail!("this Git URL service's checks can't be read (roll's GitHub App, or a GitLab or Bitbucket login)"),
+                }
+            }
             _ => Ok(crate::integrations::Ci::None),
         }
     }
