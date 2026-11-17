@@ -176,6 +176,8 @@ pub struct Review {
     pub body: String,
     /// `roll` (made in roll) or `github` (ingested from a pull request).
     pub source: String,
+    /// Written by someone who can't push to the repo: roll's MCP server in lockdown withholds it.
+    pub outside: bool,
     pub url: Option<String>,
     /// It reviewed an older revision than the change's current one.
     pub stale: bool,
@@ -237,6 +239,8 @@ pub struct Comment {
     /// The replacement lines of a ```` ```suggestion ```` block in the body.
     pub suggestion: Option<String>,
     pub source: String,
+    /// Written by someone who can't push to the repo: roll's MCP server in lockdown withholds it.
+    pub outside: bool,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(skip)]
@@ -278,13 +282,16 @@ pub struct ThreadInput {
 pub struct Origin<'a> {
     pub source: &'a str,
     pub external_id: Option<&'a str>,
+    /// Its author can't push to the repo (GitHub's `author_association`, or a roll caller without
+    /// write access): stored on what it writes, for MCP's lockdown.
+    pub outside: bool,
     /// Check the path and lines against the change's files (GitHub's lines may be from a
     /// commit roll doesn't consider the head).
     pub validate: bool,
 }
 
 impl Origin<'_> {
-    pub const ROLL: Origin<'static> = Origin { source: "roll", external_id: None, validate: true };
+    pub const ROLL: Origin<'static> = Origin { source: "roll", external_id: None, outside: false, validate: true };
 }
 
 fn header<'a>(h: &'a HeaderMap, k: &str) -> Option<&'a str> {
@@ -447,7 +454,7 @@ impl Code {
 
     /// Where `head` left the default branch: its first ancestor (first-parent walk) that's on
     /// the default branch.
-    pub(crate) fn merge_base(&self, r: &RepoRow, head: &ChangesetId) -> Result<Option<ChangesetId>> {
+    pub fn merge_base(&self, r: &RepoRow, head: &ChangesetId) -> Result<Option<ChangesetId>> {
         let Some(main) = self.head(r)? else { return Ok(None) };
         let mut cur = Some(*head);
         for _ in 0..MAX_MERGE_BASE_WALK {
@@ -751,10 +758,11 @@ impl Code {
             source: origin.source,
             external_id: origin.external_id,
             url: input.get("url").and_then(Value::as_str),
+            outside: origin.outside,
         })?;
         let mut threads = Vec::new();
         for (t, p) in comments.iter().zip(placed) {
-            threads.push(self.insert_thread(r, c, reviewer, t, p, Some(&id), &Origin { source: origin.source, external_id: None, validate: false })?);
+            threads.push(self.insert_thread(r, c, reviewer, t, p, Some(&id), &Origin { source: origin.source, external_id: None, outside: origin.outside, validate: false })?);
         }
         self.db.finish_review_requests(&c.id, reviewer, Some(&c.head))?;
         let mut review = self.db.review(&id)?.ok_or_else(|| Error::NotFound(format!("review {id}")))?;
@@ -861,7 +869,7 @@ impl Code {
             source: origin.source,
             external_id: origin.external_id,
         })?;
-        self.db.insert_comment(&new_id("cm"), &id, &r.id, author, &t.body, origin.source, None)?;
+        self.db.insert_comment(&new_id("cm"), &id, &r.id, author, &t.body, origin.source, None, origin.outside)?;
         self.db.thread(&id)?.ok_or_else(|| Error::NotFound(format!("thread {id}")))
     }
 
@@ -899,7 +907,7 @@ impl Code {
             return Err(Error::Invalid(format!("a comment is longer than {} KiB", MAX_BODY >> 10)));
         }
         let cid = new_id("cm");
-        self.db.insert_comment(&cid, &th.id, &r.id, author, body, origin.source, origin.external_id)?;
+        self.db.insert_comment(&cid, &th.id, &r.id, author, body, origin.source, origin.external_id, origin.outside)?;
         let th = self.db.thread(&th.id)?.ok_or_else(|| Error::NotFound(format!("thread {}", th.id)))?;
         self.emit(&r.id, "thread", serde_json::to_value(&th).unwrap_or_default());
         if let Some(cm) = th.comments.iter().find(|x| x.id == cid) {

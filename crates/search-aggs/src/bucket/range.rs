@@ -603,7 +603,7 @@ impl Aggregator for RangeAgg {
                 }
                 Src::Geo { origin, unit, plane, reader: Some(r) } => {
                     self.dist.clear();
-                    for &(lat, lon) in r.points(doc) {
+                    for &(lat, lon) in r.points(doc)? {
                         let m = if *plane {
                             search_index::util::geo::plane_meters(origin.0, origin.1, lat, lon)
                         } else {

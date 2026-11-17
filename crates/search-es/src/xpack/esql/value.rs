@@ -194,6 +194,8 @@ pub enum V {
     Bool(bool),
     Int(i32),
     Long(i64),
+    /// An `unsigned_long` above `i64::MAX` (those up to it are [`V::Long`]s).
+    ULong(u64),
     Double(f64),
     Str(String),
     /// Epoch milliseconds.
@@ -213,6 +215,7 @@ impl V {
             V::Bool(_) => DataType::Boolean,
             V::Int(_) => DataType::Integer,
             V::Long(_) => DataType::Long,
+            V::ULong(_) => DataType::UnsignedLong,
             V::Double(_) => DataType::Double,
             V::Str(_) => DataType::Keyword,
             V::Date(_) => DataType::Date,
@@ -225,6 +228,7 @@ impl V {
         match self {
             V::Int(i) => Some(*i as f64),
             V::Long(l) | V::Date(l) => Some(*l as f64),
+            V::ULong(u) => Some(*u as f64),
             V::Double(d) => Some(*d),
             _ => None,
         }
@@ -279,6 +283,8 @@ impl V {
                     Value::from(*l)
                 }
             }
+            V::ULong(u) if ty == DataType::Double => Value::from(*u as f64),
+            V::ULong(u) => Value::from(*u),
             // Infinite doubles print like Java's `Double.toString` (NaN never reaches output).
             V::Double(d) => {
                 if d.is_finite() {
@@ -303,6 +309,7 @@ impl V {
             V::Bool(b) => b.to_string(),
             V::Int(i) => i.to_string(),
             V::Long(l) => l.to_string(),
+            V::ULong(u) => u.to_string(),
             V::Double(d) => crate::json::write::java_double(*d),
             V::Str(s) | V::Ip(s) => s.clone(),
             V::Date(ms) => date_string(*ms),
@@ -337,10 +344,11 @@ pub fn cmp(a: &V, b: &V) -> Ordering {
     }
 }
 
-fn int_of(v: &V) -> Option<i64> {
+fn int_of(v: &V) -> Option<i128> {
     match v {
-        V::Int(i) => Some(*i as i64),
-        V::Long(l) | V::Date(l) => Some(*l),
+        V::Int(i) => Some(*i as i128),
+        V::Long(l) | V::Date(l) => Some(*l as i128),
+        V::ULong(u) => Some(*u as i128),
         _ => None,
     }
 }
@@ -636,7 +644,16 @@ pub fn from_field_in(v: &Value, ty: DataType, array_order: bool) -> V {
                 _ => V::Null,
             },
             DataType::Integer => v.as_i64().map(|i| V::Int(i as i32)).unwrap_or(V::Null),
-            DataType::Long | DataType::UnsignedLong => v.as_i64().map(V::Long).or_else(|| v.as_f64().map(|d| V::Long(d as i64))).unwrap_or(V::Null),
+            DataType::UnsignedLong => match v {
+                Value::Num(crate::json::Number::UInt(u)) => V::ULong(*u),
+                Value::Str(t) => match t.parse::<u64>() {
+                    Ok(u) if u > i64::MAX as u64 => V::ULong(u),
+                    Ok(u) => V::Long(u as i64),
+                    Err(_) => v.as_f64().map(|d| V::Long(d as i64)).unwrap_or(V::Null),
+                },
+                _ => v.as_i64().map(V::Long).or_else(|| v.as_f64().map(|d| V::Long(d as i64))).unwrap_or(V::Null),
+            },
+            DataType::Long => v.as_i64().map(V::Long).or_else(|| v.as_f64().map(|d| V::Long(d as i64))).unwrap_or(V::Null),
             DataType::Double => v.as_f64().map(V::Double).unwrap_or(V::Null),
             DataType::Date | DataType::DateNanos => match v {
                 Value::Str(s) => s.parse::<i64>().ok().or_else(|| parse_date(s)).map(V::Date).unwrap_or(V::Null),
@@ -1166,6 +1183,7 @@ fn distinct_hash(x: &V, ty: DataType) -> Option<u64> {
         V::Bool(b) => mix64(*b as u64),
         V::Int(i) => mix64(*i as i64 as u64),
         V::Long(i) => mix64(*i as u64),
+        V::ULong(u) => mix64(*u),
         V::Date(ms) if ty == DataType::DateNanos => mix64(ms.wrapping_mul(1_000_000) as u64),
         V::Date(ms) => mix64(*ms as u64),
         // `doubleToLongBits` collapses every NaN to the canonical one.

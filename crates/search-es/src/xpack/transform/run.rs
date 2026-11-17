@@ -93,7 +93,14 @@ pub(super) async fn trigger(cluster: &Cluster, id: &str) {
     if let Ok(t) = get_one(&cluster.state(), id)
         && state_of(&t) == "started"
     {
-        let outcome = checkpoint(cluster, &t).await;
+        // As the user who put or last updated it (Elasticsearch's stored security headers): it
+        // reads and writes only what that user may.
+        let owner = t.pointer(&["_roll", "user"]).and_then(internal::principal_of);
+        // Unless that user or API key can no longer act: the transform fails without running.
+        let outcome = match internal::principal_refusal(cluster, owner.as_ref()) {
+            Some(e) => Err(e),
+            None => internal::as_principal(owner, checkpoint(cluster, &t)).await,
+        };
         // A store refusing the write (a cluster unloading) leaves the trigger due: the
         // scheduler runs it again.
         let _ = record(cluster, id, outcome).await;
@@ -357,7 +364,14 @@ pub(super) async fn record(cluster: &Cluster, id: &str, outcome: EsResult<Pass>)
                         add("search_failures", 1);
                         let failures = r.get("failure_count").and_then(Value::as_i64).unwrap_or(0) + 1;
                         let reason = e.reason.clone().unwrap_or_default();
-                        if started && retries >= 0 && failures > retries {
+                        if started && e.status == 401 {
+                            // Its user or API key can no longer act ([`internal::principal_refusal`]):
+                            // retrying can't help, also for an unattended transform
+                            // (Elasticsearch's irrecoverable failures).
+                            r.insert("state".into(), "failed".into());
+                            r.insert("reason".into(), format!("task encountered irrecoverable failure: {reason}").into());
+                            r.shift_remove("next_run");
+                        } else if started && retries >= 0 && failures > retries {
                             r.insert("state".into(), "failed".into());
                             r.insert("reason".into(), format!("task encountered more than {retries} failures; latest failure: {reason}").into());
                             r.shift_remove("next_run");
@@ -401,6 +415,81 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+    }
+
+    /// A transform reads and writes as the user who put it, and its preview and delete act as
+    /// their caller: a role's document query limits what reaches the destination and the
+    /// preview, and `delete_dest_index` can't delete an index the caller may not delete.
+    #[tokio::test]
+    async fn transforms_act_as_their_user() {
+        let c = Arc::new(Cluster::open(ClusterConfig::new("c"), Arc::new(MemoryStore::new())).await.unwrap());
+        assert_eq!(call(&c, "PUT", "/src", r#"{"mappings":{"properties":{"a":{"type":"keyword"},"team":{"type":"keyword"}}}}"#).await, 200);
+        for (i, (a, team)) in [("x", "red"), ("y", "blue"), ("x", "red")].iter().enumerate() {
+            assert_eq!(call(&c, "PUT", &format!("/src/_doc/{i}?refresh=true"), &format!(r#"{{"a":"{a}","team":"{team}"}}"#)).await, 201);
+        }
+        assert_eq!(call(&c, "PUT", "/keep", "").await, 200);
+        let role = r#"{"cluster":["manage_transform"],"indices":[{"names":["src"],"privileges":["read","view_index_metadata"],"query":{"term":{"team":"red"}}},{"names":["dst"],"privileges":["all"]},{"names":["keep"],"privileges":["read"]}]}"#;
+        assert_eq!(call(&c, "PUT", "/_security/role/t", role).await, 200);
+        assert_eq!(call(&c, "PUT", "/_security/user/t", r#"{"password":"t-password-1","roles":["t"]}"#).await, 200);
+        let as_t = |method: &str, uri: &str, body: &str| {
+            use base64::Engine;
+            let mut req = if body.is_empty() { EsRequest::new(method, uri) } else { EsRequest::json(method, uri, body.to_string()) };
+            req.headers.push(("Authorization".into(), format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("t:t-password-1"))));
+            crate::rest::handle(&c, req)
+        };
+        let body = |dest: &str| format!(r#"{{"source":{{"index":"src"}},"dest":{{"index":"{dest}"}},"pivot":{{"group_by":{{"a":{{"terms":{{"field":"a"}}}}}},"aggs":{{"n":{{"value_count":{{"field":"a"}}}}}}}}}}"#);
+        let preview = as_t("POST", "/_transform/_preview", &body("dst")).await;
+        let text = String::from_utf8_lossy(&preview.body).into_owned();
+        assert_eq!(preview.status, 200, "{text}");
+        assert!(text.contains("\"x\"") && !text.contains("\"y\""), "the preview read a document the role hides: {text}");
+        assert_eq!(as_t("PUT", "/_transform/tt", &body("dst")).await.status, 200);
+        assert_eq!(as_t("POST", "/_transform/tt/_start", "").await.status, 200);
+        super::trigger(&c, "tt").await;
+        let (_, n) = {
+            let r = crate::rest::handle(&c, EsRequest::new("GET", "/dst/_count?q=a:y")).await;
+            (r.status, crate::json::parse(&r.body).ok().flatten().unwrap_or_default())
+        };
+        assert_eq!(n.get("count").and_then(Value::as_i64), Some(0), "the transform wrote a group the role hides");
+        let r = crate::rest::handle(&c, EsRequest::new("GET", "/dst/_count?q=a:x")).await;
+        assert!(String::from_utf8_lossy(&r.body).contains("\"count\":1"), "{}", String::from_utf8_lossy(&r.body));
+        // An index the caller can only read survives a delete that names it as the destination.
+        assert_eq!(as_t("PUT", "/_transform/k?defer_validation=true", &body("keep")).await.status, 200);
+        as_t("DELETE", "/_transform/k?delete_dest_index=true", "").await;
+        assert_eq!(call(&c, "HEAD", "/keep", "").await, 200, "deleted an index the caller may not delete");
+    }
+
+    /// A transform stops acting once the API key it runs as is invalidated: its next trigger
+    /// fails it without reading or writing, with a reason naming the key and not its secret.
+    #[tokio::test]
+    async fn a_transform_fails_once_its_api_key_is_invalidated() {
+        let c = Arc::new(Cluster::open(ClusterConfig::new("c"), Arc::new(MemoryStore::new())).await.unwrap());
+        assert_eq!(call(&c, "PUT", "/src", r#"{"mappings":{"properties":{"t":{"type":"date"},"a":{"type":"keyword"}}}}"#).await, 200);
+        assert_eq!(call(&c, "PUT", "/src/_doc/1?refresh=true", r#"{"t":"2020-01-01T00:00:00Z","a":"x"}"#).await, 201);
+        let key = crate::rest::handle(&c, EsRequest::json("POST", "/_security/api_key", r#"{"name":"k","role_descriptors":{"r":{"cluster":["manage_transform"],"indices":[{"names":["*"],"privileges":["all"]}]}}}"#.to_string())).await;
+        let key = crate::json::parse(&key.body).ok().flatten().unwrap_or_default();
+        let (id, encoded) = (key.get("id").unwrap().to_es_string(), key.get("encoded").unwrap().to_es_string());
+        let as_key = |method: &str, uri: &str, body: &str| {
+            let mut req = if body.is_empty() { EsRequest::new(method, uri) } else { EsRequest::json(method, uri, body.to_string()) };
+            req.headers.push(("Authorization".into(), format!("ApiKey {encoded}")));
+            crate::rest::handle(&c, req)
+        };
+        let body = r#"{"source":{"index":"src"},"dest":{"index":"dst"},"frequency":"1s","sync":{"time":{"field":"t","delay":"1s"}},"pivot":{"group_by":{"a":{"terms":{"field":"a"}}},"aggs":{"n":{"value_count":{"field":"a"}}}}}"#;
+        assert_eq!(as_key("PUT", "/_transform/tt", body).await.status, 200);
+        assert_eq!(as_key("POST", "/_transform/tt/_start", "").await.status, 200);
+        assert_eq!(roll(&c, "tt", &["checkpoint"]), Some(Value::from(1)));
+
+        assert_eq!(call(&c, "DELETE", "/_security/api_key", &format!(r#"{{"ids":["{id}"]}}"#)).await, 200);
+        assert_eq!(call(&c, "PUT", "/src/_doc/2?refresh=true", r#"{"t":"2020-01-02T00:00:00Z","a":"y"}"#).await, 201);
+        super::trigger(&c, "tt").await;
+        let stats = crate::rest::handle(&c, EsRequest::new("GET", "/_transform/tt/_stats")).await;
+        let stats = crate::json::parse(&stats.body).ok().flatten().unwrap_or_default();
+        let t = stats.get("transforms").and_then(Value::as_array).and_then(|a| a.first()).cloned().unwrap_or_default();
+        assert_eq!(t.get("state").map(Value::to_es_string).as_deref(), Some("failed"), "{stats}");
+        let reason = t.get("reason").map(Value::to_es_string).unwrap_or_default();
+        assert!(reason.contains(&format!("API key [{id}]")) && reason.contains("invalidated"), "{reason}");
+        assert!(!reason.contains(&encoded), "{reason}");
+        assert_eq!(roll(&c, "tt", &["checkpoint"]), Some(Value::from(1)), "it ran after the key was invalidated");
+        assert_eq!(roll(&c, "tt", &["next_run"]), None);
     }
 
     /// Transforms run on the cluster's job scheduler: a batch transform's checkpoint after

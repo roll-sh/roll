@@ -1,0 +1,2279 @@
+{
+  "description" : "analysis-phonetic: every encoder, replace and inject, double metaphone code lengths, Beider-Morse name and rule types and language sets, Daitch-Mokotoff branches, settings errors",
+  "steps" : [
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "soundex"
+          }
+        ],
+        "text" : "Joe Bloggs Moskowitz Müller-Lüdenscheidt d'Artagnan Wright résumé"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "J000",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "B420",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "M232",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "müller",
+            "start_offset" : 21,
+            "end_offset" : 27,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "lüdenscheidt",
+            "start_offset" : 28,
+            "end_offset" : 40,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "D632",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "W623",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "résumé",
+            "start_offset" : 59,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "refined_soundex"
+          }
+        ],
+        "text" : "Joe Bloggs Moskowitz Müller-Lüdenscheidt d'Artagnan Wright résumé"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "J40",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "B17043",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "M803065",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "müller",
+            "start_offset" : 21,
+            "end_offset" : 27,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "lüdenscheidt",
+            "start_offset" : 28,
+            "end_offset" : 40,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "D609604808",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "W090406",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "résumé",
+            "start_offset" : 59,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "caverphone1"
+          }
+        ],
+        "text" : "Joe Bloggs Moskowitz Müller-Lüdenscheidt d'Artagnan Wright résumé"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "Y11111",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "PLKS11",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "MSKWTS",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "ML1111",
+            "start_offset" : 21,
+            "end_offset" : 27,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "TNSKT1",
+            "start_offset" : 28,
+            "end_offset" : 40,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "TTKNN1",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "RT1111",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "SM1111",
+            "start_offset" : 59,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "caverphone2"
+          }
+        ],
+        "text" : "Joe Bloggs Moskowitz Müller-Lüdenscheidt d'Artagnan Wright résumé"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "YA11111111",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "PLKS111111",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "MSKWTS1111",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "MLA1111111",
+            "start_offset" : 21,
+            "end_offset" : 27,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "TNSKT11111",
+            "start_offset" : 28,
+            "end_offset" : 40,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "TTKNN11111",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "RT11111111",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "SM11111111",
+            "start_offset" : 59,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "caverphone"
+          }
+        ],
+        "text" : "Joe Bloggs Moskowitz Müller-Lüdenscheidt d'Artagnan Wright résumé"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "YA11111111",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "PLKS111111",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "MSKWTS1111",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "MLA1111111",
+            "start_offset" : 21,
+            "end_offset" : 27,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "TNSKT11111",
+            "start_offset" : 28,
+            "end_offset" : 40,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "TTKNN11111",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "RT11111111",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "SM11111111",
+            "start_offset" : 59,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "cologne"
+          }
+        ],
+        "text" : "Joe Bloggs Moskowitz Müller-Lüdenscheidt d'Artagnan Wright résumé"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "0",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "1548",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "68438",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "657",
+            "start_offset" : 21,
+            "end_offset" : 27,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "52682",
+            "start_offset" : 28,
+            "end_offset" : 40,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "272466",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "3742",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "786",
+            "start_offset" : 59,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "nysiis"
+          }
+        ],
+        "text" : "Joe Bloggs Moskowitz Müller-Lüdenscheidt d'Artagnan Wright résumé"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "J",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "BLAG",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "MASCAT",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "MÜLAR",
+            "start_offset" : 21,
+            "end_offset" : 27,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "LÜDANS",
+            "start_offset" : 28,
+            "end_offset" : 40,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "DARTAG",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "WRAGT",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "RÉSANÉ",
+            "start_offset" : 59,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "koelnerphonetik"
+          }
+        ],
+        "text" : "Joe Bloggs Moskowitz Müller-Lüdenscheidt d'Artagnan Wright résumé"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "0",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "1548",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "68438",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "657",
+            "start_offset" : 21,
+            "end_offset" : 27,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "52682",
+            "start_offset" : 28,
+            "end_offset" : 40,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "27246_2_07246",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "3742",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "786",
+            "start_offset" : 59,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "haasephonetik"
+          }
+        ],
+        "text" : "Joe Bloggs Moskowitz Müller-Lüdenscheidt d'Artagnan Wright résumé"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "9",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "1548",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "68438",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "657",
+            "start_offset" : 21,
+            "end_offset" : 27,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "52682",
+            "start_offset" : 28,
+            "end_offset" : 40,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "27246_2_97246",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "3742",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "786",
+            "start_offset" : 59,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "metaphone"
+          }
+        ],
+        "text" : "Joe Bloggs Moskowitz Müller-Lüdenscheidt d'Artagnan Wright résumé"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "J",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "BLKS",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "MSKW",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "MLR",
+            "start_offset" : 21,
+            "end_offset" : 27,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "LTNS",
+            "start_offset" : 28,
+            "end_offset" : 40,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "TRTN",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "RT",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "RSM",
+            "start_offset" : 59,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "doubleMetaphone"
+          }
+        ],
+        "text" : "Joe Bloggs Moskowitz Müller-Lüdenscheidt d'Artagnan Wright résumé"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "J",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "A",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "PLKS",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "MSKT",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "MSKF",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "MLR",
+            "start_offset" : 21,
+            "end_offset" : 27,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "LTNX",
+            "start_offset" : 28,
+            "end_offset" : 40,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "TRTN",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "TRTK",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "RT",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "RSM",
+            "start_offset" : 59,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "refinedSoundex"
+          }
+        ],
+        "text" : "Joe Bloggs Moskowitz Müller-Lüdenscheidt d'Artagnan Wright résumé"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "J40",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "B17043",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "M803065",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "müller",
+            "start_offset" : 21,
+            "end_offset" : 27,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "lüdenscheidt",
+            "start_offset" : 28,
+            "end_offset" : 40,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "D609604808",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "W090406",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "résumé",
+            "start_offset" : 59,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          {
+            "type" : "phonetic",
+            "encoder" : "soundex",
+            "replace" : false
+          }
+        ],
+        "text" : "Joe Bloggs Moskowitz Müller-Lüdenscheidt d'Artagnan Wright résumé"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "J000",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "Joe",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "B420",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "Bloggs",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "M232",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "Moskowitz",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "Müller",
+            "start_offset" : 21,
+            "end_offset" : 27,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "Lüdenscheidt",
+            "start_offset" : 28,
+            "end_offset" : 40,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "D632",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "d'Artagnan",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "W623",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "Wright",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "résumé",
+            "start_offset" : 59,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "double_metaphone",
+            "replace" : false
+          }
+        ],
+        "text" : "Joe Bloggs Moskowitz Müller-Lüdenscheidt d'Artagnan Wright résumé"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "joe",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "J",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "A",
+            "start_offset" : 0,
+            "end_offset" : 3,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "bloggs",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "PLKS",
+            "start_offset" : 4,
+            "end_offset" : 10,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "moskowitz",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "MSKT",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "MSKF",
+            "start_offset" : 11,
+            "end_offset" : 20,
+            "type" : "<ALPHANUM>",
+            "position" : 2
+          },
+          {
+            "token" : "müller",
+            "start_offset" : 21,
+            "end_offset" : 27,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "MLR",
+            "start_offset" : 21,
+            "end_offset" : 27,
+            "type" : "<ALPHANUM>",
+            "position" : 3
+          },
+          {
+            "token" : "lüdenscheidt",
+            "start_offset" : 28,
+            "end_offset" : 40,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "LTNX",
+            "start_offset" : 28,
+            "end_offset" : 40,
+            "type" : "<ALPHANUM>",
+            "position" : 4
+          },
+          {
+            "token" : "d'artagnan",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "TRTN",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "TRTK",
+            "start_offset" : 41,
+            "end_offset" : 51,
+            "type" : "<ALPHANUM>",
+            "position" : 5
+          },
+          {
+            "token" : "wright",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "RT",
+            "start_offset" : 52,
+            "end_offset" : 58,
+            "type" : "<ALPHANUM>",
+            "position" : 6
+          },
+          {
+            "token" : "résumé",
+            "start_offset" : 59,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          },
+          {
+            "token" : "RSM",
+            "start_offset" : 59,
+            "end_offset" : 65,
+            "type" : "<ALPHANUM>",
+            "position" : 7
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "double_metaphone",
+            "max_code_len" : 10
+          }
+        ],
+        "text" : "Schwarzenegger Thompson"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "XRSNKR",
+            "start_offset" : 0,
+            "end_offset" : 14,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "XFRTSNKR",
+            "start_offset" : 0,
+            "end_offset" : 14,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "TMPSN",
+            "start_offset" : 15,
+            "end_offset" : 23,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "daitch_mokotoff",
+            "replace" : false
+          }
+        ],
+        "text" : "Moskowitz Peters"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "moskowitz",
+            "start_offset" : 0,
+            "end_offset" : 9,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "645740",
+            "start_offset" : 0,
+            "end_offset" : 9,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "peters",
+            "start_offset" : 10,
+            "end_offset" : 16,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "734000",
+            "start_offset" : 10,
+            "end_offset" : 16,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "739400",
+            "start_offset" : 10,
+            "end_offset" : 16,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "beider_morse"
+          }
+        ],
+        "text" : "Schwarz d'Artagnan"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "svYrts",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "svarts",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "svorts",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "YrtYgnan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "YrtYgnon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "Yrtagnan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "Yrtagnon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "Yrtognan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "Yrtognon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "artYgnan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "artYgnon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "artagnan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "artagnon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "artanan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "artanian",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "artanion",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "artanon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "artognan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "artognon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "artonan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "artonian",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "artonion",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "artonon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ortYgnan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ortYgnon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ortagnan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ortagnon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ortanan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ortanian",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ortanion",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ortanon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ortognan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ortognon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ortonan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ortonian",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ortonion",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ortonon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dYrtYgnan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dYrtYgnon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dYrtagnan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dYrtagnon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dYrtognan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dYrtognon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dartYgnan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dartYgnon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dartagnan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dartagnon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dartanan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dartanian",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dartanion",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dartanon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dartognan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dartognon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dartonan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dartonian",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dartonion",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dartonon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dortYgnan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dortYgnon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dortagnan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dortagnon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dortanan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dortanian",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dortanion",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dortanon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dortognan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dortognon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dortonan",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dortonian",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dortonion",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "dortonon",
+            "start_offset" : 8,
+            "end_offset" : 18,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "bm",
+            "rule_type" : "exact",
+            "name_type" : "sephardic"
+          }
+        ],
+        "text" : "Schwarz Hernandez"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "SvarS",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "Svars",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "Svarts",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "dZvars",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "tSvars",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "ernandeS",
+            "start_offset" : 8,
+            "end_offset" : 17,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ernandes",
+            "start_offset" : 8,
+            "end_offset" : 17,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          },
+          {
+            "token" : "ernandets",
+            "start_offset" : 8,
+            "end_offset" : 17,
+            "type" : "<ALPHANUM>",
+            "position" : 1
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "beider_morse",
+            "languageset" : [
+              "german",
+              "english"
+            ]
+          }
+        ],
+        "text" : "Schwarz"
+      },
+      "status" : 200,
+      "response" : {
+        "tokens" : [
+          {
+            "token" : "svYrS",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "svYrs",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "svYrts",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "svarS",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "svars",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "svarts",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "svorS",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "svors",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "svorts",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "swarS",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "swars",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "sworS",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          },
+          {
+            "token" : "swors",
+            "start_offset" : 0,
+            "end_offset" : 7,
+            "type" : "<ALPHANUM>",
+            "position" : 0
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "beider_morse",
+            "name_type" : "ashkenazi",
+            "languageset" : [
+              "arabic"
+            ]
+          }
+        ],
+        "text" : "Schwarz"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No rules found for ash, rules, arabic."
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No rules found for ash, rules, arabic."
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          {
+            "type" : "phonetic",
+            "encoder" : "foo"
+          }
+        ],
+        "text" : "x"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "unknown encoder [foo] for phonetic token filter"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "unknown encoder [foo] for phonetic token filter"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          {
+            "type" : "phonetic",
+            "encoder" : "beider_morse",
+            "rule_type" : "loose"
+          }
+        ],
+        "text" : "x"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "No matching rule type [loose] for beider morse encoder"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "No matching rule type [loose] for beider morse encoder"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          {
+            "type" : "phonetic",
+            "encoder" : "double_metaphone",
+            "max_code_len" : 0
+          }
+        ],
+        "text" : "x"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "encoder error"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "encoder error"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          {
+            "type" : "phonetic",
+            "encoder" : "bm",
+            "name_type" : "other"
+          }
+        ],
+        "text" : "x"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "encoder error"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "encoder error"
+        },
+        "status" : 400
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /_analyze",
+      "body" : {
+        "tokenizer" : "standard",
+        "filter" : [
+          "lowercase",
+          {
+            "type" : "phonetic",
+            "encoder" : "metaphone"
+          }
+        ],
+        "text" : "Joe",
+        "explain" : true
+      },
+      "status" : 200,
+      "response" : {
+        "detail" : {
+          "custom_analyzer" : true,
+          "charfilters" : [ ],
+          "tokenizer" : {
+            "name" : "standard",
+            "tokens" : [
+              {
+                "token" : "Joe",
+                "start_offset" : 0,
+                "end_offset" : 3,
+                "type" : "<ALPHANUM>",
+                "position" : 0,
+                "bytes" : "[4a 6f 65]",
+                "positionLength" : 1,
+                "termFrequency" : 1
+              }
+            ]
+          },
+          "tokenfilters" : [
+            {
+              "name" : "lowercase",
+              "tokens" : [
+                {
+                  "token" : "joe",
+                  "start_offset" : 0,
+                  "end_offset" : 3,
+                  "type" : "<ALPHANUM>",
+                  "position" : 0,
+                  "bytes" : "[6a 6f 65]",
+                  "positionLength" : 1,
+                  "termFrequency" : 1
+                }
+              ]
+            },
+            {
+              "name" : "__anonymous__phonetic",
+              "tokens" : [
+                {
+                  "token" : "J",
+                  "start_offset" : 0,
+                  "end_offset" : 3,
+                  "type" : "<ALPHANUM>",
+                  "position" : 0,
+                  "bytes" : "[4a]",
+                  "positionLength" : 1,
+                  "termFrequency" : 1
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+# Products' admin-only refusals, and a request that reaches each one.
+#
+# A scoped token reaches a product as its operator (the gate decided already), so a product's
+# "needs the admin token" check passes for whatever the catalogue lets through: the request that
+# reaches it must be classified admin there, or a write or deploy token gets past it.
+# `tests/admin_only.rs` finds every such message in crates/*/src and fails when one isn't listed
+# here, or when the catalogue doesn't classify its request admin.
+#
+# message | METHOD path | JSON body (or -)
+listing GitHub installations needs the admin token | GET /v1/code/github/installations | -
+creating owners needs the admin token | POST /v1/code/owners | {"name": "acme"}
+connecting a GitHub repository needs the admin token | POST /v1/code/repos | {"name": "web", "source": {"github": {"repo": "a/b"}}}
+landing a change that adds a secret's value needs the admin token | POST /v1/code/changes/chg_1/land | {"bypass": true}
+bypassing the merge queue needs the admin token | POST /v1/code/repos/acme/web/land | {"bypass": true}
+landing without the reviews this repo requires needs the admin token | POST /v1/code/changes/chg_1/land | {"bypass": true}

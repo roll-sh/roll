@@ -366,6 +366,7 @@ impl Previews {
             // `idle` without a byte, if this node is gone and can't stop it.
             deadline: self.cfg.idle + Duration::from_secs(120),
             cache: None,
+            network: None,
         };
         {
             let tree = code.checkout(&repo.id, &head).await?;
@@ -699,6 +700,7 @@ mod tests {
             github_url: None,
             trusted: true,
             run_approved: false,
+            outside: false,
             draft: false,
             labels: Vec::new(),
             checks: Vec::new(),

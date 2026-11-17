@@ -3,13 +3,11 @@ import { useReducedMotion } from "@roll/brand";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { appsApi, SERVICE_NAME, type Build, type Environment, type Prices, type Reset, type Run, type Service, type ServicePatch, type Source } from "@/lib/apps-api";
 import { Field, Segmented } from "../redis/shared";
-import { btn, Confirm, danger, input, Panel, primary } from "../ui";
+import { btn, Confirm, danger, input, Panel, panel, primary } from "../ui";
+import { Link } from "@/components/link";
 import { ActivityPanel } from "./activity";
-import { DrainsPanel } from "./drains";
 import { DuplicatePanel } from "./duplicate";
 import { EnvironmentPanel, InstancesPanel } from "./environment";
-import { NotificationsPanel } from "./notifications";
-import { SpendPanel } from "./spend";
 import { resourceKey } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { CPU, MEMORY, mb, type Runner } from "./shared";
@@ -20,6 +18,8 @@ interface Form {
   name: string;
   sourceKind: Source["kind"];
   repo: string;
+  /** A Git source's URL. */
+  url: string;
   root: string;
   image: string;
   builder: Build["builder"];
@@ -53,6 +53,7 @@ interface Form {
   alertMemory: string;
   alertErrors: string;
   alertP95: string;
+  alertCapacity: string;
   alertLog: string;
   alertLogCount: string;
   rolloutSteps: string;
@@ -81,7 +82,8 @@ export function formOf(s: Service): Form {
     name: s.name,
     sourceKind: s.source.kind,
     repo: s.source.kind === "repo" ? s.source.repo : "",
-    root: s.source.kind === "repo" ? str(s.source.root) : "",
+    url: s.source.kind === "git" ? s.source.url : "",
+    root: s.source.kind === "repo" || s.source.kind === "git" ? str(s.source.root) : "",
     image: s.source.kind === "image" ? s.source.image : "",
     builder: s.build.builder,
     dockerfile: str(s.build.dockerfile),
@@ -111,6 +113,7 @@ export function formOf(s: Service): Form {
     alertMemory: str(s.run.alerts?.memory_pct),
     alertErrors: str(s.run.alerts?.error_pct),
     alertP95: str(s.run.alerts?.p95_ms),
+    alertCapacity: str(s.run.alerts?.capacity_pct),
     alertLog: s.run.alerts?.log_match ?? "",
     alertLogCount: str(s.run.alerts?.log_count ?? 10),
     rolloutSteps: (s.run.rollout?.steps ?? []).join(", "),
@@ -140,13 +143,15 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   const text = (v: string) => (v.trim() ? v.trim() : null);
   const num = (v: string) => (v.trim() ? Number(v) : null);
   if (f.name !== before.name) patch.name = f.name;
-  if (f.sourceKind !== before.sourceKind || f.repo !== before.repo || f.root !== before.root || f.image !== before.image)
+  if (f.sourceKind !== before.sourceKind || f.repo !== before.repo || f.url !== before.url || f.root !== before.root || f.image !== before.image)
     patch.source =
       f.sourceKind === "repo"
         ? { kind: "repo", repo: f.repo.trim(), ...(f.root.trim() ? { root: f.root.trim() } : {}) }
-        : f.sourceKind === "image"
-          ? { kind: "image", image: f.image.trim() }
-          : { kind: "upload" };
+        : f.sourceKind === "git"
+          ? { kind: "git", url: f.url.trim(), ...(f.root.trim() ? { root: f.root.trim() } : {}) }
+          : f.sourceKind === "image"
+            ? { kind: "image", image: f.image.trim() }
+            : { kind: "upload" };
   const build: Reset<Build> = {};
   if (f.builder !== before.builder) build.builder = f.builder;
   if (f.dockerfile !== before.dockerfile) build.dockerfile = text(f.dockerfile);
@@ -181,11 +186,12 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.healthTimeout !== before.healthTimeout) run.health_timeout_s = num(f.healthTimeout);
   if (f.drain !== before.drain) run.drain_s = num(f.drain);
   if (f.cpuTarget !== before.cpuTarget) run.cpu_target = num(f.cpuTarget);
-  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount)
+  if (f.alertMemory !== before.alertMemory || f.alertErrors !== before.alertErrors || f.alertP95 !== before.alertP95 || f.alertCapacity !== before.alertCapacity || f.alertLog !== before.alertLog || f.alertLogCount !== before.alertLogCount)
     run.alerts = {
       memory_pct: Number(f.alertMemory) || 0,
       error_pct: Number(f.alertErrors) || 0,
       p95_ms: Number(f.alertP95) || 0,
+      capacity_pct: Number(f.alertCapacity) || 0,
       ...(f.alertLog.trim() ? { log_match: f.alertLog.trim() } : {}),
       log_count: Number(f.alertLogCount) || 10,
     };
@@ -210,7 +216,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -266,11 +272,7 @@ export function SettingsTab({
     ...(web ? ([["networking", "Networking"], ["rollout", "Rollout"]] as [string, string][]) : []),
     ...(env ? ([["environment", "Environment"]] as [string, string][]) : []),
   ];
-  const project: [string, string][] = [
-    ["notifications", "Notifications"],
-    ["drains", "Log drains"],
-    ["spend", "Spend limits"],
-  ];
+  const project: [string, string][] = [["project", "Notifications and limits"]];
 
   return (
     <div className="lg:grid lg:grid-cols-[9.5rem_minmax(0,1fr)] lg:gap-8">
@@ -286,6 +288,7 @@ export function SettingsTab({
                 value={form.sourceKind}
                 options={[
                   { label: "repo", value: "repo" },
+                  { label: "git url", value: "git" },
                   { label: "image", value: "image" },
                   { label: "upload", value: "upload" },
                 ]}
@@ -302,6 +305,16 @@ export function SettingsTab({
                 </Field>
               </>
             )}
+            {form.sourceKind === "git" && (
+              <>
+                <Field label="Git URL" hint="each new commit on the branch deploys (a private one: its login below)">
+                  {t("url", "https://github.com/owner/name")}
+                </Field>
+                <Field label="Root directory" hint="optional">
+                  {t("root", "apps/web")}
+                </Field>
+              </>
+            )}
             {form.sourceKind === "image" && (
               <Field label="Image" hint="its digest is pinned per deploy">
                 {t("image", "docker.io/library/nginx:1.27")}
@@ -310,6 +323,7 @@ export function SettingsTab({
             {form.sourceKind === "upload" && <p className="self-end text-[12px] text-subtle">Deploys come from `roll up`.</p>}
           </Grid>
           {service.source.kind === "image" && <RegistryLogin service={service} runner={runner} />}
+          {service.source.kind === "git" && <GitLogin service={service} runner={runner} />}
         </Section>
 
         {form.sourceKind !== "image" && (
@@ -341,13 +355,13 @@ export function SettingsTab({
               <Field label="System packages" hint="installed in the generated image (apt, or apk on Alpine)">
                 {t("packages", "ffmpeg chromium")}
               </Field>
-              {form.sourceKind === "repo" && (
+              {(form.sourceKind === "repo" || form.sourceKind === "git") && (
                 <Field label="Watch paths" hint="a push deploys only when it changes one">
                   {t("watch", "apps/web/**, packages/ui/**")}
                 </Field>
               )}
             </Grid>
-            {service.source.kind === "repo" && env && (
+            {(service.source.kind === "repo" || service.source.kind === "git") && env && (
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-5 py-4">
                 <p className="text-[13px] text-muted">For a build a stale cached layer keeps breaking: no cached layers, base images pulled again, the dependency caches empty.</p>
                 <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("deploy", () => appsApi.deploy(service.id, env.name, { no_cache: true }))}>
@@ -511,6 +525,9 @@ export function SettingsTab({
                 <Field label="Alert: p95 latency (ms)" hint="in three of five minutes; 0 off">
                   {t("alertP95", "0")}
                 </Field>
+                <Field label="Alert: over capacity (%)" hint="of five minutes' requests finding every instance busy at max instances; 0 off">
+                  {t("alertCapacity", "10")}
+                </Field>
               </>
             )}
             <Field label="Alert: memory (%)" hint="of its limit, five minutes; 0 off">
@@ -626,16 +643,14 @@ export function SettingsTab({
           </Anchor>
         )}
 
-        <Anchor id="notifications">
-          <NotificationsPanel project={service.project} projectName={projectName} runner={runner} />
-        </Anchor>
-
-        <Anchor id="drains">
-          <DrainsPanel project={service.project} projectName={projectName} runner={runner} />
-        </Anchor>
-
-        <Anchor id="spend">
-          <SpendPanel project={service.project} projectName={projectName} runner={runner} />
+        {/* The project's, not this service's: said once, where they live. */}
+        <Anchor id="project">
+          <section className={`${panel} flex flex-wrap items-center justify-between gap-3 px-5 py-4`}>
+            <p className="text-[13px] text-muted">Notifications, log drains and spend limits are {projectName}'s, shared by its services.</p>
+            <Link href={`/dashboard/projects/${service.project}?settings=services`} className={btn}>
+              {projectName}'s settings
+            </Link>
+          </section>
         </Anchor>
 
         <Anchor id="activity">
@@ -787,6 +802,49 @@ function Estimate({ prices, cpu, memoryMb, min }: { prices: Prices; cpu: number;
 }
 
 const Grid = ({ children }: { children: ReactNode }) => <div className="grid gap-x-3 gap-y-4 p-5 sm:grid-cols-2 lg:grid-cols-3">{children}</div>;
+
+/** A private Git repository's login (GitLab's deploy token, Bitbucket's app password, an access
+ *  token): write-only, and sent only to the source URL's host. */
+function GitLogin({ service, runner }: { service: Service; runner: Runner }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const l = service.git_login;
+  return (
+    <div className="border-t border-line px-5 py-4">
+      <p className="text-[13px] font-medium">Private repository</p>
+      {l ? (
+        <div className="mt-2 flex flex-wrap items-center gap-3 text-[13px] text-muted">
+          <span>
+            Fetches as <span className="font-mono text-fg">{l.username}</span> from <span className="font-mono text-fg">{l.host}</span>
+          </span>
+          <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => void runner.run("git-login", () => appsApi.deleteGitLogin(service.id))}>
+            Remove
+          </button>
+        </div>
+      ) : (
+        <form
+          className="mt-2 flex flex-wrap items-end gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void runner.run("git-login", () => appsApi.putGitLogin(service.id, { username, password })).then((ok) => {
+              if (ok) {
+                setUsername("");
+                setPassword("");
+              }
+            });
+          }}
+        >
+          <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" aria-label="Git username" autoComplete="off" spellCheck={false} className={`${input} w-44 font-mono text-[12px]`} />
+          <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="token or app password" aria-label="Git token" autoComplete="new-password" className={`${input} w-56 font-mono text-[12px]`} />
+          <button type="submit" className={primary} disabled={!username || !password || runner.busy !== null}>
+            Save login
+          </button>
+          <span className="text-[12px] text-subtle">Sealed; sent only to this repository's host.</span>
+        </form>
+      )}
+    </div>
+  );
+}
 
 /** A private registry's login for the image: write-only (the password never comes back). */
 function RegistryLogin({ service, runner }: { service: Service; runner: Runner }) {

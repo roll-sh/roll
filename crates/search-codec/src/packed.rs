@@ -206,6 +206,16 @@ enum Enc {
     Linear { table: Slice },
 }
 
+/// Replaces each slot by `put` of the packed value at its index (`index`), through a
+/// [`direct::Unpacker`] where the width allows.
+#[inline(always)]
+fn unpack_each<T: Copy>(data: &[u8], bits: u32, slots: &mut [T], index: impl Fn(T) -> u64, put: impl Fn(u64) -> T) {
+    match direct::Unpacker::new(data, bits) {
+        Some(u) => slots.iter_mut().for_each(|s| *s = put(u.get(index(*s)))),
+        None => slots.iter_mut().for_each(|s| *s = put(direct::get(data, bits, index(*s)))),
+    }
+}
+
 /// Random access to values written by [`write_numeric`].
 #[derive(Clone, Debug)]
 pub struct NumericValues {
@@ -362,46 +372,38 @@ impl NumericValues {
     pub fn gather<T: Copy>(&self, slots: &mut [T], index: impl Fn(T) -> u64, value: impl Fn(i64) -> T) {
         match &self.enc {
             Enc::Const(v) => slots.iter_mut().for_each(|s| *s = value(*v)),
-            Enc::Table { table, bits } => {
-                for s in slots.iter_mut() {
-                    let i = direct::get(&self.data, *bits, index(*s)) as usize;
-                    *s = value(table.get(i).copied().unwrap_or(0));
-                }
-            }
+            Enc::Table { table, bits } => unpack_each(&self.data, *bits, slots, index, |q| value(table.get(q as usize).copied().unwrap_or(0))),
             Enc::Gcd { min, gcd, bits } => {
                 let (min, gcd, bits) = (*min as u64, *gcd, *bits);
                 if gcd == 1 {
-                    for s in slots.iter_mut() {
-                        *s = value(min.wrapping_add(direct::get(&self.data, bits, index(*s))) as i64);
-                    }
+                    unpack_each(&self.data, bits, slots, index, |q| value(min.wrapping_add(q) as i64));
                 } else {
-                    for s in slots.iter_mut() {
-                        let q = direct::get(&self.data, bits, index(*s));
-                        *s = value(min.wrapping_add(q.wrapping_mul(gcd)) as i64);
-                    }
+                    unpack_each(&self.data, bits, slots, index, |q| value(min.wrapping_add(q.wrapping_mul(gcd)) as i64));
                 }
             }
             Enc::Blocks { gcd, table } => {
-                // Batches are mostly ascending: decode a block's header only when it changes.
-                let mut cur = usize::MAX;
-                let (mut bmin, mut bits, mut data): (u64, u32, &[u8]) = (0, 0, &[]);
-                for s in slots.iter_mut() {
-                    let i = index(*s);
-                    let b = (i >> BLOCK_SHIFT) as usize;
-                    if b != cur {
-                        cur = b;
-                        match table.get(b * 17..b * 17 + 17) {
-                            Some(e) => {
-                                bmin = i64::from_le_bytes(e[0..8].try_into().unwrap()) as u64;
-                                bits = e[8] as u32;
-                                let off = u64::from_le_bytes(e[9..17].try_into().unwrap()) as usize;
-                                data = &self.data[off.min(self.data.len())..];
-                            }
-                            None => (bmin, bits, data) = (0, 0, &[]),
+                // Batches are mostly ascending: each run of slots in one block reads its header
+                // once and unpacks in a loop of its own.
+                let gcd = *gcd;
+                let mut k = 0;
+                while k < slots.len() {
+                    let b = index(slots[k]) >> BLOCK_SHIFT;
+                    let end = k + 1 + slots[k + 1..].iter().take_while(|s| index(**s) >> BLOCK_SHIFT == b).count();
+                    let (bmin, bits, data) = match table.get(b as usize * 17..b as usize * 17 + 17) {
+                        Some(e) => {
+                            let off = u64::from_le_bytes(e[9..17].try_into().unwrap()) as usize;
+                            (i64::from_le_bytes(e[0..8].try_into().unwrap()) as u64, e[8] as u32, &self.data[off.min(self.data.len())..])
                         }
+                        None => (0, 0, &[][..]),
+                    };
+                    let local = |s: T| index(s) & (BLOCK_SIZE as u64 - 1);
+                    let put = |q: u64| value(bmin.wrapping_add(q.wrapping_mul(gcd)) as i64);
+                    let run = &mut slots[k..end];
+                    match direct::Unpacker::new(data, bits) {
+                        Some(u) => run.iter_mut().for_each(|s| *s = put(u.get(local(*s)))),
+                        None => run.iter_mut().for_each(|s| *s = put(direct::get(data, bits, local(*s)))),
                     }
-                    let q = direct::get(data, bits, i & (BLOCK_SIZE as u64 - 1));
-                    *s = value(bmin.wrapping_add(q.wrapping_mul(*gcd)) as i64);
+                    k = end;
                 }
             }
             Enc::Linear { table } => {

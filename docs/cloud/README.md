@@ -451,7 +451,7 @@ The contract between the stack, the image and rolld. Each setting is a flag with
 | `ROLL_STREAM_ACK_LINGER_MS` | `50` | how long a stream's owner gathers appends before writing its write-ahead log object: `acks=all` latency against S3 PUTs (at most one per busy stream per round) |
 | `ROLL_PRODUCTS` | `redis,streams,tasks,storage,nosql,queues,code,search` | the products the node runs (see "Products"); Postgres is off until its engine runs in process |
 | `ROLL_S3_BUCKET`, `AWS_REGION` | `roll-cloud-data-<account>`, `us-east-1` | all product data, under per-product prefixes |
-| `ROLL_SECRET_KEY` | from Secrets Manager | seals owners' keys, the stored certificates and accounts' TOTP seeds |
+| `ROLL_SECRET_KEY` | from Secrets Manager | seals owners' keys, the stored certificates, accounts' TOTP seeds and search clusters' stored secrets (watch passwords, connector and Fleet secrets) |
 | `ROLL_ADMIN_TOKEN` | from Secrets Manager | the operator token every control-plane API accepts |
 | `ROLL_ACCOUNTS_MAIL_FROM` | the stack's `MailFrom` (unset: no mail) | sign-in codes and invites through SES v2 from this address (docs/accounts.md) |
 | `ROLL_ACCOUNTS_OUTBOX` | never set | writes mail to a directory instead: local development and tests only |
@@ -550,13 +550,15 @@ turns them into metrics without an API call from the node. Namespace `RollCloud`
 | `HandoffFailures` | Count | `service` | handoffs that timed out with requests in flight, whose release didn't reach the backend, or that a drain left behind |
 | `LeaseTakeovers` | Count | `service` | leases taken from a holder that never released them (it died or was cut off) |
 | `LeasesFenced` | Count | `service` | leases this node stopped using because it couldn't renew them in time |
+| `PreviewConverges`, `PreviewConvergeFailures` | Count | `service` | roll previews' converges on this node, and those that failed (retried with backoff) |
+| `PreviewScreenshots`, `PreviewScreenshotFailures` | Count | `service` | previews' screenshot runs kept, and those that failed (`roll_previews::Engine::stats`) |
 
 Forwarded requests carry no metrics: the node that received them counted them. The lease
 counters come from `roll_cluster::Cluster::stats` (roll-cluster has no AWS code).
 
 Alarms (`deploy/cloud/README.md`, "Alarms"): `errors` on `Http5xx`; `latency` on the slowest
 p99 of code, postgres, redis, storage, nosql and tasks (streams and queues long-poll, and git
-pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on any.
+pushes take as long as the pack); `handoff-failures` and `lease-takeovers` on any; `preview-converge-failures` and `preview-screenshot-failures` on most of a quarter-hour's runs failing (roll previews' `PreviewConvergeFailures`/`PreviewScreenshotFailures` over their runs), never rolling a deploy back.
 
 ## Redis on the fleet
 

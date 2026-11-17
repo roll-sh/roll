@@ -39,6 +39,9 @@ pub struct ArchivedEnvironment {
     pub expires_at: Option<i64>,
     #[serde(default)]
     pub trusted: bool,
+    /// An ephemeral environment's branched resources: restored with it, or it isn't restored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<crate::Branch>,
     #[serde(default)]
     pub protected: bool,
     #[serde(default)]
@@ -130,6 +133,7 @@ impl Secrets {
                     labels: e.labels.clone(),
                     expires_at: e.expires_at,
                     trusted: e.trusted,
+                    branches: e.branches.clone(),
                     protected: e.protected,
                     approvals: e.approvals,
                     approvers: e.approvers.clone(),
@@ -169,7 +173,7 @@ impl Secrets {
         let mut order: Vec<&ArchivedEnvironment> = archive.environments.iter().filter(|e| e.kind == Kind::Standard).collect();
         order.extend(archive.environments.iter().filter(|e| e.kind == Kind::Ephemeral));
         for e in &order {
-            let ensure = crate::Ensure { name: Some(e.name.clone()), kind: Some(e.kind), base: e.base.clone(), labels: Some(e.labels.clone()), expires_at: e.expires_at, trusted: e.trusted, ..Default::default() };
+            let ensure = crate::Ensure { name: Some(e.name.clone()), kind: Some(e.kind), base: e.base.clone(), labels: Some(e.labels.clone()), expires_at: e.expires_at, trusted: e.trusted, branches: (!e.branches.is_empty()).then(|| e.branches.clone()), ..Default::default() };
             match self.ensure_environment(project, &e.slug, ensure, caller) {
                 Ok(_) => environments += 1,
                 Err(err) => {

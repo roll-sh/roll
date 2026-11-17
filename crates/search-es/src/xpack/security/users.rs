@@ -89,17 +89,23 @@ fn principal_of(user: &Value, realm_name: &'static str, realm_type: &'static str
         metadata: user.get("metadata").cloned().unwrap_or_else(Value::object),
         realm_name,
         realm_type,
+        authenticating: None,
         kind: super::AuthKind::Realm,
     }
 }
 
 /// Checks a password against the cache, then the stored hash.
 fn check_password(cluster: &Cluster, user: &str, password: &str, stored: &str) -> bool {
+    check_password_with(cluster, user, password, stored, super::verify_password)
+}
+
+/// [`check_password`] with a verifier of the stored hash's format.
+pub(super) fn check_password_with(cluster: &Cluster, user: &str, password: &str, stored: &str, verify: fn(&str, &str) -> bool) -> bool {
     let key = super::digest(&[user.as_bytes(), password.as_bytes(), stored.as_bytes()]);
     if cluster.xpack.verified.lock().contains(&key) {
         return true;
     }
-    if !super::verify_password(password, stored) {
+    if !verify(password, stored) {
         return false;
     }
     let mut cache = cluster.xpack.verified.lock();
@@ -165,6 +171,28 @@ pub fn lookup_user(cluster: &Cluster, name: &str) -> Option<Principal> {
     }
     let u = st.metadata.xpack.get(USERS, name)?;
     (u.get("enabled").and_then(Value::as_bool) != Some(false)).then(|| principal_of(u, "default_native", "native"))
+}
+
+/// The `_source` of a native user's document in the security index (`user-<name>`), as
+/// Elasticsearch stores it (`password`: the hash). roll keeps users in the x-pack store, so
+/// this is how a get of that document reads it; the request was authorized for the
+/// (restricted) security index first.
+pub fn security_document(st: &crate::meta::ClusterState, index: &str, id: &str) -> Option<Value> {
+    if store::home_index(USERS) != Some(index) {
+        return None;
+    }
+    let u = st.metadata.xpack.get(USERS, id.strip_prefix("user-")?)?;
+    let field = |k: &str| u.get(k).cloned().unwrap_or(Value::Null);
+    Some(obj! {
+        "username" => field("username"),
+        "password" => field("password_hash"),
+        "roles" => field("roles"),
+        "full_name" => field("full_name"),
+        "email" => field("email"),
+        "metadata" => u.get("metadata").cloned().unwrap_or_else(Value::object),
+        "enabled" => u.get("enabled").cloned().unwrap_or(Value::Bool(true)),
+        "type" => "user",
+    })
 }
 
 /// A user as `GET _security/user` prints it.
