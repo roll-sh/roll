@@ -324,7 +324,9 @@ impl Engine {
         // preview nobody converges any more lets it lapse.
         let trusted = s.secrets.allow_production && r.trusted;
         let expires_at = self.store.now_ms()? + SECRETS_ENV_MARGIN_MS;
-        self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, trusted, expires_at).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // What it branched: roll secrets resolves nothing of those parents' (`followed`).
+        let branched: Vec<(Kind, String)> = self.store.resources(&r.id)?.into_iter().map(|x| (x.kind, x.parent)).collect();
+        self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, trusted, expires_at, &branched).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
 
         // 3b. The project's seed, once on fresh data, before anything serves it.
         if let Some(seed) = &s.seed
