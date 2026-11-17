@@ -1243,10 +1243,19 @@ impl Apps {
         self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
         let closed_vars = env_row.egress.closed().then(|| resolved.without_secrets());
         let mut build_env = resolved.vars;
-        // A closed environment's build still has the default network (BuildKit builds on no
-        // other but `host` and `none`), so it gets no secret value: none of what roll's logs hide
-        // (sealed and roll secrets values, links' credentials, URL passwords), nor a variable that
-        // holds one. Its code can't send what it never has.
+        // A closed environment builds on a network of its project's own with no route out and no
+        // way to the host (`Runtime::build_egress`): its steps reach public hosts only, through
+        // roll's proxy (packages, base images), never the node's services, private ranges or its
+        // metadata. It still gets no secret value: none of what roll's logs hide (sealed and roll
+        // secrets values, links' credentials, URL passwords), nor a variable that holds one. Its
+        // code can't send what it never has.
+        let build_egress = match env_row.egress.closed() {
+            true => self.deps.runtime.build_egress(&svc.project).await.map_err(|e| anyhow::anyhow!("a closed build's network: {e:#}"))?,
+            false => None,
+        };
+        if build_egress.is_some() {
+            log.line("a closed environment builds on a network of its own: out only through roll's proxy, to public hosts");
+        }
         if let Some(kept) = closed_vars {
             let before = build_env.len();
             build_env = kept;
@@ -1379,6 +1388,7 @@ impl Apps {
             // A stage of the tree's own Dockerfile; a generated one's are roll's.
             target: svc.build.target.clone().filter(|_| plan.provider == apps_build::Provider::Dockerfile),
             layers,
+            egress: build_egress,
         };
         // The same inputs built before in this project (Railway's skipped builds): the same tree,
         // Dockerfile, target and build variables, and its image still kept. Never with `no_cache`.

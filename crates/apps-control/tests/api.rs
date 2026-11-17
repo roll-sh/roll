@@ -3032,8 +3032,9 @@ async fn a_moved_base_image_is_said_and_built_again() {
     assert!(w.fake.built.lock().last().unwrap().0, "without the cache");
 }
 
-/// A closed environment's build gets none of its secret values (a build has the default network,
-/// so a fork's build step can't send them out), only the rest; its instances still get them all.
+/// A closed environment builds on its project's closed build network (out only through roll's
+/// proxy, to public hosts) and gets none of its secret values, only the rest; its instances still
+/// get them all. An open one builds on the default network.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_closed_environments_build_gets_no_secret_values() {
     let w = world().await;
@@ -3050,6 +3051,8 @@ async fn a_closed_environments_build_gets_no_secret_values() {
     settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     let vars = w.fake.build_vars.lock().last().cloned().unwrap();
     assert!(vars.contains(&"GREETING".to_string()) && !vars.contains(&"API_TOKEN".to_string()) && !vars.contains(&"DATABASE_URL".to_string()), "{vars:?}");
+    let nets = w.fake.build_networks.lock().clone();
+    assert_eq!((nets.first(), nets.last()), (Some(&None), Some(&Some(format!("roll-apps-build-{}", w.project.strip_prefix("prj_").unwrap_or(&w.project))))), "{nets:?}");
 }
 
 /// A build whose inputs were built before in the project is skipped (Railway's skipped builds):

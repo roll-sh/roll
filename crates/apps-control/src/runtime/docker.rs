@@ -933,6 +933,37 @@ impl Runtime for Docker {
         Ok(super::egress::proxy_url(network, hosts))
     }
 
+    async fn build_egress(&self, project: &str) -> anyhow::Result<Option<super::BuildEgress>> {
+        if self.egress.is_none() {
+            return Ok(None);
+        }
+        let network = build_network_name(project);
+        // No route out, and no address of the host's on it (Docker 28's isolated gateway): a
+        // step reaches neither the host's services nor its metadata, only the relay.
+        if docker(&["network", "inspect", "-f", "{{.Internal}}", &network]).await.is_err() {
+            let label = format!("{LABEL}.project={project}");
+            let made = docker(&["network", "create", "--internal", "--label", &label, "-o", "com.docker.network.bridge.gateway_mode_ipv4=isolated", "-o", "com.docker.network.bridge.gateway_mode_ipv6=isolated", &network]).await;
+            if let Err(e) = made
+                && !e.to_string().contains("already exists")
+            {
+                return Err(e.context("a closed build's network (Docker 28 or later: its isolated gateway)"));
+            }
+        }
+        let hosts = [super::egress::ANY_PUBLIC.to_string()];
+        self.egress_proxy(&network, "", &hosts).await?;
+        let relay = super::egress::relay_name(&network, &super::egress::digest(&network, &hosts));
+        let ip = docker(&["inspect", "-f", &format!("{{{{(index .NetworkSettings.Networks \"{network}\").IPAddress}}}}"), &relay]).await?;
+        let ip = ip.trim().parse::<std::net::IpAddr>().map_err(|_| anyhow::anyhow!("the closed build's proxy has no address on {network}"))?;
+        Ok(Some(super::BuildEgress { network: network.clone(), proxy: format!("http://{ip}:{}", super::egress::PORT), builder: network }))
+    }
+
+    async fn remove_build_egress(&self, project: &str) {
+        let name = build_network_name(project);
+        // Its builder's container and its cache go with it (`buildx rm`), then its relay.
+        let _ = docker(&["buildx", "rm", "-f", &name]).await;
+        self.remove_network(&name).await;
+    }
+
     fn egress_refused(&self, network: &str, hosts: &[String]) -> Vec<super::egress::Refused> {
         self.egress.as_ref().map(|p| p.refused(network, hosts)).unwrap_or_default()
     }
@@ -1150,6 +1181,36 @@ async fn write_private(path: &std::path::Path, data: &[u8]) -> anyhow::Result<()
 /// where its configuration is, nothing a build's variables could set.
 const CLI_ENV: [&str; 8] = ["PATH", "HOME", "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY", "XDG_RUNTIME_DIR"];
 
+/// A project's closed builds' network, and the name of their builder on it.
+pub fn build_network_name(project: &str) -> String {
+    format!("{}build-{}", super::PREFIX, project.strip_prefix("prj_").unwrap_or(project))
+}
+
+/// The BuildKit that runs a closed build's builder: the one the daemon's own builds use.
+const BUILDKIT_IMAGE: &str = "moby/buildkit:v0.34.0";
+
+/// The project's closed builder on its network, made once for `proxy` (BuildKit pulls base
+/// images through it too); one for an older proxy address goes.
+async fn closed_builder(egress: &super::BuildEgress) -> anyhow::Result<()> {
+    let wanted = format!("env.HTTPS_PROXY={}", egress.proxy);
+    if let Ok(info) = docker(&["buildx", "inspect", &egress.builder]).await {
+        // `Driver Options: … env.HTTPS_PROXY="http://…"`.
+        if info.contains(&format!("env.HTTPS_PROXY=\"{}\"", egress.proxy)) {
+            return Ok(());
+        }
+        let _ = docker(&["buildx", "rm", "-f", &egress.builder]).await;
+    }
+    let net = format!("network={}", egress.network);
+    let http = format!("env.HTTP_PROXY={}", egress.proxy);
+    let image = format!("image={BUILDKIT_IMAGE}");
+    let args = ["buildx", "create", "--name", &egress.builder, "--driver", "docker-container", "--driver-opt", &net, "--driver-opt", &wanted, "--driver-opt", &http, "--driver-opt", &image];
+    match docker(&args).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("existing instance") => Ok(()),
+        Err(e) => Err(e.context("a closed build's builder")),
+    }
+}
+
 /// The small image that reads or writes a volume for a backup or a restore.
 const VOLUME_IMAGE: &str = "busybox:1.37";
 /// A restore: the backup (the tar on stdin) extracts into a staging directory on the volume, and
@@ -1232,12 +1293,24 @@ impl Builder for DockerBuilder {
                 cmd.env(k, v);
             }
         }
-        cmd.env("DOCKER_BUILDKIT", "1")
-            .args(["build", "--progress", "plain", "--file"])
-            .arg(&dockerfile)
-            .args(["--tag", &job.tag, "--label", &format!("{LABEL}={}", job.service), "--label", &format!("{LABEL}.deployment={}", job.deployment)])
+        cmd.env("DOCKER_BUILDKIT", "1");
+        match &job.egress {
+            // A closed build: on its project's builder, whose network reaches only the proxy to
+            // public hosts (its steps get it as the proxy variables every package manager reads),
+            // and loaded into the daemon's images after.
+            Some(e) => {
+                closed_builder(e).await?;
+                cmd.args(["buildx", "build", "--builder", &e.builder, "--load", "--progress", "plain", "--file"]).arg(&dockerfile);
+                for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+                    cmd.arg("--build-arg").arg(format!("{k}={}", e.proxy));
+                }
+            }
             // Links (a database) are reached the way instances reach them.
-            .args(["--add-host", "host.docker.internal:host-gateway"]);
+            None => {
+                cmd.args(["build", "--progress", "plain", "--file"]).arg(&dockerfile).args(["--add-host", "host.docker.internal:host-gateway"]);
+            }
+        }
+        cmd.args(["--tag", &job.tag, "--label", &format!("{LABEL}={}", job.service), "--label", &format!("{LABEL}.deployment={}", job.deployment)]);
         if let Some(t) = &job.target {
             cmd.args(["--target", t]);
         }
