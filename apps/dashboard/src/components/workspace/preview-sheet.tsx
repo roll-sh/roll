@@ -136,9 +136,35 @@ export function PreviewSheet({
                 <NoteThread previewId={p.id} change={p.change} review={resolve} onDone={onFeedbackPosted} />
               </div>
             )}
-            {p.state === "awaiting_approval" && (
-              <p className="mb-3 rounded-lg border border-accent/40 bg-accent/[0.06] px-2.5 py-2 text-[11.5px] text-muted">
-                A pull request from a fork: a writer approves its head (<span className="font-mono text-fg">approve-run</span>) before its services run.
+            {p.state === "awaiting_approval" &&
+              (p.pull?.fork ? (
+                <div className="mb-3 flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/[0.06] px-2.5 py-2 text-[11.5px] text-muted">
+                  <span className="min-w-0 flex-1">
+                    <a href={p.pull.url || undefined} target="_blank" rel="noreferrer" className="text-accent hover:underline">
+                      Pull request #{p.pull.number}
+                    </a>{" "}
+                    is from a fork: nothing of it runs until a writer approves <span className="font-mono text-fg">{p.head.slice(0, 12)}</span>. Its next push waits again.
+                  </span>
+                  <button
+                    type="button"
+                    disabled={busy !== null || gone}
+                    onClick={() => run("approve", () => previewsApi.approve(p.id, p.head))}
+                    className="h-6 shrink-0 rounded-md border border-line-2 bg-raised px-2 text-[11px] text-fg inset-shadow-highlight hover:border-line-3 disabled:opacity-50"
+                  >
+                    {busy === "approve" ? "Approving…" : "Approve and run"}
+                  </button>
+                </div>
+              ) : (
+                <p className="mb-3 rounded-lg border border-accent/40 bg-accent/[0.06] px-2.5 py-2 text-[11.5px] text-muted">
+                  A pull request from a fork: a writer approves its head (<span className="font-mono text-fg">approve-run</span>) before its services run.
+                </p>
+              ))}
+            {p.pull && p.state !== "awaiting_approval" && (
+              <p className="mb-3 text-[11.5px] text-muted">
+                <a href={p.pull.url || undefined} target="_blank" rel="noreferrer" className="text-accent hover:underline">
+                  Pull request #{p.pull.number}
+                </a>
+                {p.pull.fork && p.pull.approved_by ? ` · from a fork, ${p.head.slice(0, 12)} approved by ${p.pull.approved_by}` : ""}
               </p>
             )}
             <VerdictStrip p={p} />

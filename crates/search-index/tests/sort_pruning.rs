@@ -27,6 +27,9 @@ const F: u32 = 22;
 const D: u32 = 23;
 const K: u32 = 24;
 const W: u32 = 25;
+/// `l` and `d` without points: sorts on them can't prune (the nested test's reference).
+const LV: u32 = 26;
+const DV: u32 = 27;
 
 fn schema(sort: Option<IndexSort>) -> Schema {
     Schema::new()
@@ -41,6 +44,10 @@ fn schema(sort: Option<IndexSort>) -> Schema {
         .with_field(FieldSchema::new(K, "k").indexed(IndexOptions::Docs, false).with_doc_values(DocValuesType::SortedSet))
         .unwrap()
         .with_field(FieldSchema::new(W, "w").indexed(IndexOptions::DocsAndFreqs, true))
+        .unwrap()
+        .with_field(FieldSchema::new(LV, "lv").with_doc_values(DocValuesType::SortedNumeric))
+        .unwrap()
+        .with_field(FieldSchema::new(DV, "dv").with_doc_values(DocValuesType::SortedNumeric))
         .unwrap()
         .with_index_sort(sort)
 }
@@ -333,6 +340,114 @@ fn index_sort_ranges_equal_plain_ranges() {
         }
     }
     assert!(cheap_counts > 0);
+}
+
+/// Nested sorts (a parent sorts by the min or max of its children's values) with a small
+/// total-hits threshold, where the pruner reads the children's points: filtered children,
+/// `max_children`, parents with values of their own (not read), childless parents, every
+/// `missing`, a second key, `search_after`, deletes and several segments give the hits of the
+/// same sort on fields without points (which nothing prunes).
+#[test]
+fn nested_sorts_prune_exactly() {
+    use search_index::collector::NestedSort;
+    use search_index::query::nested::root_filter;
+    for seed in 0..4u64 {
+        let mut rng = common::rng(seed * 31 + 7);
+        let shape = [Shape::Ties, Shape::Increasing, Shape::Uniform][seed as usize % 3];
+        let shard = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema(None), Vec::new()).unwrap();
+        let parent = |rng: &mut StdRng, i: u32| {
+            let mut d = doc(rng, shape, i, 0.5, 0.0);
+            for _ in 0..[0, 1, 2, 3, 6][rng.gen_range(0..5)] {
+                let v = value(rng, shape, i);
+                let dv = v as f64 / 3.0;
+                let keep = if rng.gen_bool(0.6) { "keep" } else { "drop" };
+                d = d.child(
+                    IndexableDoc::new(Vec::<u8>::new())
+                        .point(L, encode::i64_bytes(v).to_vec())
+                        .doc_value(L, DocValue::SortedNumeric(v))
+                        .point(D, encode::f64_bytes(dv).to_vec())
+                        .doc_value(D, DocValue::SortedNumeric(encode::f64_sortable(dv)))
+                        .doc_value(LV, DocValue::SortedNumeric(v))
+                        .doc_value(DV, DocValue::SortedNumeric(encode::f64_sortable(dv)))
+                        .term(K, keep.as_bytes().to_vec()),
+                );
+            }
+            d
+        };
+        let n = rng.gen_range(3000..8000u32);
+        for i in 0..n {
+            let d = parent(&mut rng, i);
+            shard.index(IndexOp::new(d)).unwrap();
+            if rng.gen_bool(0.0005) {
+                shard.refresh().unwrap();
+            }
+            if rng.gen_bool(0.03) {
+                let j = rng.gen_range(0..=i);
+                if rng.gen_bool(0.5) {
+                    shard.delete(DeleteOp::new(format!("d{j}").into_bytes())).unwrap();
+                } else {
+                    let d = parent(&mut rng, j);
+                    shard.index(IndexOp::new(d)).unwrap();
+                }
+            }
+        }
+        shard.refresh().unwrap();
+        let s = shard.searcher();
+        let queries: Vec<QueryRef> = vec![root_filter(), Arc::new(TermQuery::new(W, "w1"))];
+        for round in 0..40 {
+            let q = &queries[rng.gen_range(0..queries.len())];
+            let (field, plain, kind) = [(L, LV, SortType::Long), (D, DV, SortType::Double)][rng.gen_range(0..2)];
+            let child_filter: QueryRef = if rng.gen_bool(0.5) {
+                Arc::new(BooleanQuery::new().should(Arc::new(TermQuery::new(K, "keep"))).should(Arc::new(TermQuery::new(K, "drop"))))
+            } else {
+                Arc::new(TermQuery::new(K, "keep"))
+            };
+            let max_children = rng.gen_bool(0.2).then(|| rng.gen_range(1..3));
+            let missing = match rng.gen_range(0..5) {
+                0 => Missing::First,
+                1 => Missing::Value(if kind == SortType::Long { SortValue::Long(rng.gen_range(-5..5)) } else { SortValue::Double(rng.gen_range(-1.0..1.0)) }),
+                _ => Missing::Last,
+            };
+            let mode = [SortMode::Min, SortMode::Max][rng.gen_range(0..2)];
+            let nested = Some(NestedSort { parent_filter: root_filter(), child_filter, max_children });
+            let first = FieldSort { field, kind, reverse: rng.gen_bool(0.5), missing, mode, nested };
+            let mut keys = vec![SortKey::Field(first.clone())];
+            if rng.gen_bool(0.3) {
+                keys.push(random_key(&mut rng));
+            }
+            let mut reference = keys.clone();
+            reference[0] = SortKey::Field(FieldSort { field: plain, ..first });
+            let k = [1usize, 3, 10, 40][rng.gen_range(0..4)];
+            let threshold = [1u64, k as u64, 50, 1000][rng.gen_range(0..4)];
+            let what = format!("seed {seed} round {round}: k={k} threshold={threshold} keys={keys:?}");
+            let all = {
+                let mut c = TopFieldCollector::new(reference, k * 3, u64::MAX, false).with_searcher(&s);
+                one_pass(&s, q, &mut c);
+                c.top_docs()
+            };
+            let full: Vec<_> = hits(&all).into_iter().take(k).collect();
+            // Exact totals: nothing is skipped.
+            let mut c = TopFieldCollector::new(keys.clone(), k, u64::MAX, false).with_searcher(&s);
+            s.search(q, &mut c).unwrap();
+            let exact = c.top_docs();
+            assert_eq!((hits(&exact), exact.total_hits), (full.clone(), all.total_hits), "exact: {what}");
+            let mut c = TopFieldCollector::new(keys.clone(), k, threshold, false).with_searcher(&s);
+            s.search(q, &mut c).unwrap();
+            assert_eq!(hits(&c.top_docs()), full, "{what}");
+            let par = s.with_limits(SearchLimits { parallel_min_docs: 16, parallelism: 3, ..SearchLimits::default() });
+            let m = TopFieldManager { keys: keys.clone(), n: k, threshold, track_scores: false, after: None, searcher: par.clone() };
+            assert_eq!(hits(&par.search_concurrent(q, &m, &SearchControl::default()).unwrap()), full, "concurrent: {what}");
+            if all.hits.len() > 1 {
+                let at = rng.gen_range(0..all.hits.len().min(k));
+                let after = &all.hits[at];
+                let mut c = TopFieldCollector::new(keys.clone(), k, threshold, false).with_searcher(&s).with_after(after.values.clone(), Some(after.doc));
+                s.search(q, &mut c).unwrap();
+                let want: Vec<u32> = all.hits.iter().skip(at + 1).take(k).map(|h| h.doc).collect();
+                let have: Vec<u32> = c.top_docs().hits.iter().map(|h| h.doc).collect();
+                assert_eq!(have, want, "after #{at}: {what}");
+            }
+        }
+    }
 }
 
 /// A queue whose bottom changes on almost every doc (a descending sort over increasing
