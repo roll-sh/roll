@@ -205,7 +205,10 @@ impl IndexMeta {
     /// [`IndexMeta::from_json`] for an index of a cluster speaking `dialect`.
     pub fn from_json_in(name: &str, v: &Value, dialect: crate::cluster::Dialect) -> Result<IndexMeta, EsError> {
         let settings = Settings::from_json(v.get("settings").unwrap_or(&Value::Null))?;
-        let ctx = MappingCtx::from_settings_in(dialect, &settings);
+        let mut ctx = MappingCtx::from_settings_in(dialect, &settings);
+        // A stored mapping was accepted when it was written: index-time checks that came later
+        // (an `updateable` synonym analyzer as a field's `analyzer`) must not keep it from loading.
+        ctx.search_time_analyzers.clear();
         let mapping = match v.get("mappings").and_then(Value::as_object) {
             Some(m) if !m.is_empty() => Mapping::parse(m, &ctx)?,
             _ => Mapping::empty(),

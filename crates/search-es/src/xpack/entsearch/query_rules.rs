@@ -488,7 +488,7 @@ pub fn rule_matches(rule: &Value, criteria: &Map) -> EsResult<bool> {
 /// any shard runs. Checks every `ruleset_ids` / `ruleset_id` the request body names.
 pub fn check_rulesets(ctx: &Ctx, body: Option<&Value>) -> EsResult<()> {
     let (Some(body), Some(raw)) = (body, ctx.raw_json()) else { return Ok(()) };
-    if !raw.windows(10).any(|w| w == b"ruleset_id") {
+    if memchr::memmem::find(raw, b"ruleset_id").is_none() {
         return Ok(());
     }
     fn walk(v: &Value, st: &crate::meta::ClusterState) -> EsResult<()> {

@@ -17,6 +17,8 @@ impl EnvSource for Engine {
                 Some(_) => anyhow::bail!("the change moved on: the preview is updating"),
                 None => anyhow::bail!("the change was deleted"),
             }
+        } else if !self.git_head_may_run(&r)? {
+            anyhow::bail!("this pull request's head isn't approved to run (POST …/approve)");
         }
         let s = self.store.settings(&r.project_id)?;
         let services = self.store.services(preview)?;

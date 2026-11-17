@@ -1014,6 +1014,127 @@ async fn a_notes_element_is_cropped_by_the_next_screenshot() {
     assert_eq!(*e.apps.crops_asked.lock(), ["rv_h1", "rv_gone", "rv_gone"]);
 }
 
+/// A push to a branch of a Git URL service on roll apps makes that branch's preview in each
+/// project whose canvas holds the service (trusted: only the repository's writers move its
+/// branches); the same push again changes nothing, a new one moves it, `[skip preview]` skips
+/// one, and deleting the branch deletes its preview.
+#[tokio::test]
+async fn a_git_url_services_branch_push_makes_its_preview() {
+    let e = env(json!({ "enabled": true }));
+    e.ws.place(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Service, "svc_shop", 0.0, 0.0).unwrap();
+    let push = |branch: &str, sha: Option<&str>, message: &str| roll_previews::ports::GitPush {
+        service: "svc_shop".into(),
+        url: "https://github.com/acme/shop.git".into(),
+        branch: branch.into(),
+        sha: sha.map(Into::into),
+        message: message.into(),
+        pull: None,
+    };
+    let rows = || e.engine.store.rows(Some(&e.project)).unwrap().into_iter().filter(|r| r.repo == "git:svc_shop").collect::<Vec<_>>();
+    // The project's services are roll apps': the Git URL one is `git:<id>`.
+    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "shop".into(), repo: Some("git:svc_shop".into()), root: String::new(), memory_mb: 256 }]);
+    // Someone else's project with the service on its canvas: it doesn't stand for it
+    // (`Workspace::trusts`), so it gets none of its pushes.
+    let theirs = e.ws.create("usr_b", "theirs", "", None).unwrap();
+    e.ws.place(roll_workspace::Scope::All, &theirs.id, roll_workspace::Kind::Service, "svc_shop", 0.0, 0.0).unwrap();
+    e.engine.store.put_settings(&theirs.id, &serde_json::from_value(json!({ "enabled": true })).unwrap()).unwrap();
+    e.engine.git_push(&push("feat/cart", Some("a1"), "cart")).await.unwrap();
+    e.engine.git_push(&push("feat/cart", Some("a1"), "cart")).await.unwrap();
+    assert!(e.engine.store.rows(Some(&theirs.id)).unwrap().is_empty(), "a project that doesn't stand for the service gets no preview of it");
+    let r = rows();
+    assert_eq!(r.iter().map(|x| (x.branch.clone(), x.head.clone(), x.trusted)).collect::<Vec<_>>(), [(Some("feat/cart".to_string()), "a1".to_string(), true)], "made once");
+    // A pass deploys the service at the pushed commit, and discovery (roll code's branches)
+    // leaves it alone.
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row(&r[0].id).unwrap().desired, Desired::Active, "not roll code's branch to delete");
+    assert_eq!(e.apps.deployed.lock().get(&(r[0].id.clone(), "shop".to_string())).map(String::as_str), Some("a1"));
+    e.engine.git_push(&push("feat/cart", Some("b2"), "more")).await.unwrap();
+    assert_eq!(rows()[0].head, "b2", "a new push moves it");
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.deployed.lock().get(&(r[0].id.clone(), "shop".to_string())).map(String::as_str), Some("b2"), "and deploys it");
+    e.engine.git_push(&push("feat/docs", Some("c3"), "typo [skip preview]")).await.unwrap();
+    assert_eq!(rows().len(), 1, "[skip preview] skips one");
+    // Its pull request (same repo) names the branch's preview and links it, still trusted.
+    let pull = roll_previews::ports::GitPull { number: 3, title: "Cart\nbadge".into(), url: "https://github.com/acme/shop/pull/3".into(), fork: false };
+    e.engine.git_push(&roll_previews::ports::GitPush { pull: Some(pull), ..push("feat/cart", Some("b2"), "") }).await.unwrap();
+    let v = e.engine.store.view(e.engine.store.row(&r[0].id).unwrap()).unwrap();
+    assert_eq!((v.title.as_str(), v.pull.as_ref().map(|p| p.number), v.trusted, rows().len()), ("Cart badge", Some(3), true, 1));
+    e.engine.git_push(&push("feat/cart", None, "")).await.unwrap();
+    assert_eq!(e.engine.store.row(&r[0].id).unwrap().desired, Desired::Deleted, "the branch went: so does its preview");
+}
+
+/// A fork's pull request on a Git URL service (roll apps' `GitPull`, `fork: true`): its
+/// preview (`pull/<n>`, untrusted) runs nothing until a writer approves its head, only that head;
+/// the next push waits again, and closing the pull request deletes it.
+#[tokio::test]
+async fn a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head() {
+    let e = env(json!({ "enabled": true }));
+    e.ws.place(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Service, "svc_shop", 0.0, 0.0).unwrap();
+    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "shop".into(), repo: Some("git:svc_shop".into()), root: String::new(), memory_mb: 256 }]);
+    let push = |sha: Option<&str>| roll_previews::ports::GitPush {
+        service: "svc_shop".into(),
+        url: "https://github.com/acme/shop.git".into(),
+        branch: "pull/7".into(),
+        sha: sha.map(Into::into),
+        message: String::new(),
+        pull: Some(roll_previews::ports::GitPull { number: 7, title: "Faster cart".into(), url: "https://github.com/acme/shop/pull/7".into(), fork: true }),
+    };
+    let deployed = |id: &str| e.apps.deployed.lock().get(&(id.to_string(), "shop".to_string())).cloned();
+    e.engine.git_push(&push(Some("f1"))).await.unwrap();
+    e.engine.pass().await.unwrap();
+    let r = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.repo == "git:svc_shop").unwrap();
+    assert_eq!((r.state, r.trusted, r.title.as_str(), deployed(&r.id)), (State::AwaitingApproval, false, "Faster cart", None), "nothing runs before an approval");
+    assert!(matches!(e.engine.approve(&r.id, "f0", "ada"), Err(roll_previews::Error::Conflict(_))), "only the head it's at");
+    e.engine.approve(&r.id, "f1", "ada").unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(deployed(&r.id).as_deref(), Some("f1"), "the approved head runs");
+    e.engine.git_push(&push(Some("f2"))).await.unwrap();
+    e.engine.pass().await.unwrap();
+    let now = e.engine.store.row(&r.id).unwrap();
+    assert_eq!((now.state, deployed(&r.id).as_deref()), (State::AwaitingApproval, Some("f1")), "a new head waits again, never deployed");
+    assert!(e.apps.slept.lock().iter().any(|(p, s)| *p == r.id && s == "shop"), "and what ran sleeps meanwhile");
+    // A writer's own branch named `pull/7` is another preview: the fork's close leaves it.
+    let branch = roll_previews::ports::GitPush { pull: None, ..push(Some("w1")) };
+    e.engine.git_push(&branch).await.unwrap();
+    let writers = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|x| x.repo == "git:svc_shop" && x.id != r.id).unwrap();
+    assert!(writers.trusted, "a writer's branch: trusted, not the fork's row");
+    e.engine.git_push(&push(None)).await.unwrap();
+    assert_eq!(e.engine.store.row(&r.id).unwrap().desired, Desired::Deleted, "a close deletes it");
+    assert_eq!(e.engine.store.row(&writers.id).unwrap().desired, Desired::Active, "and only the fork's");
+}
+
+/// A preview's secrets environment is told what the preview branched; a link there (or in its
+/// base) to one of those parents comes back followed, never the parent's value, and the
+/// service gets the branch's value under the link's own name (renamed or not), or blank when the
+/// branch has none for that field.
+#[tokio::test]
+async fn a_secrets_link_to_a_branched_parent_gives_the_branch() {
+    use roll_previews::ports::EnvSource;
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_f", 9));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_f").unwrap().unwrap();
+    let pg = e.engine.store.resources(&p.id).unwrap().into_iter().find(|r| r.kind == Kind::Postgres).unwrap();
+    assert!(e.secrets.branched.lock().contains(&(Kind::Postgres, pg.parent.clone())), "ensure names what it branched");
+    *e.secrets.followed.lock() = vec![
+        ("STAGING_DB".into(), Kind::Postgres, pg.parent.clone(), "url".into()),
+        ("STAGING_TOKEN".into(), Kind::Postgres, pg.parent.clone(), "http_token".into()),
+    ];
+    let (_, vars) = e.engine.env(&p.id, "web").await.unwrap();
+    let get = |k: &str| vars.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    assert_eq!(get("STAGING_DB"), Some(format!("fake://{}", pg.r#ref.clone().unwrap())), "the branch's, under the link's name");
+    assert_eq!(get("STAGING_TOKEN").as_deref(), Some(""), "nothing for that field: blank");
+    // And as the environment's own key, from the base's links (nothing resolved): what roll
+    // apps reads when it resolves the environment itself.
+    *e.secrets.links.lock() = vec![("STAGING_PG_URL".into(), Kind::Postgres, pg.parent.clone(), "url".into()), ("OTHER".into(), Kind::Postgres, "pg_elsewhere".into(), "url".into())];
+    e.engine.refresh(&p.id).unwrap();
+    e.engine.pass().await.unwrap();
+    let own = e.secrets.own.lock().clone();
+    assert_eq!(own.iter().find(|(k, _)| k == "STAGING_PG_URL").map(|(_, v)| v.clone()), Some(format!("fake://{}", pg.r#ref.clone().unwrap())), "the branch's, as its own key");
+    assert!(!own.iter().any(|(k, _)| k == "OTHER"), "a link to a parent it didn't branch is left to roll secrets");
+}
+
 #[tokio::test]
 async fn a_pages_notes_by_its_environment_name() {
     let e = env(json!({ "enabled": true }));
