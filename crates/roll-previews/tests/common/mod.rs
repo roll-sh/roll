@@ -342,13 +342,17 @@ pub struct FakeSecrets {
     pub branched: Mutex<Vec<(Kind, String)>>,
     /// Keys resolve answers as followed (links to a branched parent: nothing of it resolved).
     pub followed: Mutex<Vec<(String, Kind, String, String)>>,
+    /// The base's links (`links`), and what each ensure set as the environment's own keys.
+    pub links: Mutex<Vec<(String, Kind, String, String)>>,
+    pub own: Mutex<Vec<(String, String)>>,
 }
 
 #[async_trait]
 impl roll_previews::ports::Secrets for FakeSecrets {
-    async fn ensure(&self, _: &str, env: &str, _: &str, _: &[(String, String)], trusted: bool, _: i64, branches: &[(Kind, String)]) -> anyhow::Result<()> {
+    async fn ensure(&self, _: &str, env: &str, _: &str, vars: &[(String, String)], trusted: bool, _: i64, branches: &[(Kind, String)]) -> anyhow::Result<()> {
         self.ensured.lock().push((env.to_string(), trusted));
         *self.branched.lock() = branches.to_vec();
+        *self.own.lock() = vars.to_vec();
         Ok(())
     }
     async fn resolve(&self, _: &str, _: &str, _: bool, _: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
@@ -358,6 +362,9 @@ impl roll_previews::ports::Secrets for FakeSecrets {
         }
         let n = self.issued.fetch_add(1, Ordering::SeqCst) + 1;
         Ok(roll_previews::ports::Resolved { values: vec![("DB_PASSWORD".into(), format!("pw-{n}"))], problems: Vec::new(), leases: vec![format!("lease-{n}")], followed })
+    }
+    async fn links(&self, _: &str, _: &str) -> anyhow::Result<Vec<(String, Kind, String, String)>> {
+        Ok(self.links.lock().clone())
     }
     async fn renew(&self, _: &str, lease: &str) -> anyhow::Result<Option<i64>> {
         if self.ended.lock().contains(lease) {

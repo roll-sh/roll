@@ -483,6 +483,11 @@ pub trait Secrets: Send + Sync {
     /// `untrusted`: nothing of a protected environment resolves (directly, by reference, by
     /// import or through the base): what the preview's code reads is its own overrides and links.
     async fn resolve(&self, project: &str, env: &str, untrusted: bool, consumer: &str) -> anyhow::Result<Resolved>;
+    /// The links of environment `env` (its own and what it inherits or imports): `(key, kind,
+    /// resource, field)`, with no values (nothing resolved, no lease).
+    async fn links(&self, _project: &str, _env: &str) -> anyhow::Result<Vec<(String, Kind, String, String)>> {
+        Ok(Vec::new())
+    }
     /// Push a lease's end out: `Some(its new end, ms)`, or `None` once it has ended (revoked,
     /// expired, past its longest life): a new start resolves a new credential then.
     async fn renew(&self, _project: &str, _lease: &str) -> anyhow::Result<Option<i64>> {
