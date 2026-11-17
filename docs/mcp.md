@@ -777,25 +777,37 @@ waits on a sibling PR reaching main is last.
      exhaust the 40 conflict re-runs), and code-control's Linear e2e (30 s for the elicitation).
      A test-side deadline, not more retries in production, is the likely fix. (#114's own gate
      caught a race of mine: a test read an audit row written off the request; fixed in the test.)
-2. **Tools for sibling routes as they reach main** (each a row in tools.rs and the table above):
-   - apps' stack (#138 to #205, landing together after secrets #198): `apps_purge_cache` (`POST
-     …/environments/{env}/cache/purge {paths?, tags?}`, deploy in production, write elsewhere, by
-     the environment's prefix row), and `apps_set_environment`'s new fields: `egress` (#143),
-     `routes: [{path, service}]` (#199), firewall rules with `action: "limit"`, `per_minute`,
-     `burst` (#202). The apps thread messages when it's merged.
-   - `secrets_totp` once secrets' #194 is on main: `GET …/environments/{env}/secrets/{key}/totp`
-     (`{code, expires_at, period}`), with the reveal tools (its row is reveal, audited as
-     `secrets.totp`); its description says a code lives a period, so fetch again past
-     `expires_at` (an approval that waited may hand back one about to expire).
-3. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
+2. **Enterprise SSO for people (in progress, `feature/roll-mcp-sso`, from main):** people sign in
+   to roll through their company's OpenID Connect provider (Okta, Entra ID, Google Workspace),
+   chosen by their email's domain, as Linear's, Vercel's and GitHub's enterprise sign-in do;
+   nothing in roll offered it. roll-accounts' `sso.rs`: connections (issuer, client, sealed
+   secret, domains; discovery checked when added, cached 10 minutes since `sso/start` is public),
+   the code flow with PKCE and a nonce, the ID token checked by roll-oidc against the provider's
+   keys, a verified email in the connection's domains, the account with that email linked (or an
+   invite, or `provision`), and `enforce` (other sign-ins refused for the domain where sessions are
+   issued; the operator's token never). Dashboard: sign-in goes to SSO for a connected domain, and
+   admins get "Single sign-on" in account settings. Then: SCIM provisioning (deprovision when the
+   provider removes someone), SAML for providers without OIDC, and one place for providers shared
+   with enterprise sign-in (#210's `idps`).
+3. **Tools for sibling routes as they reach main** (each a row in tools.rs and the table above):
+   - apps' stack (#138 to #207, landing one a round; the apps thread messages when the last is in):
+     `apps_purge_cache` (paths, tags), `apps_vitals`, and `apps_set_environment`'s `egress`,
+     `routes`, `vitals`, `traces`, `pages`, `redeploy_on_secrets` and `limit` firewall rules:
+     built on `feature/roll-mcp-apps-tools` (60327d467, from the stack's top), opened as a PR once
+     the last is on main.
+   - `secrets_totp` (secrets #194: `GET …/secrets/{key}/totp`, reveal; a code lives a period, so
+     fetch again past `expires_at`), `previews_requests` (previews #215: a preview's latest 200
+     requests, read), `search_restore_cluster` (search #172: `POST /v1/search/clusters/{id}/restore`,
+     write; a deleted cluster back within its window).
+4. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
    Cross App Access sandbox needs an account: the review pack's decision 5). The draft names the
    tenant `tenant`; a provider whose assertions say it another way (Entra's own tokens use `tid`)
    gets a mapping once its ID-JAGs are checked, never a guess.
-4. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
+5. **Lockdown by default where roll's own agents act on outside text:** roll code agents and
    automations that pick up issues and chat messages (the agents thread's call; no agents thread is
    running to tell), and chat messages that reach an agent marked `outside` (an install's
    non-members can't drive roll, so mostly members' text).
-5. **More MCP Apps views:** a rollback button on a deploy (calling `apps_rollback` through the
+6. **More MCP Apps views:** a rollback button on a deploy (calling `apps_rollback` through the
    host, so through the gate, as deploy), once a host that renders views is confirmed (the review
    pack's decision 4). A preview's screenshot against its baseline needs no view: hosts render
    `previews_screenshot`'s image (`diff=base`) themselves, and accepting a visual change stays a
@@ -803,30 +815,30 @@ waits on a sibling PR reaching main is last.
    (`examples/basic-host` v2.0.4: `users-live/host-shot.mjs`, with its one-line patch declaring
    the extension) and the stand-in; Claude.ai or ChatGPT need a public HTTPS rolld and the user's
    account.
-6. **Everyday routes with no tool:** rechecked on main after #114 (2026-11-17, 13:20): search,
+7. **Everyday routes with no tool:** rechecked on main after #114 (2026-11-17, 13:20): search,
    previews and secrets have nothing new; what has no tool is a credential, a password, a key's
    material, a deployment key's health, a person's review, or admin by design (tasks, streams,
    storage, queues, postgres, Redis and NoSQL have theirs). Recheck each product after its thread
    lands routes (`tool-gaps.py origin/main <product> <branch>`).
-7. **More tools that wait:** `apps_wait_deploy` is in #108. Rechecked on main (05:50): Postgres
+8. **More tools that wait:** `apps_wait_deploy` is in #108. Rechecked on main (05:50): Postgres
    branch backups and restores answer once done (nothing to wait on); search's reindexes are
    Elasticsearch's own `_tasks` behind the operator's request route. Branch backups and search reindexes
    can use `until` once their routes answer a state to wait on (search's reindex is an
    Elasticsearch task today, with no roll route to watch). Recheck with `mcpc` (`~/.local/share/roll-mcp/live/mcpc-tasks.sh`), and with the
    TypeScript SDK's `client/ext/tasks` once it ships.
-8. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
+9. **Dry-merge the sibling heads after each of their pushes** that touches the gate, the catalogue or
    rolld, and send each thread its conflicts and their resolutions (`sibling-auth.sh`: every
    route classified, per method, with #25; agreed conflicts resolved by `known-conflicts.py`), and
    compare each product's routes with its tools (an everyday route with no tool is a gap: apps'
    were found this way). #24 and #25 are on main, so `feature/mcp-on-landing` is retired:
    secrets' #64 lands on main directly.
-9. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
+10. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
    roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_`, `rlc_` and `rlk_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
-10. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
+11. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
-11. **Step-up authorization (SEP-835), once clients do it:** a refused call could answer `403`
+12. **Step-up authorization (SEP-835), once clients do it:** a refused call could answer `403`
    `WWW-Authenticate: Bearer error="insufficient_scope", scope=…` so the client reopens roll's
    consent screen for the refused rule (as the refusal's widen link proposes it now). Not yet: today
    it would take the refusal's explanation and `access_request_access` away from the main clients,
