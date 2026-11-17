@@ -1562,7 +1562,7 @@ mod tests {
         async fn prepare(&self, _: &dyn Isolation, _: &Job, _: &str, _: &str) -> anyhow::Result<()> {
             anyhow::bail!("not in this test")
         }
-        async fn run(&self, _: &Arc<dyn Isolation>, _: &code_preview::config::CheckSpec, _: &str, _: &str, _: &[(String, String)]) -> anyhow::Result<code_preview::runner::RunOutput> {
+        async fn run(&self, _: &Arc<dyn Isolation>, _: &code_preview::config::CheckSpec, _: &str, _: &str, _: &[(String, String)], _: Option<code_preview::isolation::Network>) -> anyhow::Result<code_preview::runner::RunOutput> {
             anyhow::bail!("not in this test")
         }
     }
