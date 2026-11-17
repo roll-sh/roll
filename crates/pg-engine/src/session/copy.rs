@@ -9,7 +9,7 @@ use crate::exec::ExecCtx;
 use crate::sql::binder::ast::{const_str, inner, names, with_pos};
 use crate::sql::binder::{Binder, table_rules};
 use crate::sql::expr::Expr;
-use crate::sql::plan::{CopyRow, InsertPlan, Plan};
+use crate::sql::plan::{CopyRaw, CopyRow, InsertPlan, Plan};
 use crate::types::{DataType, Value};
 use crate::types::text::{format_value, parse_value};
 use pg_query::NodeEnum;
@@ -453,7 +453,7 @@ pub struct CopyInParsed {
     /// A plain COPY (`CopyReader::plain`): records are parsed straight into values.
     plain: bool,
     /// Each row's line number and text.
-    lines: Vec<(usize, String)>,
+    lines: Vec<(usize, CopyRaw)>,
     /// Rows ON_ERROR ignore skipped.
     skipped: usize,
     /// Records (lines; binary tuples) read.
@@ -1455,10 +1455,10 @@ impl CopyReader<'_> {
     fn prepare(
         &mut self,
         rows: Vec<CopyRow>,
-        lines: Vec<(usize, String)>,
+        lines: Vec<(usize, CopyRaw)>,
         rules: &crate::sql::plan::TableRules,
         ctx: &ExecCtx,
-    ) -> Result<(Vec<CopyRow>, Vec<(usize, String)>, Option<Error>)> {
+    ) -> Result<(Vec<CopyRow>, Vec<(usize, CopyRaw)>, Option<Error>)> {
         let (c, t, fmt) = (self.c, &self.c.table, self.fmt);
         let f = &c.format;
         let target = &c.target;
@@ -1617,7 +1617,7 @@ pub(crate) fn parse_copy_data(
         for row in rows {
             st.records += 1;
             st.rows.push(CopyRow::Exprs(row));
-            st.lines.push((st.records, String::new()));
+            st.lines.push((st.records, CopyRaw::default()));
         }
         let (took, ended) = r?;
         st.ended = ended;
@@ -1683,6 +1683,13 @@ pub(crate) fn parse_copy_data(
     } = st;
     let plain = *plain;
     let ctx_line = |line: usize, raw: &str| format!("COPY {}, line {line}: \"{raw}\"", t.name);
+    // (Each record's text as a range of one copy of the chunk: `CopyRaw`. A CSV record's is
+    // made apart, as its own.)
+    let chunk: std::cell::OnceCell<Arc<str>> = std::cell::OnceCell::new();
+    let raw_of = |raw: &Cow<'_, str>| match raw {
+        Cow::Borrowed(part) => CopyRaw::within(chunk.get_or_init(|| Arc::from(text)), text, part),
+        Cow::Owned(own) => CopyRaw::from(own.as_str()),
+    };
     // (Lines without escapes of a plain text COPY: `plain_values`.)
     let direct = plain && !f.csv && f.default.is_none() && f.null.contains('\\') && c.ncols > 0 && c.target.len() == c.ncols;
     'records: for (lineno, (raw, rec)) in records.into_iter().enumerate() {
@@ -1701,7 +1708,7 @@ pub(crate) fn parse_copy_data(
                     && let Some(vals) = plain_values(text, c, fmt)
                 {
                     rows.push(CopyRow::Values(vals));
-                    lines.push((line, raw));
+                    lines.push((line, raw_of(&raw)));
                     continue;
                 }
                 plain_fields(text, f)
@@ -1787,7 +1794,7 @@ pub(crate) fn parse_copy_data(
                             && *skipped as i64 > limit
                         {
                             rows.push(CopyRow::Skipped(row, format!("COPY {}, line {line}, column {colname}: \"{s}\"", t.name)));
-                            lines.push((line, raw));
+                            lines.push((line, raw_of(&raw)));
                             return Err(Error::new(code::INVALID_TEXT_REPRESENTATION, format!("skipped more than REJECT_LIMIT ({limit}) rows due to data type incompatibility"))
                                 .context(format!("COPY {}, line {line}, column {colname}: \"{s}\"", t.name)));
                         }
@@ -1797,7 +1804,7 @@ pub(crate) fn parse_copy_data(
                             );
                         }
                         rows.push(CopyRow::Skipped(row, format!("COPY {}, line {line}, column {colname}: \"{s}\"", t.name)));
-                        lines.push((line, raw));
+                        lines.push((line, raw_of(&raw)));
                         continue 'records;
                     }
                     Err(e) => {
@@ -1823,7 +1830,7 @@ pub(crate) fn parse_copy_data(
             .context(ctx_line(line, &raw)));
         }
         rows.push(if plain { CopyRow::Values(vals) } else { CopyRow::Exprs(row) });
-        lines.push((line, raw));
+        lines.push((line, raw_of(&raw)));
     }
     // (Its line: the record's number, the lines CopyReadLine read, however many physical
     // lines its quoted newlines span; its text with them.)
@@ -1963,7 +1970,8 @@ impl InField<'_> {
     }
 }
 
-type Records<'a> = Vec<(String, Rec<'a>)>;
+/// Records: each one's text (a text-format line borrowed, a CSV record made), its fields.
+type Records<'a> = Vec<(Cow<'a, str>, Rec<'a>)>;
 
 /// A record's fields: split, or (a text-format line without escapes) the line itself, its
 /// fields each its own text (`plain_fields`).
@@ -2178,7 +2186,7 @@ fn split_text<'a>(data: &'a str, f: &CopyFormat, table: &str, first: usize) -> R
         } else {
             Rec::Fields(split_text_escaped(line, f, table, lineno)?)
         };
-        out.push((line.to_string(), fields));
+        out.push((Cow::Borrowed(line), fields));
     }
     Ok((out, false))
 }
@@ -2312,7 +2320,7 @@ fn split_csv(data: &str, f: &CopyFormat) -> (Records<'static>, Option<String>, O
             '\n' | '\r' => {
                 eol.get_or_insert(ch);
                 finish_field(&mut cur, &mut quoted, &mut fields);
-                out.push((std::mem::take(&mut line), Rec::Fields(std::mem::take(&mut fields))));
+                out.push((Cow::Owned(std::mem::take(&mut line)), Rec::Fields(std::mem::take(&mut fields))));
             }
             c => {
                 line.push(c);
@@ -2325,7 +2333,7 @@ fn split_csv(data: &str, f: &CopyFormat) -> (Records<'static>, Option<String>, O
     }
     if !cur.is_empty() || !fields.is_empty() || quoted {
         finish_field(&mut cur, &mut quoted, &mut fields);
-        out.push((line, Rec::Fields(fields)));
+        out.push((Cow::Owned(line), Rec::Fields(fields)));
     }
     (out, None, eol)
 }
