@@ -860,6 +860,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/access/checkup", "access", R, Tgt::Product),
     row("POST", "/v1/access/tokens/{id}/tighten", "access", ADMIN, Tgt::Product),
     row("DELETE", "/v1/access/tokens/{id}/temporary/{approval}", "access", ADMIN, Tgt::Product),
+    // A token asks for more for itself (a person decides): any grant may ask, as it may ask whoami.
+    row("POST", "/v1/access/requests", "access", R, Tgt::AnyGrant),
     row("GET", "/v1/access/approvals", "access", R, Tgt::Product),
     // A grant waits on its own approvals (the handler checks it's its own, or access read).
     row("GET", "/v1/access/approvals/{id}", "access", R, Tgt::AnyGrant),

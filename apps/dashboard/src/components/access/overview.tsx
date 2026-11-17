@@ -17,6 +17,11 @@ import {
   productName,
   withToolsets,
   APPROVABLE,
+  ACTIONS,
+  describeApprovalRule,
+  PRODUCTS,
+  type ApprovalRule,
+  type Action,
   KEEP_OLD,
   startsLater,
   toolsetCost,
@@ -693,56 +698,130 @@ function PolicyPanel() {
     }
   };
   return (
-    <div className="flex flex-wrap items-center gap-3 text-[12px] text-muted">
-      <span>Every token:</span>
-      <label className="flex items-center gap-1.5">
-        lives at most
-        <input
-          value={days}
-          onChange={(e) => setDays(e.target.value.replace(/\D/g, ""))}
-          onBlur={() => void save({ ...p, max_days: days ? Number(days) : null })}
-          placeholder="∞"
-          inputMode="numeric"
-          className={`${input} w-16 text-center font-mono text-[12px]`}
-          aria-label="Longest lifetime in days"
-        />
-        days
-      </label>
-      <label className="flex items-center gap-1.5">
-        <input type="checkbox" checked={Boolean(p.require_expiry)} onChange={(e) => void save({ ...p, require_expiry: e.target.checked })} />
-        must expire
-      </label>
-      <span className="flex flex-wrap items-center gap-1.5">
-        people's tokens that can
-        {APPROVABLE.map((act) => {
-          const on = (p.approve_people ?? []).includes(act);
-          return (
-            <label key={act} className="flex items-center gap-1">
-              <input
-                type="checkbox"
-                checked={on}
-                onChange={() => void save({ ...p, approve_people: on ? (p.approve_people ?? []).filter((x) => x !== act) : [...(p.approve_people ?? []), act] })}
-              />
-              {act}
-            </label>
-          );
-        })}
-        need your approval
-      </span>
-      <label className="flex items-center gap-1.5">
-        stops after
-        <input
-          value={idle}
-          onChange={(e) => setIdle(e.target.value.replace(/\D/g, ""))}
-          onBlur={() => void save({ ...p, max_idle_days: idle ? Number(idle) : null })}
-          placeholder="∞"
-          inputMode="numeric"
-          className={`${input} w-16 text-center font-mono text-[12px]`}
-          aria-label="Days unused before a token stops"
-        />
-        days unused
-      </label>
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-3 text-[12px] text-muted">
+        <span>Every token:</span>
+        <label className="flex items-center gap-1.5">
+          lives at most
+          <input
+            value={days}
+            onChange={(e) => setDays(e.target.value.replace(/\D/g, ""))}
+            onBlur={() => void save({ ...p, max_days: days ? Number(days) : null })}
+            placeholder="∞"
+            inputMode="numeric"
+            className={`${input} w-16 text-center font-mono text-[12px]`}
+            aria-label="Longest lifetime in days"
+          />
+          days
+        </label>
+        <label className="flex items-center gap-1.5">
+          <input type="checkbox" checked={Boolean(p.require_expiry)} onChange={(e) => void save({ ...p, require_expiry: e.target.checked })} />
+          must expire
+        </label>
+        <span className="flex flex-wrap items-center gap-1.5">
+          people's tokens that can
+          {APPROVABLE.map((act) => {
+            const on = (p.approve_people ?? []).includes(act);
+            return (
+              <label key={act} className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={on}
+                  onChange={() => void save({ ...p, approve_people: on ? (p.approve_people ?? []).filter((x) => x !== act) : [...(p.approve_people ?? []), act] })}
+                />
+                {act}
+              </label>
+            );
+          })}
+          need your approval
+        </span>
+        <label className="flex items-center gap-1.5">
+          stops after
+          <input
+            value={idle}
+            onChange={(e) => setIdle(e.target.value.replace(/\D/g, ""))}
+            onBlur={() => void save({ ...p, max_idle_days: idle ? Number(idle) : null })}
+            placeholder="∞"
+            inputMode="numeric"
+            className={`${input} w-16 text-center font-mono text-[12px]`}
+            aria-label="Days unused before a token stops"
+          />
+          days unused
+        </label>
+      </div>
+      <ApprovalRules rules={p.approval_rules ?? []} save={(approval_rules) => save({ ...p, approval_rules })} />
       <ErrorNote error={error} />
+    </div>
+  );
+}
+
+/**
+ * What needs more than one approver (the policy's approval rules): Teleport's and Infisical's
+ * two-person rule. Each rule covering a request is a gate; the token's own person never counts.
+ */
+function ApprovalRules({ rules, save }: { rules: ApprovalRule[]; save: (next: ApprovalRule[]) => Promise<void> }) {
+  const [adding, setAdding] = useState(false);
+  const [product, setProduct] = useState("secrets");
+  const [action, setAction] = useState("reveal");
+  const [env, setEnv] = useState("production");
+  const [count, setCount] = useState("2");
+  const [approvers, setApprovers] = useState("");
+  const add = async () => {
+    const list = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
+    const rule: ApprovalRule = { product, approvals: Number(count) || 1 };
+    if (action !== "any") rule.actions = [action as Action];
+    if (list(env).length) rule.environments = list(env);
+    if (list(approvers).length) rule.approvers = list(approvers);
+    await save([...rules, rule]);
+    setAdding(false);
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted">
+      <span>Approvals:</span>
+      {rules.length === 0 && !adding && <span className="text-subtle">one person decides each request</span>}
+      {rules.map((r, i) => (
+        <span key={i} className="flex items-center gap-1 rounded-md border border-line px-2 py-0.5">
+          {describeApprovalRule(r)}
+          <button onClick={() => void save(rules.filter((_, j) => j !== i))} className="text-subtle hover:text-fg" aria-label={`Remove ${describeApprovalRule(r)}`}>
+            ×
+          </button>
+        </span>
+      ))}
+      {adding ? (
+        <span className="flex flex-wrap items-center gap-1.5">
+          <select value={product} onChange={(e) => setProduct(e.target.value)} className={input} aria-label="Product">
+            {PRODUCTS.map((p) => (
+              <option key={p} value={p}>
+                {productName(p)}
+              </option>
+            ))}
+          </select>
+          <select value={action} onChange={(e) => setAction(e.target.value)} className={input} aria-label="Action">
+            <option value="any">any action</option>
+            {ACTIONS.map((a) => (
+              <option key={a} value={a}>
+                {a}
+              </option>
+            ))}
+          </select>
+          in
+          <input value={env} onChange={(e) => setEnv(e.target.value)} placeholder="every environment" className={`${input} w-32`} aria-label="Environments" />
+          needs
+          <input value={count} onChange={(e) => setCount(e.target.value.replace(/\D/g, "").slice(0, 2))} inputMode="numeric" className={`${input} w-10 text-center font-mono`} aria-label="Approvals needed" />
+          approvals from
+          <input value={approvers} onChange={(e) => setApprovers(e.target.value)} placeholder="anyone who decides" className={`${input} w-44`} aria-label="Approvers (usr_… ids, comma separated)" />
+          <button onClick={() => void add()} className={primary}>
+            Add
+          </button>
+          <button onClick={() => setAdding(false)} className="text-subtle hover:text-fg">
+            Cancel
+          </button>
+        </span>
+      ) : (
+        <button onClick={() => setAdding(true)} className="text-accent hover:underline">
+          Require several approvers…
+        </button>
+      )}
     </div>
   );
 }

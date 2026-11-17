@@ -381,6 +381,10 @@ async fn land_outcomes_queued_branches_and_errors() {
     let mut c = Client::new(&a, None);
     c.initialize("2025-11-25").await;
     let repo = "acme/api";
+    // A credential in what it would land isn't sent (roll_auth::credentials): nothing lands.
+    let key = format!("ghp_{}", "a1B2".repeat(9));
+    let said = c.tool_err("land", json!({ "repo": repo, "message": "oops", "files": { "cfg.txt": { "content": format!("token={key}\n") } } })).await;
+    assert!(said.contains("arguments.files.cfg.txt.content") && said.contains("a GitHub token") && !said.contains(&key), "{said}");
     let init = c.tool("land", json!({ "repo": repo, "message": "init", "files": { "a.txt": { "content": "a\n" } } })).await;
     assert_eq!(init["status"], "landed");
     let first = init["changeset"].as_str().unwrap().to_string();

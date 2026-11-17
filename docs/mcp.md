@@ -105,6 +105,46 @@ anything but `1`, `true`, `0` or `false`, or the key spelled another way (`read_
 so a typo never means "not read-only". The connect panel has a checkbox
 for it, and it goes with toolsets (`?toolsets=postgres&readonly=1`).
 
+### Credentials kept out of what agents write
+
+As GitHub's MCP server's secret protection does (push protection for agents), a tool call that would
+write a credential where people and other agents read it is refused before it's sent
+(`roll_mcp::guard`): roll code (files, work items, comments, reviews), previews (notes), the
+workspace (names, descriptions) and agents (messages). That's how a prompt-injected agent leaks a
+secret: by writing it somewhere it's read.
+
+- Found: AWS access keys (not AWS's documentation `…EXAMPLE` keys), GitHub tokens (`ghp_`…, `github_pat_`), Slack tokens, Stripe live keys,
+  Google API keys, Anthropic and OpenAI keys, PEM private keys (a block with a base64 body, not
+  a bare header in code that parses keys), and roll's own credentials (`rlt_`,
+  `rlo_`, `rlf_`, `rlc_`, `rlk_`, by their checksum, so never a false positive). roll's are refused
+  in every product but roll secrets, where keeping one is the point; the others only in the
+  products above (a database, a queue or apps' variables are where credentials belong).
+- The values of the project's own roll secrets too, for a token that may reveal them (the one that
+  could have read a value to leak): the words a write would put where others read that look like
+  credentials (as roll code's landings judge them: at least 12 characters, a digit or a capital,
+  enough entropy, so `production` or `us-east-1` never match; all of them, and a write with more
+  than 20,000, roll secrets' limit for a scan, isn't sent) go to roll secrets' own scan (`POST /v1/secrets/projects/{p}/leaks`)
+  as the token, through the gate, for the projects its secrets rules name (or, with a rule over
+  every project, the ones it can list, quietly: never asking a person; past 50 the write isn't
+  sent). A scan that fails is logged, not silent. That scan only ever matches values the caller
+  may reveal, so the guard is never a test of a guess. The refusal names the key and environment.
+  The scan carries `X-Roll-Guard: 1` (roll secrets audits it as `secrets.guard`). A key tagged
+  `sensitive` is matched only for runtime callers, never for a token (that would be a one-bit
+  oracle on a value the token may never reveal), so the guard doesn't stop one; roll code's own
+  push scan still catches it landing in a repo.
+- Reads are never refused. The refusal says where in the arguments and what kind
+  (`{refused: "credential", at: "arguments.body", kind: "a GitHub token"}`), never the value, and
+  points at roll secrets. The audit log keeps a `deny` row with the same, without the arguments.
+- Checked live against a real rolld and roll secrets (`live/guard-live.sh`): a GitHub token in a
+  project's description refused and never echoed; a production secret's value refused for a token
+  that may reveal it, named by key, through roll secrets' own scan and the gate; the same value
+  through for a token that can't reveal it; a plain description through.
+- One detector (`roll_auth::credentials`, beside the checksum of roll's own secrets) serves both
+  MCP servers: roll code's own `/v1/code/mcp` refuses the same formats in its writes (`land`,
+  changes, work items) before they're sent.
+- Nothing reached its destination, so nothing is revoked (a credential that did leak, in a landing
+  or a report from GitHub, still is: `Access::revoke_leaked`).
+
 ### Lockdown
 
 `/v1/mcp?lockdown=1` (or `X-MCP-Lockdown: true`) works like GitHub's MCP server's lockdown mode:
@@ -271,6 +311,22 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
     `ttlMs: 60000` and `cacheScope: "private"`: a token's tools are its own, and its rules can
     change.
   - Approvals are Multi Round-Trip Requests (see Approvals).
+  - `subscriptions/listen` (SEP-2575) is an open stream: first
+    `notifications/subscriptions/acknowledged` with what roll will send of what was asked
+    (`toolsListChanged`, `promptsListChanged`), then `notifications/tools/list_changed` (and the
+    prompts one) whenever the connection's tools change: an access request approved, a rule
+    remembered, the token edited. Each carries `_meta["io.modelcontextprotocol/subscriptionId"]`.
+    The grant is looked up again every 5 s, never cached; when it stops working, or after an hour,
+    the stream answers the listen request (`result: {}`, the graceful end the spec added after
+    SEP-2575) and closes, and the client listens again. At most 4 are open at once per token; a
+    listen asking for nothing roll sends is refused (`-32602`). A 2026-07-28 client hears list
+    changes only there; an older one hears `list_changed` on the call that approved an access
+    request.
+    Checked live with the official TypeScript SDK v2 (`live/sdk2/listen.mjs`): its `listChanged`
+    option opens the subscription by itself, and an access request approved mid-session refreshes
+    its tools (9 to 18). That run found two interop bugs, both fixed: the ack must carry the
+    subscription id too (the SDK matches the ack by it), and the SDK sends `notifications/cancelled`
+    without `Mcp-Method` (a notification may leave it out; one present must still match).
   - **Asking for a missing id** (`roll_mcp::ask`): a call without an id it requires (a project, a
     Postgres project, an apps service or environment), from a client that declared form
     elicitation, answers `input_required` with a form whose choices are what the connection may
@@ -448,6 +504,7 @@ previews are listed once those products are on.
 | `access_whoami` | The connection's identity: the operator, or the token or OAuth connection and the rules it has. | `GET /v1/access` |
 | `access_wait_approval` | Wait (up to 55 s) for a person to decide an approval this connection asked for; then call the original tool again with approval. | `GET /v1/access/approvals/{approval_id}` |
 | `access_check` | Whether this connection may make a request (allow, ask or deny), and as which action on what, without making it. | `POST /v1/access/check` |
+| `access_request_access` | Ask a person for one more rule for a while (15m, 1h, 8h or 1d), saying why; wait with `access_wait_approval`. Once it's approved, that call's answer says the tools changed: `notifications/tools/list_changed` first on its stream (for a client that accepts one; `tools.listChanged` is declared) and in its text. | `POST /v1/access/requests` |
 | `access_list_approvals` | Approvals, newest first: pending ones wait for the operator. | `GET /v1/access/approvals` |
 | `access_audit_log` | Every request made with a token and every MCP tool call, newest first. | `GET /v1/access/audit` |
 | `workspace_list_projects` | Workspace projects, each with the resources on its canvas (kind, ref, position). | `GET /v1/workspace/projects` |

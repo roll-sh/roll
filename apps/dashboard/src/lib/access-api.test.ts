@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { installLink, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, idpFromForm, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
+import { installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -174,6 +174,34 @@ describe("a refusal's proposal", () => {
     expect(proposedRule("?add=postgres:everything&id=x", "allow")).toBeNull();
     expect(proposedRule("?add=*:admin", "allow")).toBeNull();
     expect(proposedRule("", "allow")).toBeNull();
+  });
+});
+
+describe("two-person approvals", () => {
+  it("says what a pending approval still needs, and who approved it", () => {
+    expect(gateProgress({ gates: [] })).toBeNull();
+    expect(gateProgress({ gates: [{ approvals: 2, approved: 1 }], approved_by: ["usr_bob"] })).toBe("approved by usr_bob · 1 more approval needed");
+    expect(gateProgress({ gates: [{ approvals: 2, approved: 0, approvers: ["usr_a", "usr_b"] }] })).toBe("2 more approvals needed (from usr_a, usr_b)");
+  });
+  it("reads an access request's time and reason, and never offers to remember it", () => {
+    const asked = { method: "GRANT", resource: "pa", args: { for: "1h", reason: "drop scratch" } };
+    expect(accessRequest(asked)).toEqual({ for: "1h", reason: "drop scratch" });
+    expect(accessRequest({ method: "DELETE" })).toBeNull();
+    expect(rememberable(asked)).toBe(false);
+  });
+  it("reads chat approvers with the accounts some are linked to", () => {
+    expect(parseApprovers("U1=usr_ana, @U2 U1")).toEqual({ approvers: ["U1", "U2"], people: { U1: "usr_ana" } });
+    expect(approversText({ approvers: ["U1", "U2"], people: { U1: "usr_ana" } })).toBe("U1=usr_ana, U2");
+  });
+  it("names whoever is looking as an approval records them", () => {
+    expect(deciderName({ kind: "operator", locked: true })).toBe("operator");
+    expect(deciderName({ kind: "operator", user: { id: "usr_bob", handle: "bob" }, locked: true })).toBe("usr_bob");
+    expect(deciderName(null)).toBeNull();
+  });
+  it("names a rule as the policy panel lists it, and a gated approval isn't remembered", () => {
+    expect(describeApprovalRule({ product: "secrets", actions: ["reveal"], environments: ["production"], approvals: 2 })).toBe("Secrets · reveal · production: 2 approvals");
+    expect(rememberable({ resource: "prj_a", gates: [{ approvals: 2, approved: 1 }] })).toBe(false);
+    expect(rememberable({ resource: "prj_a" })).toBe(true);
   });
 });
 
