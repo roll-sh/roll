@@ -467,7 +467,14 @@ impl Runtime {
                     self.iso.release(&name).await;
                 }
                 live.started.lock().take();
-                let error = if tail.trim().is_empty() { e } else { format!("{e}\n\n{}", tail.trim_end()) };
+                let error = if tail.trim().is_empty() { e.clone() } else { format!("{e}\n\n{}", tail.trim_end()) };
+                // Its output's tail is its code's words: masked as its logs are before it's kept
+                // (the preview's view, the pull request's comment), or left out when the masks
+                // can't be read.
+                let error = match self.engine() {
+                    Ok(en) => en.mask_text(preview, &error).await.unwrap_or(e),
+                    Err(_) => e,
+                };
                 warn!(%preview, %service, error = %error.lines().next().unwrap_or(""), "preview service failed to start");
                 live.phase.send_replace(Phase::Failed(error.clone()));
                 if let Ok(en) = self.engine() {
@@ -943,7 +950,8 @@ impl IntoResponse for Unavailable {
                 r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
                 r
             }
-            Unavailable::Failed(e) => page(StatusCode::BAD_GATEWAY, "The preview didn't start", &e, false),
+            // A visitor sees why, never its output (that's in its logs, for who can read them).
+            Unavailable::Failed(e) => page(StatusCode::BAD_GATEWAY, "The preview didn't start", e.lines().next().unwrap_or(""), false),
         }
     }
 }
