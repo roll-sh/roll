@@ -392,7 +392,8 @@ pub struct EnvLive {
     /// so the new instance isn't taken straight back in.
     cpu_need: AtomicU32,
     last_tick: Mutex<Option<Instant>>,
-    last_health: Mutex<Option<Instant>>,
+    /// When each serving deployment's instances were last health-checked.
+    last_health: Mutex<HashMap<String, Instant>>,
     client: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
     /// HTTP/2 without TLS, for an h2c app's health checks.
     client_h2: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
@@ -442,7 +443,7 @@ impl EnvLive {
             mem_samples: Mutex::new(std::collections::VecDeque::new()),
             cpu_need: AtomicU32::new(0),
             last_tick: Mutex::new(None),
-            last_health: Mutex::new(None),
+            last_health: Mutex::new(HashMap::new()),
             client: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http(),
             client_h2: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).http2_only(true).build_http(),
         })
@@ -1649,22 +1650,29 @@ impl EnvLive {
         }
         let now = Instant::now();
         let insts = self.meter_tick(now).await;
-        let due = {
-            let mut last = self.last_health.lock();
-            let due = last.is_none_or(|t| now.duration_since(t) >= self.cfg.health_every);
-            if due {
-                *last = Some(now);
-            }
-            due
-        };
-        // Each deployment's instances by its own health path (a canary's may differ).
+        // Each deployment's instances by its own health path and interval (a canary's may differ).
         let serving: Vec<Arc<Template>> = self.template().into_iter().chain(self.canary.lock().as_ref().map(|(t, _)| t.clone())).collect();
-        for tpl in serving.iter().filter(|_| due) {
+        let due: Vec<&Arc<Template>> = {
+            let mut last = self.last_health.lock();
+            last.retain(|d, _| serving.iter().any(|t| &t.deployment == d));
+            serving
+                .iter()
+                .filter(|t| {
+                    let every = t.run.health_every_s.map_or(self.cfg.health_every, |s| Duration::from_secs(s as u64));
+                    let due = last.get(&t.deployment).is_none_or(|at| now.duration_since(*at) >= every);
+                    if due {
+                        last.insert(t.deployment.clone(), now);
+                    }
+                    due
+                })
+                .collect()
+        };
+        for tpl in due {
             if tpl.run.kind == RunType::Web
                 && let Some(path) = tpl.run.health_path.as_deref()
             {
                 let mine: Vec<Arc<Inst>> = insts.iter().filter(|i| i.deployment == tpl.deployment).cloned().collect();
-                self.check_health(&mine, path, tpl.run.concurrency, tpl.run.h2c).await;
+                self.check_health(&mine, path, &tpl.run).await;
             }
         }
         if self.held.load(Ordering::SeqCst) {
@@ -1801,7 +1809,9 @@ impl EnvLive {
     /// answers errors with its port still open) replace it: it's out of rotation and stopped
     /// as a crash (counted toward a crash loop), and the next request or the floor starts a
     /// fresh one.
-    async fn check_health(&self, insts: &[Arc<Inst>], path: &str, concurrency: u32, h2c: bool) {
+    async fn check_health(&self, insts: &[Arc<Inst>], path: &str, run: &Run) {
+        let (concurrency, h2c) = (run.concurrency, run.h2c);
+        let failures = run.health_failures.unwrap_or(self.cfg.health_failures);
         // An instance with as many requests as it takes is busy, not broken: a probe that queues
         // behind them proves nothing, so it isn't checked until it has room.
         let running: Vec<(&Arc<Inst>, SocketAddr)> = insts
@@ -1819,9 +1829,9 @@ impl EnvLive {
                 continue;
             }
             let n = i.health_fails.fetch_add(1, Ordering::SeqCst) + 1;
-            self.log.stream(Stream::System).line(format!("{}: health check {path} failed ({n} of {})", i.name, self.cfg.health_failures));
+            self.log.stream(Stream::System).line(format!("{}: health check {path} failed ({n} of {failures})", i.name));
             // Still the instance that was checked (not stopped or replaced meanwhile).
-            if n >= self.cfg.health_failures && i.phase() == Phase::Running(Some(addr)) {
+            if n >= failures && i.phase() == Phase::Running(Some(addr)) {
                 // Out of rotation now; what it's serving gets the drain to finish.
                 self.crashed_with(i, &format!("its health check {path} failed {n} times in a row"), self.cfg.drain);
             }
@@ -1968,6 +1978,14 @@ impl EnvLive {
         let mut up = 0;
         for i in &insts {
             match i.phase() {
+                // Up but failing its health command (a consumer that hung): replaced as a crash.
+                Phase::Running(_) if tpl.spec.health.is_some() && self.runtime.unhealthy(&i.name).await => {
+                    let h = tpl.spec.health.as_ref().expect("checked");
+                    let why = format!("its health command failed {} times in a row", h.failures);
+                    self.log.stream(Stream::System).line(format!("{}: {why}", i.name));
+                    self.crashed(i, &why);
+                    self.after_stop(i, run, false, &why);
+                }
                 Phase::Running(_) if self.runtime.running(&i.name).await => {
                     up += 1;
                     // A minute up: its crashes are no longer in a row.
@@ -2177,6 +2195,7 @@ mod tests {
                 idle_stop_s: None,
                 registry: None,
                 files: vec![],
+                health: None,
             },
             run,
             spa: false,

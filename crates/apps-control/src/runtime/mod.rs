@@ -60,6 +60,18 @@ pub struct InstanceSpec {
     /// The private registry login its image pulls with, where the runtime pulls at each start
     /// (Fargate: the task's repository credentials). Never in `Debug`.
     pub registry: Option<RegistryLogin>,
+    /// A worker's health check, run by the runtime in the instance ([`Runtime::unhealthy`]).
+    pub health: Option<HealthCheck>,
+}
+
+/// A command run in an instance every `every`, healthy on exit 0; `failures` in a row make it
+/// unhealthy. `start` is the grace before failures count.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HealthCheck {
+    pub command: String,
+    pub every: Duration,
+    pub failures: u32,
+    pub start: Duration,
 }
 
 impl std::fmt::Debug for InstanceSpec {
@@ -165,6 +177,11 @@ pub trait Runtime: Send + Sync {
     /// Wait for a started instance to exit: its exit code.
     async fn wait(&self, name: &str) -> anyhow::Result<i32>;
     async fn running(&self, name: &str) -> bool;
+    /// Whether its health check ([`InstanceSpec::health`]) failed `failures` times in a row. A
+    /// runtime that runs no checks answers false.
+    async fn unhealthy(&self, _name: &str) -> bool {
+        false
+    }
     /// Take on `spec.name`, still running from another process (a node that died, rolld before
     /// a restart) and of `spec.deployment` (its label or tag says so), as this process's own,
     /// its output followed into `log` from now. None: not running here, another deployment's,

@@ -48,6 +48,9 @@ interface Form {
   memory: number;
   healthPath: string;
   healthTimeout: string;
+  healthEvery: string;
+  healthFailures: string;
+  healthCommand: string;
   drain: string;
   cpuTarget: string;
   memoryTarget: string;
@@ -110,6 +113,9 @@ export function formOf(s: Service): Form {
     memory: s.run.memory_mb,
     healthPath: str(s.run.health_path),
     healthTimeout: str(s.run.health_timeout_s),
+    healthEvery: str(s.run.health_every_s),
+    healthFailures: str(s.run.health_failures),
+    healthCommand: str(s.run.health_command),
     drain: str(s.run.drain_s),
     cpuTarget: str(s.run.cpu_target),
     memoryTarget: str(s.run.memory_target),
@@ -188,6 +194,9 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.memory !== before.memory) run.memory_mb = f.memory;
   if (f.healthPath !== before.healthPath) run.health_path = text(f.healthPath);
   if (f.healthTimeout !== before.healthTimeout) run.health_timeout_s = num(f.healthTimeout);
+  if (f.healthEvery !== before.healthEvery) run.health_every_s = num(f.healthEvery);
+  if (f.healthFailures !== before.healthFailures) run.health_failures = num(f.healthFailures);
+  if (f.healthCommand !== before.healthCommand) run.health_command = text(f.healthCommand);
   if (f.drain !== before.drain) run.drain_s = num(f.drain);
   if (f.cpuTarget !== before.cpuTarget) run.cpu_target = num(f.cpuTarget);
   if (f.memoryTarget !== before.memoryTarget) run.memory_target = num(f.memoryTarget);
@@ -221,7 +230,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   return patch;
 }
 
-const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
+const NUMERIC: (keyof Form)[] = ["scalePer", "port", "timeout", "retries", "min", "max", "concurrency", "healthTimeout", "healthEvery", "healthFailures", "drain", "cpuTarget", "memoryTarget", "suspendAfter", "sleepAfter", "volumeSize", "alertMemory", "alertErrors", "alertP95", "alertCapacity", "alertLogCount", "rolloutStep", "rolloutErrors", "restartTries"];
 
 /** A rollout's steps as typed (`10, 50`): increasing percents 1–99, at most five; null when they aren't. */
 export function rolloutSteps(v: string): number[] | null {
@@ -524,10 +533,29 @@ export function SettingsTab({
           <Grid>
             {web && (
               <>
-                <Field label="Health check path" hint="checked at each deploy and every 10 s while running; none: the port accepting">
+                <Field label="Health check path" hint="checked at each deploy and while running; none: the port accepting">
                   {t("healthPath", "/healthz")}
                 </Field>
                 <Field label="Health timeout (s)">{t("healthTimeout", "60")}</Field>
+              </>
+            )}
+            {form.type === "worker" && (
+              <Field label="Health command" hint="run in each instance; exit 0 is healthy, so a hung consumer is replaced">
+                {t("healthCommand", "test -f /tmp/alive")}
+              </Field>
+            )}
+            {(web || form.type === "worker") && (
+              <>
+                <Field label="Check every (s)" hint="while running; empty: 10">
+                  {t("healthEvery", "10")}
+                </Field>
+                <Field label="Failures before it's replaced" hint="in a row; empty: 3">
+                  {t("healthFailures", "3")}
+                </Field>
+              </>
+            )}
+            {web && (
+              <>
                 <Field label="Alert: 5xx share (%)" hint="of five minutes' requests; 0 off">
                   {t("alertErrors", "5")}
                 </Field>

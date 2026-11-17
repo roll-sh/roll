@@ -86,6 +86,8 @@ pub struct Fake {
     oom: Mutex<std::collections::HashSet<String>>,
     /// Instances busy at this share of their CPU ([`Fake::set_busy`]), from when it was set.
     busy: Mutex<HashMap<String, (f64, std::time::Instant)>>,
+    /// Instances whose health command fails from now on ([`Fake::fail_health`]).
+    failing: Mutex<std::collections::HashSet<String>>,
     /// Memory an instance says it uses ([`Fake::set_memory`]; else 64 MiB).
     memory: Mutex<HashMap<String, u64>>,
     /// Volumes' contents (what a backup reads and a restore writes).
@@ -105,6 +107,12 @@ impl Fake {
     /// `name` uses `share` of its CPU from now on (its usage's CPU time grows at that rate).
     pub fn set_busy(&self, name: &str, share: f64) {
         self.busy.lock().insert(name.to_string(), (share, std::time::Instant::now()));
+    }
+
+    /// Instance `name`'s health command fails from now on (a consumer that hung), until it starts
+    /// again.
+    pub fn fail_health(&self, name: &str) {
+        self.failing.lock().insert(name.to_string());
     }
 
     /// Instance `name` uses this many bytes of memory from now on.
@@ -358,6 +366,8 @@ impl Runtime for Fake {
         if let Some(a) = self.accepted.lock().get_mut(name) {
             a.0 = 0;
         }
+        // A fresh process isn't the one that hung: its health starts over, as Docker's does.
+        self.failing.lock().remove(name);
         let spec = {
             let m = self.instances.lock();
             let i = m.get(name).ok_or_else(|| anyhow::anyhow!("no instance {name}"))?;
@@ -540,6 +550,10 @@ impl Runtime for Fake {
 
     async fn running(&self, name: &str) -> bool {
         matches!(self.state(name), Some(FakeState::Running | FakeState::Paused))
+    }
+
+    async fn unhealthy(&self, name: &str) -> bool {
+        self.instances.lock().get(name).is_some_and(|i| i.spec.health.is_some() && i.state == FakeState::Running) && self.failing.lock().contains(name)
     }
 
     async fn adopt(&self, spec: &InstanceSpec, _log: LogSink) -> Option<super::Adopted> {

@@ -263,11 +263,18 @@ every deployment is immutable with instant rollback.
   name nobody. The deployments list, `roll apps deploys` and notifications ("deploy failed … by
   Ada") show it.
 - **Health checks while running** (Render's, Fly's `checks`): with a `health_path`, every
-  running web instance is checked every 10 s (`LiveConfig::health_every`); three failures in a
-  row (`health_failures`: an app that hangs or answers errors with its port still open) replace
-  it: out of rotation, stopped, counted as a crash (so a loop of them notifies), and the next
-  request or `min_instances` starts a fresh one. Each failure is a line in the environment's
-  log. Without a path, a port that stops answering is noticed by the proxy and the reaper.
+  running web instance is checked every `health_every_s` (2–300, default 10); `health_failures`
+  in a row (1–10, default 3: an app that hangs or answers errors with its port still open)
+  replace it: out of rotation, stopped, counted as a crash (so a loop of them notifies), and the
+  next request or `min_instances` starts a fresh one. Each failure is a line in the
+  environment's log. Without a path, a port that stops answering is noticed by the proxy and the
+  reaper. A worker has no port, so its check is `health_command` (Docker's `HEALTHCHECK CMD`,
+  Kubernetes' exec probe): a shell command Docker runs in the instance at the same interval,
+  healthy on exit 0, counting only after `health_timeout_s`. One that fails `health_failures`
+  times in a row (a consumer stuck on a lock with its process up) is replaced as a crash, by its
+  `restart` policy, and says so in the log. The command runs in production, so changing it is a
+  deploy in the permissions catalogue; the interval and failures are a write. The command needs
+  a shell in the image, and Fargate doesn't run it yet.
 - **One-off jobs** (`POST …/jobs`, `roll apps run -- <cmd>`): a command in a fresh container of
   the active deployment, with its variables on the project network (no port, no volume: the
   service's instance may have it), as Render's one-off jobs and `heroku run` are. Its output is a
@@ -2587,60 +2594,58 @@ put items 1–11 first. A second review that day (after #78, against the same si
    doesn't follow and every pull request (`GitPush`, `GitPull`), each checked against the
    repository's refs; previews builds the environments, comments and gates forks behind a
    writer's approval (its side is the previews thread's, stacked on this).
-2. **Health check settings, and workers' health** (Fly's `[checks]`): interval and failures per
-   service, and a worker's `health_command` run in its instance, so a hung consumer is replaced.
-3. **Variables as files in builds**: a file variable mounted into the build as a BuildKit
+2. **Variables as files in builds**: a file variable mounted into the build as a BuildKit
    secret (`--mount=type=secret,target=…`) for an `.npmrc` or a private registry's login, never in
    a layer.
-4. **A stack trace as one entry in the log view**: the Logs tab and `roll apps logs` showing a
+3. **A stack trace as one entry in the log view**: the Logs tab and `roll apps logs` showing a
    trace's lines together (`errors::occurrences` already joins them), with a link to its group.
-5. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
+4. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
    on main, `watch_secrets` holds one `SecretSource::wait_digest` long poll per watched
    environment instead of polling every minute. Each watched environment needs a task of its
    own on the owner (resumed on ownership), not a 25-second poll inside the minute loop (`tags.rs`).
-6. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
+5. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
    proxy alone keeps them; the storage CDN's purge outbox could carry the purges.
    Across nodes means a node that doesn't own the service answering from its own copy, which
    needs the owner's say that the environment has no gate (access, allow list, firewall, rate
    limit) on each answer, a generation per environment for purges, and hits metered and logged
    where the owner reads them: only worth it once the fleet serves traffic.
-7. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
+6. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
    outbound rule but the egress proxy's, and the proxy as a task or on the node; until then
    Fargate refuses `egress: roll` (409). *Waiting on the fleet's first run.*
-8. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+7. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-9. **Region**: the region shown on the overview and each environment, defaulting to the project's
+8. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-10. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+9. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-11. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+10. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-12. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
+11. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
    digests mark "needs deploy", roll secrets' reveal rules, linked and sensitive keys, dynamic
    credentials refused, new environments ensured); what's left is service variables kept in roll
    secrets at `/services/<name>` (one store for both), and links as per-environment secrets
    links.
-13. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+12. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-14. *Waiting on a queue link provider in roll secrets.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); a queue needs a provider that issues its own user first.
-15. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+13. *Waiting on a queue link provider in roll secrets.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); a queue needs a provider that issues its own user first.
+14. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-16. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+15. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-17. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+16. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-18. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+17. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-19. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+18. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).

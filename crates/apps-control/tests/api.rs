@@ -2872,6 +2872,39 @@ async fn a_crashing_worker_restarts_and_its_crash_loop_is_one_event() {
     assert_eq!(events["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "crash_loop").count(), 1, "once, however long it lasts: {events}");
 }
 
+/// A worker with a `health_command` whose check fails (a consumer that hung, its process up)
+/// is replaced as a crash and says why; its check goes to the runtime with the interval and
+/// failures it was given, and a web service can't have one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worker_whose_health_command_fails_is_replaced() {
+    let w = world_with(|c| c.live.restart_backoff = Duration::from_millis(5)).await;
+    let (st, bad) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "webcheck", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80, "health_command": "true"} }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}");
+    let (svc, d) = image_service(&w, "consumer", json!({"type": "worker", "min_instances": 1, "health_command": "test -f /tmp/alive", "health_every_s": 5, "health_failures": 2})).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let live = w.apps.live(&id, "production");
+    let running = |w: &World| w.fake.instances(&id).into_iter().filter(|(_, _, st)| *st == FakeState::Running).map(|(n, _, _)| n).collect::<Vec<_>>();
+    let first = running(&w);
+    assert_eq!(first.len(), 1, "{:?}", w.fake.instances(&id));
+    let h = w.fake.spec(&first[0]).unwrap().health.unwrap();
+    assert_eq!((h.command.as_str(), h.every, h.failures), ("test -f /tmp/alive", Duration::from_secs(5), 2));
+    let starts = w.fake.counts.starts.load(Ordering::SeqCst);
+    w.fake.fail_health(&first[0]);
+    let mut replaced = false;
+    for _ in 0..200 {
+        live.tick().await;
+        if running(&w).len() == 1 && w.fake.counts.starts.load(Ordering::SeqCst) > starts {
+            replaced = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(replaced, "started again: {:?}", w.fake.instances(&id));
+    let log = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs"), None).await.1.to_string();
+    assert!(log.contains("its health command failed 2 times in a row"), "{log}");
+}
+
 /// A crowd at a sleeping service wakes one instance; those waiting on a start slower than the
 /// wake timeout get a 503 page that says when to try again, and the retry gets the app.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
