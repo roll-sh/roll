@@ -39,6 +39,9 @@ pub enum RankKind {
     /// OpenSearch's hybrid query (`HybridQueryWeight.explain`): the sub-queries' explanations
     /// under "combined score of:", valued at the best matching one.
     Hybrid,
+    /// `RuleQueryRankDoc`: a `rule` retriever's document, explained with its rulesets and match
+    /// criteria (the description).
+    Rule(String),
 }
 
 /// One rank doc of a shard.
@@ -85,6 +88,7 @@ impl TopQuery {
                     None => Explanation::no_match("no matching clause", sources),
                 }
             }
+            RankKind::Rule(description) => Explanation::matched(d.score, description.clone(), sources),
             RankKind::Pinned if d.score > super::extra::MAX_ORGANIC_SCORE => Explanation::matched(d.score, "Pinned document, original explanation:", sources),
             RankKind::Plain | RankKind::Pinned => Explanation::matched(
                 d.rank as i32,
@@ -329,6 +333,43 @@ impl Query for RankDocsQuery {
 
     fn profile_name(&self) -> String {
         "RankDocsQuery".into()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// A `rule` retriever's child query as Elasticsearch explains it: under a boolean query
+/// ("sum of:" its one scoring clause), which this keeps from collapsing into the query.
+#[derive(Clone, Debug)]
+pub struct SumOf(pub QueryRef);
+
+struct SumOfWeight(Box<dyn Weight>);
+
+impl Weight for SumOfWeight {
+    fn scorer(&self, seg: &SegmentContext) -> search_index::Result<Option<Box<dyn search_index::search::Scorer>>> {
+        self.0.scorer(seg)
+    }
+
+    fn explain(&self, seg: &SegmentContext, doc: u32) -> search_index::Result<Explanation> {
+        let e = self.0.explain(seg, doc)?;
+        Ok(if e.is_match() { Explanation::matched(e.value(), "sum of:", vec![e]) } else { Explanation::no_match("No matching clause", vec![e]) })
+    }
+}
+
+impl Query for SumOf {
+    fn weight(&self, s: &Searcher, mode: ScoreMode, boost: f32) -> search_index::Result<Box<dyn Weight>> {
+        Ok(Box::new(SumOfWeight(self.0.weight(s, mode, boost)?)))
+    }
+
+    fn rewrite(&self, s: &Searcher) -> search_index::Result<Option<QueryRef>> {
+        let r = s.rewrite(&self.0)?;
+        Ok((!Arc::ptr_eq(&r, &self.0)).then(|| Arc::new(SumOf(r)) as QueryRef))
+    }
+
+    fn lucene_string(&self, schema: &search_index::Schema) -> String {
+        format!("+{}", self.0.lucene_string(schema))
     }
 
     fn as_any(&self) -> &dyn Any {

@@ -317,7 +317,9 @@ impl Engine {
         // preview nobody converges any more lets it lapse.
         let trusted = s.secrets.allow_production && r.trusted;
         let expires_at = self.store.now_ms()? + SECRETS_ENV_MARGIN_MS;
-        self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, trusted, expires_at).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // What it branched: roll secrets resolves nothing of those parents' (`followed`).
+        let branched: Vec<(Kind, String)> = self.store.resources(&r.id)?.into_iter().map(|x| (x.kind, x.parent)).collect();
+        self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, trusted, expires_at, &branched).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
 
         // 3b. The project's seed, once on fresh data, before anything serves it.
         if let Some(seed) = &s.seed
@@ -398,7 +400,9 @@ impl Engine {
             // private, or a rotation, restarts nothing there (nor cuts a screenshot short).
             // The feedback button: the runtime's proxy adds it per request; roll apps at deploy.
             let feedback = s.feedback && r.change_id.is_some() && access_token.is_some();
-            let fingerprint = config_fingerprint(&vars, access_token.is_some() && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps);
+            // Egress too: a service moves onto (or off) the preview's own network by restarting.
+            let fingerprint = config_fingerprint(&vars, access_token.is_some() && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps)
+                + &if s.egress == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() };
             let config_moved = self.store.service_config(&r.id, &spec.name)?.as_deref() != Some(fingerprint.as_str());
             // The head it ran stays reachable at a URL of its own (Vercel's per-push URLs): the
             // change's own services on the runtime, a trusted change's.
@@ -431,6 +435,8 @@ impl Engine {
                     access_token: access_token.clone(),
                     bypass_sha256: bypass.clone(),
                     feedback,
+                    egress: s.egress,
+                    egress_hosts: s.egress_hosts.clone(),
                 };
                 self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
                 match self.apps.deploy(&t).await {
@@ -610,7 +616,10 @@ impl Engine {
         // their own), each a page of its own.
         let own_keys: Vec<String> = states.iter().map(|s| format!("state:{}", s.name)).chain(browsers.iter().map(|b| format!("browser:{b}"))).collect();
         first_paths.extend(own_keys.iter().filter(|k| k.starts_with("state:")).cloned());
-        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers };
+        // The open notes' elements not cropped yet, on the first service's pages (a note's link
+        // is the preview's first URL and its path): what each note is about, as a picture.
+        let crops = self.crops_wanted(r).await;
+        let opts = crate::ports::ShotOptions { pages: first_paths, hide: hide.clone(), openapi, endpoints, states, browsers, crops };
         let started = std::time::Instant::now();
         match self.apps.screenshot(&r.id, &first.name, &opts).await {
             Ok(Some(shot)) => {
@@ -639,12 +648,14 @@ impl Engine {
                 // no older picture behind to be compared and reviewed as this head's.
                 let took = |k: &String| !k.starts_with("browser:") || pages.iter().any(|p| p.path == *k);
                 let wanted: Vec<String> = entries.iter().cloned().chain(width_keys.iter().cloned()).chain(own_keys.iter().filter(|k| took(k)).cloned()).collect();
+                for (note, png) in &shot.crops {
+                    if let Err(e) = self.store.set_note_crop(&r.id, note, png) {
+                        warn!(preview = %r.id, error = %e, "previews: keeping a note's crop");
+                    }
+                }
                 let (store, id, head) = (self.store.clone(), r.id.clone(), r.build().to_string());
-                let kept = tokio::task::spawn_blocking(move || {
-                    store.set_screenshot(&id, &head, &shot.png, shot.speed.as_ref(), shot.phone.as_deref()).is_ok()
-                        && store.set_page_report(&id, shot.health.as_ref(), shot.a11y.as_ref(), shot.text.as_deref(), shot.links.as_ref(), shot.api.as_deref()).is_ok()
-                        && store.set_page_shots(&id, &head, &pages, &wanted).is_ok()
-                })
+                // One transaction: a comparison never sees the picture without its checks and pages.
+                let kept = tokio::task::spawn_blocking(move || store.keep_shot(&id, &head, &shot, &pages, &wanted).is_ok())
                 .await
                 .unwrap_or(false);
                 if kept && r.change_id.is_some() {
@@ -686,6 +697,27 @@ impl Engine {
         }
     }
 
+    /// The open notes of a change's preview without a crop, whose page and selector pass roll's
+    /// checks (they come from the preview's code), at most [`crate::store::CROPS_PER_RUN`].
+    async fn crops_wanted(&self, r: &Row) -> Vec<crate::ports::CropAsk> {
+        if r.change_id.is_none() {
+            return Vec::new();
+        }
+        let notes = match self.open_notes(&r.id).await {
+            Ok(n) => n,
+            Err(e) => {
+                warn!(preview = %r.id, error = %e, "previews: reading the notes to crop");
+                return Vec::new();
+            }
+        };
+        notes
+            .into_iter()
+            .filter(|n| !n.crop && crate::settings::page_path_ok(&n.path) && crate::settings::selector_ok(&n.selector))
+            .take(crate::store::CROPS_PER_RUN)
+            .map(|n| crate::ports::CropAsk { note: n.id, path: n.path, selector: n.selector })
+            .collect()
+    }
+
     /// The pages `github.pages` names on the preview's other services (`admin:/`, `admin:/users`),
     /// a screenshot run per service in that service's own network. Best effort: a service that
     /// can't be taken is logged and its pages wait for the next head.
@@ -699,12 +731,25 @@ impl Engine {
         let services = self.store.services(&r.id).unwrap_or_default();
         let mut out = Vec::new();
         for (svc, paths) in by_service {
-            if !services.iter().any(|s| s.name == svc) {
+            let Some(service) = services.iter().find(|s| s.name == svc) else { continue };
+            // Only the pages a push can change are taken again (Chromatic's TurboSnap): a service
+            // that runs what it ran last time (its revision, what it's deployed with, the same
+            // data) keeps its pages, checks and all, without a browser run.
+            let key = service.deployed.as_ref().map(|rev| format!("{rev}:{}:{}", self.store.service_config(&r.id, svc).ok().flatten().unwrap_or_default(), r.last_reset_at.unwrap_or(0)));
+            if let Some(key) = &key
+                && self.store.service_shot_key(&r.id, svc).ok().flatten().as_deref() == Some(key.as_str())
+                && let Some(kept) = paths.iter().map(|p| self.store.kept_page(&r.id, &format!("{svc}:{p}")).ok().flatten()).collect::<Option<Vec<_>>>()
+            {
+                let _ = self.store.log(&r.id, &format!("kept {svc}'s pages: it runs what it ran at the push before"));
+                out.extend(kept);
                 continue;
             }
-            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), openapi: None, endpoints: Vec::new(), states: Vec::new(), browsers: Vec::new() };
+            let opts = crate::ports::ShotOptions { pages: paths.iter().filter(|p| **p != "/").map(|p| p.to_string()).collect(), hide: hide.to_vec(), ..Default::default() };
             match self.apps.screenshot(&r.id, svc, &opts).await {
                 Ok(Some(shot)) => {
+                    if let Some(key) = &key {
+                        let _ = self.store.set_service_shot_key(&r.id, svc, key);
+                    }
                     if paths.contains(&"/") {
                         let errors = shot.health.as_ref().map_or(0, |h| h.errors + h.failed);
                         let report = crate::PageReport { a11y: shot.a11y.clone(), links: shot.links.clone(), text: shot.text.clone(), unstable: shot.health.as_ref().is_some_and(|h| h.unstable), step: None };
@@ -746,12 +791,21 @@ impl Engine {
     /// branch yet (their screenshots came first, as a new baseline's does) are now, and say so.
     async fn compare_waiting(&self, b: &Row) {
         let Ok(rows) = self.store.rows(Some(&b.project_id)) else { return };
+        // Every change again, not only those not compared yet: a change's screenshot run may
+        // have compared it while this baseline's was half kept (its first page in, its other
+        // pages not yet: screenshots run side by side), leaving pages uncompared for good. At the
+        // same merge base the answer is the same, so only a change whose comparison moved is
+        // reported.
+        let compared = |id: &str| {
+            self.store.row(id).and_then(|r| self.store.view(r)).ok().map(|p| {
+                let pages: Vec<(String, Option<f64>)> = p.pages.iter().map(|x| (x.path.clone(), x.base_percent)).collect();
+                serde_json::to_string(&(&p.base_change, pages)).unwrap_or_default()
+            })
+        };
         for r in rows.into_iter().filter(|x| x.change_id.is_some() && x.desired == Desired::Active) {
-            if !matches!(self.store.base_change(&r.id), Ok(None)) {
-                continue;
-            }
+            let before = compared(&r.id);
             self.compare_with_default_branch(&r).await;
-            if matches!(self.store.base_change(&r.id), Ok(Some(_))) {
+            if compared(&r.id) != before {
                 self.report(r).await;
             }
         }
@@ -865,7 +919,9 @@ impl Engine {
             let n = seen.entry(kind).or_default();
             let suffix = (*n > 0).then(|| env_suffix(&parent));
             *n += 1;
-            for (k, v) in suffixed(vars, suffix.as_deref()) {
+            // With the names a roll secrets link to the parent would hand out, so the parent's
+            // values under them don't survive the secrets layer (`names::with_standard`).
+            for (k, v) in suffixed(crate::names::with_standard(kind, vars), suffix.as_deref()) {
                 set(&mut env, &k, v);
             }
         }
@@ -966,7 +1022,17 @@ impl Engine {
 
     pub(super) async fn report(&self, row: Row) {
         let Ok(s) = self.store.settings(&row.project_id) else { return };
-        if let Ok(p) = self.store.view(row) {
+        if let Ok(mut p) = self.store.view(row) {
+            // The open notes, newest first (a few), for the pull request's comment.
+            if p.change.is_some() {
+                let mut notes = self.open_notes(&p.id).await.unwrap_or_default();
+                notes.reverse();
+                notes.truncate(10);
+                p.notes = notes.into_iter().map(|n| {
+                    let link = if n.crop { self.store.note_crop_link(&p.id, &n.id).ok().flatten() } else { None };
+                    (n, link)
+                }).collect();
+            }
             self.source.report(&p, &s).await;
         }
     }

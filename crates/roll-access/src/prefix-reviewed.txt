@@ -169,6 +169,7 @@ PUT /v1/previews/{id}/env
 POST /v1/previews/{id}/keep
 GET /v1/previews/{id}/notes
 POST /v1/previews/{id}/notes/{note}/resolve
+GET /v1/previews/{id}/notes/{note}/crop
 GET /v1/previews/{id}/logs
 POST /v1/previews/{id}/refresh
 GET /v1/previews/{id}/screenshot
@@ -248,4 +249,3 @@ GET /v1/secrets/projects/{project}/suggestions
 POST /v1/secrets/projects/{project}/syncs/preview
 DELETE /v1/secrets/projects/{project}/syncs/{id}
 POST /v1/secrets/projects/{project}/syncs/{id}/run
-DELETE /v1/secrets/projects/{project}/tokens/{id}

@@ -451,6 +451,36 @@ pub mod direct {
         }
     }
 
+    /// [`get`] for widths of 1 to 57 bits, where one unaligned 8-byte load holds any value:
+    /// no overflow guards or two-word reads, only the load's bounds check (a read near the
+    /// end of a short, corrupt stream takes [`get`]).
+    #[derive(Clone, Copy)]
+    pub struct Unpacker<'a> {
+        data: &'a [u8],
+        bits: u32,
+        mask: u64,
+    }
+
+    impl<'a> Unpacker<'a> {
+        /// `None` for widths of 0 or over 57 bits ([`get`] handles those).
+        #[inline]
+        pub fn new(data: &'a [u8], bits: u32) -> Option<Unpacker<'a>> {
+            (1..=57).contains(&bits).then_some(Unpacker { data, bits, mask: mask64(bits) })
+        }
+
+        /// Value `index`, as [`get`] reads it (an index past any real stream, from corrupt
+        /// data, may read other bytes than [`get`]'s zeros, never out of bounds).
+        #[inline(always)]
+        pub fn get(&self, index: u64) -> u64 {
+            let bit = index.wrapping_mul(self.bits as u64);
+            let byte = (bit >> 3) as usize;
+            match self.data.get(byte..byte.wrapping_add(8)) {
+                Some(w) => (u64::from_le_bytes(w.try_into().unwrap()) >> (bit & 7)) & self.mask,
+                None => get(self.data, self.bits, index),
+            }
+        }
+    }
+
     /// Calls `f` with the `n` consecutive values from `start`, in order. Faster than `n` calls
     /// to [`get`]: whole-byte widths are plain loads, the others walk the bit stream without
     /// recomputing offsets or checking bounds per value (the range is checked once).

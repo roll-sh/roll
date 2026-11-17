@@ -8,7 +8,7 @@ use crate::write::{Batch, Op, Promote, Rollback, SecretType};
 use crate::{Error, Secrets, dotenv};
 use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -76,8 +76,6 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/leases"), get(leases))
         .route(&format!("{P}/leases/{{id}}"), axum::routing::delete(revoke_lease))
         .route(&format!("{P}/leases/{{id}}/renew"), post(renew_lease))
-        .route(&format!("{P}/tokens"), get(tokens).post(create_token))
-        .route(&format!("{P}/tokens/{{id}}"), axum::routing::delete(revoke_token))
         .route(&format!("{P}/identities"), get(identities).post(create_identity))
         .route(&format!("{P}/identities/{{id}}"), axum::routing::delete(delete_identity))
         .route(&format!("{P}/identities/{{id}}/jwks"), axum::routing::put(set_identity_keys))
@@ -495,7 +493,14 @@ async fn rotate(State(s): S, Who(c): Who, Path((project, env, key)): Path<(Strin
     Ok(ok(blocking(s, move |s| s.rotate(&project, &env, &path_of(&q), &key, &c)).await?))
 }
 
-async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
+/// The entity tag a conditional read sent (`If-None-Match: "<digest>"`, weak or strong).
+fn if_none_match(headers: &HeaderMap) -> Option<String> {
+    let v = headers.get(header::IF_NONE_MATCH)?.to_str().ok()?.trim();
+    let v = v.strip_prefix("W/").unwrap_or(v).trim_matches('"');
+    (!v.is_empty() && v.len() <= 64 && v.bytes().all(|b| b.is_ascii_hexdigit())).then(|| v.to_string())
+}
+
+async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q, headers: HeaderMap) -> crate::Result<Response> {
     let resolve = flag(&q, "resolve", true);
     let format = match q.get("format") {
         Some(f) => Some(dotenv::Format::parse(f).ok_or_else(|| Error::BadRequest("format is dotenv, shell, json, yaml, docker or kubernetes".into()))?),
@@ -518,8 +523,17 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
     } else {
         // With `digest=1` (a watch): the folder's digest (`…/digest`), taken just before the read,
         // so a write landing after it is a change. Asked for, since it costs about a read.
-        let want = flag(&q, "digest", false);
+        // A conditional read (`If-None-Match`, a cache revalidating): unchanged is a 304 that
+        // decrypts nothing, issues nothing and writes no audit row.
+        let etag = if_none_match(&headers);
+        let want = flag(&q, "digest", false) || etag.is_some();
         let dynamic = flag(&q, "dynamic", true);
+        if let Some(tag) = etag.clone() {
+            let (s, c, project, env, path) = (s.clone(), c.clone(), project.clone(), env.clone(), path_of(&q));
+            if let Some(d) = blocking(s, move |s| s.unchanged(&project, &env, &path, &tag, dynamic, &c)).await? {
+                return Ok(secret_response((StatusCode::NOT_MODIFIED, [(header::ETAG, format!("\"{d}\""))]).into_response()));
+            }
+        }
         blocking(s, move |s| {
             let path = path_of(&q);
             let digest = if want { s.digest(&project, &env, &path, &c).ok() } else { None };
@@ -546,7 +560,7 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
         }
         None => {
             let mut j = serde_json::to_value(&v).expect("JSON");
-            if let Some(d) = digest {
+            if let Some(d) = &digest {
                 j["digest"] = json!(d);
             }
             ok(j)
@@ -556,6 +570,13 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
             ([(header::CONTENT_TYPE, f.content_type())], text.to_string()).into_response()
         }
     };
+    // The digest it was read against: what a cache sends back as `If-None-Match`.
+    let mut r = r;
+    if let Some(d) = digest.filter(|_| as_of.is_none())
+        && let Ok(v) = HeaderValue::from_str(&format!("\"{d}\""))
+    {
+        r.headers_mut().insert(header::ETAG, v);
+    }
     Ok(secret_response(r))
 }
 
@@ -611,8 +632,8 @@ async fn digest(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
 /// answer), it answers as soon as the digest differs from `since`, or with the same digest
 /// when `wait` runs out (`GET …/digest?since=&wait=`, and roll apps' redeploys in process). It
 /// reads the project's change counter each second (cheap) and works the digest out again only
-/// when that moved, or every 10 s (what the counter can't see: a live link's value, a folder
-/// another project shares). At most 32 held per principal and 4096 per node; past that it answers
+/// when that moved (one reader per node and project, `subscribe`), or every 10 s (what the counter
+/// can't see: a live link's value, a folder another project shares). At most 32 held per principal and 4096 per node; past that it answers
 /// at once.
 pub async fn wait_digest(s: Arc<Secrets>, project: String, env: String, path: String, since: Option<String>, wait: u64, c: Caller) -> crate::Result<String> {
     let wait = wait.min(25);
@@ -625,26 +646,60 @@ pub async fn wait_digest(s: Arc<Secrets>, project: String, env: String, path: St
         return Ok(d);
     }
     let Some(_held) = Held::take(&c.principal) else { return Ok(d) };
-    let marker = |s: Arc<Secrets>| {
+    let first = {
         let project = project.clone();
-        blocking(s, move |s| s.change_marker(&project))
+        blocking(s.clone(), move |s| s.change_marker(&project)).await?
     };
+    let mut marker = subscribe(&s, &project, first);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
-    let mut seen = marker(s.clone()).await?;
-    let mut worked_out = tokio::time::Instant::now();
     while tokio::time::Instant::now() < deadline {
-        tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(1))).await;
-        let now = marker(s.clone()).await?;
-        if now != seen || worked_out.elapsed() >= std::time::Duration::from_secs(10) {
-            seen = now;
-            worked_out = tokio::time::Instant::now();
-            d = read(s.clone()).await?;
-            if since.as_deref() != Some(d.as_str()) {
-                break;
-            }
+        // Woken when the project's counter moves, else every 10 s (what it can't see).
+        let next = deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
+        if let Ok(Err(_)) = tokio::time::timeout_at(next, marker.changed()).await {
+            tokio::time::sleep_until(next).await; // no reader (can't happen while subscribed): wait, never spin
+        }
+        d = read(s.clone()).await?;
+        if since.as_deref() != Some(d.as_str()) {
+            break;
         }
     }
     Ok(d)
+}
+
+/// One reader per node and project of a project's change counter, for every poll held on it: it
+/// reads the counter each second while anyone's subscribed and wakes them when it moves, then
+/// ends (4096 held polls cost a query a second per project, not 4096).
+type Markers = std::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<(i64, i64)>>>;
+static MARKERS: std::sync::LazyLock<Markers> = std::sync::LazyLock::new(Default::default);
+
+fn subscribe(s: &Arc<Secrets>, project: &str, first: (i64, i64)) -> tokio::sync::watch::Receiver<(i64, i64)> {
+    // Keyed by the store too: tests run several in one process.
+    let key = format!("{:p}/{project}", Arc::as_ptr(s));
+    let mut m = MARKERS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(tx) = m.get(&key) {
+        return tx.subscribe();
+    }
+    let (tx, rx) = tokio::sync::watch::channel(first);
+    m.insert(key.clone(), tx.clone());
+    let (s, project) = (s.clone(), project.to_string());
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            {
+                // Under the map's lock, so a subscriber arriving now finds no stale reader.
+                let mut m = MARKERS.lock().unwrap_or_else(|e| e.into_inner());
+                if tx.receiver_count() == 0 {
+                    m.remove(&key);
+                    return;
+                }
+            }
+            let p = project.clone();
+            if let Ok(now) = blocking(s.clone(), move |s| s.change_marker(&p)).await {
+                tx.send_if_modified(|v| std::mem::replace(v, now) != now);
+            }
+        }
+    });
+    rx
 }
 
 #[derive(Deserialize)]
@@ -692,7 +747,7 @@ async fn resolve(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
             let plain = zeroize::Zeroizing::new(serde_json::to_vec(&v.values).expect("JSON"));
             let context = format!("roll-secrets:{project}:{env}:{consumer}");
             let sealed = crate::crypto::seal_to(&to, &context, &plain).map_err(|e| Error::BadRequest(e.to_string()))?;
-            ok(json!({ "sealed": sealed, "context": context, "problems": v.problems, "leases": v.leases, "dynamic": v.dynamic, "linked": v.linked }))
+            ok(json!({ "sealed": sealed, "context": context, "problems": v.problems, "leases": v.leases, "dynamic": v.dynamic, "linked": v.linked, "followed": v.followed }))
         }
     };
     Ok(secret_response(out))
@@ -884,23 +939,6 @@ async fn revoke_lease(State(s): S, Who(c): Who, Path((project, id)): Path<(Strin
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn tokens(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
-    Ok(ok(blocking(s, move |s| s.tokens(&project, &c)).await?))
-}
-
-async fn create_token(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
-    let n: crate::tokens::NewToken = body(&b)?;
-    let (t, secret) = blocking(s, move |s| s.create_token(&project, n, &c)).await?;
-    let mut v = serde_json::to_value(&t).expect("JSON");
-    v["token"] = json!(secret);
-    Ok(secret_response(created(v)))
-}
-
-async fn revoke_token(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
-    blocking(s, move |s| s.revoke_token(&project, &id, &c)).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 #[derive(serde::Deserialize)]
 struct KeysBody {
     jwks: String,
@@ -910,7 +948,6 @@ async fn set_identity_keys(State(s): S, Who(c): Who, Path((project, id)): Path<(
     let k: KeysBody = body(&b)?;
     Ok(ok(blocking(s, move |s| s.set_identity_keys(&project, &id, &k.jwks, &c)).await?))
 }
-
 async fn identities(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.identities(&project, &c)).await?))
 }

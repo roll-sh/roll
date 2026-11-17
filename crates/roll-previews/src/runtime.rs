@@ -41,6 +41,11 @@ enum Phase {
     Stopped,
     Starting,
     Running { addr: SocketAddr },
+    /// Idle past `sleep_after`, its container paused (`docker pause`) since `since`: its memory
+    /// stays, it uses no CPU, and a request thaws it in tens of milliseconds where a start takes
+    /// seconds. Asleep to everyone else (status, cost); stopped for good after
+    /// [`RuntimeConfig::warm_for`].
+    Frozen { addr: SocketAddr, since: Instant },
     Failed(String),
 }
 
@@ -74,6 +79,12 @@ pub struct RuntimeConfig {
     /// PNG of `$URL` to `$OUT` (`chrome --headless --screenshot`).
     pub screenshot_image: String,
     pub screenshot_command: String,
+    /// How long an idle service stays frozen before it's stopped (zero: stopped at once, as
+    /// before). Docker only: Fargate has no pause.
+    pub warm_for: Duration,
+    /// The most services frozen on this node at once (their memory stays): the oldest are stopped
+    /// past it.
+    pub warm_max: usize,
 }
 
 /// Playwright's image has a headless Chromium shell (its path names its version).
@@ -137,6 +148,8 @@ impl Default for RuntimeConfig {
             dashboard: None,
             screenshot_image: SCREENSHOT_IMAGE.into(),
             screenshot_command: SCREENSHOT_COMMAND.into(),
+            warm_for: Duration::from_secs(30 * 60),
+            warm_max: 32,
         }
     }
 }
@@ -158,6 +171,9 @@ pub struct Runtime {
     browsers_failed: Mutex<Option<std::time::Instant>>,
     /// One build of [`BROWSERS_IMAGE`] at a time (screenshots may run side by side).
     browsers_building: tokio::sync::Mutex<()>,
+    /// Held while a preview's egress proxy is checked and (re)made: its services start at once,
+    /// and two makes under the one name would refuse each other (or one remove the other's).
+    egress_making: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 const BROWSERS_RETRY: Duration = Duration::from_secs(3600);
@@ -185,6 +201,7 @@ impl Runtime {
             live: Mutex::new(HashMap::new()),
             browsers_failed: Mutex::new(None),
             browsers_building: tokio::sync::Mutex::new(()),
+            egress_making: Mutex::new(HashMap::new()),
             client: Client::builder(TokioExecutor::new()).build_http(),
         })
     }
@@ -284,17 +301,96 @@ impl Runtime {
     }
 
     async fn reap(&self) {
-        let idle: Vec<((String, String), Arc<Live>)> = self
-            .live
-            .lock()
-            .iter()
-            .filter(|(_, l)| matches!(*l.phase.borrow(), Phase::Running { .. }) && l.last_request.lock().elapsed() > *l.sleep_after.lock())
-            .map(|(k, l)| (k.clone(), l.clone()))
-            .collect();
+        let warm = self.iso.name() == "docker" && !self.cfg.warm_for.is_zero() && self.cfg.warm_max > 0;
+        let all: Vec<((String, String), Arc<Live>)> = self.live.lock().iter().map(|(k, l)| (k.clone(), l.clone())).collect();
+        let (mut idle, mut frozen) = (Vec::new(), Vec::new());
+        for (key, live) in all {
+            let phase = live.phase.borrow().clone();
+            match phase {
+                Phase::Running { .. } if live.last_request.lock().elapsed() > *live.sleep_after.lock() => idle.push((key, live)),
+                Phase::Frozen { since, .. } => frozen.push((since, key, live)),
+                _ => {}
+            }
+        }
+        // Frozen long enough, or past the node's room (oldest first, leaving room for those
+        // about to freeze): stopped for good.
+        frozen.sort_by_key(|(since, ..)| *since);
+        let over = frozen.len().saturating_sub(self.cfg.warm_max.saturating_sub(if warm { idle.len() } else { 0 }));
+        for (i, (since, (p, s), live)) in frozen.into_iter().enumerate() {
+            if !warm || i < over || since.elapsed() > self.cfg.warm_for {
+                info!(preview = %p, service = %s, "preview service frozen long enough; stopping");
+                self.stop(&p, &s, &live, None).await;
+            }
+        }
         for ((p, s), live) in idle {
+            if warm && self.freeze(&p, &s, &live).await {
+                continue;
+            }
             info!(preview = %p, service = %s, "preview service idle; stopping");
             self.stop(&p, &s, &live, None).await;
         }
+    }
+
+    /// Freeze an idle service (`docker pause`) instead of stopping it: reported asleep, as a stop
+    /// is. `false`: it couldn't be (the caller stops it). A request that raced the pause (it saw
+    /// `Running` and went to the container) thaws it again at once.
+    async fn freeze(&self, preview: &str, service: &str, live: &Live) -> bool {
+        let turn = live.lifecycle.lock().await;
+        let phase = live.phase.borrow().clone();
+        let Phase::Running { addr } = phase else { return true };
+        let checked = Instant::now();
+        // A request since the reaper looked: not idle after all.
+        if live.last_request.lock().elapsed() <= *live.sleep_after.lock() {
+            return true;
+        }
+        let Some(name) = live.container.lock().clone() else { return false };
+        if code_preview::docker::docker(&["pause", &name]).await.is_err() {
+            return false;
+        }
+        live.phase.send_replace(Phase::Frozen { addr, since: Instant::now() });
+        let raced = *live.last_request.lock() >= checked;
+        if raced {
+            if code_preview::docker::docker(&["unpause", &name]).await.is_ok() {
+                live.phase.send_replace(Phase::Running { addr });
+                return true;
+            }
+            return false;
+        }
+        let ran = live.started.lock().take().map(|t| t.elapsed().as_millis() as i64).unwrap_or(0);
+        drop(turn);
+        info!(%preview, %service, "preview service idle; frozen");
+        if let Ok(e) = self.engine() {
+            e.observed(preview, service, ServiceState::Sleeping, None, ran).await;
+        }
+        true
+    }
+
+    /// Thaw a frozen service (`docker unpause`): where it answers, or `None` when it isn't frozen
+    /// any more or won't thaw (its container removed; the caller starts it as usual).
+    async fn thaw(&self, preview: &str, service: &str, live: &Live) -> Option<SocketAddr> {
+        let turn = live.lifecycle.lock().await;
+        let phase = live.phase.borrow().clone();
+        let Phase::Frozen { addr, .. } = phase else { return None };
+        let name = live.container.lock().clone();
+        let thawed = match &name {
+            Some(name) => code_preview::docker::docker(&["unpause", name]).await.is_ok(),
+            None => false,
+        };
+        if !thawed {
+            let name = live.container.lock().take();
+            if let Some(name) = name {
+                self.iso.release(&name).await;
+            }
+            live.phase.send_replace(Phase::Stopped);
+            return None;
+        }
+        *live.started.lock() = Some(Instant::now());
+        live.phase.send_replace(Phase::Running { addr });
+        drop(turn);
+        if let Ok(e) = self.engine() {
+            e.observed(preview, service, ServiceState::Running, None, 0).await;
+        }
+        Some(addr)
     }
 
     /// Where a service answers, starting it if needed; waits up to `wait`.
@@ -306,9 +402,15 @@ impl Runtime {
         }
         let mut rx = live.phase.subscribe();
         // Clone first: a borrow held through the match would deadlock `send_replace`.
-        let phase = rx.borrow_and_update().clone();
+        let mut phase = rx.borrow_and_update().clone();
+        if matches!(phase, Phase::Frozen { .. }) {
+            if let Some(addr) = self.thaw(preview, service, &live).await {
+                return Ok(addr);
+            }
+            phase = rx.borrow_and_update().clone();
+        }
         let start = match phase {
-            Phase::Running { addr } => return Ok(addr),
+            Phase::Running { addr } | Phase::Frozen { addr, .. } => return Ok(addr),
             Phase::Starting => false,
             Phase::Stopped | Phase::Failed(_) => {
                 live.phase.send_replace(Phase::Starting);
@@ -328,7 +430,7 @@ impl Runtime {
                     Phase::Running { addr } => return Ok(addr),
                     Phase::Failed(e) => return Err(Unavailable::Failed(e)),
                     Phase::Stopped => return Err(Unavailable::NotFound),
-                    Phase::Starting => {}
+                    Phase::Starting | Phase::Frozen { .. } => {}
                 }
             }
         });
@@ -400,7 +502,22 @@ impl Runtime {
             // Package caches shared by every preview of the repo: a second preview installs from
             // what the first downloaded.
             cache: Some(cache_name(&t.repo)),
+            // The project limits what its previews' code reaches: the preview's own network.
+            network: if t.egress == crate::settings::EgressRule::Roll && self.iso.name() == "docker" { Some(preview_network(preview).await?) } else { None },
         };
+        // Hosts outside roll it may still reach: through the preview's egress proxy, the one way
+        // out of its network (code that ignores the variables still can't get out).
+        let mut job = job;
+        if let Some(n) = job.network.as_ref().filter(|_| !t.egress_hosts.is_empty()) {
+            self.egress_proxy(preview, &n.name, &t.egress_hosts).await?;
+            let proxy = format!("http://{EGRESS_ALIAS}:3128");
+            for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+                job.env.push((k.into(), proxy.clone()));
+            }
+            for k in ["NO_PROXY", "no_proxy"] {
+                job.env.push((k.into(), "host.docker.internal,localhost,127.0.0.1".into()));
+            }
+        }
         self.trees.prepare(&*self.iso, &job, &t.repo, &t.revision).await?;
         let addr = self.iso.start(&name, t.spec.port).await?;
         // Stopped (slept, redeployed, removed) while it was starting: don't leave it running.
@@ -696,7 +813,7 @@ pub const SCREENSHOT_MAX: usize = 2 << 20;
 /// pages'), each at most this, and everything it writes: every PNG it can take, in base64, and
 /// those lines.
 const SHOT_REPORT_MAX: usize = 4 << 20;
-const SHOT_OUTPUT_MAX: usize = (crate::settings::MAX_PAGES + 2) * SCREENSHOT_MAX * 4 / 3 + 2 * SHOT_REPORT_MAX + (64 << 10);
+const SHOT_OUTPUT_MAX: usize = (crate::settings::MAX_PAGES + 2) * SCREENSHOT_MAX * 4 / 3 + 3 * SHOT_REPORT_MAX + crate::store::CROPS_PER_RUN * crate::store::CROP_MAX * 4 / 3 + (64 << 10);
 
 /// The header automation sends a project's bypass secret in (docs/previews.md, "Safety").
 pub const BYPASS_HEADER: &str = "x-roll-preview-bypass";
@@ -868,6 +985,16 @@ impl Apps for Runtime {
             // Whichever node started it.
             self.iso.remove(&container_name(&host)).await;
         }
+        // The preview's own network goes with its last container (refused while one's attached),
+        // its egress proxy first when no service of the preview is left.
+        if self.iso.name() == "docker" {
+            let others = self.live.lock().keys().any(|(p, s)| p == preview && s != service);
+            if !others {
+                code_preview::docker::remove(&egress_name(preview)).await;
+                self.egress_making.lock().remove(preview);
+            }
+            let _ = code_preview::docker::docker(&["network", "rm", &network_name(preview)]).await;
+        }
         // The repo's cache goes with its last preview service.
         if let Ok(Some(svc)) = self.store.services(preview).map(|v| v.into_iter().find(|s| s.name == service))
             && !self.store.repo_has_other_services(&svc.repo, preview).unwrap_or(true)
@@ -932,9 +1059,11 @@ impl Apps for Runtime {
             Err(_) => anyhow::bail!("the service didn't start in time"),
         }
         let name = container_name(&host);
-        // The port the runtime published (the service's own), not whatever else its image exposes.
-        let ports = code_preview::docker::docker(&["inspect", "-f", "{{range $p, $_ := .HostConfig.PortBindings}}{{$p}} {{end}}", &name]).await?;
-        let port = ports.split_whitespace().next().and_then(|p| p.split('/').next()).and_then(|p| p.parse::<u16>().ok()).ok_or_else(|| anyhow::anyhow!("the service publishes no port"))?;
+        // The service's own port, as its container says (`sh.roll.code.port`: with `egress: roll`
+        // it's on a network of its own and publishes nothing), else the one the runtime published
+        // (a container made before the label), never whatever else its image exposes.
+        let said = code_preview::docker::docker(&["inspect", "-f", &format!("{{{{index .Config.Labels \"{}.port\"}}}} {{{{range $p, $_ := .HostConfig.PortBindings}}}}{{{{$p}}}} {{{{end}}}}", code_preview::docker::LABEL), &name]).await?;
+        let port = said.split_whitespace().find_map(|p| p.split('/').next().and_then(|p| p.parse::<u16>().ok())).ok_or_else(|| anyhow::anyhow!("the service says no port"))?;
         self.screenshot_in(&name, port, opts).await.map(Some)
     }
 
@@ -944,6 +1073,24 @@ impl Apps for Runtime {
 
     fn status(&self, preview: &str, service: &str) -> Option<ServiceState> {
         self.service_status(preview, service)
+    }
+
+    async fn egress_refused(&self, preview: &str) -> Vec<String> {
+        if self.iso.name() != "docker" {
+            return Vec::new();
+        }
+        let tail = code_preview::docker::logs_tail(&egress_name(preview), 200).await;
+        let mut out: Vec<String> = Vec::new();
+        for h in tail.lines().filter_map(|l| l.strip_prefix("refused ")).map(|h| h.trim().chars().take(262).collect::<String>()) {
+            if !h.is_empty() && !out.contains(&h) {
+                out.push(h);
+            }
+        }
+        out
+    }
+
+    fn warm(&self, preview: &str, service: &str) -> bool {
+        self.live.lock().get(&(preview.to_string(), service.to_string())).is_some_and(|l| matches!(*l.phase.borrow(), Phase::Frozen { .. }))
     }
 }
 
@@ -998,6 +1145,17 @@ impl Runtime {
         if !endpoints.is_empty() {
             args.extend(["--env".into(), format!("ENDPOINTS={}", serde_json::to_string(&endpoints)?)]);
         }
+        // The notes' elements to crop, checked again (they come from the preview's code).
+        let crops: Vec<serde_json::Value> = opts
+            .crops
+            .iter()
+            .filter(|c| crate::settings::page_path_ok(&c.path) && crate::settings::selector_ok(&c.selector) && !c.note.is_empty() && c.note.len() <= 64)
+            .take(crate::store::CROPS_PER_RUN)
+            .map(|c| serde_json::json!({ "note": c.note, "path": c.path, "selector": c.selector }))
+            .collect();
+        if !crops.is_empty() {
+            args.extend(["--env".into(), format!("CROPS={}", serde_json::to_string(&crops)?)]);
+        }
         // The PNG on the first line, the timings (if the command wrote them) on the second, the
         // phone-width PNG (if it took one) on the third, then the other pages: what each said,
         // and their PNGs a line each.
@@ -1007,7 +1165,8 @@ impl Runtime {
             "-c".into(),
             format!(
                 "cat > /tmp/axe.js; {} >/dev/null 2>&1 && base64 -w0 /tmp/s.png && echo && (cat /tmp/s.png.json 2>/dev/null || true) && echo && (base64 -w0 /tmp/s.png.phone.png 2>/dev/null || true) \
-                 && echo && (cat /tmp/s.png.pages.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.$n.png 2>/dev/null || true; done",
+                 && echo && (cat /tmp/s.png.pages.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.$n.png 2>/dev/null || true; done \
+                 && echo && (cat /tmp/s.png.crops.json 2>/dev/null || true) && for n in 0 1 2 3 4 5 6 7 8 9; do echo; base64 -w0 /tmp/s.png.crop.$n.png 2>/dev/null || true; done",
                 self.cfg.screenshot_command
             ),
         ]);
@@ -1015,7 +1174,8 @@ impl Runtime {
         // Each other page is taken and checked too (accessibility, links up to 20 s, SEO, words).
         // A page state's steps take up to about 25 s more.
         let state_pages = pages.iter().filter(|p| crate::settings::state_entry(p).is_some()).count() as u64;
-        let within = Duration::from_secs(90 + 30 * pages.len() as u64 + 25 * state_pages + if endpoints.is_empty() { 0 } else { 25 });
+        // A crop loads its page again: about 15 s each.
+        let within = Duration::from_secs(90 + 30 * pages.len() as u64 + 25 * state_pages + 15 * crops.len() as u64 + if endpoints.is_empty() { 0 } else { 25 });
         let chromium = std::time::Instant::now();
         // The other browsers the project asked for, in a run of their own alongside Chromium's (a
         // container each in the service's network): the slot is held for the longer, not both.
@@ -1048,7 +1208,22 @@ impl Runtime {
         let png = b64e.decode(b64.trim()).map_err(|e| anyhow::anyhow!("the screenshot isn't a PNG: {e}"))?;
         anyhow::ensure!(png.starts_with(b"\x89PNG") && png.len() <= SCREENSHOT_MAX, "the screenshot isn't a PNG of at most {SCREENSHOT_MAX} bytes");
         let phone = b64e.decode(phone.trim()).ok().filter(|p| p.starts_with(b"\x89PNG") && p.len() <= SCREENSHOT_MAX);
-        let mut shot = crate::ports::Shot { png, speed: crate::PageSpeed::parse(speed), health: crate::PageHealth::parse(speed), a11y: crate::PageA11y::parse(speed), text: crate::page_text(speed), links: crate::PageLinks::parse(speed), api: crate::openapi::lines(speed), phone, pages: page_shots(&pages, said, lines) };
+        // Ten page lines, then what the crops said and their PNGs.
+        let page_lines: Vec<&str> = lines.by_ref().take(10).collect();
+        let crops_said = report(lines.next());
+        let asked: Vec<&str> = crops.iter().filter_map(|c| c["note"].as_str()).collect();
+        let mut shot = crate::ports::Shot {
+            png,
+            speed: crate::PageSpeed::parse(speed),
+            health: crate::PageHealth::parse(speed),
+            a11y: crate::PageA11y::parse(speed),
+            text: crate::page_text(speed),
+            links: crate::PageLinks::parse(speed),
+            api: crate::openapi::lines(speed),
+            phone,
+            pages: page_shots(&pages, said, page_lines.into_iter()),
+            crops: note_crops(&asked, crops_said, lines),
+        };
         // The other browsers', best effort: Chromium's screenshot stands.
         match more {
             Some(Ok(more)) => shot.pages.extend(more),
@@ -1157,9 +1332,100 @@ impl Runtime {
             Phase::Stopped => ServiceState::Sleeping,
             Phase::Starting => ServiceState::Deploying,
             Phase::Running { .. } => ServiceState::Running,
+            Phase::Frozen { .. } => ServiceState::Sleeping,
             Phase::Failed(_) => ServiceState::Failed,
         })
     }
+}
+
+/// The notes' crops a screenshot run took: which note each line is (`[{note, n}]`, each `n` the
+/// crop's line), and the PNGs a line each. Only notes that were asked for, each once, each a PNG
+/// within [`crate::store::CROP_MAX`].
+fn note_crops<'a>(asked: &[&str], said: &str, pngs: impl Iterator<Item = &'a str>) -> Vec<(String, Vec<u8>)> {
+    #[derive(serde::Deserialize)]
+    struct Said {
+        note: String,
+        n: usize,
+    }
+    use base64::Engine as _;
+    let said: Vec<Said> = serde_json::from_str(said.trim()).unwrap_or_default();
+    let pngs: Vec<&str> = pngs.take(crate::store::CROPS_PER_RUN).collect();
+    let b64e = base64::engine::general_purpose::STANDARD;
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    for s in said {
+        if !asked.contains(&s.note.as_str()) || out.iter().any(|(n, _)| *n == s.note) {
+            continue;
+        }
+        let Some(png) = pngs.get(s.n).and_then(|l| b64e.decode(l.trim()).ok()) else { continue };
+        if png.starts_with(b"\x89PNG") && png.len() <= crate::store::CROP_MAX {
+            out.push((s.note, png));
+        }
+    }
+    out
+}
+
+const EGRESS_JS: &str = include_str!("egress.js");
+/// The egress proxy's name on a preview's network.
+const EGRESS_ALIAS: &str = "roll-egress";
+
+fn egress_name(preview: &str) -> String {
+    format!("roll-previews-egress-{}", preview.trim_start_matches("pv_"))
+}
+
+impl Runtime {
+    /// The preview's egress proxy running with `hosts` (made again when they changed): on the
+    /// preview's network as [`EGRESS_ALIAS`] and on Docker's default one, its way out.
+    async fn egress_proxy(&self, preview: &str, network: &str, hosts: &[String]) -> anyhow::Result<()> {
+        let hosts: Vec<&String> = hosts.iter().filter(|h| crate::settings::egress_host_ok(h)).take(crate::settings::MAX_EGRESS_HOSTS).collect();
+        let list = serde_json::to_string(&hosts)?;
+        let digest = format!("{:016x}", list.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)));
+        let name = egress_name(preview);
+        let turn = self.egress_making.lock().entry(preview.to_string()).or_default().clone();
+        let _turn = turn.lock().await;
+        let running = code_preview::docker::docker(&["inspect", "-f", "{{.State.Running}} {{index .Config.Labels \"sh.roll.egress\"}}", &name]).await.ok();
+        if running.as_deref() == Some(format!("true {digest}").as_str()) {
+            return Ok(());
+        }
+        code_preview::docker::remove(&name).await;
+        let mut args: Vec<String> = vec!["run".into(), "-d".into(), "--name".into(), name.clone(), "--network".into(), network.into(), "--network-alias".into(), EGRESS_ALIAS.into()];
+        args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL), "--label".into(), format!("sh.roll.egress={digest}")]);
+        if let Some(l) = code_preview::docker::home_label() {
+            args.extend(["--label".into(), l]);
+        }
+        args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=16m".into()]);
+        args.extend(code_preview::docker::limits(128, 0.25));
+        args.extend(["--env".into(), format!("HOSTS={list}"), "--env".into(), format!("ROLL_EGRESS_JS={EGRESS_JS}"), self.cfg.screenshot_image.clone(), "sh".into(), "-c".into(), r#"node -e "$ROLL_EGRESS_JS""#.into()]);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        code_preview::docker::docker(&argv).await?;
+        // Its way out: Docker's default network too.
+        code_preview::docker::docker(&["network", "connect", "bridge", &name]).await?;
+        Ok(())
+    }
+}
+
+/// The network a preview whose project limits egress runs on (docs/previews.md, "Egress").
+fn network_name(preview: &str) -> String {
+    format!("roll-previews-net-{}", preview.trim_start_matches("pv_"))
+}
+
+/// The preview's own network, made `--internal` (no route out) if it isn't there yet, with its
+/// gateway (where its containers reach roll's products).
+async fn preview_network(preview: &str) -> anyhow::Result<code_preview::isolation::Network> {
+    let name = network_name(preview);
+    let gateway = |name: String| async move { code_preview::docker::docker(&["network", "inspect", "-f", "{{range .IPAM.Config}}{{.Gateway}} {{end}}", &name]).await.ok().and_then(|g| g.split_whitespace().next().map(str::to_string)) };
+    if let Some(g) = gateway(name.clone()).await {
+        return Ok(code_preview::isolation::Network { name, gateway: g });
+    }
+    let mut args: Vec<String> = vec!["network".into(), "create".into(), "--internal".into(), "--label".into(), format!("{}=preview", code_preview::docker::LABEL)];
+    if let Some(l) = code_preview::docker::home_label() {
+        args.extend(["--label".into(), l]);
+    }
+    args.push(name.clone());
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    // Two starts at once may both make it: the second's "already exists" is fine.
+    let _ = code_preview::docker::docker(&argv).await;
+    let g = gateway(name.clone()).await.ok_or_else(|| anyhow::anyhow!("couldn't make the preview's network {name}"))?;
+    Ok(code_preview::isolation::Network { name, gateway: g })
 }
 
 /// The other pages a screenshot run took: what it said about each (`[{path, errors}]`, in order)

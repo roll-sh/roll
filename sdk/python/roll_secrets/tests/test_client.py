@@ -119,3 +119,77 @@ class AWorkload(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Cached(BaseHTTPRequestHandler):
+    """rolld's values route with entity tags: a 304 when the digest still matches."""
+
+    state = {"digest": "d1", "value": "1", "dynamic": [], "asked": []}
+
+    def log_message(self, *_):
+        pass
+
+    def do_GET(self):
+        tag = self.headers.get("If-None-Match")
+        Cached.state["asked"].append(tag)
+        assert "digest=1" in self.path
+        digest = Cached.state["digest"]
+        if tag == f'"{digest}"':
+            self.send_response(304)
+            self.send_header("ETag", f'"{digest}"')
+            self.end_headers()
+            return
+        body = json.dumps({"values": {"A": Cached.state["value"]}, "problems": [], "leases": [], "dynamic": Cached.state["dynamic"], "linked": []}).encode()
+        self.send_response(200)
+        self.send_header("ETag", f'"{digest}"')
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class ACache(unittest.TestCase):
+    def test_values_are_kept_revalidated_and_never_kept_with_dynamic_credentials(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Cached)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        clock = [0.0]
+        c = roll_secrets.Client(f"http://127.0.0.1:{server.server_address[1]}", "rlt_x", project="prj_1", cache_ttl=20, clock=lambda: clock[0])
+        asked = Cached.state["asked"]
+        self.assertEqual((c.values("production").values["A"], c.values("production").values["A"], len(asked)), ("1", "1", 1))
+        clock[0] += 25
+        self.assertEqual(c.values("production").values["A"], "1")
+        self.assertEqual(asked[1:], ['"d1"'], "revalidated: a 304 keeps them")
+        clock[0] += 25
+        Cached.state.update(digest="d2", value="2", dynamic=["PW"])
+        self.assertEqual((c.values("production").values["A"], c.values("production").values["A"], len(asked)), ("2", "2", 4))
+
+
+class Echo(BaseHTTPRequestHandler):
+    """A transit endpoint that "encrypts" by echoing: enough to check the encoding both ways."""
+
+    sent = []
+
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        b = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+        Echo.sent.append({"path": self.path, **b})
+        out = {"ciphertext": "roll:v1:" + b["plaintext"]} if self.path.endswith("/encrypt") else {"plaintext": b["ciphertext"][len("roll:v1:"):]}
+        body = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class ATransitKey(unittest.TestCase):
+    def test_sends_base64_and_decrypts_back_to_the_same_bytes(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Echo)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        cards = roll_secrets.Client(f"http://127.0.0.1:{server.server_address[1]}", "rlt_x", project="prj_1").transit("cards")
+        ct = cards.encrypt("héllo ✓", "order:42")
+        self.assertEqual(Echo.sent[0], {"path": "/v1/secrets/projects/prj_1/transit/cards/encrypt", "plaintext": "aMOpbGxvIOKckw==", "context": "order:42"})
+        self.assertEqual(cards.decrypt(ct, "order:42").decode(), "héllo ✓")
+        self.assertEqual(cards.decrypt(cards.encrypt(bytes([0, 255, 128, 7]))), bytes([0, 255, 128, 7]))

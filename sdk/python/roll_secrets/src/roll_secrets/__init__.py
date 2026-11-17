@@ -13,6 +13,7 @@ token, or the short-lived token a workload identity's login gives (``login``, ``
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import os
 import threading
@@ -42,15 +43,28 @@ class Problem:
 
 
 @dataclass
+class Followed:
+    """A key left out because it links a resource the environment's preview branched: roll
+    previews sets ``name`` from its branch's ``field``."""
+
+    name: str
+    kind: str
+    parent: str
+    field: str
+
+
+@dataclass
 class Values:
     """An environment's values. ``dynamic`` keys hold a credential that ends with its lease
-    (``leases``; ``renew`` keeps it); ``linked`` keys come from a link to a resource."""
+    (``leases``; ``renew`` keeps it); ``linked`` keys come from a link to a resource; ``followed``
+    keys link a resource a preview branched, and aren't in ``values``."""
 
     values: Dict[str, str]
     problems: List[Problem] = field(default_factory=list)
     leases: List[str] = field(default_factory=list)
     dynamic: List[str] = field(default_factory=list)
     linked: List[str] = field(default_factory=list)
+    followed: List[Followed] = field(default_factory=list)
 
     @staticmethod
     def _of(d: Dict[str, Any], values: Optional[Dict[str, str]] = None) -> "Values":
@@ -60,6 +74,7 @@ class Values:
             leases=list(d.get("leases") or []),
             dynamic=list(d.get("dynamic") or []),
             linked=list(d.get("linked") or []),
+            followed=[Followed(f["name"], f["kind"], f["parent"], f["field"]) for f in d.get("followed") or []],
         )
 
 
@@ -70,26 +85,37 @@ def _q(path: str) -> str:
 class Client:
     """Reads one project's secrets."""
 
-    def __init__(self, api: str, token: str, project: Optional[str] = None, timeout: float = 30.0):
+    def __init__(self, api: str, token: str, project: Optional[str] = None, timeout: float = 30.0, cache_ttl: float = 0.0, clock: Callable[[], float] = time.monotonic):
+        """``cache_ttl`` (seconds) keeps ``values`` answers that long and answers from memory
+        meanwhile; after that it asks again with the digest they were read against, and an
+        unchanged folder costs a 304 that reads, issues and audits nothing. A folder holding dynamic
+        credentials is never kept (they end with their lease). ``clock`` is for tests."""
         self.api = api.rstrip("/")
         self.token = token
         self.project = project
         self.timeout = timeout
+        self.cache_ttl = cache_ttl
+        self._clock = clock
+        self._cache: Dict[str, Any] = {}
         self._lock = threading.Lock()
         # Renews the token of a client a workload identity's login made.
         self._login: Optional[_Relogin] = None
 
     def _call(self, method: str, path: str, body: Any = None) -> Any:
+        return self._authed(lambda token: self._send(token, method, path, body))
+
+    def _authed(self, do: Callable[[str], Any]) -> Any:
+        """``do`` with the client's token. A logged-in client's is renewed first when it's ending, and
+        when the server refuses it (revoked, ended early): one new login, then once more."""
         if self._login is None:
-            return self._send(self.token, method, path, body)
+            return do(self.token)
         token = self._login.token(self)
         try:
-            return self._send(token, method, path, body)
+            return do(token)
         except SecretsError as e:
-            # Refused: revoked, or ended early. One new login, then once more.
             if e.status != 401:
                 raise
-            return self._send(self._login.token(self, stale=token), method, path, body)
+            return do(self._login.token(self, stale=token))
 
     def _send(self, token: str, method: str, path: str, body: Any = None) -> Any:
         data = None if body is None else json.dumps(body).encode()
@@ -122,9 +148,55 @@ class Client:
     def _env(self, env: str) -> str:
         return f"/v1/secrets/projects/{urllib.parse.quote(self.project_id(), safe='')}/environments/{urllib.parse.quote(env, safe='')}"
 
-    def values(self, env: str, path: str = "") -> Values:
-        """``env``'s values under ``path`` (the root by default), references resolved."""
-        return Values._of(self._call("GET", self._env(env) + "/values" + _q(path)))
+    def values(self, env: str, path: str = "", fresh: bool = False) -> Values:
+        """``env``'s values under ``path`` (the root by default), references resolved. ``fresh``
+        skips ``cache_ttl`` (a watch that saw the digest move reads anew)."""
+        url = self._env(env) + "/values" + _q(path)
+        if self.cache_ttl <= 0 or fresh:
+            v = Values._of(self._call("GET", url))
+            if fresh:
+                with self._lock:
+                    self._cache.pop(url, None)
+            return v
+        return copy.deepcopy(self._cached(url))
+
+    def _cached(self, url: str) -> Values:
+        """Kept for ``cache_ttl``, then revalidated with the digest (a 304 keeps them)."""
+        with self._lock:
+            hit = self._cache.get(url)
+        if hit and self._clock() - hit[2] < self.cache_ttl:
+            return hit[0]
+        return self._authed(lambda token: self._revalidate(url, token, hit))
+
+    def _revalidate(self, url: str, token: str, hit: Any) -> Values:
+        """One conditional read of ``url`` with ``token``: a 304 keeps ``hit``'s values."""
+        req = urllib.request.Request(self.api + url + ("&" if "?" in url else "?") + "digest=1", method="GET")
+        if token:
+            req.add_header("Authorization", "Bearer " + token)
+        if hit and hit[1]:
+            req.add_header("If-None-Match", '"' + hit[1] + '"')
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as res:
+                text, etag = res.read(16 << 20), res.headers.get("ETag") or ""
+        except urllib.error.HTTPError as e:
+            if e.code == 304 and hit:
+                with self._lock:
+                    self._cache[url] = (hit[0], hit[1], self._clock())
+                return hit[0]
+            try:
+                err = json.loads(e.read(1 << 16) or b"{}")
+            except ValueError:
+                err = {}
+            raise SecretsError(err.get("error") or f"{e.code} {e.reason}", e.code, err.get("code")) from None
+        v = Values._of(json.loads(text))
+        with self._lock:
+            # Never kept: dynamic credentials (they end with their lease) or a key that didn't
+            # resolve (the digest may not move when the link recovers).
+            if v.dynamic or v.problems:
+                self._cache.pop(url, None)
+            else:
+                self._cache[url] = (v, etag.removeprefix("W/").strip('"'), self._clock())
+        return v
 
     def resolve(self, env: str, consumer: str, path: str = "") -> Values:
         """``env``'s values as ``consumer`` (``app:web``), what a running service gets: dynamic
@@ -147,6 +219,11 @@ class Client:
             # Under this client's own timeout, and the server's 25.
             q += ("&" if q else "?") + "since=" + urllib.parse.quote(since, safe="") + "&wait=" + str(int(max(1, min(wait, 25, self.timeout - 5))))
         return self._call("GET", self._env(env) + "/digest" + q)["digest"]
+
+    def transit(self, name: str) -> "Transit":
+        """The project's encryption key ``name`` (docs/secrets.md, "Encryption keys"): data is
+        encrypted, signed and HMACed by roll, and the key never leaves it."""
+        return Transit(self, name)
 
     def renew(self, lease: str, ttl_minutes: Optional[int] = None) -> Dict[str, Any]:
         """Pushes a dynamic lease's expiry out by ``ttl_minutes`` (its link's TTL by default)."""
@@ -185,7 +262,7 @@ class Client:
                 if stop.is_set():
                     break  # stopped while the poll was held: nothing more is called back
                 if now != last:
-                    v = self.resolve(env, consumer, path) if consumer else self.values(env, path)
+                    v = self.resolve(env, consumer, path) if consumer else self.values(env, path, fresh=True)
                     before, last = last, now
                     if v.problems:
                         if before is None:
@@ -205,6 +282,44 @@ class Client:
                         self.renew(lease)
                     except Exception as e:  # noqa: BLE001
                         fail(e)
+
+
+class Transit:
+    """One encryption key, as ``@roll/secrets``' ``transit(name)``: bytes or text in, base64 on the
+    wire, bytes back from ``decrypt``."""
+
+    def __init__(self, client: Client, name: str):
+        self._client, self.name = client, name
+
+    def _at(self, op: str) -> str:
+        return f"/v1/secrets/projects/{urllib.parse.quote(self._client.project_id(), safe='')}/transit/{urllib.parse.quote(self.name, safe='')}/{op}"
+
+    @staticmethod
+    def _bytes(data: Any) -> bytes:
+        return data.encode() if isinstance(data, str) else bytes(data)
+
+    def encrypt(self, data: Any, context: Optional[str] = None) -> str:
+        """The ciphertext (``roll:v<n>:…``); ``context``, when given, must be given to decrypt it."""
+        return self._client._call("POST", self._at("encrypt"), {"plaintext": base64.b64encode(self._bytes(data)).decode(), "context": context})["ciphertext"]
+
+    def decrypt(self, ciphertext: str, context: Optional[str] = None) -> bytes:
+        """The plaintext (audited, as a reveal)."""
+        return base64.b64decode(self._client._call("POST", self._at("decrypt"), {"ciphertext": ciphertext, "context": context})["plaintext"])
+
+    def sign(self, data: Any) -> str:
+        """An Ed25519 signature over the bytes as given: anyone with ``public_keys`` checks it."""
+        return self._client._call("POST", self._at("sign"), {"input": base64.b64encode(self._bytes(data)).decode()})["signature"]
+
+    def verify(self, data: Any, signature: str) -> bool:
+        return bool(self._client._call("POST", self._at("verify"), {"input": base64.b64encode(self._bytes(data)).decode(), "signature": signature})["valid"])
+
+    def hmac(self, data: Any) -> str:
+        """HMAC-SHA256, the same for the same input: a lookup column over encrypted fields."""
+        return self._client._call("POST", self._at("hmac"), {"input": base64.b64encode(self._bytes(data)).decode()})["hmac"]
+
+    def public_keys(self) -> List[Dict[str, Any]]:
+        """An Ed25519 key's public halves, every version (``public_key``, ``pem``, ``jwk``)."""
+        return self._client._call("GET", self._at("public"))
 
 
 def login(api: str, identity: str, oidc_token: str) -> Client:

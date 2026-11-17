@@ -107,6 +107,11 @@ async fn variables_and_an_environment_through_the_cli() {
     let pending = t.ok(&["pending", "-s", "web", "-p", "acme"]).await;
     assert!(pending.contains("+ API_KEY") && pending.contains("+ PEM") && !pending.contains("sk-live"), "{pending}");
     assert!(t.ok(&["open", "--print", "-s", "web", "-p", "acme"]).await.trim().starts_with("http"));
+    // A new name that reads as a secret is sealed without being asked; --plain keeps one revealable.
+    t.ok(&["vars", "-s", "web", "-p", "acme", "GITHUB_TOKEN=ghp_x", "WEBHOOK_SECRET=w", "--plain", "WEBHOOK_SECRET"]).await;
+    let listed = t.ok(&["vars", "-s", "web", "-p", "acme"]).await;
+    let line = |n: &str| listed.lines().find(|l| l.starts_with(n)).unwrap_or_default().to_string();
+    assert!(line("GITHUB_TOKEN").ends_with("sealed") && !line("WEBHOOK_SECRET").ends_with("sealed"), "{listed}");
     // Set and put live in one go (Heroku's config:set).
     let dep = t.json(&["vars", "-s", "web", "-p", "acme", "MODE=live", "--deploy"]).await;
     assert_eq!(dep["trigger"], "settings", "{dep}");
@@ -216,4 +221,24 @@ async fn a_projects_services_logs_read_together() {
     assert_eq!(names, ["api".to_string(), "web".to_string()].into(), "{lines}");
     let ts: Vec<i64> = lines.as_array().unwrap().iter().map(|l| l["t"].as_i64().unwrap()).collect();
     assert!(ts.windows(2).all(|w| w[0] <= w[1]), "merged by time: {ts:?}");
+}
+
+/// `roll apps exec` points a linked service's private URL at a local tunnel to it, so a command
+/// here reaches the service it links as the deployed one does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exec_reaches_a_linked_service_through_a_tunnel() {
+    let t = start().await;
+    let api = t.json(&["create", "api", "-p", "acme", "--image", "nginx:1.27", "--port", "80"]).await;
+    t.ok(&["create", "web", "-p", "acme", "--image", "nginx:1.27", "--port", "80"]).await;
+    t.ok(&["link", "service", api["id"].as_str().unwrap(), "-s", "web", "-p", "acme"]).await;
+    for _ in 0..200 {
+        if t.json(&["deploys", "-s", "api", "-p", "acme"]).await[0]["status"] == "active" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let script = r#"u=${API_URL#http://}; h=${u%%:*}; p=${u##*:}; p=${p%%/*}; echo "url=$API_URL"; exec 3<>/dev/tcp/$h/$p; printf 'GET /via HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' >&3; cat <&3"#;
+    let (code, out, err) = t.run(&["exec", "-s", "web", "-p", "acme", "--", "bash", "-c", script]).await;
+    assert_eq!(code, Some(0), "{err}\n{out}");
+    assert!(out.contains("url=http://127.0.0.1:") && out.contains("HTTP/1.1 200") && out.contains(r#""path":"/via""#), "{out}\n{err}");
 }

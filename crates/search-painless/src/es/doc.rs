@@ -537,6 +537,8 @@ fn field_value(dv: &DocValues, i: usize) -> (Value, Value) {
             (ip, Value::str(s))
         }
         Binary => (super::misc::nio(super::misc::NioBuf::wrap(Rc::from(dv.bytes[i].as_slice()))), Value::Null),
+        // The raw 64 bits (`getValue`), and the unsigned value (`asBigInteger`).
+        UnsignedLong => (Value::Long(dv.longs[i]), Value::obj(crate::value::Obj::BigInt(Rc::new(crate::bignum::BigInt::from_u64(dv.longs[i] as u64))))),
         Version => {
             let s = &dv.strings()[i];
             (es_value(EsObj::Version(Rc::from(s.as_str()))), Value::str(s))
@@ -646,6 +648,11 @@ fn fl_alt2(_: &mut Vm, a: &mut [Value]) -> VR {
     let f = field_ref(&a[0])?;
     let i = crate::lib_lang::int(&a[1]);
     Ok(if i >= 0 && (i as usize) < f.alt.len() { f.alt[i as usize].clone() } else { a[2].clone() })
+}
+
+fn fl_vals(_: &mut Vm, a: &mut [Value]) -> VR {
+    let f = field_ref(&a[0])?;
+    Ok(crate::value::JList::array_list(f.vals.clone()))
 }
 
 fn fl_alts(_: &mut Vm, a: &mut [Value]) -> VR {
@@ -1306,6 +1313,14 @@ pub fn register(b: &mut Builder) {
         b.m(*c, &format!("{ret} get({def})"), fl_get1);
         b.m(*c, &format!("{ret} get(int,{def})"), fl_get2);
     }
+    // x-pack's `UnsignedLongDocValuesField`: `getValue` is the raw long (values past
+    // `Long.MAX_VALUE` wrap negative, as `doc['f'].value` does), `asBigInteger` the unsigned value.
+    b.m(UNSIGNED_LONG_DOC_VALUES_FIELD, "long getValue(long)", fl_get1);
+    b.m(UNSIGNED_LONG_DOC_VALUES_FIELD, "long getValue(int,long)", fl_get2);
+    b.m(UNSIGNED_LONG_DOC_VALUES_FIELD, "List getValues()", fl_vals);
+    b.m(UNSIGNED_LONG_DOC_VALUES_FIELD, "BigInteger asBigInteger(BigInteger)", fl_alt1);
+    b.m(UNSIGNED_LONG_DOC_VALUES_FIELD, "BigInteger asBigInteger(int,BigInteger)", fl_alt2);
+    b.m(UNSIGNED_LONG_DOC_VALUES_FIELD, "List asBigIntegers()", fl_alts);
     b.m(HALF_FLOAT_DOC_VALUES_FIELD, "float get(double)", fl_get1);
     b.m(HALF_FLOAT_DOC_VALUES_FIELD, "float get(int,double)", fl_get2);
     b.m(HALF_FLOAT_DOC_VALUES_FIELD, "List asDoubles()", fl_alts);
