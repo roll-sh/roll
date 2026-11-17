@@ -1306,7 +1306,7 @@ impl Apps {
             rate_limit: r.rate_limit,
             firewall: r.firewall.clone(),
             headers: r.headers.clone(),
-            egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&r.egress.hosts) } else { Vec::new() },
+            egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&closed_network_name(&svc.project, &r.name), &r.egress.hosts) } else { Vec::new() },
             egress: r.egress.clone(),
             scaling,
             wait_for_ci: r.wait_for_ci,
@@ -2924,9 +2924,10 @@ pub fn network_name(project: &str, env: &str) -> String {
 }
 
 /// The project environment's network with no route out (its services with `egress` `roll`):
-/// they reach each other there, and the open ones on [`network_name`].
+/// they reach each other there, and the open ones on [`network_name`]. Its `.` is a character no
+/// environment's name has, so it's never another environment's open network.
 pub fn closed_network_name(project: &str, env: &str) -> String {
-    format!("{}-closed", network_name(project, env))
+    format!("roll-apps-closed-{}.{env}", project.strip_prefix("prj_").unwrap_or(project))
 }
 
 /// A free spot on a project's canvas for a new card (the same grid the dashboard uses).

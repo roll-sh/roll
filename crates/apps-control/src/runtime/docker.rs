@@ -739,7 +739,12 @@ impl Runtime for Docker {
     }
 
     async fn ensure_network(&self, name: &str, service: &str, closed: bool) -> anyhow::Result<()> {
-        if docker(&["network", "inspect", "-f", "{{.Name}}", name]).await.is_ok() {
+        // One already there must be what's asked for: a closed environment never joins a network
+        // with a route out (nor an open one loses its own).
+        if let Ok(internal) = docker(&["network", "inspect", "-f", "{{.Internal}}", name]).await {
+            if (internal.trim() == "true") != closed {
+                bail!("network {name} exists {} a route out; a {} environment can't use it", if closed { "with" } else { "without" }, if closed { "closed" } else { "open" });
+            }
             return Ok(());
         }
         let label = format!("{LABEL}={service}");
@@ -875,15 +880,15 @@ impl Runtime for Docker {
 
     async fn egress_proxy(&self, network: &str, _service: &str, hosts: &[String]) -> anyhow::Result<String> {
         let Some(proxies) = &self.egress else { bail!("egress proxies need the Docker daemon on this host") };
-        let digest = proxies.serve(hosts)?;
+        let digest = proxies.serve(network, hosts)?;
         let name = super::egress::relay_name(network, &digest);
         let args = super::links::relay_args_as(&name, network, &super::egress::alias(&digest), super::egress::PORT, &proxies.socket_dir(&digest), "egress");
         run_relay(&name, &args).await.map_err(|e| e.context("the egress proxy's relay"))?;
-        Ok(super::egress::proxy_url(hosts))
+        Ok(super::egress::proxy_url(network, hosts))
     }
 
-    fn egress_refused(&self, hosts: &[String]) -> Vec<super::egress::Refused> {
-        self.egress.as_ref().map(|p| p.refused(hosts)).unwrap_or_default()
+    fn egress_refused(&self, network: &str, hosts: &[String]) -> Vec<super::egress::Refused> {
+        self.egress.as_ref().map(|p| p.refused(network, hosts)).unwrap_or_default()
     }
 
     fn reach(&self, url: &str) -> String {

@@ -506,7 +506,7 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
     assert!(set.contains("HttpOnly") && set.contains("Max-Age=43200"), "{set}");
     let session = set.split(';').next().unwrap().to_string();
     assert_eq!(get(path.to_string(), None, true).await.0, StatusCode::UNAUTHORIZED, "a ticket opens once");
-    let (st, _, body) = get("/dash".into(), Some(format!("{session}; theirs=1")), true).await;
+    let (st, _, body) = get("/dash".into(), Some(format!("{session}; theirs=1; roll_access_production=a-shared-token")), true).await;
     assert_eq!((st, body["cookie"].as_str()), (StatusCode::OK, Some("theirs=1")), "the app never sees roll's cookie: {body}");
     assert_eq!(ask(Some("usr_bob"), to.clone()).await.0, StatusCode::FORBIDDEN, "someone who can't open the project gets no ticket");
     // The person loses the project: their session ends at the next look.
@@ -551,7 +551,7 @@ async fn closed_egress_runs_on_its_own_network_with_a_proxy() {
     assert!(w.fake.closed_networks().contains(&closed));
     let var = |k: &str| spec.vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
     let hosts = vec!["*.sentry.io".to_string(), "api.stripe.com".to_string()];
-    assert_eq!(var("HTTPS_PROXY"), Some(apps_control::runtime::egress::proxy_url(&hosts)));
+    assert_eq!(var("HTTPS_PROXY"), Some(apps_control::runtime::egress::proxy_url(&closed, &hosts)));
     assert!(var("NO_PROXY").is_some_and(|n| n.split(',').any(|h| h == "api")), "the project's services are reached directly: {:?}", var("NO_PROXY"));
     assert_eq!(w.fake.proxies.lock().last().map(|(n, h)| (n.clone(), h.clone())), Some((closed.clone(), hosts)));
     w.fake.refuse("evil.example.com", false);

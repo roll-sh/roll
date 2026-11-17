@@ -600,7 +600,11 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         headers: r.get::<_, Option<String>>(22)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
         paused: r.get::<_, i64>(23)? != 0,
         held_by: r.get(24)?,
-        egress: r.get::<_, Option<String>>(25)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        // Unreadable (a newer shape, a broken row): closed, never open by accident.
+        egress: match r.get::<_, Option<String>>(25)? {
+            None => crate::model::Egress::default(),
+            Some(j) => serde_json::from_str(&j).unwrap_or(crate::model::Egress { mode: crate::model::EgressMode::Roll, hosts: Vec::new() }),
+        },
         vitals: r.get::<_, i64>(26)? != 0,
     })
 }
