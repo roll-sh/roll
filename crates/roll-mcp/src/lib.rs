@@ -1017,8 +1017,13 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
     let started = std::time::Instant::now();
     // A credential headed where people and other agents read it is refused before it's sent
     // (guard.rs): a data-loss check, not a permission (the gate decides those).
-    let found = match credential_in(ctx, name, &args) {
-        None if !quiet => secret_value_in(ctx, name, &args).await,
+    // What it writes to, worked out once (a fronted set's list is built to look).
+    let target = writes_to(ctx, name);
+    let found = match target.as_ref().and_then(|(product, write)| guard::check(product, *write, &args)) {
+        None if !quiet => match &target {
+            Some((product, write)) => secret_value_in(ctx, name, product, *write, &args).await,
+            None => None,
+        },
         found => found,
     };
     if !quiet && let Some(found) = found {
@@ -1086,13 +1091,6 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
     Some(result)
 }
 
-/// What a call to `name` would leak, if anything: its product, and whether it writes (a built-in
-/// tool's method, a fronted set's `readOnlyHint`).
-fn credential_in(ctx: &Ctx, name: &str, args: &Value) -> Option<guard::Found> {
-    let (product, write) = writes_to(ctx, name)?;
-    guard::check(&product, write, args)
-}
-
 /// A tool's product, and whether it writes (a built-in tool's method, a fronted set's
 /// `readOnlyHint`).
 fn writes_to(ctx: &Ctx, name: &str) -> Option<(String, bool)> {
@@ -1113,9 +1111,8 @@ const SCAN_PROJECTS: usize = 50;
 /// secrets' own scan (`POST …/leaks`) as the caller, through the gated router, so it only ever
 /// matches values the caller may reveal (never a test of a guess), and only for a token that may
 /// reveal secrets at all: the one that could have read a value to leak.
-async fn secret_value_in(ctx: &Arc<Ctx>, name: &str, args: &Value) -> Option<guard::Found> {
-    let (product, write) = writes_to(ctx, name)?;
-    if !write || !guard::read_by_others(&product) {
+async fn secret_value_in(ctx: &Arc<Ctx>, name: &str, product: &str, write: bool, args: &Value) -> Option<guard::Found> {
+    if !write || !guard::read_by_others(product) {
         return None;
     }
     let Principal::Grant(g) = &ctx.principal else { return None };
