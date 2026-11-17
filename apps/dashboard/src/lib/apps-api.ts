@@ -416,6 +416,21 @@ export function parseAllowList(text: string): IpRule[] {
     });
 }
 
+/** How an environment differs from another (`GET …/diff?from=`): never a value. */
+export interface EnvironmentDiff {
+  from: string;
+  to: string;
+  variables: {
+    /** `from`'s own variables this one lacks (a sealed one can't be copied). */
+    missing: { name: string; sealed: boolean }[];
+    extra: string[];
+    /** Set in both with other values; null: the caller can't reveal both, so isn't told. */
+    differ: string[] | null;
+  };
+  /** Each setting that differs, and the `PUT …/environments/{to}` body that makes it `from`'s. */
+  settings: { field: string; from: unknown; to: unknown; put: EnvironmentPut }[];
+}
+
 export interface EnvironmentPut {
   branch?: string | null;
   /** Its name on the roll domain (`<hostname>.<domain>`): the old one stops answering. */
@@ -1093,8 +1108,12 @@ export const appsApi = {
   /** The values in the clear (the `reveal` action). */
   reveal: (id: string, e: string) => call<Record<string, string>>("GET", `${env(id, e)}/variables/values`),
   /** `seal`: names set here or already set, sealed for good (a new value keeps them sealed). */
-  setVariables: (id: string, e: string, change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null> }) =>
-    call<Variables>("PATCH", `${env(id, e)}/variables`, change),
+  setVariables: (
+    id: string,
+    e: string,
+    change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null>; copy_from?: string; copy?: string[] },
+  ) => call<Variables>("PATCH", `${env(id, e)}/variables`, change),
+  diff: (id: string, e: string, from: string) => call<EnvironmentDiff>("GET", `${env(id, e)}/diff${qs({ from })}`),
 
   logs: (id: string, e: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${env(id, e)}/logs${qs({ tail: q.tail, since: q.since })}`),
   /** Lines that contain `q` (any case), back through the stored logs (7 days), newest last. */
