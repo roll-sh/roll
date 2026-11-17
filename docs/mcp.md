@@ -791,7 +791,7 @@ waits on a sibling PR reaching main is last.
      official TypeScript SDK v2 (two interop bugs found and fixed).
 3. **Credentials kept out of what agents write: built** on the same branch (GitHub MCP's secret
    protection; `roll_mcp::guard`), with the values of roll secrets a token may reveal (roll
-   secrets' own scan, as the token; agreed with the secrets thread: `X-Roll-Guard: 1`). roll code's
+   secrets' own scan, as the token; agreed with the secrets thread: `X-Roll-Guard: 1`, audited as `secrets.guard` by their #169). roll code's
    tools on `/v1/mcp` are covered (fronted with `roll/product` and `readOnlyHint`); next, the same
    guard on roll code's own endpoint served by `code-control/src/mcp.rs`, with the code thread.
 4. **`roll_machine_client` in the Terraform provider:** built on `feature/roll-mcp-terraform-clients`
