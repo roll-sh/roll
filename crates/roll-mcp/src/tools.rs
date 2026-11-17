@@ -273,6 +273,18 @@ fn run_over(v: &Value) -> bool {
     matches!(v["status"].as_str(), Some("completed" | "failed" | "canceled"))
 }
 
+/// A deploy that's done one way or another (roll apps' final states); `queued`, `building` and
+/// `deploying` aren't.
+fn deploy_over(v: &Value) -> bool {
+    matches!(v["status"].as_str(), Some("active" | "ready" | "failed" | "canceled" | "superseded" | "removed" | "inactive"))
+}
+
+/// A job that ended (roll apps' `succeeded`, `failed`, `skipped`, `timed_out`, `canceled`):
+/// anything but `running`.
+fn job_over(v: &Value) -> bool {
+    v["status"].as_str().is_some_and(|s| s != "running")
+}
+
 /// An approval a person decided (or that expired): anything but `pending`.
 fn decided(v: &Value) -> bool {
     v["state"].as_str().is_some_and(|s| s != "pending")
@@ -878,6 +890,16 @@ static TOOLS: &[Tool] = &[
     t("apps_job_logs", "Job logs", "A job's output (it ends with the job).", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/logs", &[SERVICE, ENV, req("job", "Job id"), q("tail", Ty::Int, "Last lines")]),
     t("apps_list_jobs", "List jobs", "An environment's one-off jobs, newest first: command, status, exit code, when.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs", &[SERVICE, ENV]),
     t("apps_get_job", "Get a job", "One job: its status, exit code and timing; poll it until it ends, then read apps_job_logs.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/jobs/{job}", &[SERVICE, ENV, req("job", "Job id")]),
+    t(
+        "apps_wait_job",
+        "Wait for a job to finish",
+        "A job once it ends (succeeded, failed, skipped, timed out or canceled), with its exit code. A client that runs MCP tasks gets a task that waits as long as it takes; otherwise this answers the status now (call again to keep waiting).",
+        "apps",
+        "GET",
+        "/v1/apps/services/{service}/environments/{env}/jobs/{job}",
+        &[SERVICE, ENV, req("job", "Job id")],
+    )
+    .until(job_over),
     t("apps_cancel_job", "Cancel a job", "Stop a running job (production is a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/jobs/{job}/cancel", &[SERVICE, ENV, req("job", "Job id")]),
     t("apps_events", "App events", "What happened to services (deploys going live or failing, crash loops, failed cron runs and jobs, memory, error and latency alerts, and audit.* changes to settings, variables, domains and links), in order after a cursor.", "apps", "GET", "/v1/apps/events", &[q("after", Ty::Int, "The last answer's next"), q("limit", Ty::Int, "At most this many")]),
     t("apps_list_variables", "List variables", "An environment's variables, values masked. A sealed variable is never readable again by anyone (only the running service gets it): set a new value or delete it, never look for the old one.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/variables", &[SERVICE, ENV]),
@@ -904,6 +926,16 @@ static TOOLS: &[Tool] = &[
     t("apps_restore_backup", "Restore a volume backup", "Put an environment's volume back as it was in a backup, replacing its files; the environment sleeps meanwhile.", "apps", "POST", "/v1/apps/services/{service}/environments/{env}/volume/backups/{backup}/restore", &[SERVICE, ENV, req("backup", "Backup id")]),
     t("apps_activity", "Service activity", "Who changed what on a service, newest first (never a value); with all, its whole timeline: deploys, failures, crash loops, alerts, domains, spend.", "apps", "GET", "/v1/apps/services/{service}/activity", &[SERVICE, q("all", Ty::Bool, "The whole timeline, not only changes")]),
     t("apps_get_deploy", "Get a deploy", "One deploy: its status, commit, image and when it went live.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}", &[SERVICE, ENV, req("deploy", "Deploy id")]),
+    t(
+        "apps_wait_deploy",
+        "Wait for a deploy to finish",
+        "A deploy once it's live or failed, with how far each step got. A client that runs MCP tasks gets a task that waits as long as it takes; otherwise this answers the status now (call again to keep waiting).",
+        "apps",
+        "GET",
+        "/v1/apps/services/{service}/environments/{env}/deploys/{deploy}",
+        &[SERVICE, ENV, req("deploy", "Deploy id (from apps_deploy, apps_redeploy or apps_promote)")],
+    )
+    .until(deploy_over),
     t("apps_list_links", "List links", "The databases, buckets, streams and other services a service is linked to.", "apps", "GET", "/v1/apps/services/{service}/links", &[SERVICE]),
     t("apps_route_stats", "Route stats", "An environment's routes from its access log over the last minutes (5-60, default 60): requests, 5xx and 4xx errors, p50/p95/max latency per route (ids folded as :id), the busiest, most failing and slowest 50 of each. Start here when a service is slow or failing.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/routes", &[SERVICE, ENV, q("minutes", Ty::Int, "How far back, 5-60 (default 60)")]),
     t("apps_list_cron_runs", "Cron runs", "A cron service's runs, newest first.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/runs", &[SERVICE, ENV]),
