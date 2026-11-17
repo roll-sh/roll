@@ -33,7 +33,8 @@ PATHS=(crates/search-* crates/snowball crates/pg-storage crates/roll-cluster cra
        Cargo.toml Cargo.lock scripts/test-search.sh scripts/search-yaml-suites.sh
        docs/search/compatibility.md .github/workflows/search.yml tests/search
        apps/dashboard/src/lib/search-console.ts apps/dashboard/src/lib/search-docs.ts
-       apps/dashboard/src/lib/search-console.test.ts apps/dashboard/src/lib/search-docs.test.ts)
+       apps/dashboard/src/lib/search-console.test.ts apps/dashboard/src/lib/search-docs.test.ts
+       apps/dashboard/src/lib/search-playground.ts apps/dashboard/src/lib/search-playground.test.ts)
 STAMP=target/.test-search.hash
 
 force=0 unit_only=0
@@ -61,8 +62,8 @@ cargo test "${CRATES[@]}"
 # time) and run rolld with every product.
 cargo test -p roll-cli -p rolld
 
-# The dashboard's console completion and document helpers.
-pnpm --filter dashboard exec vitest run src/lib/search-console.test.ts src/lib/search-docs.test.ts
+# The dashboard's console completion, document helpers and playground requests.
+pnpm --filter dashboard exec vitest run src/lib/search-console.test.ts src/lib/search-docs.test.ts src/lib/search-playground.test.ts
 
 # Minimum pass count for a suite from docs/search/compatibility.md (0 when not set).
 threshold() {

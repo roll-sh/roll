@@ -77,7 +77,7 @@ impl MemoryIndex {
         let shard = engine.shard(0).clone();
         for ((id, source, p), d) in parsed.into_iter().zip(docs) {
             let stored = crate::write::stored_source(&meta, &table, &source, d);
-            let doc = crate::engine::convert::to_indexable(&table, &p, &crate::engine::convert::DocMeta { id: &id, routing: None, tsid: None, source: stored })?;
+            let doc = crate::engine::convert::to_indexable(&table, &p, &crate::engine::convert::DocMeta { id: &id, routing: None, tsid: None, source: stored, ignored_source: Vec::new() })?;
             shard.shard.index(search_index::IndexOp::new(doc)).map_err(crate::engine::convert::index_error)?;
         }
         shard.wrote();

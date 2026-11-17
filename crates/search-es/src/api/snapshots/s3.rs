@@ -610,6 +610,7 @@ fn read_record(r: &mut impl BufRead, source_max: usize) -> Result<Option<DocCopy
         seq_no: int("seq_no")?,
         primary_term: int("primary_term")?,
         version: int("version")?,
+        ignored_source: Vec::new(),
     }))
 }
 
@@ -895,8 +896,8 @@ mod tests {
     #[test]
     fn records_round_trip_and_bounds_hold() {
         let copies = [
-            DocCopy { id: "1".into(), routing: None, source: Bytes::from_static(b"{\"a\":1}"), seq_no: 0, primary_term: 1, version: 1 },
-            DocCopy { id: "x\ny".into(), routing: Some("r".into()), source: Bytes::from_static(b"{\n \"b\" : \"\\n\"}"), seq_no: 7, primary_term: 2, version: 3 },
+            DocCopy { id: "1".into(), routing: None, source: Bytes::from_static(b"{\"a\":1}"), seq_no: 0, primary_term: 1, version: 1, ignored_source: Vec::new() },
+            DocCopy { id: "x\ny".into(), routing: Some("r".into()), source: Bytes::from_static(b"{\n \"b\" : \"\\n\"}"), seq_no: 7, primary_term: 2, version: 3, ignored_source: Vec::new() },
         ];
         let mut c = Chunk::new();
         for d in &copies {
