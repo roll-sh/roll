@@ -2774,15 +2774,17 @@ Doppler, Infisical, Vault and 1Password (clients, IaC, CI, Kubernetes, BYOK). Th
 is Vault's signature: dynamic credentials for clouds and databases roll doesn't run. CI stays
 under a minute (the new `sdk` and `terraform` jobs take 39 s and 22 s).
 
-Ranked (twenty-eighth review, 2026-11-17 night, against Vault, Infisical, Doppler, AWS Secrets
+Ranked (twenty-ninth review, 2026-11-17 morning, against Vault, Infisical, Doppler, AWS Secrets
 Manager, 1Password, Akeyless and step-ca, and the other threads' branches): first what can be built
-now, then what waits on a merge or another thread. Since the twenty-seventh: Active Directory checked
-against Samba AD (#132, the old password's hour closed), ACME (#144), Pulumi (#145), and approvals in
-the audit (#147, on roll MCP's #114); the gateway is building. Reading roll previews' #123 (a roll
-apps link's variables in a preview come from the branch) found the same hole in roll secrets: a
-preview inherits its base's links, so a field the branch doesn't set by the same name (`PGPASSWORD`
-next to the branch's `DATABASE_URL`) is the parent's, and a preview's code, a fork's included, reaches
-staging's database. It's first below.
+now, then what waits on a merge or another thread. Since the twenty-eighth: #68 landed; the preview
+hole is closed on both sides (#151 with previews' #160); the gateway (#166) covers every outside
+engine, a second node, identity logins and revocation at once, and opens a stream in ~1 ms; MongoDB
+Atlas (#173), outside search and CQL engines (#165), TOTP keys (#194) and guard scans (#169) are in
+PRs; a screenshot pass fixed four dashboard bugs; the read path measured unchanged by #151. The
+bottleneck is no longer building: about thirty green pull requests wait on a lock five threads share,
+so landing them in batches comes first. Reading roll apps' #191 found that values from roll secrets
+not tagged `sensitive` still reach an app's log; preview service logs aren't masked at all (both
+asked of their threads).
 
 On main: #20, #62, #63 (the CSI provider), #65 (conditional reads and client caches), #85
 (roll-access's tokens), #74 (live links' digests), #66 (Terraform without values in state),
@@ -2803,6 +2805,10 @@ outside roll, on #132), #166 (a gateway into private networks, on #132), #169 (a
 guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on #136) and #194
 (TOTP keys).
 
+0. **Land in batches**: the next turn takes a pre-gated batch (#69, #70–#73, #75–#77 in order:
+   one combined tree, merged with main and gated once, each pull request then queued behind the
+   last, as roll search lands theirs), and each later turn the next batch, so thirty pull requests
+   take a handful of lock cycles instead of thirty.
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
@@ -2891,7 +2897,9 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
    comes here first).
 11. *Waits on roll search:* #134 approved once its pin covers the endpoint's whole destination
    (`service_settings` but the key, rate limit and allocations; `task_settings` where they route).
-12. *Waits on roll apps:* their redeploys holding `wait_digest` once #79 lands.
+12. *Waits on roll apps:* their redeploys holding `wait_digest` once #79 lands; #191's log
+   redaction hiding every value that comes from roll secrets, not only `sensitive` ones (asked).
+   *Waits on roll previews:* masking secret values in a preview service's logs (asked).
 13. *Waits on other threads:* a live check of OpenSearch links, roll redis and nosql keeping a
    rotated password a while, splitting the CLI's `secrets.rs` once the queue has landed.
 14. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
