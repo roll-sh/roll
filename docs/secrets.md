@@ -1247,7 +1247,7 @@ roll secrets diff    --from development --to staging | --file .env   # two envir
 roll secrets promote --from development --to staging [KEY…]
 roll secrets audit   [--key KEY] [--format csv|jsonl]
 roll secrets syncs   ls | add KIND --target name=value… | run ID | rm ID
-roll secrets sinks   ls | add URL [--from-start] | rm ID
+roll secrets sinks   ls | add URL [--from-start] [--format splunk|datadog|bearer] (token on stdin) | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
@@ -2352,13 +2352,20 @@ days.
 
 - **Export**: `GET …/audit?format=csv` or `format=jsonl` (with the same filters, `since` too)
   answers up to 10,000 rows as a file.
-- **Streaming to a SIEM**: an audit sink (`POST …/audit/sinks {url, from_start?}`, `admin`) is a
+- **Streaming to a SIEM**: an audit sink (`POST …/audit/sinks {url, from_start?, format?, token?}`, `admin`) is a
   public HTTPS URL that receives the project's new rows in order, in batches of up to 200:
   `{sink, project, events: AuditEntry[]}`, signed like syncs and every roll webhook (`X-Roll-Sink`, `X-Roll-Timestamp`,
   `X-Roll-Signature-256: sha256=HMAC(secret, "ts.body")`, `X-Roll-Delivery`; the `whsec_…` secret is shown once and kept
   sealed). Each sink keeps a cursor; the sweeper claims a sink in a write before delivering, so no
   two nodes send one batch, and a failed batch is sent again 5 minutes later. Deliveries go through
   the same `PublicOnly` client as syncs. At most 10 sinks a project.
+- **In a SIEM's own format**, as Doppler's and Infisical's log streams offer: `format` `splunk`
+  (HTTP Event Collector: one event per line, `time` in seconds, `sourcetype` `roll:audit`,
+  `Authorization: Splunk <token>`), `datadog` (the Logs intake: a JSON array of logs, `message` the
+  summary, `ddtags` the project and action, `DD-API-KEY`) or `bearer` (roll's JSON with
+  `Authorization: Bearer <token>`, for other collectors). The `token` is sealed with the project's
+  key and never shown again (`roll secrets sinks add URL --format splunk` reads it from stdin);
+  such batches carry it instead of roll's signature, and each event names its project.
 - **Into a roll bucket**: a sink whose URL is `bucket:<name>`, a bucket on the project's own canvas
   (any other is refused, and a bucket moved off the canvas later gets nothing more: it's checked at
 every delivery), writes each batch as an object `roll-secrets/audit/<sink>/<delivery>.json`
@@ -2459,7 +2466,7 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |
 | `POST /v1/secrets/shares/{id}/open` (public) | | `{ciphertext}` (one open used) |
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
-| `POST /audit/sinks` | `{url, from_start?}` (an HTTPS endpoint, `bucket:<name>` or `stream:<id>/<topic>` on the canvas) | 201 `Sink & {secret}` (shown once) |
+| `POST /audit/sinks` | `{url, from_start?, format?, token?}` (an HTTPS endpoint, `bucket:<name>` or `stream:<id>/<topic>` on the canvas; `format` `splunk`, `datadog` or `bearer` takes an HTTPS endpoint and its `token`, sealed) | 201 `Sink & {secret}` (shown once; a `Sink` names its `format`, never its token) |
 | `DELETE /audit/sinks/{id}` | | 204 |
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
