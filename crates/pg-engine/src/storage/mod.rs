@@ -67,7 +67,12 @@ fn unwatch_written(watched: &mut HashMap<u32, u64>, key: &[u8], value: Option<&[
             });
         }
     } else if toast::is_row_key(key) || toast::is_value_key(key) {
-        watched.remove(&key_table(key));
+        // (A table or two is watched: their ids are compared, a commit's every key isn't
+        // hashed for the map.)
+        let t = key_table(key);
+        if watched.len() > 8 || watched.keys().any(|&w| w == t) {
+            watched.remove(&t);
+        }
     }
 }
 
@@ -912,6 +917,9 @@ impl Store {
         }
         let mut u = self.untouched.lock();
         for (k, v) in writes {
+            if u.is_empty() {
+                break;
+            }
             unwatch_written(&mut u, k, v.as_deref());
         }
         if u.is_empty() {
@@ -1584,7 +1592,10 @@ impl Store {
             if rdel::is_marker(k) {
                 markers.push((k.to_vec(), v.map(<[u8]>::to_vec)));
             }
-            if let Some(u) = untouched.as_mut() {
+            // (Once no table is watched, the commit's other keys aren't looked at.)
+            if let Some(u) = untouched.as_mut()
+                && !u.is_empty()
+            {
                 unwatch_written(u, k, v);
             }
             key.clear();
