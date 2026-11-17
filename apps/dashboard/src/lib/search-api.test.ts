@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { perIndexRoute } from "./search-api";
+import { esReason, perIndexRoute } from "./search-api";
 
 describe("perIndexRoute", () => {
   it("maps an index's requests onto its per-index routes, with the query string", () => {
@@ -15,5 +15,20 @@ describe("perIndexRoute", () => {
     for (const [m, p] of [["GET", "/_cat/indices"], ["POST", "/_bulk"], ["GET", "/logs/_stats"], ["POST", "/logs/_doc/1/_update"], ["GET", "/"]]) {
       expect(perIndexRoute(m, p)).toBeNull();
     }
+  });
+});
+
+describe("esReason", () => {
+  it("adds the innermost cause when the outer reason is only a wrapper", () => {
+    const wrapped = {
+      error: {
+        type: "x_content_parse_exception",
+        reason: "[1:2] [query_rule] failed to parse field [criteria]",
+        caused_by: { type: "x_content_parse_exception", reason: "Failed to build", caused_by: { type: "illegal_argument_exception", reason: "Input [x] is not valid for CriteriaType [gte]" } },
+      },
+    };
+    expect(esReason(wrapped, 400)).toBe("x_content_parse_exception: [1:2] [query_rule] failed to parse field [criteria]: Input [x] is not valid for CriteriaType [gte]");
+    const said = { error: { type: "mapper_parsing_exception", reason: "Failed to parse mapping: analyzer [a] is bad", caused_by: { type: "mapper_exception", reason: "analyzer [a] is bad" } } };
+    expect(esReason(said, 400)).toBe("mapper_parsing_exception: Failed to parse mapping: analyzer [a] is bad");
   });
 });

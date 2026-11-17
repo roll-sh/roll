@@ -532,6 +532,17 @@ pub fn render_doc_stored(
             m.insert("_ignored".into(), Value::Arr(ig.into_iter().map(Value::Str).collect()));
         }
     }
+    // `_ignored_source` shows when `stored_fields` or `fields` name it (no pattern matches it),
+    // as base64 like any binary value in JSON.
+    let named = |l: &[String]| l.iter().any(|f| f == "_ignored_source");
+    if matches!(&o.stored_fields, Some(Some(l)) if named(l)) || o.fields.iter().any(|f| f.field == "_ignored_source") {
+        use base64::Engine as _;
+        let entries = crate::fetch::ignored_source(stored);
+        if !entries.is_empty() {
+            let b64 = |b: &[u8]| Value::Str(base64::engine::general_purpose::STANDARD.encode(b));
+            m.insert("_ignored_source".into(), Value::Arr(entries.into_iter().map(b64).collect()));
+        }
+    }
     let fs = wants_source(o);
     let fls = o.security.as_ref().zip(idx).and_then(|(s, i)| s.fields(crate::xpack::security::dls::READ, &i.name));
     // The stored bytes, as they are or filtered straight from the text, when nothing else
