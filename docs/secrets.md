@@ -2806,10 +2806,15 @@ outside roll, on #132), #166 (a gateway into private networks, on #132), #169 (a
 guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on #136), #194
 (TOTP keys).
 
-0. **Land in batches**: the next turn takes a pre-gated batch (#69, #70–#73, #75–#77 in order:
-   one combined tree, merged with main and gated once, each pull request then queued behind the
-   last, as roll search lands theirs), and each later turn the next batch, so thirty pull requests
-   take a handful of lock cycles instead of thirty.
+0. **Land in batches**: batch 1 is ready (`~/.local/share/roll-secrets/batch-1.txt`; the combined
+   tree gated green on all 17 steps): round 1 #69, #70, #72, #76, #77 as they are, round 2 #71, #73,
+   #75 after it (they merged #70's head, which the squash queue can't take in one round), within
+   one lock turn; #147 after, if it merges clean. Then batch 2 the same way.
+0c. **Azure DevOps** (building: `feature/roll-secrets-azure-devops`): a sync to variable groups
+   as secret variables, and Azure Pipelines logging in with its own OIDC token (one service
+   connection per identity), as Vault, Infisical and Doppler integrate.
+0d. **A Ruby client** (building: `feature/roll-secrets-ruby`), the same surface as the TypeScript,
+   Go and Python ones, the sealed-box vector opening in it, standard library only, with Rails notes.
 0b. **The polling path at scale** (building: `feature/roll-secrets-poll-path`): the Performance
    table's Postgres numbers are from 2026-11-13, before conditional reads, live digests and preview
    branches; `digest` was 143 ms at 9,900 keys, and every operator, CSI driver and ESO poll pays a
