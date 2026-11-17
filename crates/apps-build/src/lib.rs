@@ -246,6 +246,13 @@ pub fn plan(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         p.release = Some(cmd.clone());
         p.notes.push(format!("pre-deploy: the Procfile's release: {cmd}"));
     }
+    // A runtime past (or near) its end of life: said, so a deploy isn't quietly unpatched.
+    if let Some(v) = p.language_version.clone() {
+        let today = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64 / 86_400).unwrap_or(0);
+        if let Some(n) = version::end_of_life_note(p.provider, &v, today) {
+            p.notes.push(n);
+        }
+    }
     // A static site's functions (Netlify's, Vercel's `api/`) never run: said, not dropped silently.
     if p.start.as_deref() == Some(static_site::START) {
         for (dir, what, route) in [("netlify/functions", "Netlify Functions", "/.netlify/functions/*"), ("netlify/edge-functions", "Netlify Edge Functions", "the paths they answer"), ("api", "Vercel functions", "/api/*")] {
