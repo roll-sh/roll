@@ -224,7 +224,7 @@ Grant ("ID-JAG", Okta's Cross App Access) describe: the app trades the provider'
 roll token acting as that person, with no consent screen and no roll sign-in.
 
 - **Trusting a provider** (the operator): `PUT /v1/access/enterprise/idps {idps: [{issuer, jwks?,
-  matching?, domains?, admins?, name?}]}` (`roll token enterprise trust <issuer> …`). `issuer` is an
+  matching?, domains?, admins?, name?, tenant?}]}` (`roll token enterprise trust <issuer> …`). `issuer` is an
   `https` URL; its keys are fetched from its metadata through the guarded client, or pinned
   (`jwks`). `matching` says how a person is found: `email` (the default: the assertion's `email`,
   with `email_verified: true`, in one of the provider's `domains`, which email matching requires,
@@ -232,6 +232,15 @@ roll token acting as that person, with no consent screen and no roll sign-in.
   `usr_…`). A provider names people of its own company, never anyone's: some let people set their
   own email, so an unverified one or another domain is `access_denied`. roll's admins act as the
   operator, past roll's own second factor: a provider signs them in only with `admins: true`.
+  A multi-tenant issuer (one issuer URL many companies share) names the person's tenant in each
+  assertion: roll trusts the issuer with one `tenant` (`--tenant`), and refuses that issuer's other
+  tenants, and any assertion naming a tenant from a provider trusted without one (anyone can be a
+  tenant there, and set up an address in your domain). An assertion has exactly one audience
+  (roll's issuer, a string or an array of one), and the token is held to its `resource`: roll's
+  MCP server alone makes a token for that server only (refused on the API directly); roll's API,
+  both, or none makes an API token. roll's metadata advertises the ID-JAG grant profile
+  (`authorization_grant_profiles_supported`, `id_jag_signing_alg_values_supported`: RS256, ES256),
+  never which providers it trusts.
 - **Registering an app** (the operator): `POST /v1/access/enterprise/apps {name, rules,
   public_jwk?}` answers its `client_id` (`ent_…`, what the provider puts in an assertion) and, with
   no key, a `client_secret` shown once. `rules` is the most the app may do for a person.

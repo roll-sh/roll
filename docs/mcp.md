@@ -235,6 +235,12 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
   days (clients keep their registration); together the name, URI and redirect URIs are at most
   1,500 bytes, so a kept id stays under Postgres's index row limit. A flood of registrations has nothing to fill, as a metadata document's client never did. A
   network (/24, /48) still registers at most 20 a minute on a node (`429` with `Retry-After`).
+- A client that names roll's MCP server as its `resource` (RFC 8707; MCP clients always do) gets
+  tokens for that server only: they work at `/v1/mcp` and in the calls the server makes for them,
+  and the API refuses them directly (`401 invalid_token`), so what the server adds (lockdown, the
+  credential guard, a read-only URL) can't be stepped around with its token. Refreshing keeps the
+  audience; a token request naming another resource is `invalid_target`. A client that names none
+  (`roll login`) gets API tokens.
 - Codes are good for one minute, once. Access tokens (`rlo_`) last an hour. Refresh tokens (`rlf_`)
   rotate on every use, and a used one fails; a connection expires 30 days after its last refresh.
 - `scope` (`read-only`, `agent`, `project`, `development`, `previews`, `full`) picks the preset the
@@ -830,7 +836,14 @@ waits on a sibling PR reaching main is last.
    secret, the old secret kept up to a week), change rules (their people's connections take them at
    once), and a leaked app secret is revoked like any other `rlc_` (it lived outside the tables
    `revoke_leaked` searched: found in this review; the secret, a kept one and every token dropped,
-   the app back once rotated). Next on it: a live check with a real provider's ID-JAG (Okta's Cross App Access sandbox needs an account:
+   the app back once rotated). Checked against draft-ietf-oauth-identity-assertion-authz-grant-06
+   (31 October 2026): metadata advertises the grant profile, an assertion has one audience, and a
+   multi-tenant issuer is trusted with one tenant (refused otherwise: anyone can be a tenant there).
+   Next on it, first: tokens held to the assertion's `resource` (-05 made it a MUST): one from an
+   MCP-only assertion should work only through `/v1/mcp`, as should MCP clients' own OAuth tokens
+   (RFC 8707: they ask for the MCP server); roll's gate accepts any `rlo_` on the API today. That's
+   a gate change for every OAuth token (the device flow's `roll login` tokens stay API-wide). Then
+   a live check with a real provider's ID-JAG (Okta's Cross App Access sandbox needs an account:
    the user's call).
 7. **Everyday routes with no tool:** tasks, streams, storage, queues, postgres, Redis and NoSQL have
    theirs (`tool-gaps.py origin/main <product>` lists what's left). What's left is mostly what only

@@ -178,6 +178,9 @@ pub enum EnterpriseCmd {
         /// Let it sign in roll's admins too (they act as the operator).
         #[arg(long)]
         admins: bool,
+        /// A multi-tenant issuer's one tenant roll trusts (its assertions' `tenant` claim).
+        #[arg(long)]
+        tenant: Option<String>,
     },
     /// Stop trusting an identity provider: no new sign-ins from it.
     Untrust { issuer: String },
@@ -707,9 +710,16 @@ async fn enterprise(api: &Api, json_out: bool, cmd: Option<EnterpriseCmd>) -> an
     let other = |list: Vec<Value>, issuer: &str| -> Vec<Value> { list.into_iter().filter(|i| i["issuer"].as_str().map(|s| s.trim_end_matches('/')) != Some(issuer.trim_end_matches('/'))).collect() };
     let out = match cmd {
         None => current,
-        Some(EnterpriseCmd::Trust { issuer, name, jwks, matching, domains, admins }) => {
-            let mut list = other(idps(&current), &issuer);
+        Some(EnterpriseCmd::Trust { issuer, name, jwks, matching, domains, admins, tenant }) => {
+            // Again for the same issuer and tenant changes it; another tenant is another entry.
+            let mut list: Vec<Value> = idps(&current)
+                .into_iter()
+                .filter(|i| i["issuer"].as_str().map(|s| s.trim_end_matches('/')) != Some(issuer.trim_end_matches('/')) || i["tenant"].as_str() != tenant.as_deref())
+                .collect();
             let mut idp = json!({ "issuer": issuer, "matching": matching, "domains": domains, "admins": admins });
+            if let Some(t) = tenant {
+                idp["tenant"] = json!(t);
+            }
             if let Some(n) = name {
                 idp["name"] = json!(n);
             }

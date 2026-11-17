@@ -30,6 +30,8 @@ use std::sync::Arc;
 
 /// An identity assertion's JWT header `typ`.
 pub const ID_JAG_TYP: &str = "oauth-id-jag+jwt";
+/// The grant profile roll's metadata advertises (`authorization_grant_profiles_supported`).
+pub const ID_JAG_PROFILE: &str = "urn:ietf:params:oauth:grant-profile:id-jag";
 /// Where the configuration is kept (roll-access's settings).
 const SETTING: &str = "enterprise";
 const MAX_IDPS: usize = 20;
@@ -73,6 +75,11 @@ pub struct Idp {
     /// What people call it ("Okta").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The one tenant roll trusts at a multi-tenant issuer (its assertions' `tenant` claim): the
+    /// issuer with this tenant is trusted, never the issuer's other tenants. An assertion that
+    /// names a tenant is refused from a provider trusted without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,13 +163,16 @@ impl Access {
             if i.domains.len() > 50 || !i.domains.iter().all(|d| domain_ok(d)) {
                 return Err(Error::BadRequest(format!("{}'s domains are 1 to 50 email domains (acme.com)", i.issuer)));
             }
+            if i.tenant.as_deref().is_some_and(|t| t.trim().is_empty() || t.len() > 200 || t.contains(char::is_control)) {
+                return Err(Error::BadRequest(format!("{}'s tenant is its tenant id (1 to 200 characters)", i.issuer)));
+            }
             if i.matching == Matching::Email && i.domains.is_empty() {
                 return Err(Error::BadRequest(format!("{} matches people by email: name the email domains it vouches for (domains)", i.issuer)));
             }
         }
         let mut seen = std::collections::HashSet::new();
-        if !idps.iter().all(|i| seen.insert(i.issuer.trim_end_matches('/').to_string())) {
-            return Err(Error::BadRequest("each issuer once".into()));
+        if !idps.iter().all(|i| seen.insert((i.issuer.trim_end_matches('/').to_string(), i.tenant.clone()))) {
+            return Err(Error::BadRequest("each issuer (and tenant) once".into()));
         }
         self.update_enterprise(|e| {
             e.idps = idps.clone();
@@ -345,7 +355,7 @@ pub async fn token(a: Arc<Access>, headers: &axum::http::HeaderMap, f: &HashMap<
         return Err(Error::OAuth("invalid_client", "an enterprise app authenticates (client_secret_basic, client_secret_post or private_key_jwt)".into()));
     };
     let a2 = a.clone();
-    let checked: (App, Idp, Who, String, bool) = tokio::task::spawn_blocking(move || {
+    let checked: (App, Idp, Who, String, (bool, bool)) = tokio::task::spawn_blocking(move || {
         let e = a2.enterprise()?;
         let app = e.apps.iter().find(|x| x.client_id == client_id).ok_or_else(unknown)?;
         match &credential {
@@ -368,20 +378,40 @@ pub async fn token(a: Arc<Access>, headers: &axum::http::HeaderMap, f: &HashMap<
             return Err(refused("the assertion's typ is oauth-id-jag+jwt"));
         }
         let iss = jwt.str("iss").unwrap_or_default();
-        let idp = e.idps.iter().find(|i| i.issuer.trim_end_matches('/') == iss.trim_end_matches('/')).ok_or_else(|| refused("the assertion's issuer isn't one roll trusts"))?;
+        // A multi-tenant issuer names the person's tenant: roll trusts the issuer and a tenant
+        // together, never the issuer's other tenants (anyone can be a tenant there).
+        let tenant = jwt.str("tenant");
+        let idp = e
+            .idps
+            .iter()
+            .find(|i| i.issuer.trim_end_matches('/') == iss.trim_end_matches('/') && i.tenant.as_deref() == tenant)
+            .ok_or_else(|| match tenant {
+                Some(_) if e.idps.iter().any(|i| i.issuer.trim_end_matches('/') == iss.trim_end_matches('/')) => refused("the assertion's tenant isn't one roll trusts at that issuer"),
+                _ => refused("the assertion's issuer isn't one roll trusts"),
+            })?;
+        // One audience: roll (an array of exactly one is the same, the draft says; more is refused).
+        if let Some(Value::Array(auds)) = jwt.claims.get("aud")
+            && auds.len() != 1
+        {
+            return Err(refused("an identity assertion has exactly one audience"));
+        }
         let fetch = a2.oidc_fetch.get().map(|f| f.as_ref() as &dyn roll_oidc::Fetch);
         a2.oidc_keys.verify(fetch, idp.jwks.as_deref(), &jwt, &idp.issuer, &api, code_sql::now_ms() / 1000).map_err(|e| refused(&e.to_string()))?;
         if jwt.str("client_id") != Some(client_id.as_str()) {
             return Err(refused("the assertion is for another client"));
         }
         // Only roll's own resources (its API, or its MCP server).
-        let ours = |r: &str| r.trim_end_matches('/') == api || r.trim_end_matches('/') == format!("{api}/v1/mcp");
-        match jwt.claims.get("resource") {
-            None => {}
-            Some(Value::String(r)) if ours(r) => {}
-            Some(Value::Array(rs)) if !rs.is_empty() && rs.iter().all(|r| r.as_str().is_some_and(ours)) => {}
+        let mcp = format!("{api}/v1/mcp");
+        let ours = |r: &str| r.trim_end_matches('/') == api || r.trim_end_matches('/') == mcp;
+        let resources: Vec<&str> = match jwt.claims.get("resource") {
+            None => vec![],
+            Some(Value::String(r)) if ours(r) => vec![r.as_str()],
+            Some(Value::Array(rs)) if !rs.is_empty() && rs.iter().all(|r| r.as_str().is_some_and(ours)) => rs.iter().filter_map(Value::as_str).collect(),
             Some(_) => return Err(refused("the assertion's resource isn't roll's")),
-        }
+        };
+        // The token is held to what the assertion names (draft -06 §4.4.1): the MCP server alone
+        // is that server only; roll's API (or no resource) is the API.
+        let mcp_only = !resources.is_empty() && resources.iter().all(|r| r.trim_end_matches('/') == mcp);
         let jti = jwt.str("jti").filter(|j| !j.is_empty() && j.len() <= 200).ok_or_else(|| refused("the assertion has no jti"))?;
         let exp = jwt.claims.get("exp").and_then(Value::as_i64).ok_or_else(|| refused("the assertion has no exp"))?;
         if !a2.store.first_jti(&format!("idjag:{}", idp.issuer), jti, exp.saturating_mul(1000) + LEEWAY_MS)? {
@@ -407,11 +437,11 @@ pub async fn token(a: Arc<Access>, headers: &axum::http::HeaderMap, f: &HashMap<
             }
             Matching::AudSub => Who::Id(jwt.str("aud_sub").filter(|s| s.starts_with("usr_")).ok_or_else(|| refused("the assertion names no roll account (aud_sub)"))?.to_string()),
         };
-        Ok((app.clone(), idp.clone(), who, sub, read_only))
+        Ok((app.clone(), idp.clone(), who, sub, (read_only, mcp_only)))
     })
     .await
     .map_err(|e| Error::Internal(e.to_string()))??;
-    let (app, idp, who, sub, read_only) = checked;
+    let (app, idp, who, sub, (read_only, mcp_only)) = checked;
     // The person, as their account is now (never cached).
     let people = a.people.get().ok_or_else(|| Error::OAuth("access_denied", "roll has no accounts here".into()))?.clone();
     let person = match &who {
@@ -429,9 +459,9 @@ pub async fn token(a: Arc<Access>, headers: &axum::http::HeaderMap, f: &HashMap<
         if !a.sign_ins.allow(&app.client_id, SIGN_INS_PER_MINUTE) {
             return Err(Error::TooMany(format!("at most {SIGN_INS_PER_MINUTE} sign-ins a minute for one enterprise app")));
         }
-        let (grant, access) = connect(&a, &app, &idp, &person.user, read_only)?;
+        let (grant, access) = connect(&a, &app, &idp, &person.user, read_only, mcp_only)?;
         // Which person at which provider, never the assertion or their email.
-        audit_sign_in(&a, &grant, &app.client_id, json!({ "by": app.client_id, "credential": "id-jag", "issuer": idp.issuer, "subject": sub, "read_only": read_only }), ip);
+        audit_sign_in(&a, &grant, &app.client_id, json!({ "by": app.client_id, "credential": "id-jag", "issuer": idp.issuer, "subject": sub, "read_only": read_only, "mcp_only": mcp_only }), ip);
         Ok((grant, access, read_only))
     })
     .await
@@ -454,7 +484,8 @@ fn jwt_claim(jwt: &str, name: &str) -> Option<String> {
 /// hour's access token on it (`read_only`: narrowed to reads, as the assertion asked). One waiting
 /// for an admin is `access_denied` until approved; one revoked or denied stays so (the provider
 /// can't hand it back); one that lapsed (expired, or idle past roll's policy) is replaced.
-fn connect(a: &Access, app: &App, idp: &Idp, user: &str, read_only: bool) -> Result<(Grant, String), Error> {
+fn connect(a: &Access, app: &App, idp: &Idp, user: &str, read_only: bool, mcp_only: bool) -> Result<(Grant, String), Error> {
+    let audience = mcp_only.then_some(crate::store::AUDIENCE_MCP);
     // Still registered (it may have been removed since the configuration was read).
     if !a.enterprise()?.apps.iter().any(|x| x.client_id == app.client_id) {
         return Err(Error::OAuth("invalid_client", "the client's credentials didn't check out".into()));
@@ -485,7 +516,7 @@ fn connect(a: &Access, app: &App, idp: &Idp, user: &str, read_only: bool) -> Res
             // The app's rules as they are now (the operator may have changed them).
             c.execute("UPDATE grants SET rules = ? WHERE id = ? AND revoked_at IS NULL", params![rules, id])?;
             c.execute("DELETE FROM grant_secrets WHERE grant_id = ? AND kind = 'access' AND expires_at < ?", params![id, now])?;
-            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at, read_only) VALUES (?, ?, 'access', ?, ?, ?)", params![hash(&access), id, now + crate::store::ACCESS_TTL_MS, now, read_only])?;
+            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at, read_only, audience) VALUES (?, ?, 'access', ?, ?, ?, ?)", params![hash(&access), id, now + crate::store::ACCESS_TTL_MS, now, read_only, audience])?;
             Ok::<_, Error>(())
         })?;
         return Ok((a.store.get(&id)?, access));
@@ -496,9 +527,9 @@ fn connect(a: &Access, app: &App, idp: &Idp, user: &str, read_only: bool) -> Res
     if grant.pending {
         return Err(waits());
     }
-    if read_only {
+    if read_only || mcp_only {
         let h = hash(&access);
-        a.store.db.write(|c| c.execute("UPDATE grant_secrets SET read_only = 1 WHERE hash = ?", [h.as_str()]))?;
+        a.store.db.write(|c| c.execute("UPDATE grant_secrets SET read_only = ?, audience = ? WHERE hash = ?", params![read_only, audience, h]))?;
     }
     Ok((grant, access))
 }

@@ -82,6 +82,10 @@ async fn server_metadata(State(a): S) -> Json<Value> {
         "scopes_supported": SCOPES,
         "authorization_response_iss_parameter_supported": true,
         "client_id_metadata_document_supported": true,
+        // Identity Assertion JWT Authorization Grants (ID-JAG, draft-ietf-oauth-identity-assertion-
+        // authz-grant §7.2): what roll implements, never which providers it trusts.
+        "authorization_grant_profiles_supported": [crate::enterprise::ID_JAG_PROFILE],
+        "id_jag_signing_alg_values_supported": ["RS256", "ES256"],
     }))
 }
 
@@ -281,7 +285,10 @@ pub async fn authorize(State(a): S, ext: Extensions, body: axum::body::Bytes) ->
         return Err(Error::BadRequest("redirect_uri isn't one the client registered".into()));
     }
     let Consented { new, by, user, asker } = consented(&a, &ext, &client, &c.allowed)?;
-    let (a2, cl, uri, ch, res) = (a.clone(), client.clone(), c.redirect_uri.clone(), c.code_challenge.clone(), Some(resource(&a)));
+    // The resource the client asked for (RFC 8707; MCP clients always name the MCP server): its
+    // tokens are for that server only. One that named none (`roll login`) gets API tokens.
+    let res = c.resource.as_ref().map(|_| resource(&a));
+    let (a2, cl, uri, ch) = (a.clone(), client.clone(), c.redirect_uri.clone(), c.code_challenge.clone());
     let (code, grant_id) = tokio::task::spawn_blocking(move || a2.store.issue_code(&cl, &new, crate::store::Issuer { created_by: &by, user: user.as_deref() }, &uri, &ch, res.as_deref()))
         .await
         .map_err(|e| Error::Internal(e.to_string()))??;
@@ -441,6 +448,10 @@ async fn token(State(a): S, req: axum::extract::Request) -> Response {
                 return Error::OAuth("invalid_request", "code, redirect_uri and code_verifier are required".into()).into_response();
             };
             let resource = get("resource");
+            // RFC 8707: the only resource roll's codes are for is its MCP server.
+            if resource.as_deref().is_some_and(|r| r.trim_end_matches('/') != crate::oauth::resource(&a)) {
+                return Error::OAuth("invalid_target", format!("resource must be {}", crate::oauth::resource(&a))).into_response();
+            }
             tokio::task::spawn_blocking(move || a.store.exchange_code(&code, &client_id, &redirect, resource.as_deref(), |ch| pkce_ok(&verifier, ch))).await
         }
         Some("refresh_token") => {

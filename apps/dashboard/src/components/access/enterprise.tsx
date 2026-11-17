@@ -88,7 +88,7 @@ function Providers({ idps, audience, save }: { idps: EnterpriseIdp[]; audience: 
         <NewIdp
           onCancel={() => setAdding(false)}
           onAdd={async (idp) => {
-            const ok = await save([...idps.filter((i) => i.issuer !== idp.issuer), idp]);
+            const ok = await save([...idps.filter((i) => i.issuer !== idp.issuer || (i.tenant ?? "") !== (idp.tenant ?? "")), idp]);
             if (ok) setAdding(false);
             return ok;
           }}
@@ -102,16 +102,17 @@ function Providers({ idps, audience, save }: { idps: EnterpriseIdp[]; audience: 
       ) : (
         <ul className="divide-y divide-line pt-2">
           {idps.map((i) => (
-            <li key={i.issuer} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-2.5 text-[12px]">
+            <li key={`${i.issuer} ${i.tenant ?? ""}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-2.5 text-[12px]">
               <span className="font-medium">{i.name ?? i.issuer.replace(/^https:\/\//, "")}</span>
               <code className="font-mono text-subtle">{i.issuer}</code>
               <span className="text-muted">
                 {(i.matching ?? "email") === "email" ? `people at ${(i.domains ?? []).join(", ")}` : "names roll accounts (usr_…)"}
               </span>
               {i.admins && <span className="text-accent">signs in admins</span>}
+              {i.tenant && <span className="text-subtle">tenant <code className="font-mono">{i.tenant}</code></span>}
               {i.jwks && <span className="text-subtle">keys pinned</span>}
               <span className="flex-1" />
-              <button onClick={() => void save(idps.filter((x) => x.issuer !== i.issuer))} className="text-muted hover:text-danger">
+              <button onClick={() => void save(idps.filter((x) => x !== i))} className="text-muted hover:text-danger">
                 Stop trusting
               </button>
             </li>
@@ -123,7 +124,7 @@ function Providers({ idps, audience, save }: { idps: EnterpriseIdp[]; audience: 
 }
 
 function NewIdp({ onAdd, onCancel }: { onAdd: (idp: EnterpriseIdp) => Promise<boolean>; onCancel: () => void }) {
-  const [f, setF] = useState({ issuer: "", name: "", matching: "email" as "email" | "aud_sub", domains: "", jwks: "", admins: false });
+  const [f, setF] = useState({ issuer: "", name: "", matching: "email" as "email" | "aud_sub", domains: "", jwks: "", admins: false, tenant: "" });
   const [busy, setBusy] = useState(false);
   const parsed = idpFromForm(f);
   const problem = "problem" in parsed ? parsed.problem : null;
@@ -157,6 +158,10 @@ function NewIdp({ onAdd, onCancel }: { onAdd: (idp: EnterpriseIdp) => Promise<bo
           <input value={f.domains} onChange={set("domains")} placeholder="acme.com, acme.co.uk" spellCheck={false} className={`${input} w-full font-mono text-[12px]`} />
         </label>
       </div>
+      <label className="block space-y-1.5">
+        <span className="block text-[12px] text-subtle">Tenant (only for an issuer many companies share: the one tenant roll trusts there)</span>
+        <input value={f.tenant} onChange={set("tenant")} placeholder="its tenant id" spellCheck={false} className={`${input} w-full font-mono text-[12px] sm:w-1/2`} />
+      </label>
       <label className="block space-y-1.5">
         <span className="block text-[12px] text-subtle">Pinned keys (optional: its JWKS, for a provider roll can&apos;t reach; otherwise read from its metadata)</span>
         <textarea value={f.jwks} onChange={set("jwks")} rows={2} spellCheck={false} placeholder='{"keys": [...]}' className={`${input} w-full resize-y font-mono text-[12px]`} />

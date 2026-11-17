@@ -165,6 +165,7 @@ mod policy_tests {
             revoked_why: None,
             temporary: vec![],
             ask_otherwise: false,
+            mcp_only: false,
         };
         let now = 100 * day;
         assert!(p.idle(&g(0, None), now), "made 100 days ago, never used");

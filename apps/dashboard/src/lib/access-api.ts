@@ -503,6 +503,8 @@ export interface EnterpriseIdp {
   /** Whether it may sign in roll's admins. */
   admins?: boolean;
   name?: string;
+  /** A multi-tenant issuer's one tenant roll trusts (its assertions' `tenant`). */
+  tenant?: string;
 }
 
 /** An app a trusted provider may vouch for: never its secret. */
@@ -527,7 +529,7 @@ export interface Enterprise {
 }
 
 /** The trust-a-provider form as a provider, or what's wrong with it (the API checks it again). */
-export function idpFromForm(f: { issuer: string; name: string; matching: "email" | "aud_sub"; domains: string; jwks: string; admins: boolean }): { idp: EnterpriseIdp } | { problem: string } {
+export function idpFromForm(f: { issuer: string; name: string; matching: "email" | "aud_sub"; domains: string; jwks: string; admins: boolean; tenant?: string }): { idp: EnterpriseIdp } | { problem: string } {
   const issuer = f.issuer.trim();
   if (!/^https:\/\/[^\s/]+/.test(issuer)) return { problem: "The issuer is an https URL" };
   const domains = [...new Set(f.domains.split(/[\s,]+/).map((d) => d.trim().toLowerCase().replace(/^@/, "")).filter(Boolean))];
@@ -551,6 +553,7 @@ export function idpFromForm(f: { issuer: string; name: string; matching: "email"
       ...(jwks ? { jwks } : {}),
       ...(f.admins ? { admins: true } : {}),
       ...(f.name.trim() ? { name: f.name.trim() } : {}),
+      ...(f.tenant?.trim() ? { tenant: f.tenant.trim() } : {}),
     },
   };
 }

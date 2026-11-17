@@ -226,6 +226,13 @@ impl Daemon {
         (status, serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into())))
     }
 
+    /// A request roll's MCP server makes for a tool call (its `McpCall` extension), with `token`.
+    async fn via_mcp(&self, token: &str, method: Method, path: &str) -> StatusCode {
+        let mut req = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
+        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false });
+        self.router.clone().oneshot(req).await.unwrap().status()
+    }
+
     async fn form(&self, path: &str, form: &[(&str, &str)]) -> (StatusCode, Value) {
         let body = url::form_urlencoded::Serializer::new(String::new()).extend_pairs(form).finish();
         let req = Request::builder().method(Method::POST).uri(path).header("content-type", "application/x-www-form-urlencoded").body(Body::from(body)).unwrap();
@@ -742,20 +749,28 @@ async fn oauth_connects_an_mcp_client() {
     assert_eq!(exchange(verifier, code).await.1["error"], "invalid_grant", "a code works once");
     let access = tokens["access_token"].as_str().unwrap().to_string();
     assert!(access.starts_with("rlo_"));
-    assert_eq!(d.call(&access, Method::GET, "/v1/projects", None).await.0, StatusCode::OK);
-    assert_eq!(d.call(&access, Method::DELETE, "/v1/projects/pa", None).await.0, StatusCode::FORBIDDEN);
+    // It asked for the MCP server (RFC 8707), so it works through that server only: the API
+    // directly refuses it (lockdown, the credential guard and a read-only URL can't be stepped
+    // around), and a token request for another resource is refused.
+    assert_eq!(d.via_mcp(&access, Method::GET, "/v1/projects").await, StatusCode::OK);
+    assert_eq!(d.via_mcp(&access, Method::DELETE, "/v1/projects/pa").await, StatusCode::FORBIDDEN);
+    let (s, direct) = d.call(&access, Method::GET, "/v1/projects", None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{direct}");
+    assert!(direct.to_string().contains("MCP server"), "{direct}");
+    let elsewhere = d.form("/v1/access/oauth/token", &[("grant_type", "authorization_code"), ("code", "x"), ("redirect_uri", redirect), ("client_id", client_id), ("code_verifier", verifier), ("resource", "https://elsewhere.example/mcp")]).await;
+    assert_eq!(elsewhere.1["error"], "invalid_target");
 
     let refresh = tokens["refresh_token"].as_str().unwrap();
     assert_eq!(d.call(refresh, Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED, "a refresh token opens nothing");
     let (s, next) = d.form("/v1/access/oauth/token", &[("grant_type", "refresh_token"), ("refresh_token", refresh), ("client_id", client_id)]).await;
     assert_eq!(s, StatusCode::OK, "{next}");
-    assert_eq!(d.call(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects", None).await.0, StatusCode::OK);
+    assert_eq!(d.via_mcp(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects").await, StatusCode::OK);
+    assert_eq!(d.call(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED, "a refresh keeps the audience");
     // A spent refresh token used again: someone else has a copy (OAuth 2.1), so the whole
     // connection is revoked, the fresh tokens with it, and it says why.
     let reuse = d.form("/v1/access/oauth/token", &[("grant_type", "refresh_token"), ("refresh_token", refresh), ("client_id", client_id)]).await;
     assert_eq!(reuse.1["error"], "invalid_grant", "refresh tokens rotate");
-    let (s, _) = d.call(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects", None).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert_eq!(d.via_mcp(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects").await, StatusCode::UNAUTHORIZED);
     let grant = next["grant_id"].as_str().unwrap();
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{grant}"), None).await;
     assert!(g["revoked_why"].as_str().is_some_and(|w| w.contains("used again")), "{g}");
@@ -2124,7 +2139,7 @@ async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
         h.typ = Some("oauth-id-jag+jwt".into());
         jsonwebtoken::encode(&h, &claims, &jsonwebtoken::EncodingKey::from_ec_der(pkcs8.as_ref())).unwrap()
     };
-    let claims = |jti: &str, email: &str, aud: &str, client: &str| json!({ "iss": okta, "sub": "00u1alice", "aud": aud, "client_id": client, "jti": jti, "exp": now + 300, "iat": now, "email": email, "email_verified": true, "resource": format!("{api}/v1/mcp") });
+    let claims = |jti: &str, email: &str, aud: &str, client: &str| json!({ "iss": okta, "sub": "00u1alice", "aud": aud, "client_id": client, "jti": jti, "exp": now + 300, "iat": now, "email": email, "email_verified": true, "resource": api });
     let sign_in = |assertion: String, secret: String| {
         let (d, id) = (&d, client_id.clone());
         async move { d.form("/v1/access/oauth/token", &[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("assertion", &assertion), ("client_id", &id), ("client_secret", &secret)]).await }
@@ -2135,6 +2150,14 @@ async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
     let (_, me) = d.call(&token, Method::GET, "/v1/access", None).await;
     assert_eq!((me["grant"]["user"].as_str(), me["grant"]["created_by"].as_str()), (Some("usr_alice"), Some(format!("enterprise:{okta}").as_str())), "it acts as alice: {me}");
     assert_eq!(d.call(&token, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "from-claude" }))).await.0, StatusCode::CREATED);
+    // An assertion for roll's MCP server alone: its token works through that server, never on the
+    // API directly (draft -06: the token is held to the assertion's resources).
+    let mut for_mcp = claims("j40", "alice@acme.test", &api, &client_id);
+    for_mcp["resource"] = json!(format!("{api}/v1/mcp"));
+    let (_, mcp_only) = sign_in(idjag(for_mcp), secret.clone()).await;
+    let mcp_token = mcp_only["access_token"].as_str().unwrap_or_else(|| panic!("{mcp_only}")).to_string();
+    assert_eq!(d.via_mcp(&mcp_token, Method::GET, "/v1/workspace/projects").await, StatusCode::OK);
+    assert_eq!(d.call(&mcp_token, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED, "the MCP server's only");
     // Refusals: a replay, the wrong secret, no client authentication, another client's assertion,
     // another audience, someone with no account.
     assert_eq!(sign_in(idjag(claims("j1", "alice@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "invalid_grant");
@@ -2154,6 +2177,30 @@ async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
     trust(true).await;
     assert_eq!(sign_in(idjag(claims("j11", "root@acme.test", &api, &client_id)), secret.clone()).await.0, StatusCode::OK);
     trust(false).await;
+    // Exactly one audience (draft-ietf-oauth-identity-assertion-authz-grant-06 §4.4.1): an array
+    // of one is roll's, a second audience is refused.
+    let mut two = claims("j30", "alice@acme.test", &api, &client_id);
+    two["aud"] = json!([api, "https://elsewhere.example"]);
+    assert_eq!(sign_in(idjag(two), secret.clone()).await.1["error"], "invalid_grant", "two audiences");
+    let mut one = claims("j31", "alice@acme.test", &api, &client_id);
+    one["aud"] = json!([api]);
+    assert_eq!(sign_in(idjag(one), secret.clone()).await.0, StatusCode::OK, "an array of one");
+    // A multi-tenant issuer: trusted with one tenant, never its others; an assertion naming a
+    // tenant from a provider trusted without one is refused.
+    let tenant_of = |jti: &str, tenant: &str| {
+        let mut c = claims(jti, "alice@acme.test", &api, &client_id);
+        c["tenant"] = json!(tenant);
+        c
+    };
+    assert_eq!(sign_in(idjag(tenant_of("j32", "t-acme")), secret.clone()).await.1["error"], "invalid_grant", "a tenant roll wasn't told about");
+    let put = d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": [{ "issuer": okta, "jwks": jwks, "domains": ["acme.test"], "tenant": "t-acme" }] }))).await;
+    assert_eq!(put.0, StatusCode::OK, "{put:?}");
+    assert_eq!(sign_in(idjag(tenant_of("j33", "t-acme")), secret.clone()).await.0, StatusCode::OK, "the trusted tenant");
+    assert_eq!(sign_in(idjag(tenant_of("j34", "t-evil")), secret.clone()).await.1["error"], "invalid_grant", "another tenant at the same issuer");
+    assert_eq!(sign_in(idjag(claims("j35", "alice@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "invalid_grant", "no tenant, from a tenant-pinned provider");
+    trust(false).await;
+    let (_, meta) = d.call(OPERATOR, Method::GET, "/.well-known/oauth-authorization-server", None).await;
+    assert_eq!(meta["authorization_grant_profiles_supported"], json!(["urn:ietf:params:oauth:grant-profile:id-jag"]), "{meta}");
     // The assertion's read-only scope: the token reads, never writes.
     let mut reads = claims("j12", "bob@acme.test", &api, &client_id);
     reads["scope"] = json!("read-only");
