@@ -347,6 +347,12 @@ pub struct PreviewEnvironment {
     /// first, a few): untrusted text, and a public preview's signed picture of each one's element.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<PreviewNoteLink>,
+    /// The Linear issues the change names (`ENG-123` in its title, or at the start of its
+    /// branch's last part, as Linear's own branch names and roll's Linear agent's changes do):
+    /// for an automation that links the preview on the issue (the Linear template "Preview on the
+    /// Linear issue"). At most 3.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<String>,
 }
 
 /// A note on a preview's page, as roll code's surfaces show it.
