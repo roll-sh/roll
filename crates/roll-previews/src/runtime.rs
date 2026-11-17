@@ -148,7 +148,7 @@ impl Default for RuntimeConfig {
             dashboard: None,
             screenshot_image: SCREENSHOT_IMAGE.into(),
             screenshot_command: SCREENSHOT_COMMAND.into(),
-            warm_for: Duration::from_secs(30 * 60),
+            warm_for: Duration::from_secs(8 * 3600),
             warm_max: 32,
         }
     }
