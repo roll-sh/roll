@@ -1813,22 +1813,39 @@ fn several_locking_clauses() {
 }
 
 /// A connection idle for a while runs the server's idle hook (`server::set_idle_hook`: the
-/// binary returns the thread's free memory there) and goes on as before: the wait for the
-/// client's next message, and a message arriving in pieces, outlast the hook's timeout.
+/// binary gives the stack below the wait back to the system there, as this hook does) and
+/// goes on as before: deep statements before and after, the wait for the client's next
+/// message, and a message arriving in pieces, outlast the hook's timeout.
 #[test]
 fn idle_hook_runs_and_the_connection_goes_on() {
     use std::io::{Read, Write};
     use std::sync::atomic::{AtomicUsize, Ordering};
     static RUNS: AtomicUsize = AtomicUsize::new(0);
+    static RELEASED: AtomicUsize = AtomicUsize::new(0);
     pg_engine::server::set_idle_hook(|| {
         RUNS.fetch_add(1, Ordering::SeqCst);
+        if let Some((lo, hi)) = pg_engine::stack::unused_range() {
+            RELEASED.fetch_add(hi - lo, Ordering::SeqCst);
+            // SAFETY: as the server binary's hook: the thread's stack below every live frame.
+            #[cfg(target_os = "linux")]
+            unsafe {
+                libc::madvise(lo as *mut libc::c_void, hi - lo, libc::MADV_DONTNEED)
+            };
+        }
     });
+    // (A statement nested deep enough to use stack well below the wait.)
+    let deep = format!("SELECT {}1{}", "(1 + ".repeat(300), ")".repeat(300));
     let s = server(AuthMethod::ScramSha256);
     runtime().block_on(async {
         let c = s.connect("postgres").await;
         c.simple_query("CREATE TABLE idle_t (a int)").await.unwrap();
+        let rows = c.query(deep.as_str(), &[]).await.unwrap();
+        assert_eq!(rows[0].get::<_, i32>(0), 301);
         tokio::time::sleep(Duration::from_millis(4500)).await;
         assert!(RUNS.load(Ordering::SeqCst) >= 1, "the idle hook never ran");
+        assert!(RELEASED.load(Ordering::SeqCst) > 0, "no stack below the wait to give back");
+        let rows = c.query(deep.as_str(), &[]).await.unwrap();
+        assert_eq!(rows[0].get::<_, i32>(0), 301);
         c.simple_query("INSERT INTO idle_t VALUES (1), (2)").await.unwrap();
         let rows = c.query("SELECT sum(a) FROM idle_t", &[]).await.unwrap();
         assert_eq!(rows[0].get::<_, i64>(0), 3);

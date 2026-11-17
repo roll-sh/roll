@@ -182,8 +182,8 @@ static IDLE_HOOK: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
 const IDLE_TRIM: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Run `f` on a connection's thread once the connection has been idle for a while (once per
-/// idle period): the server binary returns the thread's free allocator memory to the
-/// system there, so idle sessions keep little. Set once, before serving.
+/// idle period): the server binary gives the stack below the wait back to the system there,
+/// so idle sessions keep little. Set once, before serving.
 pub fn set_idle_hook(f: fn()) {
     let _ = IDLE_HOOK.set(f);
 }
@@ -1907,191 +1907,224 @@ fn message_loop(
         let Some(t) = msg else {
             return Ok(());
         };
-        s.notifications_busy();
-        // A cancel that came while the session waited for this message cancels nothing
-        // (ProcessInterrupts ignores QueryCancelPending while DoingCommandRead, which it
-        // only sees if the read waits); one that came while it worked on the messages before
-        // this one, already buffered, cancels the statement it runs next. (Cleared before
-        // the check: a termination sets `terminated` before the cancel flag.)
-        if waits {
-            s.cancel.store(false, Ordering::Relaxed);
-        }
-        if terminated.load(Ordering::Relaxed) {
+        // (The message's work runs in a frame of its own, gone while the session waits for
+        // the next message: `dispatch`.)
+        if let Next::End = dispatch(c, s, pid, terminated, &act, t, waits, &raw, &mut skipping, &mut last_stmt)? {
             return Ok(());
         }
-        if skipping && t != b'S' && t != b'X' {
-            continue;
-        }
-        sync_client_encoding(s);
-        s.poll_config();
-        // Query text arrives in the client's encoding.
-        let converted;
-        let body: &[u8] = match t {
-            b'Q' | b'P' if !plain_utf8() => match convert_cstrings(&raw, 2) {
-                Ok(b) => {
-                    converted = b;
-                    &converted
-                }
-                Err(e) => {
-                    c.error(&e);
-                    if t == b'Q' {
-                        ready_for_query(c, s)?;
-                    } else {
-                        skipping = true;
-                    }
-                    continue;
-                }
-            },
-            _ => &raw,
-        };
-        let r: Result<()> = match t {
-            b'Q' => {
-                let mut b = Body::new(body);
-                // (Borrowed from the message's body: no copy per query.)
-                let sql: &str = match b.cstr().and_then(|q| b.end().map(|()| q)) {
-                    Ok(q) => q,
-                    Err(e) => {
-                        s.on_error();
-                        c.error(&e);
-                        send_changed(c, s);
-                        ready_for_query(c, s)?;
-                        continue;
-                    }
-                };
-                start_activity(&act, s, "active", Some(sql), s.message_starts());
-                s.start_xact_command();
-                if let Some(mode) = c.repl
-                    && (crate::repl::cmd::is_command(sql) || mode == crate::repl::walsender::Mode::Physical)
-                {
-                    let r = guard(c, s, |c, s| {
-                        if !crate::repl::cmd::is_command(sql) {
-                            return Err(Error::new(
-                                code::FEATURE_NOT_SUPPORTED,
-                                "cannot execute SQL commands in WAL sender for physical replication",
-                            ));
-                        }
-                        let cmd = crate::repl::cmd::parse(sql)?;
-                        let mut exported = c.exported.take();
-                        let r = crate::repl::walsender::exec(c, s, mode, cmd, &mut exported);
-                        c.exported = exported;
-                        r
-                    });
-                    if let Err(e) = r {
-                        s.on_error();
-                        send_notices(c, s);
-                        c.error(&e);
-                    }
+    }
+}
+
+/// What `message_loop` does after a message.
+enum Next {
+    Read,
+    End,
+}
+
+/// One message's work, out of `message_loop`: the frame that waits for the client's next
+/// message then holds only the loop's own locals, not the handlers' (a profile-guided build
+/// inlines them all here: this frame was 70 KB under PGO, against 11 KB in the plain build).
+/// Below the wait the stack is unused, and an idle session gives it back to the system
+/// (the server binary's idle hook, `set_idle_hook`), this frame's pages with it.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn dispatch(
+    c: &mut Conn,
+    s: &mut Session,
+    pid: i32,
+    terminated: &AtomicBool,
+    act: &Act,
+    t: u8,
+    waits: bool,
+    raw: &[u8],
+    skipping: &mut bool,
+    last_stmt: &mut Option<String>,
+) -> std::io::Result<Next> {
+    s.notifications_busy();
+    // A cancel that came while the session waited for this message cancels nothing
+    // (ProcessInterrupts ignores QueryCancelPending while DoingCommandRead, which it
+    // only sees if the read waits); one that came while it worked on the messages before
+    // this one, already buffered, cancels the statement it runs next. (Cleared before
+    // the check: a termination sets `terminated` before the cancel flag.)
+    if waits {
+        s.cancel.store(false, Ordering::Relaxed);
+    }
+    if terminated.load(Ordering::Relaxed) {
+        return Ok(Next::End);
+    }
+    if *skipping && t != b'S' && t != b'X' {
+        return Ok(Next::Read);
+    }
+    sync_client_encoding(s);
+    s.poll_config();
+    // Query text arrives in the client's encoding.
+    let converted;
+    let body: &[u8] = match t {
+        b'Q' | b'P' if !plain_utf8() => match convert_cstrings(raw, 2) {
+            Ok(b) => {
+                converted = b;
+                &converted
+            }
+            Err(e) => {
+                c.error(&e);
+                if t == b'Q' {
+                    ready_for_query(c, s)?;
                 } else {
-                    match guard(c, s, |c, s| Ok(simple_query(c, s, sql))) {
-                        Ok(r) => r?,
-                        Err(e) => c.error(&e),
-                    }
+                    *skipping = true;
                 }
-                statement_done_activity(&act, s);
-                c.log_sent(Some(s), pid, Some(sql));
-                s.finish_xact_command();
-                // (COPY FROM STDIN met a message it can't skip.)
-                if c.sync_lost {
-                    c.error(&sync_lost());
-                }
-                // A FATAL error (the session terminating itself) ends the session.
-                if c.fatal {
-                    return c.flush();
-                }
-                send_changed(c, s);
-                ready_for_query(c, s)?;
-                continue;
+                return Ok(Next::Read);
             }
-            b'P' => {
-                let mut b = Body::new(body);
-                last_stmt = b.cstr().ok().and_then(|_| b.cstr().ok()).map(str::to_string);
-                extended_activity(&act, s, t, body, s.message_starts());
-                s.start_xact_command();
-                guard(c, s, |c, s| parse_msg(c, s, body))
-            }
-            b'B' => {
-                extended_activity(&act, s, t, body, s.message_starts());
-                s.start_xact_command();
-                guard(c, s, |c, s| bind_msg(c, s, body))
-            }
-            b'D' => {
-                s.start_xact_command();
-                guard(c, s, |c, s| describe_msg(c, s, body))
-            }
-            b'E' => {
-                extended_activity(&act, s, t, body, s.message_starts());
-                s.start_xact_command();
-                guard(c, s, |c, s| execute_msg(c, s, body))
-            }
-            b'C' => guard(c, s, |c, s| close_msg(c, s, body)),
-            b'S' => {
-                skipping = false;
-                if !body.is_empty() {
-                    // (pq_getmsgend: the Sync isn't done; the error ends the transaction.)
+        },
+        _ => raw,
+    };
+    let r: Result<()> = match t {
+        b'Q' => {
+            let mut b = Body::new(body);
+            // (Borrowed from the message's body: no copy per query.)
+            let sql: &str = match b.cstr().and_then(|q| b.end().map(|()| q)) {
+                Ok(q) => q,
+                Err(e) => {
                     s.on_error();
-                    let _ = s.sync();
-                    c.error(&Body::bad());
-                } else if let Err(e) = guard(c, s, |_, s| s.sync()) {
+                    c.error(&e);
+                    send_changed(c, s);
+                    ready_for_query(c, s)?;
+                    return Ok(Next::Read);
+                }
+            };
+            start_activity(act, s, "active", Some(sql), s.message_starts());
+            s.start_xact_command();
+            if let Some(mode) = c.repl
+                && (crate::repl::cmd::is_command(sql) || mode == crate::repl::walsender::Mode::Physical)
+            {
+                let r = guard(c, s, |c, s| {
+                    if !crate::repl::cmd::is_command(sql) {
+                        return Err(Error::new(
+                            code::FEATURE_NOT_SUPPORTED,
+                            "cannot execute SQL commands in WAL sender for physical replication",
+                        ));
+                    }
+                    let cmd = crate::repl::cmd::parse(sql)?;
+                    let mut exported = c.exported.take();
+                    let r = crate::repl::walsender::exec(c, s, mode, cmd, &mut exported);
+                    c.exported = exported;
+                    r
+                });
+                if let Err(e) = r {
+                    s.on_error();
                     send_notices(c, s);
                     c.error(&e);
                 }
-                send_notices(c, s);
-                send_changed(c, s);
-                statement_done_activity(&act, s);
-                s.finish_xact_command();
-                ready_for_query(c, s)?;
-                continue;
-            }
-            b'H' if body.is_empty() => {
-                c.flush()?;
-                continue;
-            }
-            // (Flush's pq_getmsgend: an extended-query error, skipped to the Sync.)
-            b'H' => Err(Body::bad()),
-            b'X' => return Ok(()),
-            // Copy messages outside COPY are ignored, as Postgres does.
-            b'd' | b'c' | b'f' => continue,
-            b'F' => {
-                start_activity(&act, s, "fastpath function call", None, s.message_starts());
-                let r = guard(c, s, |c, s| fastpath_msg(c, s, body));
-                send_notices(c, s);
-                if let Err(e) = r {
-                    c.error(&e);
+            } else {
+                match guard(c, s, |c, s| Ok(simple_query(c, s, sql))) {
+                    Ok(r) => r?,
+                    Err(e) => c.error(&e),
                 }
-                statement_done_activity(&act, s);
-                send_changed(c, s);
-                ready_for_query(c, s)?;
-                continue;
             }
-            t => {
-                c.error(
-                    &Error::new(
-                        code::PROTOCOL_VIOLATION,
-                        format!("invalid frontend message type {t}"),
-                    )
-                    .fatal(),
-                );
-                return c.flush();
-            }
-        };
-        if let Err(e) = r {
-            // Any ERROR aborts the transaction (a protocol one too).
-            s.on_error();
-            send_notices(c, s);
-            c.error(&e);
-            skipping = true;
+            statement_done_activity(act, s);
+            c.log_sent(Some(s), pid, Some(sql));
+            s.finish_xact_command();
+            // (COPY FROM STDIN met a message it can't skip.)
             if c.sync_lost {
                 c.error(&sync_lost());
             }
-            // Like elog's send_message_to_frontend, an error goes out at once (a pipelining
-            // client may be waiting for it without having sent Sync or Flush).
-            c.flush()?;
+            // A FATAL error (the session terminating itself) ends the session.
             if c.fatal {
-                return Ok(());
+                return c.flush().map(|()| Next::End);
             }
+            send_changed(c, s);
+            ready_for_query(c, s)?;
+            return Ok(Next::Read);
         }
-        c.maybe_flush()?;
+        b'P' => {
+            let mut b = Body::new(body);
+            *last_stmt = b.cstr().ok().and_then(|_| b.cstr().ok()).map(str::to_string);
+            extended_activity(act, s, t, body, s.message_starts());
+            s.start_xact_command();
+            guard(c, s, |c, s| parse_msg(c, s, body))
+        }
+        b'B' => {
+            extended_activity(act, s, t, body, s.message_starts());
+            s.start_xact_command();
+            guard(c, s, |c, s| bind_msg(c, s, body))
+        }
+        b'D' => {
+            s.start_xact_command();
+            guard(c, s, |c, s| describe_msg(c, s, body))
+        }
+        b'E' => {
+            extended_activity(act, s, t, body, s.message_starts());
+            s.start_xact_command();
+            guard(c, s, |c, s| execute_msg(c, s, body))
+        }
+        b'C' => guard(c, s, |c, s| close_msg(c, s, body)),
+        b'S' => {
+            *skipping = false;
+            if !body.is_empty() {
+                // (pq_getmsgend: the Sync isn't done; the error ends the transaction.)
+                s.on_error();
+                let _ = s.sync();
+                c.error(&Body::bad());
+            } else if let Err(e) = guard(c, s, |_, s| s.sync()) {
+                send_notices(c, s);
+                c.error(&e);
+            }
+            send_notices(c, s);
+            send_changed(c, s);
+            statement_done_activity(act, s);
+            s.finish_xact_command();
+            ready_for_query(c, s)?;
+            return Ok(Next::Read);
+        }
+        b'H' if body.is_empty() => {
+            c.flush()?;
+            return Ok(Next::Read);
+        }
+        // (Flush's pq_getmsgend: an extended-query error, skipped to the Sync.)
+        b'H' => Err(Body::bad()),
+        b'X' => return Ok(Next::End),
+        // Copy messages outside COPY are ignored, as Postgres does.
+        b'd' | b'c' | b'f' => return Ok(Next::Read),
+        b'F' => {
+            start_activity(act, s, "fastpath function call", None, s.message_starts());
+            let r = guard(c, s, |c, s| fastpath_msg(c, s, body));
+            send_notices(c, s);
+            if let Err(e) = r {
+                c.error(&e);
+            }
+            statement_done_activity(act, s);
+            send_changed(c, s);
+            ready_for_query(c, s)?;
+            return Ok(Next::Read);
+        }
+        t => {
+            c.error(
+                &Error::new(
+                    code::PROTOCOL_VIOLATION,
+                    format!("invalid frontend message type {t}"),
+                )
+                .fatal(),
+            );
+            return c.flush().map(|()| Next::End);
+        }
+    };
+    if let Err(e) = r {
+        // Any ERROR aborts the transaction (a protocol one too).
+        s.on_error();
+        send_notices(c, s);
+        c.error(&e);
+        *skipping = true;
+        if c.sync_lost {
+            c.error(&sync_lost());
+        }
+        // Like elog's send_message_to_frontend, an error goes out at once (a pipelining
+        // client may be waiting for it without having sent Sync or Flush).
+        c.flush()?;
+        if c.fatal {
+            return Ok(Next::End);
+        }
     }
+    c.maybe_flush()?;
+    Ok(Next::Read)
 }
 
 /// pg_stat_activity while extended-protocol messages run (pgstat_report_activity in

@@ -251,9 +251,10 @@ pub fn mark() {
 /// The part of this thread's declared stack (`set_limit`) below the current frame, less a
 /// margin, page-aligned: (low, high) addresses no frame uses now, which an idle thread may
 /// give back to the system (deep statements touched it; it reads as zeros when touched again).
+/// The margin is room for what the caller runs after (a system call, a signal's frame).
 pub fn unused_range() -> Option<(usize, usize)> {
     const PAGE: usize = 4096;
-    const MARGIN: usize = 256 << 10;
+    const MARGIN: usize = 32 << 10;
     let st = ST.with(Cell::get);
     let limit = DECLARED.with(Cell::get);
     let sp = here();

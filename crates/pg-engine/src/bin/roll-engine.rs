@@ -419,18 +419,21 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Disable transparent huge pages, which raised idle memory without a measured speed gain.
-/// Allocator collection still returns pages freed by busy or finished threads.
+/// Allocator collection still returns pages freed by busy or finished threads. A session idle
+/// for a while gives back the stack below its wait (`release_stack`).
 #[cfg(target_os = "linux")]
 mod idle {
-    use std::ffi::{c_int, c_ulong};
+    use std::ffi::{c_int, c_ulong, c_void};
 
     unsafe extern "C" {
         fn prctl(option: c_int, ...) -> c_int;
+        fn madvise(addr: *mut c_void, len: usize, advice: c_int) -> c_int;
         // (mimalloc's: the thread's free pages go back to the system.)
         fn mi_collect(force: bool);
     }
 
     const PR_SET_THP_DISABLE: c_int = 41;
+    const MADV_DONTNEED: c_int = 4;
 
     /// First thing in `main`: pages faulted before the prctl keep their huge pages
     /// (after the arguments were parsed, 100 idle sessions took 32-34 MB; first thing, 31).
@@ -451,6 +454,20 @@ mod idle {
                     unsafe { mi_collect(false) };
                 }
             });
+        pg_engine::server::set_idle_hook(release_stack);
+    }
+
+    /// A connection's thread idle for a while (`server::set_idle_hook`): the stack its
+    /// messages' work touched below the wait goes back to the system. Without it every idle
+    /// session keeps the deepest stack it ever used, and a profile-guided build's handler
+    /// frame alone was about 60 KB a session. Only the stack: the heap stays as it is (an
+    /// allocator collection here cost the next statement 50-190 µs, BENCH.md "Modes").
+    fn release_stack() {
+        if let Some((lo, hi)) = pg_engine::stack::unused_range() {
+            // SAFETY: the range is this thread's stack below every live frame (and a margin),
+            // which reads as zeros when touched again.
+            unsafe { madvise(lo as *mut c_void, hi - lo, MADV_DONTNEED) };
+        }
     }
 }
 
