@@ -40,6 +40,11 @@ fn products() -> Router {
     Router::new()
         .route("/v1/projects", get(|| async { axum::Json(json!([{ "id": "pa" }])) }))
         .route("/v1/projects/{id}", delete(|| async { axum::http::StatusCode::NO_CONTENT }))
+        // roll secrets' scan: one stored value, found where a candidate is it.
+        .route("/v1/secrets/projects/{project}/leaks", axum::routing::post(|axum::Json(b): axum::Json<Value>| async move {
+            let i = b["candidates"].as_array().and_then(|c| c.iter().position(|w| w == "Tr0ub4dor-Horse-77"));
+            axum::Json(json!(i.map(|i| vec![json!({ "index": i, "key": "DB_PASSWORD", "environment": "production", "path": "/" })]).unwrap_or_default()))
+        }))
         .route("/v1/previews/{id}/screenshot", get(|| async { ([(axum::http::header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 0, 1, 2]) }))
         // A run still going the first two times it's waited on (each wait answers at its limit).
         .route("/v1/tasks/runs/{id}/wait", get(|| async {
@@ -739,4 +744,12 @@ async fn credentials_are_kept_out_of_what_agents_write() {
     assert_eq!(d.tool(&agent, "workspace_create_project", json!({ "name": "deploys" })).await["isError"], false);
     let audit = d.audit_until(|a| a.as_array().is_some_and(|l| l.iter().any(|e| e["resource"].as_str().is_some_and(|r| r.contains("a GitHub token in arguments.description"))))).await;
     assert!(!audit.to_string().contains(&gh), "{audit}");
+
+    // The value of a roll secret it may reveal (so it could have read it), asked of roll secrets'
+    // own scan as the token; a token that can't reveal one isn't scanned.
+    let revealer = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "write": "allow" } }, { "product": "secrets", "resources": [{ "project": "prj_s" }], "actions": { "read": "allow", "reveal": "allow" } }])).await;
+    let leak = d.tool(&revealer, "workspace_create_project", json!({ "name": "db", "description": "password: Tr0ub4dor-Horse-77" })).await;
+    assert_eq!((leak["structuredContent"]["kind"].as_str(), leak["structuredContent"]["at"].as_str()), (Some("the value of roll secret DB_PASSWORD (production)"), Some("arguments.description")), "{leak}");
+    assert!(!leak.to_string().contains("Tr0ub4dor"), "never the value");
+    assert_eq!(d.tool(&agent, "workspace_create_project", json!({ "name": "db", "description": "password: Tr0ub4dor-Horse-77" })).await["isError"], false, "it can't have read one");
 }

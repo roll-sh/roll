@@ -17,7 +17,7 @@ const READ_BY_OTHERS: &[&str] = &["code", "previews", "workspace", "agents"];
 /// What a call's arguments would leak: the kind of credential, and where (`arguments.body`).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Found {
-    pub kind: &'static str,
+    pub kind: String,
     pub at: String,
 }
 
@@ -35,7 +35,7 @@ const ROLL: &str = "a roll token";
 
 fn find(v: &Value, at: &str, counts: &dyn Fn(&'static str) -> bool) -> Option<Found> {
     match v {
-        Value::String(s) => kind_in(s).filter(|k| counts(k)).map(|kind| Found { kind, at: at.to_string() }),
+        Value::String(s) => kind_in(s).filter(|k| counts(k)).map(|kind| Found { kind: kind.to_string(), at: at.to_string() }),
         Value::Array(items) => items.iter().enumerate().find_map(|(i, x)| find(x, &format!("{at}[{i}]"), counts)),
         Value::Object(m) => m.iter().find_map(|(k, x)| find(x, &format!("{at}.{k}"), counts)),
         _ => None,
@@ -84,6 +84,37 @@ fn kind_of(w: &str) -> Option<&'static str> {
     None
 }
 
+/// Whether a product's writes are read by people and other agents.
+pub fn read_by_others(product: &str) -> bool {
+    READ_BY_OTHERS.contains(&product)
+}
+
+/// The words a call would write that could be a stored value (roll secrets matches them by
+/// fingerprint), each with where it is: runs of non-space, quotes and brackets stripped, and the
+/// right-hand side of `KEY=VALUE` and `key: value`; 8 to 512 characters, at most `max`.
+pub fn candidates(args: &Value, max: usize) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    collect(args, "arguments", max, &mut out);
+    out
+}
+
+fn collect(v: &Value, at: &str, max: usize, out: &mut Vec<(String, String)>) {
+    match v {
+        Value::String(s) => {
+            for word in s.split(|c: char| c.is_whitespace() || "\"'`,;()[]{}<>".contains(c)) {
+                let word = word.split_once('=').or_else(|| word.split_once(':').filter(|(_, r)| !r.starts_with("//"))).map_or(word, |(_, r)| r);
+                let n = word.chars().count();
+                if (8..=512).contains(&n) && out.len() < max && !out.iter().any(|(w, _)| w == word) {
+                    out.push((word.to_string(), at.to_string()));
+                }
+            }
+        }
+        Value::Array(items) => items.iter().enumerate().for_each(|(i, x)| collect(x, &format!("{at}[{i}]"), max, out)),
+        Value::Object(m) => m.iter().for_each(|(k, x)| collect(x, &format!("{at}.{k}"), max, out)),
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,9 +124,9 @@ mod tests {
     fn known_formats_are_found_where_others_read_and_nothing_else() {
         let gh = format!("ghp_{}", "a1B2".repeat(9));
         let at = |product: &str, args: Value| check(product, true, &args).map(|f| (f.kind, f.at));
-        assert_eq!(at("code", json!({ "body": format!("use {gh} to push") })), Some(("a GitHub token", "arguments.body".to_string())));
-        assert_eq!(at("code", json!({ "files": [{ "content": "AKIAIOSFODNN7EXAMPLE" }] })), Some(("an AWS access key", "arguments.files[0].content".to_string())));
-        assert_eq!(at("code", json!({ "text": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n-----END OPENSSH PRIVATE KEY-----" })).map(|f| f.0), Some("a private key"));
+        assert_eq!(at("code", json!({ "body": format!("use {gh} to push") })), Some(("a GitHub token".to_string(), "arguments.body".to_string())));
+        assert_eq!(at("code", json!({ "files": [{ "content": "AKIAIOSFODNN7EXAMPLE" }] })), Some(("an AWS access key".to_string(), "arguments.files[0].content".to_string())));
+        assert_eq!(at("code", json!({ "text": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n-----END OPENSSH PRIVATE KEY-----" })).map(|f| f.0), Some("a private key".to_string()));
         // Where credentials belong, or a read: nothing.
         assert_eq!(at("postgres", json!({ "sql": format!("-- {gh}") })), None);
         assert_eq!(check("code", false, &json!({ "q": gh })), None);

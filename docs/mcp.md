@@ -118,6 +118,12 @@ secret: by writing it somewhere it's read.
   `rlo_`, `rlf_`, `rlc_`, `rlk_`, by their checksum, so never a false positive). roll's are refused
   in every product but roll secrets, where keeping one is the point; the others only in the
   products above (a database, a queue or apps' variables are where credentials belong).
+- The values of the project's own roll secrets too, for a token that may reveal them (the one that
+  could have read a value to leak): the words a write would put where others read (8 to 512
+  characters, up to 2,000) go to roll secrets' own scan (`POST /v1/secrets/projects/{p}/leaks`)
+  as the token, through the gate, for the projects its secrets rules name (or, with a rule over
+  every project, the ones it can list; at most 10). That scan only ever matches values the caller
+  may reveal, so the guard is never a test of a guess. The refusal names the key and environment.
 - Reads are never refused. The refusal says where in the arguments and what kind
   (`{refused: "credential", at: "arguments.body", kind: "a GitHub token"}`), never the value, and
   points at roll secrets. The audit log keeps a `deny` row with the same, without the arguments.

@@ -970,7 +970,11 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
     let started = std::time::Instant::now();
     // A credential headed where people and other agents read it is refused before it's sent
     // (guard.rs): a data-loss check, not a permission (the gate decides those).
-    if !quiet && let Some(found) = credential_in(ctx, name, &args) {
+    let found = match credential_in(ctx, name, &args) {
+        None if !quiet => secret_value_in(ctx, name, &args).await,
+        found => found,
+    };
+    if !quiet && let Some(found) = found {
         let text = format!(
             "not sent: {} holds what looks like {}. Written where people and agents read it, a credential leaks: keep it in roll secrets (secrets_set) and refer to it by name.",
             found.at, found.kind
@@ -1038,15 +1042,90 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
 /// What a call to `name` would leak, if anything: its product, and whether it writes (a built-in
 /// tool's method, a fronted set's `readOnlyHint`).
 fn credential_in(ctx: &Ctx, name: &str, args: &Value) -> Option<guard::Found> {
-    let (product, write) = match tools::all().iter().find(|t| t.name == name) {
+    let (product, write) = writes_to(ctx, name)?;
+    guard::check(&product, write, args)
+}
+
+/// A tool's product, and whether it writes (a built-in tool's method, a fronted set's
+/// `readOnlyHint`).
+fn writes_to(ctx: &Ctx, name: &str) -> Option<(String, bool)> {
+    Some(match tools::all().iter().find(|t| t.name == name) {
         Some(t) => (t.product.to_string(), t.method != "GET"),
         None => {
             let def = ctx.m.sets.iter().flat_map(|s| s.tools()).find(|t| t["name"] == name)?;
             let product = def["_meta"]["roll/product"].as_str().map(str::to_string).unwrap_or_else(|| name.split('_').next().unwrap_or_default().to_string());
             (product, def["annotations"]["readOnlyHint"] != true)
         }
+    })
+}
+
+/// Candidates a scan sends, and projects it asks about.
+const SCAN_CANDIDATES: usize = 2000;
+const SCAN_PROJECTS: usize = 10;
+
+/// The value of a roll secret a write would put where people and agents read it. Asked of roll
+/// secrets' own scan (`POST …/leaks`) as the caller, through the gated router, so it only ever
+/// matches values the caller may reveal (never a test of a guess), and only for a token that may
+/// reveal secrets at all: the one that could have read a value to leak.
+async fn secret_value_in(ctx: &Arc<Ctx>, name: &str, args: &Value) -> Option<guard::Found> {
+    let (product, write) = writes_to(ctx, name)?;
+    if !write || !guard::read_by_others(&product) {
+        return None;
+    }
+    let Principal::Grant(g) = &ctx.principal else { return None };
+    if !g.scope.may("secrets", roll_auth::scope::Action::Reveal) {
+        return None;
+    }
+    let candidates = guard::candidates(args, SCAN_CANDIDATES);
+    if candidates.is_empty() {
+        return None;
+    }
+    // The projects its secrets rules name, or (a rule over every project) the ones it can list.
+    let mut projects: Vec<String> = Vec::new();
+    let mut every = false;
+    for r in g.scope.0.iter().filter(|r| (r.product == "secrets" || r.product == "*") && r.actions.contains_key(&roll_auth::scope::Action::Reveal)) {
+        match &r.resources {
+            roll_auth::scope::Resources::All => every = true,
+            roll_auth::scope::Resources::Some(sel) => projects.extend(sel.iter().map(|s| match s {
+                roll_auth::scope::Selector::Project { project } => project.clone(),
+                roll_auth::scope::Selector::Id { id, .. } => id.clone(),
+            })),
+        }
+    }
+    if every && let Ok(list) = read_route(ctx, "/v1/workspace/projects", "guard").await {
+        projects.extend(list.as_array().into_iter().flatten().filter_map(|p| p["id"].as_str().map(str::to_string)));
+    }
+    projects.sort();
+    projects.dedup();
+    let words: Vec<&str> = candidates.iter().map(|(w, _)| w.as_str()).collect();
+    for p in projects.into_iter().take(SCAN_PROJECTS) {
+        let Ok(found) = post_route(ctx, &format!("/v1/secrets/projects/{}/leaks", percent_encoding::utf8_percent_encode(&p, percent_encoding::NON_ALPHANUMERIC)), json!({ "candidates": words })).await else { continue };
+        if let Some(f) = found.as_array().and_then(|l| l.first()) {
+            let at = f["index"].as_u64().and_then(|i| candidates.get(i as usize)).map_or("arguments".to_string(), |(_, at)| at.clone());
+            let kind = format!("the value of roll secret {} ({})", f["key"].as_str().unwrap_or("?"), f["environment"].as_str().unwrap_or("?"));
+            return Some(guard::Found { kind, at });
+        }
+    }
+    None
+}
+
+/// A POST through the gated router with the caller's token (the guard's scan), its JSON answer.
+async fn post_route(ctx: &Arc<Ctx>, route: &str, body: Value) -> Result<Value, String> {
+    let mut req = Request::builder().method("POST").uri(route).header(header::CONTENT_TYPE, "application/json");
+    for (k, v) in forward_headers(&ctx.headers, &Value::Null).iter() {
+        req = req.header(k, v);
+    }
+    let mut req = req.body(Body::from(body.to_string())).map_err(|e| e.to_string())?;
+    req.extensions_mut().insert(McpCall { tool: "guard".into(), args: Arc::new(json!({ "route": route })), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: true });
+    let resp = match ctx.m.api.clone().oneshot(req).await {
+        Ok(r) => r,
+        Err(e) => match e {},
     };
-    guard::check(&product, write, args)
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let bytes = axum::body::to_bytes(resp.into_body(), MAX_ANSWER).await.map_err(|e| e.to_string())?;
+    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
 
 /// A refused credential in the audit log: the gate never saw the call. Where and what kind, never
