@@ -484,12 +484,17 @@ pub enum Syncs {
 pub enum Sinks {
     #[command(alias = "list")]
     Ls,
-    /// Stream the audit log to an HTTPS URL (its signing secret is printed once).
+    /// Stream the audit log to an HTTPS URL (its signing secret is printed once). `--format splunk`,
+    /// `datadog` or `bearer` sends the SIEM's own format with its token, read from stdin.
     Add {
         url: String,
         /// Send the rows the project already has first.
         #[arg(long)]
         from_start: bool,
+        /// roll (signed JSON, the default), splunk (HTTP Event Collector), datadog (Logs intake)
+        /// or bearer (roll's JSON with Authorization: Bearer).
+        #[arg(long, default_value = "roll")]
+        format: String,
     },
     #[command(alias = "remove")]
     Rm { id: String },
@@ -2809,10 +2814,26 @@ async fn sinks(c: &Client<'_>, cmd: Sinks, json_out: bool) -> anyhow::Result<()>
                 println!("{}  {:<6} {}  delivered {when}{}", s(&x["id"]), s(&x["status"]), s(&x["url"]), x["error"].as_str().map(|e| format!("  ({e})")).unwrap_or_default());
             }
         }
-        Sinks::Add { url, from_start } => {
-            let v = c.call(Method::POST, &base, Some(json!({ "url": url, "from_start": from_start }))).await?;
-            println!("{}", s(&v["secret"]));
-            eprintln!("Streaming the audit log to {url} ({}). That's its signing secret, shown this once.", s(&v["id"]));
+        Sinks::Add { url, from_start, format } => {
+            let mut body = json!({ "url": url, "from_start": from_start });
+            if format != "roll" {
+                // The SIEM's token: never an argument (it would sit in the shell's history).
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("The {format} token, then Enter and Ctrl-D: ");
+                }
+                let mut token = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut token).context("reading the token from stdin")?;
+                body["format"] = json!(format);
+                body["token"] = json!(token.trim());
+            }
+            let v = c.call(Method::POST, &base, Some(body)).await?;
+            if format == "roll" {
+                println!("{}", s(&v["secret"]));
+                eprintln!("Streaming the audit log to {url} ({}). That's its signing secret, shown this once.", s(&v["id"]));
+            } else {
+                // Its batches carry the SIEM's token, not roll's signature: nothing to keep.
+                eprintln!("Streaming the audit log to {url} as {format} ({}); the token is sealed in roll.", s(&v["id"]));
+            }
         }
         Sinks::Rm { id } => {
             c.call(Method::DELETE, &format!("{base}/{}", enc(&id)), None).await?;
