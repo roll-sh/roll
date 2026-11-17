@@ -451,7 +451,11 @@ fn info_inner(ctx: &Ctx) -> EsResult<Reply> {
             );
         }
         if want("plugins") {
-            n.insert("plugins".into(), Value::Arr(Vec::new()));
+            let plugins = match ctx.cluster.dialect {
+                crate::cluster::Dialect::Elasticsearch => PLUGINS.iter().map(|p| p.to_value()).collect(),
+                crate::cluster::Dialect::OpenSearch => Vec::new(),
+            };
+            n.insert("plugins".into(), Value::Arr(plugins));
             n.insert("modules".into(), Value::Arr(MODULES.iter().map(|m| m.to_value()).collect()));
         }
         if want("ingest") {
@@ -894,6 +898,43 @@ pub fn usage(ctx: &Ctx) -> EsResult<Reply> {
     Reply::ok(Value::Obj(out))
 }
 
+/// A separately installed Elasticsearch plugin whose features roll search provides, as
+/// `GET _nodes/plugins` and `_cat/plugins` report it.
+pub(crate) struct Plugin {
+    pub name: &'static str,
+    pub description: &'static str,
+    classname: &'static str,
+}
+
+impl Plugin {
+    fn to_value(&self) -> Value {
+        obj! {
+            "name" => self.name,
+            "version" => crate::version::ES_VERSION,
+            "elasticsearch_version" => crate::version::ES_VERSION,
+            "java_version" => "21",
+            "description" => self.description,
+            "classname" => self.classname,
+            "extended_plugins" => Vec::<Value>::new(),
+            "has_native_controller" => false,
+            "licensed" => false,
+            "is_official" => true,
+        }
+    }
+}
+
+/// The official plugins roll search provides, in the order Elasticsearch 9.5.5 lists them in
+/// `GET _nodes/plugins` (`_cat/plugins` sorts them by name).
+pub(crate) const PLUGINS: &[Plugin] = &[
+    Plugin { name: "analysis-phonetic", description: "The Phonetic Analysis plugin integrates phonetic token filter analysis with elasticsearch.", classname: "org.elasticsearch.plugin.analysis.phonetic.AnalysisPhoneticPlugin" },
+    Plugin { name: "analysis-icu", description: "The ICU Analysis plugin integrates the Lucene ICU module into Elasticsearch, adding ICU-related analysis components.", classname: "org.elasticsearch.plugin.analysis.icu.AnalysisICUPlugin" },
+    Plugin { name: "analysis-kuromoji", description: "The Japanese (kuromoji) Analysis plugin integrates Lucene kuromoji analysis module into elasticsearch.", classname: "org.elasticsearch.plugin.analysis.kuromoji.AnalysisKuromojiPlugin" },
+    Plugin { name: "analysis-ukrainian", description: "The Ukrainian Analysis plugin integrates the Lucene UkrainianMorfologikAnalyzer into elasticsearch.", classname: "org.elasticsearch.plugin.analysis.ukrainian.AnalysisUkrainianPlugin" },
+    Plugin { name: "analysis-smartcn", description: "Smart Chinese Analysis plugin integrates Lucene Smart Chinese analysis module into elasticsearch.", classname: "org.elasticsearch.plugin.analysis.smartcn.AnalysisSmartChinesePlugin" },
+    Plugin { name: "analysis-nori", description: "The Korean (nori) Analysis plugin integrates Lucene nori analysis module into elasticsearch.", classname: "org.elasticsearch.plugin.analysis.nori.AnalysisNoriPlugin" },
+    Plugin { name: "analysis-stempel", description: "The Stempel (Polish) Analysis plugin integrates Lucene stempel (polish) analysis module into elasticsearch.", classname: "org.elasticsearch.plugin.analysis.stempel.AnalysisStempelPlugin" },
+];
+
 /// A module Elasticsearch reports in `GET _nodes/plugins`.
 struct Module {
     name: &'static str,
@@ -923,6 +964,7 @@ impl Module {
 const MODULES: &[Module] = &[
     Module { name: "aggregations", description: "Adds \"built in\" aggregations to Elasticsearch.", classname: "org.elasticsearch.aggregations.AggregationsPlugin", extended_plugins: &["lang-painless"] },
     Module { name: "analysis-common", description: "Adds \"built in\" analyzers to Elasticsearch.", classname: "org.elasticsearch.analysis.common.CommonAnalysisPlugin", extended_plugins: &["lang-painless"] },
+    Module { name: "blob-cache", description: "Provides a blob store cache", classname: "org.elasticsearch.blobcache.BlobCachePlugin", extended_plugins: &[] },
     Module { name: "constant-keyword", description: "Module for the constant-keyword field type, which is a specialization of keyword for the case when all documents have the same value.", classname: "org.elasticsearch.xpack.constantkeyword.ConstantKeywordMapperPlugin", extended_plugins: &["x-pack-core", "lang-painless"] },
     Module { name: "data-streams", description: "Elasticsearch Expanded Pack Plugin - Data Streams", classname: "org.elasticsearch.datastreams.DataStreamsPlugin", extended_plugins: &[] },
     Module { name: "ingest-common", description: "Module for ingest processors that do not require additional security permissions or have large dependencies and resources", classname: "org.elasticsearch.ingest.common.IngestCommonPlugin", extended_plugins: &["lang-painless"] },
@@ -935,6 +977,8 @@ const MODULES: &[Module] = &[
     Module { name: "reindex", description: "The Reindex module adds APIs to reindex from one index to another or update documents in place.", classname: "org.elasticsearch.reindex.ReindexPlugin", extended_plugins: &[] },
     Module { name: "rest-root", description: "Adds HEAD and GET / endpoint to Elasticsearch", classname: "org.elasticsearch.rest.root.MainRestPlugin", extended_plugins: &[] },
     Module { name: "runtime-fields-common", description: "Module for runtime fields features and extensions that have large dependencies", classname: "org.elasticsearch.runtimefields.RuntimeFieldsCommonPlugin", extended_plugins: &["lang-painless"] },
+    Module { name: "searchable-snapshots", description: "A plugin for the searchable snapshots functionality", classname: "org.elasticsearch.xpack.searchablesnapshots.SearchableSnapshots", extended_plugins: &["x-pack-core", "blob-cache"] },
+    Module { name: "snapshot-repo-test-kit", description: "A plugin for a test kit for snapshot repositories", classname: "org.elasticsearch.repositories.blobstore.testkit.SnapshotRepositoryTestKit", extended_plugins: &["x-pack-core"] },
     Module { name: "transport-netty4", description: "Netty 4 based transport implementation", classname: "org.elasticsearch.transport.netty4.Netty4Plugin", extended_plugins: &[] },
     Module { name: "unsigned-long", description: "Module for the unsigned long field type", classname: "org.elasticsearch.xpack.unsignedlong.UnsignedLongMapperPlugin", extended_plugins: &["x-pack-core", "lang-painless"] },
     Module { name: "user-agent", description: "A utility for extraction of information from user agent header values", classname: "org.elasticsearch.useragent.UserAgentPlugin", extended_plugins: &[] },
@@ -948,11 +992,14 @@ const MODULES: &[Module] = &[
     Module { name: "x-pack-esql", description: "The plugin that powers ESQL for Elasticsearch", classname: "org.elasticsearch.xpack.esql.plugin.EsqlPlugin", extended_plugins: &["x-pack-esql-core", "lang-painless", "x-pack-ml", "x-pack-encryption"] },
     Module { name: "x-pack-esql-core", description: "Elasticsearch infrastructure plugin for ESQL", classname: "org.elasticsearch.xpack.esql.core.plugin.EsqlCorePlugin", extended_plugins: &["x-pack-core"] },
     Module { name: "x-pack-graph", description: "Elasticsearch Expanded Pack Plugin - Graph", classname: "org.elasticsearch.xpack.graph.Graph", extended_plugins: &["x-pack-core"] },
+    Module { name: "x-pack-ilm", description: "Elasticsearch Expanded Pack Plugin - Index Lifecycle Management", classname: "org.elasticsearch.xpack.ilm.IndexLifecycle", extended_plugins: &["x-pack-core"] },
     Module { name: "x-pack-logstash", description: "Elasticsearch Expanded Pack Plugin - Logstash", classname: "org.elasticsearch.xpack.logstash.Logstash", extended_plugins: &["x-pack-core"] },
     Module { name: "x-pack-migrate", description: "Elasticsearch Expanded Pack Plugin - Index and Data Stream Migration", classname: "org.elasticsearch.xpack.migrate.MigratePlugin", extended_plugins: &["x-pack-core"] },
     Module { name: "x-pack-ml", description: "Elasticsearch Expanded Pack Plugin - Machine Learning", classname: "org.elasticsearch.xpack.ml.MachineLearning", extended_plugins: &["x-pack-autoscaling", "lang-painless"] },
     Module { name: "x-pack-ql", description: "Elasticsearch infrastructure plugin for EQL and SQL for Elasticsearch", classname: "org.elasticsearch.xpack.ql.plugin.QlPlugin", extended_plugins: &["x-pack-core"] },
+    Module { name: "x-pack-rollup", description: "Elasticsearch Expanded Pack Plugin - Rollup", classname: "org.elasticsearch.xpack.rollup.Rollup", extended_plugins: &["x-pack-core"] },
     Module { name: "x-pack-security", description: "Elasticsearch Expanded Pack Plugin - Security", classname: "org.elasticsearch.xpack.security.Security", extended_plugins: &["x-pack-core"] },
+    Module { name: "x-pack-slm", description: "Elasticsearch Expanded Pack Plugin - Snapshot Lifecycle Management", classname: "org.elasticsearch.xpack.slm.SnapshotLifecycle", extended_plugins: &["x-pack-core"] },
     Module { name: "x-pack-sql", description: "The Elasticsearch plugin that powers SQL for Elasticsearch", classname: "org.elasticsearch.xpack.sql.plugin.SqlPlugin", extended_plugins: &["x-pack-ql", "lang-painless"] },
     Module { name: "x-pack-text-structure", description: "Elasticsearch Expanded Pack Plugin - Text Structure", classname: "org.elasticsearch.xpack.textstructure.TextStructurePlugin", extended_plugins: &["x-pack-core"] },
     Module { name: "x-pack-watcher", description: "Elasticsearch Expanded Pack Plugin - Watcher", classname: "org.elasticsearch.xpack.watcher.Watcher", extended_plugins: &["x-pack-core", "lang-painless"] },

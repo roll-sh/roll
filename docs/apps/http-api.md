@@ -17,15 +17,21 @@ feature/roll-mcp. Change them together.
 
 ## Routes and actions
 
+`docs/apps/openapi.json` is this table as OpenAPI 3.1: one operation per row, with its path
+parameters, the words below, and the permission it needs as `x-roll-action`. The shapes stay
+here. `api.rs::the_openapi_spec_is_the_contract_and_the_router` fails when the router serves a
+route this table doesn't list (or the reverse), and when the spec is stale:
+`ROLL_OPENAPI=write cargo test -p apps-control --test api openapi` writes it again.
+
 `action` is what the permissions catalogue (feature/roll-mcp, product `apps`) classifies the
 route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 
 | Route | Body | Answer | action |
 | --- | --- | --- | --- |
 | `GET /v1/apps` | | `Overview` | read |
-| `POST /v1/apps/plan` | `PlanRequest` | `Plan` | read |
+| `POST /v1/apps/plan` | `PlanRequest` | `Plan`; with `roots: true` (a repo or a Git URL, no `root`): `{ roots: { root, provider, framework? }[] }`, the folders up to three levels down that build on their own (a start command, a framework or a Dockerfile: no library package, docs or dependencies), at most 20 | read |
 | `POST /v1/apps/projects/{project}/export` | `{ databases? }` (`{"postgres:<ref>": "db"}`: the names of the databases its services link, as the caller lists them; one not named is named after its ref) | `{ roll_toml, notes }`: its services (source, branch, the run settings that differ from a new service's), the postgres and redis databases they link, variables by name only in its header; read back with the parser `roll up --all` uses before it's answered; 409 for a project with no service | read |
-| `POST /v1/apps/import` | `{ roll_toml }`, `{ compose }` (each at most 1 MiB), or `{ repo, revision? }` (that roll code repo's root roll.toml, at its default branch's head unless a revision is named: a "deploy to roll" link) | `ProjectImport` (read, nothing made: checked as `roll up --all` checks it; 400 says what's wrong) | read |
+| `POST /v1/apps/import` | `{ roll_toml }`, `{ compose }` (each at most 1 MiB), `{ repo, revision? }` (that roll code repo's root roll.toml, at its default branch's head unless a revision is named: a "deploy to roll" link), or `{ git, branch? }` (a public Git repository's root roll.toml by URL, at most 64 KiB, at its branch's head; https, no credentials, a public address). From a repo or a Git URL, an app that names only a `root` becomes that repository's source at that folder (a Git URL's following the branch it was read from), not an upload | `ProjectImport` (read, nothing made: checked as `roll up --all` checks it; 400 says what's wrong) | read |
 | `GET /v1/apps/services?project=` | | `Service[]` | read |
 | `POST /v1/apps/services` | `NewService` | 201 `Service` | deploy* (a repo or image source deploys production at once; write for an upload source) |
 | `GET /v1/apps/projects/{project}/services` | | `Service[]` | read |
@@ -54,11 +60,13 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/changes` | | server-sent events: `ready`, then a `changed` (data `{}`) whenever a deploy moves, an instance wakes, sleeps or crashes, or someone changes the service; the page reads it again (on the owner, in memory; it carries nothing itself) | read |
 | `PUT /v1/apps/services/{id}/registry` | `{ username, password, server? }` | `Service` (a private registry's login for an image source; sealed, never returned) | write |
 | `DELETE /v1/apps/services/{id}/registry` | | `Service` | write |
+| `PUT /v1/apps/services/{id}/git-login` | `{ username, password }` (a deploy token, app password or access token as `password`; one line each) | `Service` (a private Git repository's login for a Git URL source, bound to the URL's host: sent only there as Basic auth, dropped when the source moves to another repository; sealed, never returned) | write |
+| `DELETE /v1/apps/services/{id}/git-login` | | `Service` | write |
 | `GET /v1/apps/services/{id}/environments` | | `Environment[]` | read |
 | `PUT /v1/apps/services/{id}/environments/{env}` | `EnvironmentPut` | `Environment` | deploy*; with `variables_from` also reveal in that environment (it copies its values) |
 | `GET /v1/apps/services/{id}/environments/{env}` | | `Environment` | read |
 | `DELETE /v1/apps/services/{id}/environments/{env}` | | 204 | delete |
-| `POST /v1/apps/services/{id}/environments/{env}/deploys` | `NewDeploy`, or a gzipped tar (`application/gzip`) | 202 `Deployment` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/deploys` | `NewDeploy`, a gzipped tar of a tree (`application/gzip`, `roll up`), or an image built elsewhere (`application/x-docker-image`: `docker save`'s archive, gzipped or not; at most the upload limit; its names are taken out before it's loaded, and it's tagged as a build's would be; on the fleet a CodeBuild run of its own loads and pushes it to the service's ECR repository) | 202 `Deployment` | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys?before=` | | `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}` | | `Deployment` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs?follow=&tail=` | | `LogLine[]` or SSE | read |
@@ -69,7 +77,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/promote` | `{ from, message?, expect? }` (`expect`: a deployment id; 409 when `from`'s live deployment isn't it, checked against the read the promotion is made from) | 202 `Deployment` (trigger `promote`: `from`'s live image, no build, with `env`'s variables; `rollback_of` names the promoted deployment) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/hook` | | 201 `{ path }`: a new deploy hook, its path shown once (prefix the API's base URL; the token is `rlk_…` with a checksum, so secret scanning finds a leaked one); the old one stops working | admin (a standing credential that deploys) |
 | `DELETE /v1/apps/services/{id}/environments/{env}/hook` | | 204 | admin |
-| `POST /v1/apps/hooks/{id}/{env}/{token}?image=` | | 202 `Deployment` (actor `deploy hook`); `image`: another tag or digest of an image service's own repository, else 400; any token that isn't the live hook's is a 404. No API token: the URL is the secret (rolld's `RULES` let it through to the hook's own check; access lines log the route pattern, never the token). Each deploy is `audit.hook.deployed` in the activity, with the caller's address | none (the URL) |
+| `POST /v1/apps/hooks/{id}/{env}/{token}?image=` | none, or a repository's push webhook (GitHub's or GitLab's `push` JSON) | 202 `Deployment` (actor `deploy hook`); for a Git URL service a push to the environment's branch deploys that commit (trigger `push`, the commit's subject as its message, keyed by the commit so a redelivery is the same deploy), and another branch, a deleted branch, a `[skip ci]` commit or GitHub's ping is 200 `{ ignored }`; `image`: another tag or digest of an image service's own repository, else 400; any token that isn't the live hook's is a 404. No API token: the URL is the secret (rolld's `RULES` let it through to the hook's own check; access lines log the route pattern, never the token). Each deploy is `audit.hook.deployed` in the activity, with the caller's address | none (the URL) |
 | `GET /v1/apps/services/{id}/environments/{env}/volume/backups` | | `Backup[]`, newest first (7 kept) | read |
 | `POST /v1/apps/services/{id}/environments/{env}/volume/backups` | | 201 `Backup` (now) | write |
 | `POST /v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore` | | `Backup` (the volume as it was; the environment asleep meanwhile) | delete (it replaces the volume's files) |
@@ -113,7 +121,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 
 - Creating a service makes its `production` environment, places its card on the project's canvas
   (at `x`, `y`, or the first free spot when both are left out or 0), and, for a repo or an image,
-  queues the first deploy at once. An upload service waits for `roll up`.
+  queues the first deploy at once (a Git URL too). An upload service waits for `roll up`. A Git
+  source's deploy takes a `revision` only as a full commit id.
 - In `PATCH` bodies (`build`, `run`) a field set to `null` goes back to its default; fields left
   out stay.
 - `…/deploys/{dep}/logs?follow=1` ends when the deployment is done (at once for one that is).
@@ -152,7 +161,8 @@ type Prices = { cpu_second: number; gb_second: number; egress_gb: number; build_
 type Source =
   | { kind: "repo"; repo: string /* owner/name in roll code (GitHub repos are mirrored there) */; root?: string }
   | { kind: "image"; image: string /* docker.io/library/nginx:1.27 */ }
-  | { kind: "upload" } /* `roll up`: each deploy carries its tree, kept only until its build ends */;
+  | { kind: "upload" } /* `roll up`: each deploy carries its tree, kept only until its build ends */
+  | { kind: "git"; url: string /* a public repository: https://, no credentials, a public address (400 otherwise) */; root?: string } /* each deploy fetches its branch's head shallowly; a new commit deploys within five minutes */;
 
 type Build = {
   /** auto: detect (a Dockerfile wins); dockerfile: use `dockerfile`. */
@@ -161,8 +171,9 @@ type Build = {
   install?: string;    // overrides the detected commands
   build?: string;
   start?: string;
-  /** A repo source deploys a push only when it changes a path these match (gitignore-style, from
-   *  the repo's root, as CODEOWNERS; at most 50). roll.toml `[app] watch` wins over it. */
+  /** A repo or Git URL source deploys a push only when it changes a path these match
+   *  (gitignore-style, from the repo's root, as CODEOWNERS; at most 50). roll.toml `[app] watch`
+   *  wins over it. */
   watch?: string[];
   spa?: boolean;            // a single-page app (a page path with no file answers index.html); unset: detected
   target?: string;          // the tree's own Dockerfile's stage to build (--target): letters, digits, _ - . (64 at most)
@@ -194,7 +205,7 @@ type Run = {
   suspend_after_s: number;  // default 30; 0 never suspends
   sleep_after_s: number;    // default 600; min_instances > 0 never sleeps below min
   volume?: { mount: string; size_gb: number };
-  alerts: { memory_pct: number; error_pct: number; p95_ms: number; log_match?: string; log_count?: number }; // default 90, 5, 0 (0 off): `alert.*` events over five minutes; log_match: text its stdout/stderr holds log_count times (default 10) in five minutes, `alert.log`
+  alerts: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct: number; log_match?: string; log_count?: number }; // default 90, 5, 0, 10 (0 off); capacity_pct: the share of five minutes' requests that found every instance busy at max_instances, `alert.capacity`: `alert.*` events over five minutes; log_match: text its stdout/stderr holds log_count times (default 10) in five minutes, `alert.log`
   /** A gradual rollout (README "Gradual rollouts"): increasing percents 1–99 (at most five; []
    *  switches at once, the default), each for step_s (1–3600, default 120); a step whose 5xx
    *  share reaches error_pct (1–100, default 5) of 20+ requests, and beats the old one's, rolls
@@ -251,6 +262,7 @@ type Service = {
   build: Build;
   run: Run;
   registry: { server: string; username: string } | null; // a private registry's login (never the password)
+  git_login: { host: string; username: string } | null; // a private Git repository's login (never the password)
   links: { kind: LinkKind; ref: string }[]; // what it links (no variables): the canvas draws them
   created_at: number;
   environments: EnvironmentSummary[];
@@ -268,12 +280,18 @@ type EnvironmentSummary = {
 type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
 
 type Patch<T> = { [K in keyof T]?: T[K] | null }; // null: back to the default
-type NewService = { project: string; name: string; source: Source; build?: Patch<Build>; run?: Patch<Run>; variables?: { [name: string]: string } /* production, before its first deploy */; registry?: { username: string; password: string; server?: string } /* an image's login, before its first pull (as PUT …/registry) */; links?: { kind: LinkKind; ref: string; prefix?: string }[] /* at most 20, made before the first deploy (as PUT …/links); one that doesn't resolve makes no service */; branch?: string /* a repo source: production follows it, its first deploy that branch's head (default: the repo's default branch); 400 when the repo has no such branch */; x?: number; y?: number };
+type NewService = { project: string; name: string; source: Source; build?: Patch<Build>; run?: Patch<Run>; variables?: { [name: string]: string } /* production, before its first deploy */; sealed?: string[] /* which of those are sealed from the start (a template's generated secrets) */; registry?: { username: string; password: string; server?: string } /* an image's login, before its first pull (as PUT …/registry) */; git_login?: { username: string; password: string } /* a private Git repository's login, before its branch is checked (as PUT …/git-login) */; links?: { kind: LinkKind; ref: string; prefix?: string }[] /* at most 20, made before the first deploy (as PUT …/links); one that doesn't resolve makes no service */; branch?: string /* a repo or Git source: production follows it, its first deploy that branch's head (default: the repo's default branch); 400 when the repo has no such branch, or a Git URL doesn't answer */; x?: number; y?: number };
 type ServicePatch = { name?: string; source?: Source; build?: Patch<Build>; run?: Patch<Run> };
 
 type EnvironmentPut = {
   branch?: string | null;
   ephemeral?: boolean;
+  /** Its name on the roll domain (`<hostname>.<domain>`): 3–56 of a-z, 0-9 and -, not starting or
+   *  ending with -, never `--`, not roll's own (400); another environment's is 409, and so is any
+   *  name while custom domains' CNAMEs point at the old one (no fixed `cname_target`). The old name
+   *  stops answering at once (within a second on other nodes); the app's `ROLL_PUBLIC_URL` follows
+   *  at its next deploy. */
+  hostname?: string;
   /** Private (previews): visitors need `?roll_access=<token>` once (a host-only HttpOnly cookie
    *  `roll_access_<env>`, then a 302 to the URL without it), else a 401, before anything wakes.
    *  The token is 20–200 of [A-Za-z0-9_-]; only its SHA-256 is stored, and the app never sees
@@ -284,7 +302,9 @@ type EnvironmentPut = {
   /** Creating it: start with this environment's variables, except its sealed ones (ignored when it exists). */
   variables_from?: string;
   /** A push deploys only once its commit's checks pass (statuses other than roll apps' own):
-   *  pending waits (up to an hour; `Environment.waiting_for_ci` names it), a failure skips it. */
+   *  pending waits (up to an hour; `Environment.waiting_for_ci` names it), a failure skips it.
+   *  A roll code repo's service only (400 otherwise): a Git URL service deploys from its
+   *  workflow after its tests (sdk/apps-github-action) with the environment's branch unset. */
   wait_for_ci?: boolean;
   /** An image service whose image has a tag: deploy when the tag points at a new digest
    *  (checked every 5 minutes on the owner; actor `tag watch`). 400 otherwise. */
@@ -343,6 +363,7 @@ type Environment = EnvironmentSummary & {
   private: boolean;          // its hostnames answer only visitors with its access token
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
   volume_used?: { bytes: number; at: number }; // how full its volume was when last measured (hourly, on its owner), when it has one
+  schedules?: { name: string; next_run_at: number | null; last: { job: string; status: RunStatus; started_at: number } | null }[]; // run.schedules as they stand: next due (none paused, in a preview or undeployed) and the job each last started
   crash_loop: { crashes: number; last_at: number; last_error: string } | null; // 3+ crashes in 10 minutes
   canary: { deployment: string; share: number } | null; // a gradual rollout under way: the percent of requests the new deployment takes
   run: { [field: string]: number }; // its own run settings over the service's ({}: the service's)
@@ -396,6 +417,7 @@ type Deployment = {
   plan: Plan | null;         // what the build detected
   rollback_of: string | null;
   error_detail?: string;     // what the app or the build printed when it failed (the step, its last line): the owner's, never in a commit status, an event or a notification
+  fix?: string;             // how to fix a failure roll knows (the setting and its command), read from the error
   pruned_at?: number;        // pruned (older than the environment keeps): history only, its image gone; a rollback to it is a 409
   steps?: { step: "build" | "pre_deploy" | "rollout" | "live" | "failed"; at: number }[]; // when each began: on GET …/deploys/{dep} only
   error: string | null;
@@ -411,18 +433,19 @@ type ProjectImport = {
   roll_toml: string;          // the file as roll.toml (a Compose file's, to keep)
   notes: string[];            // what a Compose file's import left out, and why
   apps: { [name: string]: {
-    source: { kind: "repo"; repo: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
+    source: { kind: "repo"; repo: string; root: string | null } | { kind: "git"; url: string; root: string | null } | { kind: "image"; image: string } | { kind: "upload"; root: string };
     branch: string | null;    // a repo's production branch
     run: Patch<Run>;          // the run settings the entry names
-    links: { kind: "postgres" | "redis"; name: string }[]; // databases below, by name
+    links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "service"; name: string }[]; // databases below by name, or another app of the file (`service`)
+    environments: { [env: string]: { branch: string | null; run: object /* an environment's own run settings */; variables: { [name: string]: string } /* set when it's made */ } }; // besides production
     variables: { [name: string]: string }; // set when the service is made, never over what it has
     generate: string[];       // `{ generate = "secret" }`: 32 random bytes in hex, made by whoever makes the service, once
     ask: { name: string; ask: string; default: string | null }[]; // `{ ask = "…" }`: asked of whoever makes it
   } };
-  databases: { [name: string]: { kind: "postgres" | "redis" } };
+  databases: { [name: string]: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" } };
 };
 
-type PlanRequest = { repo: string; revision?: string; root?: string } | { files: Record<string, string> };
+type PlanRequest = { repo: string; revision?: string; root?: string } | { git: string /* a Git URL, fetched at its branch's head as its deploy would be */; branch?: string; root?: string; git_login?: { username: string; password: string } /* a private repository's */ } | { files: Record<string, string> };
 
 type Plan = {
   provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "static";
@@ -444,8 +467,15 @@ type Plan = {
   release?: string;
 };
 
-/** Wired on a node today: postgres (DATABASE_URL) and redis (REDIS_URL, REDIS_REST_URL/TOKEN). */
-type Link = { kind: "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "service"; ref: string; prefix: string; vars: string[] };
+/** Wired on a node today: postgres (DATABASE_URL), redis (REDIS_URL, REDIS_REST_URL/TOKEN) and search. */
+type LinkKind = "postgres" | "redis" | "bucket" | "stream" | "queue" | "nosql" | "search" | "service";
+type Link = { kind: LinkKind; ref: string; prefix: string; vars: string[] };
+// `search`: `ref` is a roll search cluster (id or name). The link makes a data-only credential of
+// its own, once (never the cluster's password): ELASTICSEARCH_URL and ELASTICSEARCH_API_KEY, or on
+// an OpenSearch-flavor cluster OPENSEARCH_URL, OPENSEARCH_USERNAME and OPENSEARCH_PASSWORD (an
+// internal user of its own). Kept
+// sealed with the link; unlinking (or deleting the service) revokes it. A scoped token needs
+// `reveal` on the cluster.
 // `service`: `ref` is another web service of the project (its id); `URL` is
 // `http://<name>.<env>.internal:<port>` in the linking environment, `PUBLIC_URL` its public URL
 // when it has one there. The prefix defaults to its name (`API_`). A service's links go with it.
@@ -461,6 +491,7 @@ type RouteStat = { method: string; route: string; requests: number; errors: numb
 type RouteStats = { minutes: number; requests: number; cut: boolean /* only the newest 50,000 requests read */; routes: RouteStat[] };
 
 type Metrics = {
+  step: number;              // minutes a point stands for: 1 up to a week (minutes=10080), 60 past it (up to 90 days: hourly rollups, counts summed, the rest their peak)
   minutes: number[];         // unix minute of each point, oldest first
   requests: number[]; errors: number[]; // 5xx
   p50_ms: number[]; p95_ms: number[]; p99_ms: number[];
@@ -470,6 +501,7 @@ type Metrics = {
   cold_starts: number[];
   cold_start_ms: number[];   // average of the minute's cold starts (0 when none)
   egress_bytes: number[];    // bytes answered (what egress is billed by); format=prometheus: roll_apps_egress_bytes_per_minute
+  over_capacity: number[];   // requests that found every instance busy at max_instances (saturation); roll_apps_over_capacity_per_minute
 };
 
 type Usage = {
@@ -479,7 +511,7 @@ type Usage = {
 
 /** In the event log, each written in the same transaction as the change it records. Sequence
  *  numbers commit in order with no gaps, so a reader moving past `next` never misses one. Kept 7 days. */
-type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" /* data.error: the daily backup failed (notified by default) */ | "volume.full" /* data.used_bytes, size_gb, pct: past 90% of its size, once until it's under 80% (notified by default) */ | "deploy.skipped" /* data.revision, tag: a push whose message said [skip ci] (the timeline only) */ | "alert.resolved" /* data.alert: which alert cleared; sent to targets that get that alert */ | `audit.${string}` /* changes people made: what /activity lists */; service: string; environment: string; deployment: string | null; data: object };
+type Event = { seq: number; at: number; kind: "deploy.active" | "deploy.failed" | "crash_loop" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.capacity" /* data.value, threshold, requests, max_instances, concurrency: that share of five minutes' requests found every instance busy at max_instances (notified by default) */ | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" /* data.error: the daily backup failed (notified by default) */ | "volume.full" /* data.used_bytes, size_gb, pct: past 90% of its size, once until it's under 80% (notified by default) */ | "deploy.skipped" /* data.revision, tag: a push whose message said [skip ci] (the timeline only) */ | "alert.resolved" /* data.alert: which alert cleared; sent to targets that get that alert */ | `audit.${string}` /* changes people made: what /activity lists */; service: string; environment: string; deployment: string | null; data: object };
 /** A webhook's body: { type, at, seq, service, environment, deployment, data, title, text, url },
  *  signed as roll code's webhooks are: X-Roll-Signature-256: sha256=hex(HMAC-SHA256(secret,
  *  X-Roll-Timestamp + "." + body)), the timestamp the send time in Unix seconds (a retry is signed
@@ -517,7 +549,7 @@ type AccessLine = {
 };
 /** A volume's backup: a tar in object storage (`apps/volumes/<service>/<env>/<id>.tar`). */
 type Backup = { id: string; at: number; size: number };
-type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord" | "email"; host: string /* an email target's: "the project's owner" */; events: ("deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" | "volume.full")[];
+type NotifyTarget = { id: string; project: string; kind: "webhook" | "slack" | "discord" | "email"; host: string /* an email target's: "the project's owner" */; events: ("deploy.failed" | "crash_loop" | "deploy.active" | "spend.alert" | "spend.limit" | "alert.memory" | "alert.errors" | "alert.latency" | "alert.capacity" | "alert.log" | "cron.failed" | "job.failed" | "domain.active" | "domain.expiring" | "domain.expired" | "domain.tls_failed" | "volume.backup_failed" | "volume.full")[];
   environments: string[];  // only these environments' events; empty: every one's
   services: string[];      // only these services' (ids); empty: every one's
   previews: boolean;       // preview (ephemeral) environments' events too (an environment named in `environments` always)

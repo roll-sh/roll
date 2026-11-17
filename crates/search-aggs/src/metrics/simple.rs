@@ -20,28 +20,33 @@ use crate::request::{AggDef, PathElement};
 use crate::values::{BoundVs, BytesReader, GeoReader, NumReader, VsOpts, VsSpec, VsType, bind};
 use crate::xparser::{Field, Tokens, XParser};
 
-/// Java's `Math.min` (NaN if either is NaN; -0.0 < 0.0).
+/// Java's `Math.min` (NaN if either is NaN; -0.0 < 0.0). Ordered unequal values take one
+/// compare; equal ones are the same value or zeros, whose min is the OR of their bits.
 #[inline]
 pub fn java_min(a: f64, b: f64) -> f64 {
-    if a.is_nan() || b.is_nan() {
-        return f64::NAN;
+    if a < b {
+        a
+    } else if b < a {
+        b
+    } else if a == b {
+        f64::from_bits(a.to_bits() | b.to_bits())
+    } else {
+        f64::NAN
     }
-    if a == 0.0 && b == 0.0 {
-        return if a.is_sign_negative() { a } else { b };
-    }
-    if a <= b { a } else { b }
 }
 
-/// Java's `Math.max`.
+/// Java's `Math.max`: equal values' max is the AND of their bits (0.0 over -0.0).
 #[inline]
 pub fn java_max(a: f64, b: f64) -> f64 {
-    if a.is_nan() || b.is_nan() {
-        return f64::NAN;
+    if a > b {
+        a
+    } else if b > a {
+        b
+    } else if a == b {
+        f64::from_bits(a.to_bits() & b.to_bits())
+    } else {
+        f64::NAN
     }
-    if a == 0.0 && b == 0.0 {
-        return if a.is_sign_negative() { b } else { a };
-    }
-    if a >= b { a } else { b }
 }
 
 /// Which simple metric.
@@ -261,17 +266,69 @@ impl SimpleAgg {
                 self.sums[ord] = k.value;
                 self.comps[ord] = k.delta;
             }
-            SimpleKind::Stats => {
-                self.counts[ord] += 1;
-                let mut k = CompensatedSum::new(self.sums[ord], self.comps[ord]);
-                k.add(v);
-                self.sums[ord] = k.value;
-                self.comps[ord] = k.delta;
-                self.mins[ord] = java_min(self.mins[ord], v);
-                self.maxs[ord] = java_max(self.maxs[ord], v);
-            }
+            SimpleKind::Stats => self.add_stats(ord, v),
             _ => self.add_values(ord, &[v]),
         }
+    }
+
+    /// [`add_one`](Self::add_one) of each `vals[k]` into bucket `ords[pos[k]]` (`pos` `None`:
+    /// `ords[k]`), every one allocated: the metric is picked once per batch, and a batch of one
+    /// bucket (a top-level metric, or every doc in one parent bucket) keeps its state in
+    /// locals, adding in the same order.
+    fn add_singles(&mut self, ords: &[u32], pos: Option<&[u32]>, vals: &[f64]) {
+        if vals.is_empty() {
+            return;
+        }
+        let ord_at = |k: usize| ords[pos.map_or(k, |pos| pos[k] as usize)];
+        let o = ord_at(0);
+        let one = (0..vals.len()).all(|k| ord_at(k) == o);
+        let o = o as usize;
+        match self.kind {
+            SimpleKind::Stats | SimpleKind::Avg | SimpleKind::Sum if one => {
+                let mut k = CompensatedSum::new(self.sums[o], self.comps[o]);
+                if self.kind == SimpleKind::Stats {
+                    let (mut min, mut max) = (self.mins[o], self.maxs[o]);
+                    for &v in vals {
+                        k.add(v);
+                        min = java_min(min, v);
+                        max = java_max(max, v);
+                    }
+                    self.mins[o] = min;
+                    self.maxs[o] = max;
+                } else {
+                    for &v in vals {
+                        k.add(v);
+                    }
+                }
+                if self.kind != SimpleKind::Sum {
+                    self.counts[o] += vals.len() as u64;
+                }
+                self.sums[o] = k.value;
+                self.comps[o] = k.delta;
+            }
+            SimpleKind::Stats => {
+                for (k, &v) in vals.iter().enumerate() {
+                    self.add_stats(ord_at(k) as usize, v);
+                }
+            }
+            _ => {
+                for (k, &v) in vals.iter().enumerate() {
+                    self.add_one(ord_at(k) as usize, v);
+                }
+            }
+        }
+    }
+
+    /// The `stats` arm of [`add_one`](Self::add_one).
+    #[inline(always)]
+    fn add_stats(&mut self, ord: usize, v: f64) {
+        self.counts[ord] += 1;
+        let mut k = CompensatedSum::new(self.sums[ord], self.comps[ord]);
+        k.add(v);
+        self.sums[ord] = k.value;
+        self.comps[ord] = k.delta;
+        self.mins[ord] = java_min(self.mins[ord], v);
+        self.maxs[ord] = java_max(self.maxs[ord], v);
     }
 
     #[inline]
@@ -583,26 +640,35 @@ impl Aggregator for SimpleAgg {
                     let (dv, decode) = r.raw().expect("raw");
                     let mut batch = std::mem::take(&mut self.batch);
                     let mut dbuf = std::mem::take(&mut self.dbuf);
-                    dv.load_batch(b.docs, &mut batch);
                     let res: Result<()> = (|| {
-                        if batch.all_single() {
-                            for (k, &p) in batch.pos.iter().enumerate() {
-                                let ord = b.ords[p as usize];
-                                self.ensure(ord)?;
-                                self.add_one(ord as usize, decode.to_f64(batch.vals[k]));
+                        if dv.load_every(b.docs, &mut batch.vals) {
+                            decode.to_f64_into(&batch.vals, &mut dbuf);
+                            if let Some(max) = b.ords.iter().copied().max() {
+                                self.ensure(max)?;
                             }
+                            self.add_singles(b.ords, None, &dbuf);
                             return Ok(());
                         }
+                        dv.load_batch(b.docs, &mut batch);
+                        decode.to_f64_into(&batch.vals, &mut dbuf);
+                        if batch.all_single() {
+                            if let Some(max) = batch.pos.iter().map(|&p| b.ords[p as usize]).max() {
+                                self.ensure(max)?;
+                            }
+                            self.add_singles(b.ords, Some(&batch.pos), &dbuf);
+                            return Ok(());
+                        }
+                        let mut off = 0;
                         for (p, raw) in batch.docs() {
                             let ord = b.ords[p];
                             self.ensure(ord)?;
-                            if let [v] = raw {
-                                self.add_one(ord as usize, decode.to_f64(*v));
-                                continue;
+                            let vals = &dbuf[off..off + raw.len()];
+                            off += raw.len();
+                            if let [v] = vals {
+                                self.add_one(ord as usize, *v);
+                            } else {
+                                self.add_values(ord as usize, vals);
                             }
-                            dbuf.clear();
-                            dbuf.extend(raw.iter().map(|&v| decode.to_f64(v)));
-                            self.add_values(ord as usize, &dbuf);
                         }
                         Ok(())
                     })();
@@ -632,7 +698,7 @@ impl Aggregator for SimpleAgg {
                 }
                 Reader::Geo(r) => {
                     for i in 0..b.len() {
-                        let n = r.points(b.docs[i]).len();
+                        let n = r.points(b.docs[i])?.len();
                         if n > 0 {
                             self.ensure(b.ords[i])?;
                             self.counts[b.ords[i] as usize] += n as u64;
@@ -1263,6 +1329,7 @@ fn value_type_description(v: crate::values::ValueType) -> &'static str {
         Date => "date",
         Ip => "ip",
         Boolean => "boolean",
+        GeoPoint => "geo_point",
     }
 }
 
@@ -1481,3 +1548,28 @@ impl Internal for Rate {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{java_max, java_min};
+
+    /// `Math.min`/`Math.max` on the values that differ from a plain compare: NaN, signed zeros.
+    #[test]
+    fn java_min_max_match_java() {
+        let vals = [f64::NAN, -0.0, 0.0, 1.0, -1.0, f64::INFINITY, f64::NEG_INFINITY, f64::MIN_POSITIVE];
+        for &a in &vals {
+            for &b in &vals {
+                let (min, max) = if a.is_nan() || b.is_nan() {
+                    (f64::NAN, f64::NAN)
+                } else if a == 0.0 && b == 0.0 {
+                    let neg = a.is_sign_negative() || b.is_sign_negative();
+                    let both = a.is_sign_negative() && b.is_sign_negative();
+                    (if neg { -0.0 } else { 0.0 }, if both { -0.0 } else { 0.0 })
+                } else {
+                    (a.min(b), a.max(b))
+                };
+                assert_eq!(java_min(a, b).to_bits(), min.to_bits(), "min({a}, {b})");
+                assert_eq!(java_max(a, b).to_bits(), max.to_bits(), "max({a}, {b})");
+            }
+        }
+    }
+}

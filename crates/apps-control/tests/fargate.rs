@@ -46,6 +46,8 @@ struct Aws {
     builds: HashMap<String, Value>,
     /// What each build's variables resolved to.
     build_envs: HashMap<String, BTreeMap<String, String>>,
+    /// Each build's buildspec, and the files of its source.
+    specs: HashMap<String, (String, Vec<String>)>,
     repos: HashMap<String, Value>,
     secrets: HashMap<String, String>,
     /// Each secret's ARN (a new random suffix each time one is made, as AWS gives) and when it
@@ -298,6 +300,7 @@ async fn build(f: Fake, id: String, req: Value) {
     let fail = names.iter().any(|n| n == "FAIL_BUILD");
     let mut a = f.aws.lock();
     a.build_envs.insert(id.clone(), env);
+    a.specs.insert(id.clone(), (req["buildspecOverride"].as_str().unwrap_or_default().to_string(), names.clone()));
     a.logs.insert(stream, vec!["#1 [internal] load build definition from Dockerfile".into(), if fail { "ERROR: process \"/bin/sh -c false\" did not complete successfully".into() } else { "#9 pushing layers done".into() }]);
     let b = a.builds.get_mut(&id).unwrap();
     b["buildComplete"] = json!(true);
@@ -897,4 +900,31 @@ async fn a_multi_line_value_reaches_the_task_through_its_deployments_secret() {
     w.fake.aws.lock().secrets.insert(format!("roll-apps/vars/roll-cloud/{short}-older"), "{}".into());
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
     assert!(!w.fake.aws.lock().secrets.keys().any(|k| k.starts_with(&format!("roll-apps/vars/roll-cloud/{short}-"))), "it goes with the service");
+}
+
+/// An image built elsewhere, on the fleet: no node loads it. A CodeBuild run of its own loads the
+/// archive (its names taken out), tags and pushes it to the service's ECR repository, and the
+/// deployment runs it by digest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_uploaded_image_is_pushed_by_codebuild() {
+    let w = world().await;
+    let id = upload_service(&w, "laptop").await;
+    let mut b = tar::Builder::new(Vec::new());
+    for (name, body) in [("manifest.json", r#"[{"Config":"blobs/sha256/c","RepoTags":["nginx:latest"],"Layers":["blobs/sha256/l"]}]"#), ("blobs/sha256/l", "layer")] {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(body.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, name, body.as_bytes()).unwrap();
+    }
+    let req = Request::post(format!("/v1/apps/services/{id}/environments/production/deploys")).header("content-type", "application/x-docker-image").body(Body::from(b.into_inner().unwrap())).unwrap();
+    let resp = w.api.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let d: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let d = settled(&w, &id, d["id"].as_str().unwrap()).await;
+    assert_eq!(d["status"], "active", "{d}");
+    assert!(d["image"].as_str().unwrap().ends_with(&format!("@{DIGEST}")), "{d}");
+    let (spec, files) = w.fake.aws.lock().specs.values().find(|(s, _)| s.contains("docker load")).cloned().expect("a load run");
+    assert_eq!(files, ["image.tar"], "only the archive goes up");
+    assert!(spec.contains("docker push") && !spec.contains("nginx"), "{spec}");
 }

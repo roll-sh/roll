@@ -177,6 +177,34 @@ impl Apps {
         }
     }
 
+    /// An environment's schedules as they stand: the next due time (the run its live deployment
+    /// runs with: roll.toml's included) and the job each last started.
+    pub(crate) async fn schedule_states(self: &Arc<Self>, svc: &crate::store::ServiceRow, env: &crate::store::EnvRow) -> Vec<crate::model::ScheduleState> {
+        let run = match self.lives.lock().get(&crate::env_key(&svc.id, &env.name)).and_then(|l| l.template()) {
+            Some(t) => t.run.clone(),
+            None => svc.run.clone(),
+        };
+        let mut out = Vec::new();
+        for sc in &run.schedules {
+            let next = (env.active.is_some() && !env.paused && !env.ephemeral)
+                .then(|| crate::cron::Schedule::parse(&sc.schedule, sc.timezone.as_deref()).ok())
+                .flatten()
+                .and_then(|s| s.next_after(code_sql::now_ms()));
+            let (sid, en, key) = (svc.id.clone(), env.name.clone(), format!("sched-job:{}/{}/{}", svc.id, env.name, sc.name));
+            let last = self
+                .db(move |s| {
+                    let Some(job) = s.get_state(&key)? else { return Ok(None) };
+                    Ok(s.job(&sid, &en, &job).ok())
+                })
+                .await
+                .ok()
+                .flatten()
+                .map(|j| crate::model::ScheduleRun { job: j.id, status: j.status, started_at: j.started_at });
+            out.push(crate::model::ScheduleState { name: sc.name.clone(), next_run_at: next, last });
+        }
+        out
+    }
+
     /// What an environment's volume was last measured at: (bytes, when).
     pub(crate) async fn volume_usage(self: &Arc<Self>, service: &str, env: &str) -> Option<(u64, i64)> {
         let key = format!("volume_used:{service}/{env}");

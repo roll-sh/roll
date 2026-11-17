@@ -1,0 +1,15 @@
+# Metabase: dashboards and questions over your data (metabase.com). Its own settings live in a
+# roll Postgres database; connect the databases it reads from its admin pages.
+[apps.metabase]
+image = "metabase/metabase:v0.56.x"
+port = 3000
+links = ["db"]
+[apps.metabase.run]
+health_path = "/api/health"
+health_timeout_s = 300
+memory_mb = 2048
+[apps.metabase.variables]
+MB_DB_CONNECTION_URI = "${{ DATABASE_URL }}"
+MB_SITE_URL = "${{ ROLL_PUBLIC_URL }}"
+[databases.db]
+kind = "postgres"

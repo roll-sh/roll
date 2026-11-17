@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
+import { approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, presetFor, presetRules, publicJwk, rulesOf, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -11,6 +11,8 @@ describe("access", () => {
   it("connects clients with OAuth unless a token is given, and never puts a token in an OAuth config", () => {
     const url = "https://api.roll.sh/v1/mcp";
     expect(mcpConfig("claude-code", url).text).toBe(`claude mcp add --transport http roll ${url}`);
+    // A URL with a mode is one shell word: `&` would end the command and run it in the background.
+    expect(mcpConfig("claude-code", `${url}?tools=search&lockdown=1`).text).toBe(`claude mcp add --transport http roll '${url}?tools=search&lockdown=1'`);
     expect(mcpConfig("cursor", url).text).not.toContain("Authorization");
     expect(mcpConfig("claude-code", url, "rlt_x").text).toContain('--header "Authorization: Bearer rlt_x"');
     expect(JSON.parse(mcpConfig("vscode", url, "rlt_x").text).servers.roll).toEqual({ type: "http", url, headers: { Authorization: "Bearer rlt_x" } });
@@ -134,5 +136,16 @@ describe("the checkup", () => {
   it("puts the most serious first", () => {
     const c = (id: string, ...kinds: string[]) => ({ grant: { id }, findings: kinds.map((kind) => ({ kind })) }) as never;
     expect(byConcern([c("a", "narrower"), c("b", "never_expires"), c("c", "everything", "never_expires"), c("d", "never_expires", "unused")]).map((x: { grant: { id: string } }) => x.grant.id)).toEqual(["c", "d", "b", "a"]);
+  });
+});
+
+describe("machine clients", () => {
+  it("turns openssl's PEM public keys into the JWKs the API takes, and refuses a private key", () => {
+    const ed = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA5rj3iN7HTU2KOZ5TXM2Zyw8+3iISgidPeqHONeMvZQM=\n-----END PUBLIC KEY-----\n";
+    expect(publicJwk(ed)).toEqual({ jwk: { kty: "OKP", crv: "Ed25519", x: "5rj3iN7HTU2KOZ5TXM2Zyw8-3iISgidPeqHONeMvZQM" } });
+    const ec =
+      "-----BEGIN PUBLIC KEY-----\r\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0CXl01/W8B09OrWXFui602a0TapW\r\nrUnzlc/PDXFBLWXU0czXjt63cFk2Zkq8vPXit79F07TIc2OQ08izssxVEg==\r\n-----END PUBLIC KEY-----";
+    expect(publicJwk(ec)).toEqual({ jwk: { kty: "EC", crv: "P-256", x: "0CXl01_W8B09OrWXFui602a0TapWrUnzlc_PDXFBLWU", y: "1NHM147et3BZNmZKvLz14re_RdO0yHNjkNPIs7LMVRI" } });
+    expect(publicJwk("-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEI…\n-----END PRIVATE KEY-----")).toHaveProperty("problem");
   });
 });

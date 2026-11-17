@@ -141,6 +141,10 @@ pub fn check_top_metrics_runtime(aggs: &Map, def: &dyn Fn(&str) -> Option<Value>
     Ok(())
 }
 
+/// Aggregations whose users can't give a `script`: a runtime field's script reaches them under
+/// search-aggs' internal key instead.
+const UNSCRIPTABLE: &[&str] = &["geo_bounds", "geohash_grid", "geotile_grid", "geohex_grid", "ip_range", "ip_prefix"];
+
 /// Aggregations whose values source takes a `format`.
 const FORMATTABLE: &[&str] = &[
     "terms", "rare_terms", "significant_terms", "histogram", "date_histogram", "auto_date_histogram", "range", "date_range", "min", "max", "avg", "sum", "stats",
@@ -165,7 +169,8 @@ pub fn rewrite_runtime(aggs: &mut Map, def: &dyn Fn(&str) -> Option<Value>) {
                 if let Value::Obj(sm) = super::runtime::agg_script(&f, &d) {
                     for (sk, sv) in sm {
                         if !(sk == "value_type" && m.contains_key("value_type")) {
-                            m.insert(sk, sv);
+                            let key = if sk == "script" && UNSCRIPTABLE.contains(&k.as_str()) { search_aggs::values::RUNTIME_SCRIPT.to_string() } else { sk };
+                            m.insert(key, sv);
                         }
                     }
                 }

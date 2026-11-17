@@ -149,7 +149,7 @@ pub(crate) fn in_use(c: &code_sql::Conn<'_>, project: &str, kind: &str, id: &str
 
 impl Secrets {
     pub fn rotators(&self, project: &str, caller: &Caller) -> Result<Vec<Rotator>> {
-        caller.need(Action::Read, &Scope::project(project))?;
+        caller.need(Action::Read, &Scope::whole(project))?;
         self.project(project)?;
         self.db.read(|c| {
             Ok(c.query("SELECT id, name, host, created_at, created_by FROM rotators WHERE project_id = ? ORDER BY name", [project], |r| {
