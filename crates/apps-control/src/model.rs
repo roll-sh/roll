@@ -1142,6 +1142,9 @@ pub struct Environment {
     /// Headers its answers carry ([]: none).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<HeaderRule>,
+    /// Paths another service of the project answers ([]: none).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<Route>,
     /// What its code may reach: anything (`open`), or roll and the listed hosts (`roll`).
     pub egress: Egress,
     /// Hosts its egress proxy refused lately (its code tried them; they aren't listed).
@@ -1282,6 +1285,42 @@ pub struct HeaderRule {
 
 /// The most header rules an environment has.
 pub const MAX_HEADER_RULES: usize = 20;
+
+/// A path on an environment's domains answered by another service of its project (Vercel's
+/// rewrites to another project, Cloud Run's URL maps): that service's environment of the same
+/// name, the path and query as they came.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Route {
+    /// A path, or a prefix ending in `*` (`/api/*`).
+    pub path: String,
+    /// The other service, by its name in the project.
+    pub service: String,
+}
+
+/// The most routes an environment has.
+pub const MAX_ROUTES: usize = 20;
+
+impl Route {
+    pub fn check(self) -> Result<Route> {
+        let p = &self.path;
+        if !p.starts_with('/') || p.len() > 512 || p.strip_suffix('*').unwrap_or(p).contains('*') || !p.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(Error::BadRequest(format!("routes: {p:?} is a path or a prefix ending in * (/api/*)")));
+        }
+        if self.service.is_empty() || self.service.len() > 64 {
+            return Err(Error::BadRequest("routes: service is another service's name in the project".into()));
+        }
+        Ok(self)
+    }
+
+    /// Whether it takes `path`.
+    pub fn takes(&self, path: &str) -> bool {
+        match self.path.strip_suffix('*') {
+            Some(prefix) => path.starts_with(prefix),
+            None => path == self.path,
+        }
+    }
+}
 
 /// What an environment's code may reach (docs/apps/README.md, "Egress"; roll previews'
 /// `egress`): anything, or only roll (its links, the project's other services there) and

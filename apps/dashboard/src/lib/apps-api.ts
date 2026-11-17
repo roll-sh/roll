@@ -355,6 +355,28 @@ export function parseHeaders(text: string): HeaderRule[] {
 }
 
 /** The rules as one header a line, as `parseHeaders` reads them. */
+/** A path (a prefix ends in `*`) another service of the project answers. */
+export interface RouteRule {
+  path: string;
+  service: string;
+}
+
+/** Routes as lines, `/api/* api`. */
+export function parseRoutes(text: string): RouteRule[] {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const [path, service = ""] = l.split(/\s+/);
+      return { path, service };
+    });
+}
+
+export function formatRoutes(rules: RouteRule[]): string {
+  return rules.map((r) => `${r.path} ${r.service}`).join("\n");
+}
+
 export function formatHeaders(rules: HeaderRule[]): string {
   return rules.flatMap((r) => Object.entries(r.set).map(([k, v]) => `${r.replace ? "!" : ""}${r.path ? `${r.path} ` : ""}${k}: ${v}`)).join("\n");
 }
@@ -408,6 +430,8 @@ export interface EnvironmentPut {
   /** Its firewall rules, in order (the first match decides); null or [] for none. */
   firewall?: FirewallRule[] | null;
   headers?: HeaderRule[] | null;
+  /** Paths another service of the project answers (its environment of the same name); null or [] for none. */
+  routes?: RouteRule[] | null;
   /** Its own size and scale over the service's; a null field goes back to the service's. */
   run?: Partial<Record<EnvRunField, number | null>>;
 }
@@ -514,6 +538,8 @@ export interface Environment extends EnvironmentSummary {
   firewall?: FirewallRule[];
   /** Headers its answers carry. */
   headers?: HeaderRule[];
+  /** Paths another service of the project answers. */
+  routes?: RouteRule[];
   created_at: number;
 }
 

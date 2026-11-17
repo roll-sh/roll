@@ -1352,6 +1352,7 @@ impl Apps {
             rate_limit: r.rate_limit,
             firewall: r.firewall.clone(),
             headers: r.headers.clone(),
+            routes: r.routes.clone(),
             egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&closed_network_name(&svc.project, &r.name), &r.egress.hosts) } else { Vec::new() },
             egress: r.egress.clone(),
             scaling,
@@ -1384,7 +1385,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused", "held", "hostname", "traces", "egress", "vitals"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "paused", "held", "hostname", "traces", "egress", "vitals"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1480,6 +1481,27 @@ impl Apps {
                     .collect::<Result<Vec<_>>>()?,
             ),
             Some(_) => return Err(Error::BadRequest(format!("headers is at most {} rules, or null", crate::model::MAX_HEADER_RULES))),
+        };
+        // Paths another service of the project answers: each named service must be there (and
+        // not this one: it would answer itself).
+        let routes = match o.get("routes") {
+            None => None,
+            Some(Value::Null) => Some(Vec::new()),
+            Some(Value::Array(a)) if a.len() <= crate::model::MAX_ROUTES => {
+                let rs = a
+                    .iter()
+                    .map(|r| serde_json::from_value::<crate::model::Route>(r.clone()).map_err(|e| Error::BadRequest(format!("routes: {e}"))).and_then(crate::model::Route::check))
+                    .collect::<Result<Vec<_>>>()?;
+                for r in &rs {
+                    match self.project_service(service, &r.service).await {
+                        Some(id) if id == service => return Err(Error::BadRequest(format!("routes: {} is this service", r.service))),
+                        Some(_) => {}
+                        None => return Err(Error::BadRequest(format!("routes: the project has no service named {}", r.service))),
+                    }
+                }
+                Some(rs)
+            }
+            Some(_) => return Err(Error::BadRequest(format!("routes is at most {} routes, or null", crate::model::MAX_ROUTES))),
         };
         // What its code may reach: `{mode: "roll", hosts?}` closes its network, null or
         // `{mode: "open"}` opens it.
@@ -1718,6 +1740,12 @@ impl Apps {
         if let Some(rules) = headers {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_headers(&sid, &e, &rules)).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(routes) = routes {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_routes(&sid, &e, &routes)).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
         }
@@ -2760,7 +2788,7 @@ impl Apps {
         let (sid, e) = (live.service.clone(), live.env.clone());
         let (row, traces) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.traces_on(&sid, &e)?))).await?;
         let allow = row.allow_ips.iter().filter_map(|r| r.cidr.parse::<ipnet::IpNet>().ok()).collect();
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, traces, vitals: row.vitals });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }
