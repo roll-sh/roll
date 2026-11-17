@@ -2503,7 +2503,7 @@
               }
             }
           },
-          "description": "`{ message? }`; `Idempotency-Key` header optional (a retry with it answers the first call's redeploy; a key a deploy of another kind used is a 409)"
+          "description": "`{ message?, closed? }` (`closed` as `NewDeploy`'s); `Idempotency-Key` header optional (a retry with it answers the first call's redeploy; a key a deploy of another kind used is a 409)"
         },
         "responses": {
           "202": {

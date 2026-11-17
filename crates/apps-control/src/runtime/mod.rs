@@ -11,6 +11,7 @@ pub mod aws;
 pub mod codebuild;
 pub mod docker;
 pub mod egress;
+pub mod ingress;
 pub mod engine;
 pub mod fake;
 pub mod fargate;

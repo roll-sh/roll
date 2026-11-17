@@ -1096,14 +1096,20 @@ async fn an_uploaded_image_runs_and_names_nothing_on_the_host() {
     delete_for_good(&w.api, &id).await;
 }
 
-/// Egress `roll` on real Docker: the instance runs on a network with no route out and is still
-/// served (at its address there); a direct connection out fails, and its proxy (through the
-/// relay on that network) refuses a host the environment doesn't list, which then shows.
+/// Egress `roll` on real Docker: the instance runs on a network with no route out and no address
+/// of the host's (an isolated gateway), and is still served (through its sandbox's socket); a
+/// direct connection out fails, so does one to a service the host serves on every interface,
+/// and its proxy (through the relay on that network) refuses a host the environment doesn't
+/// list, which then shows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_closed_environment_reaches_nothing_but_its_listed_hosts() {
     let Some(w) = docker_world().await else { return };
     use apps_control::runtime::docker::docker;
-    let start = "(env -u http_proxy -u HTTP_PROXY wget -q -T 3 -O /dev/null http://1.1.1.1/ && echo out:open || echo out:closed; wget -T 5 -O /dev/null http://unlisted.example.com/ 2>&1 | grep -o '403' | head -1 | sed 's/^/proxy:/') > /tmp/got; mkdir -p /tmp/w; cp /tmp/got /tmp/w/index.html; httpd -f -p $PORT -h /tmp/w";
+    // A service of the host's on every interface: where the network's gateway would be, the
+    // host answers it (the network's first address, `.1`).
+    let host_service = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    let hp = host_service.local_addr().unwrap().port();
+    let start = format!("(env -u http_proxy -u HTTP_PROXY wget -q -T 3 -O /dev/null http://1.1.1.1/ && echo out:open || echo out:closed; gw=$(ip route | awk '/scope link/{{split($1,a,\"/\"); split(a[1],o,\".\"); print o[1]\".\"o[2]\".\"o[3]\".1\"; exit}}'); nc -z -w 2 $gw {hp} && echo host:open || echo host:closed; wget -T 5 -O /dev/null http://unlisted.example.com/ 2>&1 | grep -o '403' | head -1 | sed 's/^/proxy:/') > /tmp/got; mkdir -p /tmp/w; cp /tmp/got /tmp/w/index.html; httpd -f -p $PORT -h /tmp/w");
     let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "closed", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"port": 8080, "start": start, "memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
@@ -1131,11 +1137,12 @@ async fn a_closed_environment_reaches_nothing_but_its_listed_hosts() {
     let host = svc["environments"][0]["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
     let resp = w.public.clone().oneshot(Request::get("/").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
     let body = String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
-    assert_eq!(body.split_whitespace().collect::<Vec<_>>(), ["out:closed", "proxy:403"], "{body}");
+    assert_eq!(body.split_whitespace().collect::<Vec<_>>(), ["out:closed", "host:closed", "proxy:403"], "{body}");
+    drop(host_service);
     let (_, e) = call(&w.api, "GET", &env, None, "application/json", None).await;
     assert_eq!(e["egress_refused"], json!([{"host": "unlisted.example.com"}]), "{e}");
     let closed = apps_control::closed_network_name(&w.project, "production");
-    assert_eq!(docker(&["network", "inspect", "-f", "{{.Internal}}", &closed]).await.unwrap(), "true");
+    assert_eq!(docker(&["network", "inspect", "-f", "{{.Internal}} {{index .Options \"com.docker.network.bridge.gateway_mode_ipv4\"}}", &closed]).await.unwrap(), "true isolated");
     delete_for_good(&w.api, &id).await;
     for _ in 0..100 {
         if docker(&["network", "inspect", &closed]).await.is_err() {
