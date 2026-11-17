@@ -2805,6 +2805,12 @@ guard's scans audited as `secrets.guard`, for roll MCP) and #173 (MongoDB Atlas,
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
+1b. **A screenshot pass over the dashboard** (2026-11-17, #132, #136, #165, #166, #173): it found
+   textareas one line tall (a fixed height beat `rows`; now `textareaField` everywhere, main's CA
+   boxes too, on #144), cut-off labels, Active Directory's fields offered for an OpenLDAP directory
+   (link targets now ask each resource for its fields), and a gateway's token refused on a server
+   without sign-in (the operator now makes it, as `POST /v1/access/tokens` does). All fixed and
+   carried up the stacks.
 2. **Keeping the queue level with main** (done 2026-11-17 for all fifteen that conflicted, each
    pushed on its own checks; #76 now also marks syncs when a product's own route changes a
    credential, as #74 put that in `source_changed`). **Landing the stacks together where it saves a
