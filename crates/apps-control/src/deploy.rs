@@ -871,6 +871,8 @@ impl Apps {
                 .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh), snapshot: Some(&snap) }))
                 .await?;
             anyhow::ensure!(ok, "another deploy switched this environment meanwhile");
+            // What the old deployment answered isn't this one's.
+            self.responses.clear(&crate::env_key(&d.service, &d.environment));
             Ok(())
         }
         .await;
@@ -1461,6 +1463,8 @@ impl Apps {
     }
 
     async fn release_service(self: &Arc<Self>, service: &str) {
+        // Its cached answers: the next owner's deploys never clear this node's.
+        self.responses.clear_service(service);
         // Another node owns it now: what this one cached may change there, and its shells go.
         {
             let mut cache = self.access.lock();

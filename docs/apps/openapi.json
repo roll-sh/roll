@@ -1107,6 +1107,53 @@
         "x-roll-action": "deploy*; with `variables_from` also reveal in that environment (it copies its values)"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/cache/purge": {
+      "post": {
+        "description": "Answers `{ purged }`: how many kept answers went (on-demand revalidation, \"Public traffic\").",
+        "operationId": "postServicesIdEnvironmentsEnvCachePurge",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ paths? }` (1–100 absolute paths, any query; a trailing `*` is a prefix; none: everything)"
+        },
+        "responses": {
+          "200": {
+            "description": "`{ purged }`: how many kept answers went (on-demand revalidation, \"Public traffic\")"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Purge environment",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "deploy*"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/deploys": {
       "get": {
         "description": "Answers `Deployment[]`, newest first, 100 at most; `before` (unix ms, the last one's `created_at`): the next page.",

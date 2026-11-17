@@ -41,6 +41,7 @@ pub mod model;
 pub mod net;
 pub mod notify;
 pub mod public;
+pub mod resp_cache;
 pub mod runtime;
 pub mod shell;
 pub mod spend;
@@ -247,6 +248,8 @@ pub struct Apps {
     scaling: std::sync::atomic::AtomicBool,
     /// The App's queued events are being run on this node.
     github_running: std::sync::atomic::AtomicBool,
+    /// Web services' answers a shared cache may keep, per environment (`resp_cache`).
+    pub(crate) responses: resp_cache::ResponseCache,
     /// Static sites' file indexes, by image digest, as this node read them.
     sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Per environment, for the live site's key: its earlier static deployments' site keys.
@@ -390,6 +393,7 @@ impl Apps {
             watching_secrets: std::sync::atomic::AtomicBool::new(false),
             scaling: std::sync::atomic::AtomicBool::new(false),
             github_running: std::sync::atomic::AtomicBool::new(false),
+            responses: resp_cache::ResponseCache::default(),
             sites: Mutex::new(HashMap::new()),
             earlier_sites: Mutex::new(HashMap::new()),
             site_loads: Mutex::new(HashMap::new()),
@@ -812,6 +816,23 @@ impl Apps {
                 Err(e) => self.logs.sink(format!("env:{service}/production"), crate::logs::Stream::System).line(format!("GitHub: {e}")),
             }
         }
+    }
+
+    /// `POST …/cache/purge {paths?}`: the environment's kept answers for those paths (a trailing
+    /// `*` is a prefix; at most 100), or all of them. Runs on the owner, which keeps them.
+    pub async fn purge_cache(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Value> {
+        self.service_env(service, env).await?;
+        let paths = match body.get("paths") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(a)) if !a.is_empty() && a.len() <= 100 => Some(
+                a.iter()
+                    .map(|p| p.as_str().filter(|p| p.starts_with('/') && p.len() <= 2048).map(str::to_string).ok_or_else(|| Error::BadRequest("paths are absolute paths (`/blog/*` for a prefix)".into())))
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            Some(_) => return Err(Error::BadRequest("paths is 1–100 paths, or left out for everything".into())),
+        };
+        let n = self.responses.purge(&env_key(service, env), paths.as_deref());
+        Ok(json!({ "purged": n }))
     }
 
     /// Where roll's GitHub App is, once rolld has it. Set once.
@@ -1654,6 +1675,7 @@ impl Apps {
 
     async fn teardown_live(&self, service: &str, env: &str) {
         self.cancel_jobs(service, env);
+        self.responses.clear(&env_key(service, env));
         let live = self.lives.lock().remove(&env_key(service, env));
         if let Some(l) = live {
             l.shutdown().await;

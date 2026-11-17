@@ -85,6 +85,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore` | | `Backup` (the volume as it was; the environment asleep meanwhile) | delete (it replaces the volume's files) |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel` | | `Deployment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/restart` | | 202 `Environment` | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/cache/purge` | `{ paths? }` (1–100 absolute paths, any query; a trailing `*` is a prefix; none: everything) | `{ purged }`: how many kept answers went (on-demand revalidation, "Public traffic") | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/instances/{name}/restart` | | `Environment` (a web service's: a fresh instance answers before this one drains; 404 for no such instance, 409 if the fresh one didn't start: this one keeps serving) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/sleep` | | `Environment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/wake` | | `Environment` | write (it starts compute someone pays for; a visitor's request wakes a public environment through the proxy, not this route) |
@@ -601,3 +602,12 @@ proxy adds `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host` and `X-Req
 strips `X-Roll-*` request headers. A service that can't wake in `wake_timeout` answers 503 with
 `Retry-After: 5` and a small page; a service with no deployment answers 404 with a page that
 says so.
+
+A 200 whose app lets a shared cache keep it (`CDN-Cache-Control: max-age=N`, else
+`Cache-Control: s-maxage=N`, with `stale-while-revalidate=M` honoured; never with `private`,
+`no-store`, `no-cache`, `Vary: *`, `Set-Cookie`, a body over 1 MiB or of unknown length) answers
+the environment's next GET or HEAD of the same path and query (and the headers it `Vary`s on)
+from the owner's cache, before anything wakes: `X-Roll-Cache: HIT`, `STALE` (fetched again in the
+background), or `MISS` when it was just kept, with `Age`. A request with `Authorization`, a
+deployment's own URL, a gradual rollout and a preview's feedback page never use it. A new live
+deployment empties it, and so does `POST …/cache/purge` (all of it, or some paths).
