@@ -379,6 +379,44 @@ async fn people_see_only_their_own_clusters() {
     assert!(all["storage"].is_string() && all["cache"].is_object(), "{all}");
 }
 
+/// A person's clusters and always-on clusters are capped (`--search-max-*-per-person`); branches
+/// count toward the parent's owner, and the operator and admins aren't held to it.
+#[tokio::test]
+async fn people_are_held_to_their_cluster_caps() {
+    use reqwest::Method;
+    let e = env_with(|c| c.person_caps = search_control::store::Caps { clusters: 3, always_on: 1 }).await;
+    let create = |name: &str, idle: Option<i64>| json!({ "name": name, "idle_timeout_s": idle });
+    assert_eq!(e.call_as("alice", Method::POST, "/v1/search/clusters", Some(create("a1", None))).await.0, 200);
+    assert_eq!(e.call_as("alice", Method::POST, "/v1/search/clusters", Some(create("a2", Some(0)))).await.0, 200);
+    let (_, info) = e.call_as("alice", Method::GET, "/v1/search", None).await;
+    assert_eq!(info["caps"], json!({ "clusters": 3, "always_on": 1 }));
+
+    // A second always-on one, made or switched to: 409, and the cap still lets a2 change.
+    let (s, v) = e.call_as("alice", Method::POST, "/v1/search/clusters", Some(create("a3", Some(0)))).await;
+    let msg = v["error"].as_str().unwrap_or_default();
+    assert!(s == 409 && msg.starts_with("you have 1 always-on") && msg.contains("may have 1") && msg.contains("sleeps when idle") && msg.contains("--search-max-always-on-per-person"), "{s} {v}");
+    let (s, v) = e.call_as("alice", Method::PATCH, "/v1/search/clusters/a1", Some(json!({ "idle_timeout_s": 0 }))).await;
+    assert_eq!((s, v["error"].as_str()), (409, Some(msg)));
+    assert_eq!(e.call_as("alice", Method::PATCH, "/v1/search/clusters/a2", Some(json!({ "max_in_flight": 8 }))).await.0, 200);
+
+    // A branch counts: the third cluster is one, and past the cap neither a create nor a branch passes.
+    assert_eq!(e.call_as("alice", Method::POST, "/v1/search/clusters/a1/branches", Some(json!({ "name": "a1-dev" }))).await.0, 200);
+    let (s, v) = e.call_as("alice", Method::POST, "/v1/search/clusters", Some(create("a4", None))).await;
+    let msg = v["error"].as_str().unwrap_or_default();
+    assert!(s == 409 && msg.starts_with("you have 3 search clusters") && msg.contains("may have 3") && msg.contains("--search-max-clusters-per-person"), "{s} {v}");
+    let (s, v) = e.call_as("alice", Method::POST, "/v1/search/clusters", Some(json!({ "name": "a1-x", "parent": "a1" }))).await;
+    assert_eq!((s, v["error"].as_str()), (409, Some(msg)));
+    assert!(e.control.store.by_name("a1-x").await.unwrap().is_none());
+
+    // An admin isn't capped, even cutting a branch that is alice's or switching hers to always-on.
+    let (s, cut) = e.call_as("admin", Method::POST, "/v1/search/clusters", Some(json!({ "name": "a1-fix", "parent": "a1" }))).await;
+    assert_eq!((s, cut["owner"].as_str()), (200, Some("usr_alice")), "{cut}");
+    assert_eq!(e.call_as("admin", Method::PATCH, "/v1/search/clusters/a1", Some(json!({ "idle_timeout_s": 0 }))).await.0, 200);
+    assert!(e.call_as("admin", Method::GET, "/v1/search", None).await.1["caps"].is_null());
+    // Alice's count toward nobody else: bob still makes his.
+    assert_eq!(e.call_as("bob", Method::POST, "/v1/search/clusters", Some(create("b1", None))).await.0, 200);
+}
+
 #[tokio::test]
 async fn branches() {
     let e = env().await;
