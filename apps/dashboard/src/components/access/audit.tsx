@@ -114,7 +114,7 @@ export function Audit({ grant }: { grant?: string }) {
   );
 }
 
-const DECISION: Record<string, string> = { allow: "text-muted", ask: "text-accent", deny: "text-danger", revoke: "text-danger" };
+const DECISION: Record<string, string> = { allow: "text-muted", sign_in: "text-muted", ask: "text-accent", deny: "text-danger", revoke: "text-danger", revoke_client: "text-danger" };
 
 function Row({ e, onResource }: { e: AuditEvent; onResource: (resource: string) => void }) {
   const [open, setOpen] = useState(false);
@@ -124,7 +124,7 @@ function Row({ e, onResource }: { e: AuditEvent; onResource: (resource: string) 
       <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex w-full items-center gap-3 px-4 py-2 text-left text-[12px] hover:bg-white/[0.02]">
         <ChevronRight className={`size-3 shrink-0 text-subtle transition-transform duration-150 ${open ? "rotate-90" : ""}`} />
         <span className="w-16 shrink-0 text-subtle">{relative(e.at)}</span>
-        <span className={`w-16 shrink-0 truncate ${DECISION[e.decision] ?? "text-subtle"}`}>{e.decision}</span>
+        <span className={`w-24 shrink-0 truncate ${DECISION[e.decision] ?? "text-subtle"}`} title={e.decision}>{e.decision}</span>
         <span className="w-28 shrink-0 truncate">{auditWho(e)}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{what}</span>
         <span className="hidden w-40 shrink-0 truncate text-muted sm:block">
