@@ -431,7 +431,7 @@ impl Engine {
             let feedback = s.feedback && r.change_id.is_some() && access_token.is_some();
             // Egress too: a service moves onto (or off) the preview's own network by restarting.
             let fingerprint = config_fingerprint(&vars, access_token.is_some() && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps)
-                + &if s.egress == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() };
+                + &if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() };
             let config_moved = self.store.service_config(&r.id, &spec.name)?.as_deref() != Some(fingerprint.as_str());
             // The head it ran stays reachable at a URL of its own (Vercel's per-push URLs): the
             // change's own services on the runtime, a trusted change's.
@@ -471,7 +471,7 @@ impl Engine {
                     access_token: access_token.clone(),
                     bypass_sha256: bypass.clone(),
                     feedback,
-                    egress: s.egress,
+                    egress: s.egress_for(r.trusted),
                     egress_hosts: s.egress_hosts.clone(),
                 };
                 self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
@@ -878,7 +878,15 @@ impl Engine {
         set(&mut env, "ROLL_PREVIEW", r.id.clone());
         set(&mut env, "ROLL_REPO", r.repo.clone());
         set(&mut env, "ROLL_CHANGESET", r.build().to_string());
-        let run = crate::ports::SeedJob { preview: r.id.clone(), repo: r.repo.clone(), revision: r.build().to_string(), seed: job.clone(), env };
+        let run = crate::ports::SeedJob {
+            preview: r.id.clone(),
+            repo: r.repo.clone(),
+            revision: r.build().to_string(),
+            seed: job.clone(),
+            env,
+            egress: s.egress_for(r.trusted),
+            egress_hosts: s.egress_hosts.clone(),
+        };
         self.store.log(&r.id, &format!("{what}: {}", job.run.lines().next().unwrap_or("")))?;
         let ran = self.apps.seed(&run).await;
         for l in &leases {
