@@ -855,6 +855,15 @@ waits on a sibling PR reaching main is last.
    `/v1/access/leaks/github`.
 13. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't
    reach the daemon on the Docker bridge; run `pnpm test:pg` where they can (CI) before merging.
+14. **Step-up authorization (SEP-835), once clients do it:** a refused call could answer `403`
+   `WWW-Authenticate: Bearer error="insufficient_scope", scope=…` so the client reopens roll's
+   consent screen for the refused rule (as the refusal's widen link proposes it now). Not yet: today
+   it would take the refusal's explanation and `access_request_access` away from the main clients,
+   which don't step up (Claude Code's 403 path is open as anthropics/claude-code#44652, Codex's as
+   openai/codex#20518; ChatGPT reads `_meta["mcp/www_authenticate"]` on an in-band error). roll's
+   unit is a rule chosen at consent, not a scope, so the challenge's scope would name the rule
+   (`roll:add:<product>:<action>…`) for the consent screen to propose, never grant by itself.
+   Recheck those issues each pass.
 
 Considered and left out: a docs search tool (Supabase's `search_docs`): roll's docs are design docs (plans, `## Next` lists, test maps), and serving them would hand agents roadmap notes as how roll works; `roll://guide` covers using roll over MCP, until user-facing docs exist; a smaller default toolset (see Toolsets: it would drop tools from connections that use them; search mode is opt-in); a connection narrowed to one project (Supabase's `project_ref`): their
 tokens are account-wide; a roll token's rules already name projects, and the builder's presets
