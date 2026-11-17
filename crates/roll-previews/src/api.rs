@@ -535,7 +535,7 @@ struct LogsQuery {
 /// one event per line as it comes, with keep-alives.
 async fn requests(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
-    Ok(Json(json!({ "requests": e.requests(&id)? })))
+    Ok(Json(json!({ "requests": e.requests(&id).await? })))
 }
 
 async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>) -> crate::Result<Response> {
