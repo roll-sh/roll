@@ -2838,6 +2838,10 @@ guard's scans audited as `secrets.guard`, for roll MCP) and #173 (MongoDB Atlas,
    Atlas login (it now refuses Atlas hosts and points here). Users taking turns and a user per
    lease (`deleteAfterDate` as a backstop) through an organization service account, as Vault's
    Atlas plugin. Unconfirmed against a real account (the user's call).
+4d. **TOTP codes from a stored seed** (building: `feature/roll-secrets-totp`), as Vault's TOTP
+   engine and 1Password's one-time passwords: a `totp` key hands out its current code (`reveal`,
+   audited, never the code in the row) to CI that logs into a 2FA-protected service; the CLI, the
+   dashboard (a countdown) and the three clients.
 5. **Terraform resources and MCP tools for the new kinds** (SaaS rotators, Kubernetes clusters,
    backup schedules, rotation windows, directories, Snowflake accounts, ACME bindings): the
    resources once their routes are on main, the tools with roll MCP.
