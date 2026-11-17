@@ -138,7 +138,13 @@ impl roll_previews::ports::Apps for RollApps {
         if self.feedback {
             body["feedback"] = json!(t.feedback);
         }
-        self.api.call(Method::PUT, &path, Some(body)).await?;
+        let made = self.api.call(Method::PUT, &path, Some(body)).await?;
+        // Roll only holds the build too: roll apps builds a closed environment without its secret
+        // values (apps' #222, `build_closed`). One that doesn't say so would build with them on an
+        // open network, where a fork's head could send them out: nothing is deployed there.
+        if closed && made["build_closed"] != json!(true) {
+            anyhow::bail!("roll apps here doesn't build closed environments without their secrets (build_closed): under Roll only, nothing is deployed to it");
+        }
         // Every variable the preview sets: the branches' plain names and the project's overrides,
         // and each prefixed link to a branched parent pointed at the branch (a link is roll apps'
         // own variable, which would still reach production).
