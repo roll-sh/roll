@@ -207,6 +207,8 @@ pub struct FakeApps {
     /// The variables each service was last deployed with.
     pub vars: Mutex<HashMap<(String, String), Vars>>,
     pub removed: Mutex<Vec<(String, String)>>,
+    /// What each service was deployed able to reach.
+    pub egress: Mutex<HashMap<(String, String), roll_previews::settings::EgressRule>>,
     /// Seeds run (their DATABASE_URL), and the exit code the next ones give.
     pub seeds: Mutex<Vec<String>>,
     pub seed_exit: std::sync::atomic::AtomicI32,
@@ -260,6 +262,7 @@ impl Apps for FakeApps {
         self.deployed.lock().insert((t.preview.clone(), t.service.clone()), t.revision.clone());
         self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
         self.feedback.lock().insert((t.preview.clone(), t.service.clone()), t.feedback);
+        self.egress.lock().insert((t.preview.clone(), t.service.clone()), t.egress);
         Ok(None)
     }
     async fn catalog(&self, _project: &str) -> anyhow::Result<Option<Vec<roll_previews::ports::CatalogService>>> {

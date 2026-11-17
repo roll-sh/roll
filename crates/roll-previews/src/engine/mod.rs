@@ -531,7 +531,7 @@ impl Engine {
         let Ok(rows) = self.store.rows(None) else { return };
         for r in rows.into_iter().filter(|r| r.desired == Desired::Active) {
             let Ok(s) = self.store.settings(&r.project_id) else { continue };
-            if s.egress != crate::settings::EgressRule::Roll || s.egress_hosts.is_empty() {
+            if s.egress_for(r.trusted) != crate::settings::EgressRule::Roll || s.egress_hosts.is_empty() {
                 continue;
             }
             let local = match self.cluster.get() {

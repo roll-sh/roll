@@ -341,8 +341,10 @@ export interface PreviewSettings {
   mail?: "catch" | "deliver";
   /** What its services' code may reach: `open` (default) anything; `roll` only roll's own products (a network with no route out). */
   egress?: "open" | "roll";
-  /** With `egress: "roll"`: hosts outside roll its code may still reach (`api.stripe.com`, `*.sentry.io`), through a proxy that refuses anything else. */
+  /** With `egress: "roll"` (or `egress_forks: "roll"`, for forks): hosts outside roll its code may still reach (`api.stripe.com`, `*.sentry.io`), through a proxy that refuses anything else. */
   egress_hosts?: string[];
+  /** What a fork's preview (an untrusted head a writer approved) may reach when `egress` is `open`: `roll` (default) or `open`. */
+  egress_forks?: "open" | "roll";
   /** Branch the data as of a point in time where the product keeps history: `-24h`, `-30m`, `-7d`, or an RFC 3339 time (30 days back at most). */
   data_at?: string | null;
   /** A feedback button on its pages for people who came in through roll (link access). */

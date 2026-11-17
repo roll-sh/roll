@@ -75,6 +75,10 @@ async fn a_fork_waits_for_approval_and_a_failed_step_is_retried() {
     let p = e.engine.store.preview(&p.id).unwrap();
     assert_eq!(p.state, State::Ready, "{p:?}");
     assert_eq!(p.resources.len(), 1, "redis is skipped by the project's rules");
+    // Approved to run, not read for what it sends out: roll only, though the project's own
+    // previews reach anything (`egress_forks`).
+    let egress = e.apps.egress.lock().clone();
+    assert!(!egress.is_empty() && egress.values().all(|x| *x == roll_previews::settings::EgressRule::Roll), "{egress:?}");
 
     // A new push un-approves it: its services stop and it waits again.
     e.code.edit("chg_f", |c| {
