@@ -2905,6 +2905,25 @@ async fn a_worker_whose_health_command_fails_is_replaced() {
     assert!(log.contains("its health command failed 2 times in a row"), "{log}");
 }
 
+/// A sealed variable's value is `***` in the environment's log whoever prints it (the app, a
+/// trace, roll), and a link-free unsealed one shows as it is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sealed_value_never_reaches_the_log() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let vars = format!("/v1/apps/services/{id}/environments/production/variables");
+    let (st, b) = call(&w.api, "PATCH", &vars, Some(json!({"set": {"STRIPE_KEY": "sk_live_51Habc", "DATABASE_URL": "postgres://app:hunter2pw@db:5432/app", "GREETING": "hello-world"}, "seal": ["STRIPE_KEY"]}))).await;
+    assert!(st.is_success(), "{b}");
+    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/redeploy"), Some(json!({}))).await;
+    settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
+    let out = w.apps.logs.sink(format!("env:{id}/production"), apps_control::logs::Stream::Stdout).instance("roll-apps-x-0", d["id"].as_str().unwrap());
+    out.line("charging with sk_live_51Habc via postgres://app:hunter2pw@db:5432/app, hello-world");
+    let log = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs"), None).await.1.to_string();
+    assert!(log.contains("charging with *** via postgres://app:***@db:5432/app, hello-world"), "{log}");
+    assert!(!log.contains("sk_live_51Habc") && !log.contains("hunter2pw"), "{log}");
+}
+
 /// A crowd at a sleeping service wakes one instance; those waiting on a start slower than the
 /// wake timeout get a 503 page that says when to try again, and the retry gets the app.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

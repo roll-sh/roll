@@ -142,6 +142,53 @@ impl Log {
     }
 }
 
+/// The shortest value redacted: anything shorter (`1`, `true`, a port) is too common in a log
+/// to hide without hiding what the log says.
+const MIN_REDACT: usize = 6;
+/// The most values one log redacts (each line of a multi-line value counts).
+const MAX_REDACT: usize = 2000;
+/// The deployments' values a log keeps redacting (the live one, a canary, a few before).
+const REDACT_DEPLOYMENTS: usize = 8;
+
+/// Secret values taken out of a log's lines as they're written (GitHub Actions' masking): an
+/// environment's sealed and sensitive variables and its links' credentials, wherever a build
+/// step, the app, a job or roll prints one. Each becomes `***`.
+pub struct Redact(aho_corasick::AhoCorasick);
+
+impl Redact {
+    /// What redacts `values` (each, and each line of one over several), if any is long enough.
+    pub fn of<'a>(values: impl IntoIterator<Item = &'a str>) -> Option<Arc<Redact>> {
+        let mut v: Vec<&str> = values.into_iter().flat_map(|v| std::iter::once(v).chain(v.lines().filter(move |_| v.contains('\n')))).map(str::trim).filter(|v| v.len() >= MIN_REDACT).collect();
+        v.sort_unstable();
+        v.dedup();
+        v.truncate(MAX_REDACT);
+        if v.is_empty() {
+            return None;
+        }
+        aho_corasick::AhoCorasick::builder().match_kind(aho_corasick::MatchKind::LeftmostLongest).build(&v).ok().map(|a| Arc::new(Redact(a)))
+    }
+
+    /// The line with every value in it as `***`, or none when it holds none.
+    pub fn apply(&self, text: &str) -> Option<String> {
+        if !self.0.is_match(text) {
+            return None;
+        }
+        let mut out = String::with_capacity(text.len());
+        self.0.replace_all_with(text, &mut out, |_, _, dst| {
+            dst.push_str("***");
+            true
+        });
+        Some(out)
+    }
+}
+
+/// A log's redactions: each deployment's values (newest last), and all of them together.
+#[derive(Default)]
+struct Redactions {
+    by: Vec<(String, Vec<String>)>,
+    all: Option<Arc<Redact>>,
+}
+
 /// A log, an instance and a stream: where a trace is open.
 type TraceKey = (Arc<str>, Option<Arc<str>>, u8);
 
@@ -159,11 +206,13 @@ pub struct LogHub {
     tap_build: std::sync::atomic::AtomicBool,
     /// The traces open in each log's instance and stream: their kind and lines so far.
     traces: Mutex<HashMap<TraceKey, (crate::errors::Kind, usize)>>,
+    /// What each log takes out of its lines ([`Redact`]), by log key.
+    redactions: Mutex<HashMap<String, Redactions>>,
 }
 
 impl LogHub {
     pub fn new(objects: Option<Objects>) -> Arc<LogHub> {
-        Arc::new(LogHub { logs: Mutex::new(HashMap::new()), objects, tap: Mutex::new(None), tap_http: Default::default(), tap_build: Default::default(), traces: Mutex::new(HashMap::new()) })
+        Arc::new(LogHub { logs: Mutex::new(HashMap::new()), objects, tap: Mutex::new(None), tap_http: Default::default(), tap_build: Default::default(), traces: Mutex::new(HashMap::new()), redactions: Mutex::new(HashMap::new()) })
     }
 
     /// Every runtime line from now on, `(log key, line)`, at most `capacity` waiting.
@@ -181,6 +230,32 @@ impl LogHub {
 
     pub fn sink(self: &Arc<Self>, key: impl Into<String>, stream: Stream) -> LogSink {
         LogSink { hub: self.clone(), key: Arc::from(key.into()), stream, instance: None, deployment: None, redact: None }
+    }
+
+    /// From now on `key`'s lines have `deployment`'s secret `values` taken out, with the values of
+    /// the few deployments before it (an old instance still draining prints too).
+    pub fn redact(&self, key: &str, deployment: &str, values: Vec<String>) {
+        let mut all = self.redactions.lock();
+        let r = all.entry(key.to_string()).or_default();
+        r.by.retain(|(d, _)| d != deployment);
+        r.by.push((deployment.to_string(), values));
+        if r.by.len() > REDACT_DEPLOYMENTS {
+            r.by.remove(0);
+        }
+        r.all = Redact::of(r.by.iter().flat_map(|(_, v)| v.iter().map(String::as_str)));
+    }
+
+    /// `to` redacts what `from` does (a job's log, its environment's values).
+    pub fn redact_like(&self, from: &str, to: &str) {
+        let mut all = self.redactions.lock();
+        if let Some(r) = all.get(from) {
+            let copy = Redactions { by: r.by.clone(), all: r.all.clone() };
+            all.insert(to.to_string(), copy);
+        }
+    }
+
+    fn redaction(&self, key: &str) -> Option<Arc<Redact>> {
+        self.redactions.lock().get(key).and_then(|r| r.all.clone())
     }
 
     /// Whether an app's line starts a stack trace, goes on with the one open in its instance and
@@ -406,12 +481,14 @@ impl LogHub {
         let mut logs = self.logs.lock();
         if logs.get(key).is_some_and(|l| l.unflushed.is_empty() && l.dropped == 0) {
             logs.remove(key);
+            self.redactions.lock().remove(key);
         }
     }
 
     /// Forget a log in memory (a deleted environment); its chunks expire with the bucket's rule.
     pub fn forget(&self, key: &str) {
         self.logs.lock().remove(key);
+        self.redactions.lock().remove(key);
     }
 
     pub async fn delete(&self, key: &str) {
@@ -460,6 +537,9 @@ impl LogSink {
         let mut text = text.as_ref().trim_end_matches(['\r', '\n']).to_string();
         if let Some(r) = &self.redact {
             text = text.replace(&**r, "…");
+        }
+        if let Some(t) = self.hub.redaction(&self.key).and_then(|r| r.apply(&text)) {
+            text = t;
         }
         if text.len() > LINE_MAX {
             let mut cut = LINE_MAX;
@@ -535,6 +615,22 @@ pub async fn pump(mut r: impl tokio::io::AsyncRead + Unpin, sink: LogSink) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A log's secret values are `***` wherever a line holds them, a multi-line value's lines too,
+    /// and a value too short to hide is left.
+    #[tokio::test]
+    async fn secret_values_are_taken_out_of_a_logs_lines() {
+        let hub = LogHub::new(None);
+        hub.redact("env:svc_x/production", "dep_a", vec!["s3cr3t-token".into(), "abc".into(), "-----BEGIN KEY-----\nMIIBOgIBAAJBAKj34GkxFhD9\n-----END KEY-----".into()]);
+        let sink = hub.sink("env:svc_x/production", Stream::Stdout);
+        sink.line("auth with s3cr3t-token then abc");
+        sink.line("MIIBOgIBAAJBAKj34GkxFhD9");
+        hub.redact_like("env:svc_x/production", "job:job_1");
+        hub.sink("job:job_1", Stream::Stdout).line("s3cr3t-token");
+        let got: Vec<String> = hub.tail("env:svc_x/production", 10, None).await.into_iter().map(|l| l.text).collect();
+        assert_eq!(got, ["auth with *** then abc", "***"]);
+        assert_eq!(hub.tail("job:job_1", 10, None).await[0].text, "***");
+    }
 
     /// A trace's lines are marked as one however another instance's lines fall between them,
     /// and the first line that doesn't go on ends it.

@@ -383,6 +383,24 @@ pub struct ResolvedVars {
     pub sealed: BTreeSet<String>,
 }
 
+impl ResolvedVars {
+    /// What its logs never show ([`logs::Redact`]): sealed and sensitive values, a link's
+    /// credentials (by their names), and the password in any URL that carries one.
+    pub fn secret_values(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (k, v) in &self.vars {
+            let credential = ["PASSWORD", "SECRET", "TOKEN", "API_KEY", "PRIVATE_KEY", "ACCESS_KEY"].iter().any(|w| k.to_ascii_uppercase().contains(w));
+            if self.sealed.contains(k) || (credential && self.sources.get(k).is_some_and(|s| *s == "link")) {
+                out.push(v.clone());
+            }
+            if let Some(p) = url::Url::parse(v).ok().and_then(|u| u.password().map(|p| percent_encoding::percent_decode_str(p).decode_utf8_lossy().into_owned())) {
+                out.push(p);
+            }
+        }
+        out
+    }
+}
+
 impl Apps {
     pub fn new(cfg: AppsConfig, store: Store, deps: Deps) -> Arc<Apps> {
         let cfg_allow = cfg.allow_private;
