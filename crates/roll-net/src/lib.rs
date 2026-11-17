@@ -6,8 +6,9 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-/// Loopback, private, link-local, CGNAT, multicast, unspecified and documentation ranges (and
-/// IPv4 inside IPv6).
+/// Loopback, private, link-local, CGNAT, benchmarking, the 6to4 relay anycast, multicast,
+/// unspecified and documentation ranges (and IPv4 inside IPv6: mapped, compatible, NAT64, 6to4,
+/// and Teredo, refused whole).
 pub fn private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => {
@@ -22,6 +23,10 @@ pub fn private_ip(ip: IpAddr) -> bool {
                 || o[0] == 0
                 || (o[0] == 100 && (o[1] & 0xc0) == 64)
                 || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+                // Benchmarking (198.18.0.0/15), routed inside some clouds' networks.
+                || (o[0] == 198 && (o[1] & 0xfe) == 18)
+                // The 6to4 relay anycast (192.88.99.0/24): whichever relay is nearest.
+                || (o[0] == 192 && o[1] == 88 && o[2] == 99)
                 || o[0] >= 240
         }
         IpAddr::V6(v) => {
@@ -36,6 +41,15 @@ pub fn private_ip(ip: IpAddr) -> bool {
                 return true;
             }
             if s[0] == 0x2002 && private_ip(IpAddr::V4(embedded(s[1], s[2]))) {
+                return true;
+            }
+            // IPv4-compatible (::a.b.c.d, deprecated but still parsed): the address it embeds
+            // (`::` and `::1` are 0.0.0.0 and 0.0.0.1, refused too).
+            if s[..6] == [0, 0, 0, 0, 0, 0] && private_ip(IpAddr::V4(embedded(s[6], s[7]))) {
+                return true;
+            }
+            // Teredo (2001::/32) carries an IPv4 server and an obfuscated client: refused whole.
+            if s[0] == 0x2001 && s[1] == 0 {
                 return true;
             }
             v.is_loopback() || v.is_unspecified() || v.is_multicast() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 || s[0] == 0x2001 && s[1] == 0xdb8
@@ -80,14 +94,15 @@ mod tests {
     #[test]
     fn private_ranges() {
         let v4 = |a, b, c, d| IpAddr::V4(Ipv4Addr::new(a, b, c, d));
-        for ip in [v4(127, 0, 0, 1), v4(10, 1, 2, 3), v4(172, 16, 0, 1), v4(192, 168, 1, 1), v4(169, 254, 169, 254), v4(100, 64, 0, 1), v4(0, 0, 0, 0)] {
+        for ip in [v4(127, 0, 0, 1), v4(10, 1, 2, 3), v4(172, 16, 0, 1), v4(192, 168, 1, 1), v4(169, 254, 169, 254), v4(100, 64, 0, 1), v4(0, 0, 0, 0), v4(198, 18, 0, 1), v4(198, 19, 255, 254), v4(192, 88, 99, 1)] {
             assert!(private_ip(ip), "{ip}");
         }
-        for s in ["::1", "fc00::1", "fe80::1", "64:ff9b::a9fe:a9fe", "2002:7f00:1::"] {
+        for s in ["::1", "fc00::1", "fe80::1", "64:ff9b::a9fe:a9fe", "2002:7f00:1::", "::7f00:1", "::a9fe:a9fe", "2001:0:4136:e378:8000:63bf:3fff:fdd2"] {
             assert!(private_ip(s.parse().unwrap()), "{s}");
         }
         assert!(private_ip(IpAddr::V6(Ipv4Addr::new(10, 0, 0, 1).to_ipv6_mapped())));
-        for ip in [v4(1, 1, 1, 1), v4(8, 8, 8, 8), IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1111))] {
+        // Neighbours of the new ranges stay public: 198.20.0.1, 192.88.98.1, 2001:4860::8888.
+        for ip in [v4(1, 1, 1, 1), v4(8, 8, 8, 8), v4(198, 20, 0, 1), v4(192, 88, 98, 1), IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1111)), IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0, 0, 0, 0, 0, 0x8888))] {
             assert!(!private_ip(ip), "{ip}");
         }
         let u = |s: &str| url::Url::parse(s).unwrap();

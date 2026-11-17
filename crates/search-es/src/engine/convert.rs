@@ -32,6 +32,9 @@ pub struct DocMeta<'a> {
     pub tsid: Option<(&'a [u8], &'a str)>,
     /// The `_source` bytes to store (already filtered by the mapping's includes/excludes).
     pub source: Option<Bytes>,
+    /// Synthetic `_source`'s `_ignored_source` entries ([`super::ignored_source`]), stored as
+    /// byte values of `_ignored`.
+    pub ignored_source: Vec<Bytes>,
 }
 
 /// Builds the engine document.
@@ -88,6 +91,9 @@ pub fn to_indexable(table: &FieldTable, parsed: &ParsedDocument, meta: &DocMeta<
         root.fields.push(IndexableField::Term { field: IGNORED_FIELD, term: b.clone() });
         root.fields.push(IndexableField::DocValue { field: IGNORED_FIELD, value: DocValue::SortedSet(b) });
         root.stored.push(StoredField { field: IGNORED_FIELD, value: OwnedStoredValue::Str(name.clone()) });
+    }
+    for e in &meta.ignored_source {
+        root.stored.push(StoredField { field: IGNORED_FIELD, value: OwnedStoredValue::Bytes(e.to_vec()) });
     }
     if let Some(c) = parsed.doc_count {
         root.fields.push(IndexableField::DocValue { field: DOC_COUNT_FIELD, value: DocValue::Numeric(c) });
