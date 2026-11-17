@@ -10,6 +10,7 @@
 //!   (`roll_auth::check`) resolves session cookies with.
 
 pub mod api;
+pub mod audit;
 mod mail;
 mod oauth;
 mod scim;
@@ -381,6 +382,8 @@ pub struct Accounts {
     sso_discovery: std::sync::Mutex<std::collections::HashMap<String, (sso::Discovered, std::time::Instant)>>,
     /// TXT records, for proving SSO domains (DNS over HTTPS; a table in tests).
     txt: std::sync::RwLock<Arc<dyn sso::TxtLookup>>,
+    /// Where account events go (rolld: roll-access's audit log); none until it's set.
+    audit: std::sync::RwLock<Option<Arc<dyn audit::Audit>>>,
     owners: Option<Arc<dyn Owners>>,
 }
 
@@ -417,7 +420,7 @@ impl Accounts {
         }
         let doh = std::env::var("ROLL_ACCOUNTS_DOH").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "https://cloudflare-dns.com/dns-query".into());
         let txt: Arc<dyn sso::TxtLookup> = Arc::new(sso::Doh { client: sso_http.clone(), url: doh });
-        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), owners })
+        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners })
     }
 
     /// Where SSO domains' TXT records are read (tests answer from a table).

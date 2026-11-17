@@ -696,3 +696,46 @@ async fn scim_provisions_and_deactivates_people() {
     env.operator(Method::DELETE, &format!("/v1/accounts/sso/{id}"), json!({})).await;
     assert_eq!(scim(Method::GET, "/Users".into(), None, token2).await.status, StatusCode::UNAUTHORIZED);
 }
+
+/// Account events, as rolld's audit log gets them (docs/accounts.md, "Audit").
+#[derive(Default)]
+struct Events(Mutex<Vec<roll_accounts::audit::AccountEvent>>);
+
+impl roll_accounts::audit::Audit for Events {
+    fn record(&self, e: roll_accounts::audit::AccountEvent) {
+        self.0.lock().unwrap().push(e);
+    }
+    fn client_ip(&self, _req: &Request<Body>) -> Option<std::net::IpAddr> {
+        Some("203.0.113.7".parse().unwrap())
+    }
+}
+
+/// Who signed in and how, who failed to, and every change to accounts go to the audit log, with
+/// the client's address and the actor; never a code or a token.
+#[tokio::test]
+async fn account_events_are_audited() {
+    let env = Env::new().await;
+    let events = Arc::new(Events::default());
+    env.accounts.set_audit(events.clone());
+    let invite = env.invite("ada@example.com").await;
+    let ada = env.email_sign_in(&mut Browser::default(), "ada@example.com", Some(&invite)).await.json["user"]["id"].as_str().unwrap().to_string();
+    // A wrong code: a refused sign-in, by nobody yet.
+    let mut b = Browser::default();
+    let started = env.call(&mut b, Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "ada@example.com" }))).await;
+    let wrong = env.call(&mut b, Method::POST, "/v1/accounts/email/verify", Some(json!({ "challenge": started.json["challenge"], "code": "000000" }))).await;
+    assert_eq!(wrong.status, StatusCode::BAD_REQUEST);
+    assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/users/{ada}"), json!({ "disabled": true })).await.status, StatusCode::OK);
+
+    let got = events.0.lock().unwrap().clone();
+    let find = |f: &dyn Fn(&roll_accounts::audit::AccountEvent) -> bool| got.iter().find(|e| f(e)).cloned().unwrap_or_else(|| panic!("{got:#?}"));
+    let made = find(&|e| e.action == "POST /v1/accounts/invites");
+    assert_eq!((made.actor.as_str(), made.ok, made.ip.map(|i| i.to_string())), ("operator", true, Some("203.0.113.7".into())));
+    let signed = find(&|e| e.action == "sign_in" && e.ok);
+    assert_eq!((signed.actor.as_str(), signed.detail["method"].as_str()), (ada.as_str(), Some("email")));
+    let refused = find(&|e| e.action == "sign_in" && !e.ok);
+    assert_eq!((refused.actor.as_str(), refused.detail["refused"].as_str()), ("anonymous", Some("bad_code")));
+    let off = find(&|e| e.action == "PATCH /v1/accounts/users/{id}");
+    assert_eq!((off.actor.as_str(), off.target.as_deref()), ("operator", Some(ada.as_str())));
+    let all = serde_json::to_string(&got).unwrap();
+    assert!(!all.contains(&invite) && !all.contains(&newest_code(&env.outbox, "ada@example.com")), "never a token or a code");
+}

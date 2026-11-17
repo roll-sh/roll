@@ -37,6 +37,22 @@ const MAX_PAGE: i64 = 200;
 const MAX_TEXT: usize = 255;
 
 type S = State<Arc<Accounts>>;
+type Ip = Option<axum::Extension<roll_auth::ClientIp>>;
+
+/// A SCIM change in the audit log, as the connection that made it.
+fn event(a: &Accounts, conn: &crate::sso::Connection, action: &str, user: &str, detail: Value, who: &crate::audit::Who) {
+    a.record(crate::audit::AccountEvent {
+        actor: format!("scim:{}", conn.id),
+        action: action.to_string(),
+        method: "-".into(),
+        target: Some(user.to_string()),
+        ok: true,
+        status: 200,
+        ip: who.ip,
+        user_agent: who.user_agent.clone(),
+        detail,
+    });
+}
 
 pub(crate) fn routes() -> Router<Arc<Accounts>> {
     Router::new()
@@ -431,7 +447,8 @@ async fn get_user(State(a): S, headers: HeaderMap, Path(id): Path<String>) -> R 
     Ok(scim_json(StatusCode::OK, body))
 }
 
-async fn create_user(State(a): S, headers: HeaderMap, Json(v): Json<Value>) -> R {
+async fn create_user(State(a): S, ip: Ip, headers: HeaderMap, Json(v): Json<Value>) -> R {
+    let who = crate::audit::Who::of(ip, &headers);
     let (id, body) = blocking(&a, move |a| {
         let conn = connection_of(a, &headers)?;
         let email = email_of(&v)?;
@@ -445,6 +462,7 @@ async fn create_user(State(a): S, headers: HeaderMap, Json(v): Json<Value>) -> R
         };
         let external = v.get("externalId").and_then(Value::as_str);
         let id = a.scim_create(&conn, &email, &user_name, name_of(&v).as_deref(), external, active)?;
+        event(a, &conn, "scim.create", &id, json!({ "active": active }), &who);
         Ok((id.clone(), user_json(a, &a.scim_person(&conn, &id)?)))
     })
     .await?;
@@ -455,7 +473,8 @@ async fn create_user(State(a): S, headers: HeaderMap, Json(v): Json<Value>) -> R
     Ok(r)
 }
 
-async fn replace_user(State(a): S, headers: HeaderMap, Path(id): Path<String>, Json(v): Json<Value>) -> R {
+async fn replace_user(State(a): S, ip: Ip, headers: HeaderMap, Path(id): Path<String>, Json(v): Json<Value>) -> R {
+    let who = crate::audit::Who::of(ip, &headers);
     let body = blocking(&a, move |a| {
         let conn = connection_of(a, &headers)?;
         let person = a.scim_person(&conn, &id)?;
@@ -473,14 +492,17 @@ async fn replace_user(State(a): S, headers: HeaderMap, Path(id): Path<String>, J
                 Some(x) => Some(bool_of(x)?),
             },
         };
+        let active = ch.active;
         a.scim_update(&conn, &id, ch)?;
+        event(a, &conn, "scim.update", &id, json!({ "active": active }), &who);
         Ok(user_json(a, &a.scim_person(&conn, &id)?))
     })
     .await?;
     Ok(scim_json(StatusCode::OK, body))
 }
 
-async fn patch_user(State(a): S, headers: HeaderMap, Path(id): Path<String>, Json(v): Json<Value>) -> R {
+async fn patch_user(State(a): S, ip: Ip, headers: HeaderMap, Path(id): Path<String>, Json(v): Json<Value>) -> R {
+    let who = crate::audit::Who::of(ip, &headers);
     let body = blocking(&a, move |a| {
         let conn = connection_of(a, &headers)?;
         if !v.get("schemas").and_then(Value::as_array).is_some_and(|s| s.iter().any(|x| x == PATCH_OP)) {
@@ -522,7 +544,9 @@ async fn patch_user(State(a): S, headers: HeaderMap, Path(id): Path<String>, Jso
                 (other, _) => return Err(invalid(&format!("op {other:?}: add, replace or remove"))),
             }
         }
+        let active = ch.active;
         a.scim_update(&conn, &id, ch)?;
+        event(a, &conn, "scim.update", &id, json!({ "active": active }), &who);
         Ok(user_json(a, &a.scim_person(&conn, &id)?))
     })
     .await?;
@@ -530,10 +554,13 @@ async fn patch_user(State(a): S, headers: HeaderMap, Path(id): Path<String>, Jso
 }
 
 /// Deactivate: roll keeps the account (its history), disabled, as `active: false` does.
-async fn delete_user(State(a): S, headers: HeaderMap, Path(id): Path<String>) -> R {
+async fn delete_user(State(a): S, ip: Ip, headers: HeaderMap, Path(id): Path<String>) -> R {
+    let who = crate::audit::Who::of(ip, &headers);
     blocking(&a, move |a| {
         let conn = connection_of(a, &headers)?;
-        a.scim_update(&conn, &id, Change { active: Some(false), ..Change::default() })
+        a.scim_update(&conn, &id, Change { active: Some(false), ..Change::default() })?;
+        event(a, &conn, "scim.update", &id, json!({ "active": false }), &who);
+        Ok(())
     })
     .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
