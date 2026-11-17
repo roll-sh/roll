@@ -1640,7 +1640,10 @@ Ranked by what a person notices first. Done so far:
      Change → ready went from 15.0–19.3 s to 11.2–12.6 s.
    - **#206:** a fork's preview reaches roll only by default (`egress_forks`), and a Roll-only
      preview's DNS forwards nowhere (a TEST-NET resolver: Docker before 26 forwarded from
-     internal networks).
+     internal networks). A preview says what it reaches (`reaches`), and a fork's sheet
+     explains why an outside call fails.
+   - **#203 also:** roll secrets' `plain` values (#198: a linked host, port, database) stay
+     readable in a preview's logs, with a URL's password in one still masked.
 5. **Also in review:** #196 (a preview's data resources branched at once) and #197 (`became` on roll
    code's `preview` event: roll code's "post a preview to Slack when it's ready" template posts
    once a push).
