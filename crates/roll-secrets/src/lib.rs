@@ -438,6 +438,9 @@ impl Secrets {
         db.ensure_schema(pki::SCHEMA)?;
         db.ensure_schema(ssh::SCHEMA)?;
         db.ensure_schema(aws::SCHEMA)?;
+        // An audit sink's format and its SIEM's token, sealed (sinks.rs): absent is roll's own.
+        db.add_column("audit_sinks", "format", "TEXT")?;
+        db.add_column("audit_sinks", "token", "BLOB")?;
         // How a role trusts roll (aws.rs): absent is the ExternalId, as before there were two.
         db.add_column("aws_roles", "trust", "TEXT")?;
         db.ensure_schema(issuer::SCHEMA)?;
