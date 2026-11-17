@@ -159,13 +159,16 @@ pub struct ServiceSpec {
 }
 
 /// A screenshot of a service's page, and how fast it loaded when the backend could time it.
-#[derive(Clone, Debug)]
+/// Serialised (its PNGs as base64) when it's taken on the node a roll apps instance runs on.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Shot {
+    #[serde(with = "png_b64")]
     pub png: Vec<u8>,
     pub speed: Option<crate::PageSpeed>,
     pub health: Option<crate::PageHealth>,
     pub a11y: Option<crate::PageA11y>,
     /// The same page at a phone's width, when the backend took one.
+    #[serde(with = "png_b64::opt")]
     pub phone: Option<Vec<u8>>,
     /// The project's other pages (`github.pages`) the backend took, in the same session.
     pub pages: Vec<PageShot>,
@@ -177,7 +180,51 @@ pub struct Shot {
     pub api: Option<Vec<String>>,
     /// The notes' elements it cropped ([`ShotOptions::crops`]), by note: PNGs of at most
     /// [`crate::store::CROP_MAX`] bytes. A note whose element wasn't found is left out.
+    #[serde(with = "png_b64::pairs")]
     pub crops: Vec<(String, Vec<u8>)>,
+}
+
+/// PNG bytes as base64 in JSON (a [`Shot`] from another node).
+mod png_b64 {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&B64.encode(v))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        B64.decode(String::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+
+    pub mod opt {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(v: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+            match v {
+                Some(b) => s.serialize_some(&B64.encode(b)),
+                None => s.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
+            Option::<String>::deserialize(d)?.map(|t| B64.decode(t).map_err(serde::de::Error::custom)).transpose()
+        }
+    }
+
+    pub mod pairs {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(v: &[(String, Vec<u8>)], s: S) -> Result<S::Ok, S::Error> {
+            s.collect_seq(v.iter().map(|(k, b)| (k, B64.encode(b))))
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<(String, Vec<u8>)>, D::Error> {
+            Vec::<(String, String)>::deserialize(d)?.into_iter().map(|(k, t)| Ok((k, B64.decode(t).map_err(serde::de::Error::custom)?))).collect()
+        }
+    }
 }
 
 /// A push to a branch of a roll apps service built from a Git URL that none of its environments
@@ -213,7 +260,7 @@ pub struct GitPull {
 }
 
 /// A note's element to crop in a screenshot run: its page and its selector, both checked.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CropAsk {
     pub note: String,
     pub path: String,
@@ -221,7 +268,8 @@ pub struct CropAsk {
 }
 
 /// What a screenshot run takes: the project's other pages, and what it blanks first.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ShotOptions {
     pub pages: Vec<String>,
     pub hide: Vec<String>,
@@ -239,9 +287,10 @@ pub struct ShotOptions {
 }
 
 /// One more page of a [`Shot`]: its path, its PNG, and what went wrong while it loaded.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PageShot {
     pub path: String,
+    #[serde(with = "png_b64")]
     pub png: Vec<u8>,
     pub errors: u32,
     /// What its session found besides the picture.

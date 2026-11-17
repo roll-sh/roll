@@ -319,9 +319,28 @@ fn variables_patch(before: &Value, mut set: serde_json::Map<String, Value>) -> V
 pub struct Services {
     pub apps: RollApps,
     pub runtime: Arc<roll_previews::runtime::Runtime>,
-    /// Where roll apps' instances can be screenshotted (`None`: they can't, so a project on roll
-    /// apps gets no screenshots and no baseline).
-    pub reach: Option<Arc<dyn Reach>>,
+    /// Screenshots of roll apps' instances that run on this node (`None`: no roll apps here, so a
+    /// project on roll apps gets no screenshots and no baseline).
+    pub shots: Option<Arc<dyn super::fleet::Shoot>>,
+    /// On a fleet: an instance runs on its service's holder, where its screenshot is taken.
+    pub fleet: Option<Arc<roll_cluster::Cluster>>,
+}
+
+/// A screenshot of a roll apps instance on this node: the same browser run as roll.toml's
+/// services, in the instance's own network, held awake meanwhile.
+pub struct AppsShots {
+    pub reach: Arc<dyn Reach>,
+    pub runtime: Arc<roll_previews::runtime::Runtime>,
+}
+
+#[async_trait]
+impl super::fleet::Shoot for AppsShots {
+    async fn shoot(&self, service: &str, env: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
+        let Some(at) = self.reach.reach(service, env).await? else { return Ok(None) };
+        let shot = self.runtime.screenshot_in(&at.container, at.port, opts).await;
+        drop(at.hold);
+        shot.map(Some)
+    }
 }
 
 /// Where a roll apps instance can be screenshotted (roll apps' `Apps::reachable`): its container
@@ -454,16 +473,13 @@ impl roll_previews::ports::Apps for Services {
 
     async fn screenshot(&self, preview: &str, service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
         let Some((id, env)) = self.apps.find(preview, service).await? else { return self.runtime.screenshot(preview, service, opts).await };
-        // A roll apps instance: the same browser run, in its own network, held awake meanwhile.
-        let Some(reach) = &self.reach else { return Ok(None) };
-        let Some(at) = reach.reach(&id, &env).await? else { return Ok(None) };
-        let shot = self.runtime.screenshot_in(&at.container, at.port, opts).await;
-        drop(at.hold);
-        shot.map(Some)
+        // A roll apps instance: taken where it runs (its service's holder on a fleet).
+        let Some(shots) = &self.shots else { return Ok(None) };
+        super::fleet::shoot(self.fleet.as_ref(), shots.as_ref(), &id, &env, opts).await
     }
 
     fn screenshots_apps(&self) -> bool {
-        self.reach.is_some()
+        self.shots.is_some()
     }
 
     fn status(&self, preview: &str, service: &str) -> Option<roll_previews::ServiceState> {
