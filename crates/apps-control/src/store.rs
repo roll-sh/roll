@@ -1499,6 +1499,21 @@ impl Store {
         })
     }
 
+    /// A deploy `deploying` → `ready` (built and healthy beside the live one) with its
+    /// `deploy.ready` event, in one transaction: whoever sees it ready sees the event.
+    pub fn set_ready(&self, id: &str, service: &str, env: &str, data: &serde_json::Value) -> Result<bool> {
+        let now = self.now()?;
+        self.db.write(|c| {
+            let cur: Option<String> = c.query_row("SELECT status FROM deployments WHERE id = ?", [id], |r| r.get(0)).optional()?;
+            if cur.as_deref() != Some(DeployStatus::Deploying.as_str()) {
+                return Ok(false);
+            }
+            c.execute("UPDATE deployments SET status = ?, finished_at = COALESCE(?, finished_at) WHERE id = ?", params![DeployStatus::Ready.as_str(), (!DeployStatus::Ready.pending()).then_some(now), id])?;
+            insert_event(c, now, "deploy.ready", service, env, Some(id), data)?;
+            Ok(true)
+        })
+    }
+
     pub fn set_built(&self, id: &str, image: &str, plan: Option<&serde_json::Value>, run: Option<&Run>) -> Result<()> {
         self.db.write(|c| {
             c.execute("UPDATE deployments SET image = ?, plan = COALESCE(?, plan) WHERE id = ?", params![image, plan.map(to_json), id])?;
