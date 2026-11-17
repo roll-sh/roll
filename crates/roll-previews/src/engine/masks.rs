@@ -27,6 +27,12 @@ impl Engine {
         Ok(lines.into_iter().map(|l| code_preview::runner::mask(&l, &values)).collect())
     }
 
+    /// `text` (a service's error with its output's tail, say) as anyone who reads the preview may
+    /// see it.
+    pub(crate) async fn mask_text(&self, id: &str, text: &str) -> Result<String> {
+        Ok(code_preview::runner::mask(text, &self.masks(id).await?))
+    }
+
     /// The preview's values to mask: what its starts and jobs were given, and what its secrets,
     /// variables and branches hold now (read again after [`MASKS_FOR_MS`]). Reading fails closed:
     /// no lines without their masks.
@@ -62,6 +68,14 @@ impl Engine {
     /// A start's or a job's values, masked in the preview's output from now on.
     pub(super) fn add_masks(&self, id: &str, values: Vec<String>) {
         add(&mut self.log_masks.lock().entry(id.to_string()).or_default().values, values);
+    }
+
+    /// What it's given changed (a variable set, the project's rules, a converge's ensure): the
+    /// next read takes the values again, rotated secrets included.
+    pub(super) fn stale_masks(&self, id: &str) {
+        if let Some(m) = self.log_masks.lock().get_mut(id) {
+            m.read_at = 0;
+        }
     }
 
     pub(super) fn forget_masks(&self, id: &str) {

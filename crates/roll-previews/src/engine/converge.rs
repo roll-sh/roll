@@ -342,6 +342,11 @@ impl Engine {
         // What it branched: roll secrets resolves nothing of those parents' (`followed`).
         let branched: Vec<(Kind, String)> = self.store.resources(&r.id)?.into_iter().map(|x| (x.kind, x.parent)).collect();
         self.secrets.ensure(&r.project_id, &env_name(&r.id), &s.secrets.base, &vars, trusted, expires_at, &branched).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        // Its logs' masks follow what it's given now: these values at once (roll apps' instances
+        // get them without a start here), roll secrets' read again at the next logs read.
+        let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();
+        self.add_masks(&r.id, super::masks::secret_values(&[], &own, &vars));
+        self.stale_masks(&r.id);
 
         // 3b. The project's seed, once on fresh data, before anything serves it.
         if let Some(seed) = &s.seed
