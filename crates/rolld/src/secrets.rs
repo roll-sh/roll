@@ -227,6 +227,41 @@ impl roll_secrets::aws::Sts for RollSts {
         })
     }
 
+    /// AssumeRoleWithWebIdentity isn't signed: AWS trusts roll's issuer's token, not a credential
+    /// of roll's (none is needed on the server).
+    fn assume_web_identity(&self, role_arn: &str, token: &str, session_name: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let conf = self.conf.get_or_init(|| aws_config::load_defaults(aws_config::BehaviorVersion::latest())).await;
+                // A server with no AWS settings at all still calls STS: the role's partition's
+                // global endpoint when no region is set.
+                let region = conf.region().cloned().unwrap_or_else(|| {
+                    aws_config::Region::from_static(match role_arn.split(':').nth(1) {
+                        Some("aws-cn") => "cn-north-1",
+                        Some("aws-us-gov") => "us-gov-west-1",
+                        _ => "us-east-1",
+                    })
+                });
+                let out = aws_sdk_sts::Client::from_conf(aws_sdk_sts::config::Builder::from(conf).region(region).build())
+                    .assume_role_with_web_identity()
+                    .role_arn(role_arn)
+                    .web_identity_token(token)
+                    .role_session_name(session_name)
+                    .duration_seconds(seconds)
+                    .send()
+                    .await
+                    .map_err(|e| sts_failure(&e))?;
+                let c = out.credentials.ok_or("STS answered without credentials")?;
+                Ok(roll_secrets::aws::Session {
+                    expires_at: c.expiration.to_millis().map_err(|_| "STS answered an expiry roll can't read")?,
+                    access_key_id: Value::new(c.access_key_id),
+                    secret_access_key: Value::new(c.secret_access_key),
+                    session_token: Value::new(c.session_token),
+                })
+            })
+        })
+    }
+
     fn iam_keys(&self, role_arn: &str, external_id: &str, user: &str) -> Result<Vec<String>, String> {
         let iam = self.iam(role_arn, external_id)?;
         Self::wait(async move {
@@ -273,6 +308,21 @@ impl RollSts {
 }
 
 /// AWS's error code, never the request (it may hold a key).
+/// Why an STS call failed: AWS's error code, else what kept it from answering (never the request).
+fn sts_failure<E: aws_sdk_sts::error::ProvideErrorMetadata, R>(e: &aws_sdk_sts::error::SdkError<E, R>) -> String {
+    use aws_sdk_sts::error::{ProvideErrorMetadata, SdkError};
+    if let Some(code) = e.code() {
+        return code.to_string();
+    }
+    match e {
+        SdkError::ConstructionFailure(_) => "the request couldn't be made (is a region set?)",
+        SdkError::TimeoutError(_) => "STS timed out",
+        SdkError::DispatchFailure(_) => "STS couldn't be reached",
+        _ => "no answer",
+    }
+    .to_string()
+}
+
 fn aws_code<E: aws_sdk_iam::error::ProvideErrorMetadata>(e: &E) -> String {
     e.code().unwrap_or("no answer").to_string()
 }
@@ -286,6 +336,12 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     #[cfg(unix)]
     o.mode(0o600);
     o.open(path)?.write_all(text.as_bytes())
+}
+
+/// How roll-access's trusted machine clients fetch their issuers' keys: the guarded client roll
+/// secrets' identities use, private addresses only where webhooks may go to them.
+pub fn oidc_fetch(args: &crate::Args, open: bool) -> Arc<dyn roll_oidc::Fetch + Send + Sync> {
+    Arc::new(syncs::OidcFetch::new(args.code_webhook_allow_private.unwrap_or(open)))
 }
 
 pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, access: Arc<roll_access::Access>, people: People) -> anyhow::Result<Arc<Secrets>> {
@@ -362,6 +418,9 @@ pub fn link_provider(api: &Api, kind: &str) -> Option<Arc<dyn LinkProvider>> {
         "bucket" => Some(Arc::new(Bucket(api.clone()))),
         "stream" => Some(Arc::new(Stream(api.clone()))),
         "nosql" => Some(Arc::new(Nosql(api.clone()))),
+        // A data-only key of the cluster's own (`ELASTICSEARCH_API_KEY`, or an OpenSearch-flavor
+        // cluster's internal user), never its password.
+        "search" => Some(Arc::new(Search(api.clone(), Default::default()))),
         _ => None,
     }
 }
@@ -864,6 +923,7 @@ impl roll_secrets::health::CodeRefs for CodeRefs {
 pub struct People {
     pub accounts: Arc<roll_accounts::Accounts>,
     pub code: Option<Arc<code_control::Code>>,
+    pub search: Option<Arc<search_control::Control>>,
 }
 
 impl roll_secrets::People for People {
@@ -883,11 +943,47 @@ impl roll_secrets::People for People {
 }
 
 /// What of a person's canvas is theirs: everything for an admin; a repo under their roll code
-/// owner; nothing else until each product says who owns its resources. A failed lookup is a no.
+/// owner; a search cluster they own; nothing else until each product says who owns its resources.
+/// A failed lookup is a no.
 impl roll_workspace::Owners for People {
     fn trusts(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
         let Ok(Some(p)) = roll_secrets::People::person(self, user) else { return false };
-        p.admin || (kind == roll_workspace::Kind::Repo && roll_secrets::access::OwnProjects::owns_repo(p.code_owner.as_deref(), r#ref))
+        p.admin
+            || match kind {
+                roll_workspace::Kind::Repo => roll_secrets::access::OwnProjects::owns_repo(p.code_owner.as_deref(), r#ref),
+                roll_workspace::Kind::Search => self.search.as_ref().is_some_and(|s| matches!(s.store.owner_of(r#ref), Ok(Some(Some(o))) if o == user)),
+                _ => false,
+            }
+    }
+}
+
+/// After a product's own route changes a resource's credential (a password reset, a restore),
+/// tell roll secrets, so every folder linking it live moves its digest at once (watches, syncs,
+/// apps' redeploys and conditional reads see it). Without this they'd still see it within
+/// seconds: a digest reads live values' fingerprints. Only the route's pattern is looked at.
+pub async fn source_changes(axum::extract::State(s): axum::extract::State<Arc<Secrets>>, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let changed = (req.method() == Method::POST).then(|| changed_source(req.uri().path())).flatten();
+    let resp = next.run(req).await;
+    if let Some((kind, r#ref)) = changed
+        && resp.status().is_success()
+    {
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = s.source_changed(kind, &r#ref) {
+                tracing::warn!(%kind, "telling roll secrets a credential changed failed: {e}");
+            }
+        });
+    }
+    resp
+}
+
+/// The link kind and resource a credential-changing product route names.
+fn changed_source(path: &str) -> Option<(&'static str, String)> {
+    let p: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match p.as_slice() {
+        ["v1", "redis", "databases", id, "password" | "restore"] => Some(("redis", id.to_string())),
+        ["v1", "nosql", "databases", id, "password" | "reset" | "restore"] => Some(("nosql", id.to_string())),
+        ["v1", "projects", id, "branches", _, "restore" | "reset"] => Some(("postgres", id.to_string())),
+        _ => None,
     }
 }
 
@@ -949,7 +1045,9 @@ impl apps_control::integrations::SecretSource for ForApps {
             // Sensitive keys (and keys holding one through a reference) are flagged: apps seals
             // them and never shows them, not even to whoever may reveal the environment.
             let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
-            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: sensitive.contains(&name), value: value.expose().to_string(), name }).collect())
+            // Link fields that aren't credentials (a host, a port): apps' logs may show these.
+            let plain: std::collections::HashSet<String> = v.plain.into_iter().collect();
+            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect())
         })
         .await?
     }

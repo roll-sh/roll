@@ -24,6 +24,8 @@ const service = {
   build: { builder: "auto" },
   run: {},
   registry: null,
+  git_login: null,
+  github: null,
   created_at: T0,
   environments: [summary("production", true), summary("staging", true)],
 } as unknown as Service;

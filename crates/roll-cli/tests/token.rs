@@ -104,6 +104,61 @@ async fn a_token_from_the_cli_is_held_to_its_rules() {
     assert!(audit.as_array().unwrap().iter().any(|e| e["decision"] == "ask"), "{audit}");
 }
 
+/// `roll token client` makes machine clients: one with a secret trades it at the token endpoint
+/// for a token held to its rules, one given an openssl PEM signs with its key, and revoking the
+/// first ends its token at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules() {
+    const ED25519_PUB: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA5rj3iN7HTU2KOZ5TXM2Zyw8+3iISgidPeqHONeMvZQM=\n-----END PUBLIC KEY-----\n";
+    let (api, dir) = serve().await;
+    let made = json_of(&roll(&api, "", &["--json", "token", "client", "create", "nightly", "--product", "postgres", "--allow", "read", "--expires", "7d"]));
+    let (client_id, secret) = (made["client_id"].as_str().unwrap(), made["client_secret"].as_str().unwrap());
+    let form = [("grant_type", "client_credentials"), ("client_id", client_id), ("client_secret", secret)];
+    let body = form.iter().map(|(k, v)| format!("{k}={}", urlencoding::encode(v))).collect::<Vec<_>>().join("&");
+    let answer: Value = reqwest::Client::new().post(made["token_endpoint"].as_str().unwrap()).header("content-type", "application/x-www-form-urlencoded").body(body).send().await.unwrap().json().await.unwrap();
+    let token = answer["access_token"].as_str().unwrap_or_else(|| panic!("{answer}")).to_string();
+    assert!(roll(&api, &token, &["db", "list"]).status.success());
+    assert!(!roll(&api, &token, &["db", "delete", "prj_a"]).status.success());
+
+    let key = dir.path().join("ci.pub.pem");
+    std::fs::write(&key, ED25519_PUB).unwrap();
+    let signed = json_of(&roll(&api, "", &["--json", "token", "client", "create", "deploy", "--preset", "read-only", "--public-key", key.to_str().unwrap()]));
+    assert!(signed.get("client_secret").is_none(), "{signed}");
+    let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
+    let by_key: Vec<(&str, bool)> = list.as_array().unwrap().iter().map(|c| (c["client_id"].as_str().unwrap(), c["signs_with_key"] == true)).collect();
+    assert_eq!(by_key, vec![(signed["client_id"].as_str().unwrap(), true), (client_id, false)]);
+
+    assert!(roll(&api, "", &["token", "client", "revoke", client_id]).status.success());
+    assert!(!roll(&api, &token, &["db", "list"]).status.success());
+
+    // GitHub Actions as the credential: the step to paste, and the one repository and ref trusted.
+    let made = roll(&api, "", &["token", "client", "create", "ci", "--preset", "read-only", "--github", "acme/web", "--ref", "refs/heads/main"]);
+    let step = String::from_utf8_lossy(&made.stdout);
+    assert!(made.status.success() && step.contains("grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer") && step.contains("::add-mask::"), "{step}");
+    let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
+    assert_eq!(list[0]["trusts"]["subject"], "repo:acme/web:ref:refs/heads/main");
+    let words = String::from_utf8_lossy(&roll(&api, "", &["token", "client", "list"]).stdout).to_string();
+    assert!(words.contains("trusts token.actions.githubusercontent.com: repo:acme/web:ref:refs/heads/main  (never signed in)"), "{words}");
+    assert!(!roll(&api, "", &["token", "client", "create", "x", "--preset", "read-only", "--github", "acme"]).status.success(), "owner/repo");
+    let lab = roll(&api, "", &["token", "client", "create", "lab", "--preset", "read-only", "--gitlab", "acme/platform/api", "--ref", "main"]);
+    assert!(lab.status.success() && String::from_utf8_lossy(&lab.stdout).contains("id_tokens:"), "{lab:?}");
+    let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
+    assert_eq!(list[0]["trusts"]["subject"], "project_path:acme/platform/api:ref_type:branch:ref:main");
+    // Any CI system's: an issuer, a subject, claims; a shared issuer still names one tenant.
+    let bk = roll(&api, "", &["--json", "token", "client", "create", "bk", "--preset", "read-only", "--issuer", "https://agent.buildkite.com", "--subject", "organization:acme:pipeline:deploy:*", "--claim", "build_branch=main"]);
+    assert!(bk.status.success(), "{bk:?}");
+    let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
+    assert_eq!((list[0]["trusts"]["subject"].as_str(), list[0]["trusts"]["claims"]["build_branch"].as_str()), (Some("organization:acme:pipeline:deploy:*"), Some("main")));
+    assert!(!roll(&api, "", &["token", "client", "create", "x", "--preset", "read-only", "--issuer", "https://agent.buildkite.com", "--subject", "*"]).status.success(), "a shared issuer names one tenant");
+    // A client on a secret moves to CI's own identity, keeping its id (the checkup's fix).
+    let moving = json_of(&roll(&api, "", &["--json", "token", "client", "create", "moving", "--preset", "read-only"]));
+    let mid = moving["client_id"].as_str().unwrap();
+    assert!(roll(&api, "", &["token", "client", "rotate", mid, "--github", "acme/api", "--environment", "production"]).status.success());
+    let list = json_of(&roll(&api, "", &["--json", "token", "client", "list"]));
+    let moved = list.as_array().unwrap().iter().find(|c| c["client_id"] == mid).unwrap();
+    assert_eq!((moved["trusts"]["subject"].as_str(), moved["signs_with_key"].as_bool()), (Some("repo:acme/api:environment:production"), Some(false)), "{moved}");
+}
+
 /// `roll login` signs a person's CLI in through the browser: it registers itself, the consent
 /// screen's answer comes back to its loopback port, commands with no token set use the login
 /// (within what was allowed), and `roll logout` revokes the connection. With no browser here

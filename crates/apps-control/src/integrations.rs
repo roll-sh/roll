@@ -56,6 +56,11 @@ pub trait Sources: Send + Sync {
     }
     /// Whether a path that differs between `from` and `to` matches one of `patterns`
     /// (gitignore-style, from the repo's root). A source that can't tell says yes.
+    /// Whether any of `paths` matches any of `patterns` (gitignore-style: roll code's matcher, so
+    /// a watch path means the same for a repo and a Git URL). Yes when it can't tell.
+    fn any_path_matches(&self, _patterns: &[String], _paths: &[String]) -> bool {
+        true
+    }
     async fn touches(&self, _repo: &str, _from: &str, _to: &str, _patterns: &[String]) -> anyhow::Result<bool> {
         Ok(true)
     }
@@ -146,6 +151,85 @@ pub trait FeedbackNotes: Send + Sync {
     async fn notes(&self, env: &str, path: &str) -> anyhow::Result<Vec<Note>>;
 }
 
+/// A push to a Git URL service's repository, to a branch none of its environments follows: roll
+/// previews makes (or moves, or tears down) that branch's preview. Checked against the
+/// repository before it's handed on: `sha` is where the branch is now, and a deletion is a branch
+/// the repository no longer has, so a hook's body alone can't name another commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitPush {
+    /// The service (`svc_…`).
+    pub service: String,
+    pub url: String,
+    pub branch: String,
+    /// None: the branch was deleted.
+    pub sha: Option<String>,
+    /// The pushed commit's message, as the push said it (`[skip ci]` is the receiver's to read).
+    pub message: String,
+    /// A pull request's (or merge request's) push, opening or closing: `branch` is its own for a
+    /// same-repository one, `pull/<number>` for a fork's.
+    pub pull: Option<GitPull>,
+}
+
+/// The pull request a [`GitPush`] is for. `sha` was checked against its head ref (a fork's
+/// `refs/pull/N/head`, GitLab's `refs/merge-requests/N/head`; a same-repository one's branch).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitPull {
+    pub number: u64,
+    /// As the event says it: untrusted text.
+    pub title: String,
+    /// Its page, made from the service's own URL and the number (never the event's link).
+    pub url: String,
+    /// From another repository (head and base repository ids differ): its code is untrusted.
+    pub fork: bool,
+}
+
+/// Where pushes to branches roll apps doesn't follow go (rolld fills it with roll previews).
+/// Unset: they're ignored.
+#[async_trait]
+pub trait GitPushes: Send + Sync {
+    /// Called once per delivery (a redelivery, or a second environment's hook, calls it again:
+    /// idempotent on `sha`). Quick: record it and return, the hook is waiting.
+    async fn pushed(&self, push: GitPush);
+    /// Whether it reads [`GitPush::pull`]. Until it says so, no pull request is handed on: one
+    /// that dropped `pull` would take a fork's head for a branch's and trust it.
+    fn takes_pulls(&self) -> bool {
+        false
+    }
+}
+
+/// roll's GitHub App, for a Git URL service on its host (rolld fills it with roll code's App):
+/// which installation sees a repository, short-lived git credentials through it, commit statuses.
+/// Installations span tenants: connecting one is the operator's (an `admin` route).
+#[async_trait]
+pub trait GitHubApp: Send + Sync {
+    /// The App's host (`github.com`, a GitHub Enterprise Server's), lowercase, with a port if
+    /// any; none while the App isn't set up.
+    fn host(&self) -> Option<String>;
+    /// The installation that sees `owner/repo`, if one does.
+    async fn installation_for(&self, owner: &str, repo: &str) -> anyhow::Result<Option<u64>>;
+    /// A username and short-lived token for fetching `owner/repo` (never stored).
+    async fn git_login(&self, installation: u64, owner: &str, repo: &str) -> anyhow::Result<(String, String)>;
+    async fn status(&self, installation: u64, owner: &str, repo: &str, sha: &str, status: &CommitStatus) -> anyhow::Result<()>;
+    /// A GitHub Deployment of `sha` to `environment` (`production` or not; `transient`: a
+    /// preview's, which GitHub lets go). Its id.
+    #[allow(clippy::too_many_arguments)]
+    async fn deployment(&self, installation: u64, owner: &str, repo: &str, sha: &str, environment: &str, production: bool, transient: bool) -> anyhow::Result<u64>;
+    /// That deployment's state (`in_progress`, `success`, `failure`), with where it answers.
+    #[allow(clippy::too_many_arguments)]
+    async fn deployment_status(&self, installation: u64, owner: &str, repo: &str, deployment: u64, state: &str, url: Option<&str>, description: &str) -> anyhow::Result<()>;
+    /// What a commit's checks on GitHub say (roll's own left out), for `wait_for_ci`.
+    async fn ci(&self, _installation: u64, _owner: &str, _repo: &str, _sha: &str) -> anyhow::Result<Ci> {
+        Ok(Ci::None)
+    }
+}
+
+/// Whether a person may still open a project's environments (rolld answers from roll-accounts:
+/// the account still signs in, and may use roll apps). A sign-in-gated environment asks when it
+/// gives a ticket and again every few minutes of a visitor's session. Unset: a session lasts.
+pub trait Visitors: Send + Sync {
+    fn may_open(&self, user: &str, project: &str) -> bool;
+}
+
 /// Email to a person through their account (rolld fills it with roll-accounts' mailer). Unset or
 /// off: no email targets.
 #[async_trait]
@@ -168,6 +252,9 @@ pub struct SecretVar {
     /// to builds and instances, and no answer ever holds it, as a sealed variable (shown
     /// `sealed`, left out of `…/variables/values` for everyone, references to it sealed too).
     pub sensitive: bool,
+    /// A link field roll secrets says isn't a credential (`Values.plain`: a host, a port, a user,
+    /// a database): logs may show it. Every other value from roll secrets is a secret.
+    pub plain: bool,
 }
 
 /// Who asks for variables' values: what rolld's gate put on the request.

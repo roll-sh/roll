@@ -11,7 +11,7 @@ use crate::logs::{LogSink, Stream};
 use crate::model::*;
 use crate::runtime::{BuildJob, InstanceSpec};
 use crate::store::{EnvRow, NewDeployment, ServiceRow, Switch};
-use crate::{Apps, Error, PENDING_CLAIM_TTL, Result, fingerprint, lease_key, network_name, volume_name};
+use crate::{Apps, Error, PENDING_CLAIM_TTL, Result, closed_network_name, fingerprint, lease_key, network_name, volume_name};
 use bytes::Bytes;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -138,7 +138,7 @@ impl Apps {
                 let sha = match &revision {
                     Some(r) if r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit()) => r.to_ascii_lowercase(),
                     Some(_) => return Err(Error::BadRequest("revision is a full commit id (40 hex digits) for a Git URL".into())),
-                    None => crate::git_source::head(&crate::git_source::client(self.cfg.allow_private), url, row.branch.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?.0,
+                    None => crate::git_source::head(&self.git_remote(service, url).await, row.branch.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?.0,
                 };
                 if message.is_empty() {
                     message = format!("{} at {}", row.branch.as_deref().unwrap_or("HEAD"), &sha[..12]);
@@ -372,17 +372,22 @@ impl Apps {
         };
         let (sid, e) = (service.to_string(), env.to_string());
         let dep = self.db(move |s| s.create_deployment(&sid, &e, d, "", None)).await?;
-        // Held from here: the next push mustn't put back what was just rolled away from.
+        // Held from here: the next push mustn't put back what was just rolled away from (a
+        // person's own hold stays theirs: putting a held build live is a rollback to it).
         let (sid, e, rid) = (service.to_string(), env.to_string(), dep.id.clone());
-        if self.db(move |s| s.set_hold(&sid, &e, Some(&rid))).await.unwrap_or(false) {
+        if self.held(service, env).await.as_deref() != Some(MANUAL_HOLD) && self.db(move |s| s.set_hold(&sid, &e, Some(&rid))).await.unwrap_or(false) {
             self.logs.sink(format!("env:{service}/{env}"), Stream::System).line("deploys held after the rollback: pushes, hooks and tag moves aren't put live until you deploy or resume them");
         }
         self.kick(service, env);
         Ok(dep)
     }
 
-    /// A person deployed (a deploy, a redeploy, a promotion): a hold after a rollback is lifted.
+    /// A person deployed (a deploy, a redeploy, a promotion): a hold after a rollback is lifted
+    /// (a person's own hold isn't: only `held: false` ends it).
     pub async fn lift_hold(self: &Arc<Self>, service: &str, env: &str) {
+        if self.held(service, env).await.as_deref() == Some(MANUAL_HOLD) {
+            return;
+        }
         let (sid, e) = (service.to_string(), env.to_string());
         if self.db(move |s| s.set_hold(&sid, &e, None)).await.unwrap_or(false) {
             self.logs.sink(format!("env:{service}/{env}"), Stream::System).line("deploys resumed");
@@ -394,6 +399,16 @@ impl Apps {
     pub(crate) async fn held(self: &Arc<Self>, service: &str, env: &str) -> Option<String> {
         let (sid, e) = (service.to_string(), env.to_string());
         self.db(move |s| s.environment(&sid, &e)).await.ok().and_then(|r| r.held_by)
+    }
+
+    /// What automation's deploy (a push, a hook, a tag move, a CI wait) does in the
+    /// environment now ([`hold_of`]).
+    pub(crate) async fn hold_for(self: &Arc<Self>, service: &str, env: &str) -> Held {
+        let (sid, e) = (service.to_string(), env.to_string());
+        match self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await {
+            Ok((svc, row)) => hold_of(&svc, &row),
+            Err(_) => Held::No,
+        }
     }
 
     /// `POST …/rollback` with no deployment: back to the one live before what runs, walking back
@@ -584,16 +599,61 @@ impl Apps {
     /// Railway's and Vercel's GitHub deployments. Best effort: a status that doesn't post is a
     /// warning, never a failed deploy.
     async fn report(self: &Arc<Self>, d: &Deployment, state: &'static str, what: &str) {
-        let (Some(sources), Some(rev)) = (self.deps.sources.clone(), d.revision.clone()) else { return };
+        let Some(rev) = d.revision.clone() else { return };
         let (sid, e) = (d.service.clone(), d.environment.clone());
         let Ok((svc, env)) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await else { return };
-        let Source::Repo { repo, .. } = &svc.source else { return };
         let status = crate::integrations::CommitStatus {
             context: format!("roll/apps/{}/{}", svc.name, d.environment),
             state,
             description: what.chars().take(140).collect(),
             target_url: Some(self.url(&env.slug)),
         };
+        // A Git URL service connected to roll's GitHub App: through its installation, a commit
+        // status and a GitHub Deployment of the environment (made when it starts, then its state).
+        if let Source::Git { url, .. } = &svc.source {
+            let Some((app, installation, owner, repo)) = self.github_for(&svc.id, url).await else {
+                // GitLab or Bitbucket, with its Git login: the same status there.
+                let remote = self.git_remote(&svc.id, url).await;
+                if let (Some(host), Some(login)) = (crate::ci_hosts::host_of(url), remote.login())
+                    && let Err(err) = crate::ci_hosts::post(self.cfg.allow_private, &host, login, &rev, &status).await
+                {
+                    warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a deploy's commit status didn't post");
+                }
+                return;
+            };
+            if let Err(err) = app.status(installation, &owner, &repo, &rev, &status).await {
+                warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a deploy's commit status didn't post");
+            }
+            let did = d.id.clone();
+            let known = self.db(move |s| s.github_deployment(&did)).await.ok().flatten();
+            let github = match known {
+                Some(g) => Some(g),
+                None if state == "pending" => match app.deployment(installation, &owner, &repo, &rev, &d.environment, d.environment == crate::model::PRODUCTION, env.ephemeral).await {
+                    Ok(g) => {
+                        let did = d.id.clone();
+                        let _ = self.db(move |s| s.set_github_deployment(&did, g)).await;
+                        Some(g)
+                    }
+                    Err(err) => {
+                        warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a GitHub Deployment wasn't made");
+                        None
+                    }
+                },
+                None => None,
+            };
+            if let Some(g) = github {
+                let gh_state = match state {
+                    "pending" => "in_progress",
+                    s => s,
+                };
+                let url = (state == "success").then(|| self.url(&env.slug));
+                if let Err(err) = app.deployment_status(installation, &owner, &repo, g, gh_state, url.as_deref(), &status.description).await {
+                    warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a GitHub Deployment's state didn't post");
+                }
+            }
+            return;
+        }
+        let (Source::Repo { repo, .. }, Some(sources)) = (&svc.source, self.deps.sources.clone()) else { return };
         if let Err(err) = sources.set_status(repo, &rev, &status).await {
             warn!(service = %d.service, deployment = %d.id, error = %err, "apps: a deploy's commit status didn't post");
         }
@@ -791,10 +851,13 @@ impl Apps {
             for i in &made {
                 self.deps.runtime.remove(&i.name).await;
             }
-            let did = d.id.clone();
-            self.db(move |s| s.set_status(&did, &[DeployStatus::Deploying], DeployStatus::Ready, None)).await?;
             let short = d.id.strip_prefix("dep_").unwrap_or(&d.id);
-            log.stream(Stream::System).line(format!("ready, not live: its own URL is {}; roll back to it to put it live", self.url(&format!("{short}--{}", env.slug))));
+            let url = self.url(&format!("{short}--{}", env.slug));
+            // Ready, and someone told to put it live (`deploy.ready`), in one write: whoever sees
+            // it ready sees the event too.
+            let (sid, en, did, data) = (svc.id.clone(), env.name.clone(), d.id.clone(), serde_json::json!({ "revision": d.revision, "url": url }));
+            self.db(move |s| s.set_ready(&did, &sid, &en, &data)).await?;
+            log.stream(Stream::System).line(format!("ready, not live: its own URL is {url}; roll back to it to put it live"));
             return Ok(());
         }
         // A gradual rollout needs something to split: the old deployment running and taking
@@ -835,6 +898,8 @@ impl Apps {
                 .db(move |s| s.switch_active(&Switch { service: &sid, env: &e, from: from.as_deref(), to: &to, ready_ms: ready, epoch, vars_hash: Some(&vh), snapshot: Some(&snap) }))
                 .await?;
             anyhow::ensure!(ok, "another deploy switched this environment meanwhile");
+            // What the old deployment answered isn't this one's.
+            self.responses.clear(&crate::env_key(&d.service, &d.environment));
             Ok(())
         }
         .await;
@@ -867,6 +932,14 @@ impl Apps {
         let r = &tpl.run.rollout;
         let every = Duration::from_millis((r.step_s as u64 * 250).min(5000));
         let sys = log.stream(Stream::System);
+        // Waiting for a person (`rollout.manual`) is undone however the rollout ends.
+        struct Unwait(Arc<Apps>, String);
+        impl Drop for Unwait {
+            fn drop(&mut self) {
+                self.0.rollout_waits.lock().remove(&self.1);
+            }
+        }
+        let _unwait = Unwait(self.clone(), id.to_string());
         for &share in &r.steps {
             live.set_share(share);
             live.take_served();
@@ -904,7 +977,68 @@ impl Apps {
                 }
             }
             sys.line(format!("canary: {share}% passed ({} requests, {:.1}% 5xx)", new.requests, new.error_pct()));
+            if !r.manual {
+                continue;
+            }
+            // Held at this split until a person says, still judged as it goes.
+            let gate = Arc::new((parking_lot::Mutex::new(None), tokio::sync::Notify::new()));
+            self.rollout_waits.lock().insert(id.to_string(), gate.clone());
+            self.changed(service);
+            sys.line(format!("canary: held at {share}% until someone advances it, puts it all live or rolls it back"));
+            // Someone has to say: they're told (`rollout.waiting`), once a step.
+            let (sid, en, did) = (service.to_string(), tpl.spec.env.clone(), id.to_string());
+            let data = serde_json::json!({ "share": share });
+            let _ = self.db(move |s| s.add_event("rollout.waiting", &sid, &en, Some(&did), &data)).await;
+            let said = loop {
+                if let Some(a) = gate.0.lock().take() {
+                    break a;
+                }
+                tokio::select! {
+                    _ = gate.1.notified() => continue,
+                    _ = tokio::time::sleep(every) => {}
+                    _ = cancel.cancelled() => anyhow::bail!("canceled"),
+                }
+                anyhow::ensure!(self.owns(service), "this node no longer holds the service; the node that took it over deploys");
+                let active = live.template().map(|t| t.deployment.clone());
+                for (dep, s) in live.take_served() {
+                    let into = if dep == tpl.deployment {
+                        &mut new
+                    } else if active.as_deref() == Some(dep.as_str()) {
+                        &mut old
+                    } else {
+                        continue;
+                    };
+                    into.requests += s.requests;
+                    into.errors += s.errors;
+                    into.crashes += s.crashes;
+                }
+                if let Some(why) = judge(new, old, r.error_pct) {
+                    sys.line(format!("canary: rolled back at {share}% while held: {why}"));
+                    anyhow::bail!("rolled back at {share}% of requests: {why}");
+                }
+            };
+            self.rollout_waits.lock().remove(id);
+            match said {
+                crate::model::RolloutAction::Advance => sys.line("canary: advanced by a person"),
+                crate::model::RolloutAction::All => {
+                    sys.line("canary: put all live by a person");
+                    return Ok(());
+                }
+                crate::model::RolloutAction::Abort => {
+                    sys.line(format!("canary: rolled back at {share}% by a person"));
+                    anyhow::bail!("rolled back at {share}% of requests by a person");
+                }
+            }
         }
+        Ok(())
+    }
+
+    /// `POST …/deploys/{dep}/rollout {action}`: what a person says to a rollout held for them.
+    /// 409 when it isn't waiting (not a manual rollout, between steps, done).
+    pub fn rollout_action(&self, deployment: &str, action: crate::model::RolloutAction) -> Result<()> {
+        let gate = self.rollout_waits.lock().get(deployment).cloned().ok_or_else(|| Error::Conflict(format!("{deployment} isn't waiting for anyone (a manual rollout waits after each step passes)")))?;
+        *gate.0.lock() = Some(action);
+        gate.1.notify_one();
         Ok(())
     }
 
@@ -1029,7 +1163,7 @@ impl Apps {
             (Source::Git { url, root }, _) => {
                 let rev = d.revision.as_deref().ok_or_else(|| anyhow::anyhow!("no revision to build"))?;
                 log.line(format!("fetching {url} at {}", &rev[..rev.len().min(12)]));
-                let files = crate::git_source::materialize(&crate::git_source::client(self.cfg.allow_private), url, rev, &tree).await?;
+                let files = crate::git_source::materialize(&self.git_remote(&svc.id, url).await, rev, &tree).await?;
                 log.line(format!("fetched {files} files"));
                 root.clone()
             }
@@ -1087,7 +1221,10 @@ impl Apps {
         // The variables the build's steps see: the environment's, as its instances will.
         let (sid, e) = (svc.id.clone(), d.environment.clone());
         let env_row = self.db(move |s| s.environment(&sid, &e)).await?;
-        let mut build_env = self.resolve_vars(svc, &env_row, &d.id).await?.vars;
+        let resolved = self.resolve_vars(svc, &env_row, &d.id).await?;
+        // Its secret values never reach the build's log, whatever a step prints.
+        self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
+        let mut build_env = resolved.vars;
         // Per deployment (the cache would never hit) or only for the running app.
         build_env.retain(|(k, _)| k != "ROLL_DEPLOYMENT" && k != "PORT");
         // The commit changes every push: out of the hash and the secrets, or no build would hit
@@ -1108,6 +1245,9 @@ impl Apps {
         };
         let mut overrides = build_cfg.overrides();
         overrides.build_env = build_env.iter().map(|(k, _)| k.clone()).collect();
+        // Variables kept as files are files in the build's steps too, at the same paths.
+        let (sid, e) = (svc.id.clone(), d.environment.clone());
+        overrides.build_files = self.db(move |s| s.variable_files(&sid, &e)).await?.into_iter().filter(|(k, _)| overrides.build_env.contains(k)).collect();
         // A Procfile's command for what this service runs (a cron's command is its own).
         overrides.process = match run.kind {
             _ if from_root => None,
@@ -1154,6 +1294,17 @@ impl Apps {
         // Heroku's release phase: the Procfile's `release:`, when the service has no pre-deploy.
         if run.pre_deploy.is_none() {
             run.pre_deploy = plan.release.clone();
+        }
+        // vercel.json's crons: schedules that call their paths, unless the service already
+        // calls that path (its own schedules win).
+        if run.kind == RunType::Web && !run.tcp {
+            for (i, c) in plan.crons.iter().enumerate() {
+                let name = format!("vercel-{}", i + 1);
+                if run.schedules.len() < 20 && !run.schedules.iter().any(|s| s.path.as_deref() == Some(c.path.as_str()) || s.name == name) {
+                    log.line(format!("plan: vercel.json's cron {} calls {}", c.schedule, c.path));
+                    run.schedules.push(crate::model::Scheduled { name, schedule: c.schedule.clone(), command: String::new(), path: Some(c.path.clone()), timezone: None, timeout_s: None });
+                }
+            }
         }
         // On a builder shared by services, the build reads a copy with its cache mounts
         // namespaced, outside the tree (so no `COPY . .` puts it in the image), next to the
@@ -1225,6 +1376,8 @@ impl Apps {
         let mut probe = svc.clone();
         probe.run.port = run.port;
         let resolved = self.resolve_vars(&probe, env, &dep.id).await?;
+        // Its secret values never reach the environment's log, whoever prints them.
+        self.logs.redact(&format!("env:{}/{}", svc.id, env.name), &dep.id, resolved.secret_values());
         if !resolved.unresolved.is_empty() {
             self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(format!("references that name nothing, left empty: {}", resolved.unresolved.join(", ")));
         }
@@ -1232,8 +1385,37 @@ impl Apps {
         if run.kind != RunType::Web {
             vars.retain(|(k, _)| k != "PORT");
         }
-        let network = network_name(&svc.project, &env.name);
-        self.deps.runtime.ensure_network(&network, &svc.id).await.map_err(|e| Error::Internal(e.to_string()))?;
+        // Variables kept as files (Render's secret files): out of the environment, into the
+        // instance at their paths.
+        let (sid, e) = (svc.id.clone(), env.name.clone());
+        let file_of = self.db(move |s| s.variable_files(&sid, &e)).await?;
+        let mut files = Vec::new();
+        vars.retain(|(k, v)| match file_of.get(k) {
+            Some(path) => {
+                files.push((path.clone(), v.clone()));
+                false
+            }
+            None => true,
+        });
+        // With `egress` `roll`: a network with no route out, and the listed hosts through its
+        // proxy (the variables every HTTP client reads; the app's own win). Nothing outside roll
+        // is reached any other way, so a runtime that can't close it never runs it open.
+        let closed = env.egress.closed();
+        if closed && !self.deps.runtime.closes_egress() {
+            return Err(Error::Conflict("its egress is \"roll\", and this node's runtime can't close an environment's network".into()));
+        }
+        let network = if closed { closed_network_name(&svc.project, &env.name) } else { network_name(&svc.project, &env.name) };
+        self.deps.runtime.ensure_network(&network, &svc.id, closed).await.map_err(|e| Error::Internal(e.to_string()))?;
+        if closed && !env.egress.hosts.is_empty() {
+            let proxy = self.deps.runtime.egress_proxy(&network, &svc.id, &env.egress.hosts).await.map_err(|e| Error::Internal(e.to_string()))?;
+            let sid = svc.project.clone();
+            let names: Vec<String> = self.db(move |s| s.services(Some(&sid))).await?.into_iter().map(|s| s.name).collect();
+            for (k, v) in egress_vars(&proxy, &names, &vars) {
+                if !vars.iter().any(|(n, _)| n == &k) {
+                    vars.push((k, v));
+                }
+            }
+        }
         // An image service's registry login, for a runtime that pulls at each start; only the
         // registry it's for gets it.
         let registry = match &svc.source {
@@ -1258,12 +1440,20 @@ impl Apps {
             cpu: run.cpu,
             memory_mb: run.memory_mb,
             network: Some(network),
+            closed,
             aliases: vec![svc.name.clone(), format!("{}.{}.internal", svc.name, env.name)],
             volume: run.volume.as_ref().map(|v| (volume_name(&svc.id, &env.name), v.mount.clone())),
             // A web service that scales to zero sleeps after `sleep_after`: an instance idle well
             // past that (its node gone) may end itself.
             idle_stop_s: (run.kind == RunType::Web && run.min_instances == 0).then(|| run.sleep_after_s.max(60) + 300),
             registry,
+            files,
+            health: run.health_command.as_ref().filter(|_| run.kind == RunType::Worker).map(|c| crate::runtime::HealthCheck {
+                command: c.clone(),
+                every: Duration::from_secs(run.health_every_s.unwrap_or(10) as u64),
+                failures: run.health_failures.unwrap_or(3),
+                start: Duration::from_secs(run.health_timeout_s as u64),
+            }),
         };
         let spa = dep.plan.as_ref().is_some_and(|p| p["spa"] == true);
         // A static plan whose files were exported answers from them, with no instance.
@@ -1425,6 +1615,8 @@ impl Apps {
     }
 
     async fn release_service(self: &Arc<Self>, service: &str) {
+        // Its cached answers: the next owner's deploys never clear this node's.
+        self.responses.clear_service(service);
         // Another node owns it now: what this one cached may change there, and its shells go.
         {
             let mut cache = self.access.lock();
@@ -1665,7 +1857,16 @@ impl Apps {
                 self.sweep_uploads().await;
                 for l in self.lives().into_iter().filter(|l| self.owns(&l.service)) {
                     self.judge_alerts(&l).await;
+                    self.note_new_errors(&l).await;
                 }
+            }
+            // roll's GitHub App's events for the services here, every second.
+            if self.github.get().is_some() && !self.github_running.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    this.run_github_events().await;
+                    this.github_running.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
             }
             if n.is_multiple_of(10) && !self.scaling.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 let this = self.clone();
@@ -1721,7 +1922,8 @@ impl Apps {
                         || self.db(move |s| s.environments(&sid)).await.is_ok_and(|envs| envs.iter().any(|e| e.run.get("min_instances").and_then(Value::as_u64).is_some_and(|n| n > 0)));
                     let always = svc.run.kind != RunType::Web || floor;
                     let sid = svc.id.clone();
-                    let pending = self.db(move |s| s.pending_deployments(&sid)).await.map(|p| !p.is_empty()).unwrap_or(false);
+                    // Pending deploys, or the GitHub App's events waiting to run there.
+                    let pending = self.db(move |s| Ok(!s.pending_deployments(&sid)?.is_empty() || s.has_github_events(&sid)?)).await.unwrap_or(false);
                     if !(always || pending) {
                         continue;
                     }
@@ -1811,10 +2013,42 @@ impl Apps {
         if ephemeral { crate::config::preview_defaults(run, file.as_ref()).0 } else { run }
     }
 
+    /// What a commit's checks say: roll code's for a repo service, GitHub's (through roll's
+    /// GitHub App) for a Git URL service connected to it. Anything else has none to read.
+    pub(crate) async fn ci_of(self: &Arc<Self>, svc: &ServiceRow, sha: &str) -> anyhow::Result<crate::integrations::Ci> {
+        match &svc.source {
+            Source::Repo { repo, .. } => match self.deps.sources.clone() {
+                Some(sources) => sources.ci(repo, sha).await,
+                None => anyhow::bail!("roll code isn't on this node"),
+            },
+            Source::Git { url, .. } => {
+                if let Some((app, installation, owner, repo)) = self.github_for(&svc.id, url).await {
+                    return app.ci(installation, &owner, &repo, sha).await;
+                }
+                // GitLab's or Bitbucket's statuses, with its Git login's token.
+                let remote = self.git_remote(&svc.id, url).await;
+                match (crate::ci_hosts::host_of(url), remote.login()) {
+                    (Some(host), Some(login)) => crate::ci_hosts::read(self.cfg.allow_private, &host, login, sha).await,
+                    _ => anyhow::bail!("this Git URL service's checks can't be read (roll's GitHub App, or a GitLab or Bitbucket login)"),
+                }
+            }
+            _ => Ok(crate::integrations::Ci::None),
+        }
+    }
+
+    /// A Git URL push to an environment that waits for CI: it waits (its checks are read until
+    /// they pass, fail or an hour goes by; GitHub's may not exist yet when the push arrives, so
+    /// none is waited on for a minute too).
+    pub(crate) async fn wait_for_git_ci(self: &Arc<Self>, svc: &ServiceRow, env: &str, sha: &str, message: &str, actor: &str) -> Result<()> {
+        let w = crate::store::CiWait { service: svc.id.clone(), env: env.to_string(), landing: 0, sha: sha.to_string(), message: message.to_string(), author: Some(actor.to_string()) };
+        self.db(move |s| s.wait_for_ci(&w)).await?;
+        self.logs.sink(format!("env:{}/{env}", svc.id), Stream::System).line(format!("push {} waits for its checks", &sha[..sha.len().min(12)]));
+        Ok(())
+    }
+
     /// Pushes waiting for their checks: deployed once they pass (or there are none), dropped when
     /// one fails or after an hour, each said in its environment's log.
     pub async fn settle_ci_waits(self: &Arc<Self>) {
-        let Some(sources) = self.deps.sources.clone() else { return };
         let Ok(waits) = self.db(|s| s.ci_waits()).await else { return };
         let now = code_sql::now_ms();
         for (w, since) in waits {
@@ -1828,10 +2062,12 @@ impl Apps {
                 let _ = self.db(move |s| s.end_ci_wait(&sid, &e, l)).await;
                 continue;
             };
-            let Source::Repo { repo, .. } = &svc.source else { continue };
+            let git = matches!(svc.source, Source::Git { .. });
             let log = self.logs.sink(format!("env:{}/{}", w.service, w.env), Stream::System);
             let sha = &w.sha[..w.sha.len().min(12)];
-            let done = match sources.ci(repo, &w.sha).await {
+            let done = match self.ci_of(&svc, &w.sha).await {
+                // GitHub's checks may not have started when the push came: a minute for them to.
+                Ok(crate::integrations::Ci::None) if git && now - since < 60_000 => false,
                 Ok(crate::integrations::Ci::Pending) if now - since > 3_600_000 => {
                     log.line(format!("push {sha} not deployed: its checks didn't finish within an hour"));
                     true
@@ -1841,19 +2077,23 @@ impl Apps {
                     log.line(format!("push {sha} not deployed: its check {which} failed"));
                     true
                 }
-                Ok(_) if self.held(&w.service, &w.env).await.is_some() => {
-                    log.line(format!("push {sha} not deployed: its checks passed while deploys are held after a rollback"));
-                    true
-                }
                 Ok(_) if self.refuse_paused(&w.service, &w.env).await.is_err() => {
                     log.line(format!("push {sha} not deployed: its checks passed while the environment is paused"));
                     true
                 }
                 Ok(_) => {
-                    log.line(format!("push {sha}'s checks passed: deploying"));
-                    let body = serde_json::json!({ "revision": w.sha, "message": w.message });
-                    let by = By { trigger: Trigger::Push, actor: w.author.as_ref().map(|a| format!("git:{a}")) };
-                    self.deploy(&w.service, &w.env, body, by, None, Some(&format!("landing:{}", w.landing))).await.is_ok()
+                    let hold = self.hold_for(&w.service, &w.env).await;
+                    if let Held::Skip(why) = &hold {
+                        log.line(format!("push {sha} not deployed: its checks passed, and {why}"));
+                        let (sid, e, l) = (w.service.clone(), w.env.clone(), w.landing);
+                        let _ = self.db(move |s| s.end_ci_wait(&sid, &e, l)).await;
+                        continue;
+                    }
+                    log.line(format!("push {sha}'s checks passed: {}", if matches!(hold, Held::Ready) { "built and held for a person to put live" } else { "deploying" }));
+                    let body = hold.body(serde_json::json!({ "revision": w.sha, "message": w.message }));
+                    let by = By { trigger: Trigger::Push, actor: w.author.as_ref().map(|a| if git { a.clone() } else { format!("git:{a}") }) };
+                    let key = if git { format!("git:{}:{}", w.env, w.sha) } else { format!("landing:{}", w.landing) };
+                    self.deploy(&w.service, &w.env, body, by, None, Some(&key)).await.is_ok()
                 }
             };
             if done {
@@ -1864,21 +2104,57 @@ impl Apps {
     }
 
     /// `roll.toml` `[app]` at a pushed revision (in the service's root), if it reads.
-    async fn app_config_at(self: &Arc<Self>, svc: &ServiceRow, revision: &str) -> Option<crate::config::AppConfig> {
-        let (Source::Repo { repo, root }, Some(sources)) = (&svc.source, &self.deps.sources) else { return None };
+    pub(crate) async fn app_config_at(self: &Arc<Self>, svc: &ServiceRow, revision: &str) -> Option<crate::config::AppConfig> {
+        let root = match &svc.source {
+            Source::Repo { root, .. } | Source::Git { root, .. } => root,
+            _ => return None,
+        };
         let path = match root {
             Some(r) => format!("{r}/roll.toml"),
             None => "roll.toml".into(),
         };
-        match sources.read_file(repo, revision, &path).await {
+        let read = match (&svc.source, &self.deps.sources) {
+            (Source::Repo { repo, .. }, Some(sources)) => sources.read_file(repo, revision, &path).await,
+            (Source::Git { url, .. }, _) => crate::git_source::read_file(&self.git_remote(&svc.id, url).await, revision, &path).await,
+            _ => return None,
+        };
+        match read {
             Ok(Some(bytes)) => crate::config::parse(&String::from_utf8_lossy(&bytes)).ok().flatten(),
             _ => None,
         }
     }
 
+    /// Why a Git URL service's push at `sha` isn't deployed to `env`, if it isn't: a skip tag in
+    /// its message, or watch paths (roll.toml's at that commit, the environment's block first,
+    /// else the service's) it changes none of. The hook and the five-minute watch both ask, with
+    /// roll.toml as read at `sha` (`app_config_at`, once per commit).
+    pub(crate) async fn git_push_skip(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, sha: &str, message: &str, file: Option<&crate::config::AppConfig>) -> Option<String> {
+        if let Some(tag) = skip_tag(message) {
+            return Some(format!("its message says {tag}"));
+        }
+        let watch = file.and_then(|f| f.watch_for(&env.name)).or_else(|| svc.build.watch.clone()).filter(|w| !w.is_empty())?;
+        if self.push_touches(svc, env, sha, &watch).await {
+            return None;
+        }
+        Some(format!("it changes nothing this service watches ({})", watch.join(", ")))
+    }
+
     /// Whether `revision` changes a watched path since what `env` runs (no active deployment, or
     /// a source that can't tell: yes).
-    async fn push_touches(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, revision: &str, patterns: &[String]) -> bool {
+    pub(crate) async fn push_touches(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, revision: &str, patterns: &[String]) -> bool {
+        // A Git URL's: the paths between the live commit and this one, matched as a repo's are.
+        if let (Source::Git { url, .. }, Some(sources)) = (&svc.source, &self.deps.sources) {
+            let Some(active) = env.active.clone() else { return true };
+            let Ok(Some(from)) = self.db(move |s| s.deployment(&active).map(|d| d.revision)).await else { return true };
+            return match crate::git_source::changed_paths(&self.git_remote(&svc.id, url).await, &from, revision).await {
+                Ok(Some(paths)) => sources.any_path_matches(patterns, &paths),
+                Ok(None) => true,
+                Err(e) => {
+                    self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(format!("{}'s changed paths couldn't be read ({e:#}): deployed as if it touched a watched one", &revision[..revision.len().min(12)]));
+                    true
+                }
+            };
+        }
         let (Source::Repo { repo, .. }, Some(sources)) = (&svc.source, &self.deps.sources) else { return true };
         let Some(active) = env.active.clone() else { return true };
         let Ok(Some(from)) = self.db(move |s| s.deployment(&active).map(|d| d.revision)).await else { return true };
@@ -1906,8 +2182,9 @@ impl Apps {
                     self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} not deployed: the environment is paused", &l.revision.sha[..l.revision.sha.len().min(12)]));
                     continue;
                 }
-                if let Some(r) = &e.held_by {
-                    self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} not deployed: deploys are held after the rollback {r}", &l.revision.sha[..l.revision.sha.len().min(12)]));
+                let hold = hold_of(svc, e);
+                if let Held::Skip(why) = &hold {
+                    self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System).line(format!("push {} not deployed: {why}", &l.revision.sha[..l.revision.sha.len().min(12)]));
                     continue;
                 }
                 // `[skip deploy]` or `[skip ci]` in its message (Render's `[skip render]`): a push
@@ -1948,7 +2225,7 @@ impl Apps {
                         }
                     }
                 }
-                let body = serde_json::json!({ "revision": l.revision.sha, "message": l.revision.message.lines().next().unwrap_or("") });
+                let body = hold.body(serde_json::json!({ "revision": l.revision.sha, "message": l.revision.message.lines().next().unwrap_or("") }));
                 // The owner queues it (it may be another node: the queue is in the store).
                 let key = format!("landing:{}", l.seq);
                 match self.deploy(&svc.id, &e.name, body, By { trigger: Trigger::Push, actor: l.author.as_ref().map(|a| format!("git:{a}")) }, None, Some(&key)).await {
@@ -2012,9 +2289,9 @@ impl Apps {
             for e in all_envs.iter().filter(|e| e.service == svc.id && e.active.is_some() && !e.ephemeral) {
                 // What the live deployment runs with: roll.toml's `[[app.run.schedules]]` are in
                 // its template, not in the service's settings.
-                let run = match self.lives.lock().get(&crate::env_key(&svc.id, &e.name)).and_then(|l| l.template()) {
-                    Some(t) => t.run.clone(),
-                    None => svc.for_env(e).map(|s| s.run).unwrap_or_else(|_| svc.run.clone()),
+                let (run, secret) = match self.lives.lock().get(&crate::env_key(&svc.id, &e.name)).and_then(|l| l.template()) {
+                    Some(t) => (t.run.clone(), t.spec.vars.iter().find(|(k, _)| k == "CRON_SECRET").map(|(_, v)| v.clone())),
+                    None => (svc.for_env(e).map(|s| s.run).unwrap_or_else(|_| svc.run.clone()), None),
                 };
                 for sc in &run.schedules {
                     let Ok(schedule) = crate::cron::Schedule::parse(&sc.schedule, sc.timezone.as_deref()) else { continue };
@@ -2033,6 +2310,45 @@ impl Apps {
                     let (k, v) = (key.clone(), due.to_string());
                     let _ = self.db(move |s| s.set_state(&k, &v)).await;
                     let log = self.logs.sink(format!("env:{}/{}", svc.id, e.name), Stream::System);
+                    // A path: called through the environment's own proxy, skipped while the last
+                    // call is still out; a failure is `cron.failed`, as a command's is.
+                    if let Some(path) = sc.path.clone() {
+                        if !self.calling.lock().insert(key.clone()) {
+                            log.line(format!("scheduled {}: skipped, its last call to {path} is still out", sc.name));
+                            continue;
+                        }
+                        let host = url::Url::parse(&self.url(&e.slug)).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+                        let (this, sid, en, name, secret) = (self.clone(), svc.id.clone(), e.name.clone(), sc.name.clone(), secret.clone());
+                        let timeout = std::time::Duration::from_secs(sc.timeout_s.unwrap_or(300) as u64);
+                        tokio::spawn(async move {
+                            let began = std::time::Instant::now();
+                            let r = crate::public::call_scheduled(this.clone(), &sid, &en, &host, &path, secret.as_deref(), timeout).await;
+                            this.calling.lock().remove(&key);
+                            let ms = began.elapsed().as_millis() as u64;
+                            let call = match &r {
+                                Ok(s) => crate::model::ScheduleCall { at: code_sql::now_ms(), status: Some(*s), ms, error: None },
+                                Err(e) => crate::model::ScheduleCall { at: code_sql::now_ms(), status: None, ms, error: Some(e.clone()) },
+                            };
+                            let log = this.logs.sink(format!("env:{sid}/{en}"), Stream::System);
+                            match &r {
+                                Ok(s) => log.line(format!("scheduled {name}: GET {path} answered {s} in {ms} ms")),
+                                Err(e) => log.line(format!("scheduled {name}: GET {path}: {e}")),
+                            }
+                            let failed = !matches!(r, Ok(s) if (200..400).contains(&s));
+                            let (k, v) = (format!("sched-call:{sid}/{en}/{name}"), serde_json::to_string(&call).expect("a call serializes"));
+                            let data = serde_json::json!({ "schedule": name, "path": path, "http_status": call.status, "error": call.error });
+                            let _ = this
+                                .db(move |s| {
+                                    s.set_state(&k, &v)?;
+                                    if failed {
+                                        s.add_event("cron.failed", &sid, &en, None, &data)?;
+                                    }
+                                    Ok(())
+                                })
+                                .await;
+                        });
+                        continue;
+                    }
                     // Skipped while the last one it started still runs.
                     let jk = format!("sched-job:{}/{}/{}", svc.id, e.name, sc.name);
                     let j = jk.clone();
@@ -2267,6 +2583,53 @@ fn build_failure(lines: &[String]) -> Option<String> {
         Some(s) => format!("{what} (its last output: {})", s.chars().take(200).collect::<String>()),
         None => what,
     })
+}
+
+
+/// A closed environment's proxy variables (`proxy` for its listed hosts): `HTTP_PROXY` and
+/// `HTTPS_PROXY` in both cases, and `NO_PROXY` naming what's reached directly: the host, its
+/// links' relays and the project's services (by name and `<name>.<env>.internal`).
+fn egress_vars(proxy: &str, services: &[String], vars: &[(String, String)]) -> Vec<(String, String)> {
+    let mut direct: Vec<String> = ["localhost", "127.0.0.1", "::1", "host.docker.internal", ".internal"].map(str::to_string).to_vec();
+    direct.extend(services.iter().cloned());
+    direct.extend(crate::runtime::links::ports(vars).into_iter().map(crate::runtime::links::relay_host));
+    let direct = direct.join(",");
+    let proxies = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"].map(|k| (k.to_string(), proxy.to_string()));
+    proxies.into_iter().chain(["NO_PROXY", "no_proxy"].map(|k| (k.to_string(), direct.clone()))).collect()
+}
+
+/// A manual rollout's wait: what a person said, and its wake.
+pub(crate) type RolloutGate = Arc<(parking_lot::Mutex<Option<crate::model::RolloutAction>>, tokio::sync::Notify)>;
+
+/// What a person's hold (`PUT … {held: true}`) is kept as, where a rollback keeps its own id.
+pub const MANUAL_HOLD: &str = "manual";
+
+/// An environment's deploys as automation finds them: going live, built to `ready` for a person
+/// to put live (held by a person, a web service without a volume, which runs beside the live
+/// one), or not made (held after a rollback, or held where nothing can wait beside the live one).
+pub(crate) enum Held {
+    No,
+    Ready,
+    Skip(String),
+}
+
+pub(crate) fn hold_of(svc: &crate::store::ServiceRow, e: &crate::store::EnvRow) -> Held {
+    match e.held_by.as_deref() {
+        None => Held::No,
+        Some(MANUAL_HOLD) if svc.run.kind == RunType::Web && svc.run.volume.is_none() => Held::Ready,
+        Some(MANUAL_HOLD) => Held::Skip("deploys are held, and this service's can't wait beside the live one: deploy it by hand".into()),
+        Some(r) => Held::Skip(format!("deploys are held after the rollback {r}")),
+    }
+}
+
+impl Held {
+    /// The deploy's body as the hold has it: `no_traffic` when it waits for a person.
+    pub(crate) fn body(&self, mut body: serde_json::Value) -> serde_json::Value {
+        if matches!(self, Held::Ready) {
+            body["no_traffic"] = serde_json::json!(true);
+        }
+        body
+    }
 }
 
 #[cfg(test)]

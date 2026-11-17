@@ -133,6 +133,12 @@ fn apps_patch_lends(b: &Value) -> Vec<Lent> {
     out
 }
 
+/// A search cluster made as a branch of `parent` (a body field, unlike `…/{id}/branches`): it
+/// copies the parent's indices, so it needs what branching there does, `write` on the parent.
+fn search_parent(b: &Value) -> Vec<Lent> {
+    b.get("parent").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Write }).into_iter().collect()
+}
+
 /// What an apps link's kind is, as a rule names it: its product and the resource kind its ids are.
 pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
     Some(match kind {
@@ -142,6 +148,7 @@ pub fn link_target(kind: &str) -> Option<(&'static str, &'static str)> {
         "stream" => ("streams", "stream"),
         "queue" => ("queues", "vhost"),
         "nosql" => ("nosql", "nosql-database"),
+        "search" => ("search", "cluster"),
         // Another service's URLs: no credential, but held to the same `reveal` as the rest.
         "service" => ("apps", "service"),
         // Not a link: a repo apps reads (`apps_repo`).
@@ -275,9 +282,14 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/oauth/devices/{code}", "only a person signs a device in, as on the consent screen"),
     ("/v1/access/notify", "where approvals go is the operator's choice"),
     ("/v1/access/policy", "the rules for every token are the operator's"),
+    ("/v1/access/clients", "a token makes no machine clients: the operator, or a person signed in, makes their own"),
+    ("/v1/access/clients/{id}", "a token revokes no machine clients: the operator, or a person signed in, revokes their own"),
+    ("/v1/access/clients/{id}/rotate", "a token rotates no machine client's credential: the operator, or a person signed in, rotates their own"),
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
+    ("/v1/apps/services/{id}/environments/{env}/visit", "a browser session in a sign-in-gated environment is a signed-in person's (rolld's gate sees their session), never a token's"),
+    ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
 ];
 
 pub fn rows() -> &'static [Row] {
@@ -728,10 +740,11 @@ fn apps_create_action(b: &Value) -> Action {
 /// A service's run settings that change only how much of it runs and how it's watched: its size,
 /// scale, health checks, timers, alerts, rollout and restarts. Every other run key decides what
 /// production runs, when, or who reaches it (start, pre-deploy, schedule, schedules and their
-/// timezone and retries, kind, port, volume, public, tcp, and `rollback_on_crash`, which has roll
+/// timezone and retries, kind, port, volume, public, tcp, a worker's `health_command`, which runs
+/// in its instances, and `rollback_on_crash`, which has roll
 /// put an older deployment live by itself), and so does any key apps adds later until it's listed
 /// here: a new setting is never a quiet way into production.
-const APPS_WRITE_RUN: [&str; 18] = [
+const APPS_WRITE_RUN: [&str; 21] = [
     "min_instances",
     "max_instances",
     "concurrency",
@@ -739,6 +752,8 @@ const APPS_WRITE_RUN: [&str; 18] = [
     "memory_mb",
     "health_path",
     "health_timeout_s",
+    "health_every_s",
+    "health_failures",
     "suspend_after_s",
     "sleep_after_s",
     "alerts",
@@ -746,6 +761,7 @@ const APPS_WRITE_RUN: [&str; 18] = [
     "scale",
     "drain_s",
     "cpu_target",
+    "memory_target",
     "restart",
     "restart_tries",
     "affinity",
@@ -1081,7 +1097,7 @@ static ROWS: &[Row] = &[
     // ── search (feature/roll-search) ──
     row("GET", "/v1/search", "search", R, Tgt::AnyGrant),
     row("GET", "/v1/search/clusters", "search", R, list("id")).reveals(SEARCH_SECRETS),
-    row("POST", "/v1/search/clusters", "search", W, create("search", "id")).reveals(SEARCH_SECRETS),
+    row("POST", "/v1/search/clusters", "search", W, create("search", "id")).reveals(SEARCH_SECRETS).lends(Lend::Each(search_parent)),
     row("GET", "/v1/search/clusters/{id}", "search", R, one(PG, "cluster")).reveals(SEARCH_SECRETS),
     row("PATCH", "/v1/search/clusters/{id}", "search", ADMIN, one(PG, "cluster")).reveals(SEARCH_SECRETS),
     row("DELETE", "/v1/search/clusters/{id}", "search", D, one(PG, "cluster")),
@@ -1149,9 +1165,11 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/aws-roles", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/aws-roles", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/aws-roles/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/aws-roles/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/aws-users", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/aws-users", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/aws-users/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/aws-users/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/rotators", "secrets", R, one(&["project"], "project")),
     // A signing secret signs calls that mint vendor keys: shown only to who may also reveal.
     row("POST", "/v1/secrets/projects/{project}/rotators", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
@@ -1216,6 +1234,8 @@ static ROWS: &[Row] = &[
     row("PUT", "/v1/secrets/projects/{project}/identities/{id}/jwks", "secrets", ADMIN, one(&["project"], "project")),
     // Renewing a lease extends a credential whoever could read it holds.
     row("POST", "/v1/secrets/projects/{project}/leases/{id}/renew", "secrets", REVEAL, one(&["project"], "project")),
+    // Ending a credential only takes access away: whoever could reveal it may.
+    row("DELETE", "/v1/secrets/projects/{project}/leases/{id}", "secrets", REVEAL, one(&["project"], "project")),
     // Exporting an environment's folder shares it with another project.
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/exports", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     // Who and what can read a folder: the project's credentials, as the tokens list (a project admin's).
@@ -1264,6 +1284,9 @@ static ROWS: &[Row] = &[
     // A private registry's login (never answered back), and unlinking a database: settings.
     row("PUT", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
     row("DELETE", "/v1/apps/services/{id}/registry", "apps", W, one(PG, "service")),
+    // A private Git repository's login (never answered back), as a registry's.
+    row("PUT", "/v1/apps/services/{id}/git-login", "apps", W, one(PG, "service")),
+    row("DELETE", "/v1/apps/services/{id}/git-login", "apps", W, one(PG, "service")),
     // A link puts the linked resource's address and password in the service's variables, where
     // its code reads them: reveal on that resource too.
     row("PUT", "/v1/apps/services/{id}/links/{kind}/{ref}", "apps", W, one(PG, "service")).lends(Lend::Path("kind", "ref")),
@@ -1359,6 +1382,9 @@ static ROWS: &[Row] = &[
     // Accepting a visual change is a person's call (with `visual_review = "required"` previews
     // refuses tokens anyway): admin, so a write token can't wave its own diff through.
     row("POST", "/v1/previews/{id}/visual/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Letting a fork's pull request run with the project's data (a Git URL service's preview,
+    // roll code's `approve-run`): a person's call, as accepting a visual change is.
+    row("POST", "/v1/previews/{id}/approve", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // ── roll code ──
     row("GET", "/v1/code", "code", R, Tgt::AnyGrant),
     row("GET", "/v1/code/health", "code", R, Tgt::AnyGrant),
