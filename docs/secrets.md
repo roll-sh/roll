@@ -2806,6 +2806,9 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
+1a. **Measured after #151** (2026-11-17, 9,900 keys on SQLite, release, five alternating runs each way
+   at load 25–68): every read's before and after ranges overlap, an ephemeral environment's values
+   included (the path that loads its branch list); #151 adds one lookup per request, not per key.
 1b. **A screenshot pass over the dashboard** (2026-11-17, #132, #136, #165, #166, #173): it found
    textareas one line tall (a fixed height beat `rows`; now `textareaField` everywhere, main's CA
    boxes too, on #144), cut-off labels, Active Directory's fields offered for an OpenLDAP directory
