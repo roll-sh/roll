@@ -2817,7 +2817,9 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
    GET has no CSRF check, and the session was checked once) — now only the gateway's own token or
    login opens it (#166). One low: an Atlas user named `.` or `..` turned the API path into the
    collection's (#173, refused now). One to confirm: ScyllaDB's audit log with a password in a CQL
-   statement (Cassandra's obfuscates it; Snowflake's key pairs avoid it).
+   statement (Cassandra's obfuscates it; Snowflake's key pairs avoid it). Building: CQL logins set
+   by `HASHED PASSWORD` (bcrypt made in rolld) where the server takes it, so no password is in a
+   statement at all (#165).
 0c. **Azure DevOps** (#227): a sync to variable groups as secret variables, and Azure Pipelines
    logging in with its own OIDC token (one pipeline or service connection per identity), as Vault,
    Infisical and Doppler integrate. Azure never returns a secret variable's value and its update
@@ -2830,7 +2832,8 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
 0d. **A Ruby client** (#212), the same surface as the TypeScript, Go and Python ones, both sealed-box
    vectors opening in it, standard library only, with Rails notes. Writing it found that Python's
    and Go's `Values` printed every value and their `Client` the token (#213 fixes both).
-   Next: Java, .NET and Ruby kept in step as the others gain TOTP and transit.
+   Building (2026-11-17 night): transit in the Java (#105) and .NET (#110) clients, which were
+   written before it; TOTP for all three once #194 is on main.
 0b. **The polling path at scale** (building: `feature/roll-secrets-poll-path`): measured on main at
    9,900 keys, a 304 costs ~140–165 ms on Postgres and `digest` ~138 ms, so 1,000 pods polling every
    30 s spend ~4–5 cores saying "nothing changed". The digest's folder read and reference walk are
