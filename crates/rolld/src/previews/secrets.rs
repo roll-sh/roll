@@ -31,9 +31,11 @@ impl roll_previews::ports::Secrets for Secrets {
         let mut body = json!({ "base": base, "labels": { "preview": env }, "ttl_minutes": ttl_minutes, "trusted": trusted, "secrets": set_ops(vars), "replace": true,
             "branches": branches.iter().map(|(k, p)| json!({ "kind": k.as_str(), "parent": p })).collect::<Vec<_>>() });
         // A roll secrets from before `branches` refuses it (unknown fields are a 400): sent again
-        // without, and the branches' values under the providers' names still win (`names`).
+        // without only when the preview branched nothing. With branches, failing is the safe
+        // side: a link to a parent under a name of its own would resolve the parent's value
+        // (a node mid-upgrade, say), so the preview waits rather than deploys with it.
         let answer = match self.0.call(Method::PUT, &path, Some(body.clone())).await {
-            Err(e) if e.downcast_ref::<Refused>().is_some_and(|r| r.status == StatusCode::BAD_REQUEST && r.error.contains("unknown field `branches`")) => {
+            Err(e) if branches.is_empty() && e.downcast_ref::<Refused>().is_some_and(|r| r.status == StatusCode::BAD_REQUEST && r.error.contains("unknown field `branches`")) => {
                 body.as_object_mut().map(|o| o.remove("branches"));
                 self.0.call(Method::PUT, &path, Some(body.clone())).await
             }

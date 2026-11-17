@@ -16,6 +16,7 @@ const private4 = (a) =>
   a[0] === 127 || a[0] === 10 || (a[0] === 172 && (a[1] & 0xf0) === 16) || (a[0] === 192 && a[1] === 168) ||
   (a[0] === 169 && a[1] === 254) || a[0] === 0 || (a[0] === 100 && (a[1] & 0xc0) === 64) || (a[0] === 192 && a[1] === 0 && a[2] === 0) ||
   (a[0] === 192 && a[1] === 0 && a[2] === 2) || (a[0] === 198 && a[1] === 51 && a[2] === 100) || (a[0] === 203 && a[1] === 0 && a[2] === 113) ||
+  (a[0] === 198 && (a[1] & 0xfe) === 18) || (a[0] === 192 && a[1] === 88 && a[2] === 99) ||
   (a[0] >= 224);
 const privateIp = (ip) => {
   if (net.isIPv4(ip)) return private4(ip.split(".").map(Number));
@@ -25,6 +26,8 @@ const privateIp = (ip) => {
   if (s.slice(0, 5).every((x) => x === 0) && s[5] === 0xffff) return private4(v4(s[6], s[7]));
   if (s[0] === 0x64 && s[1] === 0xff9b && ((s[2] === 0 && s[3] === 0 && s[4] === 0 && s[5] === 0) || s[2] === 1)) return private4(v4(s[6], s[7]));
   if (s[0] === 0x2002) return private4(v4(s[1], s[2]));
+  // Teredo (2001::/32) carries an IPv4 address of its own: never a destination.
+  if (s[0] === 0x2001 && s[1] === 0) return true;
   if (s.every((x) => x === 0) || (s.slice(0, 7).every((x) => x === 0) && s[7] === 1)) return true;
   return (s[0] & 0xff00) === 0xff00 || (s[0] & 0xfe00) === 0xfc00 || (s[0] & 0xffc0) === 0xfe80 || (s[0] === 0x2001 && s[1] === 0xdb8);
 };
