@@ -1628,25 +1628,47 @@ Ranked by what a person notices first. Done so far:
    #143 (reviewed); after it merges, the live check in `scripts/preview-apps.sh` with
    `egress: "roll"`: 1.1.1.1 unreachable from the pv- instance, a listed host through the proxy,
    a refused one in the activity.
-3. **A "preview ready" once per push, for chat and Slack templates** (with code-control's
-   automations): the `preview` event fires on every change of a preview (state, screenshot,
-   cost), so a "post the preview to Slack when it's ready" template would post several times a
-   push (Vercel posts once per deployment). Needs a field or event kind that fires once when a
-   head becomes ready (`preview.ready_head`, say), then the gallery template; the events are
-   code-control's.
+3. **A "preview ready" once per push, in review** (branch `feature/roll-previews-ready-once`):
+   roll code's `preview` event carries `became: ["ready"]` the first time a preview is up at a
+   head (not when it wakes, nor at a cost or screenshot change) and `["visual_change"]` the first
+   time a visual change waits; the gallery's "Post a change's preview to Slack when it's ready"
+   and the visual-review template filter on it, so they post once a push, as Vercel's Slack app
+   does.
 4. **Tests for rolld's `GitReport`** (after #138): a unit test of the connection's parsing, and the
    live check against `~/.cache/rpv/fake-github.py`-style fake GitHub (installations, token,
    statuses, comments and edits recorded) once roll code's App can be pointed at it.
 5. **Screenshots of roll apps' services on the fleet**: one node is done. A multi-node Docker
-   fleet needs previews' own internal screenshot route on the service's holder
-   (`cluster.dispatch(&apps_control::lease_key(service), …)`); the cloud fleet runs Fargate,
-   where it's a browser task of its own, with the cloud thread. Low while the fleet is Fargate.
-6. **Cheap Postgres branches without reflinks** (ext4 hosts like ai-server): a page server or
-   pg-engine as the branch store; neither planned (the Postgres strategy session, 2026-11-17);
-   not blocking (the fleet's volumes are XFS).
+   fleet needs previews' own internal screenshot route (operator-only, in `OPERATOR_ONLY`) run on
+   the service's holder through `cluster.dispatch(&apps_control::lease_key(service), …)`, with
+   `Shot` and `ShotOptions` serialised across (the PNGs as base64); it can't be checked here (one
+   Docker daemon serves every local node), and the cloud fleet runs Fargate, where it's a browser
+   task of its own, with the cloud thread. Low while the fleet is Fargate.
+6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+   2026-11-17 on ai-server's ext4): Docker's `local` volume driver mounts an overlay
+   (`--opt type=overlay`, lower = a read-only base copy of the parent, upper = the branch's own),
+   with no privileges beyond Docker's. A 1.4 GB pgbench parent (scale 50) branched this way was
+   accepting connections in 0.97 s, against 3.5 s for a plain copy (which grows with the data:
+   about 2 minutes at 50 GB). The branch's own bytes were 33 MB before any write. But overlay copies
+   a whole file on its first write: after 30 s of pgbench (100k random updates), the branch held
+   764 MB of table files (the whole `pgbench_accounts`) and 784 MB of WAL. So a branch shares the
+   tables it doesn't write, and copies each table it does write, up to 1 GB a segment. Reflinks
+   share blocks instead.
+   - The lower must not change: a running parent needs a base copy, made once and shared by its
+     branches. A branch as of now replays the parent's archived WAL from the base's LSN (pg-control's
+     history already restores to a time this way). Refresh the base when that replay would take
+     too long.
+   - The cost: a full copy per parent (not per branch), and a replay at each branch.
+   - Ranked below the fleet's needs: XFS volumes already share blocks.
 7. **Watch: pg-control's recovery to a time seconds old** (unowned).
 8. **Watch: a cold start on a Docker name conflict**: a preview's services each making its egress
    proxy under one name was fixed (#137); if it comes back, log both starts' container ids.
+
+Looked at and not planned: sharing the default branch's running services with a preview
+(Signadot's sandboxes route a request to the baseline unless its header names the sandbox's
+fork). A shared service writes to the baseline's data, not to the preview's branches, so it's
+only right for a stateless service; and an idle preview's services are already frozen at no
+compute cost. If a project with many stateless services asks for it, it'd be an opt-in per
+service.
 
 Looked at and kept: previews' copy of a preview's variables in its roll apps environment, next
 to the `pv-` secrets environment roll apps reads itself (#31's `ForApps`). roll apps reads
