@@ -791,6 +791,8 @@ export interface NotifyTarget {
 
 export type NotifyEvent =
   | "deploy.failed"
+  | "rollout.waiting"
+  | "deploy.ready"
   | "crash_loop"
   | "deploy.active"
   | "spend.alert"

@@ -6,6 +6,8 @@ import { since, type Runner } from "./shared";
 
 const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "deploy.failed", label: "Deploy failed" },
+  { value: "rollout.waiting", label: "Rollout waits for you" },
+  { value: "deploy.ready", label: "Built, waits to go live" },
   { value: "crash_loop", label: "Crash loop" },
   { value: "deploy.active", label: "Deployed" },
   { value: "spend.alert", label: "Spend alert" },
@@ -38,7 +40,7 @@ export function NotificationsPanel({ project, projectName, runner }: { project: 
   const [targets, setTargets] = useState<NotifyTarget[] | null>(null);
   const [kind, setKind] = useState<NotifyTarget["kind"]>("slack");
   const [url, setUrl] = useState("");
-  const [events, setEvents] = useState<NotifyEvent[]>(["deploy.failed", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
+  const [events, setEvents] = useState<NotifyEvent[]>(["deploy.failed", "rollout.waiting", "deploy.ready", "error.new", "crash_loop", "spend.alert", "spend.limit", "alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log", "cron.failed", "domain.expiring", "domain.expired", "domain.tls_failed", "volume.backup_failed", "volume.full"]);
   const [envs, setEnvs] = useState("");
   const [previews, setPreviews] = useState(false);
   // Only some of the project's services (none chosen: every one).
