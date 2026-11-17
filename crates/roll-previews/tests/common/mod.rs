@@ -372,7 +372,7 @@ impl roll_previews::ports::Secrets for FakeSecrets {
         }
         let n = self.issued.fetch_add(1, Ordering::SeqCst) + 1;
         let values = values.into_iter().chain([("DB_PASSWORD".into(), format!("pw-{n}"))]).collect();
-        Ok(roll_previews::ports::Resolved { values, problems: Vec::new(), leases: vec![format!("lease-{n}")], followed })
+        Ok(roll_previews::ports::Resolved { values, problems: Vec::new(), leases: vec![format!("lease-{n}")], followed, plain: Vec::new() })
     }
     async fn links(&self, _: &str, _: &str) -> anyhow::Result<Vec<(String, Kind, String, String)>> {
         Ok(self.links.lock().clone())

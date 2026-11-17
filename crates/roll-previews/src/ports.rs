@@ -514,6 +514,9 @@ pub struct Resolved {
     /// Keys of links to a parent the preview branched, which roll secrets resolved nothing for:
     /// `(name, kind, parent, field)`. The engine sets each from the branch ([`crate::names::follow`]).
     pub followed: Vec<(String, Kind, String, String)>,
+    /// Keys of `values` linked to a field that isn't a credential (a host, a port, a database's
+    /// name): roll secrets' `plain`. A preview's logs show them; every other value is masked.
+    pub plain: Vec<String>,
 }
 
 /// Until roll secrets lands: no environments, so services get the project's overrides and the
