@@ -2850,8 +2850,9 @@ guard's scans audited as `secrets.guard`, for roll MCP) and #173 (MongoDB Atlas,
    gateway's stream, TLS in rolld; checked by hand against real servers), `mongodb+srv://` is
    resolved by the gateway with the network's DNS and its own allow-list, and a two-node test covers
    the link following its lease, a call from the other node, the internal route's signature, and a
-   drain's reconnect. Next: ACME's pre-authorized names checked through a gateway, an identity's
-   login and refresh tested, and port ranges in the allow-list.
+   drain's reconnect; a gateway logs in with a workload identity and renews with no stream lost;
+   port ranges in its allow-list. Next: ACME's pre-authorized names checked through a gateway (once
+   #144 and #166 are both on main).
 7. **Pulumi** (#145): roll's Terraform provider through Pulumi's any-Terraform-provider package
    from a local build (no registry release), with TypeScript, Python and Go SDKs generated and an
    end-to-end `pulumi up`/`destroy` checked. Pulumi keeps every input in its state (encrypted), so
