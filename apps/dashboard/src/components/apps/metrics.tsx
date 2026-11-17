@@ -12,7 +12,7 @@
 
 import { Table2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats } from "@/lib/apps-api";
+import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary } from "@/lib/apps-api";
 import { formatBytes } from "@/lib/roll-api";
 import { btn, CopyButton, panel, useCopy } from "../ui";
 import { usePageVisible } from "./live";
@@ -194,6 +194,66 @@ const ROUTE_SORTS: { key: RouteSort; label: string }[] = [
 ];
 
 /** Errors and latency by route (Vercel's Observability): the last hour's access log, ids folded. */
+/** Recent traces (OpenTelemetry, sent by the app's instances): one opens as a waterfall. */
+function Traces({ service, env, traces }: { service: string; env: string; traces: TraceSummary[] }) {
+  const [open, setOpen] = useState<string | null>(null);
+  const [spans, setSpans] = useState<Span[] | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    setSpans(null);
+    appsApi.trace(service, env, open).then(
+      (t) => alive && setSpans(t.spans),
+      () => alive && setSpans([]),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [service, env, open]);
+  const start = spans && spans.length ? Math.min(...spans.map((s) => s.start)) : 0;
+  const total = spans && spans.length ? Math.max(1, Math.max(...spans.map((s) => s.end)) - start) : 1;
+  return (
+    <section className={`${panel} overflow-hidden`} aria-label="Traces">
+      <div className="border-b border-line px-4 py-2.5">
+        <p className="text-[12px] text-muted">
+          Traces <span className="text-subtle">· the {traces.length} newest, from the app's OpenTelemetry SDK</span>
+        </p>
+      </div>
+      <ul className="divide-y divide-line">
+        {traces.slice(0, 20).map((t) => (
+          <li key={t.trace}>
+            <button type="button" className="flex w-full items-center justify-between gap-3 px-4 py-2 text-left text-[12px] hover:bg-panel-2" aria-expanded={open === t.trace} onClick={() => setOpen(open === t.trace ? null : t.trace)}>
+              <span className="min-w-0 truncate">
+                <span className={t.error ? "text-danger" : ""}>{t.name}</span> <span className="text-subtle">· {t.spans} spans</span>
+              </span>
+              <span className="font-mono text-muted">{formatMs(t.ms)}</span>
+            </button>
+            {open === t.trace && (
+              <div className="space-y-1 px-4 pb-3">
+                {spans === null && <p className="shimmer text-[12px] text-muted">Reading its spans…</p>}
+                {spans?.map((s) => (
+                  <div key={s.span} className="grid grid-cols-[minmax(0,14rem)_1fr_4rem] items-center gap-2 text-[11.5px]">
+                    <span className={`truncate font-mono ${s.error ? "text-danger" : "text-muted"}`} title={s.name}>
+                      {s.name}
+                    </span>
+                    <span className="relative h-2 rounded-sm bg-line">
+                      <span
+                        className={`absolute inset-y-0 rounded-sm ${s.error ? "bg-danger" : "bg-accent"}`}
+                        style={{ left: `${((s.start - start) / total) * 100}%`, width: `${Math.max(0.5, ((s.end - s.start) / total) * 100)}%` }}
+                      />
+                    </span>
+                    <span className="text-right font-mono text-subtle">{formatMs((s.end - s.start) / 1e6)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 /** Visitors and page views from the access log: no script, no cookie (an address and browser a day). */
 function Visitors({ a }: { a: Analytics }) {
   const lists: { title: string; rows: { label: string; n: number }[] }[] = [
@@ -299,6 +359,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
   const [deploys, setDeploys] = useState<Deployment[]>([]);
   const [routes, setRoutes] = useState<RouteStats | null>(null);
   const [visitors, setVisitors] = useState<Analytics | null>(null);
+  const [traces, setTraces] = useState<TraceSummary[] | null>(null);
   const size = raw ? Math.max(1, Math.ceil(raw.minutes.length / MAX_POINTS)) : 1;
   const m = useMemo(() => (raw ? bucketed(raw, size) : null), [raw, size]);
   // Minutes a point stands for: rolld's step (an hour past a week) times the buckets here.
@@ -322,17 +383,19 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
     const load = async () => {
       try {
         // The deploys only mark the charts: metrics still show without them.
-        const [next, deps, byRoute, seen] = await Promise.all([
+        const [next, deps, byRoute, seen, traced] = await Promise.all([
           appsApi.metrics(service, env, range.minutes),
           appsApi.deploys(service, env).catch(() => null),
           appsApi.routes(service, env).catch(() => null),
           appsApi.analytics(service, env, Math.min(Math.max(range.minutes, 60), 10_080)).catch(() => null),
+          appsApi.traces(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
         ]);
         if (alive) {
           setM(next);
           if (deps) setDeploys(deps);
           if (byRoute) setRoutes(byRoute);
           if (seen) setVisitors(seen);
+          if (traced) setTraces(traced.traces);
           setError(null);
         }
       } catch (e) {
@@ -470,6 +533,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
       )}
       {routes && <Routes stats={routes} />}
       {visitors && visitors.page_views > 0 && <Visitors a={visitors} />}
+      {traces && traces.length > 0 && <Traces service={service} env={env} traces={traces} />}
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-subtle">
         <span>For a scraper:</span>
         <code className="min-w-0 truncate font-mono text-[11.5px] text-muted">{scrape}</code>

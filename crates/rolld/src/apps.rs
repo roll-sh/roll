@@ -561,6 +561,13 @@ pub async fn start(
     let store = tokio::task::block_in_place(|| Store::new(db, sealer(home)?).map_err(|e| anyhow::anyhow!("{e}")))?;
     let mut cfg = AppsConfig::new(home.to_path_buf());
     cfg.web_url = Some(args.web_url.trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
+    // Traces' address: `ROLL_APPS_OTLP_URL` (a fleet's public apps address), else the apps
+    // listener on loopback, which the runtime makes reachable from instances. Never the API:
+    // what an instance reaches through a relay is the node's, and the API's loopback is open.
+    cfg.otlp_base = std::env::var("ROLL_APPS_OTLP_URL").ok().filter(|u| !u.trim().is_empty()).or_else(|| {
+        let ip = if a.listen.ip().is_unspecified() { std::net::IpAddr::from([127, 0, 0, 1]) } else { a.listen.ip() };
+        Some(format!("http://{}", std::net::SocketAddr::new(ip, a.listen.port())))
+    });
     // Local development only: notification targets on this machine or a private network.
     cfg.allow_private = std::env::var("ROLL_APPS_ALLOW_PRIVATE").is_ok_and(|v| v == "1" || v == "true");
     // Built deployments each environment keeps to roll back to (older ones' images go).

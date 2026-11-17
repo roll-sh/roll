@@ -97,6 +97,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=&format=` | | `Metrics`; `format=prometheus`: the last finished minute as Prometheus text (`roll_apps_requests_per_minute`, `…_errors_per_minute`, `…_latency_ms{quantile}`, `…_cpu_seconds_per_minute`, `…_memory_bytes`, `…_instances`, `…_cold_starts_per_minute`, `…_cold_start_ms`, labelled `service`, `service_id`, `environment`) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/routes?minutes=` | | `RouteStats` (the last 5–60 minutes, default 60): the access log grouped by method and route, id-like segments `:id` and no query; the busiest, the most 5xx and the slowest (5 requests or more), each at most 50 | read |
 | `GET /v1/apps/services/{id}/environments/{env}/analytics?minutes=` | | `Analytics` (the last 60–10,080 minutes, default 1,440): visitors and page views from the access log, no script or cookie | read |
+| `GET /v1/apps/services/{id}/environments/{env}/traces?minutes=&min_ms=` | | `{ minutes, traces: TraceSummary[], cut }`: recent traces (5–10,080 minutes, default 60), newest first, at most 100; `min_ms` keeps the slower ones | read |
+| `GET /v1/apps/services/{id}/environments/{env}/traces/{trace}` | | `{ trace, spans: Span[] }` in start order (the last week's); 404 when none | read |
 | `GET /v1/apps/services/{id}/environments/{env}/usage?days=` | | `Usage` | read |
 | `GET /v1/apps/services/{id}/environments/{env}/runs` | | `CronRun[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/runs` | | 202 `CronRun` (run now) | deploy* |
@@ -316,6 +318,11 @@ type EnvironmentPut = {
   /** Redeploy (the same image, the new values) when the project's secrets change, checked each minute
    *  on the owner against roll secrets' digest; off by default. */
   redeploy_on_secrets?: boolean;
+  /** Its instances send OpenTelemetry traces to roll: `OTEL_EXPORTER_OTLP_ENDPOINT` (this
+   *  environment's address, a token of its own in it), `OTEL_EXPORTER_OTLP_PROTOCOL`,
+   *  `OTEL_TRACES_EXPORTER` and `OTEL_SERVICE_NAME` from the next deploy (its own variables win).
+   *  409 where the node has no OTLP address. */
+  traces?: boolean;
   follow_tag?: boolean;
   /** A preview environment (ephemeral) only, set by roll previews: a visitor who came in through
    *  its access link gets roll previews' feedback button on its pages (`/__roll/feedback.js`
@@ -375,6 +382,7 @@ type Environment = EnvironmentSummary & {
   hook: boolean;              // it has a deploy hook
   follow_tag: boolean;        // an image service's tag is watched: a new digest behind it deploys
   redeploy_on_secrets: boolean; // the project's secrets changing redeploys it (same image, new values)
+  traces: boolean; // its instances send OpenTelemetry traces to roll
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
   maintenance: { message: string | null } | null; // in maintenance (null message: roll's words); null: serving
   paused?: true;              // paused (absent: not)
@@ -494,6 +502,10 @@ type LogLine = { t: number; stream: "stdout" | "stderr" | "build" | "system"; in
 
 type RouteStat = { method: string; route: string; requests: number; errors: number /* 5xx */; client_errors: number /* 4xx */; p50_ms: number; p95_ms: number; max_ms: number };
 /** A page view: a browser's page load (`Sec-Fetch-Dest: document`, else `Accept: text/html`) answered 2xx or 304. A visitor: an address and user agent on one day, counted for this answer only (never kept). */
+/** A trace's root span, its duration and its spans' count. */
+type TraceSummary = { trace: string; name: string; service: string; start_ms: number; ms: number; spans: number; error: boolean };
+/** A span (OTLP's, as kept): ids in hex, times in Unix nanoseconds, its string/number/bool attributes. */
+type Span = { trace: string; span: string; parent?: string; name: string; service?: string; start: number; end: number; error?: boolean; attrs?: [string, string][] };
 type Analytics = { minutes: number; step: number /* minutes a point of series stands for */; page_views: number; visitors: number;
   pages: { path: string; views: number; visitors: number }[]; referrers: { host: string /* the referring site's, never this one's */; views: number }[];
   countries: { country: string /* the edge's CF-IPCountry */; views: number }[]; series: { t: number; views: number; visitors: number }[]; cut: boolean /* only the newest 200,000 requests read */ };
@@ -616,3 +628,9 @@ from the owner's cache, before anything wakes: `X-Roll-Cache: HIT`, `STALE` (fet
 background), or `MISS` when it was just kept, with `Age`. A request with `Authorization`, a
 deployment's own URL, a gradual rollout and a preview's feedback page never use it. A new live
 deployment empties it, and so does `POST …/cache/purge` (all of it, or some paths).
+
+`POST /_roll/otlp/{id}/{env}/{token}/v1/traces` on the apps listener (any host; not the API) takes
+an environment's traces from its instances: OTLP/HTTP `ExportTraceServiceRequest`, protobuf
+(`application/x-protobuf`) or JSON (`application/json`), gzip or not, at most 8 MiB; 200 with an
+empty export response. The token in the path is the credential (`traces: true` sets a sealed
+`OTEL_EXPORTER_OTLP_ENDPOINT` to it); any other is a 404.

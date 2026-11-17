@@ -102,6 +102,8 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/metrics"), get(metrics))
         .route(&format!("{env}/routes"), get(routes))
         .route(&format!("{env}/analytics"), get(analytics))
+        .route(&format!("{env}/traces"), get(traces))
+        .route(&format!("{env}/traces/{{trace}}"), get(trace))
         .route(&format!("{env}/usage"), get(usage))
         .route(&format!("{env}/runs"), get(runs).post(run_now))
         .route(&format!("{env}/runs/{{run}}"), get(get_run))
@@ -954,6 +956,7 @@ struct HookQuery {
 fn hooks_router(apps: Arc<Apps>) -> Router {
     Router::new()
         .route("/v1/apps/hooks/{id}/{env}/{token}", post(run_hook))
+
         .route_layer(axum::middleware::from_fn_with_state(apps.clone(), hook_on_owner))
         .with_state(apps)
 }
@@ -1094,6 +1097,20 @@ async fn metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(
 }
 
 /// `GET …/routes?minutes=`: errors and latency by route, from the access log (`crate::traffic`).
+#[derive(serde::Deserialize)]
+struct TraceQuery {
+    minutes: Option<i64>,
+    min_ms: Option<u64>,
+}
+
+async fn traces(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<TraceQuery>) -> R {
+    ok(apps.traces(&id, &env, q.minutes.unwrap_or(60), q.min_ms.unwrap_or(0)).await?)
+}
+
+async fn trace(State(apps): S, Path((id, env, trace)): Path<(String, String, String)>) -> R {
+    ok(apps.trace(&id, &env, &trace).await?)
+}
+
 async fn analytics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
     ok(apps.analytics(&id, &env, w.minutes.unwrap_or(1_440)).await?)
 }

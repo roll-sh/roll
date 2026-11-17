@@ -33,6 +33,8 @@ POST /v1/apps/services/{id}/environments/{env}/cache/purge
 POST /v1/apps/services/{id}/environments/{env}/rollback
 GET /v1/apps/services/{id}/environments/{env}/routes
 GET /v1/apps/services/{id}/environments/{env}/analytics
+GET /v1/apps/services/{id}/environments/{env}/traces
+GET /v1/apps/services/{id}/environments/{env}/traces/{trace}
 GET /v1/apps/services/{id}/environments/{env}/runs
 POST /v1/apps/services/{id}/environments/{env}/runs
 POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize

@@ -197,6 +197,20 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </button>
         </div>
 
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <div>
+            <p className="text-[13px] font-medium">Traces</p>
+            <p className="mt-1 text-[12px] text-muted">
+              {env.traces
+                ? "Its instances send OpenTelemetry traces to roll (OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_SERVICE_NAME are set); they show on the Metrics tab."
+                : "With an OpenTelemetry SDK in the app, turn this on and the next deploy sends its traces to roll, no other setup."}
+            </p>
+          </div>
+          <button className={btn} disabled={busy} aria-pressed={!!env.traces} onClick={() => runner.run("traces", () => appsApi.putEnvironment(service.id, env.name, { traces: !env.traces }))}>
+            {env.traces ? "Turn off" : "Turn on"}
+          </button>
+        </div>
+
         <div className="space-y-3 px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
