@@ -48,13 +48,6 @@ pub struct Inspect {
     pub gateways: Vec<std::net::IpAddr>,
     /// The first TCP port it exposes.
     pub exposed: Option<u16>,
-    /// A closed instance's (`sh.roll.apps.closed`: its port) address on its network, which
-    /// changes with each start.
-    pub closed: Option<std::net::SocketAddr>,
-    /// The (first) network it's on.
-    pub network: Option<String>,
-    /// Its health check's verdict (`starting`, `healthy`, `unhealthy`), when it has one.
-    pub health: Option<String>,
 }
 
 impl Engine {
@@ -314,8 +307,6 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
     struct Endpoint {
         #[serde(rename = "Gateway", default)]
         gateway: String,
-        #[serde(rename = "IPAddress", default)]
-        ip: String,
     }
     #[derive(Deserialize)]
     struct State {
@@ -327,13 +318,6 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
         oom_killed: bool,
         #[serde(rename = "Pid", default)]
         pid: u32,
-        #[serde(rename = "Health", default)]
-        health: Option<Health>,
-    }
-    #[derive(Deserialize)]
-    struct Health {
-        #[serde(rename = "Status", default)]
-        status: String,
     }
     #[derive(Deserialize)]
     struct Host {
@@ -348,16 +332,10 @@ fn parse_inspect(body: &[u8]) -> anyhow::Result<Inspect> {
     let c: Container = serde_json::from_slice(body).context("reading an inspect")?;
     let host_port = c.host.ports.into_iter().flatten().flat_map(|(_, b)| b.into_iter().flatten()).find_map(|b| b.port.parse().ok());
     let exposed = c.config.as_ref().and_then(|c| c.exposed.as_ref()).and_then(|e| e.keys().find_map(|k| k.strip_suffix("/tcp")?.parse().ok()));
-    let labels = c.config.and_then(|c| c.labels).unwrap_or_default();
-    let cpu_nanos = labels.get("sh.roll.apps.cpu").and_then(|v| v.parse().ok());
-    let named: Vec<(String, Endpoint)> = c.net.and_then(|n| n.networks).into_iter().flatten().collect();
-    let network = named.first().map(|(n, _)| n.clone());
-    let networks: Vec<Endpoint> = named.into_iter().map(|(_, e)| e).collect();
-    let gateways = networks.iter().filter_map(|e| e.gateway.parse().ok()).collect();
-    let closed = labels.get("sh.roll.apps.closed").and_then(|p| p.parse::<u16>().ok()).and_then(|p| Some(std::net::SocketAddr::new(networks.iter().find_map(|e| e.ip.parse().ok())?, p)));
+    let cpu_nanos = c.config.and_then(|c| c.labels).and_then(|l| l.get("sh.roll.apps.cpu").and_then(|v| v.parse().ok()));
+    let gateways = c.net.and_then(|n| n.networks).into_iter().flatten().filter_map(|(_, e)| e.gateway.parse().ok()).collect();
     let pid = (c.state.running && c.state.pid > 0).then_some(c.state.pid);
-    let health = c.state.health.map(|h| h.status).filter(|s| !s.is_empty());
-    Ok(Inspect { id: c.id, running: c.state.running, host_port, cpu_nanos, exit_code: c.state.exit_code, oom_killed: c.state.oom_killed, pid, gateways, exposed, closed, network, health })
+    Ok(Inspect { id: c.id, running: c.state.running, host_port, cpu_nanos, exit_code: c.state.exit_code, oom_killed: c.state.oom_killed, pid, gateways, exposed })
 }
 
 /// Splits Docker's multiplexed log stream (a container without a TTY): frames of an 8-byte header
@@ -408,7 +386,7 @@ mod tests {
     #[test]
     fn inspect_reads_id_state_and_the_published_port() {
         let body = br#"{"Id":"abc","State":{"Running":true},"HostConfig":{"PortBindings":{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"41234"}]}}}"#;
-        assert_eq!(parse_inspect(body).unwrap(), Inspect { id: "abc".into(), running: true, host_port: Some(41234), cpu_nanos: None, exit_code: None, oom_killed: false, pid: None, gateways: vec![], exposed: None, closed: None, network: None, health: None });
+        assert_eq!(parse_inspect(body).unwrap(), Inspect { id: "abc".into(), running: true, host_port: Some(41234), cpu_nanos: None, exit_code: None, oom_killed: false, pid: None, gateways: vec![], exposed: None });
         let oom = br#"{"Id":"o","State":{"Running":false,"ExitCode":137,"OOMKilled":true},"HostConfig":{}}"#;
         let i = parse_inspect(oom).unwrap();
         assert_eq!((i.exit_code, i.oom_killed), (Some(137), true));

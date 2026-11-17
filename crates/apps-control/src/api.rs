@@ -82,7 +82,6 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
         .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
-        .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
         .route(&format!("{env}/redeploy"), post(redeploy))
@@ -91,7 +90,6 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/volume/backups"), get(backups).post(backup_volume))
         .route(&format!("{env}/volume/backups/{{bid}}/restore"), post(restore_volume))
         .route(&format!("{env}/restart"), post(restart))
-        .route(&format!("{env}/cache/purge"), post(purge_cache))
         .route(&format!("{env}/instances/{{name}}/restart"), post(restart_instance))
         .route(&format!("{env}/files"), get(read_files).put(write_files).layer(DefaultBodyLimit::max(crate::shell::FILES_MAX)))
         .route(&format!("{env}/sleep"), post(sleep))
@@ -102,13 +100,6 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/logs"), get(env_logs))
         .route(&format!("{env}/metrics"), get(metrics))
         .route(&format!("{env}/routes"), get(routes))
-        .route(&format!("{env}/analytics"), get(analytics))
-        .route(&format!("{env}/visit"), post(visit))
-        .route(&format!("{env}/vitals"), get(vitals))
-        .route(&format!("{env}/app-metrics"), get(app_metrics))
-        .route(&format!("{env}/errors"), get(errors))
-        .route(&format!("{env}/traces"), get(traces))
-        .route(&format!("{env}/traces/{{trace}}"), get(trace))
         .route(&format!("{env}/usage"), get(usage))
         .route(&format!("{env}/runs"), get(runs).post(run_now))
         .route(&format!("{env}/runs/{{run}}"), get(get_run))
@@ -163,7 +154,7 @@ async fn import(State(apps): S, b: Bytes) -> R {
     use apps_build::project::{VarSpec, compose_to_toml, entry_kind, entry_run, parse_project};
     let v = body(&b)?;
     let text = |k: &str| v.get(k).and_then(Value::as_str);
-    if [text("roll_toml"), text("compose"), text("render"), text("fly"), text("railway"), text("heroku"), text("procfile")].into_iter().flatten().any(|t| t.len() > 1 << 20) {
+    if [text("roll_toml"), text("compose")].into_iter().flatten().any(|t| t.len() > 1 << 20) {
         return Err(Error::BadRequest("the file is at most 1 MiB".into()));
     }
     // A repo's own roll.toml (a "deploy to roll" link): its root's, at a revision or its head.
@@ -203,32 +194,15 @@ async fn import(State(apps): S, b: Bytes) -> R {
     let (git_url, git_branch) = from_git.as_ref().map(|(u, b, _)| (Some(u.clone()), Some(b.clone()))).unwrap_or_default();
     let repo = text("repo").map(str::to_string);
     let from_repo = from_repo.or(from_git.map(|(_, _, t)| t));
-    // Another platform's file (Render's Blueprint, fly.toml, railway.json, Heroku's app.json and
-    // Procfile), read as roll.toml with notes on what isn't carried over.
-    let platform: Vec<(&str, String)> = ["render", "fly", "railway", "heroku"].into_iter().filter_map(|k| Some((k, text(k)?.to_string()))).collect();
-    let procfile = text("procfile").map(str::to_string);
-    let given = [from_repo.is_some(), text("roll_toml").is_some(), text("compose").is_some()].into_iter().filter(|b| *b).count() + platform.len();
-    if given != 1 {
-        return Err(Error::BadRequest("give one of roll_toml, compose, render, fly, railway, heroku (with procfile), repo or git".into()));
-    }
-    let (toml_text, notes) = match (from_repo, text("roll_toml"), text("compose"), platform.into_iter().next()) {
-        (Some(t), _, _, _) => (t, Vec::new()),
-        (_, Some(t), _, _) => (t.to_string(), Vec::new()),
+    let (toml_text, notes) = match (from_repo, text("roll_toml"), text("compose")) {
+        (Some(t), None, None) => (t, Vec::new()),
+        (None, Some(t), None) => (t.to_string(), Vec::new()),
         // Off the runtime's threads: a large file is a few hundred milliseconds of parsing.
-        (_, _, Some(c), _) => {
+        (None, None, Some(c)) => {
             let c = c.to_string();
             tokio::task::spawn_blocking(move || compose_to_toml(&c)).await.map_err(|e| Error::Internal(e.to_string()))?.map_err(|e| Error::BadRequest(e.to_string()))?
         }
-        (_, _, _, Some((kind, t))) => tokio::task::spawn_blocking(move || match kind {
-            "render" => apps_build::imports::render_to_toml(&t),
-            "fly" => apps_build::imports::fly_to_toml(&t),
-            "railway" => apps_build::imports::railway_to_toml(&t),
-            _ => apps_build::imports::heroku_to_toml(&t, procfile.as_deref()),
-        })
-        .await
-        .map_err(|e| Error::Internal(e.to_string()))?
-        .map_err(|e| Error::BadRequest(e.to_string()))?,
-        _ => return Err(Error::BadRequest("give one of roll_toml, compose, render, fly, railway, heroku, repo or git".into())),
+        _ => return Err(Error::BadRequest("give one of roll_toml, compose, repo or git".into())),
     };
     let f = parse_project(&toml_text).map_err(|e| Error::BadRequest(e.to_string()))?;
     let apps: serde_json::Map<String, Value> = f
@@ -978,7 +952,6 @@ struct HookQuery {
 fn hooks_router(apps: Arc<Apps>) -> Router {
     Router::new()
         .route("/v1/apps/hooks/{id}/{env}/{token}", post(run_hook))
-
         .route_layer(axum::middleware::from_fn_with_state(apps.clone(), hook_on_owner))
         .with_state(apps)
 }
@@ -1035,18 +1008,6 @@ async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, St
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
-#[derive(Deserialize)]
-struct RolloutBody {
-    action: crate::model::RolloutAction,
-}
-
-async fn rollout_action(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, Json(b): Json<RolloutBody>) -> R {
-    apps.deployment(&id, &env, &dep).await?;
-    apps.rollout_action(&dep, b.action)?;
-    apps.audit("rollout.decided", &id, &env, actor(&ext), json!({ "deployment": dep, "action": format!("{:?}", b.action).to_ascii_lowercase() })).await;
-    Ok((StatusCode::ACCEPTED, Json(json!({ "deployment": dep }))).into_response())
-}
-
 async fn rollback_previous(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
     let d = apps.rollback_previous(&id, &env, actor(&ext), keep).await?;
@@ -1055,12 +1016,6 @@ async fn rollback_previous(State(apps): S, Path((id, env)): Path<(String, String
 
 async fn cancel(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
     ok(apps.cancel(&id, &env, &dep).await?)
-}
-
-async fn purge_cache(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
-    let v = apps.purge_cache(&id, &env, if b.is_empty() { json!({}) } else { body(&b)? }).await?;
-    apps.audit("cache.purged", &id, &env, actor(&ext), v.clone()).await;
-    ok(v)
 }
 
 async fn restart(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
@@ -1131,55 +1086,6 @@ async fn metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(
 }
 
 /// `GET …/routes?minutes=`: errors and latency by route, from the access log (`crate::traffic`).
-#[derive(serde::Deserialize)]
-struct TraceQuery {
-    minutes: Option<i64>,
-    min_ms: Option<u64>,
-}
-
-async fn traces(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<TraceQuery>) -> R {
-    ok(apps.traces(&id, &env, q.minutes.unwrap_or(60), q.min_ms.unwrap_or(0)).await?)
-}
-
-#[derive(Deserialize)]
-struct VitalsQuery {
-    minutes: Option<i64>,
-}
-
-async fn errors(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
-    ok(apps.errors(&id, &env, q.minutes.unwrap_or(1440)).await?)
-}
-
-async fn app_metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
-    ok(apps.app_metrics(&id, &env, q.minutes.unwrap_or(60)).await?)
-}
-
-async fn vitals(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
-    ok(apps.vitals(&id, &env, q.minutes.unwrap_or(1440)).await?)
-}
-
-#[derive(Deserialize)]
-struct VisitBody {
-    to: String,
-}
-
-/// A signed-in person's one-use way into a sign-in-gated environment (roll's dashboard asks
-/// for it as them, then sends the browser there). A token isn't a person: only a session gets one.
-async fn visit(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, Json(b): Json<VisitBody>) -> R {
-    let Some(user) = ext.get::<roll_auth::SignedIn>() else {
-        return Err(Error::Forbidden("signing in to an environment is for a person signed in to roll, not a token".into()));
-    };
-    ok(json!({ "url": apps.visit_ticket(&id, &env, &user.user, &b.to).await? }))
-}
-
-async fn trace(State(apps): S, Path((id, env, trace)): Path<(String, String, String)>) -> R {
-    ok(apps.trace(&id, &env, &trace).await?)
-}
-
-async fn analytics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
-    ok(apps.analytics(&id, &env, w.minutes.unwrap_or(1_440)).await?)
-}
-
 async fn routes(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
     ok(apps.routes(&id, &env, w.minutes.unwrap_or(60)).await?)
 }

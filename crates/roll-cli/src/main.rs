@@ -819,20 +819,10 @@ mod tests {
                 walk(s, p, out);
             }
         }
-        // The whole command tree, built as `roll` builds it on its main thread's stack (a test
-        // thread's 2 MiB is too little for it in a debug build).
-        let commands = std::thread::Builder::new()
-            .stack_size(16 << 20)
-            .spawn(|| {
-                let cli = Cli::command();
-                let code = cli.find_subcommand("code").expect("roll code");
-                let mut commands = Vec::new();
-                walk(code, "roll code".into(), &mut commands);
-                commands
-            })
-            .expect("a thread")
-            .join()
-            .expect("the walk");
+        let cli = Cli::command();
+        let code = cli.find_subcommand("code").expect("roll code");
+        let mut commands = Vec::new();
+        walk(code, "roll code".into(), &mut commands);
         assert!(commands.len() > 60, "{commands:?}");
         let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/code/test-coverage.md")).unwrap();
         let missing: Vec<&String> = commands

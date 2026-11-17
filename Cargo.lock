@@ -274,7 +274,6 @@ name = "apps-control"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
- "aho-corasick",
  "anyhow",
  "apps-build",
  "async-trait",
@@ -6870,7 +6869,10 @@ dependencies = [
  "hex",
  "http-body-util",
  "reqwest",
+ "ring",
  "roll-auth",
+ "roll-net",
+ "roll-oidc",
  "serde",
  "serde_json",
  "sha2 0.10.9",

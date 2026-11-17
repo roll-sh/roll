@@ -7,7 +7,7 @@ import { LogBar, LogView } from "./shared";
 const MAX_LINES = 5000;
 
 /** The environment's runtime log, live: every instance's stdout and stderr, filterable, pausable. */
-export function RuntimeLogs({ service, env, onGroup }: { service: string; env: string; onGroup?: () => void }) {
+export function RuntimeLogs({ service, env }: { service: string; env: string }) {
   const [lines, setLines] = useState<LogLine[]>([]);
   const [open, setOpen] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -251,7 +251,6 @@ export function RuntimeLogs({ service, env, onGroup }: { service: string; env: s
       <LogView
         lines={found ? found.lines : shown}
         columns
-        onGroup={onGroup}
         className="h-[min(560px,65svh)]"
         empty={
           lines.length ? (

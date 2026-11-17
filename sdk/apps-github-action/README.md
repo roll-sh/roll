@@ -23,27 +23,6 @@ jobs:
       - run: curl -fsS "${{ steps.roll.outputs.url }}/health"
 ```
 
-**With no stored token.** Make a trusted machine client for the repository once
-(`roll token client create ci --product apps --allow read,deploy --github acme/web --ref
-refs/heads/main`), and the job signs in with its own OIDC token instead of `token`:
-
-```yaml
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v5
-      - uses: roll-sh/roll/sdk/apps-github-action@main
-        with:
-          api-url: https://api.roll.example
-          client-id: mcl_…   # nothing secret: only this repository's jobs can sign in as it
-          service: svc_…
-```
-
-roll checks the token (issuer, audience, the repository and ref the client names) and gives the
-job a short-lived token, masked before anything prints it. A pull request's job is refused unless
-the client allows its ref.
-
 What it deploys depends on the service's source:
 
 - **A repo or Git URL service** builds `revision` (by default the workflow's commit) from the

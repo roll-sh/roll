@@ -217,17 +217,6 @@ pub trait GitHubApp: Send + Sync {
     /// That deployment's state (`in_progress`, `success`, `failure`), with where it answers.
     #[allow(clippy::too_many_arguments)]
     async fn deployment_status(&self, installation: u64, owner: &str, repo: &str, deployment: u64, state: &str, url: Option<&str>, description: &str) -> anyhow::Result<()>;
-    /// What a commit's checks on GitHub say (roll's own left out), for `wait_for_ci`.
-    async fn ci(&self, _installation: u64, _owner: &str, _repo: &str, _sha: &str) -> anyhow::Result<Ci> {
-        Ok(Ci::None)
-    }
-}
-
-/// Whether a person may still open a project's environments (rolld answers from roll-accounts:
-/// the account still signs in, and may use roll apps). A sign-in-gated environment asks when it
-/// gives a ticket and again every few minutes of a visitor's session. Unset: a session lasts.
-pub trait Visitors: Send + Sync {
-    fn may_open(&self, user: &str, project: &str) -> bool;
 }
 
 /// Email to a person through their account (rolld fills it with roll-accounts' mailer). Unset or

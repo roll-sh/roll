@@ -159,7 +159,6 @@ fn unloaded() -> anyhow::Error {
 mod tests {
     use super::*;
     use search_es::{Cluster, ClusterConfig, EsRequest, MemoryStore};
-    use std::time::Duration;
 
     async fn send(c: &Cluster, method: &str, uri: &str, body: &str) -> search_es::EsResponse {
         search_es::handle(c, EsRequest::json(method, uri, body.to_string())).await
@@ -237,10 +236,10 @@ mod tests {
             let c = c.clone();
             async move { send(&c, "PUT", "/racing", "{}").await }
         });
-        tokio::time::timeout(Duration::from_secs(30), gated.entered.notified()).await.expect("the change reaches the store's save");
+        gated.entered.notified().await;
         checked.close();
         gated.release.notify_one();
-        let r = tokio::time::timeout(Duration::from_secs(30), req).await.expect("the change is answered once its save is released").unwrap();
+        let r = req.await.unwrap();
         assert_eq!(r.status, 503, "{}", String::from_utf8_lossy(&r.body));
         let v: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
         assert_eq!(v["error"]["type"], "cluster_block_exception", "{v}");

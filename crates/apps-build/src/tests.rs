@@ -771,22 +771,3 @@ fn a_monorepos_apps_are_its_candidate_roots() {
     let roots: Vec<String> = candidates(&t).into_iter().map(|c| c.root).collect();
     assert_eq!(roots, ["apps/api", "apps/web", "apps/worker"]);
 }
-
-#[test]
-fn variables_reach_build_steps_as_secrets_and_files_at_their_paths() {
-    let o = Overrides {
-        build_env: vec!["NPMRC".into(), "TOKEN".into(), "ODD".into()],
-        build_files: vec![("NPMRC".into(), "/root/.npmrc".into()), ("ODD".into(), "/etc/a,b".into())],
-        ..Default::default()
-    };
-    let p = plan(&tree(&[("package.json", r#"{"scripts": {"start": "node index.js"}}"#), ("package-lock.json", "{}")]), &o).unwrap();
-    has(&p, &["--mount=type=secret,id=NPMRC,target=/root/.npmrc ", "--mount=type=secret,id=TOKEN,env=TOKEN ", "--mount=type=secret,id=ODD,env=ODD "]);
-    assert!(!p.dockerfile.contains("id=NPMRC,env="), "a file variable isn't in the environment: {}", p.dockerfile);
-}
-
-#[test]
-fn a_static_sites_functions_are_named_not_dropped() {
-    let p = plan(&tree(&[("index.html", "<h1>hi</h1>"), ("netlify/functions/hello.js", "export default () => new Response('hi')"), ("api/ping.ts", "export default () => {}")]), &Overrides::default()).unwrap();
-    assert!(p.notes.iter().any(|n| n.starts_with("netlify/functions/ has 1 Netlify Functions")), "{:?}", p.notes);
-    assert!(p.notes.iter().any(|n| n.starts_with("api/ has 1 Vercel functions")), "{:?}", p.notes);
-}

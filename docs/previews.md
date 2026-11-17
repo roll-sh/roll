@@ -514,11 +514,8 @@ It's measured on ai-server: a container on such a network gets "network unreacha
 outside address, and the host reaches its server at its address. Containers there can't reach
 the host either way (the host's firewall), so the products' reach is the same as on the default
 bridge. On the fleet, where products listen on every interface, the network's gateway reaches
-them. It's reversible: `"open"` is the default, and the setting only adds a network. A service
-hosted on roll apps gets the same rule: the preview's environment there is made with
-`egress: {mode: "roll", hosts}`, so it runs on a network of its own with no route out and its
-listed hosts go through roll apps' egress proxy (docs/apps/README.md, "Egress"); what that proxy
-refuses shows in the preview's activity too.
+them. It's reversible: `"open"` is the default, and the setting only adds a network. It covers
+services roll's runtime runs; a service hosted on roll apps follows roll apps' own networking.
 Changing it restarts the services (it's part of what they're deployed with). Live in
 `scripts/preview-cost.sh`: the service reached 1.1.1.1 with `open`, then ran on
 `roll-previews-net-<id>`, was still served through roll, and got "network unreachable".

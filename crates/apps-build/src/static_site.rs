@@ -10,39 +10,6 @@ pub(crate) const ROOT: &str = "/site";
 pub(crate) const USER: &str = "65534:65534";
 pub(crate) const START: &str = "httpd -f -v -p $PORT -h /site";
 
-/// The most a `vercel.json` or `netlify.toml` may weigh to be read.
-const MAX_CONFIG: usize = 64 << 10;
-
-/// A `RUN` that appends what the tree's `netlify.toml` and `vercel.json` say to the site's own
-/// `_redirects` and `_headers` (as those lines; the configs themselves never go into the image),
-/// with notes on what was taken and left out. None: neither says anything.
-pub(crate) fn config_rules(tree: &dyn Tree, notes: &mut Vec<String>) -> Option<String> {
-    let (mut redirects, mut headers) = (String::new(), String::new());
-    for (name, convert) in [("netlify.toml", crate::site_configs::from_netlify as fn(&str) -> crate::site_configs::Converted), ("vercel.json", crate::site_configs::from_vercel)] {
-        let Some(text) = tree.read(name).filter(|t| t.len() <= MAX_CONFIG) else { continue };
-        let c = convert(&String::from_utf8_lossy(&text));
-        let (r, h) = (c.redirects.lines().count(), c.headers.lines().filter(|l| !l.starts_with(' ')).count());
-        if r + h > 0 {
-            notes.push(format!("{name}: {r} redirect and rewrite rules, {h} header rules, served as the site's own"));
-        }
-        for why in c.skipped.iter().take(20) {
-            notes.push(format!("not taken from {why}"));
-        }
-        redirects.push_str(&c.redirects);
-        headers.push_str(&c.headers);
-    }
-    // printf's own escapes, in single quotes: no line break, quote or `%` reaches the Dockerfile.
-    let quoted = |s: &str| format!("'{}'", s.replace('\\', "\\\\").replace('%', "%%").replace('\n', "\\n").replace('\r', "").replace('\'', "'\\''"));
-    let mut cmds = Vec::new();
-    if !redirects.is_empty() {
-        cmds.push(format!("printf {} >> {ROOT}/_redirects", quoted(&format!("\n{redirects}"))));
-    }
-    if !headers.is_empty() {
-        cmds.push(format!("printf {} >> {ROOT}/_headers", quoted(&format!("\n{headers}"))));
-    }
-    (!cmds.is_empty()).then(|| cmds.join(" && "))
-}
-
 /// The directory holding the site's `index.html`: the root, or `public`.
 pub(crate) fn index(tree: &dyn Tree) -> Option<&'static str> {
     if tree.read("index.html").is_some() {
@@ -58,13 +25,12 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
     let Some(dir) = index(tree) else {
         return Ok(None);
     };
-    let mut notes = vec![match dir {
+    let notes = vec![match dir {
         "." => "found index.html: a static site, served by busybox httpd".to_string(),
         _ => {
             "found public/index.html: a static site in public, served by busybox httpd".to_string()
         }
     }];
-    let rules = config_rules(tree, &mut notes);
     let render = Box::new(move |c: &crate::Commands<'_>| {
         let mut df = Df::new(c);
         df.from(IMAGE, None);
@@ -80,9 +46,6 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
             ));
         } else {
             df.line(&format!("COPY {dir} {ROOT}"));
-        }
-        if let Some(r) = &rules {
-            df.line(&format!("RUN {r}"));
         }
         df.serve(Some(USER), c.start);
         df.finish()

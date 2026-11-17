@@ -29,17 +29,6 @@ function fake(kind, statuses) {
       else seen.comments.find((c) => u.pathname.endsWith(`/${c.id}`)).body = body;
       return json(200, {});
     }
-    // GitHub Actions' OIDC tokens, and roll's trusted-client sign-in that trades one.
-    if (u.host === "token.actions.test") {
-      assert.equal(h.authorization, "Bearer gh-oidc-request");
-      return json(200, { value: `jwt-for-${u.searchParams.get("audience")}` });
-    }
-    if (method === "POST" && u.pathname === "/v1/access/oauth/token") {
-      const f = new URLSearchParams(init.body);
-      assert.equal(f.get("grant_type"), "urn:ietf:params:oauth:grant-type:jwt-bearer");
-      if (f.get("client_id") !== "mcl_ci" || f.get("assertion") !== "jwt-for-https://roll.test") return json(400, { error: "invalid_grant", error_description: "the token's sub doesn't match the client's subject" });
-      return json(200, { access_token: "rlt_ci", token_type: "Bearer", expires_in: 900 });
-    }
     if (h.authorization !== "Bearer rlt_ci") return json(401, { error: "no token" });
     const env = "/v1/apps/services/svc_web/environments/production";
     if (method === "GET" && u.pathname === "/v1/apps/services/svc_web") return json(200, { id: "svc_web", source: { kind } });
@@ -122,22 +111,6 @@ test("an upload service sends the checkout's committed files, and a failure keep
   assert.equal(seen.logs, 0);
   await assert.rejects(run({ ...j.env, INPUT_PATH: path.join(repo, "web"), "INPUT_SHOW-LOGS": "true" }, j.out, fetchFn, childProcess.execFileSync, noSleep), /dep_1 failed$/);
   assert.match(j.printed(), /npm ERR! missing script: build/);
-});
-
-test("with client-id the job signs in with its own OIDC token, masked, and nothing is stored", async () => {
-  const { fetchFn, seen } = fake("repo", ["active"]);
-  const oidc = { "INPUT_CLIENT-ID": "mcl_ci", ACTIONS_ID_TOKEN_REQUEST_URL: "https://token.actions.test/id?x=1", ACTIONS_ID_TOKEN_REQUEST_TOKEN: "gh-oidc-request" };
-  const j = job({ INPUT_TOKEN: "", INPUT_COMMENT: "false", ...oidc });
-  const d = await run(j.env, j.out, fetchFn, () => Buffer.from("x\n"), noSleep);
-  assert.equal(d.status, "active");
-  assert.equal(seen.deploys.length, 1);
-  assert.ok(j.printed().includes("::add-mask::jwt-for-https://roll.test\n") && j.printed().includes("::add-mask::rlt_ci\n"), j.printed());
-  const wrong = job({ INPUT_TOKEN: "", "INPUT_CLIENT-ID": "mcl_other", ACTIONS_ID_TOKEN_REQUEST_URL: oidc.ACTIONS_ID_TOKEN_REQUEST_URL, ACTIONS_ID_TOKEN_REQUEST_TOKEN: "gh-oidc-request" });
-  await assert.rejects(run(wrong.env, wrong.out, fetchFn, () => Buffer.from("x\n"), noSleep), /didn't sign the job in as mcl_other: invalid_grant: the token's sub doesn't match/);
-  const both = job({ "INPUT_CLIENT-ID": "mcl_ci" });
-  await assert.rejects(run(both.env, both.out, fetchFn, () => Buffer.from("x\n"), noSleep), /client-id .* or token, not both/);
-  const noPermission = job({ INPUT_TOKEN: "", "INPUT_CLIENT-ID": "mcl_ci" });
-  await assert.rejects(run(noPermission.env, noPermission.out, fetchFn, () => Buffer.from("x\n"), noSleep), /id-token: write/);
 });
 
 test("a fork's pull request, with no token, is told why", async () => {

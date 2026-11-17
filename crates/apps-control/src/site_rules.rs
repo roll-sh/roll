@@ -225,11 +225,9 @@ impl SiteRules {
     }
 }
 
-/// The files a site's rules come from, which are never served themselves (a site built from
-/// its tree's root has its `netlify.toml` and `vercel.json` in it, and those can hold build
-/// settings).
+/// The files a site's rules come from, which are never served themselves.
 pub fn is_rules_file(path: &str) -> bool {
-    matches!(path.trim_matches('/'), "_redirects" | "_headers" | "netlify.toml" | "vercel.json")
+    matches!(path.trim_matches('/'), "_redirects" | "_headers")
 }
 
 #[cfg(test)]

@@ -566,9 +566,6 @@ impl Runtime for Fargate {
         if spec.volume.is_some() {
             bail!("volumes aren't on the fleet yet");
         }
-        if !spec.files.is_empty() {
-            bail!("variables as files aren't on the fleet yet");
-        }
         env_file(&spec.vars)?;
         let task_def = self.task_def(spec).await?;
         self.instances.lock().insert(spec.name.clone(), Instance { spec: spec.clone(), task_def, task: None });
@@ -908,7 +905,7 @@ impl Runtime for Fargate {
 
     /// Nothing yet: tasks aren't on a project network (Cloud Map is later), so a service reaches
     /// another by its public URL.
-    async fn ensure_network(&self, _name: &str, _service: &str, _closed: bool) -> anyhow::Result<()> {
+    async fn ensure_network(&self, _name: &str, _service: &str) -> anyhow::Result<()> {
         Ok(())
     }
 

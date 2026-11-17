@@ -1198,7 +1198,7 @@ Object keys (never reused; a rewritten object gets a new key):
 // search-es
 pub struct EsRequest { pub method: String, pub uri: String /* raw path?query */, pub headers: Vec<(String, String)>, pub body: Bytes }
 pub struct EsResponse { pub status: u16, pub headers: Vec<(String, String)>, pub body: Bytes, pub head: bool /* send Content-Length, no body */ }
-pub async fn handle(cluster: &Cluster, req: EsRequest) -> EsResponse;            // Send future; search and by-query APIs run in block_in_place
+pub async fn handle(cluster: &Cluster, req: EsRequest) -> EsResponse;            // Send future; search APIs run in block_in_place
 pub async fn rest::handle_shared(cluster: &Arc<Cluster>, req: EsRequest) -> EsResponse; // search APIs on a blocking thread,
                                                                                   // cancelled (ambient SearchControl.cancelled) when the future is dropped
 pub fn rest::error_response(e: &EsError, req: &EsRequest, d: Dialect) -> EsResponse; // errors before a cluster is known (auth, limits)

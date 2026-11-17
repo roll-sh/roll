@@ -200,12 +200,7 @@ impl Apps {
                 .ok()
                 .flatten()
                 .map(|j| crate::model::ScheduleRun { job: j.id, status: j.status, started_at: j.started_at });
-            let k = format!("sched-call:{}/{}/{}", svc.id, env.name, sc.name);
-            let last_call = match &sc.path {
-                Some(_) => self.db(move |s| s.get_state(&k)).await.ok().flatten().and_then(|v| serde_json::from_str(&v).ok()),
-                None => None,
-            };
-            out.push(crate::model::ScheduleState { name: sc.name.clone(), next_run_at: next, last, last_call });
+            out.push(crate::model::ScheduleState { name: sc.name.clone(), next_run_at: next, last });
         }
         out
     }

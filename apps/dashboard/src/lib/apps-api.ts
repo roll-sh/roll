@@ -68,18 +68,10 @@ export interface Run {
   memory_mb: number;
   health_path?: string;
   health_timeout_s: number;
-  /** Seconds between two health checks while running (2–300; unset 10). */
-  health_every_s?: number;
-  /** Failed checks in a row that replace an instance (1–10; unset 3). */
-  health_failures?: number;
-  /** A worker's health check: a shell command in its instance, healthy on exit 0. */
-  health_command?: string;
   /** A replaced instance's time to finish: its requests, then SIGTERM, SIGKILL when it's up (1–300; unset 30). */
   drain_s?: number;
   /** A web service also scales on CPU: another instance while they average over this percent for a minute (10–100). */
   cpu_target?: number;
-  /** And on memory: another while they average over this percent of their memory for a minute (10–100). */
-  memory_target?: number;
   suspend_after_s: number;
   sleep_after_s: number;
   volume?: { mount: string; size_gb: number };
@@ -88,7 +80,7 @@ export interface Run {
   alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number };
   /** A gradual rollout: the new deployment takes each percent of `steps` for `step_s`, rolled
    *  back by a 5xx share of `error_pct` or more (worse than the old one); no steps: at once. */
-  rollout?: { steps: number[]; step_s: number; error_pct: number; /** Each step waits for a person once it passes. */ manual?: boolean };
+  rollout?: { steps: number[]; step_s: number; error_pct: number };
   /** The app speaks HTTP/2 without TLS (a gRPC server). */
   h2c?: boolean;
   /** false: no public URL, only the project's private network (absent: public). */
@@ -112,10 +104,7 @@ export interface Run {
 export interface Scheduled {
   name: string;
   schedule: string;
-  /** A command each due time, or (absent) `path`'s call. */
-  command?: string;
-  /** A web service's path GET'd each due time instead (Vercel's crons), with `Authorization: Bearer $CRON_SECRET`. */
-  path?: string;
+  command: string;
   timezone?: string;
   timeout_s?: number;
 }
@@ -144,7 +133,7 @@ export interface Service {
   /** The private registry login its image pulls with (the password is never returned). */
   registry: { server: string; username: string } | null;
   /** A private Git repository's login, bound to the source URL's host (the password is never returned). */
-  git_login: { host: string; username: string; secret?: string } | null;
+  git_login: { host: string; username: string } | null;
   /** Connected to roll's GitHub App: fetches use its installation's tokens, deploys post statuses. */
   github: { installation: number; repo: string } | null;
   /** What it links (the canvas draws them). */
@@ -280,10 +269,7 @@ export function describePending(p: Pending): string | null {
 }
 
 export interface FirewallRule {
-  /** `limit`: let in at `per_minute` a client, a 429 past it. */
-  action: "allow" | "deny" | "limit";
-  per_minute?: number;
-  burst?: number;
+  action: "allow" | "deny";
   /** A path, or a prefix ending in `*`. */
   path?: string;
   methods?: string[];
@@ -298,16 +284,8 @@ export function parseFirewall(text: string): FirewallRule[] {
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith("#"))
     .map((l) => {
-      const [action, ...words] = l.split(/\s+/);
-      const rule: FirewallRule = { action: action === "allow" ? "allow" : action === "limit" ? "limit" : "deny" };
-      let rest = words;
-      // `limit N[:BURST] …`
-      if (rule.action === "limit") {
-        const [n, b] = (rest[0] ?? "").split(":");
-        rule.per_minute = Number(n) || 60;
-        if (b) rule.burst = Number(b) || undefined;
-        rest = rest.slice(1);
-      }
+      const [action, ...rest] = l.split(/\s+/);
+      const rule: FirewallRule = { action: action === "allow" ? "allow" : "deny" };
       for (let i = 0; i < rest.length; i++) {
         const t = rest[i];
         if (t.startsWith("ua=")) {
@@ -324,7 +302,7 @@ export function parseFirewall(text: string): FirewallRule[] {
 /** The rules as one line each, as `parseFirewall` reads them. */
 export function formatFirewall(rules: FirewallRule[]): string {
   return rules
-    .map((r) => [r.action, r.action === "limit" ? `${r.per_minute ?? 60}${r.burst ? `:${r.burst}` : ""}` : undefined, r.path, r.methods?.length ? `method=${r.methods.join(",")}` : undefined, r.user_agent ? `ua=${r.user_agent}` : undefined].filter(Boolean).join(" "))
+    .map((r) => [r.action, r.path, r.methods?.length ? `method=${r.methods.join(",")}` : undefined, r.user_agent ? `ua=${r.user_agent}` : undefined].filter(Boolean).join(" "))
     .join("\n");
 }
 
@@ -366,28 +344,6 @@ export function parseHeaders(text: string): HeaderRule[] {
 }
 
 /** The rules as one header a line, as `parseHeaders` reads them. */
-/** A path (a prefix ends in `*`) another service of the project answers. */
-export interface RouteRule {
-  path: string;
-  service: string;
-}
-
-/** Routes as lines, `/api/* api`. */
-export function parseRoutes(text: string): RouteRule[] {
-  return text
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .map((l) => {
-      const [path, service = ""] = l.split(/\s+/);
-      return { path, service };
-    });
-}
-
-export function formatRoutes(rules: RouteRule[]): string {
-  return rules.map((r) => `${r.path} ${r.service}`).join("\n");
-}
-
 export function formatHeaders(rules: HeaderRule[]): string {
   return rules.flatMap((r) => Object.entries(r.set).map(([k, v]) => `${r.replace ? "!" : ""}${r.path ? `${r.path} ` : ""}${k}: ${v}`)).join("\n");
 }
@@ -411,8 +367,7 @@ export interface EnvironmentPut {
   hostname?: string;
   ephemeral?: boolean;
   /** Private: visitors need `?roll_access=<token>` once; null makes it public again. */
-  /** `signed_in`: people signed in to roll who can open the project get in (alone, or with a token). */
-  access?: { token?: string; signed_in?: boolean; bypass_sha256?: string } | null;
+  access?: { token: string; bypass_sha256?: string } | null;
   /** Creating it: start with this environment's variables. */
   variables_from?: string;
   wait_for_ci?: boolean;
@@ -420,16 +375,10 @@ export interface EnvironmentPut {
   follow_tag?: boolean;
   /** Redeploy (same image, new values) when the project's secrets change. */
   redeploy_on_secrets?: boolean;
-  /** Its instances send OpenTelemetry traces to roll (`OTEL_*` from the next deploy). */
-  traces?: boolean;
-  /** Its pages measure their Web Vitals (a tag roll adds). */
-  vitals?: boolean;
-  /** What its code may reach from the next deploy: roll and `hosts` only, or anything. null: open. */
-  egress?: Egress | null;
   /** Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until false. */
   paused?: boolean;
   /** `false` resumes deploys held after a rollback. */
-  held?: boolean;
+  held?: false;
   /** Maintenance: its public names answer roll's page with the message; false ends it. */
   maintenance?: boolean | { message?: string | null };
   /** Its own HTML (at most 64 KiB) instead of roll's pages; null goes back to roll's, an absent field stays. */
@@ -441,8 +390,6 @@ export interface EnvironmentPut {
   /** Its firewall rules, in order (the first match decides); null or [] for none. */
   firewall?: FirewallRule[] | null;
   headers?: HeaderRule[] | null;
-  /** Paths another service of the project answers (its environment of the same name); null or [] for none. */
-  routes?: RouteRule[] | null;
   /** Its own size and scale over the service's; a null field goes back to the service's. */
   run?: Partial<Record<EnvRunField, number | null>>;
 }
@@ -478,13 +425,6 @@ export interface Domain {
   redirect_to?: string | null;
 }
 
-/** What an environment's code may reach: `roll` keeps it on a network with no route out, the
- *  listed hosts (on 443 and 80) through its egress proxy. */
-export interface Egress {
-  mode: "roll" | "open";
-  hosts?: string[];
-}
-
 export interface Environment extends EnvironmentSummary {
   service: string;
   branch: string | null;
@@ -502,11 +442,11 @@ export interface Environment extends EnvironmentSummary {
   /** How full its volume was when last measured (hourly), when it has one. */
   volume_used?: { bytes: number; at: number };
   /** Its schedules as they stand: when each is next due, and the job it last started. */
-  schedules?: { name: string; next_run_at: number | null; last: { job: string; status: Job["status"]; started_at: number } | null; last_call?: { at: number; status?: number; ms: number; error?: string } }[];
+  schedules?: { name: string; next_run_at: number | null; last: { job: string; status: Job["status"]; started_at: number } | null }[];
   /** Its instances keep crashing: three or more in the last ten minutes. */
   crash_loop: { crashes: number; last_at: number; last_error: string } | null;
   /** A gradual rollout under way: the new deployment and the percent of requests it takes. */
-  canary?: { deployment: string; share: number; /** Its step passed and it waits for a person (`rollout.manual`). */ waiting?: boolean } | null;
+  canary?: { deployment: string; share: number } | null;
   /** Its own run settings over the service's; empty: the service's. */
   run?: Partial<Record<EnvRunField, number>>;
   /** It has a deploy hook. */
@@ -517,16 +457,6 @@ export interface Environment extends EnvironmentSummary {
   follow_tag?: boolean;
   /** Redeploys (same image, new values) when the project's secrets change, checked each minute. */
   redeploy_on_secrets?: boolean;
-  /** Its instances send OpenTelemetry traces to roll. */
-  traces?: boolean;
-  /** Its pages measure their Web Vitals for roll. */
-  vitals?: boolean;
-  /** People signed in to roll who can open its project get in. */
-  signed_in?: boolean;
-  /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
-  egress?: Egress;
-  /** Hosts its egress proxy refused lately: not listed, or (`private`) resolving only to private addresses. */
-  egress_refused?: { host: string; private?: true }[];
   /** A push deploys only once its commit's checks pass. */
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
@@ -535,8 +465,6 @@ export interface Environment extends EnvironmentSummary {
   paused?: boolean;
   /** Deploys are held after this rollback: pushes, hooks and tag moves aren't put live until a person deploys or resumes them. */
   held_after?: string;
-  /** A person holds its deploys: pushes, hooks and tag moves build to `ready` for them to put live. */
-  held?: boolean;
   /** In maintenance: what visitors read (null: roll's words). Null: serving. */
   maintenance?: { message: string | null } | null;
   /** Its own pages (Heroku's): `error` for the 502/503/504 while the app can't answer or wake, `maintenance` while in maintenance. Absent: roll's. */
@@ -549,8 +477,6 @@ export interface Environment extends EnvironmentSummary {
   firewall?: FirewallRule[];
   /** Headers its answers carry. */
   headers?: HeaderRule[];
-  /** Paths another service of the project answers. */
-  routes?: RouteRule[];
   created_at: number;
 }
 
@@ -647,7 +573,7 @@ export interface Variables {
    * reference: a reference variable's template (names, never a value). sealed: run with, never
    * shown again (not by `reveal` either); a reference that reads a sealed value is sealed too.
    */
-  vars: { name: string; masked: string; source: VariableSource; reference?: string; sealed?: boolean; /** Kept as a file at this path in its instances (not in their environment). */ file?: string }[];
+  vars: { name: string; masked: string; source: VariableSource; reference?: string; sealed?: boolean }[];
 }
 
 export interface LogLine {
@@ -659,8 +585,6 @@ export interface LogLine {
   text: string;
   /** The level the app's line says (JSON's `level`/`severity`, logfmt's `level=`, a leading `ERROR`). */
   level?: LogLevel;
-  /** Part of a stack trace: `start` on its first line, `more` on the rest from its instance and stream. */
-  trace?: "start" | "more";
 }
 
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error" | "fatal";
@@ -682,18 +606,6 @@ export interface RouteStat {
   max_ms: number;
 }
 
-/** One deployment's or instance's requests in a `RouteStats` window. */
-export interface SplitStat {
-  deployment?: string;
-  instance?: string;
-  requests: number;
-  errors: number;
-  client_errors: number;
-  p50_ms: number;
-  p95_ms: number;
-  max_ms: number;
-}
-
 export interface RouteStats {
   minutes: number;
   requests: number;
@@ -701,102 +613,6 @@ export interface RouteStats {
   cut: boolean;
   /** The busiest, the most 5xx and the slowest (5 requests or more), each at most 50. */
   routes: RouteStat[];
-  /** The same requests by the deployment that answered (a canary beside the live one), the busiest first. */
-  deployments?: SplitStat[];
-  /** And by the instance that answered. */
-  instances?: SplitStat[];
-}
-
-/** A trace's root span, its duration and its spans' count. */
-export interface TraceSummary {
-  trace: string;
-  name: string;
-  service: string;
-  start_ms: number;
-  ms: number;
-  spans: number;
-  error: boolean;
-}
-
-/** A span: ids in hex, times in Unix nanoseconds. */
-export interface Span {
-  trace: string;
-  span: string;
-  parent?: string;
-  name: string;
-  service?: string;
-  start: number;
-  end: number;
-  error?: boolean;
-  attrs?: [string, string][];
-}
-
-/** Visitors and page views from the access log (no script, no cookie). */
-/** An environment's errors, grouped from its log: a trace joined from its lines, or an error line. */
-export interface ErrorGroup {
-  fingerprint: string;
-  kind: "python" | "java" | "node" | "go" | "line";
-  title: string;
-  count: number;
-  first_seen: number;
-  last_seen: number;
-  instances: number;
-  /** The newest one, whole (at most 8 KiB). */
-  sample: string;
-}
-
-/** One series of the app's own metrics (OpenTelemetry, traces on): a name and its attributes. */
-export interface AppSeries {
-  name: string;
-  kind: "gauge" | "sum" | "histogram";
-  unit: string;
-  attrs: { key: string; value: string }[];
-  /** What the points are: a gauge's value, a counter's rate a second, a histogram's mean. */
-  shows: "value" | "per_second" | "mean";
-  /** [unix ms, value] a bucket. */
-  points: [number, number][];
-}
-export interface AppMetrics {
-  minutes: number;
-  step_minutes: number;
-  series: AppSeries[];
-  cut: boolean;
-}
-
-/** A file `POST /v1/apps/import` reads: roll's own, Compose, or another platform's (Heroku's
- *  app.json with its Procfile's text, if it has one). */
-export type ImportFile = { roll_toml: string } | { compose: string } | { render: string } | { fly: string } | { railway: string } | { heroku: string; procfile?: string };
-
-/** A Web Vital's 75th percentile, rated by web.dev's thresholds. */
-export interface Vital {
-  p75: number;
-  rating: "good" | "needs-improvement" | "poor";
-  samples: number;
-}
-export type VitalName = "lcp" | "inp" | "cls" | "fcp" | "ttfb";
-/** What visitors' browsers measured (`vitals: true`): overall and for the busiest routes. */
-export interface Vitals {
-  minutes: number;
-  samples: number;
-  metrics: Partial<Record<VitalName, Vital>>;
-  routes: { route: string; samples: number; metrics: Partial<Record<VitalName, Vital>> }[];
-  cut: boolean;
-}
-
-export interface Analytics {
-  minutes: number;
-  /** Minutes a point of `series` stands for. */
-  step: number;
-  page_views: number;
-  /** An address and browser a day, counted for this answer only. */
-  visitors: number;
-  pages: { path: string; views: number; visitors: number }[];
-  /** Referring sites' hosts (never the site's own). */
-  referrers: { host: string; views: number }[];
-  /** The edge's country codes (Cloudflare's), where it said one. */
-  countries: { country: string; views: number }[];
-  series: { t: number; views: number; visitors: number }[];
-  cut: boolean;
 }
 
 export interface Metrics {
@@ -847,8 +663,6 @@ export interface NotifyTarget {
 
 export type NotifyEvent =
   | "deploy.failed"
-  | "rollout.waiting"
-  | "deploy.ready"
   | "crash_loop"
   | "deploy.active"
   | "spend.alert"
@@ -858,7 +672,6 @@ export type NotifyEvent =
   | "alert.latency"
   | "alert.capacity"
   | "alert.log"
-  | "error.new"
   | "cron.failed"
   | "job.failed"
   | "domain.active"
@@ -990,7 +803,7 @@ export const appsApi = {
   /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
   exportProject: (project: string, databases: Record<string, string>) => call<{ roll_toml: string; notes: string[] }>("POST", `/v1/apps/projects/${enc(project)}/export`, { databases }),
   /** A roll.toml or Compose file read as a project (nothing made). */
-  importProject: (file: ImportFile | { repo: string; revision?: string } | { git: string; branch?: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
+  importProject: (file: { roll_toml: string } | { compose: string } | { repo: string; revision?: string } | { git: string; branch?: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
 
   services: (project?: string) => call<Service[]>("GET", `/v1/apps/services${qs({ project })}`),
   /** Makes the service and places its card; a repo or an image source deploys to production at once. */
@@ -1026,13 +839,11 @@ export const appsApi = {
   notifyDeliveries: (project: string, id: string) => call<NotifyDelivery[]>("GET", `/v1/apps/projects/${enc(project)}/notifications/${enc(id)}/deliveries`),
   putRegistry: (id: string, body: { username: string; password: string; server?: string }) => call<Service>("PUT", `${svc(id)}/registry`, body),
   deleteRegistry: (id: string) => call<Service>("DELETE", `${svc(id)}/registry`),
-  putGitLogin: (id: string, body: { username: string; password: string } | { username: string; secret: string }) => call<Service>("PUT", `${svc(id)}/git-login`, body),
+  putGitLogin: (id: string, body: { username: string; password: string }) => call<Service>("PUT", `${svc(id)}/git-login`, body),
   deleteGitLogin: (id: string) => call<Service>("DELETE", `${svc(id)}/git-login`),
   connectGitHub: (id: string) => call<Service>("PUT", `${svc(id)}/github`),
   disconnectGitHub: (id: string) => call<Service>("DELETE", `${svc(id)}/github`),
   putEnvironment: (id: string, e: string, body: EnvironmentPut) => call<Environment>("PUT", env(id, e), body),
-  /** A one-use way into a sign-in-gated environment, as the signed-in person: the URL to go on to. */
-  visit: (id: string, e: string, to: string) => call<{ url: string }>("POST", `${env(id, e)}/visit`, { to }),
   removeEnvironment: (id: string, e: string) => call<null>("DELETE", env(id, e)),
 
   deploy: (id: string, e: string, body: NewDeploy = {}) => call<Deployment>("POST", `${env(id, e)}/deploys`, body),
@@ -1057,8 +868,6 @@ export const appsApi = {
   backUp: (id: string, e: string) => call<Backup>("POST", `${env(id, e)}/volume/backups`),
   restore: (id: string, e: string, b: string) => call<Backup>("POST", `${env(id, e)}/volume/backups/${encodeURIComponent(b)}/restore`),
   cancel: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/cancel`),
-  /** What a person says to a manual rollout waiting for them. */
-  rollout: (id: string, e: string, d: string, action: "advance" | "all" | "abort") => call<{ deployment: string }>("POST", `${dep(id, e, d)}/rollout`, { action }),
 
   restart: (id: string, e: string) => call<Environment>("POST", `${env(id, e)}/restart`),
   /** Just this one: a fresh instance answers before it leaves (a web service's), the others stay. */
@@ -1072,7 +881,7 @@ export const appsApi = {
   /** The values in the clear (the `reveal` action). */
   reveal: (id: string, e: string) => call<Record<string, string>>("GET", `${env(id, e)}/variables/values`),
   /** `seal`: names set here or already set, sealed for good (a new value keeps them sealed). */
-  setVariables: (id: string, e: string, change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null> }) =>
+  setVariables: (id: string, e: string, change: { set?: Record<string, string>; unset?: string[]; seal?: string[] }) =>
     call<Variables>("PATCH", `${env(id, e)}/variables`, change),
 
   logs: (id: string, e: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${env(id, e)}/logs${qs({ tail: q.tail, since: q.since })}`),
@@ -1108,12 +917,6 @@ export const appsApi = {
   metrics: (id: string, e: string, minutes = 60) => call<Metrics>("GET", `${env(id, e)}/metrics${qs({ minutes })}`),
   /** Errors and latency by route over the last `minutes` (5–60). */
   routes: (id: string, e: string, minutes = 60) => call<RouteStats>("GET", `${env(id, e)}/routes${qs({ minutes })}`),
-  analytics: (id: string, e: string, minutes = 1440) => call<Analytics>("GET", `${env(id, e)}/analytics${qs({ minutes })}`),
-  vitals: (id: string, e: string, minutes = 1440) => call<Vitals>("GET", `${env(id, e)}/vitals${qs({ minutes })}`),
-  errors: (id: string, e: string, minutes = 1440) => call<{ minutes: number; groups: ErrorGroup[]; scanned: number; cut: boolean }>("GET", `${env(id, e)}/errors${qs({ minutes })}`),
-  appMetrics: (id: string, e: string, minutes = 60) => call<AppMetrics>("GET", `${env(id, e)}/app-metrics${qs({ minutes })}`),
-  traces: (id: string, e: string, minutes = 60) => call<{ minutes: number; traces: TraceSummary[]; cut: boolean }>("GET", `${env(id, e)}/traces${qs({ minutes })}`),
-  trace: (id: string, e: string, trace: string) => call<{ trace: string; spans: Span[] }>("GET", `${env(id, e)}/traces/${enc(trace)}`),
   usage: (id: string, e: string, days = 30) => call<Usage>("GET", `${env(id, e)}/usage${qs({ days })}`),
 
   runs: (id: string, e: string) => call<CronRun[]>("GET", `${env(id, e)}/runs`),

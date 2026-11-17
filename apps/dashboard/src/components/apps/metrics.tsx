@@ -12,11 +12,11 @@
 
 import { Table2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary, type Vital, type VitalName, type Vitals, type AppMetrics, type AppSeries, type ErrorGroup, type SplitStat } from "@/lib/apps-api";
+import { appsApi, formatMs, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats } from "@/lib/apps-api";
 import { formatBytes } from "@/lib/roll-api";
 import { btn, CopyButton, panel, useCopy } from "../ui";
 import { usePageVisible } from "./live";
-import { clock, message, since } from "./shared";
+import { clock, message } from "./shared";
 
 const W = 300;
 const H = 84;
@@ -194,253 +194,6 @@ const ROUTE_SORTS: { key: RouteSort; label: string }[] = [
 ];
 
 /** Errors and latency by route (Vercel's Observability): the last hour's access log, ids folded. */
-/** Recent traces (OpenTelemetry, sent by the app's instances): one opens as a waterfall. */
-function Traces({ service, env, traces }: { service: string; env: string; traces: TraceSummary[] }) {
-  const [open, setOpen] = useState<string | null>(null);
-  const [spans, setSpans] = useState<Span[] | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    let alive = true;
-    setSpans(null);
-    appsApi.trace(service, env, open).then(
-      (t) => alive && setSpans(t.spans),
-      () => alive && setSpans([]),
-    );
-    return () => {
-      alive = false;
-    };
-  }, [service, env, open]);
-  const start = spans && spans.length ? Math.min(...spans.map((s) => s.start)) : 0;
-  const total = spans && spans.length ? Math.max(1, Math.max(...spans.map((s) => s.end)) - start) : 1;
-  return (
-    <section className={`${panel} overflow-hidden`} aria-label="Traces">
-      <div className="border-b border-line px-4 py-2.5">
-        <p className="text-[12px] text-muted">
-          Traces <span className="text-subtle">· the {traces.length} newest, from the app's OpenTelemetry SDK</span>
-        </p>
-      </div>
-      <ul className="divide-y divide-line">
-        {traces.slice(0, 20).map((t) => (
-          <li key={t.trace}>
-            <button type="button" className="flex w-full items-center justify-between gap-3 px-4 py-2 text-left text-[12px] hover:bg-panel-2" aria-expanded={open === t.trace} onClick={() => setOpen(open === t.trace ? null : t.trace)}>
-              <span className="min-w-0 truncate">
-                <span className={t.error ? "text-danger" : ""}>{t.name}</span> <span className="text-subtle">· {t.spans} spans</span>
-              </span>
-              <span className="font-mono text-muted">{formatMs(t.ms)}</span>
-            </button>
-            {open === t.trace && (
-              <div className="space-y-1 px-4 pb-3">
-                {spans === null && <p className="shimmer text-[12px] text-muted">Reading its spans…</p>}
-                {spans?.map((s) => (
-                  <div key={s.span} className="grid grid-cols-[minmax(0,14rem)_1fr_4rem] items-center gap-2 text-[11.5px]">
-                    <span className={`truncate font-mono ${s.error ? "text-danger" : "text-muted"}`} title={s.name}>
-                      {s.name}
-                    </span>
-                    <span className="relative h-2 rounded-sm bg-line">
-                      <span
-                        className={`absolute inset-y-0 rounded-sm ${s.error ? "bg-danger" : "bg-accent"}`}
-                        style={{ left: `${((s.start - start) / total) * 100}%`, width: `${Math.max(0.5, ((s.end - s.start) / total) * 100)}%` }}
-                      />
-                    </span>
-                    <span className="text-right font-mono text-subtle">{formatMs((s.end - s.start) / 1e6)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-/** Visitors and page views from the access log: no script, no cookie (an address and browser a day). */
-function Visitors({ a }: { a: Analytics }) {
-  const lists: { title: string; rows: { label: string; n: number }[] }[] = [
-    { title: "Pages", rows: a.pages.map((p) => ({ label: p.path, n: p.views })) },
-    { title: "Referrers", rows: a.referrers.map((r) => ({ label: r.host, n: r.views })) },
-    { title: "Countries", rows: a.countries.map((c) => ({ label: c.country, n: c.views })) },
-  ];
-  return (
-    <section className={`${panel} overflow-hidden`} aria-label="Visitors">
-      <div className="border-b border-line px-4 py-2.5">
-        <p className="text-[12px] text-muted">
-          Visitors <span className="text-subtle">· {count(a.visitors)} visitors, {count(a.page_views)} page views{a.cut ? ", the newest read" : ""}; from the access log, no script or cookie</span>
-        </p>
-      </div>
-      <div className="grid gap-px bg-line sm:grid-cols-3">
-        {lists.map((l) => (
-          <div key={l.title} className="bg-panel px-4 py-3">
-            <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">{l.title}</p>
-            {l.rows.length === 0 ? (
-              <p className="text-[12px] text-subtle">None yet.</p>
-            ) : (
-              <ul className="space-y-1">
-                {l.rows.slice(0, 8).map((r) => (
-                  <li key={r.label} className="flex items-center justify-between gap-3 text-[12px]">
-                    <span className="min-w-0 truncate font-mono text-[11.5px]">{r.label}</span>
-                    <span className="font-mono text-muted">{count(r.n)}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function Sparkline({ points }: { points: [number, number][] }) {
-  if (points.length < 2) return <span className="text-[11px] text-subtle">–</span>;
-  const xs = points.map((p) => p[0]);
-  const ys = points.map((p) => p[1]);
-  const [x0, x1] = [Math.min(...xs), Math.max(...xs)];
-  const [y0, y1] = [Math.min(...ys), Math.max(...ys)];
-  const d = points.map((p, i) => `${i ? "L" : "M"}${(((p[0] - x0) / (x1 - x0 || 1)) * 120).toFixed(1)},${(22 - ((p[1] - y0) / (y1 - y0 || 1)) * 20).toFixed(1)}`).join("");
-  return (
-    <svg viewBox="0 0 120 24" className="h-6 w-[120px] text-muted" aria-hidden>
-      <path d={d} fill="none" stroke="currentColor" strokeWidth="1.5" />
-    </svg>
-  );
-}
-
-function shown(s: AppSeries) {
-  const v = s.points[s.points.length - 1]?.[1];
-  if (v === undefined) return "–";
-  const n = Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 1 ? v.toFixed(2) : v.toPrecision(2);
-  return `${n}${s.unit && s.unit !== "1" ? ` ${s.unit}` : ""}${s.shows === "per_second" ? "/s" : ""}`;
-}
-
-/** Its errors, grouped from its log (Cloud Run's Error Reporting): the newest of each opens whole. */
-function Errors({ groups }: { groups: ErrorGroup[] }) {
-  return (
-    <section className={`${panel} overflow-hidden`} aria-label="Errors">
-      <div className="border-b border-line px-4 py-2.5">
-        <p className="text-[12px] text-muted">
-          Errors <span className="text-subtle">· from its log, stack traces joined and grouped</span>
-        </p>
-      </div>
-      <ul className="divide-y divide-line">
-        {groups.slice(0, 15).map((g) => (
-          <li key={g.fingerprint} className="px-4 py-2">
-            <details>
-              <summary className="flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-1 text-[12px] [&::-webkit-details-marker]:hidden">
-                <span className="w-12 text-right font-mono text-danger">{count(g.count)}×</span>
-                <span className="min-w-0 flex-1 truncate font-mono text-[11.5px]">{g.title}</span>
-                <span className="text-[11px] text-subtle">
-                  {g.kind === "line" ? "line" : `${g.kind} trace`} · {since(g.last_seen)}
-                  {g.instances > 1 ? ` · ${g.instances} instances` : ""}
-                </span>
-              </summary>
-              <pre className="mt-2 max-h-72 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] leading-relaxed text-muted">{g.sample}</pre>
-            </details>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-/** The app's own metrics, from its OpenTelemetry SDK (traces on). */
-function AppMetricsPanel({ m }: { m: AppMetrics }) {
-  return (
-    <section className={`${panel} overflow-hidden`} aria-label="App metrics">
-      <div className="border-b border-line px-4 py-2.5">
-        <p className="text-[12px] text-muted">
-          App metrics <span className="text-subtle">· from its OpenTelemetry SDK, {m.step_minutes}-minute points{m.cut ? ", the newest read" : ""}</span>
-        </p>
-      </div>
-      <ul className="divide-y divide-line">
-        {m.series.slice(0, 20).map((s) => (
-          <li key={s.name + s.attrs.map((a) => `|${a.key}=${a.value}`).join("")} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2 text-[12px]">
-            <span className="min-w-0 flex-1 truncate font-mono text-[11.5px]">
-              {s.name}
-              {s.attrs.length > 0 && <span className="text-subtle"> {s.attrs.map((a) => `${a.key}=${a.value}`).join(" ")}</span>}
-            </span>
-            <span className="text-[11px] text-subtle">{s.shows === "per_second" ? "rate" : s.shows === "mean" ? "mean" : s.kind}</span>
-            <Sparkline points={s.points} />
-            <span className="w-24 text-right font-mono">{shown(s)}</span>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-const VITALS: { key: VitalName; label: string; unit: "ms" | "" }[] = [
-  { key: "lcp", label: "Largest paint", unit: "ms" },
-  { key: "inp", label: "Interaction", unit: "ms" },
-  { key: "cls", label: "Layout shift", unit: "" },
-  { key: "fcp", label: "First paint", unit: "ms" },
-  { key: "ttfb", label: "First byte", unit: "ms" },
-];
-
-const RATED: Record<Vital["rating"], string> = { good: "text-fg", "needs-improvement": "text-muted", poor: "text-danger" };
-
-function vital(v: Vital | undefined, unit: "ms" | "") {
-  if (!v) return "–";
-  return unit === "ms" ? (v.p75 >= 1000 ? `${(v.p75 / 1000).toFixed(2)} s` : `${Math.round(v.p75)} ms`) : v.p75.toFixed(3);
-}
-
-/** What visitors' browsers measured (Web Vitals on): each metric's p75, and the busiest routes'. */
-function Speed({ v }: { v: Vitals }) {
-  return (
-    <section className={`${panel} overflow-hidden`} aria-label="Speed">
-      <div className="border-b border-line px-4 py-2.5">
-        <p className="text-[12px] text-muted">
-          Speed <span className="text-subtle">· p75 of {count(v.samples)} page loads in visitors' browsers{v.cut ? ", the newest read" : ""}</span>
-        </p>
-      </div>
-      <div className="grid grid-cols-2 gap-px bg-line sm:grid-cols-5">
-        {VITALS.map((m) => {
-          const x = v.metrics[m.key];
-          return (
-            <div key={m.key} className="bg-panel px-4 py-3">
-              <p className="text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">{m.label}</p>
-              <p className={`mt-1 font-mono text-[18px] tracking-[-0.04em] ${x ? RATED[x.rating] : "text-subtle"}`}>{vital(x, m.unit)}</p>
-              <p className="text-[11px] text-subtle">{x ? x.rating.replace("-", " ") : "not measured yet"}</p>
-            </div>
-          );
-        })}
-      </div>
-      {v.routes.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-[12px]">
-            <thead>
-              <tr className="text-left text-[11px] text-subtle">
-                <th className="px-4 py-2 font-medium">Route</th>
-                {VITALS.map((m) => (
-                  <th key={m.key} className="px-2 py-2 text-right font-medium uppercase">
-                    {m.key}
-                  </th>
-                ))}
-                <th className="px-4 py-2 text-right font-medium">Loads</th>
-              </tr>
-            </thead>
-            <tbody>
-              {v.routes.slice(0, 10).map((r) => (
-                <tr key={r.route} className="border-t border-line">
-                  <td className="max-w-[16rem] truncate px-4 py-1.5 font-mono text-[11.5px]">{r.route}</td>
-                  {VITALS.map((m) => {
-                    const x = r.metrics[m.key];
-                    return (
-                      <td key={m.key} className={`px-2 py-1.5 text-right font-mono ${x ? RATED[x.rating] : "text-subtle"}`}>
-                        {vital(x, m.unit)}
-                      </td>
-                    );
-                  })}
-                  <td className="px-4 py-1.5 text-right font-mono text-muted">{count(r.samples)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
-
 function Routes({ stats }: { stats: RouteStats }) {
   const [sort, setSort] = useState<RouteSort>("requests");
   const rows = useMemo(() => {
@@ -502,59 +255,12 @@ function Routes({ stats }: { stats: RouteStats }) {
   );
 }
 
-/** The last hour's requests by the deployment, and the instance, that answered (shown when more than one did). */
-function Splits({ stats }: { stats: RouteStats }) {
-  const parts = [
-    { title: "By deployment", rows: stats.deployments ?? [], name: (s: SplitStat) => (s.deployment ?? "").replace(/^dep_/, "").slice(0, 8) },
-    { title: "By instance", rows: stats.instances ?? [], name: (s: SplitStat) => (s.instance ?? "").split("-").slice(-2).join("-") },
-  ].filter((p) => p.rows.length > 1);
-  if (!parts.length) return null;
-  return (
-    <section className={`${panel} grid gap-0 overflow-hidden md:grid-cols-2`} aria-label="By deployment and instance">
-      {parts.map((p) => (
-        <div key={p.title} className="min-w-0 border-line md:[&:not(:first-child)]:border-l">
-          <p className="border-b border-line px-4 py-2.5 text-[12px] text-muted">{p.title}, the last hour</p>
-          <table className="w-full font-mono text-[11.5px] tabular-nums">
-            <thead className="text-left text-subtle">
-              <tr>
-                {["", "req", "5xx", "p50", "p95"].map((h, i) => (
-                  <th key={h || "name"} className={`px-4 py-1.5 font-normal ${i ? "text-right" : ""}`}>
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {p.rows.slice(0, 8).map((r) => (
-                <tr key={r.deployment ?? r.instance} className="border-t border-line">
-                  <td className="truncate px-4 py-1" title={r.deployment ?? r.instance}>
-                    {p.name(r)}
-                  </td>
-                  <td className="px-4 py-1 text-right">{count(r.requests)}</td>
-                  <td className={`px-4 py-1 text-right ${r.errors ? "text-danger" : "text-subtle"}`}>{r.errors ? count(r.errors) : "—"}</td>
-                  <td className="px-4 py-1 text-right text-muted">{formatMs(r.p50_ms)}</td>
-                  <td className="px-4 py-1 text-right">{formatMs(r.p95_ms)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ))}
-    </section>
-  );
-}
-
 /** Requests, errors, latency, CPU, memory, instances and cold starts over the last hour, day or week. */
 export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: string; env: string; /** Its memory limit, MB. */ memoryMb?: number; /** The most instances it scales to. */ maxInstances?: number }) {
   const [range, setRange] = useState<Range>(RANGES[0]);
   const [raw, setM] = useState<MetricsData | null>(null);
   const [deploys, setDeploys] = useState<Deployment[]>([]);
   const [routes, setRoutes] = useState<RouteStats | null>(null);
-  const [visitors, setVisitors] = useState<Analytics | null>(null);
-  const [speed, setSpeed] = useState<Vitals | null>(null);
-  const [appMetrics, setAppMetrics] = useState<AppMetrics | null>(null);
-  const [errorGroups, setErrorGroups] = useState<ErrorGroup[]>([]);
-  const [traces, setTraces] = useState<TraceSummary[] | null>(null);
   const size = raw ? Math.max(1, Math.ceil(raw.minutes.length / MAX_POINTS)) : 1;
   const m = useMemo(() => (raw ? bucketed(raw, size) : null), [raw, size]);
   // Minutes a point stands for: rolld's step (an hour past a week) times the buckets here.
@@ -578,25 +284,11 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
     const load = async () => {
       try {
         // The deploys only mark the charts: metrics still show without them.
-        const [next, deps, byRoute, seen, traced, measured, own, errs] = await Promise.all([
-          appsApi.metrics(service, env, range.minutes),
-          appsApi.deploys(service, env).catch(() => null),
-          appsApi.routes(service, env).catch(() => null),
-          appsApi.analytics(service, env, Math.min(Math.max(range.minutes, 60), 10_080)).catch(() => null),
-          appsApi.traces(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
-          appsApi.vitals(service, env, Math.min(Math.max(range.minutes, 60), 10_080)).catch(() => null),
-          appsApi.appMetrics(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
-          appsApi.errors(service, env, Math.min(Math.max(range.minutes, 5), 10_080)).catch(() => null),
-        ]);
+        const [next, deps, byRoute] = await Promise.all([appsApi.metrics(service, env, range.minutes), appsApi.deploys(service, env).catch(() => null), appsApi.routes(service, env).catch(() => null)]);
         if (alive) {
           setM(next);
           if (deps) setDeploys(deps);
           if (byRoute) setRoutes(byRoute);
-          if (seen) setVisitors(seen);
-          if (traced) setTraces(traced.traces);
-          if (measured) setSpeed(measured);
-          if (own) setAppMetrics(own);
-          if (errs) setErrorGroups(errs.groups);
           setError(null);
         }
       } catch (e) {
@@ -733,12 +425,6 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
         </div>
       )}
       {routes && <Routes stats={routes} />}
-      {routes && <Splits stats={routes} />}
-      {errorGroups.length > 0 && <Errors groups={errorGroups} />}
-      {speed && speed.samples > 0 && <Speed v={speed} />}
-      {appMetrics && appMetrics.series.length > 0 && <AppMetricsPanel m={appMetrics} />}
-      {visitors && visitors.page_views > 0 && <Visitors a={visitors} />}
-      {traces && traces.length > 0 && <Traces service={service} env={env} traces={traces} />}
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-subtle">
         <span>For a scraper:</span>
         <code className="min-w-0 truncate font-mono text-[11.5px] text-muted">{scrape}</code>

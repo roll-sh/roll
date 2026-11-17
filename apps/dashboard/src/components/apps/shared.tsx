@@ -1,5 +1,5 @@
 import { ArrowDown, Pause, Play, Search, X } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, useMemo } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { deployStatus, instanceStateLabel, instanceTone, type AccessLine, type DeployStatus, type InstanceState, type LogLine, type Tone } from "@/lib/apps-api";
 import { useMarkState } from "../mark-state";
 
@@ -157,60 +157,13 @@ function AccessText({ text }: { text: string }) {
   );
 }
 
-/** A log's entries: each line, but a stack trace's lines (`trace`) as one, at its first line. */
-export function logEntries(lines: LogLine[]): { line: LogLine; more: LogLine[] }[] {
-  const out: { line: LogLine; more: LogLine[] }[] = [];
-  const open = new Map<string, { line: LogLine; more: LogLine[] }>();
-  for (const l of lines) {
-    const k = `${l.instance ?? ""}\u0001${l.stream}`;
-    const into = l.trace === "more" ? open.get(k) : undefined;
-    if (into) {
-      into.more.push(l);
-      continue;
-    }
-    const e = { line: l, more: [] as LogLine[] };
-    out.push(e);
-    if (l.trace === "start") open.set(k, e);
-    else open.delete(k);
-  }
-  return out;
-}
-
-/** A trace's lines past its first, folded past a few until opened. */
-function TraceMore({ more, onGroup }: { more: LogLine[]; onGroup?: () => void }) {
-  const [open, setOpen] = useState(false);
-  const shown = open || more.length <= 3 ? more : more.slice(0, 2);
-  return (
-    <>
-      {shown.map((m, i) => (
-        <span key={i} className="block">
-          {m.text}
-        </span>
-      ))}
-      <span className="mt-0.5 flex gap-3 text-[11px] text-subtle select-none">
-        {shown.length < more.length && (
-          <button type="button" className="hover:text-fg" onClick={() => setOpen(true)}>
-            {more.length - shown.length} more {more.length - shown.length === 1 ? "line" : "lines"}
-          </button>
-        )}
-        {onGroup && (
-          <button type="button" className="text-accent hover:underline" onClick={onGroup}>
-            Its group in Errors
-          </button>
-        )}
-      </span>
-    </>
-  );
-}
-
 /**
  * A log in mono: time, (stream and instance), text. Follows the end while it's scrolled there;
- * scrolling up stops following until the end is reached again. A stack trace is one entry.
+ * scrolling up stops following until the end is reached again.
  */
-export function LogView({ lines, columns = false, empty, className = "h-[420px]", onGroup }: { lines: LogLine[]; columns?: boolean; empty: ReactNode; className?: string; onGroup?: () => void }) {
+export function LogView({ lines, columns = false, empty, className = "h-[420px]" }: { lines: LogLine[]; columns?: boolean; empty: ReactNode; className?: string }) {
   const box = useRef<HTMLDivElement>(null);
   const [stuck, setStuck] = useState(true);
-  const entries = useMemo(() => logEntries(lines), [lines]);
   useLayoutEffect(() => {
     if (stuck && box.current) box.current.scrollTop = box.current.scrollHeight;
   }, [lines, stuck]);
@@ -229,7 +182,7 @@ export function LogView({ lines, columns = false, empty, className = "h-[420px]"
         {lines.length === 0 ? (
           <div className="px-3 text-subtle">{empty}</div>
         ) : (
-          entries.map(({ line: l, more }, i) => (
+          lines.map((l, i) => (
             <div key={i} className="flex gap-3 px-3 hover:bg-fg/[0.03]">
               <span className="shrink-0 text-subtle tabular-nums select-none">{clock(l.t)}</span>
               {columns && (
@@ -242,10 +195,7 @@ export function LogView({ lines, columns = false, empty, className = "h-[420px]"
                   {l.level === "fatal" ? "fatal" : l.level === "error" ? "err" : "warn"}
                 </span>
               )}
-              <span className={`min-w-0 flex-1 [overflow-wrap:anywhere] whitespace-pre-wrap ${lineTone(l)}`}>
-                {l.stream === "http" ? <AccessText text={l.text} /> : l.text}
-                {more.length > 0 && <TraceMore more={more} onGroup={onGroup} />}
-              </span>
+              <span className={`min-w-0 flex-1 [overflow-wrap:anywhere] whitespace-pre-wrap ${lineTone(l)}`}>{l.stream === "http" ? <AccessText text={l.text} /> : l.text}</span>
             </div>
           ))
         )}
