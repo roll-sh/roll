@@ -851,14 +851,13 @@ impl Apps {
             for i in &made {
                 self.deps.runtime.remove(&i.name).await;
             }
-            let did = d.id.clone();
-            self.db(move |s| s.set_status(&did, &[DeployStatus::Deploying], DeployStatus::Ready, None)).await?;
             let short = d.id.strip_prefix("dep_").unwrap_or(&d.id);
             let url = self.url(&format!("{short}--{}", env.slug));
-            log.stream(Stream::System).line(format!("ready, not live: its own URL is {url}; roll back to it to put it live"));
-            // Someone has to put it live: they're told (`deploy.ready`).
+            // Ready, and someone told to put it live (`deploy.ready`), in one write: whoever sees
+            // it ready sees the event too.
             let (sid, en, did, data) = (svc.id.clone(), env.name.clone(), d.id.clone(), serde_json::json!({ "revision": d.revision, "url": url }));
-            let _ = self.db(move |s| s.add_event("deploy.ready", &sid, &en, Some(&did), &data)).await;
+            self.db(move |s| s.set_ready(&did, &sid, &en, &data)).await?;
+            log.stream(Stream::System).line(format!("ready, not live: its own URL is {url}; roll back to it to put it live"));
             return Ok(());
         }
         // A gradual rollout needs something to split: the old deployment running and taking
