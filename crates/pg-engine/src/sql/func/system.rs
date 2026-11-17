@@ -849,16 +849,22 @@ fn advisory_unlock(a: &[Value], c: &FnCtx, shared: bool) -> Result<Value> {
             Ok(Value::Bool(true))
         }
         None => {
-            c.exec.notice(Error {
-                severity: crate::error::Severity::Warning,
-                ..Error::new(
-                    code::WARNING,
-                    format!(
-                        "you don't own a lock of type {}",
-                        if shared { "ShareLock" } else { "ExclusiveLock" }
-                    ),
-                )
-            });
+            // (LockRelease: not held at all, or held by the transaction, not the session.)
+            let mode = if shared { LockMode::Share } else { LockMode::Exclusive };
+            let line = if c.exec.txn.borrow().holds_lock_mode(&key, mode) { 2149 } else { 2110 };
+            c.exec.notice(
+                Error {
+                    severity: crate::error::Severity::Warning,
+                    ..Error::new(
+                        code::WARNING,
+                        format!(
+                            "you don't own a lock of type {}",
+                            if shared { "ShareLock" } else { "ExclusiveLock" }
+                        ),
+                    )
+                }
+                .routine_at("LockRelease", line),
+            );
             Ok(Value::Bool(false))
         }
     }

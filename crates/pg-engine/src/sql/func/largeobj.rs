@@ -64,6 +64,17 @@ fn with_desc<T>(
     r
 }
 
+/// be-fsstubs.c's routine `r` raised a descriptor's error (one message, a site per routine).
+fn at(r: &'static str) -> impl FnOnce(Error) -> Error {
+    move |e| {
+        if e.message.starts_with("invalid large-object descriptor") || e.message.contains(" was not opened for ") {
+            e.routine(r)
+        } else {
+            e
+        }
+    }
+}
+
 fn not_opened(fd: i32, what: &str) -> Error {
     Error::new(
         code::OBJECT_NOT_IN_PREREQUISITE_STATE,
@@ -81,7 +92,7 @@ fn lo_open(a: &[Value], c: &FnCtx) -> Result<Value> {
 }
 
 fn lo_close(a: &[Value], c: &FnCtx) -> Result<Value> {
-    c.exec.txn.borrow_mut().lo_close(int(&a[0]) as i32)?;
+    c.exec.txn.borrow_mut().lo_close(int(&a[0]) as i32).map_err(at("be_lo_close"))?;
     Ok(Value::Int4(0))
 }
 
@@ -94,6 +105,7 @@ fn loread(a: &[Value], c: &FnCtx) -> Result<Value> {
         }
         Ok(Value::Bytea(d.read(txn, len)?.into()))
     })
+    .map_err(at("lo_read"))
 }
 
 fn lowrite(a: &[Value], c: &FnCtx) -> Result<Value> {
@@ -105,6 +117,7 @@ fn lowrite(a: &[Value], c: &FnCtx) -> Result<Value> {
         }
         Ok(Value::Int4(d.write(txn, bytes(&a[1]))?))
     })
+    .map_err(at("lo_write"))
 }
 
 fn seek(a: &[Value], c: &FnCtx) -> Result<i64> {
@@ -123,14 +136,14 @@ fn out_of_range(what: &str, fd: &Value) -> Error {
 }
 
 fn lo_lseek(a: &[Value], c: &FnCtx) -> Result<Value> {
-    let n = seek(a, c)?;
+    let n = seek(a, c).map_err(at("be_lo_lseek"))?;
     i32::try_from(n)
         .map(Value::Int4)
         .map_err(|_| out_of_range("lo_lseek", &a[0]))
 }
 
 fn lo_lseek64(a: &[Value], c: &FnCtx) -> Result<Value> {
-    Ok(Value::Int8(seek(a, c)?))
+    Ok(Value::Int8(seek(a, c).map_err(at("be_lo_lseek64"))?))
 }
 
 fn tell(a: &[Value], c: &FnCtx) -> Result<i64> {
@@ -138,14 +151,14 @@ fn tell(a: &[Value], c: &FnCtx) -> Result<i64> {
 }
 
 fn lo_tell(a: &[Value], c: &FnCtx) -> Result<Value> {
-    let n = tell(a, c)?;
+    let n = tell(a, c).map_err(at("be_lo_tell"))?;
     i32::try_from(n)
         .map(Value::Int4)
         .map_err(|_| out_of_range("lo_tell", &a[0]))
 }
 
 fn lo_tell64(a: &[Value], c: &FnCtx) -> Result<Value> {
-    Ok(Value::Int8(tell(a, c)?))
+    Ok(Value::Int8(tell(a, c).map_err(at("be_lo_tell64"))?))
 }
 
 fn truncate(a: &[Value], c: &FnCtx) -> Result<Value> {
@@ -161,12 +174,12 @@ fn truncate(a: &[Value], c: &FnCtx) -> Result<Value> {
 
 fn lo_truncate(a: &[Value], c: &FnCtx) -> Result<Value> {
     prevent_read_only(c, "lo_truncate()")?;
-    truncate(a, c)
+    truncate(a, c).map_err(at("lo_truncate_internal"))
 }
 
 fn lo_truncate64(a: &[Value], c: &FnCtx) -> Result<Value> {
     prevent_read_only(c, "lo_truncate64()")?;
-    truncate(a, c)
+    truncate(a, c).map_err(at("lo_truncate_internal"))
 }
 
 /// inv_create as the current user.
@@ -193,7 +206,7 @@ fn lo_unlink(a: &[Value], c: &FnCtx) -> Result<Value> {
     let (me, db_owner) = (c.exec.current_user(), c.exec.db_owner());
     let compat = compat(c);
     let mut txn = c.exec.txn.borrow_mut();
-    let m = largeobj::existing(&txn, oid, Snap::Latest)?;
+    let m = largeobj::existing(&txn, oid, Snap::Latest).map_err(|e| e.routine("be_lo_unlink"))?;
     if !compat && !cat.has_privs_of_role(me, m.owner, db_owner) {
         return Err(Error::new(
             code::INSUFFICIENT_PRIVILEGE,

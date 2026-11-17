@@ -5725,6 +5725,17 @@ impl Ddl<'_, '_> {
                 waited = true;
             }
         }
+        // (A table's row type and its array type go with it: findDependentObjects locks
+        // them too.)
+        for r in roots.iter().filter(|r| r.0 == REL) {
+            let types = self.cat.tables.get(&r.1).filter(|t| t.rowtype != 0 && !t.temporary).map(|t| {
+                (t.rowtype, if t.rowarray != 0 { t.rowarray } else { t.rowtype + 1 })
+            });
+            if let Some((row, array)) = types {
+                self.lock_object(super::TYPE_CLASS, row, crate::txn::locks::LockMode::AccessExclusive)?;
+                self.lock_object(super::TYPE_CLASS, array, crate::txn::locks::LockMode::AccessExclusive)?;
+            }
+        }
         // The relations were locked above: what others committed while those locks were
         // waited for (an autovacuum worker's statistics of the table) is seen too, as
         // AcceptInvalidationMessages does at every lock, or the commit merged from before it

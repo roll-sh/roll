@@ -683,8 +683,9 @@ impl<'c, 'a> Ddl<'c, 'a> {
         // (What other transactions had committed before this waits.)
         let committed = self.ctx.sess.db.catalog();
         let mut refs: Vec<(u32, u32)> = Vec::new();
+        // (IsPinnedObject: what initdb made is pinned, but the public schema.)
         let mut add = |class: u32, oid: u32| {
-            if oid >= crate::catalog::FIRST_USER_OID && !refs.contains(&(class, oid)) {
+            if (oid >= crate::catalog::FIRST_USER_OID || (class == NAMESPACE_CLASS && oid == 2200)) && !refs.contains(&(class, oid)) {
                 refs.push((class, oid));
             }
         };
@@ -732,6 +733,18 @@ impl<'c, 'a> Ddl<'c, 'a> {
         }
         // (Types made with this command's objects, a table's row type, aren't others'.)
         refs.retain(|(class, o)| *class != TYPE_CLASS || before_has_type(&before, *o));
+        // (But a new table's row type: its array type's dependency on it locks it.)
+        let mut made: Vec<(u32, u32)> = Vec::new();
+        for (oid, _, t) in before.tables.changes(&self.cat.tables) {
+            if let Some(t) = t.filter(|t| !t.temporary && t.rowtype != 0)
+                && !before.tables.contains_key(&oid)
+            {
+                made.push((TYPE_CLASS, t.rowtype));
+            }
+        }
+        for &(class, oid) in &made {
+            self.lock_object(class, oid, crate::txn::locks::LockMode::AccessShare)?;
+        }
         for (class, oid) in refs {
             self.lock_object(class, oid, crate::txn::locks::LockMode::AccessShare)?;
             let now = self.ctx.sess.db.catalog();

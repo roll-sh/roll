@@ -450,6 +450,10 @@ pub struct Settings {
     pending: Vec<&'static str>,
     /// The `defaults` the client's startup packet gave (source "client").
     client: Vec<String>,
+    /// Parameters the session set, in the order each left its default (guc_nondef_list's
+    /// tail: a RESET or an abort back to the default takes it out). RESET ALL resets them in
+    /// that order, after the ones not at their defaults from the start (`reset_rank`).
+    order: Vec<String>,
     /// The client is connected over TCP (not a Unix socket or embedded): the keepalive
     /// settings at 0 show the socket's own values.
     pub tcp: bool,
@@ -487,6 +491,7 @@ impl Default for Settings {
             argv: Vec::new(),
             pending: Vec::new(),
             client: Vec::new(),
+            order: Vec::new(),
             tcp: false,
         }
     }
@@ -2066,12 +2071,14 @@ impl Settings {
         self.touched(&canon);
         match new {
             Some(v) => {
+                self.note_set(&canon);
                 self.values.insert(canon.clone(), v);
             }
             None => {
                 // RESET / SET TO DEFAULT
                 if def.is_some() || self.defaults.contains_key(&canon) || self.file.custom(&canon).is_some() {
                     self.values.remove(&canon);
+                    self.order.retain(|n| *n != canon);
                 } else {
                     self.values.insert(canon.clone(), String::new());
                 }
@@ -2242,6 +2249,7 @@ impl Settings {
                 Some(v) => match self.values.get_mut(&name) {
                     Some(slot) => *slot = v,
                     None => {
+                        self.note_set(&name);
                         self.values.insert(name.clone(), v);
                     }
                 },
@@ -2252,6 +2260,7 @@ impl Settings {
                 }
                 None => {
                     self.values.remove(&name);
+                    self.order.retain(|n| *n != name);
                 }
             }
             self.stats_fetch_assigned();
@@ -2357,7 +2366,9 @@ impl Settings {
             .filter(|n| self.def(n).is_none_or(|d| !d.flag("NO_RESET_ALL")))
             .cloned()
             .collect();
-        names.sort();
+        // (ResetAllOptions walks guc_nondef_list: the order each left its default.)
+        names.sort_by_cached_key(|n| (self.reset_rank(n), n.clone()));
+        self.order.clear();
         if !names.is_empty() {
             self.derived = DerivedCache::default();
         }
@@ -2376,6 +2387,31 @@ impl Settings {
             }
         }
         self.stats_fetch_assigned();
+    }
+
+    /// A session SET of `name`: at guc_nondef_list's tail unless it is there already.
+    fn note_set(&mut self, name: &str) {
+        if !self.order.iter().any(|n| n == name) {
+            self.order.push(name.to_string());
+        }
+    }
+
+    /// Where `name` is in guc_nondef_list: the configuration file's parameters (the
+    /// reference image's postgresql.conf sets datestyle, then timezone) and client_encoding
+    /// (CheckMyDatabase) from the start, then the startup packet's, the role's and database's,
+    /// then the session's SETs in order.
+    fn reset_rank(&self, name: &str) -> (usize, usize) {
+        const START: [&str; 3] = ["DateStyle", "TimeZone", "client_encoding"];
+        if let Some(i) = START.iter().position(|s| *s == name) {
+            return (0, i);
+        }
+        if let Some(i) = self.client.iter().position(|s| s == name) {
+            return (1, i);
+        }
+        if self.defaults.contains_key(name) {
+            return (2, 0);
+        }
+        (3, self.order.iter().position(|s| s == name).unwrap_or(usize::MAX))
     }
 
     /// Whether a transaction's changes are pending (`end_transaction` has something to do).
