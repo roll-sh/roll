@@ -135,6 +135,9 @@ secret: by writing it somewhere it's read.
 - Reads are never refused. The refusal says where in the arguments and what kind
   (`{refused: "credential", at: "arguments.body", kind: "a GitHub token"}`), never the value, and
   points at roll secrets. The audit log keeps a `deny` row with the same, without the arguments.
+- One detector (`roll_auth::credentials`, beside the checksum of roll's own secrets) serves both
+  MCP servers: roll code's own `/v1/code/mcp` refuses the same formats in its writes (`land`,
+  changes, work items) before they're sent.
 - Nothing reached its destination, so nothing is revoked (a credential that did leak, in a landing
   or a report from GitHub, still is: `Access::revoke_leaked`).
 

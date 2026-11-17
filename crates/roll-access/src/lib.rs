@@ -94,24 +94,8 @@ pub fn new_secret(prefix: &str) -> String {
     format!("{body}{sum}")
 }
 
-/// The last 6 characters a secret ends with: CRC-32 of everything before, as base32 (30 bits).
-fn checksum(body: &str) -> String {
-    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-    let c = crc32fast::hash(body.as_bytes()) >> 2;
-    (0..6).rev().map(|i| ALPHABET[((c >> (i * 5)) & 31) as usize] as char).collect()
-}
-
-/// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`), machine
-/// clients' (`rlc_`), and other products' made the same way ([`new_secret`]): apps' deploy hooks
-/// (`rlk_`). (`rlh_` is roll code's automations' inbound webhook secrets: another shape, not ours.)
-pub const SECRET_PREFIXES: [&str; 5] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_"];
-
-/// Whether `s` is shaped like a roll secret ([`SECRET_PREFIXES`]) whose checksum holds: what
-/// scanners look for. Secrets made before checksums don't pass, but still work.
-pub fn checksum_ok(s: &str) -> bool {
-    let Some(rest) = SECRET_PREFIXES.iter().find_map(|p| s.strip_prefix(p)) else { return false };
-    rest.len() == 40 && rest.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)) && checksum(&s[..s.len() - 6]) == s[s.len() - 6..]
-}
+use roll_auth::credentials::checksum;
+pub use roll_auth::credentials::{SECRET_PREFIXES, checksum_ok};
 
 /// Every roll grant secret in `text` whose checksum holds (in a pushed file, a paste, a log).
 pub fn find_secrets(text: &str) -> Vec<String> {
