@@ -718,3 +718,25 @@ async fn a_subscription_hears_the_tools_change() {
     let changed = next().await;
     assert_eq!((changed["method"].as_str(), &changed["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]), (Some("notifications/tools/list_changed"), &json!("listen:1")), "{changed}");
 }
+
+/// A credential headed where people and agents read it is refused before it's sent (guard.rs):
+/// a well-known format in a project's description, a roll token anywhere but roll secrets. The
+/// refusal names where and what kind, never the value, and the audit log keeps it.
+#[tokio::test(flavor = "multi_thread")]
+async fn credentials_are_kept_out_of_what_agents_write() {
+    let d = Daemon::new();
+    let agent = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "write": "allow" } }, { "product": "postgres", "resources": "*", "actions": { "delete": "allow" } }])).await;
+    let gh = format!("ghp_{}", "a1B2".repeat(9));
+    let refused = d.tool(&agent, "workspace_create_project", json!({ "name": "deploys", "description": format!("push with {gh}") })).await;
+    assert_eq!((refused["isError"].as_bool(), refused["structuredContent"]["at"].as_str(), refused["structuredContent"]["kind"].as_str()), (Some(true), Some("arguments.description"), Some("a GitHub token")), "{refused}");
+    assert!(!refused.to_string().contains(&gh), "never the value");
+    let (_, _, projects) = d.http(OPERATOR, Method::GET, "/v1/workspace/projects", None).await;
+    assert_eq!(projects.as_array().map(Vec::len), Some(0), "nothing was sent");
+    // roll's own token, checksummed, anywhere but roll secrets.
+    let leaked = d.tool(&agent, "postgres_delete_project", json!({ "project": agent })).await;
+    assert_eq!(leaked["structuredContent"]["kind"], "a roll token", "{leaked}");
+    // A project without one is made as ever.
+    assert_eq!(d.tool(&agent, "workspace_create_project", json!({ "name": "deploys" })).await["isError"], false);
+    let audit = d.audit_until(|a| a.as_array().is_some_and(|l| l.iter().any(|e| e["resource"].as_str().is_some_and(|r| r.contains("a GitHub token in arguments.description"))))).await;
+    assert!(!audit.to_string().contains(&gh), "{audit}");
+}

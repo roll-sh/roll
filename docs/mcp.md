@@ -105,6 +105,25 @@ anything but `1`, `true`, `0` or `false`, or the key spelled another way (`read_
 so a typo never means "not read-only". The connect panel has a checkbox
 for it, and it goes with toolsets (`?toolsets=postgres&readonly=1`).
 
+### Credentials kept out of what agents write
+
+As GitHub's MCP server's secret protection does (push protection for agents), a tool call that would
+write a credential where people and other agents read it is refused before it's sent
+(`roll_mcp::guard`): roll code (files, work items, comments, reviews), previews (notes), the
+workspace (names, descriptions) and agents (messages). That's how a prompt-injected agent leaks a
+secret: by writing it somewhere it's read.
+
+- Found: AWS access keys, GitHub tokens (`ghp_`…, `github_pat_`), Slack tokens, Stripe live keys,
+  Google API keys, Anthropic and OpenAI keys, PEM private keys, and roll's own credentials (`rlt_`,
+  `rlo_`, `rlf_`, `rlc_`, `rlk_`, by their checksum, so never a false positive). roll's are refused
+  in every product but roll secrets, where keeping one is the point; the others only in the
+  products above (a database, a queue or apps' variables are where credentials belong).
+- Reads are never refused. The refusal says where in the arguments and what kind
+  (`{refused: "credential", at: "arguments.body", kind: "a GitHub token"}`), never the value, and
+  points at roll secrets. The audit log keeps a `deny` row with the same, without the arguments.
+- Nothing reached its destination, so nothing is revoked (a credential that did leak, in a landing
+  or a report from GitHub, still is: `Access::revoke_leaked`).
+
 ### Lockdown
 
 `/v1/mcp?lockdown=1` (or `X-MCP-Lockdown: true`) works like GitHub's MCP server's lockdown mode:

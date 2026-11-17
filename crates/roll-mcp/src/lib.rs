@@ -26,6 +26,7 @@
 //!   instead of every tool ([`search`]).
 
 pub mod card;
+pub mod guard;
 pub mod lockdown;
 pub mod modern;
 pub mod prompts;
@@ -967,6 +968,16 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
     let tool: Arc<str> = if quiet { format!("completion/complete:{name}").into() } else { name.into() };
     ext.insert(McpCall { tool, args: Arc::new(redacted), ip: ctx.ip, elicits: ctx.url_elicitation, client: ctx.client.clone(), quiet });
     let started = std::time::Instant::now();
+    // A credential headed where people and other agents read it is refused before it's sent
+    // (guard.rs): a data-loss check, not a permission (the gate decides those).
+    if !quiet && let Some(found) = credential_in(ctx, name, &args) {
+        let text = format!(
+            "not sent: {} holds what looks like {}. Written where people and agents read it, a credential leaks: keep it in roll secrets (secrets_set) and refer to it by name.",
+            found.at, found.kind
+        );
+        refused_audit(ctx, name, &found, started).await;
+        return Some(tool_error(text, json!({ "refused": "credential", "at": found.at, "kind": found.kind })));
+    }
     // The gate decides (and audits) every call a grant makes; the MCP layer refuses nothing itself.
     let (mut result, route) = if let Some(t) = tools::all().iter().find(|t| t.name == name) {
         (run(ctx, t, &args, ext).await, format!("{} {}", t.method, t.path))
@@ -1022,6 +1033,53 @@ async fn call_as(ctx: &Arc<Ctx>, name: &str, args: Value, quiet: bool) -> Option
         }
     }
     Some(result)
+}
+
+/// What a call to `name` would leak, if anything: its product, and whether it writes (a built-in
+/// tool's method, a fronted set's `readOnlyHint`).
+fn credential_in(ctx: &Ctx, name: &str, args: &Value) -> Option<guard::Found> {
+    let (product, write) = match tools::all().iter().find(|t| t.name == name) {
+        Some(t) => (t.product.to_string(), t.method != "GET"),
+        None => {
+            let def = ctx.m.sets.iter().flat_map(|s| s.tools()).find(|t| t["name"] == name)?;
+            let product = def["_meta"]["roll/product"].as_str().map(str::to_string).unwrap_or_else(|| name.split('_').next().unwrap_or_default().to_string());
+            (product, def["annotations"]["readOnlyHint"] != true)
+        }
+    };
+    guard::check(&product, write, args)
+}
+
+/// A refused credential in the audit log: the gate never saw the call. Where and what kind, never
+/// the value (the arguments aren't kept).
+async fn refused_audit(ctx: &Arc<Ctx>, name: &str, found: &guard::Found, started: std::time::Instant) {
+    let Some(access) = ctx.m.config.access.clone() else { return };
+    let (grant_id, grant_name) = match &ctx.principal {
+        Principal::Grant(g) => (Some(g.id.to_string()), Some(g.name.to_string())),
+        Principal::Operator => (None, None),
+    };
+    let e = roll_access::store::AuditEvent {
+        id: roll_access::new_id("aud"),
+        at: code_sql_now(),
+        grant_id,
+        grant_name,
+        source: "mcp".into(),
+        tool: Some(name.to_string()),
+        method: "POST".into(),
+        route: "tool".into(),
+        product: name.split('_').next().map(str::to_string),
+        action: None,
+        resource: Some(format!("{} in {}", found.kind, found.at)),
+        decision: "deny".into(),
+        approval: None,
+        status: 400,
+        args: None,
+        ip: ctx.ip.map(|i| i.to_string()),
+        duration_ms: started.elapsed().as_millis() as i64,
+        client: ctx.client.as_deref().map(str::to_string),
+    };
+    if let Some(e) = access.store.queue_audit(e) {
+        let _ = tokio::task::spawn_blocking(move || access.store.audit(&e)).await;
+    }
 }
 
 /// `roll://access/me`: `GET /v1/access` through the gated router with the caller's headers, as a
