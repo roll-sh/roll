@@ -337,6 +337,10 @@ export interface PreviewSettings {
   visual_review?: "off" | "check" | "required";
   /** `catch` (default): services send mail to roll's catcher, listed on the preview, never delivered; `deliver`: the project's own mail settings. */
   mail?: "catch" | "deliver";
+  /** What its services' code may reach: `open` (default) anything; `roll` only roll's own products (a network with no route out). */
+  egress?: "open" | "roll";
+  /** With `egress: "roll"`: hosts outside roll its code may still reach (`api.stripe.com`, `*.sentry.io`), through a proxy that refuses anything else. */
+  egress_hosts?: string[];
   /** Branch the data as of a point in time where the product keeps history: `-24h`, `-30m`, `-7d`, or an RFC 3339 time (30 days back at most). */
   data_at?: string | null;
   /** A feedback button on its pages for people who came in through roll (link access). */
@@ -401,6 +405,16 @@ function query(params: Record<string, string | number | undefined>) {
 export async function qrUrl(id: string, service?: string): Promise<string> {
   const res = await fetch(`${ROLL_API}${one(id)}/qr.png${service ? `?service=${encodeURIComponent(service)}` : ""}`, { headers: apiHeaders(), cache: "no-store" });
   onApiStatus(res.status);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
+  return URL.createObjectURL(await res.blob());
+}
+
+/** A picture of a note's element, as a screenshot run cropped it (an object URL; revoke it when
+ * done), or `null` while it has none. */
+export async function noteCropUrl(id: string, note: string): Promise<string | null> {
+  const res = await fetch(`${ROLL_API}${one(id)}/notes/${encodeURIComponent(note)}/crop`, { headers: apiHeaders(), cache: "no-store" });
+  onApiStatus(res.status);
+  if (res.status === 404) return null;
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
   return URL.createObjectURL(await res.blob());
 }

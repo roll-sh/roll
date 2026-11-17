@@ -128,7 +128,7 @@ pub(crate) fn of(c: &Conn<'_>, project: &str) -> Result<Vec<Required>> {
 
 impl Secrets {
     pub fn required(&self, project: &str, caller: &Caller) -> Result<Vec<Required>> {
-        caller.need(Action::Read, &Scope::project(project))?;
+        caller.need(Action::Read, &Scope::whole(project))?;
         self.project(project)?;
         self.db.read(|c| of(c, project))
     }

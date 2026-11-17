@@ -548,7 +548,7 @@ impl Aggregator for GridAgg {
             for i in 0..b.len() {
                 let doc = b.docs[i];
                 let mut cells: SmallVec<[i64; 4]> = SmallVec::new();
-                for &(lat, lon) in reader.points(doc) {
+                for &(lat, lon) in reader.points(doc)? {
                     if let Some(c) = self.cell(lat, lon) {
                         cells.push(c);
                     }

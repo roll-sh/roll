@@ -357,7 +357,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<Report> {
         Ok(info) => info,
         Err(e) => {
             if let Some(fresh) = probe_cluster {
-                release(fresh, probe_hook_client.as_mut()).await;
+                release(fresh, probe_hook_client.as_mut(), false).await;
             }
             return Err(e);
         }
@@ -386,7 +386,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<Report> {
     let info = Arc::new(info);
     let wipe_mode = cfg.wipe.unwrap_or(if cfg.isolated() { WipeMode::Light } else { WipeMode::Full });
     if let Some(fresh) = probe_cluster {
-        release(fresh, probe_hook_client.as_mut()).await;
+        release(fresh, probe_hook_client.as_mut(), false).await;
     } else if wipe_mode != WipeMode::None {
         // Start from a clean cluster.
         wipe(&mut probe_client, &info, wipe_mode).await.map_err(|e| anyhow::anyhow!("initial cleanup failed: {e}"))?;
@@ -543,6 +543,13 @@ fn annotate<'a>(results: impl Iterator<Item = &'a mut TestResult>, note: &str) {
     }
 }
 
+/// Whether a test failed because its cluster stopped answering (the connection was closed,
+/// reset or refused): the cluster process may have died, which [`release`] then waits to see.
+fn lost_connection<'a>(mut results: impl Iterator<Item = &'a TestResult>) -> bool {
+    const LOST: [&str; 4] = ["connection closed", "connection reset", "Connection refused", "error sending request"];
+    results.any(|r| r.failure.as_ref().is_some_and(|f| LOST.iter().any(|l| f.message.contains(l))))
+}
+
 /// Where a fresh cluster is reached: what the hook returned, else `--url`.
 fn fresh_endpoint(fresh: &FreshCluster, cfg: &Config) -> anyhow::Result<Endpoint> {
     match (&fresh.endpoint, &cfg.url) {
@@ -554,10 +561,10 @@ fn fresh_endpoint(fresh: &FreshCluster, cfg: &Config) -> anyhow::Result<Endpoint
 
 /// Deletes (stops) a fresh cluster. For a spawned process that had died on its own, returns a
 /// note for the failures it caused.
-async fn release(fresh: FreshCluster, hook_client: Option<&mut Client>) -> Option<String> {
+async fn release(fresh: FreshCluster, hook_client: Option<&mut Client>, lost: bool) -> Option<String> {
     let mut note = None;
     if let Some(p) = fresh.process
-        && let Some((status, log)) = p.stop().await
+        && let Some((status, log)) = p.stop(lost).await
     {
         let n = format!("the cluster process exited during the run ({status}); its output is in {}", log.display());
         eprintln!("search-yaml: {n}");
@@ -978,13 +985,13 @@ impl Worker {
                 }
             }
             if let Some(fc) = test_cluster
-                && let Some(note) = self.drop_cluster(fc).await
+                && let Some(note) = self.drop_cluster(fc, lost_connection(out.last().into_iter())).await
             {
                 annotate(out.last_mut().into_iter(), &note);
             }
         }
         if let Some(fc) = file_cluster
-            && let Some(note) = self.drop_cluster(fc).await
+            && let Some(note) = self.drop_cluster(fc, lost_connection(out.iter())).await
         {
             annotate(out.iter_mut(), &note);
         }
@@ -1019,10 +1026,11 @@ impl Worker {
         Ok(fc)
     }
 
-    async fn drop_cluster(&mut self, fc: FreshCluster) -> Option<String> {
+    /// `lost`: a test lost its connection to the cluster, which may have died.
+    async fn drop_cluster(&mut self, fc: FreshCluster, lost: bool) -> Option<String> {
         // Close the connection first: a stopped server would otherwise leave it half open.
         self.client = None;
-        release(fc, self.hook_client.as_mut()).await
+        release(fc, self.hook_client.as_mut(), lost).await
     }
 
     fn cluster_failure(&self, suite: &Suite, label: &str, tests: &[usize], e: &anyhow::Error) -> Vec<TestResult> {

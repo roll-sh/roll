@@ -1,0 +1,9 @@
+/**
+ * Names that read as secrets (`STRIPE_SECRET_KEY`, `GITHUB_TOKEN`, `DB_PASSWORD`): a new variable
+ * with one comes sealed by default (Vercel's sensitive-by-default), unless whoever sets it says
+ * otherwise. The CLI's `roll apps vars` uses the same rule (`looks_secret`).
+ */
+export function looksSecret(name: string): boolean {
+  const n = name.toUpperCase();
+  return /(^|_)(SECRET|TOKEN|PASSWORD|PASSWD|PASS|PRIVATE_KEY|API_KEY|ACCESS_KEY|KEY|CREDENTIALS?|DSN)(_|$)/.test(n) || /SECRET|PASSWORD|TOKEN/.test(n);
+}

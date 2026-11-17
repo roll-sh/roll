@@ -32,7 +32,8 @@ export function SearchClusters() {
         </div>
         {info && (
           <p className="font-mono text-[11px] text-subtle">
-            elasticsearch {info.version} · opensearch {info.opensearch_version} · {info.region} · {info.storage}
+            elasticsearch {info.version} · opensearch {info.opensearch_version} · {info.region}
+            {info.storage && ` · ${info.storage}`}
           </p>
         )}
       </div>
@@ -93,7 +94,7 @@ export function SearchClusters() {
 function Overview({ info, clusters }: { info: SearchInfo; clusters: SearchCluster[] }) {
   const loaded = clusters.filter((c) => c.status.state === "loaded");
   const stored = clusters.reduce((s, c) => s + c.stored_bytes, 0);
-  const docs = clusters.reduce((s, c) => s + c.docs, 0);
+  const docs = clusters.reduce((s, c) => s + (c.status.docs ?? c.docs), 0);
   const indices = clusters.reduce((s, c) => s + (c.status.indices ?? c.indices), 0);
   return (
     <div className="mt-6">
@@ -101,7 +102,11 @@ function Overview({ info, clusters }: { info: SearchInfo; clusters: SearchCluste
         items={[
           { label: "Clusters", value: clusters.length, hint: `${loaded.length} loaded · ${clusters.length - loaded.length} asleep` },
           { label: "Indices", value: formatCount(indices), hint: `${formatCount(docs)} documents` },
-          { label: "Stored", value: formatBytes(stored), hint: `cache ${formatBytes(info.cache.used_bytes)} of ${formatBytes(info.cache.budget_bytes)}` },
+          {
+            label: "Stored",
+            value: formatBytes(stored),
+            hint: info.cache ? `cache ${formatBytes(info.cache.used_bytes)} of ${formatBytes(info.cache.budget_bytes)}` : "in object storage",
+          },
           { label: "Endpoint", value: info.domain ? `*.${info.domain}` : info.http, hint: info.tls ? "HTTPS" : "HTTP" },
         ]}
       />
@@ -153,7 +158,7 @@ function ClusterList({
                 <div className="hidden min-w-0 font-mono text-[11px] text-subtle md:block">
                   <p className="truncate">
                     <span className={on ? "text-fg" : ""}>{formatCount(c.status.indices ?? c.indices)}</span>{" "}
-                    {(c.status.indices ?? c.indices) === 1 ? "index" : "indices"} · {formatCount(c.docs)} {c.docs === 1 ? "doc" : "docs"}
+                    {(c.status.indices ?? c.indices) === 1 ? "index" : "indices"} · {formatCount(c.status.docs ?? c.docs)} {(c.status.docs ?? c.docs) === 1 ? "doc" : "docs"}
                   </p>
                   <p className="truncate">{formatBytes(c.stored_bytes)} stored</p>
                 </div>

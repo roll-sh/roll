@@ -1,0 +1,18 @@
+# Directus: a headless CMS and an instant API over a roll Postgres database (directus.io).
+[apps.directus]
+image = "directus/directus:11"
+port = 8055
+links = ["db"]
+[apps.directus.run]
+health_path = "/server/health"
+health_timeout_s = 180
+memory_mb = 1024
+[apps.directus.variables]
+DB_CLIENT = "pg"
+DB_CONNECTION_STRING = "${{ DATABASE_URL }}"
+SECRET = { generate = "secret" }
+PUBLIC_URL = "${{ ROLL_PUBLIC_URL }}"
+ADMIN_EMAIL = { ask = "The first admin's email" }
+ADMIN_PASSWORD = { ask = "The first admin's password" }
+[databases.db]
+kind = "postgres"

@@ -1,4 +1,4 @@
-import { ExternalLink, Globe, Lock, RefreshCw, ShieldAlert, Trash2 } from "lucide-react";
+import { ExternalLink, Globe, Lock, Pencil, RefreshCw, ShieldAlert, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { appsApi, type Domain, type Environment } from "@/lib/apps-api";
 import { btn, CopyButton, input, panel, primary, useCopy } from "../ui";
@@ -36,7 +36,20 @@ function TlsBadge({ d }: { d: Domain }) {
 /** The generated hostname, then custom domains: their DNS record, Verify and Remove. */
 export function DomainsTab({ service, env, runner }: { service: string; env: Environment; runner: Runner }) {
   const [host, setHost] = useState("");
+  // Renaming the generated name: what's typed, while the field is open.
+  const [rename, setRename] = useState<string | null>(null);
+  const [renamed, setRenamed] = useState(false);
   const { copied, copy } = useCopy();
+  const generated = env.url ? new URL(env.url).hostname : null;
+  const [label, suffix] = generated ? [generated.split(".")[0]!, generated.slice(generated.indexOf("."))] : ["", ""];
+  const nameOk = rename !== null && /^(?!.*--)[a-z0-9][a-z0-9-]{1,54}[a-z0-9]$/.test(rename);
+  const saveName = async () => {
+    if (rename === null || rename === label) return setRename(null);
+    if (await runner.run("hostname", () => appsApi.putEnvironment(service, env.name, { hostname: rename }))) {
+      setRename(null);
+      setRenamed(true);
+    }
+  };
   const roll = env.domains.filter((d) => d.kind === "roll");
   const custom = env.domains.filter((d) => d.kind === "custom");
   // Where a domain may redirect: the environment's hostnames that serve it.
@@ -50,9 +63,38 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
   return (
     <div className="space-y-6">
       <section className={panel}>
-        <div className="flex min-h-14 items-center border-b border-line px-5 py-3">
+        <div className="flex min-h-14 items-center justify-between border-b border-line px-5 py-3">
           <h2 className="text-[15px] font-medium">roll domain</h2>
+          {generated && rename === null && (
+            <button type="button" className={btn} onClick={() => setRename(label)} title="Change its name on the roll domain">
+              <Pencil className="size-3.5" /> Change
+            </button>
+          )}
         </div>
+        {rename !== null && (
+          <form
+            className="rise flex flex-wrap items-center gap-2 border-b border-line px-5 py-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void saveName();
+            }}
+          >
+            <div className="flex min-w-0 flex-1 items-center">
+              <input autoFocus value={rename} onChange={(e) => setRename(e.target.value.toLowerCase())} aria-label="Name on the roll domain" spellCheck={false} className={`${input} min-w-0 flex-1 !rounded-r-none font-mono text-[12.5px]`} />
+              <span className="flex h-8 items-center rounded-r-md border border-l-0 border-line-2 px-2 font-mono text-[12.5px] text-subtle">{suffix}</span>
+            </div>
+            <button type="submit" className={primary} disabled={!nameOk || runner.busy !== null}>
+              {runner.busy === "hostname" ? <span className="shimmer">Saving…</span> : "Save"}
+            </button>
+            <button type="button" className={btn} onClick={() => setRename(null)}>
+              Cancel
+            </button>
+            <p className="w-full text-[12px] text-subtle">
+              {nameOk || rename === "" ? `${label}${suffix} stops answering at once; anyone can take it after.` : "3–56 of a–z, 0–9 and -, not starting or ending with -, without --."}
+            </p>
+          </form>
+        )}
+        {renamed && <p className="border-b border-line px-5 py-3 text-[12.5px] text-muted">Renamed. Redeploy to give the app its new <code className="font-mono text-fg">ROLL_PUBLIC_URL</code>.</p>}
         {roll.length === 0 && !env.url && <p className="px-5 py-4 text-[13px] text-muted">The environment gets its URL with its first deploy.</p>}
         <ul className="divide-y divide-line">
           {(roll.length ? roll.map((d) => `https://${d.hostname}`) : env.url ? [env.url] : []).map((url) => (

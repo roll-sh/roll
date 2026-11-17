@@ -220,6 +220,10 @@ pub struct FakeApps {
     pub fail_remove: AtomicUsize,
     /// Runs inside a deploy (an API call landing while the reconciler works).
     pub on_deploy: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// Which service each screenshot run was of.
+    pub shot_services: Mutex<Vec<String>>,
+    /// The notes each screenshot was asked to crop (a `#missing` selector finds nothing).
+    pub crops_asked: Mutex<Vec<String>>,
     /// Services the runtime says run on this node, and those put to sleep.
     pub running: Mutex<std::collections::HashSet<(String, String)>>,
     pub slept: Mutex<Vec<(String, String)>>,
@@ -293,8 +297,9 @@ impl Apps for FakeApps {
         self.runs.lock().push((job.seed.run.clone(), job.revision.clone(), at_rev));
         Ok((self.seed_exit.load(Ordering::SeqCst), "seed output".into()))
     }
-    async fn screenshot(&self, preview: &str, _service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
+    async fn screenshot(&self, preview: &str, service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
         let Some(png) = self.shot.lock().clone() else { return Ok(None) };
+        self.shot_services.lock().push(service.to_string());
         // The API the preview serves: by any revision it runs (whichever service is first).
         let revs: Vec<String> = self.deployed.lock().iter().filter(|((p, _), _)| p == preview).map(|(_, r)| r.clone()).collect();
         let api = opts.openapi.as_ref().and_then(|_| revs.iter().find_map(|r| self.api.lock().get(r).cloned()));
@@ -307,10 +312,18 @@ impl Apps for FakeApps {
             .chain(opts.browsers.iter().filter(|_| !self.no_browsers.load(Ordering::SeqCst)).map(|b| format!("browser:{b}")))
             .map(|path| roll_previews::ports::PageShot { path, png: png.clone(), errors: 0, report: Default::default() })
             .collect();
-        Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None, api }))
+        self.crops_asked.lock().extend(opts.crops.iter().map(|c| c.note.clone()));
+        let crops = opts.crops.iter().filter(|c| c.selector != "#missing").map(|c| (c.note.clone(), png.clone())).collect();
+        Ok(Some(roll_previews::ports::Shot { png, speed: None, health: None, a11y: None, phone: None, pages, text: None, links: None, api, crops }))
     }
     fn status(&self, p: &str, s: &str) -> Option<ServiceState> {
         self.running.lock().contains(&(p.to_string(), s.to_string())).then_some(ServiceState::Running)
+    }
+    fn warm(&self, _: &str, _: &str) -> bool {
+        false
+    }
+    async fn egress_refused(&self, _: &str) -> Vec<String> {
+        Vec::new()
     }
 }
 
@@ -325,20 +338,26 @@ pub struct FakeSecrets {
     pub renewed: Mutex<Vec<String>>,
     pub revoked: Mutex<Vec<String>>,
     pub ended: Mutex<std::collections::HashSet<String>>,
+    /// What each ensure said the preview branched.
+    pub branched: Mutex<Vec<(Kind, String)>>,
+    /// Keys resolve answers as followed (links to a branched parent: nothing of it resolved).
+    pub followed: Mutex<Vec<(String, Kind, String, String)>>,
 }
 
 #[async_trait]
 impl roll_previews::ports::Secrets for FakeSecrets {
-    async fn ensure(&self, _: &str, env: &str, _: &str, _: &[(String, String)], trusted: bool, _: i64) -> anyhow::Result<()> {
+    async fn ensure(&self, _: &str, env: &str, _: &str, _: &[(String, String)], trusted: bool, _: i64, branches: &[(Kind, String)]) -> anyhow::Result<()> {
         self.ensured.lock().push((env.to_string(), trusted));
+        *self.branched.lock() = branches.to_vec();
         Ok(())
     }
     async fn resolve(&self, _: &str, _: &str, _: bool, _: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
+        let followed = self.followed.lock().clone();
         if !self.dynamic.load(Ordering::SeqCst) {
-            return Ok(Default::default());
+            return Ok(roll_previews::ports::Resolved { followed, ..Default::default() });
         }
         let n = self.issued.fetch_add(1, Ordering::SeqCst) + 1;
-        Ok(roll_previews::ports::Resolved { values: vec![("DB_PASSWORD".into(), format!("pw-{n}"))], problems: Vec::new(), leases: vec![format!("lease-{n}")] })
+        Ok(roll_previews::ports::Resolved { values: vec![("DB_PASSWORD".into(), format!("pw-{n}"))], problems: Vec::new(), leases: vec![format!("lease-{n}")], followed })
     }
     async fn renew(&self, _: &str, lease: &str) -> anyhow::Result<Option<i64>> {
         if self.ended.lock().contains(lease) {

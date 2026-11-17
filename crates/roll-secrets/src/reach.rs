@@ -4,7 +4,7 @@
 //! goes by itself (syncs, other projects it's shared with, folders that import it), and who
 //! actually read it lately (the audit log). Names and metadata only; never a value.
 
-use crate::access::{Action, Caller, Grants, Scope, TokenScope};
+use crate::access::{Action, Caller, GrantGrants, Grants, Scope};
 use crate::{Error, Result, Secrets, envs, from_json, names};
 use code_sql::params;
 use serde::Serialize;
@@ -80,8 +80,15 @@ const ACTIONS: [Action; 4] = [Action::Read, Action::Reveal, Action::Write, Actio
 
 /// What a scope (a token's, an identity's) may do at `slug:path`.
 fn here(project: &str, environments: &Option<Vec<String>>, paths: &Option<Vec<String>>, actions: &[Action], slug: &str, path: &str) -> Vec<Action> {
-    let scope = TokenScope { project: project.to_string(), environments: environments.clone(), paths: paths.clone(), actions: actions.to_vec() };
-    ACTIONS.into_iter().filter(|a| scope.allows(*a, &Scope::at(project, slug, path))).collect()
+    // As roll-access would judge the same rule (an identity's login gets exactly this one).
+    let g = roll_auth::Grant { id: "".into(), name: "".into(), kind: roll_auth::GrantKind::Token, scope: std::sync::Arc::new(roll_auth::scope::Scope(vec![crate::access::rule(project, environments.clone(), paths.clone(), actions)])), user: None, ask_otherwise: false };
+    granted(&g, project, slug, path)
+}
+
+/// What grant `g` may do at `slug:path`, as roll secrets checks each request of it.
+fn granted(g: &roll_auth::Grant, project: &str, slug: &str, path: &str) -> Vec<Action> {
+    let g = GrantGrants(g.clone());
+    ACTIONS.into_iter().filter(|a| g.allows(*a, &Scope::at(project, slug, path))).collect()
 }
 
 impl Secrets {
@@ -91,13 +98,19 @@ impl Secrets {
         caller.need(Action::Admin, &Scope::project(project))?;
         let path = names::path(path)?;
         let now = self.db.now_ms()?;
-        let tokens = self
-            .tokens(project, caller)?
+        // roll-access's live tokens (not workload logins: those are their identities, below).
+        let all = match &self.workloads {
+            Some(w) => w.grants()?,
+            None => vec![],
+        };
+        let tokens = all
             .into_iter()
-            .filter(|t| t.expires_at.is_none_or(|e| e > now))
-            .filter_map(|t| {
-                let actions = here(project, &t.environments, &t.paths, &t.actions, slug, &path);
-                (!actions.is_empty()).then_some(Holder { id: t.id, name: t.name, actions, expires_at: t.expires_at, last_used_at: t.last_used_at, created_by: t.created_by })
+            .filter_map(|g| {
+                // As each of its requests is judged here: a person's own token only within their own
+                // projects (a token that reaches nothing here isn't listed, nor its name or person).
+                let grants = self.grant_grants(&g).ok()?;
+                let actions: Vec<Action> = ACTIONS.into_iter().filter(|a| grants.allows(*a, &Scope::at(project, slug, &path))).collect();
+                (!actions.is_empty()).then(|| Holder { id: g.id.to_string(), name: g.name.to_string(), actions, expires_at: None, last_used_at: None, created_by: g.user.as_deref().unwrap_or("operator").to_string() })
             })
             .collect();
         let identities = self
@@ -169,7 +182,7 @@ impl Secrets {
             for p in projects {
                 let wanted: std::collections::HashSet<(&str, &str)> = all.iter().filter(|s| s.0 == p).map(|s| (s.1.as_str(), s.2.as_str())).collect();
                 let rows: Vec<(String, String, String, i64, String)> = c.query(
-                    "SELECT env, path, actor, at, keys FROM audit WHERE project_id = ? AND at >= ? AND action IN ('secrets.reveal', 'secrets.export', 'secrets.resolve', 'sync.push') ORDER BY id DESC LIMIT ?",
+                    "SELECT env, path, actor, at, keys FROM audit WHERE project_id = ? AND at >= ? AND action IN ('secrets.reveal', 'secrets.export', 'secrets.resolve', 'secrets.revalidate', 'sync.push') ORDER BY id DESC LIMIT ?",
                     params![p, now - READ_DAYS * 86_400_000, READS_MAX],
                     |r| Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get::<_, Option<String>>(1)?.unwrap_or_default(), r.get(2)?, r.get(3)?, r.get(4)?)),
                 )?;

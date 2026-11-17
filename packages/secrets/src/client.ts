@@ -5,12 +5,21 @@ import type { ExportFormat, Lease, SealedValues, TransitPublicKey, Values } from
 export type ClientOptions = {
   /** rolld's API, e.g. `https://api.roll.example` (no trailing `/v1`). */
   api: string;
-  /** A scoped token (`rlst_…`) or the operator token. */
+  /** A roll token (`rlt_…`) with a rule on the project, or the operator token. */
   token: string;
   /** The project's id (`prj_…`). A scoped token knows its own project, so it may be left out. */
   project?: string;
   /** For tests and other runtimes; the global `fetch` by default. */
   fetch?: typeof fetch;
+  /**
+   * Keep `values()` answers this long (ms) and answer from memory meanwhile; after that, ask
+   * again with the digest it was read against, and an unchanged folder costs a 304 that reads,
+   * issues and audits nothing. A folder holding dynamic credentials is never kept (they end with
+   * their lease). Off by default.
+   */
+  cacheTtlMs?: number;
+  /** For tests: the clock (ms) the cache's TTL is measured with; `Date.now` by default. */
+  now?: () => number;
 };
 
 export type WatchOptions = {
@@ -83,11 +92,53 @@ export function createClient(options: ClientOptions) {
   }
   const env = async (e: string) => `/v1/secrets/projects/${enc(await projectId())}/environments/${enc(e)}`;
 
-  function values(environment: string, o?: { path?: string; format?: undefined; resolve?: boolean }): Promise<Values>;
+  /** `fresh`: skip `cacheTtlMs` (a watch that saw the digest move reads anew). */
+  function values(environment: string, o?: { path?: string; format?: undefined; resolve?: boolean; fresh?: boolean }): Promise<Values>;
   function values(environment: string, o: { path?: string; format: ExportFormat; resolve?: boolean }): Promise<string>;
-  async function values(environment: string, o: { path?: string; format?: ExportFormat; resolve?: boolean } = {}): Promise<Values | string> {
+  async function values(environment: string, o: { path?: string; format?: ExportFormat; resolve?: boolean; fresh?: boolean } = {}): Promise<Values | string> {
     const url = `${await env(environment)}/values${qs({ path: o.path, format: o.format, resolve: o.resolve === false ? "false" : undefined })}`;
-    return (await call("GET", url, undefined, !!o.format)) as Values | string;
+    if (!options.cacheTtlMs || o.format || o.fresh) {
+      const v = (await call("GET", url, undefined, !!o.format)) as Values | string;
+      // A fresh read is the newest answer: a kept one for the same folder goes.
+      if (o.fresh) cache.delete(url);
+      return v;
+    }
+    return structuredClone(await cached(url, options.cacheTtlMs));
+  }
+
+  /** Values kept for `ttl` ms, then revalidated with their digest (a 304 keeps them). */
+  const cache = new Map<string, { values: Values; etag: string | null; at: number }>();
+  const now = options.now ?? Date.now;
+  async function cached(url: string, ttl: number): Promise<Values> {
+    const hit = cache.get(url);
+    if (hit && now() - hit.at < ttl) return hit.values;
+    const sep = url.includes("?") ? "&" : "?";
+    const res = await doFetch(`${base}${url}${sep}digest=1`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${options.token}`, ...(hit?.etag ? { "if-none-match": `"${hit.etag}"` } : {}) },
+      cache: "no-store",
+    });
+    if (res.status === 304 && hit) {
+      hit.at = now();
+      return hit.values;
+    }
+    const text = await res.text();
+    if (!res.ok) {
+      let err: { error?: string; code?: string } = {};
+      try {
+        err = JSON.parse(text);
+      } catch {
+        // not JSON: the status says it
+      }
+      throw new SecretsError(err.error ?? `${res.status} ${res.statusText}`.trim(), res.status, err.code ?? null);
+    }
+    const v = JSON.parse(text) as Values;
+    const etag = res.headers.get("etag")?.replace(/^W\//, "").replace(/"/g, "") ?? null;
+    // Never kept: dynamic credentials (they end with their lease) or a key that didn't resolve
+    // (the digest may not move when the link recovers).
+    if (v.dynamic.length || v.problems.length) cache.delete(url);
+    else cache.set(url, { values: v, etag, at: now() });
+    return v;
   }
 
   function resolve(environment: string, o: { consumer: string; path?: string; sealTo?: undefined }): Promise<Values>;
@@ -124,7 +175,8 @@ export function createClient(options: ClientOptions) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let leases: string[] = [];
     let last: string | null = null;
-    const load = () => (o.consumer ? resolve(environment, { consumer: o.consumer, path: o.path }) : values(environment, { path: o.path }));
+    // Always a fresh read: the digest moved, so a kept answer is the old one.
+    const load = () => (o.consumer ? resolve(environment, { consumer: o.consumer, path: o.path }) : values(environment, { path: o.path, fresh: true }));
     const take = async (v: Values) => {
       if (v.problems.length) throw new SecretsError(`${environment} doesn't resolve: ${v.problems.map((p) => `${p.key}: ${p.problem}`).join("; ")}`, 409, "unresolved");
       leases = v.leases;
