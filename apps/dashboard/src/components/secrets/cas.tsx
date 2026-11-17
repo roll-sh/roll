@@ -2,7 +2,7 @@ import { Check, Copy, FileSignature, ListChecks, Plus, ShieldCheck, Trash2, Work
 import { useState } from "react";
 import type { AcmeBinding, Ca, NewAcmeKey, SignedCertificate } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
-import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, useLoad } from "./ui";
+import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, textareaField, useLoad } from "./ui";
 
 const DOMAIN = /^(?!-)[a-z0-9-]{1,63}(\.(?!-)[a-z0-9-]{1,63})*$/;
 
@@ -178,7 +178,7 @@ function SignCsr({ ca }: { ca: Ca }) {
           <p className="text-[11.5px] text-muted">
             For <span className="font-mono text-fg">{signed.names.join(", ")}</span> until {new Date(signed.not_after).toISOString().slice(0, 10)} · serial <span className="font-mono">{signed.serial.slice(0, 16)}…</span>
           </p>
-          <textarea readOnly value={signed.certificate} rows={6} className={`${field} h-auto py-1.5 font-mono text-[11px]`} aria-label="The signed certificate" />
+          <textarea readOnly value={signed.certificate} rows={6} className={`${textareaField} font-mono text-[11px]`} aria-label="The signed certificate" />
           <div className="flex gap-2">
             <button
               className={button}
@@ -211,7 +211,7 @@ function SignCsr({ ca }: { ca: Ca }) {
             spellCheck={false}
             placeholder={"-----BEGIN CERTIFICATE REQUEST-----\n…"}
             aria-label="The CSR (PEM)"
-            className={`${field} h-auto py-1.5 font-mono text-[11px]`}
+            className={`${textareaField} font-mono text-[11px]`}
           />
           <div className="flex flex-wrap items-center gap-2">
             <label className="flex items-center gap-1.5 whitespace-nowrap text-[12px] text-muted">
@@ -490,7 +490,7 @@ function NewKey({ made, ca, onDone }: { made: NewAcmeKey; ca: Ca; onDone: () => 
       <p className="text-subtle">
         cert-manager: <span className="font-mono">kubectl -n cert-manager create secret generic roll-{ca.name}-eab --from-literal secret=&lt;HMAC key&gt;</span>, then:
       </p>
-      <textarea readOnly value={issuer} rows={8} className={`${field} h-auto py-1.5 font-mono text-[11px]`} aria-label="cert-manager ClusterIssuer" />
+      <textarea readOnly value={issuer} rows={8} className={`${textareaField} font-mono text-[11px]`} aria-label="cert-manager ClusterIssuer" />
       <p className="text-subtle">
         certbot: <span className="font-mono">--server {made.directory} --eab-kid {made.key_id} --eab-hmac-key &lt;HMAC key&gt;</span>
       </p>
