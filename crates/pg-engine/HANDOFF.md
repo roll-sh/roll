@@ -3408,6 +3408,17 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     q07 / q09 within +-2; cycles q11 -8.3 / -15.6 / -17.2, q02 -7.7 / -6.1 / -3.9, q20 -12.9 /
     -7.2 / -2.1; gate wall medians q11 0.224 -> 0.173 s, q20 0.336 -> 0.296. `Scan::fetch_sorted`,
     `Txn::get_sorted_snap_into` and `Store::get_sorted_into` are gone.
+  - **The multi-get's values asked for before they are read** (`Block::value_span` / `span`,
+    a follow-up on `cand/a238`): the fetched row's first byte was 3.2% of q02's cycles on one
+    load (`toast::has_external`), a miss per row one after another. Each row found in the batch's
+    blocks now has its value's first lines prefetched as its seek finds it, and the values are
+    read (and checked for out-of-line parts) after every seek. Against the candidate's head
+    (plain dist, three rounds, the first with the base pass at 1.81 foreign cores): user
+    instructions within +-0.3% on q02 / q11 / q20 / q17 / q03 / q07 in the clean rounds;
+    cycles q02 -5.7 / -5.2, q11 -7.8 / -1.5, q17 -3.5 / -2.0, q20 -2.0 / -0.7, q03 / q07 within
+    +-1.7, the six -1.73 / -1.54%; own-run walls (5 runs, 3 alternating pairs) q02 0.438 ->
+    0.415 s (3 of 3), q11 0.153 -> 0.139 (2 of 3), q20 0.265 -> 0.244 (3 of 3). A memory-latency
+    change: kept on cycles and wall, as the coordinator's rule for lock changes has it.
   - **Nested loops and Aggregates rescan; tuple sizes without counting again** (agent 232's
     dropped c005 and c007, re-measured on the multi-get as the brief asked, plus a fast path):
     `NestLoopNode::rescan` (ExecReScanNestLoop: the outer side rescanned, or opened again from
@@ -3478,8 +3489,7 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     crash_random seeds 1-3 x 2 and power_cut_at_every_point, the regression suite 51,148 /
     51,150 with none newly differing, isolation 1,647 / 1,648, pg_dump TAP 14,609); handed in as
     `cand/a238` for the batch train.
-  - Next steps (largest first): the fetched rows' values prefetched once the seeks are done (a
-    pass between the seeks and the values: 3.2% of q02 on one load); the workers' lookups batched
+  - Next steps (largest first): the workers' lookups batched
     across outer rows (an outer batch's index keys probed together, then their rows by the
     multi-get: q07 / q05 / q08, 41% of q07); q02's joined rows (the nested loop's `concat_rows`
     and the Hash's sizing and spill per row); q13's probe and per-row partial aggregation; the
