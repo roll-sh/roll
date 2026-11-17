@@ -1214,7 +1214,10 @@ impl Apps {
         // The variables the build's steps see: the environment's, as its instances will.
         let (sid, e) = (svc.id.clone(), d.environment.clone());
         let env_row = self.db(move |s| s.environment(&sid, &e)).await?;
-        let mut build_env = self.resolve_vars(svc, &env_row, &d.id).await?.vars;
+        let resolved = self.resolve_vars(svc, &env_row, &d.id).await?;
+        // Its secret values never reach the build's log, whatever a step prints.
+        self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
+        let mut build_env = resolved.vars;
         // Per deployment (the cache would never hit) or only for the running app.
         build_env.retain(|(k, _)| k != "ROLL_DEPLOYMENT" && k != "PORT");
         // The commit changes every push: out of the hash and the secrets, or no build would hit
@@ -1355,6 +1358,8 @@ impl Apps {
         let mut probe = svc.clone();
         probe.run.port = run.port;
         let resolved = self.resolve_vars(&probe, env, &dep.id).await?;
+        // Its secret values never reach the environment's log, whoever prints them.
+        self.logs.redact(&format!("env:{}/{}", svc.id, env.name), &dep.id, resolved.secret_values());
         if !resolved.unresolved.is_empty() {
             self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(format!("references that name nothing, left empty: {}", resolved.unresolved.join(", ")));
         }
