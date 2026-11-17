@@ -98,6 +98,40 @@ pub struct Store {
     db: Db,
 }
 
+/// Per-person limits a write checks in its own transaction (`0`: no cap). Only clusters with an
+/// owner count, and only toward that owner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Caps {
+    /// Clusters a person may own, branches included.
+    pub clusters: i64,
+    /// Of those, ones that never unload (`idle_timeout_s` 0).
+    pub always_on: i64,
+}
+
+impl Caps {
+    /// No caps: the operator's and admins' writes.
+    pub const NONE: Caps = Caps { clusters: 0, always_on: 0 };
+}
+
+/// A write refused by a [`Caps`] limit: the cap, and how many the owner already has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Over {
+    Clusters { cap: i64, count: i64 },
+    AlwaysOn { cap: i64, count: i64 },
+}
+
+/// What [`Store::insert`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Inserted {
+    Yes,
+    /// The name (or id) is taken.
+    Taken,
+    Over(Over),
+}
+
+/// The clusters a person owns, as [`Store::list_owned`] lists them.
+const OWNED: &str = "deleting = 0 AND owner = ?1";
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS search_clusters (
   id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, region TEXT NOT NULL, flavor TEXT NOT NULL,
@@ -188,9 +222,23 @@ impl Store {
         Ok(Self { db })
     }
 
-    /// Inserts a new cluster; `false` when its name (or id) is taken.
-    pub async fn insert(&self, c: &SearchCluster) -> anyhow::Result<bool> {
+    /// Inserts a new cluster, unless its name (or id) is taken or its owner is at a cap. The
+    /// owner's clusters are counted in the insert's own transaction (SQLite's one writer;
+    /// Postgres `SERIALIZABLE`, which re-runs one of two racing creates), so two creates at the
+    /// cap can't both pass.
+    pub async fn insert(&self, c: &SearchCluster, caps: Caps) -> anyhow::Result<Inserted> {
         let r = self.db.write(|x| {
+            if let Some(owner) = &c.owner {
+                if caps.clusters > 0 {
+                    let count: i64 = x.query_row(&format!("SELECT COUNT(*) FROM search_clusters WHERE {OWNED}"), params![owner], |r| r.get(0))?;
+                    if count >= caps.clusters {
+                        return Ok(Inserted::Over(Over::Clusters { cap: caps.clusters, count }));
+                    }
+                }
+                if let Some(over) = over_always_on(x, owner, None, c.idle_timeout_s, caps)? {
+                    return Ok(Inserted::Over(over));
+                }
+            }
             x.execute(
                 &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"),
                 params![
@@ -213,24 +261,30 @@ impl Store {
                     c.owner
                 ],
             )
+            .map(|_| Inserted::Yes)
         });
         match r {
-            Ok(_) => Ok(true),
-            Err(e) if e.is_unique_violation() => Ok(false),
-            Err(e) => Err(e.into()),
+            Err(e) if e.is_unique_violation() => Ok(Inserted::Taken),
+            r => Ok(r?),
         }
     }
 
     /// Saves the settings and the password (not the metering figures: see [`Store::set_stats`]).
-    pub async fn update(&self, c: &SearchCluster) -> anyhow::Result<()> {
-        self.db.write(|x| {
+    /// Making an owned cluster always-on checks `caps.always_on` in the same transaction.
+    pub async fn update(&self, c: &SearchCluster, caps: Caps) -> anyhow::Result<Result<(), Over>> {
+        Ok(self.db.write(|x| {
+            if let Some(owner) = &c.owner
+                && let Some(over) = over_always_on(x, owner, Some(&c.id), c.idle_timeout_s, caps)?
+            {
+                return Ok(Err(over));
+            }
             x.execute(
                 "UPDATE search_clusters SET flavor = ?2, password = ?3, idle_timeout_s = ?4, max_in_flight = ?5, max_body_mb = ?6,
                  destructive_requires_name = ?7, password_rotated_at = ?8 WHERE id = ?1",
                 params![c.id, c.flavor, c.password, c.idle_timeout_s, c.max_in_flight, c.max_body_mb, c.destructive_requires_name, c.password_rotated_at],
-            )
-        })?;
-        Ok(())
+            )?;
+            Ok::<_, code_sql::Error>(Ok(()))
+        })?)
     }
 
     /// A cluster's id from its id or name, synchronously (roll's access rules resolve resources
@@ -274,9 +328,9 @@ impl Store {
         self.many("", None).await
     }
 
-    /// The clusters of the signed-in person `owner`.
+    /// The clusters of the signed-in person `owner` (what [`Caps`] counts).
     pub async fn list_owned(&self, owner: &str) -> anyhow::Result<Vec<SearchCluster>> {
-        self.many("AND owner = ?1", Some(owner)).await
+        self.many(&format!("AND {OWNED}"), Some(owner)).await
     }
 
     /// Clusters that never unload (`idle_timeout_s` 0), through a partial index: what every node
@@ -399,6 +453,23 @@ impl Store {
     }
 }
 
+/// Whether `owner` may have one more always-on cluster: `None` unless `idle_timeout_s` is 0, the
+/// cap is set, and (for an existing cluster `id`) it isn't always-on already, so a cluster that
+/// already is keeps its other settings changeable when the cap is lowered.
+fn over_always_on(x: &code_sql::Conn<'_>, owner: &str, id: Option<&str>, idle_timeout_s: i64, caps: Caps) -> code_sql::Result<Option<Over>> {
+    if idle_timeout_s != 0 || caps.always_on <= 0 {
+        return Ok(None);
+    }
+    if let Some(id) = id {
+        let was: Option<i64> = x.query_row("SELECT idle_timeout_s FROM search_clusters WHERE id = ?1", params![id], |r| r.get(0)).optional()?;
+        if was == Some(0) {
+            return Ok(None);
+        }
+    }
+    let count: i64 = x.query_row(&format!("SELECT COUNT(*) FROM search_clusters WHERE {OWNED} AND idle_timeout_s = 0"), params![owner], |r| r.get(0))?;
+    Ok((count >= caps.always_on).then_some(Over::AlwaysOn { cap: caps.always_on, count }))
+}
+
 /// The integral of a step function given as `(from, value)` points (sorted by time) up to `end`.
 pub fn integrate(points: &[(i64, i64)], end: i64) -> f64 {
     let mut total = 0.0;
@@ -442,20 +513,20 @@ mod tests {
 
     async fn crud(s: &Store) {
         let c = cluster("srch_a", "app");
-        assert!(s.insert(&c).await.unwrap());
-        assert!(!s.insert(&c).await.unwrap(), "ids are unique");
-        assert!(!s.insert(&cluster("srch_b", "app")).await.unwrap(), "names are unique");
+        assert_eq!(s.insert(&c, Caps::NONE).await.unwrap(), Inserted::Yes);
+        assert_eq!(s.insert(&c, Caps::NONE).await.unwrap(), Inserted::Taken, "ids are unique");
+        assert_eq!(s.insert(&cluster("srch_b", "app"), Caps::NONE).await.unwrap(), Inserted::Taken, "names are unique");
         assert_eq!(s.by_name("app").await.unwrap().unwrap().id, "srch_a");
         let mut child = cluster("srch_c", "app-dev");
         child.parent_id = Some("srch_a".into());
         child.parent_at = Some(5);
         child.created_at = 2;
-        assert!(s.insert(&child).await.unwrap());
+        assert_eq!(s.insert(&child, Caps::NONE).await.unwrap(), Inserted::Yes);
         assert_eq!(s.children("srch_a").await.unwrap().len(), 1);
         let mut mine = cluster("srch_m", "mine");
         mine.owner = Some("usr_a".into());
         mine.created_at = 3;
-        assert!(s.insert(&mine).await.unwrap());
+        assert_eq!(s.insert(&mine, Caps::NONE).await.unwrap(), Inserted::Yes);
         assert_eq!(s.list_owned("usr_a").await.unwrap().iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["srch_m"]);
         assert!(s.list_owned("usr_b").await.unwrap().is_empty());
         assert_eq!(s.owner_of("mine").unwrap(), Some(Some("usr_a".into())));
@@ -466,13 +537,13 @@ mod tests {
         c.flavor = "opensearch".into();
         c.password = "new".into();
         c.max_in_flight = 8;
-        s.update(&c).await.unwrap();
+        s.update(&c, Caps::NONE).await.unwrap().unwrap();
         let back = s.get("srch_a").await.unwrap().unwrap();
         assert_eq!((back.flavor.as_str(), back.password.as_str(), back.max_in_flight), ("opensearch", "new", 8));
         assert_eq!(s.list().await.unwrap().iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["app", "app-dev"]);
         assert!(s.always_on().await.unwrap().is_empty());
         c.idle_timeout_s = 0;
-        s.update(&c).await.unwrap();
+        s.update(&c, Caps::NONE).await.unwrap().unwrap();
         assert_eq!(s.always_on().await.unwrap().iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["app"]);
         s.set_deleting("srch_a", true).await.unwrap();
         assert!(s.always_on().await.unwrap().is_empty(), "a cluster being deleted is never loaded");
@@ -483,7 +554,7 @@ mod tests {
     }
 
     async fn usage_totals(s: &Store) {
-        assert!(s.insert(&cluster("srch_u", "usage")).await.unwrap());
+        assert_eq!(s.insert(&cluster("srch_u", "usage"), Caps::NONE).await.unwrap(), Inserted::Yes);
         s.record_usage("srch_u", &UsageSample { at: 100, seconds: 60, loaded_bytes: 1 << 30, requests: 10 }).await.unwrap();
         s.record_usage("srch_u", &UsageSample { at: 160, seconds: 30, loaded_bytes: 2 << 30, requests: 5 }).await.unwrap();
         let t = s.usage_since("srch_u", 0, 200).await.unwrap();
@@ -495,7 +566,7 @@ mod tests {
     }
 
     async fn storage_is_a_step_function(s: &Store) {
-        assert!(s.insert(&cluster("srch_s", "storage")).await.unwrap());
+        assert_eq!(s.insert(&cluster("srch_s", "storage"), Caps::NONE).await.unwrap(), Inserted::Yes);
         s.set_stats("srch_s", 100, 1, 10, 1000).await.unwrap();
         // An unchanged size logs nothing.
         s.set_stats("srch_s", 150, 1, 12, 1000).await.unwrap();

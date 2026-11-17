@@ -117,6 +117,7 @@ fn postgres() -> Router {
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
+        .route("/v1/search/clusters", post(|| async { axum::Json(json!({ "id": "cl_new", "password": "fresh" })) }))
         .route("/v1/search/clusters/{id}/indices", get(|| async { axum::Json(json!([])) }))
         .route("/v1/search/clusters/{id}/request", post(|| async { axum::Json(json!({})) }))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
@@ -1446,7 +1447,13 @@ async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
     // Each sign-in is in the audit log on the client's grant: who, with what (never a secret);
     // and its making is too, named for what it was.
     let wgrant = w["grant"]["id"].as_str().unwrap().to_string();
-    let log = d.audit_until(&format!("/v1/access/audit?grant={wgrant}"), |l| l.as_array().unwrap().iter().filter(|e| e["decision"] == "sign_in").count() >= 2).await;
+    // (Audit rows are written off the request: wait for the making's too, not only the sign-ins.)
+    let log = d
+        .audit_until(&format!("/v1/access/audit?grant={wgrant}"), |l| {
+            let rows = l.as_array().unwrap();
+            rows.iter().filter(|e| e["decision"] == "sign_in").count() >= 2 && rows.iter().any(|e| e["decision"] == "create_client")
+        })
+        .await;
     let sign_in = log.as_array().unwrap().iter().find(|e| e["decision"] == "sign_in").unwrap();
     assert_eq!((sign_in["args"]["by"].as_str(), sign_in["args"]["credential"].as_str()), (Some(wid.as_str()), Some("secret")), "{sign_in}");
     assert!(!log.to_string().contains(&wsecret), "no secret in the log");
@@ -1782,6 +1789,26 @@ async fn a_link_needs_reveal_on_what_it_links() {
     assert_eq!(asked["resource"], "prj_y, prj_z", "{asked}");
     let (s, _) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "1h" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+/// A search cluster made with a `parent` is a branch of it, a copy of its indices: it needs `write`
+/// on the parent too, as `…/{id}/branches` does, so a token for one project's clusters can't
+/// branch (and read) any other cluster.
+#[tokio::test]
+async fn a_search_branch_by_parent_needs_write_on_the_parent() {
+    let d = Daemon::new(50);
+    let project = d.workspace.create("", "app", "", None).unwrap();
+    let mine = json!({ "product": "search", "resources": [{ "project": project.id }], "actions": { "write": "allow" } });
+    let (scoped, _) = d.token(json!([mine.clone()]), json!({})).await;
+    let create = |t: &str, body: Value| {
+        let (d, t, p) = (&d, t.to_string(), project.id.clone());
+        async move { d.send(&t, Method::POST, "/v1/search/clusters", Some(body), &[("x-roll-project", &p)]).await }
+    };
+    assert_eq!(create(&scoped, json!({ "name": "fresh" })).await.0, StatusCode::OK);
+    let (s, e) = create(&scoped, json!({ "name": "copy", "parent": "cl_9" })).await;
+    assert_eq!((s, e["needs"]["action"].as_str(), e["needs"]["resource"].as_str()), (StatusCode::FORBIDDEN, Some("write"), Some("cl_9")), "{e}");
+    let (both, _) = d.token(json!([mine, { "product": "search", "resources": [{ "id": "cl_9" }], "actions": { "write": "allow" } }]), json!({})).await;
+    assert_eq!(create(&both, json!({ "name": "copy", "parent": "cl_9" })).await.0, StatusCode::OK);
 }
 
 /// What the gate costs a request: a token's request against the same one by the operator (no
