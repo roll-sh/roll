@@ -15,6 +15,7 @@ const service: Service = {
   build: { builder: "auto" },
   run: { type: "web", port: 80, min_instances: 0, max_instances: 1, concurrency: 50, cpu: 0.25, memory_mb: 512, health_timeout_s: 60, suspend_after_s: 30, sleep_after_s: 900 },
   registry: null,
+  git_login: null,
   created_at: T0,
   environments: [{ name: "production", state: "running", url: "https://web.roll.test", active: { id: "dep_1", revision: null, created_at: T0 }, latest: { id: "dep_1", status: "active" } }],
 };

@@ -1,6 +1,6 @@
 import { Check, Copy, Download, Plus, Radio, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { AuditEntry, AuditFilter, AuditFormat, Sink } from "@/lib/secrets-api";
+import type { AuditEntry, AuditFilter, AuditFormat, Sink, SinkFormat } from "@/lib/secrets-api";
 import { Select } from "../agents/ui/select";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, sized, ghost, primary, saveText, Section, stamp, Teach, useLoad } from "./ui";
@@ -164,23 +164,28 @@ function Streams() {
   const [adding, setAdding] = useState(false);
   const [url, setUrl] = useState("");
   const [fromStart, setFromStart] = useState(false);
+  const [format, setFormat] = useState<SinkFormat>("roll");
+  const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [made, setMade] = useState<{ host: string; secret: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
-  // An HTTPS endpoint, or a roll bucket of this project's canvas (an archive).
-  // Or an index of a search cluster, or a topic of a stream, on this canvas.
-  const urlOk = /^https:\/\/[^\s/]+/.test(url.trim()) || /^bucket:[a-z0-9][a-z0-9.-]{1,62}$/.test(url.trim()) || /^search:[^\s/]+\/[a-z0-9][a-z0-9._-]{0,254}$/.test(url.trim()) || /^stream:[^\s/]+\/[A-Za-z0-9._-]{1,249}$/.test(url.trim());
+  // An HTTPS endpoint, or a roll bucket, search index or stream topic of this project's canvas.
+  // A SIEM's own format is an HTTPS endpoint with its token.
+  const urlOk = format === "roll" ? /^https:\/\/[^\s/]+/.test(url.trim()) || /^bucket:[a-z0-9][a-z0-9.-]{1,62}$/.test(url.trim()) || /^search:[^\s/]+\/[a-z0-9][a-z0-9._-]{0,254}$/.test(url.trim()) || /^stream:[^\s/]+\/[A-Za-z0-9._-]{1,249}$/.test(url.trim()) : /^https:\/\/[^\s/]+/.test(url.trim()) && token.trim() !== "";
 
   const add = async () => {
     setBusy(true);
     setError(null);
     try {
-      const s = await api.createSink(url.trim(), fromStart);
-      setMade({ host: host(s.url), secret: s.secret });
+      const s = await api.createSink(url.trim(), fromStart, format, token.trim());
+      // A SIEM's batches carry its token, not roll's signature: nothing to copy.
+      if (format === "roll") setMade({ host: host(s.url), secret: s.secret });
       setAdding(false);
       setUrl("");
+      setToken("");
+      setFormat("roll");
       setFromStart(false);
       sinks.reload();
     } catch (e) {
@@ -242,10 +247,32 @@ function Streams() {
             if (urlOk && !busy) void add();
           }}
         >
-          <label className="min-w-64 flex-1">
-            <span className="mb-1 block text-[11px] font-medium text-subtle">HTTPS endpoint, or on this canvas: bucket:&lt;name&gt;, search:&lt;cluster&gt;/&lt;index&gt; or stream:&lt;stream&gt;/&lt;topic&gt;</span>
-            <input autoFocus value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://siem.example.com/roll  or  search:cl_…/roll-audit" spellCheck={false} className={`${field} font-mono text-[12px]`} />
+          <label className="w-40">
+            <span className="mb-1 block text-[11px] font-medium text-subtle">Format</span>
+            <select value={format} onChange={(e) => setFormat(e.target.value as SinkFormat)} className={`${field} text-[12px]`}>
+              <option value="roll">roll (signed JSON)</option>
+              <option value="splunk">Splunk HEC</option>
+              <option value="datadog">Datadog logs</option>
+              <option value="bearer">Bearer token</option>
+            </select>
           </label>
+          <label className="min-w-64 flex-1">
+            <span className="mb-1 block text-[11px] font-medium text-subtle">{format === "roll" ? <>HTTPS endpoint, or on this canvas: bucket:&lt;name&gt;, search:&lt;cluster&gt;/&lt;index&gt; or stream:&lt;stream&gt;/&lt;topic&gt;</> : "HTTPS endpoint"}</span>
+            <input
+              autoFocus
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder={{ roll: "https://siem.example.com/roll  or  search:cl_…/roll-audit", splunk: "https://splunk.example.com:8088/services/collector/event", datadog: "https://http-intake.logs.datadoghq.com/api/v2/logs", bearer: "https://collector.example.com/roll" }[format]}
+              spellCheck={false}
+              className={`${field} font-mono text-[12px]`}
+            />
+          </label>
+          {format !== "roll" && (
+            <label className="w-64">
+              <span className="mb-1 block text-[11px] font-medium text-subtle">{{ splunk: "HEC token", datadog: "API key", bearer: "Token" }[format]} (sealed, never shown again)</span>
+              <input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" spellCheck={false} className={`${field} font-mono text-[12px]`} />
+            </label>
+          )}
           <label className="flex h-8 items-center gap-1.5 text-[12px] text-muted" title="Otherwise it starts with the rows written from now on">
             <input type="checkbox" checked={fromStart} onChange={(e) => setFromStart(e.target.checked)} className="accent-[var(--accent)]" />
             Send the existing log first
@@ -269,6 +296,7 @@ function Streams() {
                 <span className="font-mono text-[12px]" title={s.url}>
                   {host(s.url)}
                 </span>
+                {s.format !== "roll" && <span className="rounded-full border border-line-2 px-1.5 text-[10.5px] text-muted">{{ splunk: "Splunk", datadog: "Datadog", bearer: "bearer" }[s.format]}</span>}
                 <span className={`text-[11.5px] ${s.status === "error" ? "text-danger" : "text-muted"}`}>{s.status === "new" ? "nothing sent yet" : s.status}</span>
                 {s.error && (
                   <span className="min-w-0 basis-full truncate pl-6.5 text-[11.5px] text-danger" title={s.error}>

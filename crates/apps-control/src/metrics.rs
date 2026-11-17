@@ -22,6 +22,8 @@ pub struct Minute {
     pub cold_ms_sum: f64,
     pub egress_bytes: i64,
     pub build_seconds: f64,
+    /// Requests that found every instance busy at `max_instances` (saturation).
+    pub over_capacity: i64,
 }
 
 impl Minute {
@@ -61,6 +63,7 @@ impl Minute {
             cold_starts: self.cold_starts,
             cold_start_ms: if self.cold_starts > 0 { self.cold_ms_sum / self.cold_starts as f64 } else { 0.0 },
             egress_bytes: self.egress_bytes,
+            over_capacity: self.over_capacity,
         }
     }
 
@@ -100,6 +103,12 @@ impl Meter {
         let i = BUCKETS_MS.iter().position(|b| latency_ms <= *b).unwrap_or(15);
         m.hist[i] += 1;
         m.egress_bytes += egress as i64;
+    }
+
+    /// A request given to an instance already at its concurrency, every one being busy at
+    /// `max_instances`: what saturation counts.
+    pub fn over_capacity(&mut self, now_ms: i64) {
+        self.at(now_ms / 60_000).over_capacity += 1;
     }
 
     pub fn cold_start(&mut self, now_ms: i64, ms: f64) {

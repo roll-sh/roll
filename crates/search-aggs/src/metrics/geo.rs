@@ -343,7 +343,7 @@ impl Aggregator for GeoMetricAgg {
         }
         let Some(reader) = self.reader.as_mut() else { return Ok(()) };
         for i in 0..b.len() {
-            let pts = reader.points(b.docs[i]);
+            let pts = reader.points(b.docs[i])?;
             if pts.is_empty() {
                 continue;
             }

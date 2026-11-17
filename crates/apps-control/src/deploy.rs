@@ -55,7 +55,7 @@ impl Apps {
         self.refuse_paused(service, env).await?;
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["revision", "image", "message", "no_traffic", "no_cache"].contains(&k.as_str()) {
+            if !["revision", "image", "message", "no_traffic", "no_cache", "image_upload"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -134,6 +134,17 @@ impl Apps {
                 }
                 (Some(rev.sha), None, trigger)
             }
+            (Source::Git { url, .. }, false, None) => {
+                let sha = match &revision {
+                    Some(r) if r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit()) => r.to_ascii_lowercase(),
+                    Some(_) => return Err(Error::BadRequest("revision is a full commit id (40 hex digits) for a Git URL".into())),
+                    None => crate::git_source::head(&self.git_remote(service, url).await, row.branch.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?.0,
+                };
+                if message.is_empty() {
+                    message = format!("{} at {}", row.branch.as_deref().unwrap_or("HEAD"), &sha[..12]);
+                }
+                (Some(sha), None, trigger)
+            }
         };
         if message.chars().count() > 500 {
             message = message.chars().take(500).collect();
@@ -143,7 +154,12 @@ impl Apps {
         {
             return Err(Error::TooLarge(format!("an upload is at most {} MiB", self.cfg.upload_max >> 20)));
         }
-        let upload_key = upload.as_ref().map(|_| format!("apps/uploads/{}.tgz", random(16)));
+        // An upload is a tree (`roll up`) or an image built elsewhere (`--image-file`).
+        let image_upload = o.get("image_upload") == Some(&Value::Bool(true));
+        if image_upload && upload.is_none() {
+            return Err(Error::BadRequest("image_upload is an uploaded image archive's".into()));
+        }
+        let upload_key = upload.as_ref().map(|_| format!("apps/uploads/{}.{}", random(16), if image_upload { "image.tar" } else { "tgz" }));
         if let (Some(key), Some(bytes)) = (&upload_key, upload) {
             match &self.deps.objects {
                 Some(o) => o.put(key, bytes).await.map_err(|e| Error::Internal(format!("storing the upload: {e}")))?,
@@ -217,10 +233,19 @@ impl Apps {
         if run.port.is_none() {
             run.port = old.run.port;
         }
+        // Without a message of its own: what it puts live, as `…/pending` names it (Heroku's
+        // "Set LOG_LEVEL config vars"), names only.
+        let message = match message {
+            Some(m) => m,
+            None => match self.pending(service, env).await.ok().as_ref().and_then(changes_said) {
+                Some(said) => format!("Redeploy: {said}"),
+                None => format!("Redeploy of {}", old.id),
+            },
+        };
         let d = NewDeployment {
             trigger: Trigger::Settings,
             revision: old.revision.clone(),
-            message: message.unwrap_or_else(|| format!("Redeploy of {}", old.id)),
+            message,
             image: Some(image),
             plan: old.plan.clone(),
             rollback_of: None,
@@ -960,6 +985,25 @@ impl Apps {
     }
 
     async fn build_in(self: &Arc<Self>, svc: &ServiceRow, d: &Deployment, log: &LogSink, cancel: CancellationToken, dir: &Path) -> anyhow::Result<(String, Run)> {
+        // An image built elsewhere: its names taken out, loaded, and tagged as a build's would be.
+        if d.trigger == Trigger::Upload {
+            let id = d.id.clone();
+            if let Some(key) = self.db(move |s| s.deployment_upload(&id)).await?.filter(|k| k.ends_with(".image.tar")) {
+                let bytes = match &self.deps.objects {
+                    Some(o) => o.get(&key).await?.ok_or_else(|| anyhow::anyhow!("the upload is gone"))?,
+                    None => Bytes::from(tokio::fs::read(self.cfg.home.join(&key)).await?),
+                };
+                log.line(format!("loading the uploaded image ({} MiB)", bytes.len() >> 20));
+                let archive = dir.join("image.tar");
+                let a = archive.clone();
+                tokio::task::spawn_blocking(move || crate::image_upload::untagged(&bytes, &a)).await??;
+                let tag = format!("roll-apps-{}:{}", svc.id.strip_prefix("svc_").unwrap_or(&svc.id), d.id.strip_prefix("dep_").unwrap_or(&d.id));
+                let image = self.deps.builder.load(&archive, &tag, log).await?;
+                let (id, img, r) = (d.id.clone(), image.clone(), svc.run.clone());
+                self.db(move |s| s.set_built(&id, &img, None, Some(&r))).await?;
+                return Ok((image, svc.run.clone()));
+            }
+        }
         let tree = dir.join("tree");
         tokio::fs::create_dir_all(&tree).await?;
         let root = match (&svc.source, d.trigger) {
@@ -980,6 +1024,13 @@ impl Apps {
                 log.line(format!("checking out {repo} at {}", &rev[..rev.len().min(12)]));
                 let sources = self.deps.sources.as_ref().ok_or_else(|| anyhow::anyhow!("roll code isn't on this node"))?;
                 sources.materialize(repo, rev, &tree).await?;
+                root.clone()
+            }
+            (Source::Git { url, root }, _) => {
+                let rev = d.revision.as_deref().ok_or_else(|| anyhow::anyhow!("no revision to build"))?;
+                log.line(format!("fetching {url} at {}", &rev[..rev.len().min(12)]));
+                let files = crate::git_source::materialize(&self.git_remote(&svc.id, url).await, rev, &tree).await?;
+                log.line(format!("fetched {files} files"));
                 root.clone()
             }
             (Source::Upload, _) => anyhow::bail!("this service deploys uploads"),
@@ -1507,6 +1558,11 @@ impl Apps {
         if a.error_pct > 0 && requests >= 20 && errors * 100 >= a.error_pct as i64 * requests {
             firing.push(("alert.errors", serde_json::json!({ "value": (errors * 100 / requests), "threshold": a.error_pct, "requests": requests })));
         }
+        // Saturation: requests that found every instance busy at max_instances.
+        let over: i64 = rows.iter().map(|r| r.over_capacity).sum();
+        if a.capacity_pct > 0 && requests >= 20 && over * 100 >= a.capacity_pct as i64 * requests {
+            firing.push(("alert.capacity", serde_json::json!({ "value": (over * 100 / requests), "threshold": a.capacity_pct, "requests": requests, "max_instances": tpl.run.max_instances, "concurrency": tpl.run.concurrency })));
+        }
         if a.p95_ms > 0 {
             let slow = rows.iter().filter(|r| r.requests > 0 && r.p95_ms >= a.p95_ms as f64).count();
             if slow >= 3 {
@@ -1524,7 +1580,7 @@ impl Apps {
                 firing.push(("alert.log", serde_json::json!({ "pattern": pat, "count": count, "threshold": a.log_count })));
             }
         }
-        for kind in ["alert.memory", "alert.errors", "alert.latency", "alert.log"] {
+        for kind in ["alert.memory", "alert.errors", "alert.latency", "alert.capacity", "alert.log"] {
             let key = format!("{}/{}/{kind}", l.service, l.env);
             match firing.iter().find(|(k, _)| *k == kind) {
                 Some((_, data)) => {
@@ -1629,6 +1685,7 @@ impl Apps {
                 let this = self.clone();
                 tokio::spawn(async move {
                     this.watch_tags().await;
+                    this.watch_git().await;
                     this.watching.store(false, std::sync::atomic::Ordering::SeqCst);
                 });
             }
@@ -1807,21 +1864,57 @@ impl Apps {
     }
 
     /// `roll.toml` `[app]` at a pushed revision (in the service's root), if it reads.
-    async fn app_config_at(self: &Arc<Self>, svc: &ServiceRow, revision: &str) -> Option<crate::config::AppConfig> {
-        let (Source::Repo { repo, root }, Some(sources)) = (&svc.source, &self.deps.sources) else { return None };
+    pub(crate) async fn app_config_at(self: &Arc<Self>, svc: &ServiceRow, revision: &str) -> Option<crate::config::AppConfig> {
+        let root = match &svc.source {
+            Source::Repo { root, .. } | Source::Git { root, .. } => root,
+            _ => return None,
+        };
         let path = match root {
             Some(r) => format!("{r}/roll.toml"),
             None => "roll.toml".into(),
         };
-        match sources.read_file(repo, revision, &path).await {
+        let read = match (&svc.source, &self.deps.sources) {
+            (Source::Repo { repo, .. }, Some(sources)) => sources.read_file(repo, revision, &path).await,
+            (Source::Git { url, .. }, _) => crate::git_source::read_file(&self.git_remote(&svc.id, url).await, revision, &path).await,
+            _ => return None,
+        };
+        match read {
             Ok(Some(bytes)) => crate::config::parse(&String::from_utf8_lossy(&bytes)).ok().flatten(),
             _ => None,
         }
     }
 
+    /// Why a Git URL service's push at `sha` isn't deployed to `env`, if it isn't: a skip tag in
+    /// its message, or watch paths (roll.toml's at that commit, the environment's block first,
+    /// else the service's) it changes none of. The hook and the five-minute watch both ask, with
+    /// roll.toml as read at `sha` (`app_config_at`, once per commit).
+    pub(crate) async fn git_push_skip(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, sha: &str, message: &str, file: Option<&crate::config::AppConfig>) -> Option<String> {
+        if let Some(tag) = skip_tag(message) {
+            return Some(format!("its message says {tag}"));
+        }
+        let watch = file.and_then(|f| f.watch_for(&env.name)).or_else(|| svc.build.watch.clone()).filter(|w| !w.is_empty())?;
+        if self.push_touches(svc, env, sha, &watch).await {
+            return None;
+        }
+        Some(format!("it changes nothing this service watches ({})", watch.join(", ")))
+    }
+
     /// Whether `revision` changes a watched path since what `env` runs (no active deployment, or
     /// a source that can't tell: yes).
-    async fn push_touches(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, revision: &str, patterns: &[String]) -> bool {
+    pub(crate) async fn push_touches(self: &Arc<Self>, svc: &ServiceRow, env: &EnvRow, revision: &str, patterns: &[String]) -> bool {
+        // A Git URL's: the paths between the live commit and this one, matched as a repo's are.
+        if let (Source::Git { url, .. }, Some(sources)) = (&svc.source, &self.deps.sources) {
+            let Some(active) = env.active.clone() else { return true };
+            let Ok(Some(from)) = self.db(move |s| s.deployment(&active).map(|d| d.revision)).await else { return true };
+            return match crate::git_source::changed_paths(&self.git_remote(&svc.id, url).await, &from, revision).await {
+                Ok(Some(paths)) => sources.any_path_matches(patterns, &paths),
+                Ok(None) => true,
+                Err(e) => {
+                    self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(format!("{}'s changed paths couldn't be read ({e:#}): deployed as if it touched a watched one", &revision[..revision.len().min(12)]));
+                    true
+                }
+            };
+        }
         let (Source::Repo { repo, .. }, Some(sources)) = (&svc.source, &self.deps.sources) else { return true };
         let Some(active) = env.active.clone() else { return true };
         let Ok(Some(from)) = self.db(move |s| s.deployment(&active).map(|d| d.revision)).await else { return true };
@@ -2249,6 +2342,28 @@ ERROR: failed to solve: process \"/bin/sh -c npm ci\" did not complete successfu
     }
 }
 
+
+/// What `…/pending` says changed, as a line (`API_KEY added, LOG_LEVEL changed, run.memory_mb,
+/// the project's secrets`); none when it names nothing. At most 300 characters.
+pub(crate) fn changes_said(p: &Value) -> Option<String> {
+    let names = |k: &str| p["variables"][k].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
+    let mut parts = Vec::new();
+    for (k, word) in [("added", "added"), ("changed", "changed"), ("removed", "removed")] {
+        let n = names(k);
+        if !n.is_empty() {
+            parts.push(format!("{} {word}", n.join(", ")));
+        }
+    }
+    let run: Vec<String> = p["run"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|k| format!("run.{k}")).collect();
+    if !run.is_empty() {
+        parts.push(run.join(", "));
+    }
+    if p["secrets"] == true {
+        parts.push("the project's secrets".into());
+    }
+    let said = parts.join("; ");
+    (!said.is_empty()).then(|| said.chars().take(300).collect())
+}
 
 /// The last due time at or before `now`, from one that is (`due`): what a pass records, so the
 /// runs an outage missed aren't made up one by one.

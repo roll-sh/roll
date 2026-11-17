@@ -29,6 +29,8 @@ pub mod cron;
 pub mod deploy;
 pub mod drains;
 pub mod export;
+pub mod git_source;
+pub mod image_upload;
 pub mod integrations;
 pub mod jobs;
 pub mod live;
@@ -212,6 +214,8 @@ pub struct Apps {
     capped_refresh: tokio::sync::Mutex<()>,
     /// roll previews' notes for a preview's feedback button ([`Apps::set_feedback_notes`]).
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
+    /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
+    pub(crate) pushes: std::sync::OnceLock<Arc<dyn integrations::GitPushes>>,
     /// Email to projects' owners (`notify`), once rolld has accounts.
     mail: std::sync::OnceLock<Arc<dyn integrations::Mailbox>>,
     /// Log drains whose batch came back (the drainer sends the next).
@@ -281,9 +285,31 @@ fn label(s: &str, max: usize) -> String {
     out.trim_matches('-').to_string()
 }
 
-/// The environment's variables' fingerprint (names and values, with the settings): a change
-/// means the active deployment no longer matches.
+/// The environment's variables' fingerprint (names and values, with what the settings set): a
+/// change means the active deployment no longer matches. Settings count by what differs from
+/// their defaults, so a setting roll adds later (at its default) moves no service's fingerprint.
+/// `2:` marks this form; a deployment's hash without it is from before ([`Apps::needs_deploy`]).
 fn fingerprint(vars: &[(String, String)], svc: &ServiceRow) -> String {
+    format!("2:{}", fingerprint_of(vars, &set_only(&svc.build, &Build::default()), &set_only(&svc.run, &Run::default())))
+}
+
+/// `value` as JSON without what equals `default` (objects compared key by key, nested too).
+fn set_only<T: serde::Serialize>(value: &T, default: &T) -> Value {
+    fn strip(v: &Value, d: &Value) -> Option<Value> {
+        match (v, d) {
+            (Value::Object(vo), Value::Object(dob)) => {
+                let kept: serde_json::Map<String, Value> = vo.iter().filter_map(|(k, x)| strip(x, dob.get(k).unwrap_or(&Value::Null)).map(|x| (k.clone(), x))).collect();
+                (!kept.is_empty()).then_some(Value::Object(kept))
+            }
+            _ if v == d => None,
+            _ => Some(v.clone()),
+        }
+    }
+    let (v, d) = (serde_json::to_value(value).expect("JSON"), serde_json::to_value(default).expect("JSON"));
+    strip(&v, &d).unwrap_or(Value::Object(Default::default()))
+}
+
+fn fingerprint_of(vars: &[(String, String)], build: &Value, run: &Value) -> String {
     let mut h = Sha256::new();
     let mut sorted: Vec<&(String, String)> = vars.iter().collect();
     sorted.sort();
@@ -293,8 +319,8 @@ fn fingerprint(vars: &[(String, String)], svc: &ServiceRow) -> String {
         h.update(v.as_bytes());
         h.update([0]);
     }
-    h.update(serde_json::to_string(&svc.build).expect("JSON").as_bytes());
-    h.update(serde_json::to_string(&svc.run).expect("JSON").as_bytes());
+    h.update(build.to_string().as_bytes());
+    h.update(run.to_string().as_bytes());
     hex(&h.finalize()[..12])
 }
 
@@ -345,6 +371,7 @@ impl Apps {
             capped: Mutex::new(Default::default()),
             capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
+            pushes: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
@@ -396,10 +423,19 @@ impl Apps {
     }
 
     /// `actor`: who asked (the first deployment's).
+    /// A source's shape, and a Git URL's address against this node's private-address rule.
+    fn check_source(&self, source: &Source) -> Result<()> {
+        source.check()?;
+        if let Source::Git { url, .. } = source {
+            git_source::check_url(url, self.cfg.allow_private).map_err(Error::BadRequest)?;
+        }
+        Ok(())
+    }
+
     pub async fn create_service(self: &Arc<Self>, body: Value, actor: Option<String>) -> Result<Service> {
         let o = body.as_object().ok_or_else(|| Error::BadRequest("the body is an object".into()))?;
         for k in o.keys() {
-            if !["project", "name", "source", "build", "run", "variables", "registry", "links", "branch", "x", "y"].contains(&k.as_str()) {
+            if !["project", "name", "source", "build", "run", "variables", "sealed", "registry", "git_login", "links", "branch", "x", "y"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -407,7 +443,7 @@ impl Apps {
         let name = o.get("name").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("name is required".into()))?.to_string();
         check_name("a service name", &name)?;
         let source: Source = serde_json::from_value(o.get("source").cloned().ok_or_else(|| Error::BadRequest("source is required".into()))?).map_err(|e| Error::BadRequest(format!("source: {e}")))?;
-        source.check()?;
+        self.check_source(&source)?;
         let build: Build = merge(&Build::default(), o.get("build"), "build")?;
         build.check()?;
         let run = Run::default().merged(o.get("run"))?;
@@ -425,6 +461,12 @@ impl Apps {
                 Some(Value::Object(m.clone()))
             }
             Some(_) => return Err(Error::BadRequest("variables is an object of names to values".into())),
+        };
+        // Which of them are sealed from the start (a template's generated secrets).
+        let sealed: Vec<Value> = match o.get("sealed") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(a)) if a.iter().all(|n| n.as_str().is_some_and(|n| variables.as_ref().is_some_and(|v| v.get(n).is_some()))) => a.clone(),
+            Some(_) => return Err(Error::BadRequest("sealed is an array of names in variables".into())),
         };
         // The project's databases (and other resources) to link before the first deploy:
         // `[{kind, ref, prefix?}]`, `PUT …/links/{kind}/{ref}`'s.
@@ -447,6 +489,21 @@ impl Apps {
             Some(Value::Object(_)) => return Err(Error::BadRequest("registry is for an image source".into())),
             Some(_) => return Err(Error::BadRequest("registry is {username, password, server?}".into())),
         };
+        // A private repository's login, for the branch check below and every fetch after
+        // (`PUT …/git-login`'s body).
+        let git_login = match o.get("git_login") {
+            None | Some(Value::Null) => None,
+            Some(g @ Value::Object(m)) if matches!(source, Source::Git { .. }) => {
+                // Checked as `PUT …/git-login` checks it, before anything is sent with it.
+                let ok = |k: &str, max: usize| m.get(k).and_then(Value::as_str).filter(|v| !v.is_empty() && v.len() <= max && !v.contains(['\0', '\n', '\r']));
+                match (ok("username", 200), ok("password", 4096)) {
+                    (Some(u), Some(p)) if m.len() == 2 => Some((g.clone(), (u.to_string(), p.to_string()))),
+                    _ => return Err(Error::BadRequest("git_login is {username, password}, each on one line (1–200 and 1–4096 characters)".into())),
+                }
+            }
+            Some(Value::Object(_)) => return Err(Error::BadRequest("git_login is for a Git URL source".into())),
+            Some(_) => return Err(Error::BadRequest("git_login is {username, password}".into())),
+        };
         let (x, y) = (o.get("x").and_then(Value::as_f64), o.get("y").and_then(Value::as_f64));
         // A paused project makes nothing new (its first deploy would be refused anyway).
         let (p, month) = (project.clone(), crate::spend::month_of(code_sql::now_ms()).0);
@@ -462,8 +519,8 @@ impl Apps {
         // first deploy is that branch's head, not the default's).
         let named = match o.get("branch") {
             None | Some(Value::Null) => None,
-            Some(Value::String(b)) if matches!(source, Source::Repo { .. }) && !b.is_empty() && b.len() <= 255 => Some(b.clone()),
-            Some(_) => return Err(Error::BadRequest("branch is a repo source's branch name".into())),
+            Some(Value::String(b)) if matches!(source, Source::Repo { .. } | Source::Git { .. }) && !b.is_empty() && b.len() <= 255 => Some(b.clone()),
+            Some(_) => return Err(Error::BadRequest("branch is a repo or Git source's branch name".into())),
         };
         let branch = match (&source, &self.deps.sources) {
             (Source::Repo { repo, .. }, Some(src)) => {
@@ -474,6 +531,12 @@ impl Apps {
                 })
             }
             (Source::Repo { repo, .. }, None) => return Err(Error::BadRequest(format!("roll code isn't on this node, so {repo} can't be a source"))),
+            // A Git URL's branch must exist now (its default when none is named), as a repo's must.
+            (Source::Git { url, .. }, _) => {
+                let remote = git_source::Remote::new(self.cfg.allow_private, url, git_login.as_ref().map(|(_, l)| l.clone()));
+                let (_, b) = git_source::head(&remote, named.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e}")))?;
+                Some(b)
+            }
             _ => None,
         };
         let row = ServiceRow { id: new_id("svc"), project: project.clone(), name: name.clone(), source: source.clone(), build, run, created_at: self.store.now()? };
@@ -493,7 +556,7 @@ impl Apps {
         }
         self.ensure_environment(&row, PRODUCTION, Some(branch.as_deref()), Some(false), &pname).await?;
         if let Some(set) = variables {
-            self.change_variables(&row.id, PRODUCTION, json!({ "set": set })).await?;
+            self.change_variables(&row.id, PRODUCTION, json!({ "set": set, "seal": sealed })).await?;
         }
         for (kind, r, body) in links {
             // A link that doesn't check out makes no service: nothing to clean up by hand.
@@ -501,6 +564,12 @@ impl Apps {
                 let _ = self.delete_service(&row.id).await;
                 return Err(e);
             }
+        }
+        if let Some((g, _)) = git_login
+            && let Err(e) = self.put_git_login(&row.id, g).await
+        {
+            let _ = self.delete_service(&row.id).await;
+            return Err(e);
         }
         if let Some(r) = registry
             && let Err(e) = self.put_registry(&row.id, r).await
@@ -511,7 +580,7 @@ impl Apps {
         }
         // The project's owner hears what needs someone from its first service on.
         self.offer_email(&row.project).await;
-        // A repo or an image deploys at once; an upload waits for `roll up`.
+        // A repo, a Git URL or an image deploys at once; an upload waits for `roll up`.
         if !matches!(source, Source::Upload) {
             self.deploy(&row.id, PRODUCTION, json!({}), By { trigger: Trigger::Api, actor: actor.clone() }, None, None).await?;
         }
@@ -538,7 +607,15 @@ impl Apps {
         }
         let (id, env_s, branch) = (svc.id.clone(), env.to_string(), branch.map(|b| b.map(str::to_string)));
         let ports = self.cfg.ports;
+        let (sid, e) = (svc.id.clone(), env.to_string());
+        let new = self.db(move |s| Ok(s.environment(&sid, &e).is_err())).await?;
         let row = self.db(move |s| s.put_environment(&id, &env_s, branch.as_ref().map(|b| b.as_deref()), ephemeral, &slugs, ports)).await?;
+        // A new environment's secrets have somewhere to go (best effort: none is no secrets).
+        if new && !row.ephemeral
+            && let Err(err) = self.deps.secrets.ensure(&svc.project, env).await
+        {
+            tracing::warn!(service = %svc.id, env, error = %err, "apps: roll secrets has no environment for it yet");
+        }
         Ok(row)
     }
 
@@ -565,9 +642,9 @@ impl Apps {
             summaries.push(self.summary(e).await?);
         }
         let id = r.id.clone();
-        let (registry, links) = self.db(move |s| Ok((s.registry(&id)?, s.links(&id)?))).await?;
+        let (registry, git_login, links) = self.db(move |s| Ok((s.registry(&id)?, s.git_login(&id)?, s.links(&id)?))).await?;
         let links = links.into_iter().map(|(kind, r#ref, _)| LinkRef { kind, r#ref }).collect();
-        Ok(Service { id: r.id, project: r.project, name: r.name, source: r.source, build: r.build, run: r.run, registry, links, created_at: r.created_at, environments: summaries })
+        Ok(Service { id: r.id, project: r.project, name: r.name, source: r.source, build: r.build, run: r.run, registry, git_login, links, created_at: r.created_at, environments: summaries })
     }
 
     /// `PUT …/registry`: the login a service's image pulls with. `server` defaults to the image's
@@ -601,6 +678,45 @@ impl Apps {
         // Wakes and new instances pull with it from now on, not at the next deploy.
         self.registry_changed(service, Some(&login)).await;
         self.service(service).await
+    }
+
+    /// `PUT …/git-login`: the login a Git URL service's private repository is fetched with (a
+    /// deploy token, app password or access token as `password`), sent only to the source URL's
+    /// host. The URL itself stays without credentials.
+    pub async fn put_git_login(self: &Arc<Self>, service: &str, body: Value) -> Result<Service> {
+        let o = body.as_object().cloned().unwrap_or_default();
+        if let Some(k) = o.keys().find(|k| !["username", "password"].contains(&k.as_str())) {
+            return Err(Error::BadRequest(format!("unknown field {k}")));
+        }
+        let text = |k: &str, max: usize| -> Result<String> {
+            match o.get(k) {
+                Some(Value::String(v)) if !v.is_empty() && v.len() <= max && !v.contains(['\0', '\n', '\r']) => Ok(v.clone()),
+                _ => Err(Error::BadRequest(format!("{k} is 1–{max} characters on one line"))),
+            }
+        };
+        let (username, password) = (text("username", 200)?, text("password", 4096)?);
+        let sid = service.to_string();
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        let Source::Git { url, .. } = &svc.source else { return Err(Error::Conflict("only a Git URL source fetches with a login".into())) };
+        let host = git_host(url).ok_or_else(|| Error::BadRequest("the source URL has no host".into()))?;
+        let sid = service.to_string();
+        self.db(move |s| s.set_git_login(&sid, &host, &username, &password)).await?;
+        self.service(service).await
+    }
+
+    pub async fn delete_git_login(self: &Arc<Self>, service: &str) -> Result<Service> {
+        let sid = service.to_string();
+        self.db(move |s| s.delete_git_login(&sid)).await?;
+        self.service(service).await
+    }
+
+    /// The repository a Git URL service fetches from: with its login when the login is for this
+    /// URL's host (a login never goes to another host).
+    pub(crate) async fn git_remote<'a>(self: &Arc<Self>, service: &str, url: &'a str) -> git_source::Remote<'a> {
+        let sid = service.to_string();
+        let login = self.db(move |s| s.git_login_secret(&sid)).await.ok().flatten();
+        let login = login.filter(|(l, _)| Some(&l.host) == git_host(url).as_ref()).map(|(l, password)| (l.username, password));
+        git_source::Remote::new(self.cfg.allow_private, url, login)
     }
 
     pub async fn delete_registry(self: &Arc<Self>, service: &str) -> Result<Service> {
@@ -688,16 +804,23 @@ impl Apps {
             check_name("a service name", n)?;
             row.name = n.to_string();
         }
-        let mut forget_login = false;
+        let (mut forget_login, mut forget_git) = (false, false);
         if let Some(s) = o.get("source") {
             let source: Source = serde_json::from_value(s.clone()).map_err(|e| Error::BadRequest(format!("source: {e}")))?;
-            source.check()?;
+            self.check_source(&source)?;
             // A registry login belongs to its registry: another one never receives it.
             let registry = |s: &Source| match s {
                 Source::Image { image } => Some(image_registry(image)),
                 _ => None,
             };
             forget_login = registry(&row.source) != registry(&source);
+            // So does a Git login its repository: one given for a repository is never used for
+            // another, even on the same host.
+            let git = |s: &Source| match s {
+                Source::Git { url, .. } => git_repo(url),
+                _ => None,
+            };
+            forget_git = git(&row.source) != git(&source);
             row.source = source;
         }
         row.build = merge(&row.build, o.get("build"), "build")?;
@@ -708,6 +831,9 @@ impl Apps {
             s.update_service(&r)?;
             if forget_login {
                 s.delete_registry(&r.id)?;
+            }
+            if forget_git {
+                s.delete_git_login(&r.id)?;
             }
             Ok(())
         })
@@ -861,7 +987,13 @@ impl Apps {
         let a = active.to_string();
         let dep = self.db(move |s| s.deployment(&a)).await?;
         let v = match self.resolve_vars(svc, r, &dep.id).await {
-            Ok(v) => fingerprint(&v.vars_for_hash(), svc) != dep.vars_hash,
+            Ok(v) if dep.vars_hash.starts_with("2:") => fingerprint(&v.vars_for_hash(), svc) != dep.vars_hash,
+            // From before settings counted by what they set: any setting added since moves its
+            // hash, so what `/pending` names decides (variables, run settings, secrets).
+            Ok(_) => self.pending(&r.service, &r.name).await.is_ok_and(|p| {
+                let vars = p["variables"].as_object().is_some_and(|m| m.values().any(|l| l.as_array().is_some_and(|a| !a.is_empty())));
+                vars || p["run"].as_array().is_some_and(|a| !a.is_empty()) || p["secrets"] == Value::Bool(true)
+            }),
             Err(_) => false,
         };
         // Kept only if nothing changed while it was worked out.
@@ -946,6 +1078,7 @@ impl Apps {
             needs_deploy,
             private,
             next_run_at,
+            schedules: self.schedule_states(&svc, &r).await,
             volume_used: match svc.run.volume {
                 Some(_) => self.volume_usage(&r.service, &r.name).await.map(|(bytes, at)| crate::model::VolumeUsed { bytes, at }),
                 None => None,
@@ -974,24 +1107,46 @@ impl Apps {
 
     /// `PUT …/environments/{env}`: make it (a preview environment, a staging one) or change its
     /// branch.
+    /// A new generated name (`<hostname>.<domain>`): the old one stops answering at once, here
+    /// and within a second on other nodes. Where custom domains' CNAMEs name it (no fixed
+    /// `cname_target`), it's refused while the environment has any: they'd stop routing.
+    async fn set_hostname(self: &Arc<Self>, service: &str, env: &str, h: &str) -> Result<()> {
+        let (sid, e) = (service.to_string(), env.to_string());
+        let (row, domains) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.domains(&sid, &e)?))).await?;
+        if row.slug == h {
+            return Ok(());
+        }
+        if self.cfg.cname_target.is_none() && domains.iter().any(|d| d.kind == DomainKind::Custom) {
+            return Err(Error::Conflict(format!("custom domains point at {}.{}: remove them first, or add them again after", row.slug, self.cfg.domain)));
+        }
+        let (sid, e, h2) = (service.to_string(), env.to_string(), h.to_string());
+        self.db(move |s| s.set_slug(&sid, &e, &h2)).await?;
+        self.changed(service);
+        Ok(())
+    }
+
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused", "held"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused", "held", "hostname"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
         // The new settings are checked before anything is written: a 400 changes nothing.
-        // Resume deploys held after a rollback (`false`); a hold is only ever a rollback's.
-        match o.get("held") {
-            None => {}
-            Some(Value::Bool(false)) => {
-                let (sid, e) = (service.to_string(), env.to_string());
-                self.db(move |s| s.set_hold(&sid, &e, None)).await?;
-                self.changed(service);
+        let hostname = match o.get("hostname") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(h)) => {
+                crate::model::check_slug(h)?;
+                Some(h.clone())
             }
+            Some(_) => return Err(Error::BadRequest("hostname is the environment's name on the roll domain".into())),
+        };
+        // Resume deploys held after a rollback (`false`); a hold is only ever a rollback's.
+        let resume = match o.get("held") {
+            None => false,
+            Some(Value::Bool(false)) => true,
             Some(_) => return Err(Error::BadRequest("held is false (deploys resume); a rollback holds them".into())),
-        }
+        };
         let paused = match o.get("paused") {
             None => None,
             Some(Value::Bool(b)) => Some(*b),
@@ -1160,10 +1315,29 @@ impl Apps {
         if o.get("follow_tag") == Some(&Value::Bool(true)) && !matches!(&svc.source, Source::Image { image } if !image.contains('@')) {
             return Err(Error::BadRequest("follow_tag is for an image service whose image has a tag (not a digest)".into()));
         }
+        // Only a roll code repo's pushes wait for their commit's checks (its statuses are roll's).
+        if o.get("wait_for_ci") == Some(&Value::Bool(true)) && !matches!(&svc.source, Source::Repo { .. }) {
+            return Err(Error::BadRequest("wait_for_ci is for a roll code repo's service: a Git URL's checks aren't roll's to read (deploy from the workflow after its tests instead: sdk/apps-github-action, with the environment's branch unset)".into()));
+        }
+        // A name another environment has is refused before anything is made or changed.
+        if let Some(h) = hostname.clone() {
+            let (sid, e) = (service.to_string(), env.to_string());
+            if self.db(move |s| s.environment_by_slug(&h)).await?.is_some_and(|r| r.service != sid || r.name != e) {
+                return Err(Error::Conflict(format!("{} is taken", hostname.as_deref().unwrap_or(""))));
+            }
+        }
         self.ensure_environment(&svc, env, branch.as_ref().map(|b| b.as_deref()), ephemeral, &pname).await?;
         if let Some(vars) = copied.filter(|v| !v.is_empty()) {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.change_variables(&sid, &e, &vars, &[], &BTreeSet::new())).await?;
+        }
+        if resume {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_hold(&sid, &e, None)).await?;
+            self.changed(service);
+        }
+        if let Some(h) = hostname {
+            self.set_hostname(service, env, &h).await?;
         }
         // Its own size and scale: each field replaces the service's, null goes back to it.
         if let Some(patch) = o.get("run") {
@@ -1470,14 +1644,28 @@ impl Apps {
                 vars.insert("ROLL_GIT_BRANCH".into(), (b, "roll"));
             }
         }
+        // A Git URL's: its environment's branch was resolved when it was made.
+        if let Source::Git { url, .. } = &svc.source {
+            if !deployment.is_empty() {
+                let d = deployment.to_string();
+                if let Ok(Some(sha)) = self.db(move |s| s.deployment(&d)).await.map(|d| d.revision) {
+                    vars.insert("ROLL_GIT_COMMIT".into(), (sha, "roll"));
+                }
+            }
+            if let Some(b) = &env.branch {
+                vars.insert("ROLL_GIT_BRANCH".into(), (b.clone(), "roll"));
+            }
+            vars.insert("ROLL_GIT_URL".into(), (url.clone(), "roll"));
+        }
         let sid = svc.id.clone();
         let links = self.db(move |s| s.links_minted(&sid)).await?;
         for (kind, r, prefix, minted) in links {
-            // A link's own credentials as made, else the resource's variables now.
-            let read = match minted {
-                Some(m) => Ok(m.vars),
-                None => self.link_vars(svc, kind, &r, &env.name).await,
-            };
+            // A preview (an ephemeral environment) never gets a resource's production variables:
+            // roll previews sets the branched ones itself, by name; another service's URLs stay.
+            if env.ephemeral && kind != LinkKind::Service {
+                continue;
+            }
+            let read = self.link_values(svc, kind, &r, &env.name, minted).await;
             match read {
                 Ok(vs) => {
                     for (k, v) in vs {
@@ -1593,9 +1781,9 @@ impl Apps {
             let Some(target) = self.db(move |s| Ok(s.services(Some(&p))?.into_iter().find(|x| x.name == n))).await? else {
                 return Err(Error::BadRequest(format!("${{{{ {name}.… }}}} names no service of this project")));
             };
-            if !who.operator
-                && let Some(g) = who.grant
-            {
+            // A grant decides whenever there is one: rolld's gate puts the operator marker beside
+            // an operator's token, narrowed by its rules, so the marker alone would read as all.
+            if let Some(g) = who.grant {
                 let resource = roll_auth::scope::Resource { product: "apps".into(), id: Some(target.id.clone()), project: Some(project.to_string()), environment: Some(env.to_string()), ..Default::default() };
                 if g.allows(&resource, roll_auth::scope::Action::Reveal) != roll_auth::scope::Outcome::Allow {
                     return Err(Error::Forbidden(format!("a reference to {name}'s variables needs reveal on {name}")));
@@ -1732,10 +1920,7 @@ impl Apps {
         let rows = self.db(move |s| s.links_minted(&sid)).await?;
         let mut out = Vec::new();
         for (kind, r, prefix, minted) in rows {
-            let names = match minted {
-                Some(m) => Ok(m.vars),
-                None => self.link_vars(&svc, kind, &r, "production").await,
-            };
+            let names = self.link_values(&svc, kind, &r, "production", minted).await;
             let vars = names.map(|v| v.into_iter().map(|(k, _)| format!("{prefix}{k}")).collect()).unwrap_or_default();
             out.push(Link { kind, r#ref: r, prefix, vars });
         }
@@ -1780,10 +1965,7 @@ impl Apps {
             Some(m) => Some(m),
             None => self.deps.resources.link(kind, r#ref, service).await.map_err(|e| Error::BadRequest(e.to_string()))?,
         };
-        let vars = match &minted {
-            Some(m) => m.vars.clone(),
-            None => self.link_vars(&svc, kind, r#ref, "production").await.map_err(|e| Error::BadRequest(e.to_string()))?,
-        };
+        let vars = self.link_values(&svc, kind, r#ref, "production", minted.clone()).await.map_err(|e| Error::BadRequest(e.to_string()))?;
         let (sid, r, p, m) = (service.to_string(), r#ref.to_string(), prefix.clone(), minted.clone());
         let vars = match self.db(move |s| s.put_link(&sid, kind, &r, &p, m.as_ref())).await {
             Ok(true) => vars,
@@ -1809,6 +1991,21 @@ impl Apps {
 
     /// A link's variables now, as `service` gets them in `env`: another service's URLs (apps'
     /// own), else the resource's through [`crate::integrations::Resources`].
+    /// What a link sets now: the resource's variables read again (an endpoint, a login that was
+    /// rotated), with the credentials the link made for itself over them. A minted link whose
+    /// resource can't be read now keeps what it made.
+    async fn link_values(self: &Arc<Self>, service: &ServiceRow, kind: LinkKind, r#ref: &str, env: &str, minted: Option<integrations::Minted>) -> anyhow::Result<Vec<(String, String)>> {
+        let Some(m) = minted else { return self.link_vars(service, kind, r#ref, env).await };
+        let mut out = self.link_vars(service, kind, r#ref, env).await.unwrap_or_default();
+        for (k, v) in m.vars {
+            match out.iter_mut().find(|(have, _)| *have == k) {
+                Some(slot) => slot.1 = v,
+                None => out.push((k, v)),
+            }
+        }
+        Ok(out)
+    }
+
     async fn link_vars(self: &Arc<Self>, service: &ServiceRow, kind: LinkKind, r#ref: &str, env: &str) -> anyhow::Result<Vec<(String, String)>> {
         if kind != LinkKind::Service {
             return self.deps.resources.link_vars(kind, r#ref).await;
@@ -2197,6 +2394,11 @@ impl Apps {
         self.notes.get().cloned()
     }
 
+    /// Where a Git URL service's pushes to branches it doesn't follow go (roll previews). Set once.
+    pub fn set_git_pushes(&self, pushes: Arc<dyn integrations::GitPushes>) {
+        let _ = self.pushes.set(pushes);
+    }
+
     /// How email reaches people (roll-accounts' mailer). Set once.
     pub fn set_mailbox(&self, mail: Arc<dyn integrations::Mailbox>) {
         let _ = self.mail.set(mail);
@@ -2274,24 +2476,55 @@ impl Apps {
         gauge("roll_apps_cold_starts_per_minute", "Cold starts in the last finished minute.", r.cold_starts as f64, "");
         gauge("roll_apps_cold_start_ms", "Their mean time to answer.", r.cold_start_ms, "");
         gauge("roll_apps_egress_bytes_per_minute", "Bytes answered in the last finished minute.", r.egress_bytes as f64, "");
+        gauge("roll_apps_over_capacity_per_minute", "Requests in the last finished minute that found every instance busy at max_instances.", r.over_capacity as f64, "");
         Ok(out)
     }
 
+    /// An environment's metrics over the last `minutes`: a point a minute for up to a week, a
+    /// point an hour past that (up to 90 days: the week's minutes grouped into hours, older hours
+    /// from the rollups). `step` says which, in minutes.
     pub async fn metrics(self: &Arc<Self>, service: &str, env: &str, minutes: i64) -> Result<Value> {
         self.service_env(service, env).await?;
-        let minutes = minutes.clamp(5, 7 * 24 * 60);
+        let minutes = minutes.clamp(5, 90 * 24 * 60);
+        let step: i64 = if minutes > 7 * 24 * 60 { 60 } else { 1 };
         let now_min = code_sql::now_ms() / 60_000;
-        let since = now_min - minutes + 1;
+        let since = (now_min - minutes + 1) / step * step;
         let (sid, e) = (service.to_string(), env.to_string());
-        let mut rows: HashMap<i64, store::MinuteRow> = self.db(move |s| s.minutes(&sid, &e, since)).await?.into_iter().map(|r| (r.minute, r)).collect();
+        let mut minute_rows = self.db(move |s| s.minutes(&sid, &e, since)).await?;
         if let Some(l) = self.lives.lock().get(&env_key(service, env))
             && let Some(cur) = l.meter.lock().current()
         {
-            rows.insert(cur.minute, cur);
+            minute_rows.retain(|r| r.minute != cur.minute);
+            minute_rows.push(cur);
         }
-        let mut out: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
-        for m in since..=now_min {
+        if step > 1 {
+            let (sid, e) = (service.to_string(), env.to_string());
+            minute_rows.extend(self.db(move |s| s.hours(&sid, &e, since / 60)).await?);
+        }
+        // Each point: its counts summed, the rest their peak.
+        let mut rows: HashMap<i64, store::MinuteRow> = HashMap::new();
+        for r in minute_rows {
+            let at = r.minute / step * step;
+            let p = rows.entry(at).or_insert_with(|| store::MinuteRow { minute: at, ..Default::default() });
+            p.requests += r.requests;
+            p.errors += r.errors;
+            p.cold_starts += r.cold_starts;
+            p.egress_bytes += r.egress_bytes;
+            p.over_capacity += r.over_capacity;
+            p.p50_ms = p.p50_ms.max(r.p50_ms);
+            p.p95_ms = p.p95_ms.max(r.p95_ms);
+            p.p99_ms = p.p99_ms.max(r.p99_ms);
+            p.cpu = p.cpu.max(r.cpu);
+            p.memory_bytes = p.memory_bytes.max(r.memory_bytes);
+            p.instances = p.instances.max(r.instances);
+            p.cold_start_ms = p.cold_start_ms.max(r.cold_start_ms);
+        }
+        let mut out: BTreeMap<&str, Value> = BTreeMap::new();
+        out.insert("step", step.into());
+        let mut series: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
+        for m in (since..=now_min).step_by(step as usize) {
             let r = rows.remove(&m).unwrap_or(store::MinuteRow { minute: m, ..Default::default() });
+            let out = &mut series;
             out.entry("minutes").or_default().push(m.into());
             out.entry("requests").or_default().push(r.requests.into());
             out.entry("errors").or_default().push(r.errors.into());
@@ -2304,7 +2537,9 @@ impl Apps {
             out.entry("cold_starts").or_default().push(r.cold_starts.into());
             out.entry("cold_start_ms").or_default().push(r.cold_start_ms.into());
             out.entry("egress_bytes").or_default().push(r.egress_bytes.into());
+            out.entry("over_capacity").or_default().push(r.over_capacity.into());
         }
+        out.extend(series.into_iter().map(|(k, v)| (k, Value::Array(v))));
         Ok(serde_json::to_value(out).expect("JSON"))
     }
 
@@ -2407,3 +2642,36 @@ fn free_spot(ws: &roll_workspace::Workspace, project: &str) -> (f64, f64) {
     }
     (48.0, 48.0)
 }
+
+/// A Git URL's repository, to compare: its host and path, without a trailing `/` or `.git`.
+fn git_repo(url: &str) -> Option<String> {
+    let u = url::Url::parse(url).ok()?;
+    let path = u.path().trim_end_matches('/');
+    Some(format!("{}{}", git_host(url)?, path.strip_suffix(".git").unwrap_or(path)))
+}
+
+/// A Git URL's host, lowercase (with its port when it names one): where its login is sent.
+fn git_host(url: &str) -> Option<String> {
+    let u = url::Url::parse(url).ok()?;
+    let host = u.host_str()?.to_ascii_lowercase();
+    Some(match u.port() {
+        Some(p) => format!("{host}:{p}"),
+        None => host,
+    })
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+
+    #[test]
+    fn only_what_differs_from_the_defaults_counts() {
+        let mut run = Run::default();
+        assert_eq!(set_only(&run, &Run::default()), json!({}));
+        run.memory_mb = 1024;
+        run.alerts.error_pct = 10;
+        // A nested setting counts alone: a sibling roll adds later doesn't change this.
+        assert_eq!(set_only(&run, &Run::default()), json!({"memory_mb": 1024, "alerts": {"error_pct": 10}}));
+    }
+}
+

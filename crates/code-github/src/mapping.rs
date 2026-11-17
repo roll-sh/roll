@@ -25,6 +25,9 @@ pub struct WorkItemDraft {
     pub state: DraftState,
     pub url: Option<String>,
     pub author: Option<String>,
+    /// The author can't push to the repo (GitHub's `author_association` isn't `OWNER`, `MEMBER`
+    /// or `COLLABORATOR`, or is missing): anyone can open an issue on a public repo.
+    pub outside: bool,
     pub updated_at: Option<String>,
 }
 
@@ -105,8 +108,14 @@ pub fn issue_draft(issue: &Issue) -> WorkItemDraft {
         state,
         url: issue.html_url.clone(),
         author: issue.user.as_ref().map(|u| u.login.clone()),
+        outside: !can_push(issue.author_association.as_deref()),
         updated_at: issue.updated_at.clone(),
     }
+}
+
+/// Does GitHub's `author_association` mean the author can push to the repo? Missing: no.
+pub fn can_push(association: Option<&str>) -> bool {
+    matches!(association.map(str::to_ascii_uppercase).as_deref(), Some("OWNER" | "MEMBER" | "COLLABORATOR"))
 }
 
 pub fn pull_request_draft(pr: &PullRequest) -> ChangeDraft {

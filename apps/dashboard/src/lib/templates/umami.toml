@@ -1,0 +1,13 @@
+# Umami: privacy-friendly web analytics (umami.is), on a roll Postgres database. It signs in
+# as admin / umami the first time: change the password in its settings.
+[apps.umami]
+image = "ghcr.io/umami-software/umami:postgresql-v2.19.0"
+port = 3000
+links = ["db"]
+[apps.umami.run]
+health_path = "/api/heartbeat"
+health_timeout_s = 120
+[apps.umami.variables]
+APP_SECRET = { generate = "secret" }
+[databases.db]
+kind = "postgres"

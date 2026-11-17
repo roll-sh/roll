@@ -1,9 +1,9 @@
 import { Play, Square, TerminalSquare, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { appsApi, followChanges, followLog, runStatus, type CronRun, type Job, type LogLine, type Scheduled } from "@/lib/apps-api";
+import { appsApi, followChanges, followLog, runStatus, type CronRun, type Environment, type Job, type LogLine, type Scheduled } from "@/lib/apps-api";
 import { btn, EmptyPanel, input, Panel, primary } from "../ui";
 import { usePageVisible } from "./live";
-import { clock, LogView, message, SureButton, type Runner } from "./shared";
+import { clock, LogView, message, SureButton, until, type Runner } from "./shared";
 
 const MAX_LINES = 5000;
 
@@ -24,7 +24,7 @@ function JobBadge({ job }: { job: Pick<Job, "status" | "exit_code"> }) {
  * Commands on a schedule (Heroku Scheduler, Vercel crons): the service's `run.schedules`, each a
  * job below at its due times, skipped while its last one still runs.
  */
-function Schedules({ service, schedules, runner }: { service: string; schedules: Scheduled[]; runner: Runner }) {
+function Schedules({ service, env, schedules, states, runner, onRan }: { service: string; env: string; schedules: Scheduled[]; states: Environment["schedules"]; runner: Runner; onRan: (j: Job) => void }) {
   const [name, setName] = useState("");
   const [schedule, setSchedule] = useState("0 3 * * *");
   const [command, setCommand] = useState("");
@@ -39,6 +39,28 @@ function Schedules({ service, schedules, runner }: { service: string; schedules:
               <span className="font-medium">{s.name}</span>
               <code className="font-mono text-[12px] text-muted">{s.schedule}{s.timezone ? ` (${s.timezone})` : ""}</code>
               <code className="min-w-0 flex-1 truncate font-mono text-[12px]">{s.command}</code>
+              {(() => {
+                const st = states?.find((x) => x.name === s.name);
+                return (
+                  <>
+                    {st?.last && <JobBadge job={{ status: st.last.status, exit_code: null }} />}
+                    {st?.next_run_at && (
+                      <span className="text-[11.5px] text-subtle" title={new Date(st.next_run_at).toLocaleString()}>
+                        next {until(st.next_run_at, Date.now())}
+                      </span>
+                    )}
+                  </>
+                );
+              })()}
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 text-[12px] text-muted hover:text-fg disabled:opacity-50"
+                disabled={runner.busy !== null}
+                title="Run it now, as a job (its schedule stays as it is)"
+                onClick={() => void runner.run(`run:${s.name}`, () => appsApi.startJob(service, env, { command: s.command, ...(s.timeout_s ? { timeout_s: s.timeout_s } : {}) })).then((j) => j && onRan(j))}
+              >
+                <Play className="size-3" /> Run now
+              </button>
               <SureButton className="p-1 text-subtle hover:text-fg" label={`Remove the schedule ${s.name}`} sure="Sure? Remove" disabled={runner.busy !== null} onSure={() => save(schedules.filter((x) => x.name !== s.name))}>
                 <Trash2 className="size-3.5" />
               </SureButton>
@@ -73,7 +95,7 @@ function Schedules({ service, schedules, runner }: { service: string; schedules:
  * One-off jobs (`roll apps run`): a command in a fresh container of the live deployment, with
  * the environment's variables. Run one, watch its output live, cancel it; the recent ones below.
  */
-export function JobsTab({ service, env, runner, cron = false, schedules }: { service: string; env: string; runner: Runner; cron?: boolean; schedules?: Scheduled[] }) {
+export function JobsTab({ service, env, runner, cron = false, schedules, states }: { service: string; env: string; runner: Runner; cron?: boolean; schedules?: Scheduled[]; states?: Environment["schedules"] }) {
   const [jobs, setJobs] = useState<Job[] | null>(null);
   const [command, setCommand] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
@@ -154,7 +176,19 @@ export function JobsTab({ service, env, runner, cron = false, schedules }: { ser
   return (
     <div className="space-y-6">
       {cron && <ScheduledRuns service={service} env={env} runner={runner} />}
-      {schedules && <Schedules service={service} schedules={schedules} runner={runner} />}
+      {schedules && (
+        <Schedules
+          service={service}
+          env={env}
+          schedules={schedules}
+          states={states}
+          runner={runner}
+          onRan={(job) => {
+            setSelected(job.id);
+            setJobs((js) => [job, ...(js ?? [])]);
+          }}
+        />
+      )}
       <Panel title="Run a command" aside={<span className="text-[12px] text-muted">in a fresh container of the live deployment, with its variables</span>}>
         <form
           className="flex flex-wrap gap-2 px-5 py-4"

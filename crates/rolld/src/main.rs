@@ -152,6 +152,10 @@ struct Args {
     /// roll code previews answer on `<change>.<this domain>` (on the API port).
     #[arg(long, env = "ROLL_CODE_PREVIEW_DOMAIN", default_value = "preview.localhost")]
     code_preview_domain: String,
+    /// roll previews' mail catcher: a preview's services send mail here (`SMTP_*`), never to the
+    /// people in its data. A port that's taken leaves it off, and previews' mail fails.
+    #[arg(long, env = "ROLL_PREVIEWS_SMTP", default_value = "0.0.0.0:2525")]
+    previews_smtp: std::net::SocketAddr,
     /// roll code checks running at once from this node (each in its own container or Fargate
     /// task; `ROLL_CODE_RUNNER`, see `isolation.rs`).
     #[arg(long, env = "ROLL_CODE_RUNNER_CONCURRENCY", default_value_t = 2)]
@@ -437,6 +441,9 @@ async fn run() -> anyhow::Result<()> {
     let workspace = workspace::open(&args, &home)?;
     // roll apps: services built and run on this host's Docker, each on its lease's holder.
     let apps_secrets = secrets::ForApps::default();
+    // The products' routes in process (set once the router is built): roll secrets' links and
+    // roll apps' links that issue credentials of their own.
+    let products_api = secrets::Api::default();
     let apps = match on.on(Product::Apps) {
         true => Some(
             apps::start(
@@ -449,6 +456,7 @@ async fn run() -> anyhow::Result<()> {
                 postgres.as_ref().map(|p| p.control.clone()),
                 redis.as_ref().map(|r| r.control.clone()),
                 apps_secrets.clone(),
+                products_api.clone(),
             )
             .await?,
         ),
@@ -501,7 +509,7 @@ async fn run() -> anyhow::Result<()> {
                 queues: queues.is_some(),
                 tasks: tasks.is_some(),
             };
-            let p = previews::start(&args, &home, c, workspace.clone(), cluster.clone(), on_products)?;
+            let p = previews::start(&args, &home, c, workspace.clone(), cluster.clone(), on_products, apps.as_ref().map(|a| a.apps.clone()))?;
             router = router.merge(roll_previews::api::router(p.engine.clone()));
             Some(p.runtime)
         }
@@ -559,20 +567,21 @@ async fn run() -> anyhow::Result<()> {
     // above this line, or its links 404.
     // People's accounts: what a person made acts while they can sign in, and a person's canvas
     // stands only for what's theirs (roll_workspace::Workspace::trusts, asked by every consumer).
-    let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()) };
+    let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()), search: search.as_ref().map(|s| s.control.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
-    // Grants from roll-access are looked up when a sync made by one pushes.
-    let products_api = secrets::Api::default();
-    let grants: std::sync::Arc<dyn roll_auth::Grants> = access.clone();
-    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), Some(grants), people)?;
+    // Its tokens are roll-access's: grants for syncs a token made, workload tokens for identities.
+    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people)?;
     code_secrets.set(secrets.clone(), workspace.clone());
     apps_secrets.set(secrets.clone(), workspace.clone());
     let _ = secrets_envs.0.set(secrets.clone());
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }
-    router = router.merge(roll_secrets::router(secrets));
+    router = router.merge(roll_secrets::router(secrets.clone()));
     products_api.set(router.clone());
+    // A product's own credential changes (a password reset, a restore) move live links' digests
+    // at once. Layered after the copy above: roll secrets' own rotations say so themselves.
+    router = router.layer(axum::middleware::from_fn_with_state(secrets, secrets::source_changes));
     // apps' deploy hooks found leaked (`rlk_`) stop working, like tokens.
     if let Some(a) = &apps {
         let apps = a.apps.clone();
@@ -606,6 +615,7 @@ async fn run() -> anyhow::Result<()> {
         .info_route(cluster.node_id().to_string())
         .merge(on.off_routes())
         .merge(roll_access::oauth::public_router(access.clone()))
+        .merge(roll_mcp::card::routes(&access::api_url(&args), &args.web_url))
         .merge(auth.gate("api", router));
     let mut router = auth.cors(router).layer(axum::middleware::from_fn(logs::access));
     if let Some(c) = &code {

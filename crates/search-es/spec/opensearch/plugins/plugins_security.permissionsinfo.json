@@ -1,0 +1,26 @@
+{
+  "plugins_security.permissionsinfo": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/security/access-control/api/",
+      "description": "Whether the user may use the Security plugin's REST API, and which endpoints it may not."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_security/api/permissionsinfo",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "path": "/_opendistro/_security/api/permissionsinfo",
+          "methods": [
+            "GET"
+          ]
+        }
+      ]
+    },
+    "params": {}
+  }
+}

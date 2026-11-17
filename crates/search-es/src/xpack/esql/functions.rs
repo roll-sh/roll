@@ -66,6 +66,9 @@ pub enum F {
     Contains,
     EndsWith,
     FromBase64,
+    TopSnippets,
+    /// `CATEGORIZE` (a grouping only: not in [`NAMES`]).
+    Categorize,
     Hash,
     LTrim,
     Left,
@@ -197,6 +200,7 @@ const NAMES: &[(&str, F)] = &[
     ("byte_length", F::ByteLength),
     ("concat", F::Concat),
     ("contains", F::Contains),
+    ("top_snippets", F::TopSnippets),
     ("ends_with", F::EndsWith),
     ("from_base64", F::FromBase64),
     ("hash", F::Hash),
@@ -410,7 +414,7 @@ impl F {
             | MvAppend | MvConcat | MvContains | MvDifference | MvIntersection | MvPercentile | MvPseriesWeightedSum | MvUnion => Exact(2),
             Clamp | Replace | DateDiff => Exact(3),
             Log | Round | DateFormat | MvSort | ToInteger | ToLong | ToIp | Repeat => Range(1, 2),
-            Substring | Locate | IpPrefix | MvSlice | MvZip => Range(2, 3),
+            Substring | Locate | IpPrefix | MvSlice | MvZip | TopSnippets => Range(2, 3),
             DateParse => Range(1, 3),
             Greatest | Least | Coalesce => AtLeast(1),
             Concat | CidrMatch | RoundTo => AtLeast(2),
@@ -433,6 +437,8 @@ impl F {
             (MvPseriesWeightedSum, _) => ("double", |t| t == DataType::Double),
             (BitLength | ByteLength | Concat | Contains | EndsWith | StartsWith | Hash | LTrim | RTrim | Trim | Length | Md5 | Sha1 | Sha256 | Reverse | ToLower | ToUpper | FromBase64 | ToBase64 | UrlDecode | UrlEncode | UrlEncodeComponent | Split | ToText, 0) => STRING,
             (Concat | Contains | EndsWith | StartsWith | Hash | Split | Replace | DateParse | MvConcat | MvZip | CidrMatch, _) if i > 0 => STRING,
+            (TopSnippets, 0 | 1) => STRING,
+            (TopSnippets, _) => return None,
             (Left | Right | Substring | Repeat | Locate | MvSlice | IpPrefix, _) if i >= 1 && !(self == Locate && i == 1) => INTEGER,
             (Locate, 1) => STRING,
             (Left | Right | Substring | Repeat | Locate | Replace, 0) => STRING,
@@ -498,6 +504,7 @@ impl F {
             Coalesce
                 | Greatest
                 | Least
+                | TopSnippets
                 | CidrMatch
                 | ToLower
                 | ToUpper
@@ -713,6 +720,13 @@ pub fn check(f: F, written: &str, call: &str, at: (usize, usize), args: &[Arg<'_
     }
     let verification = |msg: String| EsError::new(400, "verification_exception", format!("Found 1 problem\nline {}:{}: {msg}", at.0, at.1));
     let types: Vec<DataType> = args.iter().map(|a| a.ty).collect();
+    // `TopSnippets.resolveType`: the query is a constant.
+    if f == F::TopSnippets
+        && let Some(q) = args.get(1)
+        && q.lit.is_none()
+    {
+        return Err(verification(format!("second argument of [{call}] must be a constant, received [{}]", q.text)));
+    }
     if f == F::RoundTo {
         for (i, a) in args.iter().enumerate().skip(1) {
             if a.lit.is_none() {
@@ -964,6 +978,13 @@ pub fn eval(f: F, args: &[V], types: &[DataType]) -> Result<V, Fail> {
         ByteLength => V::Int(text(0).len() as i32),
         Concat => V::Str(args.iter().map(V::to_text).collect()),
         Contains => V::Bool(text(0).contains(text(1).as_str())),
+        Categorize => V::Str(categorize(&text(0))),
+        TopSnippets => {
+            let options = args.get(2).and_then(V::as_str).and_then(|o| crate::json::parse(o.as_bytes()).ok().flatten());
+            let option = |k: &str, d: i64| options.as_ref().and_then(|o| o.get(k)).and_then(crate::json::Value::as_i64).unwrap_or(d);
+            let values: Vec<String> = a0.values().into_iter().map(V::to_text).collect();
+            top_snippets(&values, &text(1), option("num_snippets", 5).max(1) as usize, option("num_words", 300).max(1))
+        }
         StartsWith => V::Bool(text(0).starts_with(text(1).as_str())),
         EndsWith => V::Bool(text(0).ends_with(text(1).as_str())),
         LTrim => V::Str(text(0).trim_start_matches(java_space).to_string()),
@@ -1742,6 +1763,80 @@ fn round_whole(x: i64, digits: i64) -> i64 {
     if x < 0 { -(r as i64) } else { r as i64 }
 }
 
+/// `TOP_SNIPPETS` (`TopSnippets`): the text cut into sentence chunks of at most `words` words
+/// (no overlap), the `n` chunks that score best for the query's terms (BM25 over the chunks,
+/// terms lowercased Unicode words), best first; `null` when no chunk holds a query term.
+fn top_snippets(values: &[String], query: &str, n: usize, words: i64) -> V {
+    use crate::xpack::inference::chunking::Chunking;
+    fn terms(t: &str) -> Vec<String> {
+        use unicode_segmentation::UnicodeSegmentation;
+        t.unicode_words().map(str::to_lowercase).collect()
+    }
+    let chunking = Chunking::Sentence { max_chunk_size: words, sentence_overlap: 0 };
+    let chunks: Vec<&str> = values.iter().flat_map(|v| chunking.pieces(v).into_iter().map(|(_, t)| t)).filter(|c| !c.trim().is_empty()).collect();
+    let tokens: Vec<Vec<String>> = chunks.iter().map(|c| terms(c)).collect();
+    let mut qterms = terms(query);
+    qterms.dedup();
+    // Each term's document frequency once (per chunk and term would be quadratic in chunks).
+    let df: Vec<f64> = qterms.iter().map(|q| tokens.iter().filter(|t| t.contains(q)).count() as f64).collect();
+    let (count, avg) = (tokens.len() as f64, tokens.iter().map(Vec::len).sum::<usize>() as f64 / tokens.len().max(1) as f64);
+    let (k1, b) = (1.2f64, 0.75f64);
+    let mut scored: Vec<(f64, usize)> = tokens
+        .iter()
+        .enumerate()
+        .map(|(i, toks)| {
+            let score = qterms
+                .iter()
+                .zip(&df)
+                .map(|(q, &df)| {
+                    let tf = toks.iter().filter(|t| *t == q).count() as f64;
+                    if tf == 0.0 {
+                        return 0.0;
+                    }
+                    let idf = (1.0 + (count - df + 0.5) / (df + 0.5)).ln();
+                    idf * tf * (k1 + 1.0) / (tf + k1 * (1.0 - b + b * toks.len() as f64 / avg.max(1.0)))
+                })
+                .sum::<f64>();
+            (score, i)
+        })
+        .filter(|(s, _)| *s > 0.0)
+        .collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut out: Vec<V> = scored.into_iter().take(n).map(|(_, i)| V::Str(chunks[i].to_string())).collect();
+    match out.len() {
+        0 => V::Null,
+        1 => out.pop().unwrap_or(V::Null),
+        _ => V::Multi(out),
+    }
+}
+
+/// `CATEGORIZE`'s category of a message, as the regex Elasticsearch prints for it
+/// (`.*?tok1.+?tok2.*?`): its words that hold no digit (the `ml_standard` tokenizer's tokens,
+/// numbers and identifiers left out). Messages with the same words are one category; roll
+/// doesn't merge categories by similarity as Elasticsearch's categorizer does.
+pub fn categorize(text: &str) -> String {
+    let tokens: Vec<&str> = text
+        .split(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '\'')))
+        .map(|t| t.trim_matches(|c: char| matches!(c, '.' | '-' | '\'')))
+        .filter(|t| !t.is_empty() && !t.chars().any(|c| c.is_ascii_digit()))
+        .collect();
+    if tokens.is_empty() {
+        return ".*".into();
+    }
+    format!(".*?{}.*?", tokens.iter().map(|t| regex_quote(t)).collect::<Vec<_>>().join(".+?"))
+}
+
+fn regex_quote(t: &str) -> String {
+    let mut out = String::with_capacity(t.len());
+    for c in t.chars() {
+        if matches!(c, '.' | '\\' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1864,4 +1959,19 @@ mod tests {
         v.sort_by(|a, b| version_cmp(a, b));
         assert_eq!(v, ["0.9", "1.2.3-alpha", "1.2.3", "1.10.0", "2.0.0", "nope"]);
     }
+
+    #[test]
+    fn categories_and_snippets() {
+        assert_eq!(categorize("Connected to 10.1.0.1"), ".*?Connected.+?to.*?");
+        assert_eq!(categorize("42"), ".*");
+        let v = top_snippets(&["The quick brown fox. Rust is fast. Search ranks text.".into()], "search ranks rust", 1, 5);
+        assert_eq!(v, V::Str("Search ranks text.".into()));
+        assert_eq!(top_snippets(&["Nothing here.".into()], "search", 5, 300), V::Null);
+        // A long text of one-word chunks, every one holding the term: linear, not quadratic.
+        let started = std::time::Instant::now();
+        let long = "rust. ".repeat(40_000);
+        assert!(matches!(top_snippets(&[long], "rust", 3, 1), V::Multi(v) if v.len() == 3));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+    }
+
 }

@@ -1916,13 +1916,22 @@ impl PostingsCursor {
     /// Number of impact levels for the current position (see [`impacts`](Self::impacts)).
     pub fn impact_levels(&mut self) -> usize {
         self.ensure_impacts_state();
+        if !self.ds.has_freqs {
+            return 1;
+        }
         self.view.levels as usize
     }
 
     /// Last doc covered by impact level `level` (inclusive); [`NO_MORE_DOCS`] for the last
-    /// region of the term.
+    /// region of the term. Without frequencies every doc has the same impact, so one level
+    /// covers the whole term (Lucene104PostingsReader's `getDocIdUpTo`): a block-max
+    /// conjunction led by a clause without impacts gets this term's exact bound for any
+    /// window, not the unbounded global one.
     pub fn impact_doc_upto(&mut self, level: usize) -> u32 {
         self.ensure_impacts_state();
+        if !self.ds.has_freqs {
+            return NO_MORE_DOCS;
+        }
         if level == 0 || self.view.levels < 2 {
             self.view.block_last
         } else {
