@@ -95,7 +95,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/aws-users"), get(aws_users).post(add_aws_user))
         .route(&format!("{P}/aws-users/{{id}}"), axum::routing::delete(delete_aws_user).patch(update_aws_user))
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
-        .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
+        .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator).patch(update_rotator))
+        .route(&format!("{P}/rotators/{{id}}/rotate-secret"), post(rotate_rotator_secret))
         .route(&format!("{P}/transit"), get(transit_keys).post(add_transit_key))
         .route(&format!("{P}/transit/{{name}}"), axum::routing::patch(config_transit_key).delete(delete_transit_key))
         .route(&format!("{P}/transit/{{name}}/rotate"), post(rotate_transit_key))
@@ -1048,6 +1049,18 @@ async fn add_rotator(State(s): S, Who(c): Who, Path(project): Path<String>, b: B
     let mut v = serde_json::to_value(&r).expect("JSON");
     v["secret"] = json!(secret);
     Ok(secret_response(created(v)))
+}
+
+async fn update_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let ch: crate::rotators::RotatorChange = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.update_rotator(&project, &id, ch, &c)).await?))
+}
+
+async fn rotate_rotator_secret(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<Response> {
+    let (r, secret) = blocking(s, move |s| s.rotate_rotator_secret(&project, &id, &c)).await?;
+    let mut v = serde_json::to_value(&r).expect("JSON");
+    v["secret"] = json!(secret);
+    Ok(secret_response(ok(v)))
 }
 
 async fn delete_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
