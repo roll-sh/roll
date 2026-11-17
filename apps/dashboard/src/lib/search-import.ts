@@ -53,6 +53,30 @@ export function indexNameProblem(name: string): string | null {
   return null;
 }
 
+/** The longest NDJSON line or CSV field read; past it the rest of the line or file is an error
+ * (a file without line breaks, or a quote left open, would otherwise grow one string forever). */
+export const MAX_RECORD_BYTES = 32 * 1024 * 1024;
+
+type RawJson = (text: string) => unknown;
+const rawJSON: RawJson | undefined = (JSON as unknown as { rawJSON?: RawJson }).rawJSON;
+
+/**
+ * `JSON.parse`, but numbers JavaScript can't hold exactly keep their text: an integer past 2^53
+ * (`12345678901234567890`, an id or a counter) or more digits than a double has. They're sent as
+ * written (`JSON.rawJSON`), as Elasticsearch would have read them from the file; where the browser
+ * lacks it, an unsafe integer becomes its text, which Elasticsearch coerces for a numeric field.
+ */
+export function parseJson(text: string): unknown {
+  const reviver = (_key: string, value: unknown, context?: { source?: string }) => {
+    if (typeof value !== "number" || context?.source === undefined) return value;
+    const src = context.source;
+    if (String(value) === src) return value;
+    if (rawJSON) return rawJSON(src);
+    return Number.isInteger(value) && !Number.isSafeInteger(value) ? src : value;
+  };
+  return JSON.parse(text, reviver as (this: unknown, key: string, value: unknown) => unknown);
+}
+
 /** A document that couldn't be read from the file. */
 export interface ReadError {
   /** Line (NDJSON, CSV: the record's first line) or element (JSON) number, from 1. */
@@ -73,15 +97,50 @@ export class NdjsonReader {
     if (this.errors.length < 5) this.errors.push({ at: this.line, message });
   }
 
+  /** An over-long line is being skipped until its end (it was reported when it grew too long). */
+  private skipping = false;
+
   push(text: string): Record<string, unknown>[] {
-    const lines = (this.rest + text).split("\n");
-    this.rest = lines.pop() ?? "";
-    return this.parse(lines);
+    const nl = text.lastIndexOf("\n");
+    // Only a chunk that ends a line splits anything: a line spread over many chunks is joined
+    // once, not rescanned with every chunk.
+    if (nl < 0) {
+      this.hold(text);
+      return [];
+    }
+    const head = this.rest + text.slice(0, nl);
+    this.rest = "";
+    const lines = head.split("\n");
+    if (this.skipping) {
+      lines.shift();
+      this.line++;
+      this.skipping = false;
+    }
+    const out = this.parse(lines);
+    this.hold(text.slice(nl + 1));
+    return out;
+  }
+
+  /** Keeps the start of the next line, unless it has grown past [`MAX_RECORD_BYTES`]. */
+  private hold(text: string) {
+    if (this.skipping) return;
+    this.rest += text;
+    if (this.rest.length > MAX_RECORD_BYTES) {
+      // The line after those read so far; it's counted when its end arrives.
+      this.errorCount++;
+      if (this.errors.length < 5) this.errors.push({ at: this.line + 1, message: `a line longer than ${MAX_RECORD_BYTES / 1024 / 1024} MiB` });
+      this.rest = "";
+      this.skipping = true;
+    }
   }
 
   end(): Record<string, unknown>[] {
     const last = this.rest;
     this.rest = "";
+    if (this.skipping) {
+      this.skipping = false;
+      return [];
+    }
     return this.parse([last]);
   }
 
@@ -92,7 +151,7 @@ export class NdjsonReader {
       const l = (this.line === 1 ? raw.replace(/^﻿/, "") : raw).trim();
       if (!l) continue;
       try {
-        const v: unknown = JSON.parse(l);
+        const v: unknown = parseJson(l);
         if (v && typeof v === "object" && !Array.isArray(v)) out.push(v as Record<string, unknown>);
         else this.fail("not a JSON object");
       } catch (e) {
@@ -105,8 +164,8 @@ export class NdjsonReader {
 
 /** The documents of a JSON file: an array of objects, an object holding exactly one such
  * array (`{"products": [...]}`), or one object. */
-export function jsonDocuments(text: string): { docs: Record<string, unknown>[]; errors: ReadError[] } {
-  const v: unknown = JSON.parse(text.replace(/^﻿/, ""));
+export function jsonDocuments(text: string): { docs: Record<string, unknown>[]; errors: ReadError[]; errorCount: number } {
+  const v: unknown = parseJson(text.replace(/^﻿/, ""));
   const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === "object" && !Array.isArray(x);
   let items: unknown[];
   if (Array.isArray(v)) items = v;
@@ -116,8 +175,12 @@ export function jsonDocuments(text: string): { docs: Record<string, unknown>[]; 
   } else throw new Error("The file holds no JSON objects.");
   const docs: Record<string, unknown>[] = [];
   const errors: ReadError[] = [];
-  items.forEach((x, i) => (isObj(x) ? docs.push(x) : errors.push({ at: i + 1, message: "not a JSON object" })));
-  return { docs, errors };
+  let errorCount = 0;
+  items.forEach((x, i) => {
+    if (isObj(x)) docs.push(x);
+    else if (errorCount++ < 5) errors.push({ at: i + 1, message: "not a JSON object" });
+  });
+  return { docs, errors, errorCount };
 }
 
 /**
@@ -178,6 +241,7 @@ export class CsvReader {
         } else {
           if (c === "\n") this.line++;
           this.field += c;
+          if (this.field.length > MAX_RECORD_BYTES) throw new Error(`A quoted field from line ${this.recordLine} runs past ${MAX_RECORD_BYTES / 1024 / 1024} MiB: is a quote left open?`);
           continue;
         }
       }
@@ -236,7 +300,11 @@ function guessDelimiter(line: string): string {
   return best;
 }
 
-export type ColumnType = "long" | "double" | "boolean" | "string";
+export type ColumnType = "long" | "double" | "boolean" | "date" | "string";
+
+/** Elasticsearch's dynamic date detection (`strict_date_optional_time`): a column of these is
+ * mapped as a date. The values are sent as written. */
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}(T\d{2}(:\d{2}(:\d{2}([.,]\d{1,9})?)?)?(Z|[+-]\d{2}(:?\d{2})?)?)?$/;
 
 const INT = /^-?(0|[1-9]\d{0,15})$/;
 const FLOAT = /^-?(0|[1-9]\d*)?(\.\d+)?([eE][+-]?\d+)?$/;
@@ -253,7 +321,15 @@ export function columnTypes(rows: string[][], width: number): ColumnType[] {
     for (const r of rows) {
       const v = (r[c] ?? "").trim();
       if (v === "") continue;
-      const own: ColumnType = INT.test(v) ? "long" : FLOAT.test(v) && /\d/.test(v) && Number.isFinite(Number(v)) ? "double" : /^(true|false)$/i.test(v) ? "boolean" : "string";
+      const own: ColumnType = INT.test(v)
+        ? "long"
+        : FLOAT.test(v) && /\d/.test(v) && Number.isFinite(Number(v))
+          ? "double"
+          : /^(true|false)$/i.test(v)
+            ? "boolean"
+            : ISO_DATE.test(v)
+              ? "date"
+              : "string";
       t = t === null ? own : t === own ? t : (t === "long" && own === "double") || (t === "double" && own === "long") ? "double" : "string";
       if (t === "string") break;
     }
@@ -264,6 +340,11 @@ export function columnTypes(rows: string[][], width: number): ColumnType[] {
 
 /** A CSV record as a document: header names as fields, typed values, empty cells left out. A
  * value that doesn't fit its column's type is kept as text (Elasticsearch then reports it). */
+/** Sets `key` as an own field: assigning `__proto__` would set the object's prototype instead. */
+export function setField(obj: Record<string, unknown>, key: string, value: unknown) {
+  Object.defineProperty(obj, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
 export function csvDocument(header: string[], types: ColumnType[], cells: string[]): Record<string, unknown> {
   const doc: Record<string, unknown> = {};
   header.forEach((name, i) => {
@@ -274,14 +355,16 @@ export function csvDocument(header: string[], types: ColumnType[], cells: string
       case "long":
       case "double": {
         const n = Number(v);
-        doc[name] = v !== "" && Number.isFinite(n) && FLOAT.test(v) ? n : raw;
+        // An integer past 2^53 would be rounded as a number: sent as its text, which Elasticsearch
+        // reads exactly for a long.
+        setField(doc, name, v !== "" && Number.isFinite(n) && FLOAT.test(v) ? (Number.isInteger(n) && !Number.isSafeInteger(n) ? v : n) : raw);
         break;
       }
       case "boolean":
-        doc[name] = /^true$/i.test(v) ? true : /^false$/i.test(v) ? false : raw;
+        setField(doc, name, /^true$/i.test(v) ? true : /^false$/i.test(v) ? false : raw);
         break;
       default:
-        doc[name] = raw;
+        setField(doc, name, raw);
     }
   });
   return doc;
@@ -298,11 +381,34 @@ export function csvHeader(cells: string[]): string[] {
   });
 }
 
-/** The `_bulk` lines of one document (the index comes from the route; `_id` from `idField`). */
-export function bulkLines(doc: Record<string, unknown>, idField: string | null): string {
-  const id = idField ? doc[idField] : undefined;
-  const action = id === undefined || id === null || id === "" ? { index: {} } : { index: { _id: String(id) } };
-  return `${JSON.stringify(action)}\n${JSON.stringify(doc)}\n`;
+/** The text of an id value: a string, a number (exact, as the file wrote it) or a boolean;
+ * `null` for an object or an array, which has no id text. */
+function idText(v: unknown): string | null {
+  if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v);
+  if (v && typeof v === "object" && typeof (v as { rawJSON?: unknown }).rawJSON === "string") return (v as { rawJSON: string }).rawJSON;
+  return null;
+}
+
+/**
+ * The `_bulk` lines of one document (the index comes from the route; `_id` from `idField`), or why
+ * it can't be sent. An `_id` key is metadata Elasticsearch refuses in a document's source: it's
+ * taken out, and is the id when no other field was chosen.
+ */
+export function bulkLines(doc: Record<string, unknown>, idField: string | null): { lines: string } | { error: string } {
+  let source = doc;
+  let id: unknown = idField ? doc[idField] : undefined;
+  if (Object.prototype.hasOwnProperty.call(doc, "_id")) {
+    if (!idField || idField === "_id") id = doc._id;
+    source = {};
+    for (const [k, v] of Object.entries(doc)) if (k !== "_id") setField(source, k, v);
+  }
+  let action: { index: { _id?: string } } = { index: {} };
+  if (id !== undefined && id !== null && id !== "") {
+    const text = idText(id);
+    if (text === null) return { error: `the id field (${idField ?? "_id"}) holds ${Array.isArray(id) ? "an array" : "an object"}, not an id` };
+    action = { index: { _id: text } };
+  }
+  return { lines: `${JSON.stringify(action)}\n${JSON.stringify(source)}\n` };
 }
 
 /** Collects bulk lines into bodies of at most `maxBytes` (one larger document goes alone). */

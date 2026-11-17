@@ -9,6 +9,8 @@
  * ([`hitSources`]), and display re-indents text token by token ([`formatJson`]).
  */
 
+import { setField } from "./search-import";
+
 /** A source flattened to dotted paths (`user.name`); arrays stay values. */
 export function flatten(source: unknown, prefix = "", out: Map<string, unknown> = new Map()): Map<string, unknown> {
   if (source && typeof source === "object" && !Array.isArray(source)) {
@@ -258,6 +260,12 @@ export function sourceCells(source: string | undefined): Map<string, string> {
   };
   walk(root, "");
   return out;
+}
+
+/** Why a document id can't be used in a request path, or `null`: `.` and `..` are path steps to
+ * every URL parser (`%2E` too), so `/<index>/_doc/.` would name the index itself. */
+export function idProblem(id: string): string | null {
+  return id === "." || id === ".." ? `An id of ${id} can't be named in a URL (it reads as a path step); use the console with _bulk, or another id.` : null;
 }
 
 /**
@@ -531,6 +539,7 @@ export function newIndexProblem(fields: NewField[], opensearch: boolean): string
 
 /** The `PUT /<index>` body of the editor's fields (dotted names as objects). */
 export function newIndexBody(fields: NewField[], dynamic: "true" | "strict", opensearch: boolean): Record<string, unknown> {
+  // Own fields only: a field named `__proto__` is a field like any other (`setField`).
   const properties: Record<string, unknown> = {};
   for (const f of fields) {
     const name = f.name.trim();
@@ -538,10 +547,11 @@ export function newIndexBody(fields: NewField[], dynamic: "true" | "strict", ope
     const parts = name.split(".");
     let at = properties;
     for (const p of parts.slice(0, -1)) {
-      const obj = (at[p] ??= { properties: {} }) as { properties: Record<string, unknown> };
+      if (!Object.prototype.hasOwnProperty.call(at, p)) setField(at, p, { properties: {} });
+      const obj = at[p] as { properties: Record<string, unknown> };
       at = obj.properties;
     }
-    at[parts[parts.length - 1]] = fieldMapping(f, opensearch);
+    setField(at, parts[parts.length - 1], fieldMapping(f, opensearch));
   }
   const mappings: Record<string, unknown> = {};
   if (dynamic === "strict") mappings.dynamic = "strict";
