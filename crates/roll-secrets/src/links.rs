@@ -265,7 +265,7 @@ impl crate::Secrets {
             out.extend(self.snowflake_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::snowflake::KIND.into(), fields: provider.fields_for(&id), r#ref: id, name }));
         }
         if let Some(provider) = self.links.0.get(crate::atlas::KIND) {
-            out.extend(self.atlas_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::atlas::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+            out.extend(self.atlas_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::atlas::KIND.into(), r#ref: id.clone(), name, fields: provider.fields_for(&id) }));
         }
         for (kind, id, name) in self.cloud_refs(project)? {
             if let Some(provider) = self.links.0.get(kind.as_str()) {
