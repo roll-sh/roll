@@ -649,6 +649,20 @@ async fn approvals_are_posted_to_chat_and_decided_there() {
     let (_, a) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
     assert_eq!((a["state"].as_str(), a["decided_by"].as_str()), (Some("approved"), Some("slack:U1")));
 
+    // Under a two-person rule a chat press counts only as the account the operator linked it to,
+    // and never for that person's own token's request.
+    let notify = json!({ "chat": { "install": "chi_a", "channel": "C9", "approvers": ["U1", "U3"], "people": { "U1": "usr_ana", "U3": "usr_ben" } } });
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/notify", Some(json!({ "chat": { "install": "chi_a", "channel": "C9", "approvers": ["U1"], "people": { "U2": "usr_x" } } }))).await.0, StatusCode::BAD_REQUEST, "people are approvers");
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/notify", Some(notify)).await.0, StatusCode::OK);
+    d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "approval_rules": [{ "product": "postgres", "actions": ["delete"], "approvals": 2 }] }))).await;
+    let (_, pending) = d.call(&asker, Method::DELETE, "/v1/projects/pb", None).await;
+    let id = pending["approval"].as_str().unwrap().to_string();
+    d.access.decide_from_chat(id.clone(), true, "slack:U1".into(), "chi_a".into()).await.unwrap();
+    assert!(d.access.decide_from_chat(id.clone(), true, "slack:U1".into(), "chi_a".into()).await.is_err(), "once");
+    d.access.decide_from_chat(id.clone(), true, "slack:U3".into(), "chi_a".into()).await.unwrap();
+    let (_, a) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{id}"), None).await;
+    assert_eq!((a["state"].as_str(), a["approved_by"].clone()), (Some("approved"), json!(["usr_ana", "usr_ben"])), "{a}");
+
     // Once a day, the tokens about to expire are posted there too.
     d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({ "name": "ci-deploy", "expires_at": code_sql::now_ms() + 2 * 86_400_000 })).await;
     assert!(d.access.expiry_digest().await.unwrap());

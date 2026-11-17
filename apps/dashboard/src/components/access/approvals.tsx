@@ -1,6 +1,6 @@
 import { Bell, Hand } from "lucide-react";
 import { useEffect, useState } from "react";
-import { accessApi, accessRequest, approvalWhere, deciderName, forLabel, gateProgress, productName, REMEMBER, RISKY, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
+import { accessApi, accessRequest, approversText, parseApprovers, approvalWhere, deciderName, forLabel, gateProgress, productName, REMEMBER, RISKY, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
 import { createIntegrationsApi, type ChatInstall } from "@/lib/integrations-api";
 import { call } from "@/lib/roll-api";
 import { useShownOwner } from "../agents/use-connection";
@@ -202,7 +202,7 @@ function ChatSetting() {
         setCurrent(n.chat);
         setInstall(n.chat?.install ?? "");
         setChannel(n.chat?.channel ?? "");
-        setApprovers(n.chat?.approvers?.join(", ") ?? "");
+        setApprovers(n.chat ? approversText(n.chat) : "");
       })
       .catch(() => setCurrent(null));
   }, []);
@@ -250,8 +250,8 @@ function ChatSetting() {
           className="rise flex flex-wrap items-center gap-2"
           onSubmit={(e) => {
             e.preventDefault();
-            const ids = approverIds(approvers);
-            if (install && channel.trim() && ids.length) void save({ install, channel: channel.trim().replace(/^#/, ""), approvers: ids });
+            const { approvers: ids, people } = parseApprovers(approvers);
+            if (install && channel.trim() && ids.length) void save({ install, channel: channel.trim().replace(/^#/, ""), approvers: ids, ...(Object.keys(people).length ? { people } : {}) });
           }}
         >
           <select value={install} onChange={(e) => setInstall(e.target.value)} className={input} aria-label="Slack workspace">
@@ -266,11 +266,11 @@ function ChatSetting() {
           <input
             value={approvers}
             onChange={(e) => setApprovers(e.target.value)}
-            placeholder="Who may decide: Slack member ids (U0123…, U0456…)"
+            placeholder="Who may decide: Slack member ids (U0123…, U0456=usr_… links an account)"
             className={`${input} min-w-64 flex-1 font-mono text-[12px]`}
             aria-label="Approvers' Slack member ids"
           />
-          <button type="submit" disabled={!install || !channel.trim() || approverIds(approvers).length === 0} className={primary}>
+          <button type="submit" disabled={!install || !channel.trim() || parseApprovers(approvers).approvers.length === 0} className={primary}>
             Save
           </button>
         </form>
@@ -278,11 +278,6 @@ function ChatSetting() {
       <ErrorNote error={error} />
     </div>
   );
-}
-
-/** Slack member ids typed as a list (commas, spaces or new lines). */
-function approverIds(text: string): string[] {
-  return [...new Set(text.split(/[\s,]+/).map((s) => s.trim().replace(/^@/, "")).filter(Boolean))];
 }
 
 /**

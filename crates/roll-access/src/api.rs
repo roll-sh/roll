@@ -1150,14 +1150,22 @@ async fn set_notify(State(a): S, ext: Extensions, Json(v): Json<Value>) -> crate
     let short = |v: &Value| v.as_str().is_some_and(|i| i.len() <= 64 && !i.is_empty());
     let id = |v: &Value| short(v) && v.as_str().is_some_and(|i| i.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)));
     let approvers = chat["approvers"].as_array().filter(|a| !a.is_empty() && a.len() <= 50 && a.iter().all(id));
+    // `people`: an approver's roll account (`{"U1": "usr_…"}`), so a press there decides as that
+    // person: it counts toward the policy's approval rules, never for their own token's request.
+    let people_ok = match &chat["people"] {
+        Value::Null => true,
+        Value::Object(m) => m.iter().all(|(k, v)| approvers.is_some_and(|a| a.iter().any(|x| x == k)) && id(v) && v.as_str().is_some_and(|u| u.starts_with("usr_"))),
+        _ => false,
+    };
     let ok = chat.is_null()
         || (short(&chat["install"])
             && short(&chat["channel"])
             && approvers.is_some()
-            && chat.as_object().is_some_and(|o| o.keys().all(|k| ["install", "channel", "approvers"].contains(&k.as_str()))));
+            && people_ok
+            && chat.as_object().is_some_and(|o| o.keys().all(|k| ["install", "channel", "approvers", "people"].contains(&k.as_str()))));
     if !ok || v.as_object().is_none_or(|o| o.keys().any(|k| k != "chat")) {
         return Err(Error::BadRequest(
-            "expected {\"chat\": {\"install\": \"chi_…\", \"channel\": \"C…\", \"approvers\": [\"U…\"]}} (1-50 chat user ids who may decide) or {\"chat\": null}".into(),
+            "expected {\"chat\": {\"install\": \"chi_…\", \"channel\": \"C…\", \"approvers\": [\"U…\"], \"people\"?: {\"U…\": \"usr_…\"}}} (1-50 chat user ids who may decide, and the roll accounts of those who have one) or {\"chat\": null}".into(),
         ));
     }
     let v2 = json!({ "chat": chat });

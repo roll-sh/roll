@@ -659,7 +659,8 @@ secrets:reveal@production=2`, the overview's "Require several approvers…"):
   own tokens' requests, except as below). The operator's token (`operator`) and chat approvers
   (`slack:U…`) count only where a rule names them: anyone may hold the token, and a chat id isn't
   tied to an account, so one human could otherwise count twice, or approve their own token's
-  request from chat. A rule that names a chat id trusts the operator's choice of who's behind it.
+  request from chat. A chat approver the operator linked to their account ("Approvals in chat")
+  is that person, and counts as them.
 - A person named in `approvers` sees and decides the approvals naming them, admin or not.
 - An approver counts once; the person whose token asked never counts (as a change request's author
   can't approve it). A token made with the operator's token has no person: the operator approving
@@ -718,7 +719,10 @@ Approvals can also go to a Slack or Discord channel, through roll code's chat op
   approvals go to and from one of the approvers: not whoever else can see the channel (a Slack
   Connect guest, an install open to anyone), and not the install's member list, which the roll
   code owner manages rather than the operator. Anyone else is told so. `decided_by` is the
-  person (`slack:U123`, `discord:123…`).
+  person (`slack:U123`, `discord:123…`), or the roll account the operator linked them to
+  (`"people": {"U123": "usr_…"}`, `--approver U123=usr_…`, `U123=usr_…` on the approvals page):
+  a linked approver decides as that person, so they count toward the policy's approval rules
+  ("Two-person approvals") and never for their own token's request.
 - Once a day, the live tokens that expire within a week are posted there too (`expiry_digest`,
   from the hourly maintenance loop; one node posts it, the day claimed in the store).
 - Posting is best effort: an approval lives in roll (the dashboard, the API, `roll mcp approvals`);

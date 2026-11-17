@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accessRequest, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
+import { accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -188,6 +188,10 @@ describe("two-person approvals", () => {
     expect(accessRequest(asked)).toEqual({ for: "1h", reason: "drop scratch" });
     expect(accessRequest({ method: "DELETE" })).toBeNull();
     expect(rememberable(asked)).toBe(false);
+  });
+  it("reads chat approvers with the accounts some are linked to", () => {
+    expect(parseApprovers("U1=usr_ana, @U2 U1")).toEqual({ approvers: ["U1", "U2"], people: { U1: "usr_ana" } });
+    expect(approversText({ approvers: ["U1", "U2"], people: { U1: "usr_ana" } })).toBe("U1=usr_ana, U2");
   });
   it("names whoever is looking as an approval records them", () => {
     expect(deciderName({ kind: "operator", locked: true })).toBe("operator");

@@ -967,10 +967,13 @@ impl Access {
             }
             // Only the people the operator named: not everyone who can see the channel.
             let user = by.split_once(':').map_or(by.as_str(), |(_, u)| u);
-            let named = me.store.setting("notify").ok().flatten().is_some_and(|n| n["chat"]["approvers"].as_array().is_some_and(|a| a.iter().any(|v| v == user)));
+            let notify = me.store.setting("notify").ok().flatten().unwrap_or_default();
+            let named = notify["chat"]["approvers"].as_array().is_some_and(|a| a.iter().any(|v| v == user));
             if !named {
                 return Err(Error::Forbidden("you aren't one of the people roll's operator lets approve these".into()));
             }
+            // An approver the operator linked to their roll account decides as that person.
+            let by = notify["chat"]["people"][user].as_str().map_or(by, str::to_string);
             let r = me.decide(&approval, approve, &by, None);
             // Already decided or expired: bring the card up to date as well.
             if r.is_err()

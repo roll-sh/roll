@@ -440,7 +440,24 @@ export interface ChatTarget {
   install: string;
   channel: string;
   approvers: string[];
+  /** An approver's roll account: they decide as that person (they count toward the policy's approval rules). */
+  people?: Record<string, string>;
 }
+
+/** Approvers as typed (`U0123=usr_ana, U0456`): the chat ids, and the accounts some are linked to. */
+export function parseApprovers(text: string): { approvers: string[]; people: Record<string, string> } {
+  const approvers: string[] = [];
+  const people: Record<string, string> = {};
+  for (const raw of text.split(/[\s,]+/).map((s) => s.trim().replace(/^@/, "")).filter(Boolean)) {
+    const [id, user] = raw.split("=");
+    if (!approvers.includes(id)) approvers.push(id);
+    if (user) people[id] = user;
+  }
+  return { approvers, people };
+}
+
+/** The approvers as the form shows them (`U0123=usr_ana`). */
+export const approversText = (c: Pick<ChatTarget, "approvers" | "people">) => c.approvers.map((a) => (c.people?.[a] ? `${a}=${c.people[a]}` : a)).join(", ");
 
 /**
  * A machine client (docs/permissions.md, "Machine clients"): automation with no person that trades

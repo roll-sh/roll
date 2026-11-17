@@ -106,6 +106,21 @@ pub enum Token {
     },
 }
 
+/// `--approver` values: chat ids, and the roll accounts of those given as `U…=usr_…`.
+fn chat_approvers(given: &[String]) -> (Vec<String>, std::collections::BTreeMap<String, String>) {
+    let mut ids = Vec::new();
+    let mut people = std::collections::BTreeMap::new();
+    for a in given {
+        let (id, user) = a.split_once('=').map_or((a.as_str(), None), |(i, u)| (i, Some(u)));
+        let id = id.trim().trim_start_matches('@').to_string();
+        if let Some(u) = user {
+            people.insert(id.clone(), u.trim().to_string());
+        }
+        ids.push(id);
+    }
+    (ids, people)
+}
+
 /// `product[:action][@env,…]=N[/approver,…]` as a policy approval rule.
 fn approval_rule(s: &str) -> Result<Value, String> {
     let bad = || format!("{s:?}: product[:action][@env,…]=N[/approver,…], e.g. secrets:reveal@production=2");
@@ -581,6 +596,8 @@ pub enum Mcp {
         #[arg(long, requires = "install")]
         channel: Option<String>,
         /// A chat user id (Slack `U…`, a Discord user id) who may decide there; repeat it for more.
+        /// `U…=usr_…` links them to their roll account: they decide as that person (they count
+        /// toward the policy's approval rules, never for their own token's request).
         #[arg(long, requires = "install")]
         approver: Vec<String>,
         #[arg(long, conflicts_with_all = ["install", "channel"])]
@@ -1213,7 +1230,11 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
         Mcp::Notify { install, channel, approver, off } => {
             let v = match (install, channel, off) {
                 (Some(i), Some(c), _) => {
-                    let chat = json!({ "install": i, "channel": c.trim_start_matches('#'), "approvers": approver });
+                    let (ids, people) = chat_approvers(&approver);
+                    let mut chat = json!({ "install": i, "channel": c.trim_start_matches('#'), "approvers": ids });
+                    if !people.is_empty() {
+                        chat["people"] = json!(people);
+                    }
                     api.call(reqwest::Method::PUT, "/v1/access/notify", Some(json!({ "chat": chat }))).await?
                 }
                 (_, _, true) => api.call(reqwest::Method::PUT, "/v1/access/notify", Some(json!({ "chat": null }))).await?,
@@ -1224,7 +1245,8 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
             } else if v["chat"].is_null() {
                 println!("approvals go only to the dashboard and `roll mcp approvals`");
             } else {
-                let who: Vec<&str> = v["chat"]["approvers"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+                let people = &v["chat"]["people"];
+                let who: Vec<String> = v["chat"]["approvers"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).map(|u| people[u].as_str().map_or(u.to_string(), |p| format!("{u} ({p})"))).collect()).unwrap_or_default();
                 println!("approvals are also posted to {} in {}; decided there by {}", s(&v["chat"]["channel"]), s(&v["chat"]["install"]), who.join(", "));
             }
         }
@@ -1259,6 +1281,12 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_approvers_can_name_their_account() {
+        let (ids, people) = chat_approvers(&["U1=usr_ana".into(), "@U2".into()]);
+        assert_eq!((ids, people.get("U1").map(String::as_str), people.len()), (vec!["U1".to_string(), "U2".to_string()], Some("usr_ana"), 1));
+    }
 
     #[test]
     fn approval_rules_read_as_the_policy_takes_them() {
