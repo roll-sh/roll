@@ -227,6 +227,17 @@ free at once, so a delete moves the storage aside (`search-control` `Control::de
    row live (only if its claim still holds), then removes the kept copy. Under another name the
    password and API keys stay: the name is only the user, the key id's suffix and the host label.
    A restored cluster's point-in-time history starts at the restore (`restored_at`).
+   **Keys revoked meanwhile stay revoked.** The restore brings the cluster's security back as
+   it was, so a key revoked while the cluster was deleted (roll secrets or roll apps unlinking:
+   `DELETE …/{id}/keys/{key}`, `Control::revoke_link`) would work again. So that route, on a
+   deleted cluster its caller may see, keeps the revoke with the row (`search_revokes`, checked
+   against the row in the same transaction, at most 1,000 per cluster) and answers 204; the
+   restore applies them right after the row goes live, before it answers, and forgets each once
+   done. One that fails stays, and the purge sweep retries it every 10 minutes. This was chosen
+   over invalidating every link key at the restore: that would also kill the keys still linked,
+   whose managed values roll secrets keeps until their next rotation, and a user's own data
+   keys. It fails safe the same way: the route answers 204 only once the revoke is committed,
+   otherwise an error that roll secrets' sweeper retries (as for a live cluster).
 4. **Purge.** After `purge_at` a sweep (every 10 minutes; on a fleet one node at a time,
    `singleton:search-purge`, as garbage collection is placed) claims each due row the same way,
    removes the kept copy with `Store::delete_cluster` (commit points, state and pins; segments

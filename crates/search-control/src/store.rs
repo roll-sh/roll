@@ -173,6 +173,19 @@ pub enum Inserted {
     Over(Over),
 }
 
+/// What [`Store::record_revoke`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Recorded {
+    /// Kept with the deleted cluster, for its restore.
+    Yes,
+    /// The cluster is live (restored meanwhile): revoke it on the cluster.
+    Live,
+    /// No such cluster any more (purged, or never).
+    Gone,
+    /// The cluster keeps as many as it may.
+    Full,
+}
+
 /// The clusters a person owns, as [`Store::list_owned`] lists them.
 const OWNED: &str = "deleting = 0 AND deleted_at IS NULL AND owner = ?1";
 
@@ -281,6 +294,8 @@ impl Store {
         db.add_column("search_clusters", "claimed_at", "INTEGER")?;
         db.add_column("search_clusters", "restored_at", "INTEGER")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_purge ON search_clusters (purge_at) WHERE deleted_at IS NOT NULL")?;
+        // Credentials revoked while their cluster was deleted, for its restore to revoke.
+        db.ensure_schema("CREATE TABLE IF NOT EXISTS search_revokes (cluster_id TEXT NOT NULL, credential TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (cluster_id, credential))")?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
         Ok(Self { db })
@@ -292,16 +307,10 @@ impl Store {
     /// cap can't both pass.
     pub async fn insert(&self, c: &SearchCluster, caps: Caps) -> anyhow::Result<Inserted> {
         let r = self.db.write(|x| {
-            if let Some(owner) = &c.owner {
-                if caps.clusters > 0 {
-                    let count: i64 = x.query_row(&format!("SELECT COUNT(*) FROM search_clusters WHERE {OWNED}"), params![owner], |r| r.get(0))?;
-                    if count >= caps.clusters {
-                        return Ok(Inserted::Over(Over::Clusters { cap: caps.clusters, count }));
-                    }
-                }
-                if let Some(over) = over_always_on(x, owner, None, c.idle_timeout_s, caps)? {
-                    return Ok(Inserted::Over(over));
-                }
+            if let Some(owner) = &c.owner
+                && let Some(over) = over_caps(x, owner, c.idle_timeout_s, caps)?
+            {
+                return Ok(Inserted::Over(over));
             }
             x.execute(
                 &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"),
@@ -331,6 +340,13 @@ impl Store {
             Err(e) if e.is_unique_violation() => Ok(Inserted::Taken),
             r => Ok(r?),
         }
+    }
+
+    /// Whether one more cluster of `owner` (`idle_timeout_s`: its setting) is past one of `caps`,
+    /// as [`Store::insert`] counts it. Only a quick refusal before work an insert would undo: the
+    /// insert's own count decides.
+    pub async fn check_caps(&self, owner: &str, idle_timeout_s: i64, caps: Caps) -> anyhow::Result<Option<Over>> {
+        Ok(self.db.read(|x| over_caps(x, owner, idle_timeout_s, caps))?)
     }
 
     /// Saves the settings and the password (not the metering figures: see [`Store::set_stats`]).
@@ -537,16 +553,10 @@ impl Store {
                 })
                 .optional()?;
             let Some((owner, idle_timeout_s)) = row else { return Ok::<_, code_sql::Error>(Ok(false)) };
-            if let Some(owner) = &owner {
-                if caps.clusters > 0 {
-                    let count: i64 = x.query_row(&format!("SELECT COUNT(*) FROM search_clusters WHERE {OWNED}"), params![owner], |r| r.get(0))?;
-                    if count >= caps.clusters {
-                        return Ok(Err(Over::Clusters { cap: caps.clusters, count }));
-                    }
-                }
-                if let Some(over) = over_always_on(x, owner, None, idle_timeout_s, caps)? {
-                    return Ok(Err(over));
-                }
+            if let Some(owner) = &owner
+                && let Some(over) = over_caps(x, owner, idle_timeout_s, caps)?
+            {
+                return Ok(Err(over));
             }
             let n = x.execute(
                 "UPDATE search_clusters SET deleted_at = NULL, purge_at = NULL, deleted_name = NULL, stored_as = NULL, claim = NULL, claimed_at = NULL,
@@ -565,8 +575,60 @@ impl Store {
             }
             x.execute("DELETE FROM search_usage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_storage WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1", params![id])?;
             Ok(true)
         })?)
+    }
+
+    /// Keeps `credential` (what `Control::revoke_link` takes) to revoke when deleted cluster `id`
+    /// is restored, unless it already keeps `max`. Checked against the row in the same
+    /// transaction, so a restore that flips the row live after this reads it
+    /// ([`Store::revokes`]), and one that flipped it before makes this [`Recorded::Live`].
+    pub async fn record_revoke(&self, id: &str, credential: &str, at: i64, max: i64) -> anyhow::Result<Recorded> {
+        Ok(self.db.write(|x| {
+            let deleted: Option<Option<i64>> = x.query_row("SELECT deleted_at FROM search_clusters WHERE id = ?1", params![id], |r| r.get(0)).optional()?;
+            match deleted {
+                None => return Ok::<_, code_sql::Error>(Recorded::Gone),
+                Some(None) => return Ok(Recorded::Live),
+                Some(Some(_)) => {}
+            }
+            let kept: Option<i64> = x.query_row("SELECT 1 FROM search_revokes WHERE cluster_id = ?1 AND credential = ?2", params![id, credential], |r| r.get(0)).optional()?;
+            if kept.is_some() {
+                return Ok(Recorded::Yes);
+            }
+            let n: i64 = x.query_row("SELECT COUNT(*) FROM search_revokes WHERE cluster_id = ?1", params![id], |r| r.get(0))?;
+            if n >= max {
+                return Ok(Recorded::Full);
+            }
+            x.execute("INSERT INTO search_revokes (cluster_id, credential, at) VALUES (?1, ?2, ?3)", params![id, credential, at])?;
+            Ok(Recorded::Yes)
+        })?)
+    }
+
+    /// The revokes live cluster `id` still has to apply ([`Store::record_revoke`]), oldest first.
+    /// Read with the row in a write transaction, so it can't miss one recorded before the row
+    /// went live.
+    pub async fn revokes(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self.db.write(|x| {
+            x.query(
+                "SELECT r.credential FROM search_revokes r JOIN search_clusters c ON c.id = r.cluster_id WHERE r.cluster_id = ?1 AND c.deleting = 0 AND c.deleted_at IS NULL ORDER BY r.at, r.credential",
+                params![id],
+                |r| r.get(0),
+            )
+        })?)
+    }
+
+    /// Live clusters with revokes still to apply (a restore that couldn't apply them all).
+    pub async fn clusters_with_revokes(&self) -> anyhow::Result<Vec<String>> {
+        Ok(self.db.read(|x| {
+            x.query("SELECT DISTINCT r.cluster_id FROM search_revokes r JOIN search_clusters c ON c.id = r.cluster_id WHERE c.deleting = 0 AND c.deleted_at IS NULL", params![], |r| r.get(0))
+        })?)
+    }
+
+    /// A revoke applied: forgotten.
+    pub async fn forget_revoke(&self, id: &str, credential: &str) -> anyhow::Result<()> {
+        self.db.write(|x| x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1 AND credential = ?2", params![id, credential]))?;
+        Ok(())
     }
 
     /// Deletes a cluster's rows.
@@ -574,7 +636,8 @@ impl Store {
         self.db.write(|x| {
             x.execute("DELETE FROM search_clusters WHERE id = ?1", params![id])?;
             x.execute("DELETE FROM search_usage WHERE cluster_id = ?1", params![id])?;
-            x.execute("DELETE FROM search_storage WHERE cluster_id = ?1", params![id])
+            x.execute("DELETE FROM search_storage WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1", params![id])
         })?;
         Ok(())
     }
@@ -651,6 +714,17 @@ impl Store {
 /// Whether `owner` may have one more always-on cluster: `None` unless `idle_timeout_s` is 0, the
 /// cap is set, and (for an existing cluster `id`) it isn't always-on already, so a cluster that
 /// already is keeps its other settings changeable when the cap is lowered.
+/// Whether one more cluster of `owner` (with `idle_timeout_s`) is past one of `caps`.
+fn over_caps(x: &code_sql::Conn<'_>, owner: &str, idle_timeout_s: i64, caps: Caps) -> code_sql::Result<Option<Over>> {
+    if caps.clusters > 0 {
+        let count: i64 = x.query_row(&format!("SELECT COUNT(*) FROM search_clusters WHERE {OWNED}"), params![owner], |r| r.get(0))?;
+        if count >= caps.clusters {
+            return Ok(Some(Over::Clusters { cap: caps.clusters, count }));
+        }
+    }
+    over_always_on(x, owner, None, idle_timeout_s, caps)
+}
+
 fn over_always_on(x: &code_sql::Conn<'_>, owner: &str, id: Option<&str>, idle_timeout_s: i64, caps: Caps) -> code_sql::Result<Option<Over>> {
     if idle_timeout_s != 0 || caps.always_on <= 0 {
         return Ok(None);

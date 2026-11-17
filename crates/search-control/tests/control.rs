@@ -386,7 +386,10 @@ async fn people_are_held_to_their_cluster_caps() {
     use reqwest::Method;
     let e = env_with(|c| c.person_caps = search_control::store::Caps { clusters: 3, always_on: 1 }).await;
     let create = |name: &str, idle: Option<i64>| json!({ "name": name, "idle_timeout_s": idle });
-    assert_eq!(e.call_as("alice", Method::POST, "/v1/search/clusters", Some(create("a1", None))).await.0, 200);
+    let (s, a1) = e.call_as("alice", Method::POST, "/v1/search/clusters", Some(create("a1", None))).await;
+    assert_eq!(s, 200, "{a1}");
+    let (u, p) = creds(&a1);
+    assert_eq!(e.es(&u, &p, Method::PUT, "/notes/_doc/1?refresh=true", Some(json!({"t": "x"}))).await.0, 201);
     assert_eq!(e.call_as("alice", Method::POST, "/v1/search/clusters", Some(create("a2", Some(0)))).await.0, 200);
     let (_, info) = e.call_as("alice", Method::GET, "/v1/search", None).await;
     assert_eq!(info["caps"], json!({ "clusters": 3, "always_on": 1 }));
@@ -400,13 +403,19 @@ async fn people_are_held_to_their_cluster_caps() {
     assert_eq!(e.call_as("alice", Method::PATCH, "/v1/search/clusters/a2", Some(json!({ "max_in_flight": 8 }))).await.0, 200);
 
     // A branch counts: the third cluster is one, and past the cap neither a create nor a branch passes.
+    let branched = e.control.data.stats().branches;
     assert_eq!(e.call_as("alice", Method::POST, "/v1/search/clusters/a1/branches", Some(json!({ "name": "a1-dev" }))).await.0, 200);
+    assert_eq!(e.control.data.stats().branches, branched + 1, "a branch of a1 copies its storage");
     let (s, v) = e.call_as("alice", Method::POST, "/v1/search/clusters", Some(create("a4", None))).await;
     let msg = v["error"].as_str().unwrap_or_default();
     assert!(s == 409 && msg.starts_with("you have 3 search clusters") && msg.contains("may have 3") && msg.contains("--search-max-clusters-per-person"), "{s} {v}");
+    let before = e.control.data.stats();
     let (s, v) = e.call_as("alice", Method::POST, "/v1/search/clusters", Some(json!({ "name": "a1-x", "parent": "a1" }))).await;
     assert_eq!((s, v["error"].as_str()), (409, Some(msg)));
     assert!(e.control.store.by_name("a1-x").await.unwrap().is_none());
+    // Refused before anything was written to storage (or removed again).
+    let after = e.control.data.stats();
+    assert_eq!((after.branches, after.clusters_deleted), (before.branches, before.clusters_deleted));
 
     // An admin isn't capped, even cutting a branch that is alice's or switching hers to always-on.
     let (s, cut) = e.call_as("admin", Method::POST, "/v1/search/clusters", Some(json!({ "name": "a1-fix", "parent": "a1" }))).await;
@@ -1667,6 +1676,47 @@ async fn deleted_clusters_restore_within_their_window() {
     let (bu, bp) = creds(&other);
     let (s, v) = e.es(&bu, &bp, reqwest::Method::GET, "/_mapping", None).await;
     assert_eq!((s, index_names(&v)), (200, Vec::<String>::new()));
+    e.control.shutdown().await.unwrap();
+}
+
+/// A link removed while its cluster is deleted stays removed after a restore: roll secrets'
+/// unlink (the keys route) and an app's (`revoke_link`) reach a kept cluster, and the restore
+/// revokes what they named before it answers. A key still linked works again.
+#[tokio::test]
+async fn a_link_removed_while_deleted_stays_removed_after_a_restore() {
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "relink"})).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let unlinked = e.post(&format!("/v1/search/clusters/{id}/keys"), json!({"name": "roll secrets prod ES_KEY", "access": "data"})).await;
+    let linked = e.post(&format!("/v1/search/clusters/{id}/keys"), json!({"name": "roll secrets dev ES_KEY", "access": "data"})).await;
+    let app = e.control.mint_link(&id, "svc_1").await.unwrap();
+    let app_key = app.vars.iter().find(|(k, _)| k == "ELASTICSEARCH_API_KEY").unwrap().1.clone();
+    let count = |key: &str| {
+        let r = e.http.get(format!("{}/notes/_count", e.es)).header("Authorization", format!("ApiKey {key}")).send();
+        async move { r.await.unwrap().status().as_u16() }
+    };
+    let (s, _) = e.call(reqwest::Method::PUT, &format!("/v1/search/clusters/{id}/indices/notes"), Some(json!({}))).await;
+    assert_eq!(s, 200);
+    for k in [unlinked["api_key"].as_str().unwrap(), linked["api_key"].as_str().unwrap(), &app_key] {
+        assert_eq!(count(k).await, 200);
+    }
+
+    // Deleted, then unlinked as roll secrets and roll apps do it.
+    assert_eq!(e.call(reqwest::Method::DELETE, &format!("/v1/search/clusters/{id}"), None).await.0, 200);
+    let (s, v) = e.call(reqwest::Method::DELETE, &format!("/v1/search/clusters/{id}/keys/{}", unlinked["id"].as_str().unwrap()), None).await;
+    // Kept with the cluster for its restore (204). Someone who can't see it, or a cluster
+    // that isn't there, is still 404.
+    assert_eq!(s, 204, "{v}");
+    assert_eq!(e.call_as("bob", reqwest::Method::DELETE, &format!("/v1/search/clusters/{id}/keys/k1"), None).await.0, 404);
+    assert_eq!(e.call(reqwest::Method::DELETE, "/v1/search/clusters/srch_nothere/keys/k1", None).await.0, 404);
+    e.control.revoke_link(&id, &app.kept).await.unwrap();
+
+    // Restored: the unlinked keys stay dead, the linked one works.
+    let (s, r) = e.call(reqwest::Method::POST, &format!("/v1/search/clusters/{id}/restore"), None).await;
+    assert_eq!(s, 200, "{r}");
+    assert_eq!(count(unlinked["api_key"].as_str().unwrap()).await, 401, "roll secrets' unlinked key");
+    assert_eq!(count(&app_key).await, 401, "an app's unlinked key");
+    assert_eq!(count(linked["api_key"].as_str().unwrap()).await, 200, "a key still linked");
     e.control.shutdown().await.unwrap();
 }
 

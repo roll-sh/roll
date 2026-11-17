@@ -27,7 +27,7 @@
 
 use crate::meter::{Meter, MeterHooks, engine_figures, index_figures, now_ms};
 use crate::pricing::{Cost, Pricing};
-use crate::store::{Caps, DeletedCluster, Inserted, Over, SearchCluster, Store, UsageTotals};
+use crate::store::{Caps, DeletedCluster, Inserted, Over, Recorded, SearchCluster, Store, UsageTotals};
 pub use crate::wake::SqlCatalog;
 use crate::wake::{ControlHooks, GuardedStores, LOAD_WAIT, Wakes};
 use base64::Engine;
@@ -233,6 +233,9 @@ const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
 /// How long a restore's or purge's claim on a deleted cluster holds before another node may take
 /// it over (the node that held it died).
 const CLAIM_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// Most revokes a deleted cluster keeps for its restore ([`Control::delete_key`]).
+const MAX_KEPT_REVOKES: i64 = 1000;
 
 /// The name a deleted cluster's storage is kept under: never a cluster name (those have no `_`),
 /// and new for every delete, so a copy from an earlier delete of the same cluster is never
@@ -783,6 +786,13 @@ impl Control {
         );
         self.check(&c)?;
         self.check_free(name).await?;
+        // Refused by a cap before anything is copied (the insert's count, in its transaction,
+        // still decides).
+        if let Some(owner) = &c.owner
+            && let Some(o) = self.store.check_caps(owner, c.idle_timeout_s, caps).await?
+        {
+            return Err(over(o));
+        }
         // A parent that was never written to has nothing to copy: the branch starts empty too.
         if self.data.cluster_exists(&p.name).await? {
             let r = match at {
@@ -1207,6 +1217,9 @@ impl Control {
                 return Err(over(o));
             }
         }
+        // Credentials revoked while it was deleted, before anything else (the sweep retries a
+        // failure).
+        self.apply_revokes(&d.cluster.id).await;
         if had_data && let Err(e) = self.data.delete_cluster(&d.stored_as).await {
             tracing::warn!(cluster = target, kept = d.stored_as, error = %e, "removing a restored search cluster's kept copy failed");
         }
@@ -1272,6 +1285,14 @@ impl Control {
                     Ok(0) => {}
                     Ok(n) => tracing::info!(purged = n, "purged deleted search clusters"),
                     Err(e) => tracing::warn!(error = %e, "purging deleted search clusters failed"),
+                }
+                match c.store.clusters_with_revokes().await {
+                    Ok(ids) => {
+                        for id in ids {
+                            c.apply_revokes(&id).await;
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "listing restored search clusters' revokes failed"),
                 }
             }
         });
@@ -1449,22 +1470,85 @@ impl Control {
     }
 
     /// Revokes what [`Self::mint_link`] made (`kept`), at once. Gone already (the key, the
-    /// user, the cluster) is done.
+    /// user, the cluster) is done. On a deleted cluster it is kept for the restore, which
+    /// revokes it ([`Self::keep_revoke`]).
     pub async fn revoke_link(&self, id: &str, kept: &str) -> Result<()> {
+        if !matches!(kept.split_once(':'), Some(("key" | "osuser" | "user", _))) {
+            return Err(ControlError::Invalid(format!("not a link credential: {kept:?}")));
+        }
+        match self.get(id).await {
+            Ok(c) => self.revoke_on(&c, kept).await,
+            Err(ControlError::NotFound(_)) => self.keep_revoke(id, kept).await.map(drop),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A revoke (what [`Self::revoke_link`] takes) on deleted cluster `id`: a restore brings the
+    /// cluster's security back as it was, so it is kept with the row and the restore applies it
+    /// before it answers ([`Self::apply_revokes`]). `false`: `id` is no deleted cluster (purged,
+    /// or never was).
+    async fn keep_revoke(&self, id: &str, credential: &str) -> Result<bool> {
+        if credential.len() > 512 {
+            return Ok(false);
+        }
+        match self.store.record_revoke(id, credential, now(), MAX_KEPT_REVOKES).await? {
+            Recorded::Yes => Ok(true),
+            Recorded::Gone => Ok(false),
+            Recorded::Full => Err(ControlError::Conflict(format!(
+                "deleted search cluster {id} keeps {MAX_KEPT_REVOKES} revoked keys for its restore already: restore it, then revoke"
+            ))),
+            // Restored meanwhile: revoke it there. Hidden while a delete runs (a fleet's
+            // `deleting`): retried, never "gone", or the restore would bring it back.
+            Recorded::Live => match self.get(id).await {
+                Ok(c) => self.revoke_on(&c, credential).await.map(|()| true),
+                Err(ControlError::NotFound(_)) => Err(ControlError::Conflict(format!("search cluster {id} is being deleted; retry"))),
+                Err(e) => Err(e),
+            },
+        }
+    }
+
+    /// Applies the revokes kept while cluster `id` was deleted, forgetting each once it is done
+    /// (gone already counts). One that fails stays for the purge sweep to try again.
+    pub(crate) async fn apply_revokes(&self, id: &str) {
+        let pending = match self.store.revokes(id).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(cluster = id, error = %e, "reading a restored search cluster's revokes failed");
+                return;
+            }
+        };
+        if pending.is_empty() {
+            return;
+        }
         let c = match self.get(id).await {
             Ok(c) => c,
-            Err(ControlError::NotFound(_)) => return Ok(()),
-            Err(e) => return Err(e),
+            Err(e) => {
+                tracing::warn!(cluster = id, error = %e, "revoking a restored search cluster's keys failed");
+                return;
+            }
         };
+        for credential in pending {
+            let r = match self.revoke_on(&c, &credential).await {
+                Ok(()) => self.store.forget_revoke(id, &credential).await.map_err(ControlError::from),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = r {
+                tracing::warn!(cluster = c.name, error = %e, "revoking a key removed while its search cluster was deleted failed; retried");
+            }
+        }
+    }
+
+    /// [`Self::revoke_link`] on live cluster `c`.
+    async fn revoke_on(&self, c: &SearchCluster, kept: &str) -> Result<()> {
         match kept.split_once(':') {
-            Some(("key", key_id)) => match self.delete_key(&c.id, key_id).await {
+            Some(("key", key_id)) => match self.delete_key_on(c, key_id).await {
                 Ok(()) | Err(ControlError::NotFound(_)) => Ok(()),
                 Err(e) => Err(e),
             },
             Some(("osuser", name)) => {
                 let api = "/_plugins/_security/api";
                 for path in [format!("{api}/internalusers/{name}"), format!("{api}/roles/{name}")] {
-                    let r = self.call(&c, EsRequest::new("DELETE", &path)).await;
+                    let r = self.call(c, EsRequest::new("DELETE", &path)).await;
                     if r.status >= 300 && r.status != 404 {
                         return Err(ControlError::Internal(anyhow::anyhow!("removing link user {name} of cluster {} failed ({})", c.name, r.status)));
                     }
@@ -1472,7 +1556,7 @@ impl Control {
                 Ok(())
             }
             Some(("user", user)) => {
-                let r = self.call(&c, EsRequest::new("DELETE", &format!("/_security/user/{}", urlencoding::encode(user)))).await;
+                let r = self.call(c, EsRequest::new("DELETE", &format!("/_security/user/{}", urlencoding::encode(user)))).await;
                 if r.status < 300 || r.status == 404 { Ok(()) } else { Err(ControlError::Internal(anyhow::anyhow!("removing link user {user} of cluster {} failed ({})", c.name, r.status))) }
             }
             _ => Err(ControlError::Invalid(format!("not a link credential: {kept:?}"))),
@@ -1533,17 +1617,34 @@ impl Control {
     }
 
     /// Revokes API key `key_id` of cluster `id` (`NotFound` when it doesn't exist or was
-    /// revoked already).
+    /// revoked already). On a deleted cluster (by its id) it is kept for the restore, which
+    /// revokes it ([`Self::keep_revoke`]): roll secrets unlinking meanwhile must not see "gone"
+    /// and leave a key the restore brings back.
     pub async fn delete_key(&self, id: &str, key_id: &str) -> Result<()> {
-        let c = self.get(id).await?;
+        let c = match self.get(id).await {
+            Ok(c) => c,
+            Err(ControlError::NotFound(m)) => {
+                let kept = match self.store.get_deleted(id).await? {
+                    // Only what the route could revoke on the live cluster.
+                    Some(d) if d.cluster.flavor != "opensearch" || key_id.starts_with(OS_KEY_PREFIX) => self.keep_revoke(id, &format!("key:{key_id}")).await?,
+                    _ => false,
+                };
+                return if kept { Ok(()) } else { Err(ControlError::NotFound(m)) };
+            }
+            Err(e) => return Err(e),
+        };
+        self.delete_key_on(&c, key_id).await
+    }
+
+    async fn delete_key_on(&self, c: &SearchCluster, key_id: &str) -> Result<()> {
         if c.flavor == "opensearch" {
             // Only users the keys route made: never another internal user.
             let api = "/_plugins/_security/api";
             if !key_id.starts_with(OS_KEY_PREFIX) {
                 return Err(ControlError::NotFound(format!("no API key {key_id} on cluster {}", c.name)));
             }
-            let r = self.call(&c, EsRequest::new("DELETE", &format!("{api}/internalusers/{}", urlencoding::encode(key_id)))).await;
-            let _ = self.call(&c, EsRequest::new("DELETE", &format!("{api}/roles/{}", urlencoding::encode(key_id)))).await;
+            let r = self.call(c, EsRequest::new("DELETE", &format!("{api}/internalusers/{}", urlencoding::encode(key_id)))).await;
+            let _ = self.call(c, EsRequest::new("DELETE", &format!("{api}/roles/{}", urlencoding::encode(key_id)))).await;
             return match r.status {
                 s if s < 300 => Ok(()),
                 404 => Err(ControlError::NotFound(format!("no API key {key_id} on cluster {}", c.name))),
@@ -1551,7 +1652,7 @@ impl Control {
             };
         }
         let body = serde_json::to_vec(&json!({ "ids": [key_id] })).unwrap_or_default();
-        let resp = self.call(&c, EsRequest::json("DELETE", "/_security/api_key", body)).await;
+        let resp = self.call(c, EsRequest::json("DELETE", "/_security/api_key", body)).await;
         let v: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);
         let revoked = v["invalidated_api_keys"].as_array().is_some_and(|a| a.iter().any(|k| k.as_str() == Some(key_id)));
         match (resp.status, revoked) {
