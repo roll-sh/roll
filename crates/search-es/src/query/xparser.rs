@@ -744,8 +744,12 @@ impl<'a> XParser<'a> {
         // value is written out first), so they're only computed for the messages that use them.
         while let Some(name) = self.next_field_name() {
             let idx = fields.iter().position(|f| f.name == name || f.deprecated.contains(&name));
+            // An unknown name is reported at the name, but only after its value token is read:
+            // the enclosing object's "failed to parse field" sits where the parser stopped.
+            let name_loc = idx.is_none().then(|| self.token_location());
+            let token = self.next_token().unwrap_or(Token::EndObject);
             let Some(idx) = idx else {
-                let name_loc = self.token_location();
+                let name_loc = name_loc.unwrap_or((1, 1));
                 let mut candidates: Vec<&str> = Vec::new();
                 for f in fields {
                     candidates.push(f.name);
@@ -757,7 +761,6 @@ impl<'a> XParser<'a> {
                     format!("[{parser_name}] unknown field [{name}]{}", crate::rest::params::suggest(name, &candidates)),
                 ));
             };
-            let token = self.next_token().unwrap_or(Token::EndObject);
             let field = fields[idx];
             // `ParseField.match` gets the location supplier after the value token was read; only
             // a deprecated name's warning reads it.
