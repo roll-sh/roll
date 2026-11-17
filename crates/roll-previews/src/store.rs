@@ -2224,7 +2224,13 @@ impl Store {
         let share_url = url.as_deref().map(share);
         let (schema_changes, schema_risks, release) = self.release_facts(&r.id)?;
         let kept_until = self.kept_until(&r.id)?;
-        let pull = self.git_pull(&r.id)?;
+        // Its page as a link only when it's `https://` (it's kept whole to tell its repository).
+        let pull = self.git_pull(&r.id)?.map(|mut g| {
+            if !g.url.starts_with("https://") {
+                g.url.clear();
+            }
+            g
+        });
         let goes_at = self.goes_at(&r.id)?;
         // The screenshot row in one read, without its images.
         let f = self.shot_facts(&r.id)?;
