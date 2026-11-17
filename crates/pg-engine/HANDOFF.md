@@ -13903,5 +13903,10 @@ Then, rebased onto `262443ded`, `tools/quick-check.sh` on `bff4d91c1` (profile v
 clippy (16 warnings, none new in changed files), tests 434 passed in 31 binaries (golden, wire,
 wire_waits and the 28 the diff maps to), crash seeds 1-3 x 2 and power_cut_at_every_point,
 regress 51,148 / 51,150 with 0 newly differing, isolation 1647/1648, pg_dump 14609 passed.
-Handed in as `cand/a240` for the batch train.
+Handed in as `cand/a240` for the batch train. Its checked stage (`--profile verify-checked`,
+debug assertions) failed in `info_schema_rows`: `system::row_count`'s count of
+information_schema.columns still took the materialized views' columns the relation maps count
+(`RelRows::live`, stored in the catalog header, so left as it is): the count now subtracts
+them where it is read. `cargo test --profile verify-checked -p pg-engine --test wire`: 74 passed;
+quick-check again on the rebased tree before handing it in again.
 
