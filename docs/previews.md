@@ -260,7 +260,9 @@ behind the `Apps` trait:
   - Every variable of a link to a branched resource comes from the branch, under roll apps'
     names (a stream's `KAFKA_BROKERS`/`KAFKA_USERNAME`/`KAFKA_PASSWORD`, a bucket's
     `AWS_ENDPOINT_URL`, a search cluster's `ELASTICSEARCH_API_KEY` or `OPENSEARCH_URL`/
-    `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD`, from the branch's login), or is set blank when
+    `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD`: the branch's data-only key or user, made with the
+    branch through roll search's keys route (`access: data`), with `ELASTICSEARCH_URL` then carrying
+    no login, so code that needs more than production's link fails in its preview too), or is set blank when
     the branch has nothing for it (a Redis branch gives its `REDIS_REST_URL`/`REDIS_REST_TOKEN`
     too). Never production's: until 2026-11-16 a name that differed
     from the branch's kept production's value, so a stream's or an OpenSearch cluster's preview
@@ -323,7 +325,7 @@ behind the `Apps` trait:
      | Stream | `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` |
      | Queue | `AMQP_URL` |
      | Tasks | `ROLL_TASKS_URL`, `ROLL_TASKS_TOKEN` |
-     | Search | `ELASTICSEARCH_URL` |
+     | Search | `ELASTICSEARCH_URL` (the branch's own login in it), and a data-only credential of the branch as production's link gets: `ELASTICSEARCH_API_KEY`, or `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD` on OpenSearch |
 
      With two resources of a kind, the first one takes the plain name and the others add
      `_<NAME>` (`DATABASE_URL_ANALYTICS`).
