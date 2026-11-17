@@ -526,6 +526,13 @@ async fn accept(hub: Arc<Gateways>, id: String, req: Request, guard: Guard) -> R
     let operator = roll_auth::Operator::on(&parts.extensions);
     let user = parts.extensions.get::<roll_auth::SignedIn>().cloned();
     let grant = roll_auth::Grant::on(&parts.extensions).cloned();
+    // Only the gateway's own credential opens its link: a token whose rule names it, or a workload
+    // identity's login. Never a person's session (a WebSocket upgrade is a GET, with no CSRF check,
+    // and a session would be checked once and then outlive a sign-out) nor the operator's token
+    // (make the gateway its token instead). A grant is looked up again on every stream.
+    if grant.is_none() {
+        return refuse(StatusCode::UNAUTHORIZED, "a gateway connects with its own token or a workload identity's login, never a session or the operator's token");
+    }
     let (s, i, u, g) = (secrets.clone(), id.clone(), user.clone(), grant.clone());
     match tokio::task::spawn_blocking(move || s.gateway_link(&i, operator, u.as_ref(), g.as_ref())).await {
         Ok(Ok(_)) => {}
@@ -829,6 +836,9 @@ mod tests {
     async fn a_gateway_reaches_only_its_allow_list_holds_a_window_for_a_slow_reader_and_drops_at_once_when_revoked_or_deleted() {
         let r = Rolld::start().await;
         let (gw, token) = r.gateway("vpc").await;
+        // No grant (a person's session, the operator's token): the link isn't opened.
+        let refused = r.http.get(format!("{}/v1/secrets/gateways/{gw}/connect", r.url)).send().await.unwrap();
+        assert_eq!(refused.status(), reqwest::StatusCode::UNAUTHORIZED, "only the gateway's own token or login opens its link");
         let echo = echo_server().await;
         let written = Arc::new(AtomicUsize::new(0));
         let flood = flood_server(written.clone()).await;
