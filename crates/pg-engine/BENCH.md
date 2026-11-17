@@ -285,6 +285,54 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Analytic CPU, round 4 (2026-11-17, agent 251)
+
+HANDOFF "Analytic CPU, round 4" has what changed. Lane C (servers in containers on CPUs
+14,15,32,33, `--memory 8g`; clients on 16,17,34,35), TPC-H SF1, a 2 GB cache and
+`max_parallel_workers_per_gather=2`, `max_parallel_workers=8` on all three (pgrust's set by
+ALTER SYSTEM and a restart, checked with SHOW). **base** is `6d3b7e9e5`; **n1** the typed walk,
+filters and lanes on it, **n2** n1 with the batch sums and index-chunk fills, **n5** n2 with
+the trim, dropped runs, bitmap runs a row at a time and the key filter (the candidate's code,
+before its rebase onto `6913fd09c`). Plain dist builds (`tools/dist.sh`, line tables) of each
+commit in one build worktree. Harness: agent 245's (`~/.cache/a251/tpch/scripts/`: a pass is
+a fresh engine on the restored data directory, a warm-up of the 22, then per query its runs in
+one `perf stat -e instructions:u,cycles:u` window), the engine stopped and started only under
+the lane lock (a profiling job of this round that didn't killed a pass; that pass is left out).
+
+### Whole-run profiles by function class (one pass of the 22 after a warm-up; `perf record -e instructions:u -c 200003`; % of each server's user instructions)
+
+| class | roll base | roll n5 | PostgreSQL 18.6 |
+|---|---|---|---|
+| all, G | 147.5 | 126.9 | 160.9 |
+| row decode (column batches; rows to `Value`s) | 30.7 (`Pre::decode` 14.2) | 26.2 (`Pre::decode` 13.2) | 5.9 (deform, detoast) |
+| store scan read (blocks, merge, batch fill) | 12.4 | 13.7 | 11.7 (buffers, pages) |
+| expression evaluation | 9.7 | 8.7 | 18.5, and JIT code 13.4 |
+| hash join build and probe | 6.8 | 8.6 | 4.2 |
+| allocation | 6.4 | 7.0 | 8.1, and musl 5.6 |
+| index scans, point gets | 6.0 | 6.3 | 10.4 |
+| aggregation state, groups | 5.8 | 7.0 | 6.5 |
+| memcmp | 5.7 | 6.3 | |
+| `Value` drops and clones | 4.6 | 5.2 | |
+| tuple routing (workers, leader) | 3.2 | 2.5 | 0.5 |
+| memcpy | 2.8 | 2.8 | |
+| visibility | 0.6 | 0.6 | 2.5 |
+| sort | 0.6 | 0.6 | 0.9 |
+
+pgrust, 83.7 G (its binary is stripped: by thread and module): its runtime in the parallel
+workers 57.0%, in the backend 15.6%, JIT code 19.2%, its pool purge thread 6.4%.
+
+### The changes, gated (user instructions a run, % per pair; plain dist, 5 runs a pass)
+
+| change | query: instructions % per pair | cycles % per pair |
+|---|---|---|
+| n1 against base (3 pairs; foreign 0.38-0.76 cores) | q06 -23.9 x3, q12 -20.4 / -20.3 / -20.3, q01 -15.5 x3, q10 -14.4 x3, q05 -7.2 / -7.6 / -7.6, q03 -5.0 / -5.1 / -5.1, q19 -4.0 / -4.0 / -3.9, q18 -2.9 / -3.1 / -3.2, q14 -1.9 / -2.2 / -2.2, q09 -0.6 / -0.9 / -0.8; the 10 -9.1 / -9.2 / -9.2 | q06 -27 / -24 / -20, q12 -18 / -17 / -11, q01 -18 / -12 / -8, q10 -11 / -9 / -5; the 10 -9.0 / -4.7 / -1.4 |
+| n1 against base, the 22 (2 rounds, 3 runs a pass; one n1 pass at 2.46 foreign cores) | q15 -19.5 x2, q21 -17.5, q04 -6.8 / -6.7, q13 -6.2 / -5.0, q17 -5.6 / +0.3, q22 -2.7, q16 -1.8 / +0.1, q02 -1.2 / -1.1, q08 -1.2 / -1.3, q07 -0.7 / -0.9, q20 -1.0, q11 -0.1 / +0.5; the 22 -8.9 / -9.3 | |
+| n2 against n1 (2 pairs) | q18 -20.4 x2, q01 -5.0 x2, q14 +0.4 / +0.6, q06 / q15 / q17 / q21 within +-0.7 | q18 -24.1 / -23.8 |
+| n5 against n2 (3 pairs; foreign 0.59-1.12) | q12 -4.7 / -4.6 / -4.6, q10 -2.8 / -2.8 / -2.7, q17 -2.1 / -2.4 / -1.3, q14 +0.4 / +0.4 / +1.9, q03 / q05 / q06 / q09 / q19 / q21 within +-1.1 | q21 -2.9 / -8.3 / -7.3, q17 -4.3 / -9.9 / -1.5 |
+| dropped: the walk's rows in a loop of their own (n3 against n2, 3 pairs) | q21 +2.1 x2, q12 +1.9 / +2.1, q10 +1.1 x2, q06 -1.7 / -1.8, q01 -1.3 / -1.2; the 10 +0.3 / +0.4 / +2.0 | the 10 +6.1 / -4.0 / -7.4 |
+
+Every pass's 22 result hashes are PostgreSQL's. VmHWM base 1,690-1,734 MB, n5 1,689-1,691.
+
 ## Storage round 2, part 2: dead-entry sets, linkable runs in format 2 (2026-11-17, agent 245)
 
 HANDOFF "Storage round 2, part 2" has what changed. **c1** is `cand/a245` (`d262652cb`, the

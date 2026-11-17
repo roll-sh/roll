@@ -11033,6 +11033,100 @@ at open, a compaction): older builds ignore the manifest's `format` and fail on 
   the probe needs from the OS page cache, as PostgreSQL's 8 kB page), each a format change for
   its own round.
 
+## Analytic CPU, round 4 (agent 251)
+
+TPC-H SF1 on lane C against pgrust's 84.7 G user instructions: whole-run profiles of the three
+servers by function class first (BENCH.md "Analytic CPU, round 4" has the tables), then the
+largest class, row decode, and the filters, aggregation and probes over the column batches.
+Base `6d3b7e9e5`; the candidate's four commits rebased without conflict onto `6913fd09c`
+(agent 244's batched lookups, agent 243's round 7) as `cand/a251`.
+
+- **Profiles by function class** (one pass of the 22 queries after a warm-up, `perf record -e
+  instructions:u` of each server; classified by function: `~/.cache/a251/scripts/classify.py`,
+  `classify_pg.py`, `resolve.py`). roll (plain dist) 147.5 G: row decode 30.7% (`Pre::decode`
+  14.2%; the row path's `LazyBuf::read`, `skip_value`, `decode_value`,
+  `decode_row_need_spare`, `Lazy::into_row` 10%), the store's scan read 12.4%, expression
+  evaluation 9.7%, hash join build and probe 6.8%, allocation 6.4%, index point gets 6.0%,
+  aggregation 5.8%, memcmp 5.7%, `Value` drops and clones 4.6%, tuple routing 3.2%, visibility
+  and sort 0.6% each. PostgreSQL 160.9 G: expression evaluation 18.5% plus its JIT's code 13.4%,
+  buffers and pages 11.7%, index scans 10.4%, allocation 8.1% plus musl 5.6%, aggregation 6.5%,
+  deform 5.9%. pgrust 83.7 G, its binary stripped: workers' runtime code 57%, the backend's 16%,
+  JIT code 19%. Per query (roll): `Pre::decode` was 54% of q06 and q12, 41% of q01, 32% of q10,
+  31% of q21 (720 user instructions a row on q06: every value up to the last column read
+  walked through a tag dispatch); q06's filter 24% more (`VB::eval`, `Inst::at`: a call
+  through the comparison's `fn` per row, the column looked up per row); q01 `batch_run` 22%,
+  `Lanes::eval` 16%; q18's subquery the row path (its index-ordered rows never reached the
+  batch kernels); q17's probe of 178 parts by every lineitem row 15% (`Pre::fate`).
+- **Column batches by a typed walk** (`storage::cols::walk_plan`, `walk_row`): a plan made once
+  a batch from the declared types: runs of skipped values of one kind stepped over together
+  (fixed-size tags, numerics, short strings, booleans; any other type by `skip`), a needed
+  column's value written into its slot, NULLs by their tag. A row the plan doesn't fit (another
+  tag, a string of 128 bytes or more, a numeric past a word or a byte of scale, a row out of
+  line or without its last columns, a string outside a block buffer) has its slots reset and
+  goes the general walk, as before. The row path's walks (`LazyBuf::read`,
+  `decode_row_need_spare`, `row::decode_cols`) use the fast skip.
+- **Filters a column at a time** (`exec::vector`): `NumCmp` of a numeric or integer column and a
+  constant (either side) compares integers at the constant's scale, rescaled once per row scale
+  seen, `scaled_cmp` for a smaller scale, `Out` past an i128; `Instant` of date columns and
+  constants compares day numbers (instants where a timestamp is involved), column against
+  column too; each comparison's outcome per ordering made once a batch (`outcomes`). bpchar's
+  trailing spaces are trimmed eight bytes at a time (`cols::trim_spaces`: the spaces at a
+  word's end counted from its leading zero bits). `Pre::mark` makes a filtered fill's outcomes
+  in one pass, a probe's misses a column at a time, and `Reader::next_row_with` passes a run
+  of dropped rows at once.
+- **Batch aggregation**: lanes copy a numeric column without a per-row branch (the scale
+  check an xor accumulated), their magnitude bound by one OR pass (`bound_of`: at most twice
+  the largest, so a batch near the limits can go the row way where it didn't); aggregates over
+  one argument (sum and avg of a column) take its per-slot sums once, and every lane without
+  NULLs takes the slot's row count.
+- **Index chunks fill row batches** (`IndexChunk` is a `FillRows`): a parallel index scan's
+  rows (q18's GroupAggregate over lineitem's primary key) go into the scan's batch by reference
+  (a dense range's rows from the store scan's batch, others as their values), so the column
+  decode, filters and partial aggregation take them. A bitmap heap scan's key runs stay a row
+  at a time (`FillIter` over the same fill): their chunks (a few hundred rows) stay under
+  `Pre::worth`'s 2,048-row cut-off, so decoding columns there only added work (q14 +0.5%).
+- **Hash join tables' integer keys in a bit filter** (`pipe::KeyFilter`): 16 bits a key, a power
+  of two, at most 2^23 bits; a clear bit is a miss without a lookup (`Built::int_span`,
+  `Built::lookup`).
+- Measured (plain dist, user instructions, lane C, 3 alternating pairs unless said; BENCH has
+  the tables): the typed walk, filters and lanes against base q06 -23.9%, q12 -20.3%, q01
+  -15.5%, q10 -14.4%, q05 -7.6%, q03 -5.1%, q19 -4.0%, q18 -3.1%, q14 -2.2%, q09 -0.8%, the same
+  in every pair; over the 22 (2 rounds) q15 -19.5%, q21 -17.5%, q04 -6.8%, q13 -5 to -6%, the 22
+  -8.9 / -9.3%. Then the batch sums and index chunks: q18 -20.4% (cycles -24%), q01 -5.0%, q14
+  +0.5% (2 pairs). Then the trim, the dropped runs, the bitmap runs back and the key filter: q12
+  -4.6%, q10 -2.8%, q17 -1.3 to -2.4%, q14 +0.4 to +1.9%, the rest within +-1%. Whole run (one
+  pass, the 22): 147.5 -> 126.9 G (-14.0%). Result hashes PostgreSQL's in every pass; VmHWM
+  unchanged (1.69-1.71 GB).
+- Dropped: the walk's rows in a non-inlined loop of their own with slice patterns and the
+  numerics' word load inline (`n3`, `~/.cache/a251/patches/dropped-n2c-walk-rows-loop.patch`):
+  user instructions +0.3 to +2.0% over 10 queries (q12 +2.0, q21 +2.1, q01 -1.3, q06 -1.7),
+  cycles mixed. The walk is ~575 instructions a q01 row spread over its steps' dispatch, tag
+  checks and slot stores (the `instructions:u` samples skid onto the stores after loads, so a
+  line's share is not a measure there); no single step dominates.
+- Tests: `storage::cols` `typed_walk_matches_decoded_rows` (14 types, NULLs, long strings,
+  numerics of every width, rows before ADD COLUMN, TID headers, rows outside block buffers,
+  8 masks, a batch decoded twice into one `ColBatch`), `trim_spaces_of_every_length`,
+  `exec::pipe` `key_filter_keeps_every_key`; golden `a251_batch_walk_filters` (recorded from
+  PostgreSQL 18.6: numeric and integer columns against constants of other scales and NULL,
+  dates against dates, timestamps and infinite constants, column against column, skipped
+  columns of many types with NULLs, rows before ADD COLUMN, grouped). `tools/quick-check.sh` green on the
+  rebased head `6f3f7fdf0`: Clippy no new warning in a changed file, 427 tests in 28 binaries,
+  crash seeds 1-3 x 2 and the power cut, regression 51,148 / 51,150 with none newly differing,
+  isolation 1,647 / 1,648, pg_dump TAP 14,609.
+- Found, not changed (the planner's): `sql/costs.rs` compares a date with a timestamp as
+  `d as i64 * USECS_PER_DAY`, which overflows for an infinite date (`DATE_POS_INF`): with
+  overflow checks (`--profile verify-checked`) a query comparing a date column holding
+  'infinity' with a timestamp panics while planning; release builds compare a wrapped value
+  in the estimate. `sql::func::datetime::date_to_ts` maps the infinities as date2timestamp
+  does. The golden keeps infinite dates to its constants.
+- Next (largest first): `Pre::decode` is still 13% of the whole run (the walk ~575
+  instructions a q01 row; numerics as 32-byte `(i128, u32)` slots, then copied into lanes):
+  a column directory per block or row (a format change: the store's owners) or numerics
+  decoded straight into lanes; the join row path is ~20% (`Value` rows made, cloned and dropped
+  per stage: `joined`, `run_stages`, `Lazy::into_row`, allocation), much of it in the lookup
+  stages (agent 244's); the store's `fill_batch_with` 6.5% (agent 247's); q01's group keys
+  packed per row (`Partials::packed`) and lanes in i128.
+
 ## Analytic path against pgrust (agent 220)
 
 TPC-H SF1 on lane C (servers on CPUs 14,15,32,33, i.e. two cores with their hyperthreads;
