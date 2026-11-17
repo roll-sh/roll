@@ -334,6 +334,9 @@ impl LeafCollector for MinScoreLeaf<'_> {
         }
         self.inner.collect(doc, &mut Fixed { score, inner: scorer })
     }
+    fn set_scorer(&mut self, scorer: &mut dyn Scorable) {
+        self.inner.set_scorer(scorer);
+    }
     fn finish(&mut self) -> Result<()> {
         self.inner.finish()
     }
@@ -406,6 +409,9 @@ impl FilterBits {
 impl LeafCollector for PostFilterLeaf<'_> {
     fn collect(&mut self, doc: u32, scorer: &mut dyn Scorable) -> Result<()> {
         if self.filter.accepts(doc) { self.inner.collect(doc, scorer) } else { Ok(()) }
+    }
+    fn set_scorer(&mut self, scorer: &mut dyn Scorable) {
+        self.inner.set_scorer(scorer);
     }
     fn finish(&mut self) -> Result<()> {
         self.inner.finish()

@@ -164,3 +164,27 @@ impl Tree for MapTree {
         names
     }
 }
+
+/// `inner`'s directory `prefix` as a tree of its own (a candidate root's view of a monorepo).
+pub struct SubTree<'a> {
+    pub inner: &'a dyn Tree,
+    pub prefix: String,
+}
+
+impl SubTree<'_> {
+    fn at(&self, path: &str) -> String {
+        if path.is_empty() { self.prefix.clone() } else { format!("{}/{path}", self.prefix) }
+    }
+}
+
+impl Tree for SubTree<'_> {
+    fn read(&self, path: &str) -> Option<Vec<u8>> {
+        self.inner.read(&self.at(path))
+    }
+    fn exists(&self, path: &str) -> bool {
+        self.inner.exists(&self.at(path))
+    }
+    fn list(&self, dir: &str) -> Vec<String> {
+        self.inner.list(&self.at(dir))
+    }
+}

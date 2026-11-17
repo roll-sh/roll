@@ -26,6 +26,8 @@ type fakeRolld struct {
 	identities map[string]map[string]any
 	syncs      map[string]map[string]any
 	tokens     map[string]map[string]any // roll-access's grants, kept when revoked
+	// Dynamic credentials' leases a read with dynamic=true issued, and those revoked since.
+	issued, revoked []string
 	// What a project registers itself: cas, ssh-cas, transit, outside-databases.
 	regs map[string]map[string]map[string]any
 	// The admin URLs databases were registered with (never listed back).
@@ -157,6 +159,11 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if lease, ok := strings.CutPrefix(r.URL.Path, "/v1/secrets/projects/prj_a/leases/"); ok && r.Method == http.MethodDelete {
+		f.revoked = append(f.revoked, lease)
+		write(204, nil)
+		return
+	}
 	rest, ok := strings.CutPrefix(r.URL.Path, "/v1/secrets/projects/prj_a/environments/")
 	if !ok {
 		write(404, map[string]string{"error": "no route"})
@@ -201,7 +208,14 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				values[key] = k["value"].(string)
 			}
 		}
-		write(200, map[string]any{"values": values, "problems": []any{}})
+		leases := []string{}
+		if r.URL.Query().Get("dynamic") == "true" {
+			lease := fmt.Sprintf("lse_%d", len(f.issued)+1)
+			f.issued = append(f.issued, lease)
+			leases = append(leases, lease)
+			values["TEMP_PASSWORD"] = "temporary"
+		}
+		write(200, map[string]any{"values": values, "problems": []any{}, "leases": leases})
 		return
 	}
 	key, valueRoute := strings.CutSuffix(parts[2], "/value")
@@ -331,6 +345,56 @@ resource "roll_secrets_sync" "deploys" {
 			}
 			return nil
 		},
+	})
+}
+
+// A value from an ephemeral read, written write-only: it reaches roll secrets and never Terraform's
+// state, and the run's dynamic credential is revoked when it closes.
+func TestValuesStayOutOfTheState(t *testing.T) {
+	f := &fakeRolld{envs: map[string]*environment{"production": {Slug: "production", Name: "production"}, "staging": {Slug: "staging", Name: "staging"}}, keys: map[string]map[string]any{"production:/DB_URL": {"value": "postgres://db/shop", "version": float64(1), "comment": ""}}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	config := fmt.Sprintf(`
+provider "roll" {
+  api_url = %q
+  token   = "rlt_terraform"
+  project = "prj_a"
+}
+ephemeral "roll_secrets_values" "production" {
+  environment = "production"
+  dynamic     = true
+}
+resource "roll_secret" "copy" {
+  environment      = "staging"
+  key              = "DB_URL"
+  value_wo         = ephemeral.roll_secrets_values.production.values["DB_URL"]
+  value_wo_version = 1
+}
+`, srv.URL)
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){"roll": providerserver.NewProtocol6WithError(New("test")())},
+		TerraformVersionChecks:   []tfversion.TerraformVersionCheck{tfversion.SkipBelow(tfversion.Version1_11_0)},
+		Steps: []resource.TestStep{{
+			Config: config,
+			Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckNoResourceAttr("roll_secret.copy", "value"),
+				resource.TestCheckNoResourceAttr("roll_secret.copy", "value_wo"),
+				func(s *terraform.State) error {
+					f.mu.Lock()
+					defer f.mu.Unlock()
+					if got := f.keys["staging:/DB_URL"]["value"]; got != "postgres://db/shop" {
+						return fmt.Errorf("roll secrets got %v", got)
+					}
+					if state := fmt.Sprintf("%#v", s.RootModule().Resources); strings.Contains(state, "postgres://") {
+						return fmt.Errorf("the value is in the state")
+					}
+					if len(f.issued) == 0 || len(f.revoked) != len(f.issued) {
+						return fmt.Errorf("leases issued %v, revoked %v", f.issued, f.revoked)
+					}
+					return nil
+				},
+			),
+		}},
 	})
 }
 

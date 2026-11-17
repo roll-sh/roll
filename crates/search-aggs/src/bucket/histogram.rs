@@ -469,6 +469,7 @@ pub fn create_histogram(def: &AggDef, spec: &HistogramSpec, ctx: &mut BindCtx<'_
         doc_count_field: ctx.doc_count_field,
         tracker: ctx.tracker(def),
         batch: Default::default(),
+        scratch: Default::default(),
         prepared: None,
         slot_ords: Vec::new(),
         num_min: None,
@@ -570,6 +571,7 @@ pub fn create_date_histogram(def: &AggDef, spec: &DateHistogramSpec, ctx: &mut B
         doc_count_field: ctx.doc_count_field,
         tracker: ctx.tracker(def),
         batch: Default::default(),
+        scratch: Default::default(),
         prepared: None,
         slot_ords: Vec::new(),
         num_min: None,
@@ -641,9 +643,22 @@ fn floor(x: f64) -> f64 {
 /// Most keys a numeric histogram caches bucket ordinals for, per segment.
 const NUM_SLOTS: f64 = 4096.0;
 
+/// A numeric histogram batch's decoded values and the `(doc, bucket)` pairs it hands its
+/// sub-aggregations ([`HistoAgg::collect_slots`]).
+#[derive(Default)]
+struct SlotScratch {
+    raw: Vec<i64>,
+    vals: Vec<f64>,
+    keys: Vec<i64>,
+    docs: Vec<u32>,
+    ords: Vec<u32>,
+    scores: Vec<f32>,
+}
+
 struct HistoAgg {
     /// Batch-decoded doc values (fields without script or `missing`).
     batch: crate::values::NumBatch,
+    scratch: SlotScratch,
     key_fn: KeyFn,
     /// Set for range fields (collected from binary doc values instead of `reader`).
     range: Option<RangeSrc>,
@@ -772,17 +787,14 @@ impl HistoAgg {
         {
             let at = key - min;
             if at >= 0.0 && (at as usize) < self.slot_ords.len() {
-                let at = at as usize;
-                let c = self.slot_ords[at];
+                let c = self.slot_ords[at as usize];
                 if c != u64::MAX && c >> 32 == u64::from(owning) {
                     return self.add_existing(c as u32, doc, score);
                 }
-                let ord = self.add_ord(owning, key.to_bits(), doc, score)?;
-                self.slot_ords[at] = u64::from(owning) << 32 | u64::from(ord);
-                return Ok(());
             }
         }
-        self.add(owning, key.to_bits(), doc, score)
+        let ord = self.numeric_ord(owning, key)?;
+        self.add_existing(ord, doc, score)
     }
 
     #[inline]
@@ -821,6 +833,14 @@ impl HistoAgg {
         match &self.key_fn {
             KeyFn::Numeric { interval, offset, hard } => {
                 let (interval, offset, hard) = (*interval, *offset, *hard);
+                if batch.all_single()
+                    && let Some(min) = self.slot_path()
+                {
+                    let mut scratch = std::mem::take(&mut self.scratch);
+                    let res = self.collect_slots(b, Some(&batch.pos), &batch.vals, decode, interval, offset, min, &mut scratch);
+                    self.scratch = scratch;
+                    return res;
+                }
                 for (p, raw) in batch.docs() {
                     let doc = b.docs[p];
                     let mut prev = f64::NEG_INFINITY;
@@ -849,6 +869,91 @@ impl HistoAgg {
             }
         }
         Ok(())
+    }
+
+    /// Single-valued docs of a numeric histogram on the [`slot_path`](Self::slot_path): a
+    /// doc's bucket is its key's slot (or [`numeric_ord`](Self::numeric_ord)), counted in
+    /// place, and the batch's `(doc, bucket)` pairs go to the sub-aggregations together, in
+    /// doc order as one at a time did. `raw[k]` is the value of the doc at batch position
+    /// `pos[k]` (`pos` `None`: `k`, every doc of the batch has one).
+    #[allow(clippy::too_many_arguments)]
+    fn collect_slots(&mut self, b: Batch<'_>, pos: Option<&[u32]>, raw: &[i64], decode: crate::values::Decode, interval: f64, offset: f64, min: f64, s: &mut SlotScratch) -> Result<()> {
+        decode.to_f64_into(raw, &mut s.vals);
+        // Keys below 2^51 in magnitude are computed as integers in a pass of their own: adding
+        // 1.5 * 2^52 rounds to an integer (the sum's spacing is 1), read back from the bits,
+        // and `floor` steps down where that rounded up. `NO_KEY` marks the values `floor`
+        // decides: -0.0 (a bucket of its own), NaN and larger ones.
+        const NO_KEY: i64 = i64::MIN;
+        const ROUND: f64 = 6_755_399_441_055_744.0;
+        s.keys.clear();
+        s.keys.extend(s.vals.iter().map(|&v| {
+            let x = (v - offset) / interval;
+            if x.abs() < 2_251_799_813_685_248.0 && x.to_bits() != (-0.0f64).to_bits() {
+                let n = (x + ROUND).to_bits() as i64 - ROUND.to_bits() as i64;
+                n - i64::from(n as f64 > x)
+            } else {
+                NO_KEY
+            }
+        }));
+        // Then each doc's bucket: its key's slot when that holds this parent's bucket.
+        let min_key = min as i64;
+        let slots = self.slot_ords.len() as u64;
+        s.ords.clear();
+        s.ords.resize(s.keys.len(), 0);
+        for k in 0..s.keys.len() {
+            let owning = b.ords[pos.map_or(k, |pos| pos[k] as usize)];
+            let key = s.keys[k];
+            let at = key.wrapping_sub(min_key) as u64;
+            let c = if key != NO_KEY && at < slots { self.slot_ords[at as usize] } else { u64::MAX };
+            let ord = if c != u64::MAX && c >> 32 == u64::from(owning) {
+                c as u32
+            } else {
+                let key = if key == NO_KEY { floor((s.vals[k] - offset) / interval) } else { key as f64 };
+                self.numeric_ord(owning, key)?
+            };
+            self.counts[ord as usize] += 1;
+            s.ords[k] = ord;
+        }
+        if self.subs.is_empty() {
+            return Ok(());
+        }
+        let Some(pos) = pos else { return self.subs.push_many(b.docs, &s.ords, b.scores) };
+        s.docs.clear();
+        s.docs.extend(pos.iter().map(|&p| b.docs[p as usize]));
+        s.scores.clear();
+        if !b.scores.is_empty() {
+            s.scores.extend(pos.iter().map(|&p| b.scores[p as usize]));
+        }
+        self.subs.push_many(&s.docs, &s.ords, &s.scores)
+    }
+
+    /// The smallest slot key, when [`collect_slots`](Self::collect_slots) may take the
+    /// segment's single-valued docs: a numeric histogram with the slot cache, no hard bounds,
+    /// and every doc counting one.
+    fn slot_path(&self) -> Option<f64> {
+        let KeyFn::Numeric { hard: None, .. } = self.key_fn else { return None };
+        if self.doc_counter.is_none() { self.num_min } else { None }
+    }
+
+    /// The bucket of numeric key `key` under `owning`, created if new, and cached in the key's
+    /// slot when it has one (not counted).
+    fn numeric_ord(&mut self, owning: u32, key: f64) -> Result<u32> {
+        let (ord, new) = self.ords.add(owning, key.to_bits());
+        if new {
+            grow(&mut self.counts, ord, 0);
+            if self.counts.len() * 8 > self.tracker.reserved() as usize {
+                self.tracker.ensure(self.counts.len() * 8 + self.ords.ram_bytes())?;
+            }
+        }
+        if let Some(min) = self.num_min
+            && !(key == 0.0 && key.is_sign_negative())
+        {
+            let at = key - min;
+            if at >= 0.0 && (at as usize) < self.slot_ords.len() {
+                self.slot_ords[at as usize] = u64::from(owning) << 32 | u64::from(ord);
+            }
+        }
+        Ok(ord)
     }
 
     /// The date arm of [`collect_batch`](Self::collect_batch): single values inside the
@@ -1075,6 +1180,18 @@ impl Aggregator for HistoAgg {
         }
         let Some(mut r) = self.reader.take() else { return Ok(()) };
         if let Some((dv, decode)) = r.raw() {
+            if let (Some(min), KeyFn::Numeric { interval, offset, .. }) = (self.slot_path(), &self.key_fn) {
+                let (interval, offset) = (*interval, *offset);
+                let mut s = std::mem::take(&mut self.scratch);
+                let mut raw = std::mem::take(&mut s.raw);
+                let res = dv.load_every(b.docs, &mut raw).then(|| self.collect_slots(b, None, &raw, decode, interval, offset, min, &mut s));
+                s.raw = raw;
+                self.scratch = s;
+                if let Some(res) = res {
+                    self.reader = Some(r);
+                    return res;
+                }
+            }
             let mut batch = std::mem::take(&mut self.batch);
             dv.load_batch(b.docs, &mut batch);
             let res = self.collect_batch(b, &batch, decode);

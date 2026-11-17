@@ -194,7 +194,27 @@ pub enum FusionKind {
     Linear { weights: Vec<f32>, normalizers: Vec<Normalizer> },
     /// `pinned` over a compound retriever: the pins (index, id) above its one child's
     /// ranking; a pin naming another index still takes its pin position.
-    Pinned { pins: Vec<(Option<String>, String)>, organic: Option<Value> },
+    /// `rule`: the same, with the pins (and exclusions) its rulesets' matching rules make.
+    Pinned { pins: Vec<(Option<String>, String)>, organic: Option<Value>, rule: Option<RuleSpec> },
+}
+
+/// A `rule` retriever's rulesets and match criteria.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuleSpec {
+    pub ruleset_ids: Vec<String>,
+    pub match_criteria: Map,
+}
+
+impl RuleSpec {
+    /// `RuleQueryRankDoc.explain`'s description: the criteria as Java prints a `HashMap`.
+    pub fn description(&self) -> String {
+        let keys: Vec<&str> = self.match_criteria.keys().map(String::as_str).collect();
+        let entries: Vec<String> = crate::mapping::java_hash_map_order(keys.iter().copied())
+            .into_iter()
+            .map(|i| format!("{}={}", keys[i], self.match_criteria[keys[i]].to_es_string()))
+            .collect();
+        format!("query rules evaluated rules from rulesets [{}] and match criteria {{{}}}", self.ruleset_ids.join(", "), entries.join(", "))
+    }
 }
 
 /// A `linear` child's score normalizer (`ScoreNormalizer`).
@@ -792,7 +812,7 @@ fn extract(
                     _ => Vec::new(),
                 };
                 let src = SearchSource { fusion: Some(Box::new(child)), ..Default::default() };
-                *fusion = Some(Fusion { kind: FusionKind::Pinned { pins, organic: None }, window, min_score: None, children: vec![src], names: vec![None], tails: vec![None] });
+                *fusion = Some(Fusion { kind: FusionKind::Pinned { pins, organic: None, rule: None }, window, min_score: None, children: vec![src], names: vec![None], tails: vec![None] });
                 return Ok(());
             }
             let inner_name = entry(inner)?.1.get("_name").map(Value::to_es_string);
@@ -835,7 +855,7 @@ fn extract(
                 Value::Obj(m) => m.get("pinned").and_then(|p| p.get("organic")).cloned(),
                 _ => None,
             };
-            *fusion = Some(Fusion { kind: FusionKind::Pinned { pins: Vec::new(), organic }, window, min_score: None, children: vec![src], names: vec![inner_name], tails: vec![Some(query)] });
+            *fusion = Some(Fusion { kind: FusionKind::Pinned { pins: Vec::new(), organic, rule: None }, window, min_score: None, children: vec![src], names: vec![inner_name], tails: vec![Some(query)] });
             let _ = out;
             Ok(())
         }
@@ -856,14 +876,26 @@ fn extract(
                 Value::Arr(a) => Value::Arr(a.clone()),
                 other => crate::arr![other.clone()],
             };
+            let spec = RuleSpec {
+                ruleset_ids: ruleset_ids.as_array().into_iter().flatten().map(Value::to_es_string).collect(),
+                match_criteria: match &body["match_criteria"] {
+                    Value::Obj(m) => m.clone(),
+                    _ => Map::new(),
+                },
+            };
             let Some(Value::Obj(inner)) = body.get("retriever") else { return Err(EsError::parse("Required [retriever]")) };
-            if matches!(entry(inner)?.0, "rrf" | "linear") {
-                return Err(EsError::not_implemented("[rule] retriever over a compound retriever"));
-            }
             let window = body.get("rank_window_size").and_then(Value::as_i64).unwrap_or(10);
             checks.push((name.to_string(), "rank_window_size", window));
             let mut fs = filters(body.get("filter"));
             fs.extend(inherited.iter().cloned());
+            if matches!(entry(inner)?.0, "rrf" | "linear") {
+                // Over a compound retriever (`QueryRuleRetrieverBuilder` on its child's rank
+                // docs): the child ranks first, then the rules pin and exclude documents.
+                let child = crate::stack::maybe_grow(|| self::compound(inner, depth + 1, &fs, checks))?;
+                let src = SearchSource { fusion: Some(Box::new(child)), ..Default::default() };
+                *fusion = Some(Fusion { kind: FusionKind::Pinned { pins: Vec::new(), organic: None, rule: Some(spec) }, window, min_score: None, children: vec![src], names: vec![None], tails: vec![None] });
+                return Ok(());
+            }
             let inner_name = entry(inner)?.1.get("_name").map(Value::to_es_string);
             let mut sub = Map::new();
             crate::stack::maybe_grow(|| extract(inner, true, depth + 1, &fs, &mut sub, checks, diversify, fusion))?;
@@ -892,7 +924,7 @@ fn extract(
             sub.insert("query".into(), query.clone());
             let mut src = SearchSource::parse(&Value::Obj(sub), None)?;
             src.diversify = diversify.take();
-            *fusion = Some(Fusion { kind: FusionKind::Pinned { pins: Vec::new(), organic: Some(organic) }, window, min_score: None, children: vec![src], names: vec![inner_name], tails: vec![Some(query)] });
+            *fusion = Some(Fusion { kind: FusionKind::Pinned { pins: Vec::new(), organic: Some(organic), rule: Some(spec) }, window, min_score: None, children: vec![src], names: vec![inner_name], tails: vec![Some(query)] });
             let _ = out;
             Ok(())
         }
