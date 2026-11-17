@@ -358,8 +358,8 @@ pub enum Secrets {
     /// Back the project up, sealed to a public key (`keygen`): every environment, folder, value,
     /// link, import, policy and required key. Written to stdout or --out.
     Backup {
-        /// The recipient's public key (base64url X25519).
-        #[arg(long)]
+        /// The recipient's public key (base64url X25519). It may start with `-`.
+        #[arg(long, allow_hyphen_values = true)]
         to: String,
         #[arg(long)]
         out: Option<std::path::PathBuf>,
