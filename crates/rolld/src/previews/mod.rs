@@ -127,6 +127,8 @@ pub fn start(
     // roll apps' proxy lists a preview page's notes from the engine (`Engine::notes_for`).
     if let Some(a) = &apps_for_notes {
         a.set_feedback_notes(Arc::new(services::Notes(Arc::downgrade(&engine))));
+        // Its pushes to branches of a Git URL service: those branches' previews.
+        a.set_git_pushes(Arc::new(services::GitPushes(Arc::downgrade(&engine))));
     }
     if clustered {
         let _ = engine.cluster.set(cluster.clone());
