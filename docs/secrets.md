@@ -1378,7 +1378,10 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   a host) and all of its task settings (they can carry headers, and `custom`'s request). On any
   difference the push refuses, so someone who may change the cluster but not reveal the key can't
   recreate or repoint the endpoint and wait for the next rotation; creating it again from the
-  Inference tab binds it anew. Its errors name
+  Inference tab binds it anew. One window stays: the endpoint recreated in the milliseconds
+  between the push's check and its `_update`, which calls the service with the key before it
+  answers. The push compares the answer's pin too, so that case fails loudly (an error log line
+  and the sync's error say to rotate the key) rather than passing unseen. Its errors name
   the endpoint and Elasticsearch's error type, never the provider's message (it can quote part of
   a key).
 - Deleting the endpoint from the tab deletes its sync; one deleted another way leaves the sync,

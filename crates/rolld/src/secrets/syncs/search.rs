@@ -171,6 +171,9 @@ impl SyncTarget for InferenceKeys {
             return Err(t.fail(es_error(status, &v)));
         }
         let e = &v["endpoints"][0];
+        if e["inference_id"].as_str() != Some(t.endpoint.as_str()) {
+            return Err(t.fail("roll search answered another endpoint"));
+        }
         if pin(e) != t.pin {
             return Err(t.fail("its settings changed since its key was bound to the secret (where it sends the key may differ), so the new key isn't sent: create the endpoint again from the cluster's Inference tab"));
         }
@@ -180,6 +183,12 @@ impl SyncTarget for InferenceKeys {
         let (status, v) = es(&self.0, &t.cluster, "PUT", &format!("/_inference/{}/{}/_update", seg(task), seg(&t.endpoint)), Some(body))?;
         if !(200..300).contains(&status) {
             return Err(t.fail(es_error(status, &v)));
+        }
+        // The endpoint recreated between the check and the update: `_update` had already called
+        // its service with the key when it answered, so this only tells. Nobody may miss it.
+        if pin(&v) != t.pin {
+            tracing::error!(cluster = %t.cluster, endpoint = %t.endpoint, "a search-inference push sent the key to an endpoint whose settings changed under it");
+            return Err(t.fail("its settings changed while the key was being pushed, so the key may have reached where it sends now: rotate the key, then create the endpoint again from the cluster's Inference tab"));
         }
         Ok(())
     }
