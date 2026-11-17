@@ -1044,9 +1044,9 @@ pub const NEED_COPY_ROWS: &str = "XXCPY";
 /// read and inserted.
 fn next_copied(
     c: &CopyLines,
-    taken: &mut std::collections::VecDeque<(crate::sql::plan::CopyRow, usize, String)>,
+    taken: &mut std::collections::VecDeque<(crate::sql::plan::CopyRow, usize, crate::sql::plan::CopyRaw)>,
     ctx: &ExecCtx,
-) -> Result<Option<(Row, (usize, String))>> {
+) -> Result<Option<(Row, (usize, crate::sql::plan::CopyRaw))>> {
     loop {
         // (The feed's rows taken a batch at a time: one lock each, not one a row.)
         let mut done = false;
@@ -3852,9 +3852,9 @@ pub struct InsertNode {
     /// The table each RETURNING row went to (tableoid).
     last_table: u32,
     /// COPY: the line number and text of the row being inserted.
-    copy_line: (usize, String),
+    copy_line: (usize, crate::sql::plan::CopyRaw),
     /// COPY: the rows taken from its feed, not inserted yet (`next_copied`).
-    copy_taken: std::collections::VecDeque<(crate::sql::plan::CopyRow, usize, String)>,
+    copy_taken: std::collections::VecDeque<(crate::sql::plan::CopyRow, usize, crate::sql::plan::CopyRaw)>,
     /// COPY's multi-insert buffer as PostgreSQL fills it (rows, line bytes since its last
     /// flush), and a unique or exclusion violation found in it: raised when the buffer would
     /// be flushed (CopyMultiInsertBufferFlush inserts the index entries then), after the rest
@@ -4083,7 +4083,7 @@ impl InsertNode {
             after: Vec::new(),
             routed_after: Vec::new(),
             last_table,
-            copy_line: (0, String::new()),
+            copy_line: (0, Default::default()),
             copy_taken: Default::default(),
             copy_buf: (0, 0),
             copy_err: None,

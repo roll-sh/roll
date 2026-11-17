@@ -49,7 +49,7 @@ pub enum Frame {
     Copy {
         table: std::sync::Arc<str>,
         line: usize,
-        raw: Option<String>,
+        raw: Option<crate::sql::plan::CopyRaw>,
     },
 }
 
@@ -125,6 +125,7 @@ impl Frame {
                 line,
                 raw: Some(raw),
             } => {
+                let raw = raw.as_str();
                 // (limit_printout_length: at most MAX_COPY_DATA_DISPLAY (100) bytes, cut at a
                 // character, then "...".)
                 let shown = match raw.len() > 100 {

@@ -1124,10 +1124,52 @@ pub struct CopyLines {
     pub feed: std::sync::Mutex<CopyFeed>,
 }
 
+/// A COPY record's text, for its CONTEXT line: a range of the data chunk it was parsed from
+/// (one copy of the chunk for all its records, not a string each).
+#[derive(Clone, Debug)]
+pub struct CopyRaw {
+    chunk: Arc<str>,
+    start: usize,
+    end: usize,
+}
+
+impl Default for CopyRaw {
+    fn default() -> CopyRaw {
+        CopyRaw::from("")
+    }
+}
+
+impl From<&str> for CopyRaw {
+    fn from(s: &str) -> CopyRaw {
+        CopyRaw { chunk: Arc::from(s), start: 0, end: s.len() }
+    }
+}
+
+impl CopyRaw {
+    /// `part`, a slice of `text`, as a range of `chunk` (a copy of `text`).
+    pub fn within(chunk: &Arc<str>, text: &str, part: &str) -> CopyRaw {
+        let start = (part.as_ptr() as usize).wrapping_sub(text.as_ptr() as usize);
+        debug_assert!(start <= text.len() && start + part.len() <= text.len(), "a slice of the chunk");
+        CopyRaw { chunk: chunk.clone(), start, end: start + part.len() }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.chunk[self.start..self.end]
+    }
+
+    pub fn len(&self) -> usize {
+        self.end - self.start
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct CopyFeed {
     /// Each row with its line number and text.
-    pub rows: std::collections::VecDeque<(CopyRow, usize, String)>,
+    pub rows: std::collections::VecDeque<(CopyRow, usize, CopyRaw)>,
     /// The data has all been read.
     pub done: bool,
     /// Rows read so far.
