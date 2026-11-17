@@ -294,6 +294,8 @@ fn credential_id(state: &Option<Json>) -> Option<String> {
 pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind: &str, message: &str, caller: &Caller, now: i64) -> Result<(Change, Vec<ItemDiff>)> {
     let project = &env.project_id;
     c.execute("UPDATE projects SET seq = seq + 1 WHERE project_id = ?", [project])?;
+    // The project's syncs check their digests next, within seconds, ahead of their turn.
+    c.execute("UPDATE syncs SET checked_at = NULL WHERE project_id = ? AND checked_at IS NOT NULL", [project])?;
     let seq: i64 = c.query_row("SELECT seq FROM projects WHERE project_id = ?", [project], |r| r.get(0))?;
     let mut diffs = vec![];
     let mut dropped_credentials: BTreeMap<String, (Link, Json)> = BTreeMap::new();
