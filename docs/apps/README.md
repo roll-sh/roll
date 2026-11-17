@@ -1468,6 +1468,18 @@ lines; every matching block adds its headers over roll's own (`Cache-Control` fo
 100 blocks, the response's framing (`Content-Length`, `Transfer-Encoding`, hop-by-hop) roll's.
 Each file is at most 64 KiB; a line that doesn't parse is skipped, as theirs are.
 
+A site moved from Vercel or Netlify keeps its rules (`apps-build/src/site_configs.rs`): at plan
+time the tree's `netlify.toml` (`[[redirects]]` from, to, status; `[[headers]]` for and values)
+and `vercel.json` (`redirects` with `permanent` 308/307 or `statusCode`, `rewrites` as 200s,
+`headers`; `:name` segments, and `:name*`, `:name+` or `(.*)` at the end as the rest, `$1` and
+`:name*` in a destination as `:splat`) become `_redirects` and `_headers` lines appended in the
+image, after the site's own files (whose rules come first, as Netlify reads them). The configs
+themselves never go in, and a site built from its tree's root, which has them, never serves them
+(`netlify.toml` can hold build settings). What those lines can't say (a regular expression in a
+path, `has`/`missing`, Netlify's conditions, query or signing, `trailingSlash`, `routes`) is
+left out, each named in the build's notes. `docker.rs::a_sites_vercel_json_and_netlify_toml_rules_answer`
+checks a redirect, a rewrite and a header answering, and neither config served.
+
 A rewrite may send a path to one of the project's own services (Netlify's and Vercel's proxy
 rewrites, only ever to the project's own): `/api/* service:api/v1/:splat 200` sends `/api/users?x=1`
 to the `api` web service in the same environment at `/v1/users?x=1`, its method, headers and body
@@ -2490,75 +2502,72 @@ put items 1–11 first. A second review that day (after #78, against the same si
    doesn't follow and every pull request (`GitPush`, `GitPull`), each checked against the
    repository's refs; previews builds the environments, comments and gates forks behind a
    writer's approval (its side is the previews thread's, stacked on this).
-2. **`vercel.json` and `netlify.toml` rules for static sites**: their redirects, rewrites, headers,
-   `cleanUrls` and `trailingSlash` mapped onto `SiteRules` (today only `_redirects`/`_headers`), and
-   the deploy log saying which were skipped.
-3. **Scaling on memory** (Render's): `run.memory_target` beside `cpu_target`, read the same way.
-4. **Stack traces as one entry, grouped** (Cloud Run's Error Reporting): continuation lines joined to
+2. **Scaling on memory** (Render's): `run.memory_target` beside `cpu_target`, read the same way.
+3. **Stack traces as one entry, grouped** (Cloud Run's Error Reporting): continuation lines joined to
    their error per instance and stream, fingerprinted and counted (`…/errors`, first and last seen),
    an `error.new` event for notifications.
-5. **Wait for CI and statuses on Git URL services**: check runs read through the GitHub App, GitLab
+4. **Wait for CI and statuses on Git URL services**: check runs read through the GitHub App, GitLab
    and Bitbucket statuses through the Git login (through `PublicOnly`), so `wait_for_ci` and commit
    statuses work beyond roll code repos.
-6. **Imports from other platforms** (Render's Heroku migration, Railway's and Koyeb's): `render.yaml`,
+5. **Imports from other platforms** (Render's Heroku migration, Railway's and Koyeb's): `render.yaml`,
    `fly.toml`, `railway.json`/`.toml` and `app.json`+Procfile converted to roll.toml beside the
    Compose converter.
-7. **Rollouts that wait for a person** (Vercel's manual Rolling Releases, Cloud Run's held split):
+6. **Rollouts that wait for a person** (Vercel's manual Rolling Releases, Cloud Run's held split):
    `rollout.manual`, a route to advance or abort, the Deployments tab.
-8. **Cache purges by tag** (`Vercel-Cache-Tag`, `Netlify-Cache-Tag`, surrogate keys): a tag index in
+7. **Cache purges by tag** (`Vercel-Cache-Tag`, `Netlify-Cache-Tag`, surrogate keys): a tag index in
    the response cache and `{tags}` on `…/cache/purge`.
-9. **Health check settings, and workers' health** (Fly's `[checks]`): interval and failures per
+8. **Health check settings, and workers' health** (Fly's `[checks]`): interval and failures per
    service, and a worker's `health_command` run in its instance, so a hung consumer is replaced.
-10. **Variables as files in builds**: a file variable mounted into the build as a BuildKit
+9. **Variables as files in builds**: a file variable mounted into the build as a BuildKit
    secret (`--mount=type=secret,target=…`) for an `.npmrc` or a private registry's login, never in
    a layer.
-11. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
+10. **Secrets changes redeploy within seconds** (Vercel's, Railway's): once roll secrets' #79 is
    on main, `watch_secrets` holds one `SecretSource::wait_digest` long poll per watched
    environment instead of polling every minute. Each watched environment needs a task of its
    own on the owner (resumed on ownership), not a 25-second poll inside the minute loop (`tags.rs`).
-12. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
+11. *Waiting on the fleet's first run.* **Cached answers across nodes and at the edge** (Vercel's, Netlify's): today the owner's
    proxy alone keeps them; the storage CDN's purge outbox could carry the purges.
    Across nodes means a node that doesn't own the service answering from its own copy, which
    needs the owner's say that the environment has no gate (access, allow list, firewall, rate
    limit) on each answer, a generation per environment for purges, and hits metered and logged
    where the owner reads them: only worth it once the fleet serves traffic.
-13. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
+12. **Egress on the fleet** (Fargate): a security group per closed environment's tasks with no
    outbound rule but the egress proxy's, and the proxy as a task or on the node; until then
    Fargate refuses `egress: roll` (409). *Waiting on the fleet's first run.*
-14. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
+13. *Waiting on queues as a workspace resource.* **Workers that follow a queue's depth**, as they
    follow a stream group's lag now (a queue's project is what keeps another tenant's depth
    unread).
-15. **Region**: the region shown on the overview and each environment, defaulting to the project's
+14. **Region**: the region shown on the overview and each environment, defaulting to the project's
    databases', then a choice per environment once the fleet has a second region (Railway's,
    Fly's). *Waiting on the fleet.*
-16. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
+15. **Static outbound IPs**: a NAT gateway with Elastic IPs on the fleet's subnets, listed in
    Settings, without stopping services from sleeping (Railway's and Render's). *Waiting on the
    user's first AWS run.*
-17. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
+16. *Waiting on the edge's owner (roll cloud).* **gRPC from the internet**: roll-edge's HTTPS
    listener offering `h2` (ALPN `h2, http/1.1`; hyper's `http2::Builder` when `h2` is chosen,
    with the same graceful drain) and setting `Host` from `:authority` (HTTP/2 has no `Host`,
    and every product behind the edge routes on it), so Cloudflare's gRPC reaches h2c apps.
    Done here: `run.h2c` to the app, trailers through the proxy. Then TCP services.
-18. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
+17. **roll secrets as the env store**: the wiring is done (deploys resolve the project's secrets,
    digests mark "needs deploy", roll secrets' reveal rules, linked and sensitive keys, dynamic
    credentials refused, new environments ensured); what's left is service variables kept in roll
    secrets at `/services/<name>` (one store for both), and links as per-environment secrets
    links.
-19. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
+18. *Waiting on the user.* The fleet runtime in the stack: the roles, project, security group and
    settings listed in "Not done yet", a first run against AWS with its cold starts measured (a
    warm window or `min_instances` 1 by default there until a wake is fast), and
    allocation-based metering for Fargate.
-20. *Waiting on a queue link provider in roll secrets.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); a queue needs a provider that issues its own user first.
-21. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
+19. *Waiting on a queue link provider in roll secrets.* **Queues linkable from a service**: buckets, streams and NoSQL are (rolld's `RollResources::link`, through roll secrets' providers); a queue needs a provider that issues its own user first.
+20. *Waiting on the edge's owner (roll cloud).* **Wildcard certificates**: DNS-01 on a delegated
    `_acme-challenge.<base>` CNAME into a zone roll writes (`roll_edge::acme`'s DNS solver at
    another name), then `DomainTls::wildcards` true there; the routing and verification are done.
-22. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
+21. *Waiting on a static build (no musl target on ai-server, and adding one is the shared toolchain's).* **A waker that takes every caller while the app starts**: busybox `nc -l` takes one, so a burst
    of private calls to a stopped service loses all but the first (refused). A waker of roll's own
    (roll-fetch's `wake` mode, a static binary mounted read-only) that accepts each, holds them,
    and hands them over once the app listens; the cheap accept count already tells rolld.
-23. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
+22. Custom domains' TLS on the fleet for real (the zone settings in "Not done yet", authenticated
     origin pulls for custom hostnames, then a first domain through Let's Encrypt and Cloudflare).
-24. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
+23. **The rest of a cold start**: done: the network in a sandbox (258 → 175 ms); next, snapshot
     restore (CRIU, which needs the host's Docker daemon with checkpoints on: the user's call), or
     Firecracker microVM hosts on the fleet.
-25. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
+24. EFS volumes and Cloud Map private DNS on the fleet; TCP services on the fleet (the edge carrying TCP to a service's owner).
