@@ -361,10 +361,10 @@ impl roll_previews::ports::Secrets for FakeSecrets {
         *self.own.lock() = vars.to_vec();
         Ok(())
     }
-    async fn resolve(&self, _: &str, _: &str, _: bool, _: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
+    async fn resolve(&self, _: &str, _: &str, _: bool, dynamic: bool, _: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
         let followed = self.followed.lock().clone();
         let values = self.values.lock().clone();
-        if !self.dynamic.load(Ordering::SeqCst) {
+        if !dynamic || !self.dynamic.load(Ordering::SeqCst) {
             return Ok(roll_previews::ports::Resolved { followed, values, ..Default::default() });
         }
         let n = self.issued.fetch_add(1, Ordering::SeqCst) + 1;

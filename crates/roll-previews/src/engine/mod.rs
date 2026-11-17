@@ -481,9 +481,9 @@ impl Engine {
     /// without them, saying which). The leases of the dynamic credentials among them come back
     /// too: the caller keeps them while what it starts runs ([`Engine::keep_leases`]) or revokes
     /// them when it's done.
-    pub(super) async fn resolve_secrets(&self, r: &Row, untrusted: bool, consumer: &str) -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
+    pub(super) async fn resolve_secrets(&self, r: &Row, untrusted: bool, dynamic: bool, consumer: &str) -> anyhow::Result<(Vec<(String, String)>, Vec<String>)> {
         let consumer = format!("preview:{}/{consumer}", env_name(&r.id));
-        let got = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted, &consumer).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
+        let got = self.secrets.resolve(&r.project_id, &env_name(&r.id), untrusted, dynamic, &consumer).await.map_err(|e| anyhow::anyhow!("secrets: {e:#}"))?;
         let mut problems = got.problems.clone();
         problems.sort();
         let new = self.secrets_told.lock().insert(r.id.clone(), problems.clone()).is_none_or(|before| before != problems);

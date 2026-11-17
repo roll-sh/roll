@@ -871,7 +871,7 @@ impl Engine {
     async fn run_job(&self, r: &Row, s: &Settings, vars: &[(String, String)], what: &str, job: &crate::settings::Seed) -> anyhow::Result<()> {
         let untrusted = !(s.secrets.allow_production && r.trusted);
         // Its dynamic credentials last as long as the job does.
-        let (mut env, leases) = self.resolve_secrets(r, untrusted, what).await?;
+        let (mut env, leases) = self.resolve_secrets(r, untrusted, true, what).await?;
         // Its output becomes the preview's error (a teardown's, the pull request's comment): what
         // it was given is masked there, as checks' output is.
         let own: Vec<(String, String)> = project_env(s, r.branch.as_deref()).into_iter().chain(self.store.vars(&r.id)?).collect();

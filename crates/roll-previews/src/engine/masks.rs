@@ -40,9 +40,10 @@ impl Engine {
         let r = self.store.row(id)?;
         let s = self.store.settings(&r.project_id)?;
         let untrusted = !(s.secrets.allow_production && r.trusted);
-        // The values as a start would get them. A dynamic credential issued for this read is
-        // ended at once: a start's own are added as it starts ([`Engine::add_masks`]).
-        let (secrets, leases) = self.resolve_secrets(&r, untrusted, "logs").await.map_err(|e| Error::Conflict(format!("its logs wait for what they must hide: {e:#}")))?;
+        // The values as a start would get them, but no dynamic credential: a fresh one isn't what
+        // the running service holds (a start's own are added as it starts, [`Engine::add_masks`]).
+        // One a roll secrets from before `dynamic: false` issues anyway is ended at once.
+        let (secrets, leases) = self.resolve_secrets(&r, untrusted, false, "logs").await.map_err(|e| Error::Conflict(format!("its logs wait for what they must hide: {e:#}")))?;
         for l in &leases {
             if let Err(e) = self.secrets.revoke(&r.project_id, l).await {
                 warn!(preview = %id, lease = %l, error = %e, "previews: ending a credential read to mask logs (it expires by itself)");
@@ -88,7 +89,8 @@ pub(super) fn secret_values(secrets: &[(String, String)], own: &[(String, String
     let mut out: Vec<String> = secrets.iter().chain(own).map(|(_, v)| v.clone()).collect();
     for (k, v) in branches {
         let k = k.to_ascii_uppercase();
-        if ["PASSWORD", "PASSWD", "PASS", "SECRET", "TOKEN", "KEY"].iter().any(|w| k.ends_with(w) || k.contains(&format!("{w}_"))) {
+        // `…_PROPERTIES`: a client's config (Kafka's `sasl.jaas.config=… password="…"`), whole.
+        if ["PASSWORD", "PASSWD", "PASS", "SECRET", "TOKEN", "KEY", "PROPERTIES"].iter().any(|w| k.ends_with(w) || k.contains(&format!("{w}_"))) {
             out.push(v.clone());
         }
         out.extend(url_password(v));
