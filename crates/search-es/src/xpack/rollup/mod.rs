@@ -281,6 +281,10 @@ pub fn get(ctx: &Ctx<'_>) -> EsResult<Reply> {
         if let Some(p) = job.get("position").filter(|p| !p.is_null()) {
             status.insert("current_position".into(), p.clone());
         }
+        // Why it stopped by itself (its user or API key can no longer act): roll's addition.
+        if let Some(r) = job.get("reason") {
+            status.insert("reason".into(), r.clone());
+        }
         jobs.push(obj! { "config" => job.get("config").cloned().unwrap_or_default(), "status" => Value::Obj(status), "stats" => stats_value(job) });
     }
     Reply::ok(obj! { "jobs" => Value::Arr(jobs) })
@@ -309,6 +313,7 @@ pub async fn start(ctx: &Ctx<'_>) -> EsResult<Reply> {
             let Some(Value::Obj(mut j)) = st.metadata.xpack.get(JOBS, &key).cloned() else { return Err(not_found(&key)) };
             let cron = config_str(&j, "cron");
             j.insert("state".into(), "started".into());
+            j.shift_remove("reason");
             match next_cron(&cron, now) {
                 Some(t) => j.insert("next_run".into(), t.into()),
                 None => j.shift_remove("next_run"),

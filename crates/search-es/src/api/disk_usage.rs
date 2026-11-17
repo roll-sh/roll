@@ -129,14 +129,19 @@ fn shard_usage(table: &FieldTable, synthetic: bool, searcher: &search_index::Sea
         }
         // The stored section split by the raw bytes each field's values take.
         seg.ensure_stored().map_err(ie)?;
-        let mut raw: BTreeMap<u32, u64> = BTreeMap::new();
+        // Keyed by reported name: `_ignored`'s byte values are the `_ignored_source` entries.
+        let mut raw: BTreeMap<String, u64> = BTreeMap::new();
         let mut reader = seg.reader.stored();
         for d in 0..seg.reader.max_doc() {
             if !seg.is_live(d) {
                 continue;
             }
             for (f, v) in reader.document(d).map_err(|e| EsError::internal(e.to_string()))? {
-                *raw.entry(f).or_insert(0) += stored_len(&v);
+                let name = match (f, &v) {
+                    (IGNORED_FIELD, search_codec::stored::OwnedStoredValue::Bytes(_)) => "_ignored_source".to_string(),
+                    _ => field_name(table, f, synthetic),
+                };
+                *raw.entry(name).or_insert(0) += stored_len(&v);
             }
         }
         let sum: u64 = raw.values().sum();
@@ -148,7 +153,7 @@ fn shard_usage(table: &FieldTable, synthetic: bool, searcher: &search_index::Sea
         for (i, (f, bytes)) in raw.into_iter().enumerate() {
             let share = if i + 1 == n { stored_section - given } else { (stored_section as u128 * bytes as u128 / sum as u128) as u64 };
             given += share;
-            out.entry(field_name(table, f, synthetic)).or_default().stored_fields += share;
+            out.entry(f).or_default().stored_fields += share;
         }
     }
     Ok(())
