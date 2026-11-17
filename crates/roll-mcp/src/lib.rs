@@ -1182,6 +1182,8 @@ async fn guard_route(ctx: &Arc<Ctx>, method: &str, route: &str, body: Option<Val
         req = req.header(k, v);
     }
     let mut req = req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).map_err(|e| e.to_string())?;
+    // rolld keeps `X-Roll-Guard` on roll secrets' routes only for an in-process call carrying this
+    // extension with tool "guard" (secrets' #169): keep both if this ever changes.
     req.extensions_mut().insert(McpCall { tool: "guard".into(), args: Arc::new(json!({ "route": route })), ip: ctx.ip, elicits: false, client: ctx.client.clone(), quiet: true });
     let resp = match ctx.m.api.clone().oneshot(req).await {
         Ok(r) => r,
