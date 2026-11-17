@@ -130,6 +130,16 @@ fn postgres() -> Router {
         .route("/v1/secrets/projects/{project}/environments/{env}/imports", axum::routing::put(|| async { axum::Json(json!({})) }))
 }
 
+/// A test daemon's database: Postgres when `ROLL_CODE_TEST_DATABASE` says so, else SQLite with one
+/// reader, not production's four. Every test runs a daemon with two of these at once, so five
+/// connections each ran a gate inside a systemd user unit (1,024 open files) out of descriptors.
+fn test_db(path: std::path::PathBuf, name: &str) -> code_sql::Db {
+    if std::env::var(code_sql::TEST_DATABASE_ENV).is_ok_and(|u| !u.is_empty()) {
+        return code_sql::Db::open_or_test(&code_sql::Target::Sqlite(path), name).unwrap();
+    }
+    code_sql::Db::open_sqlite(&path, code_sql::SqliteOptions { readers: 1, cache_kib: 2048 }).unwrap()
+}
+
 impl Daemon {
     fn new(wait_ms: u64) -> Daemon {
         Daemon::with(wait_ms, |_| {})
@@ -137,7 +147,7 @@ impl Daemon {
 
     fn with(wait_ms: u64, configure: impl FnOnce(&mut Config)) -> Daemon {
         let dir = tempfile::tempdir().unwrap();
-        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws_db = test_db(dir.path().join("workspace.db"), "workspace");
         let workspace = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
         let mut resolvers = Resolvers::default();
         resolvers.by_kind.insert("endpoint", Arc::new(Endpoints));
@@ -146,7 +156,7 @@ impl Daemon {
         // Metadata documents from 127.0.0.1 (the test's own server) are allowed here only.
         let mut config = Config { locked: true, approval_wait: std::time::Duration::from_millis(wait_ms), metadata_allow_private: true, ..Config::default() };
         configure(&mut config);
-        let access = Access::with_db(code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("access.db")), "access").unwrap(), config, resolvers).unwrap();
+        let access = Access::with_db(test_db(dir.path().join("access.db"), "access"), config, resolvers).unwrap();
         let rules = vec![
             roll_auth::Rule { route: "/v1/open", access: roll_auth::Access::Public("a shared link") },
             roll_auth::Rule { route: "/v1/workspace", access: roll_auth::Access::User("a user's own projects") },
