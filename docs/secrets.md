@@ -1992,11 +1992,13 @@ roll secrets -e production syncs add azure-devops --target organization=acme --t
 
 Each push finds the group by name (`GET …/{project}/_apis/distributedtask/variablegroups?groupName=`,
 the one whose name matches exactly) and puts it back whole (`PUT …/{organization}/_apis/distributedtask/variablegroups/{id}`,
-API 7.1), since Azure's update replaces every variable at once: changed keys are set with
-`isSecret: true`, removed ones (keys this sync pushed before) are dropped, and every other variable
-goes back as it came, its description and project references too. A secret Azure answered with
-no value (it never returns one) goes back without one, which Azure takes as unchanged. Azure's
-variable names are case-insensitive, and so is the match. Roll creates no group: one that doesn't
+API 7.1), since Azure's update replaces every variable at once: every key this sync manages is
+set with its value and `isSecret: true` (all of them on each push, never a secret without its
+value), removed ones (keys this sync pushed before) are dropped, and the group's plain variables go
+back as they came, its description and project references too. **Give the sync a group of its
+own**: Azure never returns a secret variable's value, so a secret roll doesn't manage couldn't be
+written back as it was, and a group holding one is refused, naming it, rather than risk clearing
+it. Azure's variable names are case-insensitive, and so is the match. Roll creates no group: one that doesn't
 exist fails the push (create it in Pipelines → Library), and so does one linked to a Key Vault
 (sync to the vault instead). A key named with a prefix Azure Pipelines keeps for itself
 (`endpoint`, `input`, `secret`, `path`, `securefile`, any case: `SECRET_KEY` too) never reaches a

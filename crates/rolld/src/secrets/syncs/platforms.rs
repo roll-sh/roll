@@ -952,13 +952,23 @@ impl SyncTarget for AzureDevOps {
             if group["type"].as_str().is_some_and(|k| k != "Vsts") {
                 return Err(Error::Link(format!("{what}: {} is linked to a Key Vault, whose secrets it shows: sync to the vault instead", t.group)));
             }
-            // Every variable that isn't this push's goes back as it came.
-            let touched = |k: &str| p.changed.iter().chain(p.removed).any(|n| n.eq_ignore_ascii_case(k));
-            let mut variables: serde_json::Map<String, Json> = group["variables"].as_object().into_iter().flatten().filter(|(k, _)| !touched(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
-            for name in p.changed {
-                if let Some(v) = p.values.get(name) {
-                    variables.insert(name.clone(), json!({ "value": v.expose(), "isSecret": true }));
-                }
+            // The update writes the whole group. Azure DevOps never returns a secret variable's
+            // value, so one roll doesn't manage can't be written back as it was: a group holding
+            // one is refused rather than risk clearing it. Roll's own are always sent with their
+            // values (every one, not only what changed), and plain variables go back as they came.
+            let ours = |k: &str| p.values.keys().chain(p.removed).any(|n| n.eq_ignore_ascii_case(k));
+            let current = group["variables"].as_object().cloned().unwrap_or_default();
+            let foreign: Vec<&str> = current.iter().filter(|(k, v)| !ours(k) && v["isSecret"] == true).map(|(k, _)| k.as_str()).collect();
+            if !foreign.is_empty() {
+                return Err(Error::Link(format!(
+                    "{what}: {} holds secret variables roll doesn't manage ({}): Azure DevOps never returns a secret's value, so writing the group back could clear them; give the sync a group of its own",
+                    t.group,
+                    foreign.join(", ")
+                )));
+            }
+            let mut variables: serde_json::Map<String, Json> = current.into_iter().filter(|(k, _)| !ours(k)).collect();
+            for (name, v) in p.values {
+                variables.insert(name.clone(), json!({ "value": v.expose(), "isSecret": true }));
             }
             let mut body = json!({
                 "name": group["name"], "description": group["description"], "type": "Vsts", "variables": variables,
@@ -1957,7 +1967,13 @@ mod tests {
                           "variables": { "OLD": { "value": null, "isSecret": true }, "KEEP": { "value": null, "isSecret": true }, "PLAIN": { "value": "x" } },
                           "variableGroupProjectReferences": [{ "name": "shop-production", "projectReference": { "id": "00000000-0000-0000-0000-0000000000aa", "name": "shop" } }] },
                     ] }))),
+                    ("GET", "shop/_apis/distributedtask/variablegroups?groupName=shop-staging&api-version=7.1") => (StatusCode::OK, axum::Json(json!({ "count": 1, "value": [
+                        { "id": 9, "name": "shop-staging", "type": "Vsts",
+                          "variables": { "OLD": { "value": null, "isSecret": true }, "PLAIN": { "value": "x" } },
+                          "variableGroupProjectReferences": [{ "name": "shop-staging", "projectReference": { "id": "00000000-0000-0000-0000-0000000000aa", "name": "shop" } }] },
+                    ] }))),
                     ("PUT", "_apis/distributedtask/variablegroups/7?api-version=7.1") => (StatusCode::OK, axum::Json(json!({ "id": 7 }))),
+                    ("PUT", "_apis/distributedtask/variablegroups/9?api-version=7.1") => (StatusCode::OK, axum::Json(json!({ "id": 9 }))),
                     _ => (StatusCode::NOT_FOUND, axum::Json(json!({ "typeKey": "VariableGroupNotFoundException", "message": "no" }))),
                 };
             }
@@ -2114,26 +2130,33 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn azure_devops_puts_the_whole_group_back_changing_only_its_own_variables() {
+    async fn azure_devops_writes_a_group_of_its_own_and_refuses_one_with_secrets_it_doesnt_manage() {
         let (base, seen) = mock().await;
+        // A group holding a secret roll doesn't manage (KEEP) is refused, naming it: Azure DevOps never
+        // returns a secret's value, so writing the group back could clear it.
         let t = json!({ "organization": "acme", "project": "shop", "group": "shop-production", "token_key": "ADO_PAT" });
-        push(Arc::new(AzureDevOps(http(&base))), t.clone(), &[("ADO_PAT", "ado-pat-test")]).await.unwrap();
+        let refused = push(Arc::new(AzureDevOps(http(&base))), t.clone(), &[("ADO_PAT", "ado-pat-test")]).await.unwrap_err().to_string();
+        assert!(refused.contains("KEEP") && refused.contains("group of its own") && !refused.contains("v-123"), "{refused}");
+        assert!(seen.lock().unwrap().iter().all(|(m, _, _)| m != "PUT"), "nothing written");
+        // A group of roll's own: OLD is gone, every roll value is sent with its value, PLAIN goes back as it came.
+        seen.lock().unwrap().clear();
+        let staging = json!({ "organization": "acme", "project": "shop", "group": "shop-staging", "token_key": "ADO_PAT" });
+        push(Arc::new(AzureDevOps(http(&base))), staging, &[("ADO_PAT", "ado-pat-test")]).await.unwrap();
         let calls = seen.lock().unwrap().clone();
         let route: Vec<(&str, &str)> = calls.iter().map(|(m, p, _)| (m.as_str(), p.as_str())).collect();
         assert_eq!(
             route,
-            [("GET", "/acme/shop/_apis/distributedtask/variablegroups?groupName=shop-production&api-version=7.1"), ("PUT", "/acme/_apis/distributedtask/variablegroups/7?api-version=7.1")]
+            [("GET", "/acme/shop/_apis/distributedtask/variablegroups?groupName=shop-staging&api-version=7.1"), ("PUT", "/acme/_apis/distributedtask/variablegroups/9?api-version=7.1")]
         );
-        // OLD is gone, the team's own go back untouched (a secret's null keeps its value), NEW is secret.
         let put = &calls[1].2;
-        assert_eq!(put["variables"], json!({ "KEEP": { "value": null, "isSecret": true }, "PLAIN": { "value": "x" }, "NEW": { "value": "v-123", "isSecret": true } }));
-        assert_eq!((put["name"].as_str(), put["variableGroupProjectReferences"][0]["projectReference"]["name"].as_str()), (Some("shop-production"), Some("shop")));
+        assert_eq!(put["variables"], json!({ "PLAIN": { "value": "x" }, "NEW": { "value": "v-123", "isSecret": true } }));
+        assert_eq!((put["name"].as_str(), put["variableGroupProjectReferences"][0]["projectReference"]["name"].as_str()), (Some("shop-staging"), Some("shop")));
         // A refused PAT gets a sign-in page: the error says so, and holds neither token nor value.
         let refused = push(Arc::new(AzureDevOps(http(&base))), t, &[("ADO_PAT", "wrong-pat")]).await.unwrap_err().to_string();
         assert!(refused.contains("203") && !refused.contains("wrong-pat") && !refused.contains("v-123"), "{refused}");
         // Or as a service principal, for Azure DevOps' own resource.
         seen.lock().unwrap().clear();
-        let sp = json!({ "organization": "acme", "project": "shop", "group": "shop-production", "tenant_id": "contoso.onmicrosoft.com", "client_id": "app-1", "client_secret_key": "ADO_SECRET" });
+        let sp = json!({ "organization": "acme", "project": "shop", "group": "shop-staging", "tenant_id": "contoso.onmicrosoft.com", "client_id": "app-1", "client_secret_key": "ADO_SECRET" });
         push(Arc::new(AzureDevOps(http(&base))), sp, &[("ADO_SECRET", "sp-secret-test")]).await.unwrap();
         let calls = seen.lock().unwrap().clone();
         assert!(calls[0].2.as_str().unwrap().contains("scope=499b84ac-1321-427f-aa17-267ca6975798%2F.default"), "{}", calls[0].2);
