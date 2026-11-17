@@ -11097,6 +11097,21 @@ Base `6d3b7e9e5`; the candidate's four commits rebased without conflict onto `69
   -4.6%, q10 -2.8%, q17 -1.3 to -2.4%, q14 +0.4 to +1.9%, the rest within +-1%. Whole run (one
   pass, the 22): 147.5 -> 126.9 G (-14.0%). Result hashes PostgreSQL's in every pass; VmHWM
   unchanged (1.69-1.71 GB).
+- **cand/a251-2** (on `cand/a251`, depends on it): words-keyed groups check a row's key words
+  against the row before's first (`Partials::run_groups`: a sorted input's rows come a group at
+  a time; q18's 1.5 million groups of about four rows); `IndexChunk` reads an index's entries
+  into a `RowBatch` by reference (`TxnScan::fill_batch`) and a bitmap scan's keys as slices of
+  its list, no owned key or value per entry; entries already in their rows' order (a primary
+  key's) take each row at their own place, without sorting or binary-searching the 256 keys.
+  Against `c1` (3 pairs): q18 -27.3% user instructions (cycles -24 to -31%), q16 -7.4 to
+  -10.1%, q14 -2.7%, q13 -0.6%, q03 / q05 / q09 / q10 within +-0.3%. q18 is then about 16.8 G
+  against pgrust's 16.2 and PostgreSQL's 40.9.
+- The same day, lane C, plain dist (BENCH "Analytic CPU, round 4" has the table): origin's
+  `6913fd09c` against `cand/a251` on it, the 22 queries: user instructions 146.9 -> 126.4 G
+  (-13.9%), cycles 110.8 -> 98.3 G, CPU 31.7 -> 27.4 s, wall 12.2 -> 10.6 s; PostgreSQL 159.3 G
+  and 44.6 s CPU, pgrust 84.6 G and 19.3 s: against pgrust 1.50x user instructions (from 1.74x)
+  and 1.42x CPU (from 1.64x). With `cand/a251-2` q18 moves from 23.2 to about 16.8 G.
+  `tools/quick-check.sh` green on `cand/a251-2`'s code (`ffd61e215`), as on `cand/a251`'s.
 - Dropped: the walk's rows in a non-inlined loop of their own with slice patterns and the
   numerics' word load inline (`n3`, `~/.cache/a251/patches/dropped-n2c-walk-rows-loop.patch`):
   user instructions +0.3 to +2.0% over 10 queries (q12 +2.0, q21 +2.1, q01 -1.3, q06 -1.7),

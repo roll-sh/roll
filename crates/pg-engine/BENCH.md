@@ -333,6 +333,62 @@ workers 57.0%, in the backend 15.6%, JIT code 19.2%, its pool purge thread 6.4%.
 
 Every pass's 22 result hashes are PostgreSQL's. VmHWM base 1,690-1,734 MB, n5 1,689-1,691.
 
+### cand/a251-2 against c1 (plain dist, 3 alternating pairs, 5 runs a pass; foreign 0.37-2.12 cores)
+
+| query | instructions % per pair | cycles % per pair |
+|---|---|---|
+| q18 | -27.3 / -27.3 / -27.4 | -31.3 / -31.0 / -23.9 |
+| q16 | -8.5 / -7.4 / -10.1 | -9.3 / -7.7 / +0.7 |
+| q14 | -2.8 / -2.8 / -2.6 | -1.4 / +2.4 / +23.7 |
+| q13 | -1.0 / -0.0 / -0.6 | |
+| q03, q05, q09, q10 | within +-0.3 | |
+
+The 8 queries -10.1 to -10.4% user instructions; hashes PostgreSQL's in every pass.
+
+### TPC-H SF1, the same day: PostgreSQL, pgrust, b2 and c1 (plain dist; G user instructions a run / median s)
+
+**b2** is origin's `6913fd09c`, **c1** `cand/a251` on it (the code of `6f3f7fdf0`). Five rounds,
+the order rotated (PostgreSQL, pgrust, b2, c1); a pass is a warm-up of the 22, then 3 runs a
+query in one perf window (PostgreSQL's and pgrust's container cgroup counted with `-a -G`).
+Medians of the clean passes: PostgreSQL and pgrust 5 each, the engines 2 each (3 of 5 engine
+passes ran at 1.06-2.62 foreign cores; their user instructions are within 0.1% of the clean
+ones: b2 146.78-146.93 G, c1 126.41-126.50 G over the 22).
+
+| query | PostgreSQL 18.6 | pgrust | b2 | c1 | c1 / b2 | c1 / PostgreSQL | c1 / pgrust |
+|---|---|---|---|---|---|---|---|
+| q01 | 45.15 / 2.941 | 6.71 / 0.619 | 11.19 / 0.491 | 8.98 / 0.420 | -19.7% | 0.20x | 1.34x |
+| q02 | 1.15 / 0.273 | 0.91 / 0.189 | 2.92 / 0.557 | 2.88 / 0.521 | -1.2% | 2.50x | 3.18x |
+| q03 | 4.00 / 0.572 | 3.36 / 0.408 | 6.31 / 0.455 | 5.98 / 0.440 | -5.2% | 1.50x | 1.78x |
+| q04 | 1.00 / 0.210 | 1.38 / 0.168 | 4.01 / 0.279 | 3.74 / 0.265 | -6.8% | 3.73x | 2.70x |
+| q05 | 1.97 / 0.400 | 1.54 / 0.248 | 4.20 / 0.401 | 3.87 / 0.383 | -7.9% | 1.96x | 2.51x |
+| q06 | 4.76 / 0.554 | 5.53 / 0.562 | 8.05 / 0.380 | 6.13 / 0.305 | -23.8% | 1.29x | 1.11x |
+| q07 | 2.56 / 0.526 | 3.13 / 0.509 | 5.15 / 0.473 | 5.09 / 0.486 | -1.1% | 1.99x | 1.63x |
+| q08 | 0.92 / 0.250 | 1.05 / 0.179 | 2.01 / 0.278 | 1.98 / 0.281 | -1.3% | 2.17x | 1.88x |
+| q09 | 13.20 / 1.704 | 14.03 / 2.016 | 11.42 / 1.185 | 11.33 / 1.201 | -0.8% | 0.86x | 0.81x |
+| q10 | 6.50 / 0.935 | 4.24 / 0.998 | 9.61 / 0.641 | 8.00 / 0.596 | -16.7% | 1.23x | 1.89x |
+| q11 | 0.37 / 0.119 | 0.31 / 0.061 | 0.87 / 0.166 | 0.87 / 0.170 | -0.0% | 2.35x | 2.77x |
+| q12 | 8.65 / 0.789 | 9.02 / 0.860 | 8.60 / 0.426 | 6.54 / 0.377 | -24.0% | 0.76x | 0.72x |
+| q13 | 6.75 / 0.921 | 3.65 / 0.560 | 7.94 / 1.079 | 7.49 / 1.086 | -5.6% | 1.11x | 2.05x |
+| q14 | 1.05 / 0.208 | 0.58 / 0.087 | 1.73 / 0.247 | 1.71 / 0.223 | -1.0% | 1.64x | 2.95x |
+| q15 | 3.09 / 0.447 | 2.88 / 0.287 | 6.94 / 0.376 | 5.59 / 0.309 | -19.4% | 1.81x | 1.94x |
+| q16 | 3.52 / 0.357 | 1.76 / 0.311 | 4.99 / 0.462 | 4.74 / 0.324 | -5.0% | 1.35x | 2.70x |
+| q17 | 4.54 / 1.020 | 2.19 / 0.666 | 6.23 / 0.834 | 5.76 / 0.713 | -7.6% | 1.27x | 2.63x |
+| q18 | 40.89 / 3.877 | 16.15 / 2.495 | 30.19 / 2.103 | 23.16 / 1.392 | -23.3% | 0.57x | 1.43x |
+| q19 | 0.39 / 0.091 | 0.42 / 0.036 | 0.96 / 0.095 | 0.93 / 0.075 | -3.8% | 2.38x | 2.21x |
+| q20 | 0.43 / 0.167 | 0.51 / 0.121 | 1.50 / 0.321 | 1.49 / 0.319 | -1.1% | 3.47x | 2.93x |
+| q21 | 7.31 / 0.823 | 4.64 / 0.555 | 10.39 / 0.784 | 8.53 / 0.566 | -17.9% | 1.17x | 1.84x |
+| q22 | 1.12 / 0.131 | 0.56 / 0.060 | 1.69 / 0.151 | 1.63 / 0.123 | -3.2% | 1.46x | 2.89x |
+| **all 22** | **159.3 / 17.32** | **84.6 / 11.99** | **146.9 / 12.18** | **126.4 / 10.57** | -13.9% | 0.79x | 1.50x |
+
+- CPU s (medians summed): PostgreSQL 44.57, pgrust 19.27, b2 31.65, c1 27.35.
+- User cycles G (medians summed): PostgreSQL 141.0, pgrust 65.6, b2 110.8, c1 98.3.
+- Foreign load per engine pass, cores: b2 1.33, 0.94, 0.99, 1.61, 2.24; c1 0.82, 1.06, 0.57, 1.35, 2.62.
+- Every pass's 22 result hashes are PostgreSQL's. c1 against b2: user instructions -13.9%,
+  cycles -11.3%, CPU -13.6%, wall -13.2% over the 22. Against pgrust: 1.50x user instructions
+  (b2 1.74x), 1.42x CPU (b2 1.64x), 0.88x wall; fewer instructions than pgrust on q09 and q12,
+  than PostgreSQL on q01, q09, q12 and q18 (0.20-0.86x), more on the rest (q02, q04, q11, q20,
+  the lookups' queries, 2.3-3.7x PostgreSQL's).
+
 ## Storage round 2, part 2: dead-entry sets, linkable runs in format 2 (2026-11-17, agent 245)
 
 HANDOFF "Storage round 2, part 2" has what changed. **c1** is `cand/a245` (`d262652cb`, the
