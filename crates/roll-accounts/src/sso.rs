@@ -324,6 +324,13 @@ impl Accounts {
                 verified.retain(|v| d.contains(v));
                 c.execute("UPDATE sso_connections SET domains = ?, verified = ? WHERE id = ?", params![json!(d).to_string(), json!(verified).to_string(), id])?;
                 drop_links_outside(c, &provider, &verified)?;
+                // And what SCIM kept about people now outside its domains.
+                let kept: Vec<(String, String)> = c.query("SELECT s.user_id, u.email FROM scim_users s JOIN users u ON u.id = s.user_id WHERE s.connection_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                for (user, email) in kept {
+                    if !verified.iter().any(|v| v == domain_of(&email)) {
+                        c.execute("DELETE FROM scim_users WHERE connection_id = ? AND user_id = ?", [id, user.as_str()])?;
+                    }
+                }
             }
             if let Some(n) = &name {
                 c.execute("UPDATE sso_connections SET name = ? WHERE id = ?", params![n, id])?;

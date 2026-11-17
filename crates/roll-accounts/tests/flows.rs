@@ -652,7 +652,7 @@ async fn scim_provisions_and_deactivates_people() {
     assert_eq!((found.json["totalResults"].as_u64(), found.json["Resources"][0]["id"].as_str()), (Some(1), Some(carol_id.as_str())), "{}", found.json);
     // The admin is roll's to manage: invisible to SCIM.
     assert_eq!(scim(Method::GET, format!("/Users/{root}"), None, token.clone()).await.status, StatusCode::NOT_FOUND);
-    assert_eq!(scim(Method::GET, "/Users".into(), None, token.clone()).await.json["totalResults"], 1);
+    assert_eq!(scim(Method::GET, "/Users".into(), None, token.clone()).await.json["totalResults"], 1, "Carol only");
 
     // Carol signs in; deactivated by the provider (Entra's string), her session ends at once.
     let mut b = Browser::default();
@@ -665,6 +665,29 @@ async fn scim_provisions_and_deactivates_people() {
     assert_eq!(on.json["active"], true);
     assert_eq!(scim(Method::DELETE, format!("/Users/{carol_id}"), None, token.clone()).await.status, StatusCode::NO_CONTENT);
     assert_eq!(scim(Method::GET, format!("/Users/{carol_id}"), None, token.clone()).await.json["active"], false, "DELETE deactivates");
+
+    // Entra's userName is often a UPN, not the address: roll's address is the primary email,
+    // and the UPN finds the person.
+    let dave = scim(Method::POST, "/Users".into(), Some(json!({ "userName": "d.ruiz@acme.onmicrosoft.example", "emails": [{ "value": "dave@acme.test", "primary": true, "type": "work" }], "displayName": "Dave Ruiz" })), token.clone()).await;
+    assert_eq!((dave.status, dave.json["emails"][0]["value"].as_str()), (StatusCode::CREATED, Some("dave@acme.test")), "{}", dave.json);
+    assert!(dave.headers.get(header::LOCATION).is_some(), "201 says where");
+    let dave_id = dave.json["id"].as_str().unwrap().to_string();
+    let by_upn = scim(Method::GET, "/Users?filter=userName%20eq%20%22d.ruiz@acme.onmicrosoft.example%22".into(), None, token.clone()).await;
+    assert_eq!(by_upn.json["Resources"][0]["id"].as_str(), Some(dave_id.as_str()), "{}", by_upn.json);
+    // A deactivation roll can't read is refused, never silently nothing; a remove of what roll
+    // keeps nothing of goes through with the rest.
+    let patch = |ops: Value| json!({ "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": ops });
+    assert_eq!(scim(Method::PATCH, format!("/Users/{dave_id}"), Some(patch(json!([{ "op": "replace", "path": "active", "value": "no" }]))), token.clone()).await.status, StatusCode::BAD_REQUEST);
+    let mixed = scim(Method::PATCH, format!("/Users/{dave_id}"), Some(patch(json!([{ "op": "Remove", "path": "title" }, { "op": "Replace", "path": "active", "value": "False" }]))), token.clone()).await;
+    assert_eq!((mixed.status, mixed.json["active"].as_bool()), (StatusCode::OK, Some(false)), "{}", mixed.json);
+    // An admin's disable is roll's: SCIM can't lift it.
+    let ruth = scim(Method::POST, "/Users".into(), Some(json!({ "userName": "ruth@acme.test" })), token.clone()).await.json["id"].as_str().unwrap().to_string();
+    assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/users/{ruth}"), json!({ "disabled": true })).await.status, StatusCode::OK);
+    assert_eq!(scim(Method::PATCH, format!("/Users/{ruth}"), Some(patch(json!([{ "op": "replace", "path": "active", "value": true }]))), token.clone()).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(scim(Method::GET, format!("/Users/{ruth}"), None, token.clone()).await.json["active"], false);
+    // What roll's SCIM doesn't serve is a SCIM 404 to the token (a 401 would read as a bad token).
+    assert_eq!(scim(Method::GET, "/Groups".into(), None, token.clone()).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(scim(Method::GET, "/Groups".into(), None, "rlp_wrong".into()).await.status, StatusCode::UNAUTHORIZED);
 
     // A new token stops the old one; removing the connection stops SCIM.
     let token2 = env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/scim"), json!({})).await.json["token"].as_str().unwrap().to_string();

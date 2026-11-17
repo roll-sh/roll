@@ -313,17 +313,24 @@ over SCIM 2.0 (RFC 7643 and 7644), so someone who leaves loses roll at once.
   provider uses `base_url` (`<api>/v1/accounts/scim/v2`) and sends the token as `Authorization:
   Bearer`. It's looked up on every request.
 - It reaches only people whose email is in the connection's verified domains, and never an
-  admin (admins are managed in roll): anyone else is a 404 to it. It never changes an email
-  (`userName`).
-- `GET /Users` (`filter=userName eq "…"` or `externalId eq "…"`, `startIndex`, `count` up to
-  200), `GET /Users/{id}`, `POST /Users` (a new person in its domains, never an admin; 409
-  `uniqueness` when the email has an account, which the provider then finds by filter), `PUT` and
-  `PATCH /Users/{id}` (name, `externalId`, `active`; `"False"` and `false` both count),
-  `DELETE /Users/{id}` (deactivates). `ServiceProviderConfig`, `ResourceTypes` and `Schemas`
-  describe this: users only, no groups, no bulk.
-- Deactivating is roll's own disable: the person's sessions end, and their roll code owner (its
-  tokens and machine links) is cut off; tokens acting as them stop with their account.
-  Reactivating turns the account back on, none of those back.
+  admin (admins are managed in roll): anyone else is a 404 to it. It never changes an email.
+- A person's roll address is their primary email (`emails`), else a `userName` that is an email.
+  The provider's `userName` (Entra's userPrincipalName, say) is kept beside it: map the work email
+  to `emails[type eq "work"].value` in Entra. Filters: `userName eq` (the provider's userName or
+  the address), `externalId eq`, `emails.value eq`; `startIndex` and `count` (up to 200) page,
+  in the database.
+- `GET /Users`, `GET /Users/{id}`, `POST /Users` (a new person in its domains, never an admin,
+  made in one write; 409 `uniqueness` when the email has an account, which the provider then finds
+  by filter; `Location` on the 201), `PUT` and `PATCH /Users/{id}` (name, `externalId`,
+  `userName`, `active`: `"False"` and `false` both count, anything else is a 400; `remove` of what
+  roll keeps nothing of is fine), `DELETE /Users/{id}` (deactivates). `ServiceProviderConfig`,
+  `ResourceTypes` and `Schemas` describe this: users only, no groups, no bulk; any other path is a
+  SCIM 404 (turn group provisioning off in the provider).
+- Deactivating is roll's own disable, done every time it's asked (a retry finishes cutting off
+  what a failure left): the person's sessions end, and their roll code owner (its tokens and
+  machine links) is cut off. Their own roll tokens and connections pause with the account, and
+  come back if it's reactivated. SCIM reactivates only an account it deactivated: one an admin
+  disabled stays so (403 `admin_disabled`).
 
 ### Second factor
 

@@ -7,17 +7,20 @@
 //!   token names the connection: everything it does is that connection's.
 //! - It reaches only people whose email is in the connection's verified domains, and never an
 //!   admin (admins are managed in roll): anyone else is a 404 to it. It never changes an email.
-//! - Deactivating (`active: false`, or DELETE) is roll's own disable: sessions end, and the
-//!   person's roll code owner (its tokens, machine links) is cut off; reactivating turns the
-//!   account back on, none of that back. A new person is made never an admin.
-//! - Users only: no groups (the service provider config says so), filters `userName eq` and
-//!   `externalId eq`.
+//! - A person's roll address is their primary email (`emails`), else `userName`; the provider's
+//!   `userName` (Entra's UPN, say) is kept beside it, and filters match either.
+//! - Deactivating (`active: false`, or DELETE) is roll's own disable, every time it's asked (a
+//!   retry finishes what a failure left): sessions end, and the person's roll code owner (its
+//!   tokens, machine links) is cut off. Their own roll tokens pause with the account. SCIM
+//!   reactivates only an account it deactivated itself, never one an admin disabled.
+//! - Users only: no groups (the service provider config says so; other paths are SCIM 404s),
+//!   filters `userName eq`, `externalId eq`, `emails.value eq`.
 
 use crate::{Accounts, Error, normalize_email, sha256_hex};
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{any, get};
 use axum::{Json, Router};
 use code_sql::{OptionalExtension, params};
 use serde::Deserialize;
@@ -29,7 +32,9 @@ const LIST: &str = "urn:ietf:params:scim:api:messages:2.0:ListResponse";
 const ERROR: &str = "urn:ietf:params:scim:api:messages:2.0:Error";
 const PATCH_OP: &str = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
 /// Users one page answers, at most.
-const MAX_PAGE: usize = 200;
+const MAX_PAGE: i64 = 200;
+/// The longest name, `userName` or `externalId` roll keeps.
+const MAX_TEXT: usize = 255;
 
 type S = State<Arc<Accounts>>;
 
@@ -40,6 +45,9 @@ pub(crate) fn routes() -> Router<Arc<Accounts>> {
         .route("/v1/accounts/scim/v2/Schemas", get(schemas))
         .route("/v1/accounts/scim/v2/Users", get(list_users).post(create_user))
         .route("/v1/accounts/scim/v2/Users/{id}", get(get_user).put(replace_user).patch(patch_user).delete(delete_user))
+        // Groups, Bulk, Me, a schema by id: a SCIM 404 (an unmatched path would be the gate's
+        // 401, which a provider reads as a bad token and stops syncing for).
+        .route("/v1/accounts/scim/v2/{*rest}", any(not_here))
 }
 
 /// A SCIM error answer (RFC 7644 §3.12).
@@ -51,7 +59,12 @@ impl IntoResponse for ScimError {
         if let Some(t) = self.1 {
             body["scimType"] = json!(t);
         }
-        scim_json(self.0, body)
+        let unauthorized = self.0 == StatusCode::UNAUTHORIZED;
+        let mut r = scim_json(self.0, body);
+        if unauthorized {
+            r.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer realm=\"roll SCIM\""));
+        }
+        r
     }
 }
 
@@ -75,8 +88,12 @@ type R = std::result::Result<Response, ScimError>;
 
 fn scim_json(status: StatusCode, body: Value) -> Response {
     let mut r = (status, Json(body)).into_response();
-    r.headers_mut().insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/scim+json"));
+    r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/scim+json"));
     r
+}
+
+fn invalid(m: &str) -> Error {
+    Error::BadRequest(m.to_string(), None)
 }
 
 async fn blocking<T: Send + 'static>(a: &Arc<Accounts>, f: impl FnOnce(&Accounts) -> crate::Result<T> + Send + 'static) -> std::result::Result<T, ScimError> {
@@ -86,9 +103,13 @@ async fn blocking<T: Send + 'static>(a: &Arc<Accounts>, f: impl FnOnce(&Accounts
 
 /// The connection a request's bearer token belongs to (looked up every time; never cached).
 fn connection_of(a: &Accounts, headers: &HeaderMap) -> crate::Result<crate::sso::Connection> {
-    let token = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer "))).map(str::trim);
     let unauthorized = || Error::Unauthorized("a SCIM token from roll's SSO settings, as Authorization: Bearer".into());
-    let token = token.filter(|t| t.starts_with("rlp_")).ok_or_else(unauthorized)?;
+    let raw = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).ok_or_else(unauthorized)?;
+    let (scheme, token) = raw.trim().split_once(' ').ok_or_else(unauthorized)?;
+    let token = token.trim();
+    if !scheme.eq_ignore_ascii_case("bearer") || !token.starts_with("rlp_") {
+        return Err(unauthorized());
+    }
     let id = a.db.read(|c| c.query_row("SELECT connection_id FROM scim_tokens WHERE token_hash = ?", [sha256_hex(token)], |r| r.get::<_, String>(0)).optional())?.ok_or_else(unauthorized)?;
     a.sso_connections()?.into_iter().find(|c| c.id == id).ok_or_else(unauthorized)
 }
@@ -99,11 +120,27 @@ struct Person {
     email: String,
     name: String,
     disabled: bool,
+    disabled_by: Option<String>,
     external_id: Option<String>,
+    user_name: Option<String>,
+}
+
+/// Which people a query is about.
+enum Who<'a> {
+    Id(&'a str),
+    /// `userName eq`: the provider's userName, or the roll address.
+    UserName(&'a str),
+    Email(&'a str),
+    ExternalId(&'a str),
+    All,
 }
 
 fn domain_of(email: &str) -> &str {
     email.rsplit_once('@').map(|(_, d)| d).unwrap_or_default()
+}
+
+fn clean(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(MAX_TEXT).collect::<String>().trim().to_string()
 }
 
 impl Accounts {
@@ -131,61 +168,125 @@ impl Accounts {
         }
     }
 
-    fn scim_people(&self, conn: &crate::sso::Connection, only: Option<&str>) -> crate::Result<Vec<Person>> {
-        let rows: Vec<(String, String, String, bool, bool, Option<String>)> = self.db.read(|c| {
+    /// The people `who` names that the connection may see, a page of them (`offset`, `limit`),
+    /// and how many there are: filtered in the database, never by reading every account.
+    fn scim_people(&self, conn: &crate::sso::Connection, who: Who<'_>, offset: i64, limit: i64) -> crate::Result<(i64, Vec<Person>)> {
+        if conn.verified.is_empty() {
+            return Ok((0, Vec::new()));
+        }
+        let mut wheres = vec![format!("({})", conn.verified.iter().map(|_| "u.email LIKE ?").collect::<Vec<_>>().join(" OR ")), "u.admin = 0".to_string()];
+        let mut args: Vec<String> = conn.verified.iter().map(|d| format!("%@{d}")).collect();
+        let (clause, values): (&str, Vec<String>) = match who {
+            Who::Id(id) => ("u.id = ?", vec![id.into()]),
+            Who::UserName(n) => ("(LOWER(s.user_name) = ? OR u.email = ?)", vec![n.to_ascii_lowercase(), n.to_ascii_lowercase()]),
+            Who::Email(e) => ("u.email = ?", vec![e.to_ascii_lowercase()]),
+            Who::ExternalId(x) => ("s.external_id = ?", vec![x.into()]),
+            Who::All => ("1 = 1", vec![]),
+        };
+        wheres.push(clause.into());
+        args.extend(values);
+        // Ids and the connection go in the SQL as parameters; the LIKE patterns are built from
+        // verified domains (letters, digits, dots, hyphens: no wildcards).
+        let from = format!("FROM users u LEFT JOIN scim_users s ON s.user_id = u.id AND s.connection_id = ? WHERE {}", wheres.join(" AND "));
+        let mut all: Vec<String> = vec![conn.id.clone()];
+        all.extend(args);
+        let total: i64 = self.db.read(|c| c.query_row(&format!("SELECT COUNT(*) {from}"), &all, |r| r.get(0)))?;
+        let rows = self.db.read(|c| {
             c.query(
-                "SELECT u.id, u.email, u.name, u.disabled, u.admin, s.external_id FROM users u LEFT JOIN scim_users s ON s.user_id = u.id AND s.connection_id = ? ORDER BY u.created_at, u.id",
-                [conn.id.as_str()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                &format!("SELECT u.id, u.email, u.name, u.disabled, u.disabled_by, s.external_id, s.user_name {from} ORDER BY u.created_at, u.id LIMIT {limit} OFFSET {offset}"),
+                &all,
+                |r| Ok(Person { id: r.get(0)?, email: r.get(1)?, name: r.get(2)?, disabled: r.get(3)?, disabled_by: r.get(4)?, external_id: r.get(5)?, user_name: r.get(6)? }),
             )
         })?;
-        Ok(rows
-            .into_iter()
-            .filter(|(id, email, _, _, admin, _)| !admin && conn.verified.iter().any(|d| d == domain_of(email)) && only.is_none_or(|o| o == id))
-            .map(|(id, email, name, disabled, _, external_id)| Person { id, email, name, disabled, external_id })
-            .collect())
+        Ok((total, rows))
     }
 
     fn scim_person(&self, conn: &crate::sso::Connection, id: &str) -> crate::Result<Person> {
-        self.scim_people(conn, Some(id))?.pop().ok_or_else(|| Error::NotFound(format!("no user {id}")))
+        self.scim_people(conn, Who::Id(id), 0, 1)?.1.pop().ok_or_else(|| Error::NotFound(format!("no user {id}")))
     }
 
-    /// Apply what the provider says about a person: their name, their external id, active.
-    fn scim_update(&self, conn: &crate::sso::Connection, id: &str, name: Option<&str>, external_id: Option<Option<&str>>, active: Option<bool>) -> crate::Result<()> {
+    /// Apply what the provider says about a person: their name, external id, userName, active.
+    fn scim_update(&self, conn: &crate::sso::Connection, id: &str, ch: Change) -> crate::Result<()> {
         let person = self.scim_person(conn, id)?;
-        let name = name.map(|n| n.chars().filter(|c| !c.is_control()).take(100).collect::<String>()).filter(|n| !n.trim().is_empty());
+        let name = ch.name.as_deref().map(clean).filter(|n| !n.is_empty());
         self.db.write(|c| {
             if let Some(n) = &name {
-                c.execute("UPDATE users SET name = ? WHERE id = ?", params![n.trim(), person.id])?;
+                c.execute("UPDATE users SET name = ? WHERE id = ?", params![n, person.id])?;
             }
-            if let Some(x) = external_id {
-                c.execute(
-                    "INSERT INTO scim_users (connection_id, user_id, external_id) VALUES (?, ?, ?) ON CONFLICT (connection_id, user_id) DO UPDATE SET external_id = excluded.external_id",
-                    params![conn.id, person.id, x],
-                )?;
+            if ch.external_id.is_some() || ch.user_name.is_some() {
+                c.execute("INSERT INTO scim_users (connection_id, user_id) VALUES (?, ?) ON CONFLICT (connection_id, user_id) DO NOTHING", params![conn.id, person.id])?;
+            }
+            if let Some(x) = &ch.external_id {
+                c.execute("UPDATE scim_users SET external_id = ? WHERE connection_id = ? AND user_id = ?", params![x.as_deref().map(clean), conn.id, person.id])?;
+            }
+            if let Some(u) = &ch.user_name {
+                c.execute("UPDATE scim_users SET user_name = ? WHERE connection_id = ? AND user_id = ?", params![clean(u), conn.id, person.id])?;
             }
             Ok::<_, Error>(())
         })?;
-        if let Some(a) = active
-            && a == person.disabled
-        {
-            self.update_user(&person.id, None, Some(!a))?;
-            tracing::info!(user = %person.id, connection = %conn.id, active = a, "accounts: SCIM changed a person's access");
+        let me = format!("scim:{}", conn.id);
+        match ch.active {
+            // Every time: a retry finishes cutting off what a failure left (roll code's tokens).
+            Some(false) => {
+                self.update_user_by(&person.id, None, Some(true), if person.disabled { person.disabled_by.as_deref().unwrap_or("admin") } else { &me })?;
+                tracing::info!(user = %person.id, connection = %conn.id, "accounts: SCIM deactivated a person");
+            }
+            // Only a disable of its own: an admin's stays.
+            Some(true) if person.disabled => {
+                if person.disabled_by.as_deref() != Some(me.as_str()) {
+                    return Err(Error::Forbidden("an admin disabled this account in roll: only an admin turns it back on".into(), "admin_disabled"));
+                }
+                self.update_user_by(&person.id, None, Some(false), &me)?;
+                tracing::info!(user = %person.id, connection = %conn.id, "accounts: SCIM reactivated a person");
+            }
+            _ => {}
         }
         Ok(())
     }
+
+    /// A new person, in one write: the account (never an admin), disabled or not, and what the
+    /// provider calls them.
+    fn scim_create(&self, conn: &crate::sso::Connection, email: &str, user_name: &str, name: Option<&str>, external_id: Option<&str>, active: bool) -> crate::Result<String> {
+        let handle = self.pick_handle(None, email)?;
+        let id = crate::new_id("usr");
+        let now = self.db.now_ms()?;
+        let name: String = name.map(clean).filter(|n| !n.is_empty()).unwrap_or_else(|| handle.clone());
+        let by = format!("scim:{}", conn.id);
+        self.db.write(|c| {
+            if c.query_row("SELECT 1 FROM users WHERE email = ? OR handle = ?", [email, handle.as_str()], |_| Ok(())).optional()?.is_some() {
+                return Err(Error::Conflict(format!("{email} has an account: find it with filter=userName eq \"{email}\"")));
+            }
+            c.execute(
+                "INSERT INTO users (id, email, handle, name, admin, disabled, disabled_by, code_owner_id, invited_by, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, NULL, ?, ?)",
+                params![id, email, handle, name, !active, (!active).then_some(by.as_str()), by, now],
+            )?;
+            c.execute("INSERT INTO scim_users (connection_id, user_id, external_id, user_name) VALUES (?, ?, ?, ?)", params![conn.id, id, external_id.map(clean), clean(user_name)])?;
+            Ok(())
+        })?;
+        tracing::info!(user = %id, connection = %conn.id, "accounts: SCIM created a person");
+        Ok(id)
+    }
+}
+
+/// What a PUT or PATCH changes (`None`: left as it is).
+#[derive(Default)]
+struct Change {
+    name: Option<String>,
+    external_id: Option<Option<String>>,
+    user_name: Option<String>,
+    active: Option<bool>,
 }
 
 fn user_json(a: &Accounts, p: &Person) -> Value {
     let mut u = json!({
         "schemas": [USER],
         "id": p.id,
-        "userName": p.email,
+        "userName": p.user_name.clone().unwrap_or_else(|| p.email.clone()),
         "displayName": p.name,
         "name": { "formatted": p.name },
         "emails": [{ "value": p.email, "primary": true, "type": "work" }],
         "active": !p.disabled,
-        "meta": { "resourceType": "User", "location": format!("{}/v1/accounts/scim/v2/Users/{}", a.config.api_url, p.id) },
+        "meta": { "resourceType": "User", "location": location(a, &p.id) },
     });
     if let Some(x) = &p.external_id {
         u["externalId"] = json!(x);
@@ -193,13 +294,18 @@ fn user_json(a: &Accounts, p: &Person) -> Value {
     u
 }
 
-/// A boolean as Okta (`false`) or Entra (`"False"`) sends it.
-fn bool_of(v: &Value) -> Option<bool> {
+fn location(a: &Accounts, id: &str) -> String {
+    format!("{}/v1/accounts/scim/v2/Users/{id}", a.config.api_url)
+}
+
+/// A boolean as Okta (`false`) or Entra (`"False"`) sends it; anything else is a 400, never
+/// silently nothing (a provider would think a person gone who isn't).
+fn bool_of(v: &Value) -> crate::Result<bool> {
     match v {
-        Value::Bool(b) => Some(*b),
-        Value::String(s) if s.eq_ignore_ascii_case("true") => Some(true),
-        Value::String(s) if s.eq_ignore_ascii_case("false") => Some(false),
-        _ => None,
+        Value::Bool(b) => Ok(*b),
+        Value::String(s) if s.eq_ignore_ascii_case("true") => Ok(true),
+        Value::String(s) if s.eq_ignore_ascii_case("false") => Ok(false),
+        _ => Err(invalid("active is true or false")),
     }
 }
 
@@ -216,6 +322,19 @@ fn name_of(v: &Value) -> Option<String> {
             _ => None,
         })
         .or_else(|| s("displayName").map(str::to_string))
+}
+
+/// The person's roll address: their primary (or first) email, else a `userName` that is one.
+fn email_of(v: &Value) -> crate::Result<String> {
+    let emails = v.get("emails").and_then(Value::as_array).cloned().unwrap_or_default();
+    let primary = emails.iter().find(|e| e.get("primary").and_then(Value::as_bool) == Some(true)).or_else(|| emails.first());
+    let raw = primary.and_then(|e| e.get("value")).and_then(Value::as_str).or_else(|| v.get("userName").and_then(Value::as_str)).unwrap_or_default();
+    normalize_email(raw).map_err(|_| invalid("the person's work email (emails, or a userName that's an email)"))
+}
+
+async fn not_here(State(a): S, headers: HeaderMap) -> R {
+    blocking(&a, move |a| connection_of(a, &headers)).await?;
+    Err(ScimError(StatusCode::NOT_FOUND, None, "roll's SCIM serves Users only (no Groups, Bulk or Me)".into()))
 }
 
 async fn service_provider_config(State(a): S, headers: HeaderMap) -> R {
@@ -244,9 +363,13 @@ async fn resource_types(State(a): S, headers: HeaderMap) -> R {
 async fn schemas(State(a): S, headers: HeaderMap) -> R {
     blocking(&a, move |a| connection_of(a, &headers)).await?;
     let attr = |name: &str, ty: &str, mutability: &str| json!({ "name": name, "type": ty, "multiValued": false, "required": name == "userName", "mutability": mutability, "returned": "default", "uniqueness": if name == "userName" { "server" } else { "none" } });
+    let mut emails = attr("emails", "complex", "readOnly");
+    emails["multiValued"] = json!(true);
+    let mut name = attr("name", "complex", "readWrite");
+    name["subAttributes"] = json!([attr("formatted", "string", "readWrite"), attr("givenName", "string", "writeOnly"), attr("familyName", "string", "writeOnly")]);
     let user = json!({
         "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Schema"], "id": USER, "name": "User",
-        "attributes": [attr("userName", "string", "immutable"), attr("displayName", "string", "readWrite"), attr("active", "boolean", "readWrite"), attr("externalId", "string", "readWrite")],
+        "attributes": [attr("userName", "string", "readWrite"), name, attr("displayName", "string", "readWrite"), emails, attr("active", "boolean", "readWrite"), attr("externalId", "string", "readWrite")],
     });
     Ok(scim_json(StatusCode::OK, json!({ "schemas": [LIST], "totalResults": 1, "startIndex": 1, "itemsPerPage": 1, "Resources": [user] })))
 }
@@ -255,41 +378,45 @@ async fn schemas(State(a): S, headers: HeaderMap) -> R {
 struct ListQuery {
     filter: Option<String>,
     #[serde(rename = "startIndex")]
-    start_index: Option<usize>,
-    count: Option<usize>,
+    start_index: Option<String>,
+    count: Option<String>,
 }
 
-/// `userName eq "x"` or `externalId eq "x"`: the attribute and the value.
+/// `userName eq "x"`, `externalId eq "x"` or `emails.value eq "x"` (extra spaces, `\"` inside).
 fn parse_filter(f: &str) -> std::result::Result<(String, String), ScimError> {
-    let bad = || ScimError(StatusCode::BAD_REQUEST, Some("invalidFilter"), "filters are userName eq \"…\" or externalId eq \"…\"".into());
-    let mut it = f.trim().splitn(3, ' ');
-    let (attr, op, value) = (it.next().ok_or_else(bad)?, it.next().ok_or_else(bad)?, it.next().ok_or_else(bad)?);
-    let value = value.trim().strip_prefix('"').and_then(|v| v.strip_suffix('"')).ok_or_else(bad)?;
-    if !op.eq_ignore_ascii_case("eq") || value.contains('"') {
+    let bad = || ScimError(StatusCode::BAD_REQUEST, Some("invalidFilter"), "filters are userName eq \"…\", externalId eq \"…\" or emails.value eq \"…\"".into());
+    let f = f.trim();
+    let (attr, rest) = f.split_once(char::is_whitespace).ok_or_else(bad)?;
+    let (op, value) = rest.trim_start().split_once(char::is_whitespace).ok_or_else(bad)?;
+    let value = value.trim().strip_prefix('"').and_then(|v| v.strip_suffix('"')).ok_or_else(bad)?.replace("\\\"", "\"");
+    if !op.eq_ignore_ascii_case("eq") || value.is_empty() || value.len() > 320 {
         return Err(bad());
     }
     match attr.to_ascii_lowercase().as_str() {
-        "username" => Ok(("userName".into(), value.to_string())),
-        "externalid" => Ok(("externalId".into(), value.to_string())),
+        "username" => Ok(("userName".into(), value)),
+        "externalid" => Ok(("externalId".into(), value)),
+        "emails.value" | "emails" => Ok(("email".into(), value)),
         _ => Err(bad()),
     }
 }
 
 async fn list_users(State(a): S, headers: HeaderMap, Query(q): Query<ListQuery>) -> R {
-    let filter = q.filter.as_deref().map(parse_filter).transpose()?;
-    let (start, count) = (q.start_index.unwrap_or(1).max(1), q.count.unwrap_or(100).min(MAX_PAGE));
+    // RFC 7644 §3.4.2.4: a startIndex below 1 is 1, a negative count is 0.
+    let num = |s: &Option<String>| s.as_deref().and_then(|v| v.trim().parse::<i64>().ok());
+    let start = num(&q.start_index).unwrap_or(1).max(1);
+    let count = num(&q.count).unwrap_or(100).clamp(0, MAX_PAGE);
+    let filter = q.filter.clone();
     let (total, page) = blocking(&a, move |a| {
         let conn = connection_of(a, &headers)?;
-        let mut people = a.scim_people(&conn, None)?;
-        if let Some((attr, value)) = &filter {
-            people.retain(|p| match attr.as_str() {
-                "userName" => p.email.eq_ignore_ascii_case(value),
-                _ => p.external_id.as_deref() == Some(value.as_str()),
-            });
-        }
-        let total = people.len();
-        let page: Vec<Value> = people.iter().skip(start - 1).take(count).map(|p| user_json(a, p)).collect();
-        Ok((total, page))
+        let filter = filter.as_deref().map(parse_filter).transpose().map_err(|e| invalid(&e.2))?;
+        let who = match &filter {
+            Some((k, v)) if k == "userName" => Who::UserName(v),
+            Some((k, v)) if k == "externalId" => Who::ExternalId(v),
+            Some((_, v)) => Who::Email(v),
+            None => Who::All,
+        };
+        let (total, people) = a.scim_people(&conn, who, start.saturating_sub(1).min(i64::MAX / 2), count)?;
+        Ok((total, people.iter().map(|p| user_json(a, p)).collect::<Vec<_>>()))
     })
     .await?;
     Ok(scim_json(StatusCode::OK, json!({ "schemas": [LIST], "totalResults": total, "startIndex": start, "itemsPerPage": page.len(), "Resources": page })))
@@ -305,38 +432,48 @@ async fn get_user(State(a): S, headers: HeaderMap, Path(id): Path<String>) -> R 
 }
 
 async fn create_user(State(a): S, headers: HeaderMap, Json(v): Json<Value>) -> R {
-    let body = blocking(&a, move |a| {
+    let (id, body) = blocking(&a, move |a| {
         let conn = connection_of(a, &headers)?;
-        let raw = v.get("userName").and_then(Value::as_str).unwrap_or_default();
-        let email = normalize_email(raw).map_err(|_| Error::BadRequest("userName is the person's work email".into(), None))?;
+        let email = email_of(&v)?;
         if !conn.verified.iter().any(|d| d == domain_of(&email)) {
-            return Err(Error::BadRequest(format!("{email} isn't in this connection's verified domains"), None));
+            return Err(invalid(&format!("{email} isn't in this connection's verified domains")));
         }
-        if a.db.read(|c| c.query_row("SELECT 1 FROM users WHERE email = ?", [email.as_str()], |_| Ok(())).optional())?.is_some() {
-            return Err(Error::Conflict(format!("{email} has an account: find it with filter=userName eq \"{email}\"")));
-        }
-        let name = name_of(&v);
-        let user = a.provision_user(&email, name.as_deref(), None, &format!("scim:{}", conn.id))?;
-        let external = v.get("externalId").and_then(Value::as_str).map(|x| x.chars().take(255).collect::<String>());
-        let active = v.get("active").and_then(bool_of).unwrap_or(true);
-        a.scim_update(&conn, &user, None, Some(external.as_deref()), Some(active))?;
-        Ok(user_json(a, &a.scim_person(&conn, &user)?))
+        let user_name = v.get("userName").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()).unwrap_or(&email).to_string();
+        let active = match v.get("active") {
+            None | Some(Value::Null) => true,
+            Some(x) => bool_of(x)?,
+        };
+        let external = v.get("externalId").and_then(Value::as_str);
+        let id = a.scim_create(&conn, &email, &user_name, name_of(&v).as_deref(), external, active)?;
+        Ok((id.clone(), user_json(a, &a.scim_person(&conn, &id)?)))
     })
     .await?;
-    Ok(scim_json(StatusCode::CREATED, body))
+    let mut r = scim_json(StatusCode::CREATED, body);
+    if let Ok(loc) = HeaderValue::from_str(&location(&a, &id)) {
+        r.headers_mut().insert(header::LOCATION, loc);
+    }
+    Ok(r)
 }
 
 async fn replace_user(State(a): S, headers: HeaderMap, Path(id): Path<String>, Json(v): Json<Value>) -> R {
     let body = blocking(&a, move |a| {
         let conn = connection_of(a, &headers)?;
         let person = a.scim_person(&conn, &id)?;
-        if let Some(u) = v.get("userName").and_then(Value::as_str)
-            && !u.trim().eq_ignore_ascii_case(&person.email)
+        if let Ok(e) = email_of(&v)
+            && e != person.email
         {
-            return Err(Error::BadRequest("userName (the email) can't change over SCIM".into(), None));
+            return Err(invalid("the email can't change over SCIM"));
         }
-        let external = v.get("externalId").map(|x| x.as_str().map(|s| s.chars().take(255).collect::<String>()));
-        a.scim_update(&conn, &id, name_of(&v).as_deref(), external.as_ref().map(|x| x.as_deref()), v.get("active").and_then(bool_of))?;
+        let ch = Change {
+            name: name_of(&v),
+            external_id: v.get("externalId").map(|x| x.as_str().map(str::to_string)),
+            user_name: v.get("userName").and_then(Value::as_str).map(str::to_string),
+            active: match v.get("active") {
+                None | Some(Value::Null) => None,
+                Some(x) => Some(bool_of(x)?),
+            },
+        };
+        a.scim_update(&conn, &id, ch)?;
         Ok(user_json(a, &a.scim_person(&conn, &id)?))
     })
     .await?;
@@ -347,38 +484,45 @@ async fn patch_user(State(a): S, headers: HeaderMap, Path(id): Path<String>, Jso
     let body = blocking(&a, move |a| {
         let conn = connection_of(a, &headers)?;
         if !v.get("schemas").and_then(Value::as_array).is_some_and(|s| s.iter().any(|x| x == PATCH_OP)) {
-            return Err(Error::BadRequest("a PatchOp".into(), None));
+            return Err(invalid("a PatchOp"));
         }
-        let (mut name, mut external, mut active) = (None, None, None);
+        let mut ch = Change::default();
         for op in v.get("Operations").and_then(Value::as_array).into_iter().flatten() {
             let kind = op.get("op").and_then(Value::as_str).unwrap_or_default().to_ascii_lowercase();
-            if kind != "replace" && kind != "add" {
-                return Err(Error::BadRequest(format!("op {kind:?}: replace or add"), None));
-            }
+            let path = op.get("path").and_then(Value::as_str).map(str::to_ascii_lowercase);
             let value = op.get("value").cloned().unwrap_or(Value::Null);
-            match op.get("path").and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() {
-                Some("active") => active = bool_of(&value).or(active),
-                Some("displayname") | Some("name.formatted") => name = value.as_str().map(str::to_string).or(name),
-                Some("externalid") => external = Some(value.as_str().map(str::to_string)),
-                Some("username") => return Err(Error::BadRequest("userName (the email) can't change over SCIM".into(), None)),
-                // A path roll doesn't keep (title, phone numbers…): nothing to do.
-                Some(_) => {}
+            match (kind.as_str(), path.as_deref()) {
+                // Removing what roll keeps nothing of (title, phone numbers…) is fine; removing
+                // the external id clears it; anything else roll needs stays.
+                ("remove", Some("externalid")) => ch.external_id = Some(None),
+                ("remove", Some("active")) => return Err(invalid("active can't be removed: set it")),
+                ("remove", _) => {}
+                ("replace" | "add", Some("active")) => ch.active = Some(bool_of(&value)?),
+                ("replace" | "add", Some("displayname" | "name.formatted")) => ch.name = value.as_str().map(str::to_string).or(ch.name),
+                ("replace" | "add", Some("externalid")) => ch.external_id = Some(value.as_str().map(str::to_string)),
+                ("replace" | "add", Some("username")) => ch.user_name = value.as_str().map(str::to_string),
+                ("replace" | "add", Some(p)) if p.starts_with("emails") => return Err(invalid("the email can't change over SCIM")),
+                // A path roll doesn't keep (title, name.givenName…): nothing to do.
+                ("replace" | "add", Some(_)) => {}
                 // No path: the value is an object of attributes.
-                None => {
-                    if let Some(b) = value.get("active").and_then(bool_of) {
-                        active = Some(b);
+                ("replace" | "add", None) => {
+                    if let Some(x) = value.get("active") {
+                        ch.active = Some(bool_of(x)?);
                     }
                     if let Some(n) = name_of(&value) {
-                        name = Some(n);
+                        ch.name = Some(n);
                     }
                     if let Some(x) = value.get("externalId") {
-                        external = Some(x.as_str().map(str::to_string));
+                        ch.external_id = Some(x.as_str().map(str::to_string));
+                    }
+                    if let Some(u) = value.get("userName").and_then(Value::as_str) {
+                        ch.user_name = Some(u.to_string());
                     }
                 }
+                (other, _) => return Err(invalid(&format!("op {other:?}: add, replace or remove"))),
             }
         }
-        let external = external.map(|x| x.map(|s| s.chars().take(255).collect::<String>()));
-        a.scim_update(&conn, &id, name.as_deref(), external.as_ref().map(|x| x.as_deref()), active)?;
+        a.scim_update(&conn, &id, ch)?;
         Ok(user_json(a, &a.scim_person(&conn, &id)?))
     })
     .await?;
@@ -389,7 +533,7 @@ async fn patch_user(State(a): S, headers: HeaderMap, Path(id): Path<String>, Jso
 async fn delete_user(State(a): S, headers: HeaderMap, Path(id): Path<String>) -> R {
     blocking(&a, move |a| {
         let conn = connection_of(a, &headers)?;
-        a.scim_update(&conn, &id, None, None, Some(false))
+        a.scim_update(&conn, &id, Change { active: Some(false), ..Change::default() })
     })
     .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
