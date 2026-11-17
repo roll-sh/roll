@@ -17,17 +17,8 @@ use std::time::Instant;
 /// Block `i`'s entries in the store's file form (a linked run's relinked: as compaction would
 /// write them), and its stored length.
 fn raw_of(r: &SstReader, i: usize) -> (Vec<u8>, usize) {
-    let (off, len) = r.index.at[i];
-    let mut buf = vec![0u8; len as usize];
-    r.file.read_exact_at(&mut buf, off).unwrap();
-    let crc_pos = buf.len() - 4;
-    let raw = match buf[0] {
-        0 => buf[1..crc_pos].to_vec(),
-        _ => {
-            let n = u32::from_le_bytes(buf[1..5].try_into().unwrap()) as usize;
-            zstd::bulk::decompress(&buf[5..crc_pos], n).unwrap()
-        }
-    };
+    let len = r.index.at[i].1;
+    let raw = r.body(i).unwrap().to_vec();
     match r.meta.commit_ts {
         Some(ts) => (relink(&raw, ts).unwrap().to_vec(), len as usize),
         None => (raw, len as usize),
@@ -191,6 +182,177 @@ fn study() {
     }
     if only("seek") {
         seeks(&readers);
+    }
+    if std::env::var("FMT_ONLY").is_ok_and(|o| o.split(',').any(|x| x == "blocks")) {
+        blocks(&readers);
+    }
+}
+
+/// A block codec of the `blocks` study: zstd at level 1 without or with a dictionary of
+/// `dict` bytes trained from the file's first `sample` bytes of blocks, or LZ4.
+#[derive(Clone, Copy)]
+enum BCodec {
+    Zstd,
+    Dict { dict: usize, sample: usize },
+    /// `finalize_dict`: raw content, the samples' statistics.
+    Raw { dict: usize, sample: usize },
+    Lz4,
+}
+
+impl BCodec {
+    fn name(self) -> String {
+        match self {
+            BCodec::Zstd => "zstd1".into(),
+            BCodec::Dict { dict, sample } => format!("zstd1+dict{}k/{}k", dict >> 10, sample >> 10),
+            BCodec::Raw { dict, sample } => format!("zstd1+raw{}k/{}k", dict >> 10, sample >> 10),
+            BCodec::Lz4 => "lz4".into(),
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+struct BStat {
+    blocks: u64,
+    raw: u64,
+    stored: u64,
+    dict_bytes: u64,
+    train_ns: u64,
+    comp_ns: u64,
+    /// A fresh context per block (as `raw_block` decompresses), and one kept with the
+    /// dictionary referenced.
+    dec_ns: u64,
+}
+
+/// Every file's entries written again in format 2 blocks of `FMT_T` (comma-separated targets,
+/// format 1 bytes as `SstWriter` counts them), uncompressed, then each block body through
+/// each codec: bytes stored, compression and decompression time per block, by relation kind
+/// (rows or index entries, by a file's first key). FMT_FILES limits the files read.
+fn blocks(readers: &[Arc<SstReader>]) {
+    let targets: Vec<usize> = std::env::var("FMT_T").unwrap_or("16384,8192,4096".into()).split(',').map(|t| t.parse().unwrap()).collect();
+    let codecs = [
+        BCodec::Zstd,
+        BCodec::Dict { dict: 16 << 10, sample: 1 << 20 },
+        BCodec::Raw { dict: 16 << 10, sample: 256 << 10 },
+        BCodec::Raw { dict: 8 << 10, sample: 1 << 20 },
+        BCodec::Raw { dict: 32 << 10, sample: 1 << 20 },
+        BCodec::Lz4,
+    ];
+    let nfiles = std::env::var("FMT_FILES").ok().and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
+    let tmp = std::env::temp_dir().join(format!("fmt-blocks-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    // (target, kind, codec) -> stat
+    let mut stats: BTreeMap<(usize, &'static str, usize), BStat> = BTreeMap::new();
+    let mut zd = zstd::bulk::Decompressor::new().unwrap();
+    for r in readers.iter().filter(|r| r.format() >= 2 && r.meta.commit_ts.is_none()).take(nfiles) {
+        let kind = match group_of(&r.meta.first_key) {
+            (0, _) => "system",
+            (_, 0) => "rows",
+            (_, 0xffff_fffe) => "toast",
+            _ => "index",
+        };
+        for &t in &targets {
+            let mut w = SstWriter::create_with(&tmp, 1, super::Codec::None, true).unwrap();
+            w.set_block_target(t);
+            for i in 0..r.block_count() {
+                let e = r.raw_block(i).unwrap().expand();
+                for j in 0..e.len() {
+                    w.add(e.key(j), e.value_ref(j)).unwrap();
+                }
+            }
+            let meta = w.finish().unwrap();
+            let nr = SstReader::open(&tmp, meta, BlockCache::new(1 << 20)).unwrap();
+            let bodies: Vec<Vec<u8>> = (0..nr.block_count()).map(|i| raw_of(&nr, i).0).collect();
+            let _ = std::fs::remove_file(nr.path());
+            drop(nr);
+            for (ci, c) in codecs.iter().enumerate() {
+                let st = stats.entry((t, kind, ci)).or_default();
+                st.blocks += bodies.len() as u64;
+                st.raw += bodies.iter().map(|b| b.len() as u64).sum::<u64>();
+                match *c {
+                    BCodec::Zstd => {
+                        let mut zc = zstd::bulk::Compressor::new(1).unwrap();
+                        for b in &bodies {
+                            let t0 = Instant::now();
+                            let z = zc.compress(b).unwrap();
+                            let t1 = Instant::now();
+                            let d = zstd::bulk::decompress(&z, b.len()).unwrap();
+                            let t2 = Instant::now();
+                            std::hint::black_box(&d);
+                            st.stored += (z.len() + 9).min(b.len() + 5) as u64;
+                            st.comp_ns += (t1 - t0).as_nanos() as u64;
+                            st.dec_ns += (t2 - t1).as_nanos() as u64;
+                        }
+                    }
+                    BCodec::Dict { dict, sample } | BCodec::Raw { dict, sample } => {
+                        let t0 = Instant::now();
+                        let mut n = 0;
+                        let samples: Vec<&[u8]> = bodies.iter().take_while(|b| { n += b.len(); n - b.len() < sample }).map(|b| b.as_slice()).collect();
+                        let d = match *c {
+                            BCodec::Raw { .. } => super::finalize_dict(&samples, dict).unwrap_or_default(),
+                            _ => zstd::dict::from_samples(&samples, dict).unwrap_or_default(),
+                        };
+                        st.train_ns += t0.elapsed().as_nanos() as u64;
+                        st.dict_bytes += d.len() as u64;
+                        let mut zc = zstd::bulk::Compressor::with_dictionary(1, &d).unwrap();
+                        let dd = zstd::dict::DecoderDictionary::copy(&d);
+                        let mut zdd = zstd::bulk::Decompressor::with_prepared_dictionary(&dd).unwrap();
+                        for b in &bodies {
+                            let t0 = Instant::now();
+                            let z = zc.compress(b).unwrap();
+                            let t1 = Instant::now();
+                            let out = zdd.decompress(&z, b.len()).unwrap();
+                            let t2 = Instant::now();
+                            std::hint::black_box(&out);
+                            st.stored += (z.len() + 9).min(b.len() + 5) as u64;
+                            st.comp_ns += (t1 - t0).as_nanos() as u64;
+                            st.dec_ns += (t2 - t1).as_nanos() as u64;
+                        }
+                        st.stored += d.len() as u64;
+                    }
+                    BCodec::Lz4 => {
+                        for b in &bodies {
+                            let t0 = Instant::now();
+                            let z = lz4_flex::block::compress(b);
+                            let t1 = Instant::now();
+                            let d = lz4_flex::block::decompress(&z, b.len()).unwrap();
+                            let t2 = Instant::now();
+                            std::hint::black_box(&d);
+                            st.stored += (z.len() + 9).min(b.len() + 5) as u64;
+                            st.comp_ns += (t1 - t0).as_nanos() as u64;
+                            st.dec_ns += (t2 - t1).as_nanos() as u64;
+                        }
+                    }
+                }
+            }
+        }
+        let _ = &mut zd;
+        eprintln!("file {} {kind} done", r.meta.id);
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    println!("\n## blocks: per target and relation kind, each codec: stored MB (dict MB), train ms, compress ns/block, decompress ns/block, ns/KB raw");
+    println!("| target | kind | blocks | raw MB | {} |", codecs.iter().map(|c| c.name()).collect::<Vec<_>>().join(" | "));
+    println!("|---|---|---|---|{}", "---|".repeat(codecs.len()));
+    let kinds: Vec<&str> = stats.keys().map(|k| k.1).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    for &t in &targets {
+        for kind in kinds.iter().copied().chain(["all"]) {
+            let mut cells = Vec::new();
+            let mut head = (0, 0);
+            for ci in 0..codecs.len() {
+                let mut a = BStat::default();
+                for ((tt, k, cc), s) in &stats {
+                    if *tt == t && *cc == ci && (kind == "all" || *k == kind) {
+                        a.blocks += s.blocks; a.raw += s.raw; a.stored += s.stored; a.dict_bytes += s.dict_bytes;
+                        a.train_ns += s.train_ns; a.comp_ns += s.comp_ns; a.dec_ns += s.dec_ns;
+                    }
+                }
+                head = (a.blocks, a.raw);
+                if a.blocks == 0 { cells.push("-".into()); continue; }
+                cells.push(format!("{:.1} ({:.2}) {:.0}ms {:.0} {:.0} {:.0}", mb(a.stored), mb(a.dict_bytes), a.train_ns as f64 / 1e6,
+                    a.comp_ns as f64 / a.blocks as f64, a.dec_ns as f64 / a.blocks as f64, a.dec_ns as f64 / (a.raw as f64 / 1024.0)));
+            }
+            if head.0 == 0 { continue; }
+            println!("| {t} | {kind} | {} | {:.1} | {} |", head.0, mb(head.1), cells.join(" | "));
+        }
     }
 }
 
