@@ -1111,7 +1111,8 @@ async fn secret_value_in(ctx: &Arc<Ctx>, name: &str, args: &Value) -> Option<gua
 
 /// A POST through the gated router with the caller's token (the guard's scan), its JSON answer.
 async fn post_route(ctx: &Arc<Ctx>, route: &str, body: Value) -> Result<Value, String> {
-    let mut req = Request::builder().method("POST").uri(route).header(header::CONTENT_TYPE, "application/json");
+    // roll secrets audits a guard's scans as `secrets.guard`, apart from a person's scans.
+    let mut req = Request::builder().method("POST").uri(route).header(header::CONTENT_TYPE, "application/json").header("x-roll-guard", "1");
     for (k, v) in forward_headers(&ctx.headers, &Value::Null).iter() {
         req = req.header(k, v);
     }

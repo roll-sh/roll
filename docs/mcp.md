@@ -124,6 +124,10 @@ secret: by writing it somewhere it's read.
   as the token, through the gate, for the projects its secrets rules name (or, with a rule over
   every project, the ones it can list; at most 10). That scan only ever matches values the caller
   may reveal, so the guard is never a test of a guess. The refusal names the key and environment.
+  The scan carries `X-Roll-Guard: 1` (roll secrets audits it as `secrets.guard`). A key tagged
+  `sensitive` is matched only for runtime callers, never for a token (that would be a one-bit
+  oracle on a value the token may never reveal), so the guard doesn't stop one; roll code's own
+  push scan still catches it landing in a repo.
 - Reads are never refused. The refusal says where in the arguments and what kind
   (`{refused: "credential", at: "arguments.body", kind: "a GitHub token"}`), never the value, and
   points at roll secrets. The audit log keeps a `deny` row with the same, without the arguments.
