@@ -4,7 +4,7 @@
 
 use crate::access::{Action, Caller, Scope};
 use crate::crypto::{Dek, value_aad};
-use crate::envs::{self, EnvRow, Kind};
+use crate::envs::{self, Branch, EnvRow, Kind};
 use crate::links::{Link, Mode};
 use crate::refs::{self, Part};
 use crate::write::{Item, ItemAction, SecretType};
@@ -148,6 +148,32 @@ pub struct Values {
     /// Keys whose value comes from a link to a resource (any mode): a consumer that reaches
     /// resources another way (a container on a private network) knows which addresses to rewrite.
     pub linked: Vec<String>,
+    /// Keys linked to a resource the ephemeral environment's preview branched: left out of
+    /// `values` (no value of the parent's leaves roll secrets), for roll previews to set from its
+    /// branch by `field`.
+    pub followed: Vec<Followed>,
+}
+
+/// A key left out because it links a resource the environment's preview branched.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct Followed {
+    /// The variable as the answer would have named it.
+    pub name: String,
+    pub kind: String,
+    /// The branched resource (the link's `ref`).
+    pub parent: String,
+    /// The provider field the key is linked to (`url`, `password`, `role_url`…).
+    pub field: String,
+}
+
+/// Whether `l` names one of `branches`' parents: its value is the parent's, never the preview's.
+fn follows(branches: &[Branch], l: &Link) -> bool {
+    branches.iter().any(|b| b.kind == l.kind && b.parent == l.r#ref)
+}
+
+/// What a followed key answers instead of a value, where one was asked for.
+fn followed_problem(l: &Link) -> String {
+    format!("links {} {}, which this preview branched: roll previews sets it from its branch", l.kind, l.r#ref)
 }
 
 #[derive(Debug, Serialize)]
@@ -279,6 +305,83 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
     Ok(out)
 }
 
+/// What a folder's digest can't vouch for ([`Secrets::digest_of`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Unvouched {
+    /// A read would issue a dynamic credential.
+    pub dynamic: bool,
+}
+
+/// How long a live link's fingerprint is reused before its product is asked again.
+const LIVE_FP_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Live links' values as last read, by project, link and options, kept only as fingerprints
+/// (never the value): a digest asks each product at most every [`LIVE_FP_TTL`], however many
+/// watches, syncs and caches poll it.
+#[derive(Default)]
+pub(crate) struct LiveFps(std::sync::Mutex<HashMap<String, (Option<std::time::Instant>, String)>>);
+
+impl Secrets {
+    /// A product changed `kind ref`'s credential itself (a password reset, a restore): every folder
+    /// that links it live moves its digest now, on every node, instead of within [`LIVE_FP_TTL`].
+    pub fn source_changed(&self, kind: &str, r#ref: &str) -> Result<()> {
+        let prefix = format!("\0{kind}\0{ref}\0", ref = r#ref);
+        for (_, v) in self.live_fps.0.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().filter(|(k, _)| k.contains(&prefix)) {
+            v.0 = None;
+        }
+        self.db.write(|c| {
+            c.execute(
+                "INSERT INTO source_generations (kind, ref, generation) VALUES (?, ?, 1) ON CONFLICT (kind, ref) DO UPDATE SET generation = source_generations.generation + 1",
+                [kind, r#ref],
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Expire every live link's fingerprint (tests: the next digest asks the products; their last
+    /// fingerprints stay for one that doesn't answer).
+    #[doc(hidden)]
+    pub fn forget_live_fingerprints(&self) {
+        for v in self.live_fps.0.lock().unwrap_or_else(|e| e.into_inner()).values_mut() {
+            v.0 = None;
+        }
+    }
+
+    /// The fingerprint of a live link's value as its product answers now (or a marker when it's
+    /// not this project's any more, or doesn't answer).
+    /// `members`: the project's linkable resources, `None` when they couldn't be read (then nothing
+    /// counts as gone: a passing error mustn't move every digest).
+    fn live_fp(&self, project: &str, dek: &Dek, l: &Link, members: Option<&BTreeSet<(String, String)>>) -> String {
+        if members.is_some_and(|m| !m.contains(&(l.kind.clone(), l.r#ref.clone()))) {
+            return "gone".into();
+        }
+        let key = format!("{project}\0{}\0{}\0{}\0{}", l.kind, l.r#ref, l.field, json(&l.options));
+        let now = std::time::Instant::now();
+        let lock = || self.live_fps.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((Some(at), fp)) = lock().get(&key)
+            && now.duration_since(*at) < LIVE_FP_TTL
+        {
+            return fp.clone();
+        }
+        let fp = match self.links.get(&l.kind).and_then(|p| p.read(&l.r#ref, &l.field, l)) {
+            Ok(v) => dek.fingerprint(v.expose()),
+            // A product that doesn't answer for a moment (an owner handing over, a timeout) leaves
+            // the digest as it was: flipping it would redeploy apps and push syncs twice. Its
+            // last fingerprint stays, however old, and the next digest asks again.
+            Err(_) => return lock().get(&key).map(|(_, fp)| fp.clone()).unwrap_or_else(|| "unreadable".into()),
+        };
+        let mut m = lock();
+        if m.len() >= 10_000 {
+            m.retain(|_, (at, _)| at.is_some_and(|at| now.duration_since(at) < LIVE_FP_TTL));
+            if m.len() >= 10_000 {
+                m.clear();
+            }
+        }
+        m.insert(key, (Some(now), fp.clone()));
+        fp
+    }
+}
+
 /// Value reads a principal may make in a minute across every node unless the operator says otherwise
 /// (`ROLL_SECRETS_READS_PER_MINUTE`), as Vault's rate-limit quotas: a token or a person in a loop is
 /// told to slow down (429) before it decrypts, audits and issues without end. roll's own runtimes
@@ -404,7 +507,10 @@ impl Secrets {
         if names::sensitive(&e.row.tags) && !caller.runtime {
             return Err(Error::Forbidden(format!("{key} is sensitive: its value reaches only roll's runtimes and syncs, never a person or a token")));
         }
-        let mut r = Resolver::new(self, project, &dek, caller, resolve, &caller.principal);
+        let mut r = Resolver::new(self, project, slug, &dek, caller, resolve, &caller.principal)?;
+        if let Some(l) = r.followed(e) {
+            return Err(Error::Conflict("followed", format!("{key} {}", followed_problem(&l))));
+        }
         let (v, problem) = r.entry(e);
         let leases = r.finish(slug)?;
         self.audit_now(project, caller, "secrets.reveal", Some(slug), Some(&path), &[key.to_string()], &format!("revealed {key}{}", lease_note(&leases)));
@@ -430,7 +536,7 @@ impl Secrets {
         let dek = self.project(project)?;
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let who = consumer.unwrap_or(&caller.principal).to_string();
-        let mut r = Resolver::new(self, project, &dek, caller, resolve, &who);
+        let mut r = Resolver::new(self, project, slug, &dek, caller, resolve, &who)?;
         // Code nobody vetted (a check, a sandbox, an untrusted preview) never gets a dynamic
         // credential, whatever it asks: a GitHub App token, an AWS session or a database login
         // would act for the project until its lease ends.
@@ -443,7 +549,14 @@ impl Secrets {
         let mut sensitive = vec![];
         // Set, but not in this answer (withheld, or dynamic under `dynamic=false`): not missing.
         let mut left_out = vec![];
+        let mut followed = vec![];
         for e in &entries {
+            // First: nothing of the parent's is read, issued or decrypted for it.
+            if let Some(l) = r.followed(e) {
+                followed.push(Followed { name: e.row.key.clone(), kind: l.kind, parent: l.r#ref, field: l.field });
+                left_out.push(e.row.key.clone());
+                continue;
+            }
             if names::sensitive(&e.row.tags) && !caller.runtime {
                 withheld.push(e.row.key.clone());
                 left_out.push(e.row.key.clone());
@@ -478,9 +591,10 @@ impl Secrets {
             None => format!("exported {}{}", crate::write::plural(keys.len(), "value"), lease_note(&leases)),
         };
         self.audit_now(project, caller, action, Some(slug), Some(&path), &keys, &summary);
-        let dynamic = entries.iter().filter(|e| e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic)).map(|e| e.row.key.clone()).collect();
-        let linked = entries.iter().filter(|e| e.row.link.is_some()).map(|e| e.row.key.clone()).collect();
-        Ok(Values { values, problems, leases, dynamic, linked, withheld, sensitive })
+        let ours = |e: &&Entry| !followed.iter().any(|f| f.name == e.row.key);
+        let dynamic = entries.iter().filter(ours).filter(|e| e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic)).map(|e| e.row.key.clone()).collect();
+        let linked = entries.iter().filter(ours).filter(|e| e.row.link.is_some()).map(|e| e.row.key.clone()).collect();
+        Ok(Values { values, problems, leases, dynamic, linked, withheld, sensitive, followed })
     }
 
     /// A folder's own values as they were after change `seq` (or at time `at`): what was stored
@@ -491,19 +605,20 @@ impl Secrets {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
         let dek = self.project(project)?;
-        let (seq, state) = self.db.read(|c| {
+        let (seq, state, branches) = self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
             let seq = match (seq, at) {
                 (Some(s), None) => s,
                 (None, Some(at)) => c.query_row("SELECT COALESCE(MAX(seq), 0) FROM changes WHERE project_id = ? AND at <= ?", params![project, at], |r| r.get(0))?,
                 _ => return Err(Error::BadRequest("seq (a change) or at (a time), one of them".into())),
             };
-            Ok::<_, Error>((seq, crate::write::state_at(c, &env.id, seq)?))
+            Ok::<_, Error>((seq, crate::write::state_at(c, &env.id, seq)?, env.branches))
         })?;
         let mut values = BTreeMap::new();
         let mut problems = vec![];
         let mut linked = vec![];
         let mut withheld = vec![];
+        let mut followed = vec![];
         // Keys sensitive now: none of their versions shows, however old.
         let now_sensitive: std::collections::HashSet<String> = if caller.runtime {
             Default::default()
@@ -517,6 +632,11 @@ impl Secrets {
                 continue;
             }
             let link: Option<Link> = v.link.as_deref().and_then(|l| serde_json::from_str(l).ok());
+            // A managed link's stored value was the parent's then too.
+            if let Some(l) = link.as_ref().filter(|l| follows(&branches, l)) {
+                followed.push(Followed { name: v.key, kind: l.kind.clone(), parent: l.r#ref.clone(), field: l.field.clone() });
+                continue;
+            }
             if link.is_some() {
                 linked.push(v.key.clone());
             }
@@ -535,7 +655,7 @@ impl Secrets {
         }
         let keys: Vec<String> = values.keys().cloned().collect();
         self.audit_now(project, caller, "secrets.export", Some(slug), Some(&path), &keys, &format!("exported {} as of change #{seq}", crate::write::plural(keys.len(), "value")));
-        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, withheld, sensitive: vec![] }))
+        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, withheld, sensitive: vec![], followed }))
     }
 
     /// A digest of a folder's effective secrets (keys, where they come from, versions,
@@ -543,6 +663,14 @@ impl Secrets {
     /// link's resource rotating. Decrypts nothing, issues nothing, isn't audited: what
     /// `roll run --watch` polls.
     pub fn digest(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<String> {
+        Ok(self.digest_of(project, slug, path, caller)?.0)
+    }
+
+    /// The digest, and what it can't vouch for: whether reading the folder would issue a dynamic
+    /// credential (one of its keys, or a key a reference reaches, links dynamically: the digest
+    /// doesn't move when its lease ends). A live link counts its value's fingerprint as its product answers (at most [`LIVE_FP_TTL`] old), so the digest moves
+    /// however the credential changed: roll rotating it, a password reset through the product, SQL.
+    pub(crate) fn digest_of(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<(String, Unvouched)> {
         use sha2::{Digest, Sha256};
         let path = names::path(path)?;
         caller.need(Action::Read, &Scope::at(project, slug, &path))?;
@@ -552,16 +680,32 @@ impl Secrets {
         let caller = &narrowed;
         self.project(project)?;
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
+        let branches = self.db.read(|c| envs::by_slug(c, project, slug))?.branches;
         let dek = self.project(project)?;
         let mut h = Sha256::new();
-        // A live link's value is the resource's credential as it is: it moves when roll rotates it.
+        let dynamic = std::cell::Cell::new(false);
+        let members = std::cell::OnceCell::new();
+        // A live link's value is the resource's credential as it is: it moves when roll rotates it
+        // (at once, on every node), and its fingerprint when anything else changes it.
         let generations: HashMap<(String, String), i64> = self.db.read(|c| c.query("SELECT kind, ref, generation FROM source_generations", (), |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?))))?.into_iter().collect();
-        // No fingerprint: a digest is readable without reveal, and a version moves with every value.
+        // No stored value's fingerprint: a digest is readable without reveal, and a version moves
+        // with every value. A live value's goes into the hash, which tells nothing of it.
         let stamp = |h: &mut Sha256, e: &Entry| {
-            let generation = e.row.link.as_ref().filter(|l| l.mode == Mode::Live).and_then(|l| generations.get(&(l.kind.clone(), l.r#ref.clone()))).copied().unwrap_or(0);
+            // A followed key is the same stamp each read: its parent is never asked, issued for or
+            // counted (its rotations are no change to the preview).
+            if e.row.link.as_ref().is_some_and(|l| follows(&branches, l)) {
+                h.update(format!("{}\0{}\0{}\0{}\0{}\0followed\n", e.row.key, e.env, e.row.id, e.row.version, e.row.link.as_ref().map(json).unwrap_or_default()));
+                return;
+            }
+            let live = e.row.link.as_ref().filter(|l| l.mode == Mode::Live);
+            if e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
+                dynamic.set(true);
+            }
+            let generation = live.and_then(|l| generations.get(&(l.kind.clone(), l.r#ref.clone()))).copied().unwrap_or(0);
             // Only once rotated, so a digest taken before there were generations stays the same.
             let rotated = if generation > 0 { format!("\0{generation}") } else { String::new() };
-            h.update(format!("{}\0{}\0{}\0{}\0{}{rotated}\n", e.row.key, e.env, e.row.id, e.row.version, e.row.link.as_ref().map(json).unwrap_or_default()))
+            let now = live.map(|l| format!("\0live:{}", self.live_fp(project, &dek, l, members.get_or_init(|| self.members(project).ok()).as_ref()))).unwrap_or_default();
+            h.update(format!("{}\0{}\0{}\0{}\0{}{rotated}{now}\n", e.row.key, e.env, e.row.id, e.row.version, e.row.link.as_ref().map(json).unwrap_or_default()))
         };
         for e in &entries {
             stamp(&mut h, e);
@@ -595,7 +739,44 @@ impl Secrets {
         for m in self.missing_required(project, &path, &have)? {
             h.update(format!("required\0{}\n", m.key));
         }
-        Ok(h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect())
+        Ok((h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect(), Unvouched { dynamic: dynamic.get() }))
+    }
+
+    /// A conditional read (`If-None-Match`): `Some(digest)` when the folder's values are as they
+    /// were for `etag`, so nothing is read, issued or audited (a 304). Never when the read would
+    /// issue a dynamic credential: the cached one may have ended with its lease. Needs reveal, as
+    /// the read does: whether values changed isn't told to whoever couldn't read them.
+    pub fn unchanged(&self, project: &str, slug: &str, path: &str, etag: &str, dynamic: bool, caller: &Caller) -> Result<Option<String>> {
+        let at = names::path(path)?;
+        caller.need(Action::Reveal, &Scope::at(project, slug, &at))?;
+        let (digest, unvouched) = self.digest_of(project, slug, &at, caller)?;
+        if digest != etag || (dynamic && unvouched.dynamic) {
+            return Ok(None);
+        }
+        // Still read, just not again: at most one row a day for each caller and folder, so a
+        // folder read only through revalidations doesn't look unused (health, insights, reach).
+        // Looked up in a read first: a 304 takes no write once today's row is there.
+        let now = self.db.now_ms()?;
+        let seen = |c: &code_sql::Conn<'_>| -> Result<bool> {
+            Ok(c.query_row(
+                "SELECT id FROM audit WHERE project_id = ? AND actor = ? AND action = 'secrets.revalidate' AND env = ? AND path = ? AND at > ? LIMIT 1",
+                code_sql::params![project, caller.principal, slug, at, now - 86_400_000],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some())
+        };
+        if self.db.read(seen)? {
+            return Ok(Some(digest));
+        }
+        let keys: Vec<String> = self.view(project, slug, &at, caller, false, Action::Reveal)?.into_iter().map(|e| e.row.key).collect();
+        self.db.write(|c| {
+            if !seen(c)? {
+                crate::audit::record(c, project, caller, "secrets.revalidate", Some(slug), Some(&at), &keys, &format!("revalidated {} (unchanged since its last read)", crate::write::plural(keys.len(), "value")), now)?;
+            }
+            Ok::<_, Error>(())
+        })?;
+        Ok(Some(digest))
     }
 
     pub fn versions(&self, project: &str, slug: &str, path: &str, key: &str, kind: Option<SecretType>, caller: &Caller) -> Result<Vec<Version>> {
@@ -873,14 +1054,25 @@ pub(crate) struct Resolver<'a> {
     /// Refuse dynamic links instead of issuing (syncs: a short-lived credential would expire at
     /// the target; readers that ask for `dynamic=false`).
     pub no_dynamic: bool,
+    /// The read environment's branched resources: a link to one is never followed, however it's
+    /// reached (asked for, by reference, through an import or the base).
+    branches: Vec<Branch>,
 }
 
 impl<'a> Resolver<'a> {
-    pub fn new(s: &'a Secrets, project: &'a str, dek: &'a Dek, caller: &'a Caller, resolve: bool, consumer: &str) -> Self {
+    /// A resolve of `slug`'s values: what it branched comes from it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(s: &'a Secrets, project: &'a str, slug: &str, dek: &'a Dek, caller: &'a Caller, resolve: bool, consumer: &str) -> Result<Self> {
         // Code nobody vetted never gets a dynamic credential, whichever read it makes (values, a
         // resolve, one key's reveal).
         let no_dynamic = caller.grants.untrusted();
-        Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], tainted: Default::default(), members: None, issued: BTreeMap::new(), no_dynamic, deks: HashMap::new() }
+        let branches = s.db.read(|c| envs::by_slug(c, project, slug))?.branches;
+        Ok(Resolver { s, project, dek, caller, resolve, consumer: consumer.into(), envs: HashMap::new(), views: HashMap::new(), done: HashMap::new(), stack: vec![], tainted: Default::default(), members: None, issued: BTreeMap::new(), no_dynamic, deks: HashMap::new(), branches })
+    }
+
+    /// `e`'s link, when it names a resource the read environment branched.
+    pub(crate) fn followed(&self, e: &Entry) -> Option<Link> {
+        e.row.link.as_ref().filter(|l| follows(&self.branches, l)).cloned()
     }
 
     fn env(&mut self, slug: &str) -> Option<EnvRow> {
@@ -908,6 +1100,10 @@ impl<'a> Resolver<'a> {
     /// An entry's value and the first problem resolving it (the value then keeps the
     /// unresolved reference's text).
     pub fn entry(&mut self, e: &Entry) -> (Value, Option<String>) {
+        // Every value goes through here: a followed link is neither read, issued nor decrypted.
+        if let Some(l) = self.followed(e) {
+            return (Value::default(), Some(followed_problem(&l)));
+        }
         // By the environment's id, not its slug: a folder another project shares may have the same
         // slug and path as one of this project's.
         let id = format!("{}:{}:{}", e.row.env_id, e.row.path, e.row.key);
@@ -1050,13 +1246,14 @@ impl<'a> Resolver<'a> {
         }
         let now = self.s.db.now_ms()?;
         let consumer = self.consumer.clone();
+        let by = self.caller.principal.clone();
         let project = self.project.to_string();
         let ids: Vec<String> = issued.iter().map(|_| names::new_id("lse", 16)).collect();
         let res = self.s.db.write(|c| {
             for ((env_id, handle, link, (key, path)), id) in issued.iter().zip(&ids) {
                 c.execute(
-                    "INSERT INTO leases (id, project_id, env_id, key, path, kind, link, handle, consumer, issued_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, 'dynamic', ?, ?, ?, ?, ?, NULL)",
-                    params![id, project, env_id, key, path, json(link), json(handle), consumer, now, now + link.ttl_minutes() as i64 * 60_000],
+                    "INSERT INTO leases (id, project_id, env_id, key, path, kind, link, handle, consumer, issued_at, expires_at, revoked_at, issued_by) VALUES (?, ?, ?, ?, ?, 'dynamic', ?, ?, ?, ?, ?, NULL, ?)",
+                    params![id, project, env_id, key, path, json(link), json(handle), consumer, now, now + link.ttl_minutes() as i64 * 60_000, by],
                 )?;
             }
             Ok::<_, Error>(())

@@ -4,6 +4,7 @@ import { appsApi, describePending, parseEnv, toEnv, VARIABLE_NAME, type Environm
 import { KIND_LABEL, resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { btn, input, panel, primary } from "../ui";
+import { looksSecret } from "@/lib/secret-names";
 import type { RefCatalog } from "@/lib/var-refs";
 import { RefInput } from "./ref-input";
 import { message, SureButton, type Runner } from "./shared";
@@ -17,11 +18,15 @@ const SOURCE_TONE: Record<VariableSource, string> = {
   reference: "border-line-2 text-muted",
 };
 
-/** Workspace kinds a service can link to, by their link kind. */
-/** What a service can link to today: rolld wires Postgres and Redis (buckets, streams and NoSQL come as roll secrets links, docs/apps/README.md "Next"). */
-export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", service: "service" };
+/**
+ * Workspace kinds a service can link to, by their link kind: databases give their URLs, a bucket,
+ * a stream and a search cluster credentials of their own (a search key has data access only), a
+ * NoSQL database its login, another service its URLs.
+ */
+export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", bucket: "bucket", stream: "stream", nosql: "nosql", search: "search", service: "service" };
 
-type Edit = { name: string; value: string; seal?: boolean };
+/** `sealSet`: the seal was chosen by hand (a secret-looking name no longer decides it). */
+type Edit = { name: string; value: string; seal?: boolean; sealSet?: boolean };
 
 /**
  * The environment's variables (masked; Reveal asks for the values), edited in place and saved in
@@ -80,7 +85,7 @@ export function VariablesTab({
   const stage = (set: Record<string, string>) => {
     const have = new Set((vars?.vars ?? []).filter((v) => v.source === "service" || v.source === "reference").map((v) => v.name));
     setEdits((e) => ({ ...e, ...Object.fromEntries(Object.entries(set).filter(([k]) => have.has(k))) }));
-    setAdded((a) => [...a.filter((x) => !(x.name in set)), ...Object.entries(set).filter(([k]) => !have.has(k)).map(([name, value]) => ({ name, value }))]);
+    setAdded((a) => [...a.filter((x) => !(x.name in set)), ...Object.entries(set).filter(([k]) => !have.has(k)).map(([name, value]) => ({ name, value, seal: looksSecret(name) }))]);
   };
   const copyFrom = async (from: string) => {
     // Reading another environment's values is a reveal there: the gate decides it as one.
@@ -331,7 +336,7 @@ export function VariablesTab({
                   autoFocus={i === added.length - 1}
                   value={a.name}
                   placeholder="NAME"
-                  onChange={(e) => setAdded((l) => l.map((x, j) => (j === i ? { ...x, name: e.target.value.toUpperCase() } : x)))}
+                  onChange={(e) => setAdded((l) => l.map((x, j) => (j === i ? { ...x, name: e.target.value.toUpperCase(), seal: x.sealSet ? x.seal : looksSecret(e.target.value) } : x)))}
                   className={`${input} w-56 max-w-full font-mono text-[12px] ${a.name && !VARIABLE_NAME.test(a.name) ? "border-danger/60" : ""}`}
                   spellCheck={false}
                 />
@@ -342,7 +347,7 @@ export function VariablesTab({
                   onWantCatalog={() => setWanted(true)}
                 />
                 <button
-                  onClick={() => setAdded((l) => l.map((x, j) => (j === i ? { ...x, seal: !x.seal } : x)))}
+                  onClick={() => setAdded((l) => l.map((x, j) => (j === i ? { ...x, seal: !x.seal, sealSet: true } : x)))}
                   className={`p-1 hover:text-fg ${a.seal ? "text-accent" : "text-subtle"}`}
                   aria-pressed={!!a.seal}
                   aria-label="Seal"
@@ -414,7 +419,7 @@ function Links({ service, project, runner, onChange }: { service: string; projec
     <section className={panel}>
       <div className="flex min-h-14 items-center justify-between gap-3 border-b border-line px-5 py-3">
         <h2 className="text-[15px] font-medium">Links</h2>
-        <span className="text-[12px] text-subtle">A link adds a database's connection variables, or another service's URLs.</span>
+        <span className="text-[12px] text-subtle">A link adds a resource's connection variables, or another service's URLs.</span>
       </div>
       <ul className="divide-y divide-line">
         {links?.length === 0 && <li className="px-5 py-4 text-[13px] text-muted">Nothing linked.</li>}
