@@ -498,6 +498,7 @@ async fn run() -> anyhow::Result<()> {
     // Workspace projects: always on; the operator's, and each signed-in user's own.
     router = router.merge(roll_workspace::router(workspace.clone()));
     // roll previews: an environment per change of a project's repos (needs roll code).
+    let mut previews_engine: Option<std::sync::Arc<roll_previews::Engine>> = None;
     let preview_hosts = match &code {
         Some(c) => {
             let on_products = previews::Products {
@@ -511,6 +512,7 @@ async fn run() -> anyhow::Result<()> {
             };
             let p = previews::start(&args, &home, c, workspace.clone(), cluster.clone(), on_products, apps.as_ref().map(|a| a.apps.clone()))?;
             router = router.merge(roll_previews::api::router(p.engine.clone()));
+            previews_engine = Some(p.engine.clone());
             if let Some(internal) = p.internal {
                 router = router.merge(internal);
             }
@@ -597,6 +599,10 @@ async fn run() -> anyhow::Result<()> {
     if let Some(a) = &apps {
         let apps = a.apps.clone();
         access.on_leaked("rlk_", move |secret, _why| apps.revoke_leaked_hook(secret));
+    }
+    // …and previews' (`rlb_`).
+    if let Some(e) = previews_engine.clone() {
+        access.on_leaked("rlb_", move |secret, _why| e.revoke_leaked_hook(secret));
     }
     // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
     access::sinks(&access);
