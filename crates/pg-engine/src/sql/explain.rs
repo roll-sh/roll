@@ -394,6 +394,9 @@ enum Removed {
 #[derive(Clone, Debug)]
 enum Detail {
     Text(&'static str, String),
+    /// A sample scan's method, parameters and REPEATABLE seed (show_tablesample: one line in
+    /// text, three properties in the structured formats).
+    Sampling(String, Vec<String>, Option<String>),
     List(&'static str, Vec<String>),
     /// "Rows Removed by …" under ANALYZE.
     Removed(&'static str, Vec<Removed>),
@@ -688,10 +691,13 @@ impl ExNode {
         {
             Some(Detail::Removed(_, list)) => list.push(r),
             _ => {
+                // (An aggregation's after its hash table's batches and memory: show_hashagg_info
+                // comes between its Filter and the count.)
                 let at = self
                     .details
                     .iter()
-                    .position(|d| matches!(d, Detail::Text(l, _) if *l == label))
+                    .position(|d| matches!(d, Detail::HashAggInfo(_)))
+                    .or_else(|| self.details.iter().position(|d| matches!(d, Detail::Text(l, _) if *l == label)))
                     .map_or(self.details.len(), |i| i + 1);
                 self.details
                     .insert(at, Detail::Removed(removed_label, vec![r]));
@@ -5649,9 +5655,17 @@ impl Builder<'_, '_> {
         let tmp = Arc::new(Plan::Scan(Box::new(sp.scan.clone())));
         let refname = self.refname(p);
         self.refnames.insert(addr(&tmp), refname);
+        // (The columns read of it: the catalog scan's.)
+        let needed = self.needed.get(&addr(p)).cloned();
+        if let Some(m) = &needed {
+            self.needed.insert(addr(&tmp), m.clone());
+        }
         let Plan::Scan(s) = &*tmp else { unreachable!() };
         let mut b = self.scan(&tmp, s);
         self.refnames.remove(&addr(&tmp));
+        if needed.is_some() {
+            self.needed.remove(&addr(&tmp));
+        }
         b.node.key = Some(addr(p));
         b
     }
@@ -6160,12 +6174,18 @@ impl Builder<'_, '_> {
                 );
                 let cols = table.columns();
                 let names: Vec<Name> = cols.iter().map(|(c, _)| Name::col(&refname, c)).collect();
-                n.width = cols.iter().map(|(_, t)| type_width(t)).sum();
-                // cost_seqscan over the catalog's rows (its reltuples) and the pages they
-                // fill.
-                let tuples = sys_tuples(*table, self.ctx);
-                let pages = ((tuples * (n.width as f64 + 28.0)) / 8192.0).ceil().max(1.0);
-                n.rows = tuples;
+                // (Of the columns read above, by their statistics' widths: its reltarget's.)
+                let stand_in = crate::sql::paths::sys_table(*table);
+                let cat = self.ctx.catalog();
+                let needed = self.needed.get(&key).filter(|m| m.len() == cols.len());
+                n.width = (0..cols.len())
+                    .filter(|&i| needed.is_none_or(|m| m[i]))
+                    .map(|i| costs::col_width(&cat, &stand_in, i))
+                    .sum();
+                drop(cat);
+                // cost_seqscan over the catalog's estimated pages and tuples.
+                let costs::RelSize { pages, tuples } = sys_rel_size(*table, self.ctx);
+                n.rows = costs::clamp_rows(tuples);
                 n.total_cost = pages + tuples * costs::CPU_TUPLE_COST;
                 if let Some(f) = filter {
                     // A catalog index its conditions can use (as the planner would pick).
@@ -12039,15 +12059,9 @@ impl Builder<'_, '_> {
             }
         }
         if let Some(ts) = &s.sample {
-            let mut text = format!(
-                "{} ({})",
-                ts.method,
-                self.show(&ts.percent, &names, Cx::Scan)
-            );
-            if let Some(r) = &ts.repeatable {
-                text.push_str(&format!(" REPEATABLE ({})", self.show(r, &names, Cx::Scan)));
-            }
-            n.details.push(Detail::Text("Sampling", text));
+            let params = vec![self.show(&ts.percent, &names, Cx::Scan)];
+            let seed = ts.repeatable.as_ref().map(|r| self.show(r, &names, Cx::Scan));
+            n.details.push(Detail::Sampling(ts.method.to_string(), params, seed));
         }
         let schema = self.ctx.catalog().schema_name(t.schema).to_string();
         self.target(
@@ -14484,6 +14498,7 @@ impl Builder<'_, '_> {
                     chains.push((chain, cols));
                 }
             }
+            n.details.push(Detail::Text("Grouping Sets", String::new()));
             if !hash_sets.is_empty() {
                 n.strategy = Some("Mixed");
                 n.title = "MixedAggregate".into();
@@ -14628,6 +14643,7 @@ impl Builder<'_, '_> {
                 }
                 .into();
                 let mut r = Vec::new();
+                n.details.push(Detail::Text("Grouping Sets", String::new()));
                 for (si, cols) in crate::exec::agg::hashed_sets_order(sets) {
                     n.details.push(Detail::List("Hash Key", hash_keys(self, &cols)));
                     r.push((true, vec![si]));
@@ -17761,11 +17777,19 @@ fn union_arms<'p>(p: &'p Arc<Plan>, all: bool, out: &mut Vec<&'p Arc<Plan>>) {
     }
 }
 
-/// A system catalog's rows now (its reltuples), cached for the catalog version.
+/// A system catalog's tuples as the planner estimates them (its RelOptInfo.tuples).
 pub(crate) fn sys_tuples(table: crate::catalog::system::SysTable, ctx: &ExecCtx) -> f64 {
+    sys_rel_size(table, ctx).tuples
+}
+
+/// A system catalog's size as estimate_rel_size sees it, cached for the catalog version. A
+/// catalog initdb filled has its fresh pg_class relpages and reltuples: its tuple density
+/// over its current pages (initdb's, more once its rows outgrow them); one initdb left empty
+/// (relpages 0), the density its columns' widths give. A view's, its rows now.
+pub(crate) fn sys_rel_size(table: crate::catalog::system::SysTable, ctx: &ExecCtx) -> costs::RelSize {
     // (By the catalog's address, with a `Weak` to it: that keeps the allocation, so a later
-    // catalog can't take the address and find this one's count.)
-    type SysRows = HashMap<(usize, u32), (std::sync::Weak<crate::catalog::Catalog>, f64)>;
+    // catalog can't take the address and find this one's size.)
+    type SysRows = HashMap<(usize, u32), (std::sync::Weak<crate::catalog::Catalog>, costs::RelSize)>;
     thread_local! {
         static SYS_ROWS: std::cell::RefCell<SysRows> = std::cell::RefCell::new(HashMap::new());
     }
@@ -17797,16 +17821,38 @@ pub(crate) fn sys_tuples(table: crate::catalog::system::SysTable, ctx: &ExecCtx)
                 None => crate::catalog::system::rows(table, ctx).map_or(1000.0, |r| r.len() as f64),
             },
         }
-    }
-    .max(1.0);
+    };
+    let width = || -> u32 {
+        let t = crate::sql::paths::sys_table(table);
+        (0..t.columns.len()).map(|i| costs::col_width(&cat, &t, i)).sum()
+    };
+    let size = match crate::catalog::static_rows::initdb_class_sizes().get(&table.oid()) {
+        Some(&(relpages, reltuples)) => {
+            let relpages = relpages as f64;
+            // (MAXALIGN(SizeofHeapTupleHeader) + sizeof(ItemIdData); integer division.)
+            let by_width = || ((8192 - 24) / (width() + 28)).max(1) as f64;
+            let density = if relpages > 0.0 { reltuples as f64 / relpages } else { by_width() };
+            // (The pages its rows fill now: initdb's last pages have room left, so rows
+            // added take more pages only past what its columns' widths would fit, or its
+            // own density where that is more; a catalog initdb found empty, as pg_shdepend,
+            // keeps a density of 0.)
+            let fill = density.max(by_width());
+            let pages = relpages.max((n / fill).ceil());
+            costs::RelSize { pages, tuples: (density * pages).round_ties_even() }
+        }
+        None => {
+            let tuples = n.max(1.0);
+            costs::RelSize { pages: ((tuples * (width() as f64 + 28.0)) / 8192.0).ceil().max(1.0), tuples }
+        }
+    };
     SYS_ROWS.with(|m| {
         let mut m = m.borrow_mut();
         if m.len() > 256 {
             m.clear();
         }
-        m.insert(key, (Arc::downgrade(&cat), n));
+        m.insert(key, (Arc::downgrade(&cat), size));
     });
-    n
+    size
 }
 
 /// The planner planning a WITH's body: its CTEs' estimated rows and columns, for the CTE
@@ -18700,6 +18746,34 @@ impl Writer {
         }
     }
 
+    /// ExplainPropertyListNested: an unlabeled list in a list (JSON, YAML); a list in XML.
+    fn list_nested(&mut self, name: &str, items: &[String]) {
+        // (escape_yaml is escape_json.)
+        let inline = |w: &mut Self| {
+            w.buf.push('[');
+            for (k, i) in items.iter().enumerate() {
+                if k > 0 {
+                    w.buf.push_str(", ");
+                }
+                json_escape(i, &mut w.buf);
+            }
+            w.buf.push(']');
+        };
+        match self.format {
+            Format::Json => {
+                self.json_line_ending();
+                self.spaces(self.indent * 2);
+                inline(self);
+            }
+            Format::Yaml => {
+                self.yaml_line_starting();
+                self.buf.push_str("- ");
+                inline(self);
+            }
+            Format::Xml | Format::Text => self.list(name, items),
+        }
+    }
+
     fn list(&mut self, name: &str, items: &[String]) {
         match self.format {
             Format::Xml => {
@@ -18744,6 +18818,14 @@ impl Writer {
             }
         }
     }
+}
+
+/// The grouping set group a structured EXPLAIN has open (`Render::grouping_set_key`).
+#[derive(Clone, Copy)]
+enum GsGroup {
+    None,
+    Hash,
+    Group,
 }
 
 struct Render<'r> {
@@ -18933,6 +19015,62 @@ impl Render<'_> {
         self.w.indent = save;
     }
 
+    /// show_grouping_set_keys in a structured format: key list `k` (`Hash Key`, `Group Key`,
+    /// a later rollup's `Sort Key` and its indented `  Group Key`s) of the grouping set
+    /// group `g` open; the group it leaves open. Each hashed set is a group of its own, a
+    /// sorted rollup's sets one group.
+    fn grouping_set_key(&mut self, g: GsGroup, k: &str, v: &[String]) -> GsGroup {
+        let set: Vec<String> = if v.len() == 1 && v[0] == "()" { Vec::new() } else { v.to_vec() };
+        let open = |w: &mut Writer, keys: &str| {
+            w.open("Grouping Set", None, true);
+            w.open(keys, Some(keys), false);
+        };
+        match (g, k) {
+            (GsGroup::Group, "Group Key" | "  Group Key") => {
+                self.w.list_nested("Group Key", &set);
+                GsGroup::Group
+            }
+            (g, "Sort Key") => {
+                self.close_grouping_set(g);
+                self.w.open("Grouping Set", None, true);
+                self.w.list("Sort Key", v);
+                self.w.open("Group Keys", Some("Group Keys"), false);
+                GsGroup::Group
+            }
+            (g, "Hash Key") => {
+                self.close_grouping_set(g);
+                open(&mut self.w, "Hash Keys");
+                self.w.list_nested("Hash Key", &set);
+                GsGroup::Hash
+            }
+            (g, _) => {
+                self.close_grouping_set(g);
+                open(&mut self.w, "Group Keys");
+                self.w.list_nested("Group Key", &set);
+                GsGroup::Group
+            }
+        }
+    }
+
+    fn close_grouping_set(&mut self, g: GsGroup) {
+        match g {
+            GsGroup::None => {}
+            GsGroup::Hash => {
+                self.w.close("Hash Keys", false);
+                self.w.close("Grouping Set", true);
+            }
+            GsGroup::Group => {
+                self.w.close("Group Keys", false);
+                self.w.close("Grouping Set", true);
+            }
+        }
+    }
+
+    fn close_grouping_sets(&mut self, g: GsGroup) {
+        self.close_grouping_set(g);
+        self.w.close("Grouping Sets", false);
+    }
+
     fn details(&mut self, n: &ExNode) {
         // (An Append's, Merge Append's or Recursive Union's target list is a dummy.)
         if !n.output.is_empty()
@@ -18957,11 +19095,44 @@ impl Render<'_> {
         } else if !text && let Some((_, v, _)) = n.target.iter().find(|t| t.0 == "Inner Unique") {
             self.w.prop("Inner Unique", v, true);
         }
+        // (A grouping-sets aggregation's keys in a structured format: show_grouping_sets'
+        // groups, each set's keys a nested list.)
+        let mut gs: Option<GsGroup> = None;
         for d in &n.details {
+            let gs_key = matches!(d, Detail::List("Hash Key" | "Group Key" | "  Group Key" | "Sort Key", _));
+            if let Some(g) = gs.take() {
+                if gs_key {
+                    let Detail::List(k, v) = d else { unreachable!() };
+                    gs = Some(self.grouping_set_key(g, k, v));
+                    continue;
+                }
+                self.close_grouping_sets(g);
+            }
             match d {
                 // (ExplainMissingMembers: after the extensions' properties, below.)
                 Detail::Text("Subplans Removed", _) => {}
+                Detail::Text("Grouping Sets", _) => {
+                    if !text {
+                        self.w.open("Grouping Sets", Some("Grouping Sets"), false);
+                        gs = Some(GsGroup::None);
+                    }
+                }
                 Detail::Text(k, v) => self.w.prop(k, v, false),
+                Detail::Sampling(method, params, seed) => {
+                    if text {
+                        let mut line = format!("{method} ({})", params.join(", "));
+                        if let Some(r) = seed {
+                            line.push_str(&format!(" REPEATABLE ({r})"));
+                        }
+                        self.w.prop("Sampling", &line, false);
+                    } else {
+                        self.w.prop("Sampling Method", method, false);
+                        self.w.list("Sampling Parameters", params);
+                        if let Some(r) = seed {
+                            self.w.prop("Repeatable Seed", r, false);
+                        }
+                    }
+                }
                 Detail::Workers(w) => {
                     self.w.prop("Workers Planned", &w.to_string(), true);
                     if executed {
@@ -19311,6 +19482,9 @@ impl Render<'_> {
                 | Detail::Hook(..)
                 | Detail::MemoizeInfo => {}
             }
+        }
+        if let Some(g) = gs.take() {
+            self.close_grouping_sets(g);
         }
         // A tuplestore's storage (show_windowagg_info / show_material_info): in memory,
         // or on disk past work_mem.
@@ -21519,8 +21693,9 @@ pub fn explain(
             if text {
                 r.w.prop("Memory", "used=9kB  allocated=16kB", false);
             } else {
-                r.w.prop("Memory Used", "9200", true);
-                r.w.prop("Memory Allocated", "16384", true);
+                // (show_memory_counters: in kB, as the text form says.)
+                r.w.prop("Memory Used", "9", true);
+                r.w.prop("Memory Allocated", "16", true);
             }
         }
         if text {

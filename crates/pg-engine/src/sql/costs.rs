@@ -530,10 +530,11 @@ fn cmp_as(a: &Value, b: &Value, ty: &DataType) -> Ordering {
         });
     }
     // (A date against a timestamp: the cross-type operators compare the date as the
-    // timestamp of its midnight, date2timestamp.)
+    // timestamp of its midnight, infinite dates as infinite timestamps.)
+    use crate::sql::func::ops::date_instant;
     match (a, b) {
-        (Value::Date(d), Value::Timestamp(t) | Value::Timestamptz(t)) => return (*d as i64 * USECS_PER_DAY).cmp(t),
-        (Value::Timestamp(t) | Value::Timestamptz(t), Value::Date(d)) => return t.cmp(&(*d as i64 * USECS_PER_DAY)),
+        (Value::Date(d), Value::Timestamp(t) | Value::Timestamptz(t)) => return date_instant(*d).cmp(t),
+        (Value::Timestamp(t) | Value::Timestamptz(t), Value::Date(d)) => return t.cmp(&date_instant(*d)),
         _ => {}
     }
     cmp(a, b)
@@ -942,6 +943,11 @@ impl Est<'_> {
                 {
                     return sel;
                 }
+                if crate::sql::func::oper_row(d.name, d).rest == 5040
+                    && let Some(sel) = self.matchingsel(d.name, &args[0], &args[1])
+                {
+                    return sel;
+                }
                 match restrict_default(d) {
                     Some(sel) => sel,
                     None => {
@@ -1217,6 +1223,57 @@ impl Est<'_> {
             ts_opr_selec(&q.items, 0, None, 0.0)
         };
         Some(sel * (1.0 - st.nullfrac as f64))
+    }
+
+    /// matchingsel (generic_restriction_selectivity) of jsonb operator `op` between a column
+    /// and a constant: the operator applied to the column's most common values and to its
+    /// histogram's inner entries, the default 0.010 weighed in for a histogram under 100
+    /// entries. None: not a column against a constant, or an operator not modelled.
+    fn matchingsel(&self, op: &str, l: &Expr, r: &Expr) -> Option<f64> {
+        const DEFAULT_MATCHING_SEL: f64 = 0.010;
+        let test = crate::sql::func::json::matching_test(op)?;
+        let (v, c, varonleft) = match (self.var(l), self.constant(r)) {
+            (Some(v), Some(c)) => (v, c, true),
+            _ => match (self.constant(l), self.var(r)) {
+                (Some(c), Some(v)) => (v, c, false),
+                _ => return None,
+            },
+        };
+        let Some(c) = c else {
+            return Some(0.0);
+        };
+        let holds = |x: &Value| if varonleft { test(x, &c, self.fmt) } else { test(&c, x, self.fmt) };
+        let s = v.stats(self.cat);
+        let (mut mcvsel, mut mcvsum) = (0.0, 0.0);
+        if let Some((vals, nums)) = s.and_then(|s| slot(s, 1, self.fmt)) {
+            for (x, f) in vals.iter().zip(&nums) {
+                if holds(x) {
+                    mcvsel += f;
+                }
+                mcvsum += f;
+            }
+        }
+        // histogram_selectivity (at least 10 entries, the first and last skipped).
+        let (hist, hist_size) = match s.and_then(|s| slot(s, 2, self.fmt)) {
+            Some((vals, _)) if vals.len() >= 10 => {
+                let n = vals.len();
+                let hits = vals[1..n - 1].iter().filter(|x| holds(x)).count();
+                (hits as f64 / (n - 2) as f64, n)
+            }
+            Some((vals, _)) => (-1.0, vals.len()),
+            None => (-1.0, 0),
+        };
+        let mut selec = if hist < 0.0 {
+            DEFAULT_MATCHING_SEL
+        } else if hist_size < 100 {
+            let w = hist_size as f64 / 100.0;
+            hist.pg_mul_add(w, DEFAULT_MATCHING_SEL * (1.0 - w))
+        } else {
+            hist
+        };
+        selec = selec.clamp(0.0001, 0.9999);
+        let nullfrac = s.map_or(0.0, |s| s.nullfrac as f64);
+        Some(selec.pg_mul_add(1.0 - nullfrac - mcvsum, mcvsel).clamp(0.0, 1.0))
     }
 
     /// arraycontsel of `l op r` (`@>`, `&&`, `<@`) for an array column against a constant
@@ -2105,10 +2162,22 @@ fn scalars(v: &Value, lo: &Value, hi: &Value, fmt: &FormatCtx) -> Option<(f64, f
             Value::Numeric(_) => crate::types::text::format_value(x, &DataType::NUMERIC, fmt)
                 .parse()
                 .ok()?,
+            Value::Oid(o) => *o as f64,
             // (convert_timevalue_to_scalar: a date as its midnight's timestamp, so a date
-            // column's histogram and a timestamp constant share one scale.)
+            // column's histogram and a timestamp constant share one scale; an infinite date
+            // at the end of the doubles, date2timestamp_no_overflow.)
+            Value::Date(i32::MIN) => -f64::MAX,
+            Value::Date(i32::MAX) => f64::MAX,
             Value::Date(d) => *d as f64 * USECS_PER_DAY as f64,
             Value::Timestamp(t) | Value::Timestamptz(t) | Value::Time(t) => *t as f64,
+            Value::Timetz(t, zone) => *t as f64 + *zone as f64 * 1_000_000.0,
+            // (A month as 365.25 / 12 days; an infinite interval's fields at their ends put it
+            // past every finite one.)
+            Value::Interval(iv) => {
+                iv.micros as f64
+                    + iv.days as f64 * USECS_PER_DAY as f64
+                    + iv.months as f64 * (365.25 / 12.0 * USECS_PER_DAY as f64)
+            }
             _ => return None,
         })
     };

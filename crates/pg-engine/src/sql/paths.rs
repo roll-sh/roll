@@ -50,7 +50,7 @@ pub(crate) mod sublinkcopy;
 pub(crate) use sublinkcopy::make_copy as make_subquery_copy;
 mod syscat;
 pub use syscat::{sys_index_order, sys_size, sys_table};
-pub(crate) use syscat::{stand_in_of, sys_unique_col};
+pub(crate) use syscat::{stand_in_indexes, stand_in_of, sys_unique_col};
 
 pub const CPU_INDEX_TUPLE_COST: f64 = 0.005;
 /// DEFAULT_PAGE_CPU_MULTIPLIER.
@@ -5813,6 +5813,10 @@ impl Planner<'_, '_> {
                 };
                 self.plan_scan(s, needed, &want, 0);
             }
+            return;
+        }
+        if matches!(p, Plan::SysScan { .. }) {
+            self.sys_plain_scan(p, needed, lim);
             return;
         }
         // A FROM subquery planned apart: its own query level, planned for the columns read

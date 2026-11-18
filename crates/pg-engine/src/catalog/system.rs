@@ -2583,13 +2583,18 @@ pub fn attribute_rows_of(ctx: &ExecCtx, rels: &[u32]) -> Result<Option<Vec<Row>>
     if rels.len() > WHERE_MAX || rels.len().saturating_mul(4) > total {
         return Ok(None);
     }
-    static FIRST: OnceLock<std::collections::HashMap<u32, usize>> = OnceLock::new();
-    let first = FIRST.get_or_init(|| {
-        let mut m = std::collections::HashMap::new();
+    // (Each built-in row's place in the static rows: a relation's rows aren't all together
+    // there, as pg_subscription's, whose column privileges moved the rows they updated.)
+    type Places = (std::collections::HashMap<u32, usize>, std::collections::HashMap<(u32, i64), usize>);
+    static FIRST: OnceLock<Places> = OnceLock::new();
+    let (first, place) = FIRST.get_or_init(|| {
+        let (mut first, mut place) = (std::collections::HashMap::new(), std::collections::HashMap::new());
         for (i, r) in super::static_rows::rows(SysTable::PgAttribute).iter().enumerate() {
-            m.entry(super::static_rows::oid_at(r, 0)).or_insert(i);
+            let oid = super::static_rows::oid_at(r, 0);
+            first.entry(oid).or_insert(i);
+            place.insert((oid, r[4].as_i64().unwrap_or(0)), i);
         }
-        m
+        (first, place)
     });
     let mut keyed: Vec<((u8, u64), u32)> = Vec::with_capacity(rels.len());
     for &r in rels {
@@ -2606,9 +2611,15 @@ pub fn attribute_rows_of(ctx: &ExecCtx, rels: &[u32]) -> Result<Option<Vec<Row>>
     keyed.dedup();
     REL_GENERATED.with(|c| c.set(c.get() + 1));
     let mut rows = Vec::new();
-    for (_, r) in keyed {
+    let mut builtin = 0;
+    for (k, r) in keyed {
         rows.extend(rows_generated_for(SysTable::PgAttribute, ctx, Some(r))?);
+        if k.0 == 0 {
+            builtin = rows.len();
+        }
     }
+    // (The built-in relations' rows in the static rows' order, row by row.)
+    rows[..builtin].sort_by_key(|r| place.get(&(super::static_rows::oid_at(r, 0), r[4].as_i64().unwrap_or(0))).copied());
     #[cfg(debug_assertions)]
     {
         let want: std::collections::HashSet<u32> = rels.iter().copied().collect();

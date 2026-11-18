@@ -153,6 +153,11 @@ fn read_sys_indexes(t: SysTable, lines: &[(usize, Vec<&str>)]) -> Vec<Arc<Index>
     out
 }
 
+/// A stand-in table's indexes: its catalog's (None: not a stand-in).
+pub(crate) fn stand_in_indexes(t: &Table) -> Option<&'static [Arc<Index>]> {
+    stand_in_of(t).map(sys_indexes)
+}
+
 /// Whether stand-in table `t`'s column `col` is the one key of a unique index of its
 /// catalog's (examine_variable's isunique).
 pub(crate) fn sys_unique_col(t: &Table, col: usize) -> bool {
@@ -163,20 +168,19 @@ pub(crate) fn sys_unique_col(t: &Table, col: usize) -> bool {
     })
 }
 
-/// The catalog's size: its rows, and the heap pages they'd fill.
+/// The catalog's size as the planner sees it (`explain::sys_rel_size`).
 pub fn sys_size(t: SysTable, ctx: &ExecCtx) -> RelSize {
-    let tuples = crate::sql::explain::sys_tuples(t, ctx);
-    let width: u32 = t.columns().iter().map(|(_, ty)| costs::type_width(ty)).sum();
-    RelSize {
-        pages: ((tuples * (width as f64 + 28.0)) / 8192.0).ceil().max(1.0),
-        tuples,
-    }
+    crate::sql::explain::sys_rel_size(t, ctx)
 }
+
+const PG_STATISTIC_RELID_ATT_INH_INDEX: u32 = 2696;
 
 /// The index paths' view of the catalog's indexes (all its rows visible: index-only scans
 /// read no heap).
 pub(super) fn sys_index_infos(t: SysTable, tuples: f64) -> Vec<IndexInfo> {
     let table = sys_table(t);
+    let fresh = crate::catalog::static_rows::initdb_class_sizes();
+    let fresh_tuples = fresh.get(&t.oid()).map_or(0.0, |s| s.1 as f64);
     let mut out: Vec<IndexInfo> = sys_indexes(t)
         .iter()
         .cloned()
@@ -191,7 +195,18 @@ pub(super) fn sys_index_infos(t: SysTable, tuples: f64) -> Vec<IndexInfo> {
                 .collect();
             // (Leaf pages at 90% full: the keys and their tuple headers.)
             let kw: u32 = keys.iter().map(|k| costs::type_width(&k.ty())).sum();
-            let pages = ((tuples * (kw as f64 + 16.0)) / (8192.0 * 0.9)).ceil().max(1.0) + 1.0;
+            let built = ((tuples * (kw as f64 + 16.0)) / (8192.0 * 0.9)).ceil().max(1.0) + 1.0;
+            // A fresh database's index has initdb's pages (pg_statistic's grew to four with
+            // initdb's ANALYZE after the VACUUM that set its relpages), more in proportion
+            // once the catalog's rows outgrow initdb's.
+            let pages = match fresh.get(&ix.oid) {
+                Some(&(p, _)) if fresh_tuples > 0.0 => {
+                    let p = if ix.oid == PG_STATISTIC_RELID_ATT_INH_INDEX { 4.0 } else { p as f64 };
+                    if tuples > fresh_tuples { (p * tuples / fresh_tuples).ceil() } else { p }
+                }
+                Some(&(p, _)) => built.max(p as f64),
+                None => built,
+            };
             let height = if pages <= 2.0 { 0 } else { 1 };
             let n = keys.len();
             IndexInfo {
@@ -300,6 +315,25 @@ impl Planner<'_, '_> {
         let mut s = stand_in_scan(table, filter.cloned());
         s.written = written_order(filter);
         self.rel(&s, needed).expect("a stand-in relation")
+    }
+
+    /// A catalog's scan alone: its path chosen as a table's (sequential, index, index-only
+    /// or bitmap scan, for a LIMIT's fraction). Whether it was planned here.
+    pub(super) fn sys_plain_scan(&self, p: &mut Plan, needed: &[bool], lim: Option<(f64, f64)>) -> bool {
+        let Plan::SysScan { table, filter, path, mark: None, .. } = p else {
+            return false;
+        };
+        if path.is_some() || table.is_view() || sys_indexes(*table).is_empty() {
+            return false;
+        }
+        let rel = self.sys_rel(*table, filter.as_ref(), needed);
+        let want = Want { merge: Vec::new(), keys: Vec::new(), limit: lim };
+        let chosen = self.choose(&rel, &want, 0);
+        let mut s = stand_in_scan(rel.table.clone(), filter.clone());
+        s.written = rel.written.as_ref().clone();
+        apply(&rel, &mut s, &chosen);
+        *path = Some(Arc::new(crate::sql::plan::SysPath { scan: s, ordered: false }));
+        true
     }
 
     /// A Sort over a catalog's scan (through projections): read an index in order when

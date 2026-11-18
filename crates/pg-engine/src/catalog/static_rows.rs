@@ -52,6 +52,23 @@ fn source(table: SysTable) -> Option<std::borrow::Cow<'static, str>> {
     )
 }
 
+/// pg_class's relpages and reltuples of each system relation in a fresh database (initdb's
+/// VACUUM left them), by oid: what the planner's estimate_rel_size starts from.
+pub fn initdb_class_sizes() -> &'static HashMap<u32, (u32, f32)> {
+    static SIZES: OnceLock<HashMap<u32, (u32, f32)>> = OnceLock::new();
+    SIZES.get_or_init(|| {
+        let raw = source(SysTable::PgClass).expect("pg_class data");
+        raw.lines()
+            .filter_map(|l| {
+                let mut f = l.split('\t');
+                let oid = f.next()?.parse().ok()?;
+                let mut f = f.skip(8);
+                Some((oid, (f.next()?.parse().ok()?, f.next()?.parse().ok()?)))
+            })
+            .collect()
+    })
+}
+
 fn is_reg(ty: &DataType) -> bool {
     use DataType::*;
     matches!(

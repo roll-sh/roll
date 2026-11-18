@@ -1350,8 +1350,7 @@ pub fn register(r: &mut Registry) {
 /// Mixed date/timestamp comparisons: compare as timestamptz instants.
 fn as_instant(v: &Value, c: &FnCtx) -> i64 {
     match v {
-        // date2timestamp_opt_overflow: dates past the timestamp range sort as infinity.
-        Value::Date(d) => date_to_ts(*d).unwrap_or(datetime::TS_POS_INF),
+        Value::Date(d) => date_instant(*d),
         Value::Timestamp(t) => *t,
         Value::Timestamptz(t) => {
             // Compare timestamptz against local timestamps in the session zone.
@@ -1472,7 +1471,7 @@ fn p_num_mul(x: &Value, y: &Value, _: &T) -> Result<Value> {
 /// the executor's thread).
 fn p_instant(v: &Value) -> Result<i64> {
     match v {
-        Value::Date(d) => Ok(date_to_ts(*d).unwrap_or(datetime::TS_POS_INF)),
+        Value::Date(d) => Ok(date_instant(*d)),
         Value::Timestamp(t) => Ok(*t),
         Value::Timestamptz(_) => Err(crate::error::internal("timestamptz compared off the session")),
         _ => Ok(0),
@@ -1500,9 +1499,10 @@ fn p_dt_ge(x: &Value, y: &Value, _: &T) -> Result<Value> {
     Ok(Value::Bool(p_dtcmp(x, y)? != Ordering::Less))
 }
 
-/// A date as `p_instant` compares it with a timestamp (no `Value` made: `exec::vector`).
+/// A date as it compares with a timestamp (date_cmp_timestamp_internal): its midnight, and a
+/// finite date past the timestamps' range above every finite timestamp but below infinity.
 pub fn date_instant(d: i32) -> i64 {
-    date_to_ts(d).unwrap_or(datetime::TS_POS_INF)
+    date_to_ts(d).unwrap_or(datetime::TS_POS_INF - 1)
 }
 
 /// The test of the ordering `f` is when it is a date / timestamp comparison (`p_dt_*`:
