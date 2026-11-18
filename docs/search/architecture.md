@@ -192,6 +192,11 @@ Lucene can (the FSTs, smartcn's serialized tables), the FSTs are rebuilt with th
   `job_wake_interval` (15 s) the node a due cluster's lease is placed on loads it, the scheduler
   runs what came due, and the idle unload puts it back to sleep, billed as loaded time. A
   cluster without jobs is never woken: the only standing cost is one catalog query per node.
+- **Search analytics** (README, "Search analytics") cost a search one relaxed load while no index
+  has them on. Recorded buckets wait on the cluster (`search_es::analytics`) for the 60 s metering
+  pass, which already runs, with the request metrics and slow logs (`Node::take_observations`);
+  an unloading cluster hands them to the node's carry-over, so a sleeping cluster holds and
+  writes nothing.
 - **Local disk** is a cache with a byte budget (`--search-cache-bytes`). Evicting a segment is
   always safe: every segment in a manifest is already in object storage.
 - **The audit log** (README, "Audit log") writes nothing for a cluster nothing happens to: a

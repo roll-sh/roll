@@ -318,6 +318,67 @@ and in the dashboard (Settings → Audit log: a table filtered by time and event
   the failure as the cluster's filter said when it last unloaded on that node (its defaults if it
   never did there).
 
+## Search analytics
+
+Like Algolia's and Elastic App Search's analytics: per index, the queries people search for, the
+ones that find nothing, and how often their results are clicked, so the Relevance tab's synonyms
+and query rules can be aimed at real searches. The Relevance tab shows them first ("Search
+analytics": totals, searches per hour or day, top queries, no-result queries and low
+click-through queries), and each query offers "Synonym" and "Rule", which open the synonym and
+query-rule editors prefilled with it (`query, ` as a rule; an `exact` `query_string` criterion).
+
+- **Turning it on.** It's off for every index until the owner turns it on with the index setting
+  `index.roll.analytics.enabled: true` (from the Relevance tab, or `PUT /<index>/_settings`). An
+  index setting rather than a cluster setting: query text is the tenant's users' data, and an
+  owner usually wants it for the one index behind a search box and not for logs or vectors;
+  settings already carry per-index switches, follow aliases and data streams' backing indices, and
+  are dropped with the index. roll registers it in both dialects with no default, so
+  `include_defaults` stays Elasticsearch's.
+- **What a search records.** Its text, from the `X-Roll-Search-Query` header when the client sends
+  one, else the `q` parameter, else the user's text in the body: the first full-text query
+  (`query_string`, `simple_query_string`, `multi_match`, `match` and its phrase forms,
+  `combined_fields`, `semantic`, `sparse_vector`, `knn`'s `query_vector_builder` text, OpenSearch's
+  `neural`) found through compound queries' scoring clauses (never a filter), then a retriever's
+  (`standard`, `rrf`/`linear` and their simplified `query`, `text_similarity_reranker`'s
+  `inference_text`, `rule`), then the `knn` section's. The text is lower-cased, its whitespace
+  collapsed and cut at 128 characters. With it: whether the search found nothing, its hit count and
+  its latency. `_search`, `_msearch` (each item) and search templates record; a search with no
+  text (a `term` filter, `match_all`) records nothing.
+- **Clicks** are Elasticsearch's own behavioral analytics events:
+  `POST _application/analytics/<collection>/event/search_click` with the clicked `document`
+  (`index`, `id`) and the `search` it came from (`query`, and `results.items` and `page` when the
+  client has them, which give the click's position). The event is still indexed into the
+  collection's data stream as Elasticsearch does; a click on an index with analytics on also counts
+  toward its query's click-through and average position.
+- **Aggregated in place.** Each index keeps one bucket per hour: exact totals and two bounded
+  heavy-hitter lists (Space-Saving: 256 queries and 128 no-result queries per hour on the node; a
+  query searched more than `searches / 256` times in the hour is always kept). The 60 s metering
+  pass hands buckets to the catalog's fixed rings, as metrics are: 168 hourly buckets (7 days,
+  100 queries each) and 31 daily ones (30 days, 300 queries each), a row per slot replaced when its
+  time comes round. Nothing is ever a log of searches. A cluster holds at most 4 MiB of query text
+  between passes; past it, new queries count only in the totals.
+- **Cost.** While no index of a cluster has analytics on, a search pays one relaxed atomic load.
+  With them on, recording is a mutex and a hash-map update after the search. Measured on a release
+  build (`analytics::tests::record_cost` in search-es, 2026-11-18): the recording path alone (the
+  text, the clock, the indices, the record) takes 630 ns, 0.47% of a `term` search for 10 hits on a
+  10,000-document index through the REST handler (134 µs median); end to end, 12 alternating rounds
+  of 5,000 such searches with analytics off and on differ by less than the rounds' own spread
+  (medians 134 and 128 µs, rounds 114–141 µs). A sleeping cluster holds nothing in memory, runs no
+  timer and writes no rows.
+- **Reading it**: `GET /v1/search/clusters/{id}/analytics?index=&range=24h|7d|30d` (all indices
+  without `index`). A read for roll-access; a person sees only their own clusters' (404 otherwise).
+  The answer adds what the cluster's owner recorded since the last pass.
+
+**Privacy.** No `Authorization` header, credential, API key or document body is ever recorded:
+the only header read is `X-Roll-Search-Query`, and only a query's text, counted, is kept. Query
+text is kept only aggregated as above, only while the index has analytics on, and for at most 30
+days. Turning it off (or deleting the index, or replacing it with another of the same name)
+deletes everything kept for it: reads stop showing it at once, the node drops what it holds, and
+the next metering pass deletes the catalog's rows (a node that unloaded the cluster before that
+hands the deletion on; one that died is overruled by the next load, which hands on the list of
+indices with analytics on and the catalog drops every other index's rows). Deleting a cluster
+deletes its analytics with its other rows when it's purged.
+
 ## Metering and pricing
 
 Every 60 s the control plane accounts each loaded cluster's loaded time exactly (load and unload
