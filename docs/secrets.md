@@ -145,6 +145,25 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
   (roles, group, CA; its admin URL `admin_url_wo` is write-only, Terraform 1.11+: sent once and
   sealed in roll, never in the state, and bumping `admin_url_wo_version` registers it again). roll
   changes none in place, so every attribute replaces them; keys link to them as to any resource.
+- **More of what a project registers**, each imported by `prj_…/<id>` (or the id alone, in the
+  provider's project). Credentials going in are write-only (Terraform 1.11+), with a `…_wo_version`
+  to send a new one:
+  - **`roll_secrets_rotator`**: its name and URL change in place (`PATCH`). Its signing secret is
+    shown once, so it's kept, sensitive, in `secret` from creation. Changing `rotate_secret` (a
+    keepers map) rotates it (`…/rotate-secret`) and keeps the new one.
+  - **`roll_secrets_audit_sink`**: an HTTPS endpoint, or `bucket:`, `search:` or `stream:` on the
+    canvas. A SIEM `format` takes `token_wo`. A roll sink's signing secret is kept in `secret`.
+  - **`roll_secrets_github_app`**: `private_key_wo`, never returned.
+  - **`roll_secrets_aws_role`** and **`roll_secrets_aws_user`**: both change in place (`PATCH`),
+    except a user's IAM user name.
+  - **`roll_secrets_cloud_account`**: `cloud = "gcp"` or `"azure"`, with that cloud's fields.
+
+  Sinks, Apps and accounts have no `PATCH`, so every attribute replaces them.
+- **Project settings**, imported by `prj_…`:
+  - **`roll_secrets_required_keys`** owns the project's whole required list (`PUT …/required`), so
+    keep one per project; destroying it requires nothing.
+  - **`roll_secrets_kms_key`** is the customer-managed key (`PUT`/`DELETE …/kms`): a new ARN changes
+    in place, and destroying it unwraps the data key.
 - **Without values in the state** (Terraform 1.10 and 1.11+), as Vault's and AWS' providers allow:
   - **`ephemeral "roll_secrets_values"`** reads an environment for one run, never into the plan or
     the state; it feeds another provider's configuration or a write-only argument. Strict: a key

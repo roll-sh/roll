@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -20,8 +21,10 @@ import (
 )
 
 // What a project registers with roll secrets itself (docs/secrets.md, "Links"): a CA, an SSH CA,
-// an encryption key, a database outside roll. roll changes none in place, so every attribute
-// replaces it; reads find it in the project's list.
+// an encryption key, a database outside roll, a rotator, an audit sink, a GitHub App, AWS roles and
+// users, cloud accounts. Attributes replace it unless roll changes them in place (`update`); reads
+// find it in the project's list, and an import takes `prj_…/<id>` (or the id, in the provider's
+// project).
 type registration[M any] struct {
 	c *client
 	// typeName after the provider's (`_secrets_ca`), route under the project (`cas`), what it is.
@@ -38,7 +41,17 @@ type registration[M any] struct {
 	deletePath func(m *M) string
 	// guard refuses a delete with its reason (deletion protection), or "".
 	guard func(m *M) string
+	// update changes in place what roll can (a PATCH at `at`, the item's path), filling plan from
+	// the answer; prior is the state. None: the plan is kept as it is (only local settings change).
+	update func(ctx context.Context, c *client, at string, plan, prior *M, d *diag.Diagnostics)
+	// validate checks a configuration before any plan (an attribute that needs another).
+	validate func(ctx context.Context, cfg *M, d *diag.Diagnostics)
 }
+
+var (
+	_ resource.ResourceWithImportState    = (*registration[caModel])(nil)
+	_ resource.ResourceWithValidateConfig = (*registration[caModel])(nil)
+)
 
 func (r *registration[M]) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + r.typeName
@@ -117,13 +130,59 @@ func (r *registration[M]) Read(ctx context.Context, req resource.ReadRequest, re
 	resp.State.RemoveResource(ctx)
 }
 
-// Update only changes what roll doesn't keep (deletion protection): everything else replaces it.
+// Update changes what roll changes in place (`update`) or keeps locally (deletion protection):
+// everything else replaces it.
 func (r *registration[M]) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var m M
+	var m, prior M
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &m)...)
-	if !resp.Diagnostics.HasError() {
-		resp.Diagnostics.Append(resp.State.Set(ctx, m)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
+	if r.update != nil {
+		proj, id := r.keys(&prior)
+		r.update(ctx, r.c, r.base(proj.ValueString())+"/"+url.PathEscape(id.ValueString()), &m, &prior, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, m)...)
+}
+
+func (r *registration[M]) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	if r.validate == nil {
+		return
+	}
+	var m M
+	resp.Diagnostics.Append(req.Config.Get(ctx, &m)...)
+	if !resp.Diagnostics.HasError() {
+		r.validate(ctx, &m, &resp.Diagnostics)
+	}
+}
+
+// ImportState takes `prj_…/<id>`, or the id alone in the provider's project. What roll never
+// shows again (a write-only credential, a once-shown secret) isn't imported.
+func (r *registration[M]) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	importProject(ctx, r.c, req, resp, "prj_…/<id>", true)
+}
+
+// importProject sets project (and id, when withID) from `prj_…/<id>`, `<id>` or `prj_…`.
+func importProject(ctx context.Context, c *client, req resource.ImportStateRequest, resp *resource.ImportStateResponse, shape string, withID bool) {
+	proj, id, two := strings.Cut(req.ID, "/")
+	if !withID {
+		proj, id = req.ID, req.ID
+	} else if !two {
+		proj, id = "", req.ID
+	}
+	if proj == "" && c != nil {
+		proj = c.project
+	}
+	if proj == "" || id == "" || strings.Contains(id, "/") {
+		resp.Diagnostics.AddError("import id", fmt.Sprintf("%q isn't %s", req.ID, shape))
+		return
+	}
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("project"), proj)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), id)...)
 }
 
 func (r *registration[M]) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {

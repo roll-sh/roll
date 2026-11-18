@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -35,6 +36,52 @@ type fakeRolld struct {
 	regs map[string]map[string]map[string]any
 	// The admin URLs databases were registered with (never listed back).
 	adminURLs []string
+	// Credentials roll was sent and never lists back: private keys, SIEM tokens, rotator URLs.
+	received []string
+	// The project's required keys, and the KMS key wrapping its data key ("": none).
+	required []any
+	kms      string
+}
+
+// settings serves …/required and …/kms: one value per project.
+func (f *fakeRolld) settings(r *http.Request, write func(int, any)) {
+	var b any
+	_ = json.NewDecoder(r.Body).Decode(&b)
+	if strings.HasSuffix(r.URL.Path, "/required") {
+		if r.Method == http.MethodPut {
+			// As roll keeps them: the folder without a trailing /, sorted by folder and key.
+			list := b.([]any)
+			for _, x := range list {
+				k := x.(map[string]any)
+				if k["comment"] == nil {
+					k["comment"] = ""
+				}
+				if p, _ := k["path"].(string); p == "" {
+					k["path"] = "/"
+				} else if p != "/" {
+					k["path"] = strings.TrimSuffix(p, "/")
+				}
+			}
+			sort.Slice(list, func(i, j int) bool {
+				a, b := list[i].(map[string]any), list[j].(map[string]any)
+				return a["path"].(string)+" "+a["key"].(string) < b["path"].(string)+" "+b["key"].(string)
+			})
+			f.required = list
+		}
+		write(200, append([]any{}, f.required...))
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		f.kms = b.(map[string]any)["key"].(string)
+	case http.MethodDelete:
+		f.kms = ""
+	}
+	if f.kms == "" {
+		write(200, map[string]any{"key": nil})
+	} else {
+		write(200, map[string]any{"key": f.kms})
+	}
 }
 
 // machineClients serves /v1/access/clients: made (a key or CI's identity) with a grant in tokens,
@@ -129,7 +176,27 @@ func (f *fakeRolld) grants(r *http.Request, write func(int, any)) {
 // rest serves identities and syncs (create, list, delete), as roll keeps them.
 func (f *fakeRolld) rest(w http.ResponseWriter, r *http.Request, kind string, items map[string]map[string]any, write func(int, any)) {
 	id := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/v1/secrets/projects/prj_a/"+kind), "/")
+	id, action, _ := strings.Cut(id, "/")
+	host := func(u string) string { h, _, _ := strings.Cut(strings.TrimPrefix(u, "https://"), "/"); return h }
 	switch {
+	case r.Method == http.MethodPatch && items[id] != nil && action == "":
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		for k, v := range b {
+			items[id][k] = v
+		}
+		if u, ok := b["url"].(string); ok {
+			f.received = append(f.received, u)
+			delete(items[id], "url")
+			items[id]["host"] = host(u)
+		}
+		write(200, items[id])
+	case r.Method == http.MethodPost && kind == "rotators" && items[id] != nil && action == "rotate-secret":
+		answer := map[string]any{"secret": fmt.Sprintf("whsec_rotated_%d", len(f.received))}
+		for k, v := range items[id] {
+			answer[k] = v
+		}
+		write(200, answer)
 	case r.Method == http.MethodPost && id == "":
 		var b map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&b)
@@ -150,6 +217,30 @@ func (f *fakeRolld) rest(w http.ResponseWriter, r *http.Request, kind string, it
 			b["public_key"], b["max_hours"], b["max_host_days"] = "ssh-ed25519 AAAA roll-secrets:"+b["name"].(string), 24, 90
 		case "transit":
 			b["latest_version"] = 1
+		case "rotators":
+			f.received = append(f.received, b["url"].(string))
+			b["host"] = host(b["url"].(string))
+			delete(b, "url")
+		case "audit/sinks":
+			if t, ok := b["token"].(string); ok {
+				f.received = append(f.received, t)
+			}
+			if b["format"] == nil {
+				b["format"] = "roll"
+			}
+			delete(b, "token")
+			delete(b, "from_start")
+		case "github-apps":
+			f.received = append(f.received, b["private_key"].(string))
+			delete(b, "private_key")
+		case "aws-roles":
+			if b["trust"] == nil {
+				b["trust"] = "external_id"
+			}
+		case "cloud-accounts":
+			if b["cloud"] == "azure" && b["scope"] == nil {
+				b["scope"] = "https://management.azure.com/.default"
+			}
 		case "outside-databases":
 			f.adminURLs = append(f.adminURLs, b["url"].(string))
 			delete(b, "url")
@@ -166,6 +257,9 @@ func (f *fakeRolld) rest(w http.ResponseWriter, r *http.Request, kind string, it
 		}
 		if kind == "syncs" && b["kind"] == "webhook" {
 			answer["signing_secret"] = "whsec_once"
+		}
+		if kind == "rotators" || kind == "audit/sinks" {
+			answer["secret"] = "whsec_made_" + b["id"].(string)
 		}
 		write(201, answer)
 	case r.Method == http.MethodGet && id == "":
@@ -223,7 +317,11 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		write(200, map[string]any{"issuer": api, "token_endpoint": api + "/v1/access/oauth/token"})
 		return
 	}
-	for _, kind := range []string{"identities", "syncs", "cas", "ssh-cas", "transit", "outside-databases"} {
+	if r.URL.Path == "/v1/secrets/projects/prj_a/required" || r.URL.Path == "/v1/secrets/projects/prj_a/kms" {
+		f.settings(r, write)
+		return
+	}
+	for _, kind := range []string{"identities", "syncs", "cas", "ssh-cas", "transit", "outside-databases", "rotators", "audit/sinks", "github-apps", "aws-roles", "aws-users", "cloud-accounts"} {
 		if r.URL.Path == "/v1/secrets/projects/prj_a/"+kind || strings.HasPrefix(r.URL.Path, "/v1/secrets/projects/prj_a/"+kind+"/") {
 			items := map[string]map[string]map[string]any{"identities": f.identities, "syncs": f.syncs}[kind]
 			if items == nil {

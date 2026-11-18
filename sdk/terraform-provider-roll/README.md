@@ -69,6 +69,62 @@ resource "roll_secret" "staging_db" {
   value_wo_version = 1 # bump to write it again
 }
 
+# What a project registers itself: credentials go in write-only (Terraform 1.11+), from ephemeral
+# variables or resources, so they reach neither the plan nor the state.
+resource "roll_secrets_rotator" "vendor" {
+  name          = "vendor"
+  url           = "https://rotate.example/roll"   # .secret: its signing secret, shown once
+  rotate_secret = { round = "1" }                 # change it to rotate the signing secret
+}
+
+resource "roll_secrets_audit_sink" "splunk" {
+  url              = "https://splunk.example/services/collector"   # or bucket:…, search:…, stream:…
+  format           = "splunk"                                      # roll (signed), datadog, bearer
+  token_wo         = var.hec_token
+  token_wo_version = 1
+}
+
+resource "roll_secrets_github_app" "deploy" {
+  name                   = "deploy"
+  app_id                 = 123
+  installation_id        = 456
+  private_key_wo         = var.github_app_key
+  private_key_wo_version = 1
+  repositories           = ["web"]
+  permissions            = { contents = "write", pull_requests = "write" }
+}
+
+resource "roll_secrets_aws_role" "deploy" {
+  name     = "deploy"
+  role_arn = "arn:aws:iam::123456789012:role/roll"
+  trust    = "oidc"                  # or external_id (the default)
+}
+
+resource "roll_secrets_aws_user" "legacy" {
+  name = "legacy"
+  role = roll_secrets_aws_role.deploy.id   # an external_id role
+  user = "legacy-ci"
+}
+
+resource "roll_secrets_cloud_account" "gcp" {
+  name            = "gcp"
+  cloud           = "gcp"            # or azure: tenant, client_id, scope
+  audience        = "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/roll/providers/roll"
+  service_account = "deploy@acme.iam.gserviceaccount.com"
+}
+
+# The project's whole list: one per project.
+resource "roll_secrets_required_keys" "all" {
+  keys = [
+    { key = "DATABASE_URL" },
+    { key = "PORT", path = "/api", type = "port", owner = "@payments" },
+  ]
+}
+
+resource "roll_secrets_kms_key" "cmk" {
+  key = "arn:aws:kms:eu-west-1:123456789012:key/…"
+}
+
 # roll apps: a service, a variable, a custom domain, an environment, a link and a notification
 # target (docs/apps/http-api.md).
 resource "roll_app_service" "web" {
@@ -158,6 +214,22 @@ resource "roll_machine_client" "web_ci" {
   `roll_secrets_ca`, `roll_secrets_ssh_ca`, `roll_secrets_transit_key` and
   `roll_secrets_outside_database` (whose `admin_url_wo` is write-only: bump
   `admin_url_wo_version` to register it again).
+
+- Rotators, audit sinks, GitHub Apps, AWS roles and users and cloud accounts import by
+  `prj_…/<id>` (or the id alone, in the provider's project); the required keys and the KMS key by
+  `prj_…`. A write-only credential (`token_wo`, `private_key_wo`) and a once-shown `secret` aren't
+  imported: the first apply after an import with a `…_wo_version` in the file registers it again
+  (a replace), and a rotator's `rotate_secret` there rotates its secret into the state. A rotator's
+  URL isn't read back either (only its host): the first apply sends it again, in place.
+- A rotator's name and URL, an AWS role's name, ARN and trust, and an AWS user's name and role
+  change in place; their other attributes, and every attribute of a sink, an App or a cloud
+  account, replace them. A rotator's URL is in the state (sensitive), so keep a token out of it or
+  keep the state private.
+- `roll_secrets_required_keys` owns the project's whole list: a key left out isn't required, and a
+  second one on the same project undoes the first. Write folders without a trailing `/` (roll keeps
+  them so, and an import reads them so). Destroying it requires nothing.
+- `roll_secrets_kms_key` checks roll can use the key when it's set; destroying it unwraps the data
+  key, so KMS must still answer.
 
 - A notification target's URL is never read back, and a new URL is a new target. A webhook's
   signing secret is in `.secret` from when it's made. Filters left out are the defaults.
