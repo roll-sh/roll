@@ -102,6 +102,8 @@ export interface Run {
   tcp?: boolean;
   /** A deployment that crash-loops within ten minutes of going live is replaced by the one before it. */
   rollback_on_crash?: boolean;
+  /** Build the same revision again, without the cache, when one of its base images moves. */
+  rebuild_on_base?: boolean;
   /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
   scale?: { stream: string; group: string; per_instance?: number };
   /** Commands on a schedule, each a job of the live deployment at its due times (Heroku Scheduler); at most 20. */
@@ -531,6 +533,8 @@ export interface Environment extends EnvironmentSummary {
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
   waiting_for_ci?: string | null;
+  /** Base images the live deployment was built on that have moved since in their registries. */
+  base_updated?: string[];
   /** Paused: nothing runs, wakes, deploys or is scheduled. Absent: not paused. */
   paused?: boolean;
   /** Deploys are held after this rollback: pushes, hooks and tag moves aren't put live until a person deploys or resumes them. */
@@ -847,6 +851,7 @@ export interface NotifyTarget {
 
 export type NotifyEvent =
   | "deploy.failed"
+  | "deploy.base_updated"
   | "rollout.waiting"
   | "deploy.ready"
   | "crash_loop"

@@ -272,6 +272,20 @@ function Conditions({ service, env, runner, go }: { service: Service; env: Envir
         </button>
       ),
     });
+  if (env.base_updated?.length)
+    lines.push({
+      key: "base",
+      text: (
+        <>
+          Its base image {env.base_updated.map((b) => <span key={b} className="font-mono">{b} </span>)}was updated since this deployment was built: a deploy without the cache gets its fixes.
+        </>
+      ),
+      action: (
+        <button type="button" className={btn} disabled={runner.busy !== null} onClick={() => runner.run("rebuild", () => appsApi.deploy(service.id, env.name, { no_cache: true }))}>
+          Deploy without the cache
+        </button>
+      ),
+    });
   if (env.waiting_for_ci)
     lines.push({ key: "ci", text: <>Waiting for the checks on <span className="font-mono">{env.waiting_for_ci.slice(0, 8)}</span> before it deploys.</> });
   for (const d of env.domains.filter((d) => d.kind === "custom" && (d.status === "failed" || d.tls === "failed")))

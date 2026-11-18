@@ -790,3 +790,9 @@ fn a_static_sites_functions_are_named_not_dropped() {
     assert!(p.notes.iter().any(|n| n.starts_with("netlify/functions/ has 1 Netlify Functions")), "{:?}", p.notes);
     assert!(p.notes.iter().any(|n| n.starts_with("api/ has 1 Vercel functions")), "{:?}", p.notes);
 }
+
+#[test]
+fn a_dockerfiles_base_images_are_its_froms_not_its_stages() {
+    let df = "FROM node:22-slim AS base\nFROM base AS build\nRUN x\nFROM --platform=linux/amd64 python:3.12 AS py\nFROM scratch\nFROM gcr.io/distroless/static@sha256:abc\nFROM ${IMG}\nFROM base\n";
+    assert_eq!(crate::base_images(df), ["node:22-slim", "python:3.12"]);
+}

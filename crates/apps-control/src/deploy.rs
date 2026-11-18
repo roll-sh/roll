@@ -1327,7 +1327,10 @@ impl Apps {
             (dockerfile, log.clone(), None)
         };
         let log = &log;
-        let plan_json = serde_json::to_value(&plan)?;
+        let mut plan_json = serde_json::to_value(&plan)?;
+        // The images it builds on, to watch for their fixes (`watch_bases`).
+        let base_text = if plan.provider == apps_build::Provider::Dockerfile { std::fs::read_to_string(context.join(&dockerfile)).unwrap_or_default() } else { plan.dockerfile.clone() };
+        let bases = apps_build::base_images(&base_text);
         if plan.provider == apps_build::Provider::Dockerfile {
             build_env.extend(commit);
         }
@@ -1361,6 +1364,18 @@ impl Apps {
             }
             Err(e) => return Err(e),
         };
+        // Each base's digest as the registry says it now (what the build just resolved).
+        let mut pinned = Vec::new();
+        for b in &bases {
+            if let Ok(Ok(p)) = tokio::time::timeout(std::time::Duration::from_secs(10), self.deps.runtime.remote_digest(b, None)).await
+                && let Some((_, digest)) = p.rsplit_once('@')
+            {
+                pinned.push(serde_json::json!({ "image": b, "digest": digest }));
+            }
+        }
+        if !pinned.is_empty() {
+            plan_json["bases"] = serde_json::Value::Array(pinned);
+        }
         let (id, img, r) = (d.id.clone(), image.clone(), run.clone());
         self.db(move |s| s.set_built(&id, &img, Some(&plan_json), Some(&r))).await?;
         Ok((image, run))
@@ -1888,6 +1903,13 @@ impl Apps {
                     this.watch_tags().await;
                     this.watch_git().await;
                     this.watching.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
+            }
+            if n.is_multiple_of(3600) && !self.watching_bases.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    this.watch_bases().await;
+                    this.watching_bases.store(false, std::sync::atomic::Ordering::SeqCst);
                 });
             }
             if n.is_multiple_of(3600) && !self.backing_up.swap(true, std::sync::atomic::Ordering::SeqCst) {

@@ -271,6 +271,7 @@ pub struct Apps {
     backing_up: std::sync::atomic::AtomicBool,
     /// Watched tags are being checked (on their own task).
     watching: std::sync::atomic::AtomicBool,
+    watching_bases: std::sync::atomic::AtomicBool,
     watching_secrets: std::sync::atomic::AtomicBool,
     /// Scaling workers' backlogs are being read (on their own task).
     scaling: std::sync::atomic::AtomicBool,
@@ -450,6 +451,7 @@ impl Apps {
             changes: tokio::sync::broadcast::channel(256).0,
             backing_up: std::sync::atomic::AtomicBool::new(false),
             watching: std::sync::atomic::AtomicBool::new(false),
+            watching_bases: std::sync::atomic::AtomicBool::new(false),
             watching_secrets: std::sync::atomic::AtomicBool::new(false),
             scaling: std::sync::atomic::AtomicBool::new(false),
             github_running: std::sync::atomic::AtomicBool::new(false),
@@ -1366,6 +1368,10 @@ impl Apps {
             scaling,
             wait_for_ci: r.wait_for_ci,
             waiting_for_ci,
+            base_updated: match r.active.clone() {
+                Some(a) => self.db(move |s| s.get_state(&format!("base_moved:{a}"))).await.ok().flatten().and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default(),
+                None => Vec::new(),
+            },
             created_at: r.created_at,
         })
     }
