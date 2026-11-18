@@ -12,6 +12,12 @@
 //! Either way the answer is claimed in that same transaction, so a request answered once never
 //! lands twice, and a refused answer uses nothing up.
 //!
+//! An answer is stored as it was typed: a `${` in it is kept with the references' escape (`$${`),
+//! so an outsider can't point a key at another value (`${production.DB_PASSWORD}`) for a broad
+//! reader to resolve. Each request counts its answers a minute in its row (shared by every node,
+//! and untouched by attempts at other requests), and keeps a digest of every box it has landed:
+//! sending the same boxes again is refused, so a box seen on the way can't use up the answers left.
+//!
 //! The answer's destination is roll itself, so unlike a share's value roll must be able to open it
 //! in the end; a key only the requester's browser held would add a step (they'd have to open it and
 //! write it) without keeping it from roll.
@@ -45,7 +51,10 @@ CREATE TABLE IF NOT EXISTS value_requests (
     expires_at INTEGER NOT NULL,
     answered_at INTEGER,
     cancelled_at INTEGER,
-    outcome TEXT
+    outcome TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    attempts_from INTEGER NOT NULL DEFAULT 0,
+    boxes TEXT NOT NULL DEFAULT '[]'
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS value_requests_project ON value_requests (project_id, created_at);
 CREATE INDEX IF NOT EXISTS value_requests_expiry ON value_requests (expires_at);
@@ -55,9 +64,9 @@ CREATE INDEX IF NOT EXISTS value_requests_expiry ON value_requests (expires_at);
 const KEYS_MAX: usize = 20;
 /// Requests a project may have open at once (as shares).
 const OPEN_MAX: i64 = 200;
-/// Answers a minute from one address, and to one request (public: a cap on work).
+/// Answers a minute from one address (in memory, per node), and to one request (in its row).
 const ANSWERS_PER_IP: u32 = 10;
-const ANSWERS_PER_REQUEST: u32 = 5;
+const ANSWERS_PER_REQUEST: i64 = 5;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -122,6 +131,19 @@ pub fn answer_context(id: &str, key: &str) -> String {
 /// The associated data of a request's sealed secret key.
 fn key_aad(project: &str, id: &str) -> String {
     format!("roll-secrets:value-request:{project}:{id}")
+}
+
+/// A box's digest, kept on its request once it lands: each box has its own ephemeral key, so an
+/// answer sealed afresh never repeats one.
+fn box_digest(b: &Sealed) -> String {
+    use sha2::{Digest, Sha256};
+    URL_SAFE_NO_PAD.encode(&Sha256::digest(format!("{}\0{}\0{}\0{}", b.v, b.epk, b.nonce, b.ct))[..16])
+}
+
+/// A value as an answer stores it: literal, with every `${` escaped (refs.rs), so it holds no
+/// reference and resolves to exactly what was sent.
+fn literal(value: &str) -> String {
+    value.replace("${", "$${")
 }
 
 fn gone() -> Error {
@@ -271,8 +293,7 @@ impl Secrets {
     /// in that transaction.
     pub fn answer_value_request(&self, id: &str, a: Answer, ip: Option<String>) -> Result<()> {
         // Before any work: answering is public.
-        let busy = !self.answers.allow(&format!("request:{id}"), ANSWERS_PER_REQUEST) || ip.as_ref().is_some_and(|ip| !self.answers.allow(&format!("ip:{ip}"), ANSWERS_PER_IP));
-        if busy {
+        if ip.as_ref().is_some_and(|ip| !self.answers.allow(&format!("ip:{ip}"), ANSWERS_PER_IP)) {
             return Err(Error::TooMany("too many answers: try again in a minute".into()));
         }
         let now = self.db.now_ms()?;
@@ -289,6 +310,17 @@ impl Secrets {
         let (Some(sealed_key), Some(slug)) = (sealed_key, slug) else { return Err(gone()) };
         if left <= 0 || expires_at <= now {
             return Err(gone());
+        }
+        // The request's own count, in its row: shared by every node, and only an open request's.
+        let attempts: i64 = self.db.write(|c| {
+            c.execute(
+                "UPDATE value_requests SET attempts = CASE WHEN attempts_from > ? THEN attempts + 1 ELSE 1 END, attempts_from = CASE WHEN attempts_from > ? THEN attempts_from ELSE ? END WHERE id = ?",
+                params![now - 60_000, now - 60_000, now, id],
+            )?;
+            c.query_row("SELECT attempts FROM value_requests WHERE id = ?", [id], |r| r.get(0))
+        })?;
+        if attempts > ANSWERS_PER_REQUEST {
+            return Err(Error::TooMany("too many answers: try again in a minute".into()));
         }
         let keys: Vec<String> = from_json(&keys);
         let mut asked = keys.clone();
@@ -309,19 +341,27 @@ impl Secrets {
             if value.is_empty() {
                 return Err(Error::BadRequest(format!("the value for {key} is empty")));
             }
-            names::value(value)?;
+            let value = literal(value);
+            names::value(&value)?;
             items.push(Item { path: path.clone(), key: key.clone(), owner: String::new(), action: ItemAction::set_value(Value::new(value)) });
         }
+        let digests: Vec<String> = a.values.values().map(box_digest).collect();
         // As whoever asked, as they are now: no answer lands where they couldn't write.
         let landing = self.acting_as(&requester, format!("request:{id}"))?.ok_or_else(|| Error::Gone(format!("{requester} asked for this and can't write secrets any more")))?;
         let landing = Caller { ip: ip.clone(), ..landing };
         self.check_items(&project, &slug, &items, &landing)?;
         let answerer = Caller { principal: "request-link".into(), grants: Arc::new(Everything), ip, runtime: false, approval: None };
         let claim = |c: &Conn<'_>, outcome: Json, summary: String| -> Result<()> {
+            let landed: Option<String> = c.query_row("SELECT boxes FROM value_requests WHERE id = ?", [id], |r| r.get(0)).optional()?;
+            let mut boxes: Vec<String> = landed.map(|b| from_json(&b)).unwrap_or_default();
+            if digests.iter().any(|d| boxes.contains(d)) {
+                return Err(Error::Conflict("conflict", "this answer was already sent: seal each value afresh to answer again".into()));
+            }
+            boxes.extend(digests.iter().cloned());
             let n = c.execute(
-                "UPDATE value_requests SET answers_left = answers_left - 1, answered_at = ?, outcome = ?, seal_key = CASE WHEN answers_left <= 1 THEN NULL ELSE seal_key END
+                "UPDATE value_requests SET answers_left = answers_left - 1, answered_at = ?, outcome = ?, boxes = ?, seal_key = CASE WHEN answers_left <= 1 THEN NULL ELSE seal_key END
                  WHERE id = ? AND seal_key IS NOT NULL AND answers_left > 0 AND expires_at > ?",
-                params![now, outcome.to_string(), id, now],
+                params![now, outcome.to_string(), json(&boxes), id, now],
             )?;
             if n != 1 {
                 return Err(gone());

@@ -2876,6 +2876,35 @@ async fn a_secret_request_lands_an_outside_value_once_as_a_change() {
 }
 
 #[tokio::test]
+async fn a_secret_requests_answer_is_stored_as_sent_and_never_replayed() {
+    let api = Api::new().await;
+    api.set("production", "DB_PASSWORD", "fake-production-password").await;
+    let r = api.ok(Method::POST, "/environments/staging/value-requests?path=/vendor", Some(json!({ "keys": ["VENDOR_KEY"], "answers": 3 }))).await;
+    let id = r["id"].as_str().unwrap().to_string();
+    let (_, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{id}"), None).await;
+    let public = peek["public_key"].as_str().unwrap().to_string();
+    let url = format!("/v1/secrets/value-requests/{id}/answer");
+
+    // An outsider's `${…}` is text, not a reference: a broad reader never gets production's value.
+    let sent = answer(&id, &public, &[("VENDOR_KEY", "${production.DB_PASSWORD}")]);
+    assert_eq!(api.call(Method::POST, &url, Some(sent.clone())).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(api.values("staging", "/vendor").await["values"]["VENDOR_KEY"], "${production.DB_PASSWORD}");
+    let meta = api.ok(Method::GET, "/environments/staging/secrets/VENDOR_KEY?path=/vendor", None).await;
+    assert!(meta["refs"].as_array().is_none_or(|r| r.is_empty()), "{meta}");
+
+    // The same boxes again are refused and use nothing up.
+    let (s, e) = api.call(Method::POST, &url, Some(sent)).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::CONFLICT, Some("conflict")), "{e}");
+    assert_eq!(api.ok(Method::GET, "/value-requests", None).await[0]["answers_left"], 2);
+
+    // The request's own count stops a sixth attempt in the minute, whatever else is asked for.
+    for _ in 0..3 {
+        assert_eq!(api.call(Method::POST, &url, Some(json!({ "values": {} }))).await.0, StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(api.call(Method::POST, &url, Some(answer(&id, &public, &[("VENDOR_KEY", "fake-key")]))).await.0, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
 async fn a_secret_request_into_a_folder_that_needs_approval_opens_a_change_request() {
     let api = Api::new().await;
     api.ok(Method::PUT, "/environments/production/folder-policies?path=/payments", Some(json!({ "approvals": 1 }))).await;

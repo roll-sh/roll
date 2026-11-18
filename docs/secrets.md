@@ -1838,6 +1838,12 @@ request` alone lists them, `roll secrets request --cancel ID` cancels one.
   request by whoever asked: an approver other than them approves it. The answer is claimed in the
   same transaction, so an answer that doesn't land (a value that doesn't fit its typed key, a box
   that doesn't open, a missing key) uses nothing up, and a request answered once never lands twice.
+- **Stored as sent.** An answer is never a reference: a `${` in it is kept with the references'
+  escape (`$${`), so `${production.DB_PASSWORD}` sent for `VENDOR_KEY` resolves to that text,
+  never to production's password, and a vendor's value that happens to hold `${` arrives intact.
+- **No replays.** A request keeps a digest of every box it has landed and refuses an answer that
+  repeats one (409). Each box has its own ephemeral key, so an answer sealed afresh never does,
+  and boxes seen on the way can't be sent again to use up the answers left.
 - **Audited** when it's asked for (`value_request.create`), answered (`value_request.answer`, with
   the answerer's address) and cancelled (`value_request.cancel`); the change or change request is
   audited as any other. The environment's notify URL hears that it landed (key names and the
@@ -1845,8 +1851,9 @@ request` alone lists them, `roll secrets request --cancel ID` cancels one.
 - **The public routes** are `GET /v1/secrets/value-requests/{id}` (`{note, keys, expires_at,
   public_key}`) and `POST /v1/secrets/value-requests/{id}/answer` (`{values: {KEY: box}}`, 204).
   An unknown id is a 404; one answered as often as allowed, expired or cancelled is a 410 `gone`.
-  Answers are capped at 5 a minute per request and 10 per client address (429), and a value at
-  64 KiB, as a share's.
+  Answers are capped at 5 a minute per request (counted in the request's row, so every node
+  shares it and attempts at other ids never reset it) and 10 per client address (429), and a
+  value at 64 KiB, as a share's.
 - **MCP**: there's no tool for it. The link is for a person outside roll, and an agent that may
   write a folder can already set its values; `GET …/value-requests` is readable through the API
   with `read`.
