@@ -156,6 +156,10 @@ CREATE TABLE IF NOT EXISTS throttle (
     n INTEGER NOT NULL,
     since INTEGER NOT NULL
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS logout_tokens (
+    jti_hash TEXT PRIMARY KEY,
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS sso_connections (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -475,6 +479,11 @@ impl Accounts {
         if !db.has_column("sessions", "cap_ms")? {
             db.add_column("sessions", "cap_ms", "INTEGER")?;
         }
+        // Which SSO connection signed a session in, and the provider's session (back-channel logout).
+        if !db.has_column("sessions", "sso_sid")? {
+            db.add_column("sessions", "sso_connection", "TEXT")?;
+            db.add_column("sessions", "sso_sid", "TEXT")?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;
@@ -562,9 +571,12 @@ impl Accounts {
 
     /// A session for a person their company's SSO provider (connection `connection`) just signed
     /// in: no longer than the connection's session length.
-    pub(crate) fn issue_sso(&self, user: &str, user_agent: &str, connection: &str) -> Result<Issued> {
+    pub(crate) fn issue_sso(&self, user: &str, user_agent: &str, connection: &str, sid: Option<&str>) -> Result<Issued> {
         let cap = self.db.read(|c| c.query_row("SELECT session_hours FROM sso_connections WHERE id = ?", [connection], |r| r.get::<_, Option<i64>>(0)).optional())?.flatten().filter(|h| *h > 0);
-        self.issue_capped(user, user_agent, Some("sso"), false, cap.map(|h| h * 3_600_000))
+        let issued = self.issue_capped(user, user_agent, Some("sso"), false, cap.map(|h| h * 3_600_000))?;
+        // Which connection, and the provider's own session: its back-channel logout ends this one.
+        self.db.write(|c| c.execute("UPDATE sessions SET sso_connection = ?, sso_sid = ? WHERE id = ?", params![connection, sid, issued.id]))?;
+        Ok(issued)
     }
 
     /// A session for a person a passkey signed in on its own: the authenticator verified them
@@ -609,8 +621,13 @@ impl Accounts {
     pub(crate) fn complete(&self, owed: &roll_auth::SecondFactorOwed, user_agent: &str) -> Result<Issued> {
         // A sign-in that began some other way while SSO was enforced (or before it was) doesn't
         // finish: the provider signs those people in.
-        let row = self.db.read(|c| c.query_row("SELECT method, cap_ms FROM sessions WHERE id = ?", [owed.session.as_str()], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?))).optional())?;
-        let (method, cap_ms) = row.unwrap_or((None, None));
+        let row = self.db.read(|c| {
+            c.query_row("SELECT method, cap_ms, sso_connection, sso_sid FROM sessions WHERE id = ?", [owed.session.as_str()], |r| {
+                Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?))
+            })
+            .optional()
+        })?;
+        let (method, cap_ms, sso_connection, sso_sid) = row.unwrap_or((None, None, None, None));
         // An SSO connection's session length holds past the second factor too.
         let ttl = cap_ms.map_or(SESSION_TTL_MS, |c| c.min(SESSION_TTL_MS));
         if method.as_deref() != Some("sso") {
@@ -625,8 +642,8 @@ impl Accounts {
                 return Err(Error::signed_out());
             }
             c.execute(
-                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method, cap_ms) VALUES (?, ?, ?, 'full', ?, ?, ?, ?, ?, ?)",
-                params![sha256_hex(&token), id, owed.user, now, now, now + ttl, user_agent, method, cap_ms],
+                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method, cap_ms, sso_connection, sso_sid) VALUES (?, ?, ?, 'full', ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![sha256_hex(&token), id, owed.user, now, now, now + ttl, user_agent, method, cap_ms, sso_connection, sso_sid],
             )?;
             Ok(())
         })?;

@@ -73,6 +73,7 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/sso/{id}", axum::routing::patch(update_sso).delete(remove_sso))
         .route("/v1/accounts/sso/{id}/callback", get(sso_callback))
         .route("/v1/accounts/sso/{id}/verify", post(verify_sso))
+        .route("/v1/accounts/sso/{id}/backchannel-logout", post(backchannel_logout))
         .route("/v1/accounts/sso/{id}/scim", post(scim_token).delete(remove_scim_token))
         .merge(crate::scim::routes())
         .route_layer(axum::middleware::from_fn(json_only))
@@ -88,7 +89,11 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
 async fn json_only(req: Request, next: Next) -> Response {
     let json = |v: &HeaderValue| v.to_str().ok().and_then(|s| s.split(';').next()).is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json"));
     let h = req.headers();
+    // OIDC Back-Channel Logout posts a form, by spec: it reads no cookie and sets none, and only a
+    // token the provider's key signed does anything, which no other site can make.
+    let logout = req.uri().path().starts_with("/v1/accounts/sso/") && req.uri().path().ends_with("/backchannel-logout");
     let form = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS)
+        && !logout
         && !h.contains_key(header::AUTHORIZATION)
         && h.get(header::CONTENT_TYPE).is_some_and(|v| !json(v));
     if form {
@@ -389,12 +394,12 @@ async fn finish_redirect(a: &Arc<Accounts>, headers: &HeaderMap, done: Result<Fi
     match done {
         Err(e) => fail(&back, e.redirect_code()),
         Ok(Finished::Linked { return_to }) => redirect(format!("{web}{return_to}"), Vec::new()),
-        Ok(Finished::SignIn { user, return_to, .. }) => {
+        Ok(Finished::SignIn { user, return_to, sid, .. }) => {
             let ua = user_agent(headers);
             let (u2, m2, w2) = (user.clone(), method.to_string(), who.clone());
             // An SSO sign-in's method is `sso:<connection>`: its session length applies.
             let connection = method.strip_prefix("sso:").unwrap_or_default().to_string();
-            match blocking(a, move |a| if sso { a.issue_sso(&user, &ua, &connection) } else { a.issue(&user, &ua) }).await {
+            match blocking(a, move |a| if sso { a.issue_sso(&user, &ua, &connection, sid.as_deref()) } else { a.issue(&user, &ua) }).await {
                 Err(e) => {
                     a.record_sign_in(Some(&u2), &m2, Some(&e), false, &w2);
                     fail("/signin", e.redirect_code())
@@ -484,6 +489,24 @@ async fn remove_scim_token(State(a): S, me: Me, op: Op, Path(id): Path<String>) 
     admin_sudo(&a, &me, &op).await?;
     blocking(&a, move |a| a.remove_scim_token(&id)).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+struct LogoutForm {
+    logout_token: String,
+}
+
+/// OIDC Back-Channel Logout 1.0 (docs/accounts.md, "SSO"): the provider posts a signed logout
+/// token; the sessions it names end. No session or token: the token is the credential.
+async fn backchannel_logout(State(a): S, Path(id): Path<String>, axum::extract::Form(f): axum::extract::Form<LogoutForm>) -> Response {
+    let no_store = |mut r: Response| {
+        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        r
+    };
+    match a.backchannel_logout(&id, &f.logout_token).await {
+        Ok(_) => no_store(StatusCode::OK.into_response()),
+        Err(e) => no_store(e.into_response()),
+    }
 }
 
 /// Check the connection's domains' TXT records now; the ones that have it are verified.

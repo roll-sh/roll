@@ -71,6 +71,8 @@ pub struct Connection {
     pub created_at: i64,
     /// What to register at the provider as the sign-in redirect.
     pub redirect_uri: String,
+    /// What to register at the provider as its back-channel logout URI (OIDC Back-Channel Logout).
+    pub backchannel_logout_uri: String,
     /// The TXT record that proves a domain: `name` with the domain in place of `<domain>`.
     pub dns: DnsRecord,
     /// Its provider provisions people over SCIM (it has a live token).
@@ -215,6 +217,7 @@ impl Accounts {
         let challenge: String = r.get(9)?;
         Ok(Connection {
             redirect_uri: self.sso_redirect_uri(&id),
+            backchannel_logout_uri: format!("{}/v1/accounts/sso/{id}/backchannel-logout", self.config.api_url),
             id,
             name: r.get(1)?,
             issuer: r.get(2)?,
@@ -618,9 +621,15 @@ impl Accounts {
             return Err(Error::BadRequest("that Google account isn't one of the company's Workspace accounts".into(), Some("domain")));
         }
         let subject = jwt.str("sub").filter(|s| !s.is_empty() && s.len() <= 255).ok_or_else(|| failed("no subject"))?.to_string();
+        // The provider's session, for its back-channel logout to end this one by.
+        let sid = jwt.str("sid").filter(|s| !s.is_empty() && s.len() <= 255).map(str::to_string);
         let name = jwt.str("name").map(|n| n.chars().filter(|c| !c.is_control()).take(100).collect::<String>());
         let id = id.to_string();
-        blocking(self, move |a| a.sso_finish(&id, st, &email, &subject, name.as_deref())).await
+        let finished = blocking(self, move |a| a.sso_finish(&id, st, &email, &subject, name.as_deref())).await?;
+        Ok(match finished {
+            Finished::SignIn { user, return_to, new, .. } => Finished::SignIn { user, return_to, new, sid },
+            other => other,
+        })
     }
 
     fn sso_finish(&self, id: &str, st: crate::oauth::State, email: &str, subject: &str, name: Option<&str>) -> Result<Finished> {
@@ -682,7 +691,7 @@ impl Accounts {
         match next {
             Next::SignIn(user, new) => {
                 tracing::info!(user = %user, connection = %id, "accounts: SSO sign-in");
-                Ok(Finished::SignIn { user, return_to: st.return_to, new })
+                Ok(Finished::SignIn { user, return_to: st.return_to, new, sid: None })
             }
             Next::Linked => Ok(Finished::Linked { return_to: st.return_to }),
             Next::Create { provision } => {
@@ -691,9 +700,76 @@ impl Accounts {
                     None if provision => (self.provision_user(email, name, Some((&provider, subject)), &provider)?, "provisioned"),
                     None => return Err(Error::BadRequest("no account has this email, and there was no invite".into(), Some("not_invited"))),
                 };
-                Ok(Finished::SignIn { user, return_to: st.return_to, new: Some(new) })
+                Ok(Finished::SignIn { user, return_to: st.return_to, new: Some(new), sid: None })
             }
         }
+    }
+
+    /// OIDC Back-Channel Logout 1.0: the connection's provider says a person signed out there (or
+    /// an admin ended their sessions). The logout token is verified as an ID token is (the
+    /// provider's keys, issuer, roll's client as audience, its times), carries the back-channel
+    /// logout event and no nonce, names a `sid` or a `sub`, and is used once (`jti`). The sessions
+    /// this connection signed in for it end: the provider's session by `sid`, else the person's.
+    /// How many ended.
+    pub async fn backchannel_logout(self: &Arc<Self>, id: &str, logout_token: &str) -> Result<usize> {
+        let bad = |what: &str| Error::BadRequest(format!("the logout token: {what}"), Some("logout_token"));
+        let (id2, conn) = (id.to_string(), self.sso_connection(id)?);
+        let ep = self.discover(&conn.issuer).await.map_err(|e| bad(&e))?;
+        let jwt = roll_oidc::Jwt::parse(logout_token).map_err(|e| bad(&e.to_string()))?;
+        let now_s = chrono_now_s();
+        let check = |jwks: &str| roll_oidc::Keys::default().verify(None, Some(jwks), &jwt, &ep.issuer, &conn.client_id, now_s);
+        let jwks = self.keys(&conn.issuer, &ep, false).await.map_err(|e| bad(&e))?;
+        if let Err(first) = check(&jwks) {
+            let fresh = self.keys(&conn.issuer, &ep, true).await.map_err(|e| bad(&e))?;
+            check(&fresh).map_err(|_| bad(&first.to_string()))?;
+        }
+        if !jwt.claims.get("events").and_then(Value::as_object).is_some_and(|e| e.get("http://schemas.openid.net/event/backchannel-logout").is_some_and(Value::is_object)) {
+            return Err(bad("it isn't a back-channel logout (its events)"));
+        }
+        if jwt.claims.contains_key("nonce") {
+            return Err(bad("a logout token has no nonce"));
+        }
+        let sid = jwt.str("sid").filter(|s| !s.is_empty() && s.len() <= 255).map(str::to_string);
+        let sub = jwt.str("sub").filter(|s| !s.is_empty() && s.len() <= 255).map(str::to_string);
+        if sid.is_none() && sub.is_none() {
+            return Err(bad("it names no session (sid) and no person (sub)"));
+        }
+        let jti = jwt.str("jti").filter(|j| !j.is_empty() && j.len() <= 255).ok_or_else(|| bad("it has no jti"))?.to_string();
+        let exp = jwt.claims.get("exp").and_then(Value::as_i64).unwrap_or(now_s + 300);
+        let jti_hash = sha256_hex(&format!("{id2}:{jti}"));
+        let provider = format!("sso:{id2}");
+        let p2 = provider.clone();
+        let (ended, user) = blocking(self, move |a| {
+            let now = a.db.now_ms()?;
+            a.db.write(|c| {
+                c.execute("DELETE FROM logout_tokens WHERE expires_at <= ?", [now])?;
+                if c.query_row("SELECT 1 FROM logout_tokens WHERE jti_hash = ?", [jti_hash.as_str()], |_| Ok(())).optional()?.is_some() {
+                    return Err(Error::BadRequest("the logout token: it was used already".into(), Some("logout_token")));
+                }
+                c.execute("INSERT INTO logout_tokens (jti_hash, expires_at) VALUES (?, ?)", params![jti_hash, (exp + 60) * 1000])?;
+                let user: Option<String> = match &sub {
+                    Some(s) => c.query_row("SELECT user_id FROM identities WHERE provider = ? AND subject = ?", [p2.as_str(), s.as_str()], |r| r.get(0)).optional()?,
+                    None => None,
+                };
+                // The provider's session by its sid; else (no sid, or one roll never saw) the person's.
+                let mut n = match &sid {
+                    Some(sid) => c.execute("DELETE FROM sessions WHERE sso_connection = ? AND sso_sid = ?", [id2.as_str(), sid.as_str()])?,
+                    None => 0,
+                };
+                if n == 0
+                    && let Some(u) = &user
+                {
+                    n = c.execute("DELETE FROM sessions WHERE sso_connection = ? AND user_id = ?", [id2.as_str(), u.as_str()])?;
+                }
+                Ok::<_, Error>((n, user))
+            })
+        })
+        .await?;
+        if let Some(u) = &user {
+            self.record(crate::audit::AccountEvent { actor: provider.clone(), action: "session.end".into(), method: "-".into(), target: Some(u.clone()), ok: true, status: 200, ip: None, user_agent: None, detail: json!({ "via": "backchannel_logout", "ended": ended }) });
+        }
+        tracing::info!(connection = %id, ended, "accounts: an SSO provider's back-channel logout");
+        Ok(ended)
     }
 }
 
