@@ -4952,12 +4952,15 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
         ("pull/8".to_string(), None, Some((8, true, page(8), "Try it".to_string()))),
     ]);
     // GitLab's merge request: its own event and fields, its page under `/-/merge_requests/`.
-    let mr = json!({ "object_kind": "merge_request", "user": { "username": "renovate-bot" }, "object_attributes": { "iid": 3, "title": "Try it on GitLab", "action": "open", "source_branch": "topic", "source_project_id": 5, "target_project_id": 5, "last_commit": { "id": code } } }).to_string();
-    let r = Request::builder().method("POST").uri(hook.clone()).header("content-type", "application/json").header("x-gitlab-event", "Merge Request Hook").body(Body::from(mr)).unwrap();
-    let (_, v) = answer(r).await;
+    let mr = |user: (u64, &str), action: &str| json!({ "object_kind": "merge_request", "user": { "id": user.0, "username": user.1 }, "object_attributes": { "iid": 3, "title": "Try it on GitLab", "action": action, "author_id": 9, "source_branch": "topic", "source_project_id": 5, "target_project_id": 5, "last_commit": { "id": code } } }).to_string();
+    let gitlab = |body: String| Request::builder().method("POST").uri(hook.clone()).header("content-type", "application/json").header("x-gitlab-event", "Merge Request Hook").body(Body::from(body)).unwrap();
+    let (_, v) = answer(gitlab(mr((9, "renovate-bot"), "open"))).await;
     assert!(v["ignored"].as_str().unwrap().contains("handed to roll previews"), "{v}");
     let last = pushes.0.lock().last().cloned().unwrap();
     assert_eq!((last.branch.as_str(), last.pull.map(|p| (p.number, p.fork, p.url, p.author))), ("topic", Some((3, false, format!("{url}/-/merge_requests/3"), Some("renovate-bot".to_string())))));
+    // A person's push to it: GitLab names the actor, not the opener, so no author.
+    answer(gitlab(mr((10, "ana"), "update"))).await;
+    assert_eq!(pushes.0.lock().last().cloned().unwrap().pull.map(|p| p.author), Some(None));
 }
 
 /// A private repository on any Git host: the service's own login (sealed, never returned, sent

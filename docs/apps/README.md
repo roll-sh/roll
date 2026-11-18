@@ -1636,8 +1636,9 @@ Pull requests reach roll previews the same way (`GitPush::pull`, a `GitPull`): G
 (open, update, reopen, close, merge) posted to the hook carry the number, the title (untrusted
 text, at most 200 characters), the page (made from the service's own URL, never the event's link)
 whether it's a fork's (the head repository's id against the base's), and who opened it (GitHub's
-`user.login`, GitLab's `user.username`: untrusted text, at most 100 characters, for roll previews'
-`skip_authors` like `*[bot]`, never for trust). A same-repository one
+`pull_request.user.login`; GitLab's `user.username` only when that actor is the opener,
+`author_id`, since GitLab names whoever acted, so none on another person's push to it: untrusted
+text, at most 100 characters, for roll previews' `skip_authors` like `*[bot]`, never for trust). A same-repository one
 keeps its branch, so it's the branch's preview with the number on it; a fork's is `pull/<N>`, and
 roll previews runs it only once a writer approves that head. Its head is checked against the
 repository first, as a push's is: a same-repository one's against its branch, a fork's against

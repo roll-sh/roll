@@ -356,7 +356,10 @@ fn pull_of(w: &Webhook) -> Option<Push> {
         "Merge Request Hook" => {
             let mr = &p["object_attributes"];
             let fork = mr["source_project_id"].as_u64().is_none() || mr["source_project_id"] != mr["target_project_id"];
-            (mr["iid"].as_u64(), mr["title"].as_str(), mr["source_branch"].as_str(), mr["last_commit"]["id"].as_str(), fork, true, mr["action"].as_str().unwrap_or(""), p["user"]["username"].as_str())
+            // GitLab's `user` is whoever acted (a push to it, a reopen); the opener is only
+            // `author_id`. Named when they're the same person, else unknown.
+            let opener = (p["user"]["id"].as_u64().is_some() && p["user"]["id"] == mr["author_id"]).then(|| p["user"]["username"].as_str()).flatten();
+            (mr["iid"].as_u64(), mr["title"].as_str(), mr["source_branch"].as_str(), mr["last_commit"]["id"].as_str(), fork, true, mr["action"].as_str().unwrap_or(""), opener)
         }
         _ => return None,
     };
