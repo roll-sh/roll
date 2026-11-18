@@ -482,6 +482,9 @@ impl Secrets {
             links.register(Arc::new(ssh::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone() }));
         }
         db.ensure_schema(outside::SCHEMA)?;
+        // A rotation's new admin URL, kept until the server took it (outside.rs).
+        db.add_column("outside_dbs", "url_next", "BLOB")?;
+        db.add_column("outside_dbs", "url_next_at", "INTEGER")?;
         if let (Some(outside), Ok(keys)) = (&opts.outside, &opts.keyring) {
             links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), outside: outside.clone() }));
         }

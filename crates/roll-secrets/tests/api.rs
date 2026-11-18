@@ -187,10 +187,24 @@ impl roll_secrets::clouds::CloudTokens for FakeClouds {
 /// A Postgres server outside roll: each role's current password and, for a dynamic login, its
 /// group and `VALID UNTIL`; the flag refuses every change.
 #[derive(Default)]
-struct Outside(std::sync::Mutex<BTreeMap<String, String>>, std::sync::atomic::AtomicBool, std::sync::Mutex<BTreeMap<String, (String, i64)>>);
+struct Outside(std::sync::Mutex<BTreeMap<String, String>>, std::sync::atomic::AtomicBool, std::sync::Mutex<BTreeMap<String, (String, i64)>>, std::sync::atomic::AtomicBool, std::sync::atomic::AtomicBool);
+
+impl Outside {
+    /// The admin's password as the server has it.
+    fn admin(&self) -> String {
+        self.0.lock().unwrap().get("admin").cloned().unwrap_or_else(|| "hunter2".into())
+    }
+}
 
 impl roll_secrets::outside::OutsideDb for Outside {
     fn check(&self, url: &str, _: Option<&str>, roles: &[String], _: Option<&str>) -> Result<(), String> {
+        // With the flag set, the server can't be reached at all.
+        if self.4.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("connection timed out".into());
+        }
+        if !url.contains(&format!("admin:{}@", self.admin())) {
+            return Err("password authentication failed".into());
+        }
         if url.contains("@db.example") && roles.iter().all(|r| r.starts_with("app_")) { Ok(()) } else { Err("there's no role that can log in".into()) }
     }
     fn set_password(&self, _: &str, _: Option<&str>, role: &str, password: &str) -> Result<(), String> {
@@ -213,6 +227,15 @@ impl roll_secrets::outside::OutsideDb for Outside {
         self.0.lock().unwrap().remove(name);
         self.2.lock().unwrap().remove(name);
         Ok(())
+    }
+    fn set_own_password(&self, url: &str, _: Option<&str>, password: &str) -> Result<(), String> {
+        // The admin logs in with the password it has, which then changes; with the flag set, the
+        // reply is lost after the change.
+        if !url.contains(&format!(":{}@", self.admin())) {
+            return Err("password authentication failed".into());
+        }
+        self.0.lock().unwrap().insert("admin".into(), password.into());
+        if self.3.load(std::sync::atomic::Ordering::Relaxed) { Err("connection reset by peer".into()) } else { Ok(()) }
     }
 }
 
@@ -1742,6 +1765,44 @@ async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
 
     let (s, _) = api.call(Method::DELETE, &format!("/outside-databases/{}", d["id"].as_str().unwrap()), None).await;
     assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");
+
+    // The admin's own password rotates to one nobody knows but roll, which keeps using it; the
+    // registration is edited in place (a name, a URL whose password changed elsewhere), links intact.
+    let id = d["id"].as_str().unwrap();
+    api.ok(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await;
+    let admin = api.outside.0.lock().unwrap()["admin"].clone();
+    assert!(admin.len() == 40 && admin != "hunter2");
+    assert!(api.ok(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await["host"] == "db.example:5432", "a second rotation logs in with the first's password");
+    assert_ne!(api.outside.0.lock().unwrap()["admin"], admin);
+    // The server takes a new password but its reply is lost: roll keeps the one that logs in.
+    api.outside.3.store(true, std::sync::atomic::Ordering::Relaxed);
+    api.ok(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await;
+    api.outside.3.store(false, std::sync::atomic::Ordering::Relaxed);
+    api.ok(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await;
+    // Lost reply and an unreachable server: roll keeps both URLs. Another rotation meanwhile is
+    // refused (the first may still land), and the next use that finds only the new one logging in
+    // finishes the rotation.
+    let set = |flag: &std::sync::atomic::AtomicBool, on: bool| flag.store(on, std::sync::atomic::Ordering::Relaxed);
+    set(&api.outside.3, true);
+    set(&api.outside.4, true);
+    assert!(!api.call(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await.0.is_success());
+    set(&api.outside.3, false);
+    set(&api.outside.4, false);
+    assert_eq!(api.call(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await.0, StatusCode::CONFLICT, "another rotation is in flight");
+    let lease = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;
+    assert!(password(lease["values"]["TMP_USER"].as_str().unwrap()).is_some(), "issuing finished the interrupted rotation");
+    api.ok(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await;
+    // Its logins live on this server: it moves to another only once nothing links to it.
+    let (s, e) = api.call(Method::PATCH, &format!("/outside-databases/{id}"), Some(json!({ "url": "postgres://admin:x@other.example/app" }))).await;
+    assert!(s == StatusCode::CONFLICT && !e.to_string().contains(":x@"), "{e}");
+    // A password changed elsewhere: the registration takes the new URL, checked first.
+    api.outside.0.lock().unwrap().insert("admin".into(), "reset".into());
+    let (s, _) = api.call(Method::PATCH, &format!("/outside-databases/{id}"), Some(json!({ "url": "postgres://admin:wrong@db.example:5432/app" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a URL that doesn't log in isn't kept");
+    let renamed = api.ok(Method::PATCH, &format!("/outside-databases/{id}"), Some(json!({ "name": "billing-eu", "url": "postgres://admin:reset@db.example:5432/app" }))).await;
+    assert_eq!((renamed["name"].as_str(), renamed["host"].as_str()), (Some("billing-eu"), Some("db.example:5432")));
+    let lease = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;
+    assert!(password(lease["values"]["TMP_USER"].as_str().unwrap()).is_some(), "its links carry on through the new URL");
 }
 
 #[tokio::test]
