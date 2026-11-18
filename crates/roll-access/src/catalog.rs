@@ -284,6 +284,7 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/policy", "the rules for every token are the operator's"),
     ("/v1/access/enterprise", "which identity providers roll trusts is the operator's"),
     ("/v1/access/enterprise/idps", "which identity providers roll trusts is the operator's"),
+    ("/v1/access/tokens/revoke", "an incident's cut-off of many tokens at once is the operator's"),
     ("/v1/access/enterprise/apps", "which apps an identity provider may sign people in to is the operator's"),
     ("/v1/access/enterprise/apps/{id}", "which apps an identity provider may sign people in to is the operator's"),
     ("/v1/access/enterprise/apps/{id}/rotate", "an enterprise app's credential is the operator's"),
@@ -1383,6 +1384,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/previews/projects/{project}/bypass", "previews", REVEAL, one(&["project"], "project")),
     row("GET", "/v1/previews/projects/{project}/bypass", "previews", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/previews/projects/{project}/bypass", "previews", ADMIN, one(&["project"], "project")),
+    // A deploy hook's answer is its secret URL (shown once), as the bypass's is.
+    row("POST", "/v1/previews/projects/{project}/hooks", "previews", REVEAL, one(&["project"], "project")),
+    row("DELETE", "/v1/previews/projects/{project}/hooks/{hook}", "previews", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/previews/{id}", "previews", R, one(PG, "preview")).env(EnvFrom::Fixed("preview")).reveals(&["share_url"]),
     row("DELETE", "/v1/previews/{id}", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("*", "/v1/previews/{id}/", "previews", M, one(PG, "preview")).env(EnvFrom::Fixed("preview")),

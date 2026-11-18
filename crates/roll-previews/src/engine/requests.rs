@@ -2,6 +2,12 @@
 
 use super::*;
 
+/// How long a preview's metrics are kept before they're read again (ms).
+const METRICS_FOR: i64 = 10_000;
+
+/// The least time between two rebuilds by one deploy hook (ms).
+pub const HOOK_EVERY: i64 = 60_000;
+
 impl Engine {
     // ── what the API asks for ──
 
@@ -66,7 +72,9 @@ impl Engine {
     /// A preview for `branch` of `repo` (or for change `change`), made by hand.
     pub async fn create(&self, project_id: &str, repo: &str, branch: Option<&str>, change: Option<&str>, by: &str) -> Result<(Preview, bool)> {
         let project = self.workspace.get(roll_workspace::Scope::All, project_id)?;
-        if !project.resources.iter().any(|r| r.kind == roll_workspace::Kind::Repo && r.r#ref == repo) {
+        // Only a repo the project stands for (`Workspace::trusts`), as for the previews it makes
+        // itself: anyone may put any repo on their own canvas, and a preview builds and runs it.
+        if !project.resources.iter().any(|r| r.kind == roll_workspace::Kind::Repo && r.r#ref == repo) || !self.workspace.trusts(&project, roll_workspace::Kind::Repo, repo) {
             return Err(Error::NotFound(format!("{repo} isn't in project {}", project.name)));
         }
         let s = self.store.settings(project_id)?;
@@ -83,7 +91,12 @@ impl Engine {
                 if !c.open {
                     return Err(Error::Conflict(format!("change {id} has landed or closed")));
                 }
+                // A change has one preview: this project's is answered, another's never (it's
+                // another project's, perhaps another owner's).
                 if let Some(existing) = self.store.row_by_change(id)? {
+                    if existing.project_id != project_id {
+                        return Err(Error::Conflict(format!("change {id} already has a preview in another project")));
+                    }
                     return Ok((self.store.view(existing)?, false));
                 }
                 self.store.undismiss(id)?;
@@ -196,7 +209,7 @@ impl Engine {
                 (None, None) => {}
                 (Some(sha), Some(r)) => {
                     if let Some(pl) = &p.pull {
-                        self.store.set_git_pull(&r.id, pl.number as i64, https_only(&pl.url), pl.fork, sha)?;
+                        self.store.set_git_pull(&r.id, pl.number as i64, kept_url(&pl.url), pl.fork, sha)?;
                     }
                     let title = pull_title.clone().filter(|t| !t.is_empty() && *t != r.title);
                     if r.head != *sha || title.is_some() || (fork && r.trusted) {
@@ -255,7 +268,7 @@ impl Engine {
                     };
                     let (row, _) = self.store.create(&n)?;
                     if let Some(pl) = &p.pull {
-                        self.store.set_git_pull(&row.id, pl.number as i64, https_only(&pl.url), pl.fork, sha)?;
+                        self.store.set_git_pull(&row.id, pl.number as i64, kept_url(&pl.url), pl.fork, sha)?;
                     }
                     if fork {
                         self.store.log(&row.id, &format!("pull request #{} is from a fork: it runs once a writer approves {}", p.pull.as_ref().map_or(0, |pl| pl.number), short(sha)))?;
@@ -318,6 +331,54 @@ impl Engine {
         self.usage_read.lock().remove(id);
         self.kick();
         self.store.view(r)
+    }
+
+    /// A deploy hook for `project`'s previews of `branches` (globs; `["*"]`: every one): its path,
+    /// shown once (`/v1/previews/hooks/rlb_…`).
+    pub fn create_hook(&self, project: &str, name: &str, branches: &[String]) -> Result<(crate::store::Hook, String)> {
+        self.workspace_project(project)?;
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {
+            return Err(Error::BadRequest("a hook's name is 1–64 printable characters".into()));
+        }
+        if branches.is_empty() || branches.len() > crate::settings::MAX_BRANCH_GLOBS || branches.iter().any(|b| b.is_empty() || b.len() > 200) {
+            return Err(Error::BadRequest(format!("branches: 1–{} globs of 1–200 characters", crate::settings::MAX_BRANCH_GLOBS)));
+        }
+        let (hook, secret) = self.store.create_hook(project, name, branches)?;
+        Ok((hook, format!("/v1/previews/hooks/{secret}")))
+    }
+
+    /// `POST /v1/previews/hooks/{secret}` (a headless CMS's publish webhook): every active preview
+    /// of the hook's project whose branch a glob matches is built again at its head, with nothing
+    /// cached. At most once a [`HOOK_EVERY`] (a CMS that saves often makes one rebuild, not one a
+    /// save: `coalesced`). Anything but a live hook is the same 404. `from`: the caller's address,
+    /// for each preview's activity.
+    pub fn run_hook(&self, secret: &str, from: Option<&str>) -> Result<(Vec<String>, bool)> {
+        let Some(hook) = self.store.hook_by_secret(secret)? else { return Err(Error::NotFound("no such hook".into())) };
+        if !self.store.fire_hook(&hook.id, self.store.now_ms()?, HOOK_EVERY)? {
+            return Ok((Vec::new(), true));
+        }
+        let mut rebuilt = Vec::new();
+        for r in self.store.rows(Some(&hook.project))? {
+            if r.desired != Desired::Active || !crate::glob::any(&hook.branches, r.branch.as_deref().unwrap_or("*")) {
+                continue;
+            }
+            self.store.add_rebuild(&r.id)?;
+            let by = from.map(|a| format!(" (from {a})")).unwrap_or_default();
+            self.store.log(&r.id, &format!("built again by the deploy hook {:?}{by}", hook.name))?;
+            rebuilt.push(r.id);
+        }
+        self.kick();
+        Ok((rebuilt, false))
+    }
+
+    /// A hook secret found where it shouldn't be (roll-access's leak scanning): the hook stops
+    /// working at once. Says which it was, or `None` when no live hook has it.
+    pub fn revoke_leaked_hook(&self, secret: &str) -> Option<String> {
+        let hook = self.store.hook_by_secret(secret).ok()??;
+        self.store.delete_hook(&hook.project, &hook.id).ok()?;
+        tracing::warn!(project = %hook.project, hook = %hook.id, "previews: a leaked deploy hook was revoked");
+        Some(format!("previews' deploy hook {:?} of project {}", hook.name, hook.project))
     }
 
     /// A link to the preview for someone outside the team, open for `hours` (1–720), on its own
@@ -538,6 +599,30 @@ impl Engine {
         Ok(lines)
     }
 
+    /// What its services use right now (on its holder, which runs them): the running ones. Read
+    /// at most once per [`METRICS_FOR`] (each read is a `docker stats` or a roll apps call per
+    /// service), whoever asks.
+    pub async fn metrics(&self, id: &str) -> Result<Vec<crate::ServiceMetrics>> {
+        self.store.row(id)?;
+        let now = self.store.now_ms()?;
+        if let Some((at, m)) = self.metrics_read.lock().get(id)
+            && now - at < METRICS_FOR
+        {
+            return Ok(m.clone());
+        }
+        let services = self.store.services(id)?;
+        let got = futures::future::join_all(services.iter().map(|s| self.apps.metrics(id, &s.name))).await;
+        let m: Vec<crate::ServiceMetrics> = services
+            .into_iter()
+            .zip(got)
+            .filter_map(|(s, m)| m.map(|(cpu, memory_bytes)| crate::ServiceMetrics { service: s.name, cpu, memory_bytes, memory_mb: s.memory_mb }))
+            .collect();
+        let mut read = self.metrics_read.lock();
+        read.retain(|_, (at, _)| now - *at < METRICS_FOR);
+        read.insert(id.to_string(), (now, m.clone()));
+        Ok(m)
+    }
+
     pub async fn logs(&self, id: &str, service: Option<&str>, lines: usize) -> Result<(String, Vec<String>)> {
         let services = self.store.services(id)?;
         let svc = match service {
@@ -627,8 +712,11 @@ pub fn resume_at(before: &[String], now: &[String]) -> Option<usize> {
 
 /// A pull request's link as the sheet may show it: `https://` only (`""` otherwise), so a link
 /// can't run script.
-fn https_only(url: &str) -> &str {
-    if url.starts_with("https://") && !url.chars().any(char::is_whitespace) { url } else { "" }
+/// A pull request's page as roll apps built it (from the service's source and the number), kept
+/// to tell its repository (`pull_repo`): whole when it's one printable URL of at most 500
+/// bytes. Shown as a link only when `https://` (the preview's view).
+fn kept_url(url: &str) -> &str {
+    if url.len() <= 500 && url.contains("://") && !url.chars().any(|c| c.is_whitespace() || c.is_control()) { url } else { "" }
 }
 
 #[cfg(test)]

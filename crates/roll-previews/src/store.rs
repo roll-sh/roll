@@ -174,10 +174,32 @@ CREATE TABLE IF NOT EXISTS budget_alerts (
     at INTEGER NOT NULL,
     PRIMARY KEY (project_id, month, max_usd, level)
 );
+CREATE TABLE IF NOT EXISTS hooks (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    branches TEXT NOT NULL,
+    hash TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    fired_at INTEGER
+);
 CREATE TABLE IF NOT EXISTS bypass (
     project_id TEXT PRIMARY KEY,
     hash TEXT NOT NULL,
     created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS git_reports (
+    preview_id TEXT PRIMARY KEY,
+    status TEXT,
+    comment_id INTEGER,
+    comment_hash TEXT
+);
+CREATE TABLE IF NOT EXISTS pull_comments (
+    service TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    comment_id INTEGER NOT NULL,
+    PRIMARY KEY (service, repo, number)
 );
 CREATE TABLE IF NOT EXISTS git_pulls (
     preview_id TEXT PRIMARY KEY,
@@ -301,6 +323,27 @@ pub struct Access {
     /// The project's bypass secret's SHA-256 (hex), for automation (`x-roll-preview-bypass`);
     /// never for a fork's (`trusted: false`) preview.
     pub bypass: Option<String>,
+}
+
+/// The most deploy hooks a project has.
+pub const MAX_HOOKS: i64 = 20;
+
+/// A project's deploy hook (Vercel's and Netlify's): a secret URL that rebuilds its previews of
+/// `branches` at their heads, for a headless CMS's publish webhook.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Hook {
+    pub id: String,
+    pub project: String,
+    pub name: String,
+    pub branches: Vec<String>,
+    pub created_at: i64,
+    /// When it last rebuilt anything.
+    pub fired_at: Option<i64>,
+}
+
+fn hook_row(r: &code_sql::Row<'_>) -> code_sql::Result<Hook> {
+    let globs: String = r.get(3)?;
+    Ok(Hook { id: r.get(0)?, project: r.get(1)?, name: r.get(2)?, branches: serde_json::from_str(&globs).unwrap_or_default(), created_at: r.get(4)?, fired_at: r.get(5)? })
 }
 
 /// The SHA-256 (hex) a bypass secret is kept as.
@@ -615,12 +658,15 @@ impl Store {
                 db.add_column("previews", col, "INTEGER")?;
             }
         }
+        if !db.has_column("previews", "rebuilds")? {
+            db.add_column("previews", "rebuilds", "INTEGER NOT NULL DEFAULT 0")?;
+        }
         for col in ["release_ms", "prev_release_ms"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "INTEGER")?;
             }
         }
-        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head", "teardown_error", "schema_risks"] {
+        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head", "teardown_error", "schema_risks", "reported_by"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "TEXT")?;
             }
@@ -753,6 +799,7 @@ impl Store {
         self.db.write(|c| {
             c.execute("DELETE FROM settings WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM bypass WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM hooks WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM budget_alerts WHERE project_id = ?", [project])?;
             Ok::<_, Error>(())
         })
@@ -885,7 +932,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1117,6 +1164,26 @@ impl Store {
     /// warning; `None`: not close).
     pub fn goes_at(&self, id: &str) -> Result<Option<i64>> {
         Ok(self.db.read(|c| c.query_row("SELECT goes_at FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    /// The name of the project that reports this preview's change (or pull request) when it's
+    /// another project's (roll previews' `refresh_voice`); `None`: this one reports it.
+    pub fn reported_by(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT reported_by FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    /// Sets [`Store::reported_by`]: whether it changed (written only then).
+    pub fn set_reported_by(&self, id: &str, by: Option<&str>) -> Result<bool> {
+        if self.reported_by(id)?.as_deref() == by {
+            return Ok(false);
+        }
+        Ok(self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE previews SET reported_by = ? WHERE id = ? AND reported_by IS NOT ?", params![by, id, by])?))? > 0)
+    }
+
+    /// The active previews of `repo`'s `branch` in every project (a Git URL service's branch has
+    /// one in each project whose canvas holds the service).
+    pub fn branch_rows(&self, repo: &str, branch: Option<&str>) -> Result<Vec<Row>> {
+        Ok(self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM previews WHERE repo = ? AND branch IS ? AND desired = 'active' ORDER BY id"), params![repo, branch], row))?)
     }
 
     pub fn set_goes_at(&self, id: &str, at: Option<i64>) -> Result<()> {
@@ -1918,6 +1985,62 @@ impl Store {
         })
     }
 
+    // ── deploy hooks: a secret URL that rebuilds a project's previews of some branches ──
+
+    /// A new hook for `project`'s previews of `branches` (globs): its secret, returned once and
+    /// kept only as its SHA-256 (`rlb_…`, a roll secret leak scanning finds).
+    pub fn create_hook(&self, project: &str, name: &str, branches: &[String]) -> Result<(Hook, String)> {
+        let secret = roll_auth::credentials::new_secret("rlb_");
+        let (id, hash, now) = (format!("hk_{}", crate::new_id()), bypass_hash(&secret), self.now_ms()?);
+        let globs = serde_json::to_string(branches).map_err(|e| Error::Internal(e.to_string()))?;
+        self.db.write(|c| {
+            let n: i64 = c.query_row("SELECT COUNT(*) FROM hooks WHERE project_id = ?", [project], |r| r.get(0))?;
+            if n >= MAX_HOOKS {
+                return Err(Error::Conflict(format!("the project has {MAX_HOOKS} deploy hooks: delete one first")));
+            }
+            c.execute("INSERT INTO hooks (id, project_id, name, branches, hash, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![id, project, name, globs, hash, now])?;
+            Ok(())
+        })?;
+        Ok((Hook { id, project: project.to_string(), name: name.to_string(), branches: branches.to_vec(), created_at: now, fired_at: None }, secret))
+    }
+
+    /// `project`'s hooks (never their secrets).
+    pub fn hooks(&self, project: &str) -> Result<Vec<Hook>> {
+        Ok(self.db.read(|c| c.query("SELECT id, project_id, name, branches, created_at, fired_at FROM hooks WHERE project_id = ? ORDER BY created_at, id", [project], hook_row))?)
+    }
+
+    pub fn delete_hook(&self, project: &str, id: &str) -> Result<()> {
+        let n = self.db.write(|c| Ok::<_, Error>(c.execute("DELETE FROM hooks WHERE project_id = ? AND id = ?", [project, id])?))?;
+        if n == 0 {
+            return Err(Error::NotFound("no such deploy hook".into()));
+        }
+        Ok(())
+    }
+
+    /// The hook a secret is, if it's a live one.
+    pub fn hook_by_secret(&self, secret: &str) -> Result<Option<Hook>> {
+        let hash = bypass_hash(secret);
+        Ok(self.db.read(|c| c.query_row("SELECT id, project_id, name, branches, created_at, fired_at FROM hooks WHERE hash = ?", [hash.as_str()], hook_row).optional())?)
+    }
+
+    /// Records a firing at `now` unless the hook fired less than `every` ms ago: whether it
+    /// counts (a CMS that saves often makes one rebuild a minute, not one a save).
+    pub fn fire_hook(&self, id: &str, now: i64, every: i64) -> Result<bool> {
+        Ok(self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE hooks SET fired_at = ?1 WHERE id = ?2 AND (fired_at IS NULL OR fired_at <= ?1 - ?3)", params![now, id, every])?))? > 0)
+    }
+
+    /// One more rebuild asked of a preview (a deploy hook): its services are built again at their
+    /// heads, with nothing cached.
+    pub fn add_rebuild(&self, id: &str) -> Result<()> {
+        self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE previews SET rebuilds = rebuilds + 1, next_at = 0, generation = generation + 1 WHERE id = ?", [id])?))?;
+        Ok(())
+    }
+
+    /// How many rebuilds were asked of a preview.
+    pub fn rebuilds(&self, id: &str) -> Result<i64> {
+        Ok(self.db.read(|c| c.query_row("SELECT rebuilds FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.unwrap_or(0))
+    }
+
     /// When `project`'s bypass secret was made, if it has one.
     pub fn bypass_created(&self, project: &str) -> Result<Option<i64>> {
         Ok(self.db.read(|c| c.query_row("SELECT created_at FROM bypass WHERE project_id = ?", [project], |r| r.get(0)).optional())?)
@@ -2054,6 +2177,38 @@ impl Store {
                 return Err(Error::Conflict("only a pull request from a fork waits for an approval".into()));
             }
             Ok(())
+        })
+    }
+
+    /// What was last posted on a Git URL service's repository for a preview: the status (its sha,
+    /// state and description, as one string), the pull request comment's id and its body's hash.
+    pub fn git_report(&self, id: &str) -> Result<(Option<String>, Option<i64>, Option<String>)> {
+        Ok(self.db.read(|c| c.query_row("SELECT status, comment_id, comment_hash FROM git_reports WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?.unwrap_or((None, None, None)))
+    }
+
+    pub fn set_git_report(&self, id: &str, status: Option<&str>, comment: Option<(i64, &str)>) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("INSERT INTO git_reports (preview_id) VALUES (?1) ON CONFLICT (preview_id) DO NOTHING", [id])?;
+            if let Some(s) = status {
+                c.execute("UPDATE git_reports SET status = ?2 WHERE preview_id = ?1", params![id, s])?;
+            }
+            if let Some((cid, hash)) = comment {
+                c.execute("UPDATE git_reports SET comment_id = ?2, comment_hash = ?3 WHERE preview_id = ?1", params![id, cid, hash])?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The comment a Git URL service's previews keep on pull request `number` of `repo`, whichever
+    /// project's preview posted it: the next project to speak for the service edits the same one.
+    pub fn pull_comment(&self, service: &str, repo: &str, number: i64) -> Result<Option<i64>> {
+        Ok(self.db.read(|c| c.query_row("SELECT comment_id FROM pull_comments WHERE service = ? AND repo = ? AND number = ?", params![service, repo, number], |r| r.get(0)).optional())?)
+    }
+
+    pub fn set_pull_comment(&self, service: &str, repo: &str, number: i64, comment_id: i64) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("INSERT INTO pull_comments (service, repo, number, comment_id) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (service, repo, number) DO UPDATE SET comment_id = excluded.comment_id", params![service, repo, number, comment_id])?;
+            Ok::<_, Error>(())
         })
     }
 
@@ -2199,8 +2354,15 @@ impl Store {
         let share_url = url.as_deref().map(share);
         let (schema_changes, schema_risks, release) = self.release_facts(&r.id)?;
         let kept_until = self.kept_until(&r.id)?;
-        let pull = self.git_pull(&r.id)?;
+        // Its page as a link only when it's `https://` (it's kept whole to tell its repository).
+        let pull = self.git_pull(&r.id)?.map(|mut g| {
+            if !g.url.starts_with("https://") {
+                g.url.clear();
+            }
+            g
+        });
         let goes_at = self.goes_at(&r.id)?;
+        let reported_by = self.reported_by(&r.id)?;
         // The screenshot row in one read, without its images.
         let f = self.shot_facts(&r.id)?;
         let screenshot_at = f.at;
@@ -2285,6 +2447,7 @@ impl Store {
             kept_until,
             pull,
             goes_at,
+            reported_by,
             earlier,
             screenshot_at,
             visual_change,
