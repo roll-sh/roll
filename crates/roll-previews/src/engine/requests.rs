@@ -213,7 +213,9 @@ impl Engine {
                     self.mark_deleted(&r.id, "its pull request's opener is in skip_authors")?;
                 }
                 continue;
-            } else if p.pull.is_none() && self.store.git_skipped(&project.id, &repo, &p.branch)? {
+            } else if self.store.git_skipped(&project.id, &repo, &p.branch)? {
+                // A later push, or a pull event that names no opener (GitLab's when someone else
+                // acted: unknown, not a person), keeps what the opening event decided.
                 continue;
             }
             match (&p.sha, existing) {

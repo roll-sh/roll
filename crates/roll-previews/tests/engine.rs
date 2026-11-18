@@ -1271,6 +1271,10 @@ async fn a_git_url_preview_reports_its_status_and_pull_request_comment() {
     assert!(!of_bump(), "a bot's pull request is skipped");
     e.engine.git_push(&roll_previews::ports::GitPush { sha: Some("d2".into()), ..branch_push() }).await.unwrap();
     assert!(!of_bump(), "and so are its branch's later pushes");
+    // A later event that names no opener (GitLab's when someone else acted) keeps the skip.
+    let unknown = roll_previews::ports::GitPush { pull: Some(roll_previews::ports::GitPull { author: None, ..bump("Bump lodash").pull.unwrap() }), sha: Some("d3".into()), ..branch_push() };
+    e.engine.git_push(&unknown).await.unwrap();
+    assert!(!of_bump(), "an unknown opener isn't a person");
     e.engine.git_push(&bump("Bump lodash [preview]")).await.unwrap();
     assert!(of_bump(), "unless its title asks");
 }
