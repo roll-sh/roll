@@ -3008,8 +3008,10 @@ inconsistencies are fixed in #264:
 - R4. **GCP KMS, Azure Key Vault and HSM keys** (M), next to AWS KMS: real accounts (the user's call).
 - R5. **`roll://` wherever another roll product takes a key** (M): agent endpoints (they take `op://`),
   the gateway's upstreams, review provider keys, storage replication and search snapshot credentials.
-- R6. **roll queues as a link provider** (building: `feature/roll-secrets-queue-links`): the only
-  workspace kind without one.
+- R6. **roll queues as a link provider** (#274): live host, port and vhost; an AMQP URL with a user
+  of its own, managed or dynamic, and only the access asked for (read, write, configure). It found
+  roll queues checking a default-exchange publish against `""` rather than `amq.default` (being
+  fixed in queues); roll apps' `RollResources` wiring for queues is apps' next step.
 - R7. **AWS IAM login for EC2/ECS/EKS** (S–M; a signed `GetCallerIdentity`, as Vault's): an account to confirm.
 - R8. **A tamper-evident audit log** (building: `feature/roll-secrets-audit-chain`): a per-project hash
   chain written with each row, digests signed by roll's issuer key to the sinks, `audit verify`.
