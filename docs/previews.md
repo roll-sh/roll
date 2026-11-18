@@ -1796,17 +1796,22 @@ Ranked by what a person notices first. Done so far:
    birth date, IP, national ids, tokens) in each branched Postgres, NoSQL and search parent and
    aren't masked, each with a one-click rule (`email`, `redact`, `hash`, `null`), on the rules
    dialog and the sheet.
-4. **A project's own preview domain, the wiring** (previews' half #275 is on main): after apps'
+4. **A preview's errors on its sheet** (Vercel's runtime logs, Sentry's grouping): the sheet shows
+   raw logs only. Group a preview's errors by fingerprint: roll apps' `…/environments/pv-…/errors`
+   for its instances, the same grouping over roll's runtime's logs (stack traces joined, ids and
+   numbers taken out), masked as logs are; the count on the row and the pull request comment's
+   "What went wrong".
+5. **A project's own preview domain, the wiring** (previews' half #275 is on main): after apps'
    #278, rolld hands apps' `PreviewRouter` previews' `runtime::serve_host`, and
    `scripts/preview-apps.sh` checks a verified domain over plain HTTP, a roll apps service and a
    runtime one by label. TLS waits on wildcard certificates over DNS-01 on the edge.
-5. **Bots on Git URL services** (draft #305, on apps' #282): previews' own `GitPull` carries the
+6. **Bots on Git URL services** (draft #305, on apps' #282): previews' own `GitPull` carries the
    opener and `skip_authors` reaches a Git URL service's pull requests. Undraft once #282 is on
    main.
-6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-7. **Watch: pg-control's recovery to a time seconds old** (unowned).
-8. **Watch: a cold start on a Docker name conflict.**
+8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+9. **Watch: a cold start on a Docker name conflict.**
 
 Landed in previews' lock turn of 2026-11-18 (main 440e13ebf; one combined tree, each step
 tagged and gated once with both live checks, then landed one at a time, each identical to its
