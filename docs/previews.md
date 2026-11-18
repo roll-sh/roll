@@ -1785,33 +1785,36 @@ Ranked by what a person notices first. Done so far:
    `team` is #300 on it: a visitor let in through roll (link or a live team session) gets it, and
    a note is posted from roll's dashboard as the signed-in person; a team preview's services on
    roll apps get no button yet (apps adds it only for link visitors).
-2. **`roll preview up`, in review** (#314): a preview of the working tree (Netlify's `netlify deploy`, Vercel's
+2. **Who opened a team preview** (on #285): a sign-in to a `team` preview (the ticket traded for a
+   session) is said in its activity, once per person per session ("ana opened it"), so a team sees
+   who looked at production's data; the sheet lists who opened it lately.
+3. **`roll preview up`, in review** (#314): a preview of the working tree (Netlify's `netlify deploy`, Vercel's
    `vercel deploy`): from a checkout of a project's repo, uncommitted changes included, a commit
    made without touching the user's index or HEAD is pushed to a branch of their own
    (`preview/<user>/<name>`) and previewed, the URL printed once it's ready; again moves it,
    `roll preview down` deletes the branch and the preview.
-3. **Mask suggestions, in review** (#324, review findings fixed: never a suggestion that fails masking, checked on real Postgres; Tonic's and Neon's anonymisation). The dialog reads columns only when asked, so opening it never resets a running parent's idle timer: previews read production's data, and
+4. **Mask suggestions, in review** (#324, review findings fixed: never a suggestion that fails masking, checked on real Postgres; Tonic's and Neon's anonymisation). The dialog reads columns only when asked, so opening it never resets a running parent's idle timer: previews read production's data, and
    today the rules dialog only says "mask what holds people's data" when a resource has no masks
    at all. Name the columns and fields that look like personal data (email, phone, name, address,
    birth date, IP, national ids, tokens) in each branched Postgres, NoSQL and search parent and
    aren't masked, each with a one-click rule (`email`, `redact`, `hash`, `null`), on the rules
    dialog and the sheet.
-4. **A preview's errors on its sheet, in review** (#326, review findings fixed: masked whole before any cut, bounded log reads, a count route that reads no secrets; Vercel's runtime logs, Sentry's grouping): the sheet shows
+5. **A preview's errors on its sheet, in review** (#326, review findings fixed: masked whole before any cut, bounded log reads, a count route that reads no secrets; Vercel's runtime logs, Sentry's grouping): the sheet shows
    raw logs only. Group a preview's errors by fingerprint: roll apps' `…/environments/pv-…/errors`
    for its instances, the same grouping over roll's runtime's logs (stack traces joined, ids and
    numbers taken out), masked as logs are; the count on the row and the pull request comment's
    "What went wrong".
-5. **A project's own preview domain, the wiring** (previews' half #275 is on main): after apps'
+6. **A project's own preview domain, the wiring** (previews' half #275 is on main): after apps'
    #278, rolld hands apps' `PreviewRouter` previews' `runtime::serve_host`, and
    `scripts/preview-apps.sh` checks a verified domain over plain HTTP, a roll apps service and a
    runtime one by label. TLS waits on wildcard certificates over DNS-01 on the edge.
-6. **Bots on Git URL services** (draft #305, on apps' #282): previews' own `GitPull` carries the
+7. **Bots on Git URL services** (draft #305, on apps' #282): previews' own `GitPull` carries the
    opener and `skip_authors` reaches a Git URL service's pull requests. Undraft once #282 is on
    main.
-7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-8. **Watch: pg-control's recovery to a time seconds old** (unowned).
-9. **Watch: a cold start on a Docker name conflict.**
+9. **Watch: pg-control's recovery to a time seconds old** (unowned).
+10. **Watch: a cold start on a Docker name conflict.**
 
 Landed in previews' lock turn of 2026-11-18 (main 440e13ebf; one combined tree, each step
 tagged and gated once with both live checks, then landed one at a time, each identical to its
