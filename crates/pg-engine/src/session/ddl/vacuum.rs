@@ -549,13 +549,11 @@ impl Ddl<'_, '_> {
                         if process_main || !vacuum {
                             live = Some(self.measure(&r, vacuum)?);
                         }
-                        // The table's store files (its rows', indexes' and TOAST's) holding dead
-                        // entries a compaction marked (`Store::mark_dead`) are written again
-                        // without them: VACUUM returns their space, as PostgreSQL's does.
-                        if vacuum && process_main {
-                            let start = crate::storage::keys::index_prefix(r.oid, 0)[..4].to_vec();
-                            self.ctx.sess.db.store.reclaim_dead(&start, &crate::storage::keys::prefix_end(&start))?;
-                        }
+                        // (The table's store files holding dead entries a compaction marked,
+                        // `Store::mark_dead`, aren't written again here: those entries are
+                        // unreadable already, and their space goes back with the next compaction
+                        // meeting the file or the store's reclaim on pressure or idleness, as
+                        // PostgreSQL's VACUUM leaves its freed space in the table's pages.)
                         // lazy_truncate_heap's AccessExclusiveLock is WAL-logged for hot
                         // standbys (LogAccessExclusiveLock), which gives the VACUUM's
                         // transaction an id: btree pages it deleted are recyclable once it

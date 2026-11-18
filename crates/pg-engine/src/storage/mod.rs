@@ -161,8 +161,8 @@ pub struct StoreOptions {
 }
 
 /// When a store writes its marked files (`Store::mark_dead`) again without their dead
-/// entries by itself; VACUUM of a table always does it for the table's files
-/// (`Store::reclaim_dead`). Never while a client statement runs (`busy`).
+/// entries by itself (`Store::reclaim_dead`; a compaction meeting one writes it too). Never
+/// while a client statement runs (`busy`).
 #[derive(Clone)]
 pub struct Reclaim {
     /// Pressure: the dead entries of the store's files are at least this percent of their
@@ -2482,9 +2482,8 @@ impl Store {
 
     /// Write again the L1 files whose range meets [start, end) (an empty `end`: unbounded)
     /// that have dead entries (`mark_dead`) making up at least `RECLAIM_DEAD` of them: what a
-    /// compaction would have written of them, so their dead entries' space is returned (VACUUM
-    /// of a table, as PostgreSQL's returns a table's space; and on pressure or when idle,
-    /// `schedule_reclaim`). One file at a time, each written outside `bg` (`reclaim_one`).
+    /// compaction would have written of them, so their dead entries' space is returned (on
+    /// pressure or when idle, `schedule_reclaim`). One file at a time, each written outside `bg` (`reclaim_one`).
     /// Returns how many were written again.
     pub fn reclaim_dead(&self, start: &[u8], end: &[u8]) -> Result<usize> {
         let mut tried = std::collections::HashSet::new();
@@ -2573,8 +2572,9 @@ impl Store {
     /// on real pressure or once the store is idle (`opts.reclaim`), never while a client
     /// statement runs: a rewrite a statement's start finds running is abandoned. It looks
     /// every `RECLAIM_TICK`, and ends when no such file is left or the store closes. VACUUM
-    /// reclaims a table's files itself (`reclaim_dead`), so a script that vacuums after a
-    /// bulk DELETE pays for the rewrite once, in its VACUUM, as PostgreSQL's returns pages.
+    /// doesn't write them: its dead entries are unreadable already, and their space is taken
+    /// back by the next compaction that meets the file (a write into its range) or by this
+    /// thread, as PostgreSQL's VACUUM leaves its pages' freed space to later inserts.
     fn schedule_reclaim(self: &Arc<Self>) {
         let r = &self.opts.reclaim;
         let never = r.dead_percent == 0 && r.idle == std::time::Duration::MAX;
