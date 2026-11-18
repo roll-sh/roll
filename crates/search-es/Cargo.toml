@@ -10,6 +10,10 @@ publish.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 aes-gcm.workspace = true
+# Inference: SigV4 for Amazon Bedrock and SageMaker (`xpack::inference::services::aws`).
+aws-credential-types.workspace = true
+aws-sigv4.workspace = true
+aws-smithy-runtime-api.workspace = true
 base64.workspace = true
 # OpenSearch Security (`xpack::security::opensearch`): internal users' bcrypt hashes, masked
 # fields' BLAKE2b, password strength.
@@ -24,6 +28,8 @@ crc32fast.workspace = true
 # Fixed-seed hashing of per-document lookups (field tables, the bulk fast path).
 foldhash.workspace = true
 indexmap.workspace = true
+# Inference: Google service-account JWTs (RS256) for Vertex AI's OAuth tokens.
+jsonwebtoken.workspace = true
 itoa.workspace = true
 libc.workspace = true
 memchr.workspace = true
@@ -31,8 +37,9 @@ parking_lot.workspace = true
 # Password hashes of the native realm (`xpack::security`, `{PBKDF2}` format).
 pbkdf2.workspace = true
 rand.workspace = true
-# Reindex from remote clusters (`api::remote`), behind `reindex.remote.whitelist`.
-reqwest.workspace = true
+# Reindex from remote clusters (`api::remote`), behind `reindex.remote.whitelist`, and inference
+# services (their hosts are HTTPS).
+reqwest = { workspace = true, features = ["rustls"] }
 regex.workspace = true
 regex-syntax.workspace = true
 # The one private-address guard for URLs tenants choose (watcher's `http` input and webhooks).
@@ -58,4 +65,6 @@ serde_json.workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true
+# Inference tests: a throwaway service account key for Vertex AI's token flow.
+rsa.workspace = true
 tokio.workspace = true

@@ -1099,6 +1099,20 @@ The inference API of Elasticsearch 9.5.5's inference plugin (`crates/search-es/s
 to run one, `POST …/_stream` (completion and the unified `chat_completion`), `GET _inference/_services[/{task_type}]`,
 the region policy (`_inference/_region_policy`) and the `inference` section of `_xpack/usage`.
 Task types `text_embedding`, `sparse_embedding`, `rerank`, `completion`, `chat_completion`.
+The services after `anthropic` were measured the same way, on a private Elasticsearch 9.5.5 whose
+provider hosts (`*.openai.azure.com`, `bedrock-runtime.*.amazonaws.com` over HTTP/2,
+`*-aiplatform.googleapis.com`, `oauth2.googleapis.com`, `generativelanguage.googleapis.com`,
+`api.mistral.ai`, …) resolved to a mock with a certificate from a CA the node trusted: each
+scenario (create with its validation call, get, run, stream, update, delete, and the error cases:
+missing and malformed settings, the wrong secret, 401, 403, 429, 500, a dimensions mismatch) was
+recorded with Elasticsearch's answers, every request it sent upstream and the mock's answers. The
+recordings are `crates/search-es/tests/fixtures/inference/*.json`, and
+`crates/search-es/tests/inference_services/` replays them against roll with a mock that gives the
+same answers: roll sends the same requests (method, path, body byte for byte, headers apart from
+transport ones (`Host`, `Content-Length`, `User-Agent`, `Accept`, `Accept-Encoding`) and the
+values of signatures, dates and SDK invocation ids) and answers the same. Steps marked `differs`
+compare the status only; their differences are listed below.
+
 Measured against a private Elasticsearch 9.5.5 calling a mock of the services: the OpenAI flows
 (create with its validation call, get, run, stream, update, delete), 42 error and update cases and
 the region policy CRUD answer the same, and the requests sent upstream are byte for byte
@@ -1109,6 +1123,16 @@ Elasticsearch's (headers, `encoding_format: base64`, `n: 1`, `stream_options`).
 | `openai` | `text_embedding`, `completion`, `chat_completion` | `url` points it at any OpenAI-compatible server (vLLM, Ollama, LiteLLM, roll's model gateway). Not supported: OAuth2 client credentials (`client_secret`) and the multimodal `embedding` task type |
 | `cohere` | `text_embedding`, `rerank`, `completion` | the V2 API Elasticsearch uses for new endpoints; `service_settings.url` (Elasticsearch reads it too) or the node's `roll.inference.cohere.url` move the host off `api.cohere.ai` |
 | `anthropic` | `completion`, `chat_completion` | the Messages API; the unified chat stream is translated to and from it. The node's `roll.inference.anthropic.url` moves the host off `api.anthropic.com` |
+| `azureopenai` | `text_embedding`, `completion`, `chat_completion` | `https://<resource_name>.openai.azure.com/openai/deployments/<deployment_id>/…?api-version=…`; `api_key` (sent as `api-key`) or `entra_id` (a Microsoft Entra token, sent as a bearer token), exactly one, and an update replaces it only with one of the same kind. `resource_name` must be a host name label. Not supported: OAuth2 client credentials (`client_secret`, `client_id`, `tenant_id`, `scopes`) |
+| `amazonbedrock` | `text_embedding`, `completion` | Bedrock Runtime's `InvokeModel` (Amazon Titan's and Cohere's embedding bodies) and `Converse` (every provider: `amazontitan`, `cohere`, `anthropic`, `ai21labs`, `meta`, `mistral`), signed with SigV4 by `aws-sigv4` (service `bedrock`) with the AWS SDK's `amz-sdk-*` headers; `access_key` and `secret_key` are secrets and are updated together. Not supported: `chat_completion` and streamed completions (`ConverseStream` answers in AWS's binary event stream) |
+| `googlevertexai` | `text_embedding`, `rerank`, `completion`, `chat_completion` | embeddings (`:predict`), Discovery Engine's ranking API, Gemini (`:generateContent`, `:streamGenerateContent?alt=sse`). The `service_account_json` is a secret; roll signs an RS256 JWT with its key (`jsonwebtoken`) and trades it at `https://oauth2.googleapis.com/token`, never at the JSON's own `token_uri`, keeping the access token per endpoint until five minutes before it expires. Not supported: Model Garden providers (`provider` other than `google`, `url`, `streaming_url`) |
+| `googleaistudio` | `text_embedding`, `completion` | `:batchEmbedContents`, `:generateContent`, `:streamGenerateContent`; the key travels in the `key` query parameter, as Elasticsearch sends it, and errors print URLs without their query |
+| `mistral` | `text_embedding`, `completion`, `chat_completion` | `api.mistral.ai`'s embeddings (`encoding_format: float`) and chat completions |
+| `voyageai` | `text_embedding`, `rerank` | `api.voyageai.com`; `embedding_type` `float`, `int8` or `bit` |
+| `jinaai` | `text_embedding`, `rerank` | `api.jina.ai`; `embedding_type` `float` or `bit`. Not supported: the multimodal `embedding` task type |
+| `deepseek` | `completion`, `chat_completion` | `https://api.deepseek.com/chat/completions` or the endpoint's `url` |
+| `hugging_face` | `text_embedding`, `sparse_embedding`, `rerank`, `completion`, `chat_completion` | the endpoint's `url`: an Inference Endpoint, Text Embeddings Inference or Text Generation Inference server (`{"inputs": …}`, `{"texts": …, "query": …}`, OpenAI-shaped chat) |
+| `custom` | `text_embedding`, `sparse_embedding`, `rerank`, `completion` | Elasticsearch 9's generic service: `url`, `headers`, `query_parameters` and a `request` template filled from `${input}`, `${query}`, `${top_n}`, `${return_documents}`, `${input_type}` (through `input_type.translation`), the task settings' `parameters` and the endpoint's `secret_parameters`; `response.json_parser` JSON paths per task type; `batch_size`. Templates reach only the endpoint's own secrets, and the URL and query parameters are filled only from what the endpoint's manager stored (its secrets and stored `parameters`), never from a caller's per-request `task_settings`, so a caller can't send the endpoint's secrets to a host of its choosing. Not supported: `response.error_parser` (errors are read the OpenAI way). Like Elasticsearch, `_services` doesn't list it |
 | `elasticsearch` | (needs ML nodes) | the three preconfigured endpoints (`.elser-2-elasticsearch`, `.multilingual-e5-small-elasticsearch`, `.rerank-v1-elasticsearch`) are listed, and running them or creating an endpoint of the service answers what a cluster without ML nodes answers (captured: 429, `Could not start deployment because no ML nodes with sufficient capacity were found`; such an endpoint is stored first, as there). roll never makes up their output |
 
 Creating and updating an endpoint calls the service once (`how big`, as Elasticsearch's model
@@ -1118,7 +1142,11 @@ validators do), which also learns a text embedding model's dimensions and simila
 Security: API keys are secrets, stored apart from the endpoint (`.secrets-inference`) and sealed
 with the deployment key (`seal.rs`, kind `inference api key`); nothing prints them (`GET` shows the
 service settings without `api_key`, as Elasticsearch does) and they're opened only to send a
-request. Every URL is fetched through `roll_net::PublicOnly` with no redirects and no proxy,
+request. So are the other credentials: Azure's `entra_id`, Bedrock's `access_key` and
+`secret_key`, Vertex AI's `service_account_json` and `custom`'s `secret_parameters`. Each goes only
+to its provider's host (a resource name, region or location must be a host name label before it
+becomes part of one), and the replay tests check that none appears in a listing, an answer, an
+error or an endpoint's `Debug` form. Every URL is fetched through `roll_net::PublicOnly` with no redirects and no proxy,
 refusing private IP literals and `localhost`, reading at most 32 MiB
 (`roll.inference.allow_private_hosts` lifts the address rule, for test clusters only). Calls are
 authorized by the one security evaluator (`monitor_inference`, `manage_inference`). Answers are
@@ -1131,7 +1159,19 @@ one-token bucket per cluster and endpoint, requests waiting their turn, timing o
 would outlast them; a cluster runs on one node at a time, so it is the cluster's limit), and the
 service's own 429s are retried at most twice; `max_input_tokens` doesn't truncate inputs;
 Cohere's settings are read with roll's settings reader, so a malformed one fails with
-`validation_exception` instead of Cohere's object parser's `x_content_parse_exception`.
+`validation_exception` instead of Cohere's object parser's `x_content_parse_exception` (so does
+Azure OpenAI's `task_settings.user`). Amazon Bedrock embeds Titan inputs one request each, where
+Elasticsearch 9.5.5 times out on a request with more than one; Vertex AI fetches a token only when
+the cached one is about to expire (Elasticsearch's client fetched one per call in the recording);
+a service account JSON that isn't JSON fails with roll's message, not Gson's; after an update stores Vertex AI's `auto_truncate`, roll sends it at once (Elasticsearch 9.5.5 left it out of the next request in the recording); Azure's
+`client_secret` and Vertex AI's Model Garden settings answer that roll doesn't support them.
+
+Left: `alibabacloud-ai-search`, `watsonxai` (an IBM Cloud IAM token flow), `amazon_sagemaker`,
+`azureaistudio`, `ai21`, `contextualai`, `fireworksai`, `groq`, `llama`, `nvidia`,
+`openshift_ai`; Bedrock's `chat_completion` and streamed completions; Azure OpenAI's and OpenAI's
+OAuth2 client credentials; Vertex AI's Model Garden providers; Jina AI's and OpenAI's multimodal
+`embedding` task; `custom`'s `error_parser`. Out of scope: `elastic` (the Elastic Inference
+Service needs Elastic Cloud credentials) and running ELSER or E5 models on the cluster.
 
 YAML: `platinum/inference` 22 of the 23 tests that pass on Elasticsearch (the last needs the
 `random_reranker` retriever). The `inference` extended suite runs the
@@ -1140,7 +1180,10 @@ same directory on a cluster with the `inference-service-test` plugin's services,
 `text_embedding_test_service`, `test_reranking_service`, `completion_test_service`,
 `streaming_completion_test_service`, reproduced exactly) and real clusters never have; the plugin
 isn't in Elasticsearch's release, so there is no Elasticsearch baseline (roll 161 of 305).
-Tests: `crates/search-es/tests/inference.rs` runs every service against a mock server.
+Tests: `crates/search-es/tests/inference.rs` runs `openai`, `cohere` and `anthropic` against a
+mock server; `crates/search-es/tests/inference_services/` replays the recorded scenarios of the
+other services, one file per family (Azure OpenAI, Amazon Bedrock, Google, the OpenAI-compatible
+services, `custom`).
 
 ### `semantic_text`
 
