@@ -4,6 +4,7 @@
 
 use crate::access::{Action, Caller, Scope};
 use crate::chain::{self, Digest, Verification, Walk};
+use crate::crypto::Keyring;
 use crate::{Error, Result, Secrets, from_json, json};
 use code_sql::{Conn, OptionalExtension, params};
 
@@ -48,6 +49,26 @@ CREATE TABLE IF NOT EXISTS audit_heads (
 ) WITHOUT ROWID;
 ";
 
+/// What the head's MAC covers ([`Keyring::audit_mac`]): the project, the chain's last row and its
+/// hash, and where the log starts. A database writer can recompute every hash, but without the
+/// deployment key can't move the head back after cutting rows from the end, or forward over rows it
+/// rewrote, or move where the log starts. Its own label, so a MAC of anything else never passes.
+fn head_msg(project: &str, seq: i64, hash: &str, start: i64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64 + project.len() + hash.len());
+    for part in ["roll-secrets:audit-head:v1", project, hash] {
+        out.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        out.extend_from_slice(part.as_bytes());
+    }
+    out.extend_from_slice(&seq.to_be_bytes());
+    out.extend_from_slice(&start.to_be_bytes());
+    out
+}
+
+/// How old the newest digest may be before `verify` calls the log `stale`: the sweeper signs every
+/// chain hourly, moved or not, so an older one means rows after it can't be vouched for (cut from
+/// the end and the head put back from a copy) or the signer stopped.
+pub const STALE_MS: i64 = 2 * chain::DIGEST_EVERY_MS;
+
 #[derive(Debug, Default, Deserialize)]
 pub struct AuditFilter {
     pub env: Option<String>,
@@ -60,10 +81,12 @@ pub struct AuditFilter {
     pub limit: Option<i64>,
     /// `csv` or `jsonl`: an export (up to 10,000 rows) instead of JSON.
     pub format: Option<String>,
+    /// `false` leaves out roll's signed digests (`audit.digest`, hourly for every chain).
+    pub digests: Option<bool>,
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn record(c: &Conn<'_>, project: &str, caller: &Caller, action: &str, env: Option<&str>, path: Option<&str>, keys: &[String], summary: &str, now: i64) -> Result<()> {
+pub(crate) fn record(c: &Conn<'_>, mac: &Keyring, project: &str, caller: &Caller, action: &str, env: Option<&str>, path: Option<&str>, keys: &[String], summary: &str, now: i64) -> Result<()> {
     let e = AuditEntry {
         at: now,
         actor: caller.principal.clone(),
@@ -76,25 +99,35 @@ pub(crate) fn record(c: &Conn<'_>, project: &str, caller: &Caller, action: &str,
         approval: caller.approval.clone(),
         ..AuditEntry::default()
     };
-    append(c, project, e).map(|_| ())
+    append(c, mac, project, e, None).map(|_| ())
 }
 
 /// Add a row to the end of `project`'s chain, in the caller's transaction: its number and the hash
 /// before it come from the project's head, which this updates first. The head's row lock (Postgres
 /// re-runs a serializable write that loses it) or SQLite's one writer means two writers never take
-/// one number, and `audit_seq` refuses a second row at one anyway. Returns the row's `seq`.
-fn append(c: &Conn<'_>, project: &str, mut e: AuditEntry) -> Result<i64> {
-    let take = |c: &Conn<'_>| -> Result<Option<(i64, String)>> {
-        Ok(c.query("UPDATE audit_heads SET seq = seq + 1, at = ? WHERE project_id = ? RETURNING seq, hash", params![e.at, project], |r| Ok((r.get(0)?, r.get(1)?)))?.pop())
+/// one number, and `audit_seq` refuses a second row at one anyway. The head carries a MAC
+/// ([`head_msg`]), checked before it moves: a head changed outside roll isn't MACed again, so it
+/// stays visibly broken and the sweeper won't sign it. `start` moves where the log starts
+/// (retention's cut). Returns the row's `seq`.
+fn append(c: &Conn<'_>, mac: &Keyring, project: &str, mut e: AuditEntry, start: Option<i64>) -> Result<i64> {
+    type Head = (i64, String, i64, Option<String>);
+    let take = |c: &Conn<'_>| -> Result<Option<Head>> {
+        Ok(c.query("UPDATE audit_heads SET seq = seq + 1, at = ? WHERE project_id = ? RETURNING seq, hash, start_seq, mac", params![e.at, project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.pop())
     };
-    let (seq, prev) = match take(c)? {
+    let (seq, prev, was_start, tag) = match take(c)? {
         Some(h) => h,
         None => {
             // The project's first chained row: older rows stay unchained.
-            c.execute("INSERT OR IGNORE INTO audit_heads (project_id, seq, hash, at, digest_seq, digest_at, start_seq) VALUES (?, 0, '', ?, 0, 0, 1)", params![project, e.at])?;
+            let tag = mac.audit_mac(&head_msg(project, 0, "", 1));
+            c.execute("INSERT OR IGNORE INTO audit_heads (project_id, seq, hash, at, digest_seq, digest_at, start_seq, mac) VALUES (?, 0, '', ?, 0, 0, 1, ?)", params![project, e.at, tag])?;
             take(c)?.ok_or_else(|| Error::Internal("the audit chain's head vanished".into()))?
         }
     };
+    let intact = tag.is_some_and(|t| mac.audit_mac_ok(&head_msg(project, seq - 1, &prev, was_start), &t));
+    if !intact {
+        tracing::warn!(project, "the audit chain's head isn't one roll wrote (changed in the database): it stays broken and unsigned");
+    }
+    let start = start.unwrap_or(was_start);
     e.seq = Some(seq);
     let hash = chain::link(&prev, project, &e);
     // The row and the head's new hash in one round trip on Postgres.
@@ -103,10 +136,11 @@ fn append(c: &Conn<'_>, project: &str, mut e: AuditEntry) -> Result<i64> {
         v.as_deref().map_or(Null, Text)
     }
     let (keys, approval) = (json(&e.keys), e.approval.as_ref().map(json));
+    let tag = intact.then(|| mac.audit_mac(&head_msg(project, seq, &hash, start)));
     let row = vec![Text(project), Int(seq), Text(&hash), Int(e.at), Text(&e.actor), Text(&e.action), opt(&e.environment), opt(&e.path), Text(&keys), Text(&e.summary), opt(&e.ip), opt(&approval), opt(&e.digest)];
     c.execute_pipeline(&[
         ("INSERT INTO audit (project_id, seq, hash, at, actor, action, env, path, keys, summary, ip, approval, digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", vec![row]),
-        ("UPDATE audit_heads SET hash = ? WHERE project_id = ?", vec![vec![Text(&hash), Text(project)]]),
+        ("UPDATE audit_heads SET hash = ?, start_seq = ?, mac = ? WHERE project_id = ?", vec![vec![Text(&hash), Int(start), opt(&tag), Text(project)]]),
     ])?;
     Ok(seq)
 }
@@ -116,7 +150,7 @@ impl Secrets {
     /// failure is logged): the database that would hold the row is the one that's failing.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn audit_now(&self, project: &str, caller: &Caller, action: &str, env: Option<&str>, path: Option<&str>, keys: &[String], summary: &str) {
-        let res = self.db.now_ms().map_err(crate::Error::from).and_then(|now| self.db.write(|c| record(c, project, caller, action, env, path, keys, summary, now)));
+        let res = self.db.now_ms().map_err(crate::Error::from).and_then(|now| self.keys().and_then(|mac| self.db.write(|c| record(c, mac, project, caller, action, env, path, keys, summary, now))));
         if let Err(e) = res {
             tracing::error!(project, action, "recording an audit row failed: {e}");
         }
@@ -142,6 +176,7 @@ impl Secrets {
         cond(" AND actor = ?", f.actor.clone());
         cond(" AND action LIKE ?", f.action.as_ref().map(|a| format!("{a}%")));
         cond(" AND keys LIKE ?", f.key.as_ref().map(|k| format!("%\"{k}\"%")));
+        cond(" AND action <> ?", (f.digests == Some(false)).then(|| chain::DIGEST.to_string()));
         if let Some(since) = f.since {
             sql.push_str(" AND at >= ?");
             args.push(code_sql::Value::Int(since));
@@ -173,14 +208,18 @@ impl Secrets {
     pub fn verify_audit(&self, project: &str, q: VerifyQuery, caller: &Caller) -> Result<Verification> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
-        let keys = crate::issuer::public_keys(&self.db)?;
+        let mac = self.keys()?;
+        // Only keys whose private half opens with the deployment key: one a database writer added
+        // doesn't vouch for anything (issuer.rs).
+        let keys = crate::issuer::public_keys(&self.db, mac, &self.issuer_keys)?;
         let from: Option<i64> = match q.since {
             Some(t) => self.db.read(|c| c.query_row("SELECT MAX(seq) FROM audit WHERE project_id = ? AND action = ? AND at <= ?", params![project, chain::DIGEST, t], |r| r.get(0)))?,
             None => None,
         };
         // The head first: rows written while walking come after it, and a row and the head move in
         // one transaction.
-        let head: Option<(i64, String)> = self.db.read(|c| c.query_row("SELECT seq, hash FROM audit_heads WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
+        type Head = (i64, String, i64, Option<String>);
+        let head: Option<Head> = self.db.read(|c| c.query_row("SELECT seq, hash, start_seq, mac FROM audit_heads WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional())?;
         let upto = head.as_ref().map_or(0, |h| h.0);
         let mut walk = Walk::new(project, from.is_none());
         let mut after = from.map_or(0, |s| s - 1);
@@ -197,8 +236,12 @@ impl Secrets {
                 break;
             }
         }
-        // Rows deleted from the end: the head still counts them.
-        if let Some((seq, hash)) = head {
+        // Rows deleted from the end: the head still counts them, and a head put back over them, or
+        // forward over rows rewritten after the last digest, doesn't carry roll's MAC.
+        if let Some((seq, hash, start, tag)) = head {
+            if !tag.is_some_and(|t| mac.audit_mac_ok(&head_msg(project, seq, &hash, start), &t)) {
+                walk.broken(Some(seq), "head", "the chain's head isn't one roll wrote: rows were cut from the end or rewritten, and the head moved to match".into());
+            }
             let walked = walk.v.head.unwrap_or(0);
             if walked < seq {
                 walk.broken(Some(walked + 1), "truncated", format!("rows #{}–#{seq} are missing from the end", walked + 1));
@@ -218,13 +261,23 @@ impl Secrets {
         if late > 0 {
             walk.broken(None, "unchained", format!("{} written after the chain began outside it", crate::write::plural(late as usize, "row")));
         }
+        // The signer writes a digest hourly: an older newest one leaves the end unvouched for.
+        let signed = match walk.v.signed_at {
+            Some(at) => Some(at),
+            None => self.db.read(|c| c.query_row("SELECT MIN(at) FROM audit WHERE project_id = ? AND seq IS NOT NULL", [project], |r| r.get::<_, Option<i64>>(0)))?,
+        };
+        let now = self.db.now_ms()?;
+        if let Some(at) = signed.filter(|at| now - at > STALE_MS) {
+            let hours = (now - at) / 3_600_000;
+            walk.broken(None, "stale", format!("roll last signed the log {hours} hours ago (it signs hourly): what's after #{} isn't vouched for", walk.v.through.unwrap_or(0)));
+        }
         Ok(walk.finish())
     }
 
-    /// The sweeper: sign a digest for each project whose chain moved in the last hour, and cut what
-    /// retention drops. Rows go only at a digest older than `keep_ms`, which is then where the log
-    /// starts; the digest written with the cut signs that, in the cut's transaction. Returns the
-    /// digests written.
+    /// The sweeper: sign a digest of each project's chain hourly, moved or not (so `verify` can tell
+    /// a stale one), and cut what retention drops. Rows go only at a digest older than `keep_ms`,
+    /// which is then where the log starts; the digest written with the cut signs that, in the cut's
+    /// transaction. Returns the digests written.
     #[doc(hidden)]
     pub fn sweep_audit_chain(&self, keep_ms: i64) -> Result<usize> {
         let now = self.db.now_ms()?;
@@ -233,7 +286,7 @@ impl Secrets {
         self.db.write(|c| c.execute("DELETE FROM audit WHERE seq IS NULL AND at < ?", [cutoff]))?;
         let due: Vec<String> = self.db.read(|c| {
             c.query(
-                "SELECT h.project_id FROM audit_heads h WHERE (h.seq > h.digest_seq AND h.digest_at <= ?)
+                "SELECT h.project_id FROM audit_heads h WHERE h.digest_at <= ?
                  OR EXISTS (SELECT 1 FROM audit a WHERE a.project_id = h.project_id AND a.action = ? AND a.at < ? AND a.seq > h.start_seq) LIMIT 500",
                 params![now - chain::DIGEST_EVERY_MS, chain::DIGEST, cutoff],
                 |r| r.get(0),
@@ -242,17 +295,24 @@ impl Secrets {
         if due.is_empty() {
             return Ok(0);
         }
-        let Ok(keys) = self.keys() else { return Ok(0) };
-        let (kid, key) = crate::issuer::signer(&self.db, keys)?;
+        let Ok(mac) = self.keys() else { return Ok(0) };
+        let (kid, key) = crate::issuer::signer(&self.db, mac)?;
         let mut written = 0;
         for project in due {
             // The write is the claim: a node that comes second finds nothing due.
             let wrote = self.db.write(|c| {
-                type Head = (i64, String, i64, i64, i64, i64);
-                let (seq, hash, last_at, digest_seq, digest_at, start): Head =
-                    c.query_row("SELECT seq, hash, at, digest_seq, digest_at, start_seq FROM audit_heads WHERE project_id = ?", [&project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
+                type Head = (i64, String, i64, i64, i64, Option<String>);
+                let (seq, hash, last_at, digest_at, start, tag): Head =
+                    c.query_row("SELECT seq, hash, at, digest_at, start_seq, mac FROM audit_heads WHERE project_id = ?", [&project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
                 let cut: Option<i64> = c.query_row("SELECT MAX(seq) FROM audit WHERE project_id = ? AND action = ? AND at < ? AND seq > ?", params![project, chain::DIGEST, cutoff, start], |r| r.get(0))?;
-                if cut.is_none() && (seq <= digest_seq || digest_at > now - chain::DIGEST_EVERY_MS) {
+                if cut.is_none() && digest_at > now - chain::DIGEST_EVERY_MS {
+                    return Ok(false);
+                }
+                // Never sign a head changed outside roll: a sink would get roll's word for it. Not
+                // asked again for an hour.
+                if !tag.is_some_and(|t| mac.audit_mac_ok(&head_msg(&project, seq, &hash, start), &t)) {
+                    tracing::warn!(project, "not signing the audit log: its head isn't one roll wrote");
+                    c.execute("UPDATE audit_heads SET digest_at = ? WHERE project_id = ?", params![now, project])?;
                     return Ok(false);
                 }
                 let start = match cut {
@@ -271,8 +331,8 @@ impl Secrets {
                     digest: Some(chain::sign(&kid, &key, &d).map_err(|_| Error::Internal("signing a digest failed".into()))?),
                     ..AuditEntry::default()
                 };
-                let own = append(c, &project, e)?;
-                c.execute("UPDATE audit_heads SET digest_seq = ?, digest_at = ?, start_seq = ? WHERE project_id = ?", params![own, now, start, project])?;
+                let own = append(c, mac, &project, e, Some(start))?;
+                c.execute("UPDATE audit_heads SET digest_seq = ?, digest_at = ? WHERE project_id = ?", params![own, now, project])?;
                 Ok::<_, Error>(true)
             })?;
             written += usize::from(wrote);

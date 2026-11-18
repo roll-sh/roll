@@ -229,9 +229,9 @@ impl Secrets {
     }
 
     /// The issuer's public keys: they verify the audit log's digests too, so they're served
-    /// whether or not clouds are set up.
+    /// whether or not clouds are set up. Only rows that are roll's (issuer.rs, `open_row`).
     pub fn oidc_jwks(&self) -> Result<Json> {
-        crate::issuer::jwks(&self.db)
+        crate::issuer::jwks(&self.db, self.keys()?, &self.issuer_keys)
     }
 
     pub fn cloud_accounts(&self, project: &str, caller: &Caller) -> Result<Vec<CloudAccount>> {
@@ -286,7 +286,7 @@ impl Secrets {
                 "INSERT INTO cloud_accounts (id, project_id, name, cloud, config, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 params![a.id, project, a.name, a.account.kind(), serde_json::to_string(&a.account).expect("JSON"), now, a.created_by],
             )?;
-            audit::record(c, project, caller, "cloud_account.add", None, None, &[], &format!("added {} account {} ({})", a.account.kind(), a.name, a.account.label()), now)
+            audit::record(c, self.keys()?, project, caller, "cloud_account.add", None, None, &[], &format!("added {} account {} ({})", a.account.kind(), a.name, a.account.label()), now)
         })?;
         Ok(a)
     }
@@ -308,7 +308,7 @@ impl Secrets {
                 return Err(Error::Conflict("in_use", format!("{name} still issues {}: unlink them first", linked.join(", "))));
             }
             c.execute("DELETE FROM cloud_accounts WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "cloud_account.delete", None, None, &[], &format!("deleted cloud account {name}"), now)
+            audit::record(c, self.keys()?, project, caller, "cloud_account.delete", None, None, &[], &format!("deleted cloud account {name}"), now)
         })
     }
 

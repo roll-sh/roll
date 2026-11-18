@@ -167,7 +167,7 @@ impl Secrets {
                 c.execute("INSERT INTO required (project_id, path, key, comment, created_at, type, pattern, owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", params![project, r.path, r.key, r.comment, now, kind, r.pattern, r.owner])?;
             }
             let keys: Vec<String> = list.iter().map(|r| r.key.clone()).collect();
-            audit::record(c, project, caller, "required.set", None, None, &keys, &format!("{} required", crate::write::plural(list.len(), "key")), now)?;
+            audit::record(c, self.keys()?, project, caller, "required.set", None, None, &keys, &format!("{} required", crate::write::plural(list.len(), "key")), now)?;
             of(c, project)
         })
     }

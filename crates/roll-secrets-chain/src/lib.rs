@@ -5,7 +5,7 @@
 //! - Each project's rows are numbered `seq` 1, 2, 3… and each stores `hash = H(previous hash,
 //!   canonical(row))`, written in the row's own transaction (roll-secrets' audit.rs, `append`). The per-project
 //!   head (`audit_heads`) is updated in that transaction too, so two writers can't fork the chain.
-//! - About hourly the sweeper appends a digest row (`audit.digest`) holding a JWS signed with roll's
+//! - Every hour the sweeper appends a digest row (`audit.digest`) holding a JWS signed with roll's
 //!   issuer key: `{project, seq, hash, last_at, at}` of the row before it. Sinks get it like any
 //!   other row. Rewriting the chain before a digest, even with recomputed hashes, no longer matches
 //!   what roll signed.
@@ -114,7 +114,8 @@ pub struct Break {
     /// `edited` (a row doesn't hash to what's stored), `missing` (a gap: rows deleted),
     /// `rewritten` (the chain doesn't match what a digest signed), `signature` (a digest that
     /// doesn't verify), `truncated` (rows deleted from the end), `cut` (rows deleted from the
-    /// start other than by retention), `unchained` (a row added outside the chain).
+    /// start other than by retention), `unchained` (a row added outside the chain); the server
+    /// also says `head` (the head lacks roll's MAC) and `stale` (no digest for over two hours).
     pub reason: String,
     pub detail: String,
 }

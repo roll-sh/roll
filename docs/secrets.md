@@ -1311,7 +1311,7 @@ roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | r
 roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
 roll secrets diff    --from development --to staging | --file .env   # two environments, or a local copy
 roll secrets promote --from development --to staging [KEY…]
-roll secrets audit   [--key KEY] [--format csv|jsonl] | verify [--since TIME] [--file F [--jwks F]]
+roll secrets audit   [--key KEY] [--format csv|jsonl] | verify [--since TIME] [--file F --jwks F]
 roll secrets syncs   ls | add KIND --target name=value… | run ID | rm ID
 roll secrets sinks   ls | add URL [--from-start] [--format splunk|datadog|bearer] (token on stdin) | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
@@ -2424,7 +2424,8 @@ allows it. The dashboard's audit log and an environment's
 activity show it as "approved by …". This is how roll secrets does access requests (a time-boxed
 `reveal` an approver grants, as Infisical's and 1Password's): a token that asks for `reveal`.
 Listing metadata isn't audited. Revealing, exporting, resolving and every write are.
-`GET …/audit?env=&key=&actor=&action=&before=&limit=` reads it newest first. Rows are kept for 400
+`GET …/audit?env=&key=&actor=&action=&before=&limit=&digests=` reads it newest first (`digests=false`
+leaves out roll's hourly signed digests, as the dashboard's list does). Rows are kept for 400
 days, and each project's rows are a hash chain roll signs hourly ("Tamper evidence" below).
 
 - **Export**: `GET …/audit?format=csv` or `format=jsonl` (with the same filters, `since` too)
@@ -2473,8 +2474,16 @@ with signed digests, so such a change shows:
   on Postgres a second writer loses the head's row lock and its serializable write is re-run, and a
   unique index on `(project_id, seq)` refuses a second row at one number anyway, so racing writers,
   on one node or several, never fork the chain.
-- **Digests.** About hourly, the sweeper appends an `audit.digest` row (actor `roll:audit`) for
-  each project whose chain moved. Its `digest` is a JWS (RS256, `typ` `roll-audit-digest`) signed
+- **The head's MAC.** The head carries an HMAC-SHA256 of `{project, seq, hash, start}` under a key
+  derived from `ROLL_SECRET_KEY` (HKDF, its own label `audit:head:v1`), checked before every append
+  and remade after it (two HMACs a write). Plain SHA-256 lets a database writer recompute every
+  hash; the MAC means they can't move the head to match: not back over rows they cut from the end,
+  not forward over rows they rewrote after the last digest, and not where the log starts. A head
+  that fails the check is never MACed again or signed: it stays broken (`head`) until someone looks.
+  After a deployment-key rotation the previous key's MACs still pass, and the hourly digests remake
+  every head's with the current one.
+- **Digests.** Every hour, the sweeper appends an `audit.digest` row (actor `roll:audit`) to each
+  project's chain, moved or not. Its `digest` is a JWS (RS256, `typ` `roll-audit-digest`) signed
   with roll's OIDC issuer key: `{project, seq, hash, last_at, at, start}`, the row before it and
   where the log starts. The digest is claimed per project in its own write, so two nodes don't sign
   one twice. Sinks get digests like any other row, so a SIEM or a locked bucket holds roll's
@@ -2486,23 +2495,36 @@ with signed digests, so such a change shows:
   hold (`broken: {seq, reason, detail}`): `edited` (a row doesn't match its hash), `missing` (a
   gap), `rewritten` (the chain isn't what a digest signed), `signature` (a digest no key of roll's
   signed), `truncated` (rows gone from the end; the head still counts them), `cut` (rows gone from
-  the start other than by retention) or `unchained` (a row added outside the chain). The dashboard's
-  audit log shows "Verified through #N" or the break. `roll secrets audit verify [--since TIME]`
-  asks the same.
-- **Offline.** `roll secrets audit verify --file audit.jsonl [--jwks keys.json]` checks an export
-  (`audit --format jsonl`, unfiltered: a filtered one has gaps) on the machine it runs on, with
-  roll's public keys from `/v1/secrets/oidc/jwks`, served whether or not clouds are set up. The
-  digests name their project. An export of the newest 10,000 rows starts checking at its first
-  digest. The server's own check trusts the keys in its database; to rule that out, save the JWKS
-  once and pass `--jwks`.
+  the start other than by retention), `unchained` (a row added outside the chain), `head` (the
+  head doesn't carry roll's MAC) or `stale` (the newest digest is over two hours old: the signer
+  stopped, or rows after it were cut and the head put back from a copy). The dashboard's audit log
+  shows "Verified through #N" or the break. `roll secrets audit verify [--since TIME]` asks the
+  same.
+- **Whose keys.** A row in `oidc_keys` is roll's only when its sealed private key opens with the
+  deployment key and is the private half of the row's `n` and `e`. Only those sign, check digests
+  and are published in the JWKS (which GCP, Azure and AWS trust too). A row that fails is logged
+  by kid (never the key) and ignored, so a database writer who adds a key of their own gets
+  neither a digest nor a cloud to accept their signature.
+- **Offline.** `roll secrets audit verify -p prj_… --file audit.jsonl --jwks keys.json` checks an
+  export (`audit --format jsonl`, unfiltered: a filtered one has gaps) on the machine it runs on.
+  `--jwks` is required: roll's public keys as saved earlier from `/v1/secrets/oidc/jwks` (served
+  whether or not clouds are set up) and kept apart from roll, since keys fetched from the server
+  being checked would vouch for themselves. Save it once, and again only after a key you expected
+  is added. A file whose digests name another project than `-p`, or more than one, is refused (a
+  `prj_…` id needs no server; a name is looked up). An export of the newest 10,000 rows starts
+  checking at its first digest, and a row without a `seq` after the chain began is `unchained`.
+  Staleness isn't checked offline: an export is a copy from some time.
 - **Retention** cuts the chain only at a digest at least 400 days old, which is then where the log
   starts: a signed anchor, its hash the one before it. The digest written in the cut's own
   transaction signs the new start, so rows removed from the start any other way are a `cut`.
 - **Older rows** written before the chain have no `seq` or hash: they count as `unchained`, the
   chain starts at the first row after them, and they're dropped by age as before. A row written by
   a node still running an older roll during an upgrade shows as `unchained` too.
-- **What it can't show**: rows deleted from the end together with the head, after the last digest
-  a sink delivered. A sink keeps that window to about an hour.
+- **What it can't show without a sink**: someone holding both the database and `ROLL_SECRET_KEY`
+  can rewrite anything and sign it again, MAC and digests alike. So can someone who puts back a copy
+  of the database (or its rows and head) from earlier, once the signer has signed it again within
+  the hour. Only a copy held outside roll tells: a sink (a SIEM, a locked bucket) that already
+  received the digests, or a saved `--jwks` file for a key roll never made.
 
 
 ## HTTP API
@@ -2579,7 +2601,7 @@ isn't in the workspace is 404.
 | `DELETE /identities/{id}` | | 204 (its tokens revoked) |
 | `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept |
 | `POST /v1/secrets/login` | `{identity, token}` | `{token, expires_at, project, identity}` (public) |
-| `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format` |
+| `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&digests=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format`; `digests=false` leaves out `audit.digest` rows |
 | `GET /required` | | `Required[]` |
 | `PUT /required` | `Required[]` | `Required[]` (replaces the list; `admin`) |
 | `GET /shares` | | `Share[]` newest first |
@@ -2777,7 +2799,7 @@ identities(id PK, project_id, name, issuer, audience, subject, claims, environme
        actions, ttl_minutes, created_at, created_by, last_used_at, last_subject)
 audit(id INTEGER PK, project_id, at, actor, action, env_id, path, keys, summary, ip, approval,
       seq, hash, digest)  -- UNIQUE (project_id, seq); digest: an audit.digest row's JWS
-audit_heads(project_id PK, seq, hash, at, digest_seq, digest_at, start_seq)
+audit_heads(project_id PK, seq, hash, at, digest_seq, digest_at, start_seq, mac)  -- mac: HMAC under ROLL_SECRET_KEY
 syncs(id PK, project_id, env_id, path, kind, target, keys, prefix, secret BLOB, status, error,
       last_digest, state, last_synced_at, running_until, retry_at, checked_at, created_at, created_by)
       -- secret: the sealed signing secret; state: {name: stamp} of what was pushed (no values)

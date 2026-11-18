@@ -58,12 +58,15 @@ export function AuditView() {
     limit: PAGE,
   };
   const sig = JSON.stringify(filter);
+  // The list leaves out roll's hourly signed digests unless asked for by action; exports keep them
+  // (an export is verified with them).
+  const listed: AuditFilter = { ...filter, digests: filter.action ? undefined : false };
 
   // Filters typed into fields settle for a moment before they load.
   useEffect(() => {
     let live = true;
     const t = setTimeout(() => {
-      api.audit(filter).then(
+      api.audit(listed).then(
         (r) => {
           if (!live) return;
           setRows(r);
@@ -82,7 +85,7 @@ export function AuditView() {
   const older = () => {
     const last = rows?.[rows.length - 1];
     if (!last) return;
-    api.audit({ ...filter, before: last.id }).then(
+    api.audit({ ...listed, before: last.id }).then(
       (r) => {
         setRows((x) => [...(x ?? []), ...r]);
         setEnd(r.length < PAGE);

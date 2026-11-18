@@ -367,6 +367,8 @@ pub struct Secrets {
     crls: pki::Crls,
     /// Live links' fingerprints as last read (read.rs): what digests count.
     live_fps: read::LiveFps,
+    /// Which issuer key rows are roll's, as last checked (issuer.rs).
+    issuer_keys: issuer::Checked,
 }
 
 impl std::fmt::Debug for Secrets {
@@ -410,6 +412,8 @@ impl Secrets {
         db.add_column("audit", "hash", "TEXT")?;
         db.add_column("audit", "digest", "TEXT")?;
         db.ensure_schema(audit::SCHEMA)?;
+        // The head's MAC (audit.rs, `head_msg`): a head without one isn't roll's.
+        db.add_column("audit_heads", "mac", "TEXT")?;
         // Workload identities (identities.rs); their logins' tokens are roll-access's.
         db.ensure_schema(identities::SCHEMA)?;
         // Secrets' own `rlst_` tokens are gone (roll-access's grants instead); never on main.
@@ -503,7 +507,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, github: opts.github, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, github: opts.github, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default(), issuer_keys: Default::default() })
     }
 
     pub fn links(&self) -> &Links {

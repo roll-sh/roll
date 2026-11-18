@@ -392,7 +392,7 @@ impl Secrets {
                         let v = issued.parts.get(&l.field).cloned().ok_or_else(|| Error::Link(format!("{} didn't issue {}", l.kind, l.field)))?;
                         items.push(Item { path: p, key: k, owner: String::new(), action: ItemAction::Set { value: Some(v), comment: None, tags: None, link: None, link_state: Some(new_state.clone()), expires_at: None } });
                     }
-                    let r = crate::write::apply(c, &dek, &env, &items, "rotate", &format!("rotated {} {}", link.kind, link.r#ref), caller, now)?;
+                    let r = crate::write::apply(c, &dek, self.keys()?, &env, &items, "rotate", &format!("rotated {} {}", link.kind, link.r#ref), caller, now)?;
                     if let (None, Some(h)) = (&old, state.as_ref().and_then(|s| s.get("handle"))) {
                         retire(c, &env, &link, h, &caller.principal, now + link.grace_minutes() as i64 * 60_000, now)?;
                     }

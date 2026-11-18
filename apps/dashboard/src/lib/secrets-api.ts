@@ -208,7 +208,7 @@ export function secretsApi(project: string) {
 
     audit: (f: AuditFilter = {}) => req<AuditEntry[]>("GET", `${P}/audit${qs(f)}`),
     /** The audit log with these filters as a file (up to 10,000 rows): text, not JSON. */
-    auditText: (f: AuditFilter, format: AuditFormat) => text(`${P}/audit${qs({ ...f, before: undefined, limit: undefined, format })}`),
+    auditText: (f: AuditFilter, format: AuditFormat) => text(`${P}/audit${qs({ ...f, before: undefined, limit: undefined, digests: undefined, format })}`),
     /** Walks the audit log's hash chain and checks roll's signed digests (from the last before `since`). */
     verifyAudit: (since?: number) => req<AuditVerification>("GET", `${P}/audit/verify${qs({ since })}`),
     sinks: () => req<Sink[]>("GET", `${P}/audit/sinks`),

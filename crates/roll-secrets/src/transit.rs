@@ -346,7 +346,7 @@ impl Secrets {
                 params![id, project, name, serde_json::to_string(&[&first]).expect("JSON"), now, caller.principal],
             )?;
             let what = if first.imported { "brought" } else { "made" };
-            audit::record(c, project, caller, "transit.add", None, None, &[], &format!("{what} encryption key {name}{}", vault_note(first.vault)), now)
+            audit::record(c, self.keys()?, project, caller, "transit.add", None, None, &[], &format!("{what} encryption key {name}{}", vault_note(first.vault)), now)
         })?;
         self.transit_keys(project, caller)?.into_iter().find(|k| k.name == name).ok_or_else(|| Error::Internal("the key vanished".into()))
     }
@@ -372,7 +372,7 @@ impl Secrets {
             stored.push(next.clone());
             c.execute("UPDATE transit_keys SET versions = ? WHERE id = ?", params![serde_json::to_string(&stored).expect("JSON"), id])?;
             let how = if next.imported { "brought a key for" } else { "rotated" };
-            audit::record(c, project, caller, "transit.rotate", None, None, &[], &format!("{how} encryption key {name}, version {}{}", next.v, vault_note(next.vault)), now)
+            audit::record(c, self.keys()?, project, caller, "transit.rotate", None, None, &[], &format!("{how} encryption key {name}, version {}{}", next.v, vault_note(next.vault)), now)
         })?;
         self.transit_keys(project, caller)?.into_iter().find(|k| k.name == name).ok_or_else(|| Error::Internal("the key vanished".into()))
     }
@@ -388,7 +388,7 @@ impl Secrets {
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             c.execute("UPDATE transit_keys SET min_decrypt_version = ? WHERE project_id = ? AND name = ?", params![min, project, name])?;
-            audit::record(c, project, caller, "transit.config", None, None, &[], &format!("encryption key {name} decrypts from version {min}"), now)
+            audit::record(c, self.keys()?, project, caller, "transit.config", None, None, &[], &format!("encryption key {name} decrypts from version {min}"), now)
         })?;
         self.transit_keys(project, caller)?.into_iter().find(|k| k.name == name).ok_or_else(|| Error::Internal("the key vanished".into()))
     }
@@ -405,7 +405,7 @@ impl Secrets {
             if c.execute("DELETE FROM transit_keys WHERE project_id = ? AND name = ?", [project, name])? == 0 {
                 return Err(Error::NotFound(format!("no key {name}")));
             }
-            audit::record(c, project, caller, "transit.delete", None, None, &[], &format!("deleted encryption key {name}"), now)
+            audit::record(c, self.keys()?, project, caller, "transit.delete", None, None, &[], &format!("deleted encryption key {name}"), now)
         })
     }
 

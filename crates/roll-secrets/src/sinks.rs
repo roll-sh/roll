@@ -220,7 +220,7 @@ impl Secrets {
                  VALUES (?, ?, ?, ?, ?, 'new', NULL, NULL, 0, 0, ?, ?, ?, ?)",
                 params![id, project, n.url.trim(), sealed, cursor, now, caller.principal, format, sealed_token],
             )?;
-            audit::record(c, project, caller, "sink.create", None, None, &[], &format!("audit stream to {} ({format})", host(&n.url)), now)?;
+            audit::record(c, self.keys()?, project, caller, "sink.create", None, None, &[], &format!("audit stream to {} ({format})", host(&n.url)), now)?;
             Ok(c.query_row(&format!("SELECT {COLUMNS} FROM audit_sinks WHERE id = ?"), [&id], sink_row)?)
         })?;
         Ok((sink, secret))
@@ -234,7 +234,7 @@ impl Secrets {
             let url: Option<String> = c.query_row("SELECT url FROM audit_sinks WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?;
             let url = url.ok_or_else(|| Error::NotFound(format!("no audit sink {id}")))?;
             c.execute("DELETE FROM audit_sinks WHERE id = ?", [id])?;
-            audit::record(c, project, caller, "sink.delete", None, None, &[], &format!("stopped the audit stream to {}", host(&url)), now)
+            audit::record(c, self.keys()?, project, caller, "sink.delete", None, None, &[], &format!("stopped the audit stream to {}", host(&url)), now)
         })
     }
 

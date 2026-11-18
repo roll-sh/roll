@@ -254,8 +254,9 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
 }
 
 #[tokio::test]
-async fn an_exported_audit_log_verifies_offline_with_rolls_public_keys_and_an_edit_fails_it() {
-    let (api, secrets, _, _dir) = serve().await;
+async fn an_exported_audit_log_verifies_offline_with_saved_keys_for_its_own_project_and_an_edit_fails_it() {
+    let (api, secrets, projects, _dir) = serve().await;
+    let shop = projects.list(roll_workspace::Scope::All).unwrap().into_iter().find(|p| p.name == "shop").unwrap().id;
     let at = ["secrets", "-p", "shop", "-e", "production"];
     ok(&api, &[], &[&at[..], &["set", "HOST=db.internal", "PORT=5432"]].concat(), None).await;
     let s = secrets.clone();
@@ -266,11 +267,19 @@ async fn an_exported_audit_log_verifies_offline_with_rolls_public_keys_and_an_ed
     let (log, keys) = (files.path().join("audit.jsonl"), files.path().join("jwks.json"));
     std::fs::write(&keys, secrets.oidc_jwks().unwrap().to_string()).unwrap();
     std::fs::write(&log, &export).unwrap();
-    // Nothing but the file and the keys: the API isn't there.
+    // Nothing but the file, the keys and the project's id: the API isn't there.
     let offline = "http://127.0.0.1:9";
-    let verify = ["secrets", "audit", "verify", "--file", log.to_str().unwrap(), "--jwks", keys.to_str().unwrap()];
+    let verify = ["secrets", "-p", shop.as_str(), "audit", "verify", "--file", log.to_str().unwrap(), "--jwks", keys.to_str().unwrap()];
     let out = ok(offline, &[], &verify, None).await;
     assert!(out.contains("signed through #"), "{out}");
+    // Keys fetched from the server being checked would vouch for themselves: saved ones only.
+    let o = roll(offline, &[], &verify[..7], None).await;
+    assert!(o.code != Some(0) && o.stderr.contains("--jwks"), "{}", o.stderr);
+    // Another project's log isn't this one's, however well it verifies.
+    let mut other = verify;
+    other[2] = "prj_someoneelse";
+    let o = roll(offline, &[], &other, None).await;
+    assert!(o.code != Some(0) && o.stderr.contains("not prj_someoneelse's"), "{}", o.stderr);
     std::fs::write(&log, export.replacen("\"summary\":\"", "\"summary\":\"not ", 1)).unwrap();
     let o = roll(offline, &[], &verify, None).await;
     assert!(o.code != Some(0) && o.stderr.contains("edited"), "{}{}", o.stdout, o.stderr);

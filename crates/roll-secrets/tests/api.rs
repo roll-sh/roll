@@ -1462,6 +1462,60 @@ async fn the_audit_log_is_a_signed_chain_that_shows_an_edit_and_a_deletion_and_s
     assert_eq!(sweep(0).await, 1);
     let v = api.ok(Method::GET, "/audit/verify", None).await;
     assert_eq!((v["ok"].as_bool(), v["from"].as_i64(), v["through"].as_i64(), v["digests"].as_i64()), (Some(true), Some(6), Some(7), Some(2)), "{v}");
+
+    // Rows cut from the end and the head put back on the digest before them: the head's MAC needs
+    // the deployment key.
+    api.set("production", "F", "v").await;
+    api.db.write(|c| c.execute("DELETE FROM audit WHERE project_id = ? AND seq = 9", [p.as_str()])).unwrap();
+    api.db.write(|c| c.execute("UPDATE audit_heads SET seq = 8, hash = (SELECT hash FROM audit WHERE project_id = ? AND seq = 8) WHERE project_id = ?", [p.as_str(), p.as_str()])).unwrap();
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["broken"]["seq"].as_i64(), v["broken"]["reason"].as_str()), (Some(false), Some(8), Some("head")), "{v}");
+}
+
+#[tokio::test]
+async fn a_signing_key_added_to_the_database_vouches_for_no_digest_and_isnt_published() {
+    use base64::Engine as _;
+    use roll_secrets::chain;
+    use rsa::pkcs8::EncodePrivateKey;
+    use rsa::traits::PublicKeyParts;
+    let api = Api::new().await;
+    api.set("production", "A", "v").await;
+    api.set("production", "B", "v").await;
+    let s = api.secrets.clone();
+    assert_eq!(tokio::task::spawn_blocking(move || s.sweep_audit_chain(i64::MAX / 2).unwrap()).await.unwrap(), 1);
+
+    // A database writer adds a key of their own, older than roll's so roll's still signs...
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    let theirs = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+    let (n, e) = (b64(&theirs.n().to_bytes_be()), b64(&theirs.e().to_bytes_be()));
+    api.db.write(|c| c.execute("INSERT INTO oidc_keys (kid, sealed_dek, private, n, e, created_at) VALUES ('k_theirs', 'v1:AAAA', ?, ?, ?, 0)", code_sql::params![vec![0u8], n, e])).unwrap();
+    // ...edits row #1, recomputes every hash after it and signs the digest again with that key.
+    let p = api.project.clone();
+    let mut rows: Vec<roll_secrets::AuditEntry> = serde_json::from_value(api.ok(Method::GET, "/audit", None).await).unwrap();
+    rows.sort_by_key(|r| r.seq);
+    let signed = rows.iter().find(|r| r.action == chain::DIGEST).and_then(|r| r.seq);
+    let pair = ring::signature::RsaKeyPair::from_pkcs8(theirs.to_pkcs8_der().unwrap().as_bytes()).unwrap();
+    let mut prev = String::new();
+    for r in &mut rows {
+        if r.seq == Some(1) {
+            r.summary = "nothing happened".into();
+        }
+        if r.action == chain::DIGEST {
+            let d = chain::Digest { project: p.clone(), seq: r.seq.unwrap() - 1, hash: prev.clone(), last_at: r.at, at: r.at, start: 1 };
+            r.digest = Some(chain::sign("k_theirs", &pair, &d).unwrap());
+        }
+        prev = chain::link(&prev, &p, r);
+        let (seq, hash, digest) = (r.seq.unwrap(), prev.clone(), r.digest.clone());
+        let summary = r.summary.clone();
+        api.db.write(|c| c.execute("UPDATE audit SET summary = ?, hash = ?, digest = ? WHERE project_id = ? AND seq = ?", code_sql::params![summary, hash, digest, p, seq])).unwrap();
+    }
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["broken"]["seq"].as_i64(), v["broken"]["reason"].as_str()), (Some(false), signed, Some("signature")), "{v}");
+    // Nor does a cloud see it: the JWKS has roll's key alone.
+    let s = api.secrets.clone();
+    let jwks = tokio::task::spawn_blocking(move || s.oidc_jwks().unwrap()).await.unwrap();
+    let kids: Vec<&str> = jwks["keys"].as_array().unwrap().iter().map(|k| k["kid"].as_str().unwrap()).collect();
+    assert!(kids.len() == 1 && kids[0] != "k_theirs", "{jwks}");
 }
 
 #[tokio::test]

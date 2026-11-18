@@ -471,7 +471,7 @@ impl Secrets {
                 "INSERT INTO cas (id, project_id, name, certificate, private_key, policy, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 params![id, project, ca.name, ca.certificate, sealed, serde_json::to_string(&ca.policy).expect("JSON"), at, ca.created_by],
             )?;
-            audit::record(c, project, caller, "ca.add", None, None, &[], &format!("made CA {} for {}", ca.name, ca.policy.domains.join(", ")), at)
+            audit::record(c, self.keys()?, project, caller, "ca.add", None, None, &[], &format!("made CA {} for {}", ca.name, ca.policy.domains.join(", ")), at)
         })?;
         Ok(ca)
     }
@@ -496,7 +496,7 @@ impl Secrets {
             }
             c.execute("DELETE FROM cas WHERE id = ?", [id])?;
             c.execute("DELETE FROM ca_certs WHERE ca_id = ?", [id])?;
-            audit::record(c, project, caller, "ca.delete", None, None, &[], &format!("deleted CA {name}"), now)
+            audit::record(c, self.keys()?, project, caller, "ca.delete", None, None, &[], &format!("deleted CA {name}"), now)
         })
     }
 
@@ -551,7 +551,7 @@ impl Secrets {
         let summary = format!("{ca_name} signed a CSR for {} (serial {serial})", names.join(", "));
         self.db.write(|c| {
             record_in(c, id, project, &serial, &names, "csr", not_after, &caller.principal, now)?;
-            audit::record(c, project, caller, "ca.sign", None, None, &[], &summary, now)
+            audit::record(c, self.keys()?, project, caller, "ca.sign", None, None, &[], &summary, now)
         })?;
         Ok(Signed { certificate: cert.pem(), ca: ca_pem, serial, names, not_after })
     }
@@ -602,7 +602,7 @@ impl Secrets {
             }
             c.execute("UPDATE ca_certs SET revoked_at = ?, revoked_by = ? WHERE ca_id = ? AND serial = ?", params![now, caller.principal, id, serial])?;
             let names: Vec<String> = serde_json::from_str(&names).unwrap_or_default();
-            audit::record(c, project, caller, "ca.revoke", None, None, &[], &format!("{ca} revoked {serial} ({})", names.join(", ")), now)
+            audit::record(c, self.keys()?, project, caller, "ca.revoke", None, None, &[], &format!("{ca} revoked {serial} ({})", names.join(", ")), now)
         })?;
         // This node's next CRL has it at once; another node's within a minute.
         self.crls.lock().expect("crls").revoked(id);
