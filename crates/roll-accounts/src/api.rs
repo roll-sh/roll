@@ -51,6 +51,9 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/me/totp/confirm", post(totp_confirm))
         .route("/v1/accounts/me/recovery-codes", post(recovery_codes))
         .route("/v1/accounts/me/passkeys", get(my_passkeys).post(add_passkey))
+        .route("/v1/accounts/me/reauth", get(reauth_info).post(reauth))
+        .route("/v1/accounts/me/reauth/email", post(reauth_email))
+        .route("/v1/accounts/me/reauth/passkey/options", post(reauth_passkey_options))
         .route("/v1/accounts/me/passkeys/options", post(passkey_options))
         .route("/v1/accounts/me/passkeys/{id}", axum::routing::patch(rename_passkey).delete(remove_passkey))
         .route("/v1/accounts/invites", get(list_invites).post(create_invite))
@@ -128,6 +131,22 @@ fn body<T: DeserializeOwned>(b: &Bytes) -> Result<T> {
 
 fn signed_in(me: Me) -> Result<SignedIn> {
     me.map(|Extension(u)| u).ok_or_else(Error::signed_out)
+}
+
+/// Sudo mode (docs/accounts.md): a change to how an account is reached needs a recent proof.
+async fn sudo(a: &Arc<Accounts>, u: &SignedIn) -> Result<()> {
+    let s = u.session.clone();
+    blocking(a, move |a| a.fresh(&s)).await
+}
+
+/// An admin's change to who's an admin or how people sign in: an admin's session must be fresh
+/// (the operator's token has no session).
+async fn admin_sudo(a: &Arc<Accounts>, me: &Me, op: &Op) -> Result<String> {
+    let by = admin(a, me, op)?;
+    if let Some(Extension(u)) = me {
+        sudo(a, u).await?;
+    }
+    Ok(by)
 }
 
 /// Who may use the admin routes: an admin's session (by their id), the operator's token, or
@@ -434,27 +453,27 @@ async fn list_sso(State(a): S, me: Me, op: Op) -> Result<Response> {
 }
 
 async fn add_sso(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response> {
-    admin(&a, &me, &op)?;
+    admin_sudo(&a, &me, &op).await?;
     let n: crate::sso::NewConnection = body(&b)?;
     Ok((StatusCode::CREATED, Json(a.add_sso(n).await?)).into_response())
 }
 
 async fn update_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>, b: Bytes) -> Result<Response> {
-    admin(&a, &me, &op)?;
+    admin_sudo(&a, &me, &op).await?;
     let ch: crate::sso::ConnectionChange = body(&b)?;
     Ok(Json(blocking(&a, move |a| a.update_sso(&id, ch)).await?).into_response())
 }
 
 /// A SCIM token for the connection (replacing its old one): `{token, base_url}`, this once.
 async fn scim_token(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
-    admin(&a, &me, &op)?;
+    admin_sudo(&a, &me, &op).await?;
     let token = blocking(&a, move |a| a.scim_token(&id)).await?;
     let base = format!("{}/v1/accounts/scim/v2", a.config.api_url);
     Ok(with_cookies((StatusCode::CREATED, Json(json!({ "token": token, "base_url": base }))).into_response(), None))
 }
 
 async fn remove_scim_token(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
-    admin(&a, &me, &op)?;
+    admin_sudo(&a, &me, &op).await?;
     blocking(&a, move |a| a.remove_scim_token(&id)).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -466,7 +485,7 @@ async fn verify_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Resu
 }
 
 async fn remove_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
-    admin(&a, &me, &op)?;
+    admin_sudo(&a, &me, &op).await?;
     blocking(&a, move |a| a.remove_sso(&id)).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -576,6 +595,83 @@ async fn signin_passkey(State(a): S, owed: Owed, ip: Ip, headers: HeaderMap, b: 
     .await
 }
 
+// ── sudo mode (docs/accounts.md, "Sudo mode") ──
+
+/// How long this session's proof lasts, and how its person can confirm it's them.
+async fn reauth_info(State(a): S, me: Me) -> Result<Json<Value>> {
+    let u = signed_in(me)?;
+    Ok(Json(blocking(&a, move |a| Ok(json!({ "fresh_until": a.fresh_until(&u.session)?, "methods": a.reauth_methods(&u.user)? }))).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Reauth {
+    /// A TOTP or recovery code; or, with `challenge`, the code an email carried.
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    challenge: Option<String>,
+    /// A passkey: its challenge's id and the browser's credential.
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    credential: Option<Value>,
+}
+
+/// Confirm it's you: the session is fresh for another two hours.
+async fn reauth(State(a): S, me: Me, ip: Ip, headers: HeaderMap, b: Bytes) -> Result<Json<Value>> {
+    let u = signed_in(me)?;
+    let r: Reauth = body(&b)?;
+    let who = Who::of(ip, &headers);
+    Ok(Json(
+        blocking(&a, move |a| {
+            let (method, proved) = match r {
+                Reauth { id: Some(id), credential: Some(c), .. } => ("passkey", a.passkey_check_for("reauth", &id, &c, Some(&u.user)).map(|_| ())),
+                Reauth { challenge: Some(ch), code: Some(code), .. } => ("email", match a.email_verify(&ch, &code) {
+                    Ok((user, _)) if user == u.user => Ok(()),
+                    Ok(_) => Err(Error::bad_code()),
+                    Err(e) => Err(e),
+                }),
+                Reauth { code: Some(code), .. } => ("totp", match a.second_factor(&u.user, &code) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(Error::bad_code()),
+                    Err(e) => Err(e),
+                }),
+                _ => return Err(Error::BadRequest("a code, an email's challenge and code, or a passkey".into(), None)),
+            };
+            let done = proved.and_then(|()| a.mark_verified(&u.user, &u.session));
+            a.record_reauth(&u.user, method, done.as_ref().err(), &who);
+            Ok(json!({ "fresh_until": done? }))
+        })
+        .await?,
+    ))
+}
+
+/// An email code to confirm it's you, to your own address: `{challenge}`.
+async fn reauth_email(State(a): S, me: Me) -> Result<(StatusCode, Json<Value>)> {
+    let u = signed_in(me)?;
+    if !a.mail_on() {
+        return Err(Error::Unavailable("email isn't configured on this server".into(), "email_off"));
+    }
+    let challenge = crate::new_id("chl");
+    let (a2, id) = (a.clone(), challenge.clone());
+    let mail = blocking(&a2, move |a| {
+        let email = a.user(&u.user)?.email;
+        a.email_start(&id, &email, None)
+    })
+    .await?;
+    if let Some(mail) = mail {
+        a.send_later(mail, "confirmation code");
+    }
+    Ok((StatusCode::ACCEPTED, Json(json!({ "challenge": challenge }))))
+}
+
+/// A passkey challenge to confirm it's you (your own passkeys only).
+async fn reauth_passkey_options(State(a): S, me: Me) -> Result<Json<Value>> {
+    let u = signed_in(me)?;
+    Ok(Json(blocking(&a, move |a| a.passkey_assert_options(Some(&u.user), "reauth")).await?))
+}
+
 async fn my_passkeys(State(a): S, me: Me) -> Result<Json<Value>> {
     let u = signed_in(me)?;
     Ok(Json(json!({ "passkeys": blocking(&a, move |a| a.passkeys(&u.user)).await? })))
@@ -583,11 +679,13 @@ async fn my_passkeys(State(a): S, me: Me) -> Result<Json<Value>> {
 
 async fn passkey_options(State(a): S, me: Me) -> Result<Json<Value>> {
     let u = signed_in(me)?;
+    sudo(&a, &u).await?;
     Ok(Json(blocking(&a, move |a| a.passkey_register_options(&u.user)).await?))
 }
 
 async fn add_passkey(State(a): S, me: Me, b: Bytes) -> Result<(StatusCode, Json<Value>)> {
     let u = signed_in(me)?;
+    sudo(&a, &u).await?;
     let PasskeyAnswer { id, credential, name } = body(&b)?;
     let made = blocking(&a, move |a| a.passkey_add(&u.user, &id, name.as_deref().unwrap_or("Passkey"), &credential)).await?;
     Ok((StatusCode::CREATED, Json(json!(made))))
@@ -601,6 +699,7 @@ async fn rename_passkey(State(a): S, me: Me, Path(id): Path<String>, b: Bytes) -
 
 async fn remove_passkey(State(a): S, me: Me, Path(id): Path<String>) -> Result<StatusCode> {
     let u = signed_in(me)?;
+    sudo(&a, &u).await?;
     blocking(&a, move |a| a.passkey_remove(&u.user, &id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -661,6 +760,7 @@ async fn revoke_my_session(State(a): S, me: Me, Path(id): Path<String>) -> Resul
 
 async fn unlink(State(a): S, me: Me, Path(p): Path<String>) -> Result<StatusCode> {
     let u = signed_in(me)?;
+    sudo(&a, &u).await?;
     // GitHub, Google, or an SSO connection's link (`sso:<id>`).
     let p = match p.strip_prefix("sso:") {
         Some(id) if !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') => p.clone(),
@@ -672,6 +772,7 @@ async fn unlink(State(a): S, me: Me, Path(p): Path<String>) -> Result<StatusCode
 
 async fn totp_enrol(State(a): S, me: Me) -> Result<Json<Value>> {
     let u = signed_in(me)?;
+    sudo(&a, &u).await?;
     let e = blocking(&a, move |a| a.totp_enrol(&u.user)).await?;
     Ok(Json(json!({ "secret": e.secret, "otpauth_url": e.otpauth_url, "qr_png": e.qr_png })))
 }
@@ -710,6 +811,10 @@ struct NewInvite {
 async fn create_invite(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response> {
     let by = admin(&a, &me, &op)?;
     let NewInvite { email, admin, handle } = body(&b)?;
+    // Making an admin is sudo; inviting someone else isn't.
+    if let (true, Some(Extension(u))) = (admin, &me) {
+        sudo(&a, u).await?;
+    }
     let (invite, token, url) = blocking(&a, move |a| a.invite(&by, &email, admin, handle.as_deref())).await?;
     if a.mail_on() {
         let text = format!("You're invited to roll.\n\nSign in here within 7 days: {url}\n\nThe link works once, for {}.\n", invite.email);
@@ -744,7 +849,7 @@ struct UserPatch {
 }
 
 async fn update_user(State(a): S, me: Me, op: Op, Path(id): Path<String>, b: Bytes) -> Result<Response> {
-    admin(&a, &me, &op)?;
+    admin_sudo(&a, &me, &op).await?;
     let UserPatch { admin, disabled } = body(&b)?;
     Ok(Json(blocking(&a, move |a| a.update_user(&id, admin, disabled)).await?).into_response())
 }

@@ -963,3 +963,65 @@ async fn passkeys_sign_people_in_on_their_own_or_as_a_second_factor() {
 fn listed_owner(got: &[roll_accounts::audit::AccountEvent]) -> String {
     got.iter().find(|e| e.action == "POST /v1/accounts/me/passkeys").and_then(|e| e.target.clone()).unwrap()
 }
+
+/// Sudo mode (docs/accounts.md): changing how an account is reached, or who's an admin, needs a
+/// proof from the last two hours (here 1.5 s): a sign-in, or a confirmation by email code (or the
+/// authenticator app, or a passkey). Another person's code proves nothing; the operator's token
+/// has no session and is exempt.
+#[tokio::test]
+async fn sudo_mode_asks_for_a_recent_proof() {
+    let env = Env::new().await;
+    let events = Arc::new(Events::default());
+    env.accounts.set_audit(events.clone());
+    env.accounts.set_sudo_window(1500);
+    let invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@example.com", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let mut b = Browser::default();
+    env.email_sign_in(&mut b, "root@example.com", Some(&invite)).await;
+    let bob_invite = env.invite("bob@example.com").await;
+    let mut bb = Browser::default();
+    let bob = env.email_sign_in(&mut bb, "bob@example.com", Some(&bob_invite)).await.json["user"]["id"].as_str().unwrap().to_string();
+
+    // Just signed in: fresh.
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys/options", None).await.status, StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    let stale = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys/options", None).await;
+    assert_eq!((stale.status, stale.json["code"].as_str()), (StatusCode::FORBIDDEN, Some("reauth_required")), "{}", stale.json);
+    assert_eq!(env.call(&mut b, Method::PATCH, &format!("/v1/accounts/users/{bob}"), Some(json!({ "admin": true }))).await.json["code"], "reauth_required");
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/totp", None).await.json["code"], "reauth_required");
+    // Not everything: a name change, inviting someone who isn't an admin.
+    assert_eq!(env.call(&mut b, Method::PATCH, "/v1/accounts/me", Some(json!({ "name": "Root" }))).await.status, StatusCode::OK);
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/invites", Some(json!({ "email": "carol@example.com" }))).await.status, StatusCode::CREATED);
+    // The operator's token has no session to prove.
+    assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/users/{bob}"), json!({ "admin": false })).await.status, StatusCode::OK);
+
+    let info = env.call(&mut b, Method::GET, "/v1/accounts/me/reauth", None).await.json;
+    assert_eq!(info["methods"], json!(["email"]), "{info}");
+    // Someone else's email code proves nothing.
+    let theirs = env.call(&mut bb, Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "bob@example.com" }))).await.json["challenge"].as_str().unwrap().to_string();
+    let wait_codes = |to: &'static str, n: usize| {
+        let outbox = env.outbox.clone();
+        async move {
+            for _ in 0..200 {
+                if read_codes(&outbox, to).len() >= n {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    };
+    wait_codes("bob@example.com", 2).await;
+    let wrong = env.call(&mut b, Method::POST, "/v1/accounts/me/reauth", Some(json!({ "challenge": theirs, "code": newest_code(&env.outbox, "bob@example.com") }))).await;
+    assert_eq!((wrong.status, wrong.json["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_code")), "{}", wrong.json);
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/reauth", Some(json!({ "code": "123456" }))).await.json["code"], "bad_code", "no app to check");
+    // Their own code: fresh again.
+    let ch = env.call(&mut b, Method::POST, "/v1/accounts/me/reauth/email", None).await;
+    assert_eq!(ch.status, StatusCode::ACCEPTED);
+    wait_codes("root@example.com", 2).await;
+    let ok = env.call(&mut b, Method::POST, "/v1/accounts/me/reauth", Some(json!({ "challenge": ch.json["challenge"], "code": newest_code(&env.outbox, "root@example.com") }))).await;
+    assert_eq!(ok.status, StatusCode::OK, "{}", ok.json);
+    assert!(ok.json["fresh_until"].as_i64().unwrap() > 0);
+    assert_eq!(env.call(&mut b, Method::PATCH, &format!("/v1/accounts/users/{bob}"), Some(json!({ "admin": true }))).await.status, StatusCode::OK);
+
+    let got = events.0.lock().unwrap().clone();
+    assert_eq!(got.iter().filter(|e| e.action == "reauth").map(|e| (e.ok, e.detail["method"].as_str().unwrap().to_string())).collect::<Vec<_>>(), [(false, "email".into()), (false, "totp".into()), (true, "email".into())]);
+}

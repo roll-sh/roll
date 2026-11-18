@@ -5,6 +5,7 @@ import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } fr
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { SsoSection } from "./account-sso";
 import { AppShell } from "./app-shell";
+import { ReauthDialog } from "./reauth-dialog";
 
 const card = "rounded-xl border border-line-2 bg-sheet inset-shadow-highlight";
 const btn = "flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-raised px-2.5 text-[12px] font-medium inset-shadow-highlight transition-colors hover:border-line-3 disabled:opacity-50";
@@ -47,6 +48,7 @@ export function AccountPage() {
           {user.admin && <Invites />}
           {user.admin && <Users me={user.id} />}
           {user.admin && <SsoSection />}
+          <ReauthDialog />
         </div>
       )}
     </AppShell>

@@ -388,6 +388,29 @@ phished: a passkey works only on roll's own site.
 - A refused passkey sign-in is in the passkey owner's security log (by `anonymous` when no
   session owed a second factor); adding, renaming and removing one are there too.
 
+### Sudo mode
+
+As GitHub does, a change to how an account is reached needs the person to have proved who they
+are in the last two hours: their sign-in (a session's start), or a confirmation since. A stolen
+session cookie alone can't add its own passkey or authenticator app, unlink the owner's GitHub,
+or make someone an admin.
+
+- What needs it, from a person's own session: adding a passkey (`POST /me/passkeys/options` and
+  `POST /me/passkeys`), removing one, setting up an authenticator app (`POST /me/totp`), unlinking
+  a sign-in method. From an admin's session: changing a person's `admin` or `disabled`, an invite
+  that makes an admin, and adding, changing or removing an SSO connection or its SCIM token. The
+  operator's token has no session: it's exempt. Turning TOTP off and new recovery codes already
+  take a code.
+- Without a recent proof: 403 `{code: "reauth_required"}`. `GET /v1/accounts/me/reauth` says
+  until when the session is fresh and how its person can confirm (`totp`, `passkey`, `email`),
+  and `POST /v1/accounts/me/reauth` takes `{code}` (TOTP or a recovery code), `{challenge, code}`
+  (an email code from `POST /me/reauth/email`, sent to their own address; anyone else's code
+  proves nothing) or `{id, credential}` (a passkey, from `POST /me/reauth/passkey/options`, only
+  their own). It's fresh for another two hours (`sessions.verified_at`).
+- The dashboard asks in place: the change's call answers `reauth_required`, a "Confirm it's you"
+  dialog takes the proof, and the call runs once more (`onReauthRequired` in `accounts-api.ts`).
+- Each confirmation, and each refused one, is in the person's security log (`reauth`).
+
 ## Routes
 
 Bodies are JSON. Every error is `{"error": string}`, with a `code` where listed. Routes marked
@@ -448,6 +471,10 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | `POST /v1/accounts/me/totp/confirm` | `{code}` | `{recovery_codes: string[10]}`, shown once; 400 `{code: "bad_code"}`; 404 nothing to confirm |
 | `DELETE /v1/accounts/me/totp` | `{code}` (TOTP or recovery) | 204; 400 `{code: "bad_code"}` |
 | `POST /v1/accounts/me/recovery-codes` | `{code}` (TOTP) | `{recovery_codes}`, replacing the old ones |
+| `GET /v1/accounts/me/reauth` | | `{fresh_until, methods: ("totp" \| "passkey" \| "email")[]}` (sudo mode) |
+| `POST /v1/accounts/me/reauth` | `{code}`, `{challenge, code}` or `{id, credential}` | `{fresh_until}`; 400 `{code: "bad_code"}` or `{code: "passkey"}` |
+| `POST /v1/accounts/me/reauth/email` | | 202 `{challenge}`: a code to the person's own address |
+| `POST /v1/accounts/me/reauth/passkey/options` | | `{id, publicKey}`: the person's own passkeys |
 | `GET /v1/accounts/me/passkeys` | | `{passkeys: [{id, name, created_at, last_used_at, synced}]}` (never a key) |
 | `POST /v1/accounts/me/passkeys/options` | | `{id, publicKey}` for `navigator.credentials.create`; 409 at 20 passkeys |
 | `POST /v1/accounts/me/passkeys` | `{id, name, credential}` | 201 `Passkey`; 400 `{code: "passkey"}`; 409 already registered |

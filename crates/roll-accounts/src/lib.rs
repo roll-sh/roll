@@ -14,6 +14,7 @@ pub mod audit;
 mod mail;
 mod oauth;
 pub mod passkeys;
+mod sudo;
 mod scim;
 pub mod sso;
 mod twofactor;
@@ -199,11 +200,11 @@ pub enum Error {
 }
 
 impl Error {
-    fn bad_code() -> Error {
+    pub(crate) fn bad_code() -> Error {
         Error::BadRequest("the code is wrong or expired".into(), Some("bad_code"))
     }
 
-    fn signed_out() -> Error {
+    pub(crate) fn signed_out() -> Error {
         Error::Unauthorized("sign in first".into())
     }
 
@@ -393,6 +394,8 @@ pub struct Accounts {
     /// Where account events go (rolld: roll-access's audit log); none until it's set.
     audit: std::sync::RwLock<Option<Arc<dyn audit::Audit>>>,
     owners: Option<Arc<dyn Owners>>,
+    /// Sudo mode's window (`sudo::SUDO_MS`; shorter in tests).
+    sudo_ms: std::sync::atomic::AtomicI64,
 }
 
 impl Accounts {
@@ -430,13 +433,17 @@ impl Accounts {
         if !db.has_column("passkeys", "synced")? {
             db.add_column("passkeys", "synced", "INTEGER")?;
         }
+        // When a session last proved who it is (sudo mode): its sign-in until then.
+        if !db.has_column("sessions", "verified_at")? {
+            db.add_column("sessions", "verified_at", "INTEGER")?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;
         }
         let doh = std::env::var("ROLL_ACCOUNTS_DOH").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "https://cloudflare-dns.com/dns-query".into());
         let txt: Arc<dyn sso::TxtLookup> = Arc::new(sso::Doh { client: sso_http.clone(), url: doh });
-        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners })
+        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners, sudo_ms: std::sync::atomic::AtomicI64::new(sudo::SUDO_MS) })
     }
 
     /// Where SSO domains' TXT records are read (tests answer from a table).
