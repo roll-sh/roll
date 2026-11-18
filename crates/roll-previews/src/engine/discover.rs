@@ -77,11 +77,6 @@ impl Engine {
             if existing.iter().any(|r| r.change_id.as_deref() == Some(&c.id)) || self.store.dismissed(&c.id, &c.head)? {
                 continue;
             }
-            // A change has one preview: the project that speaks for its repo makes it (with the
-            // repo on two canvases, the first project to look would otherwise take it at random).
-            if self.speaker(roll_workspace::Kind::Repo, &c.repo).is_some_and(|(id, _)| id != project_id) {
-                continue;
-            }
             let key = match c.github_pr {
                 Some(n) => format!("pr{n}"),
                 None => format!("c{}", c.number),
@@ -126,10 +121,11 @@ impl Engine {
                 self.mark_deleted(&r.id, if r.repo.starts_with("git:") { "its service is no longer in the project" } else { "its repo is no longer in the project" })?;
                 continue;
             }
-            // Another project took over speaking for it, or handed it back: the change hears from
-            // this one again at once.
-            if let (true, true) = self.refresh_voice(&r)? {
-                self.report(r.clone()).await;
+            // Another project's preview of the branch stopped speaking for it: this one does, at
+            // once, from its own node's converge (which ends in a report).
+            if let Ok((true, true)) = self.refresh_voice(&r) {
+                self.store.update(&r.id, |row| row.next_at = 0)?;
+                self.kick();
             }
             // A baseline lasts while there are changes to compare with it.
             let held = r.is_baseline() && has_changes;

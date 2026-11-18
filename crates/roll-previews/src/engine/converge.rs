@@ -1232,13 +1232,28 @@ impl Engine {
     /// speaker at all (its project's previews just turned off) it speaks for itself. Only a Git
     /// URL service's previews can be quiet: each project with the service on its canvas has its
     /// own preview of a branch, where a change has one preview (made by its repo's speaker).
-    pub(super) fn refresh_voice(&self, row: &Row) -> Result<(bool, bool)> {
-        let Some(of) = row.repo.strip_prefix("git:") else { return Ok((false, true)) };
-        let kind = roll_workspace::Kind::Service;
+    /// An error (the workspace or the store unread) changes nothing: the voice stored stays.
+    pub(super) fn refresh_voice(&self, row: &Row) -> anyhow::Result<(bool, bool)> {
+        let Some(svc) = row.repo.strip_prefix("git:") else { return Ok((false, true)) };
+        // Of the projects with an active preview of this branch (each stands for the service, or
+        // its preview would be gone), the one that has had the service on its canvas longest:
+        // a project whose rules skip the branch has no preview, so it never silences one that does.
+        let mut speaker: Option<(i64, String, String)> = None;
+        let mut operators = false;
+        for r in self.store.branch_rows(&row.repo, row.branch.as_deref())? {
+            let p = self.workspace.get(roll_workspace::Scope::All, &r.project_id)?;
+            if r.id == row.id {
+                operators = p.owner.is_empty();
+            }
+            let Some(added) = p.resources.iter().find(|x| x.kind == roll_workspace::Kind::Service && x.r#ref == svc).map(|x| x.added_at) else { continue };
+            let key = (added, p.id.clone(), p.name.clone());
+            if speaker.as_ref().is_none_or(|s| key < *s) {
+                speaker = Some(key);
+            }
+        }
         // Named only on the operator's projects, which see every project: a person's project
         // never learns another owner's project's name (they're 404s to them).
-        let operators = self.workspace.get(roll_workspace::Scope::All, &row.project_id).is_ok_and(|p| p.owner.is_empty());
-        let by = self.speaker(kind, of).filter(|(id, _)| *id != row.project_id).map(|(_, name)| if operators { name } else { "another project".into() });
+        let by = speaker.filter(|(_, id, _)| *id != row.project_id).map(|(_, _, name)| if operators { name } else { "another project".into() });
         Ok((self.store.set_reported_by(&row.id, by.as_deref())?, by.is_none()))
     }
 }

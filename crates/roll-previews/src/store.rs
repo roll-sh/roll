@@ -1131,9 +1131,18 @@ impl Store {
         Ok(self.db.read(|c| c.query_row("SELECT reported_by FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
     }
 
-    /// Sets [`Store::reported_by`]: whether it changed.
+    /// Sets [`Store::reported_by`]: whether it changed (written only then).
     pub fn set_reported_by(&self, id: &str, by: Option<&str>) -> Result<bool> {
+        if self.reported_by(id)?.as_deref() == by {
+            return Ok(false);
+        }
         Ok(self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE previews SET reported_by = ? WHERE id = ? AND reported_by IS NOT ?", params![by, id, by])?))? > 0)
+    }
+
+    /// The active previews of `repo`'s `branch` in every project (a Git URL service's branch has
+    /// one in each project whose canvas holds the service).
+    pub fn branch_rows(&self, repo: &str, branch: Option<&str>) -> Result<Vec<Row>> {
+        Ok(self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM previews WHERE repo = ? AND branch IS ? AND desired = 'active' ORDER BY id"), params![repo, branch], row))?)
     }
 
     pub fn set_goes_at(&self, id: &str, at: Option<i64>) -> Result<()> {
