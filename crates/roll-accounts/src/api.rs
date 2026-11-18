@@ -71,7 +71,9 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/invites/{id}", delete(revoke_invite))
         .route("/v1/accounts/users", get(list_users))
         .route("/v1/accounts/users/{id}", axum::routing::patch(update_user))
-        .route("/v1/accounts/users/{id}/sessions", delete(revoke_user_sessions))
+        .route("/v1/accounts/users/{id}/sessions", get(user_sessions).delete(revoke_user_sessions))
+        .route("/v1/accounts/users/{id}/sessions/{session}", delete(revoke_user_session))
+        .route("/v1/accounts/users/{id}/activity", get(user_activity))
         .route("/v1/accounts/sso", get(list_sso).post(add_sso))
         .route("/v1/accounts/sso/start", post(sso_start))
         .route("/v1/accounts/sso/{id}", axum::routing::patch(update_sso).delete(remove_sso))
@@ -1038,6 +1040,36 @@ async fn update_user(State(a): S, me: Me, op: Op, Path(id): Path<String>, b: Byt
     admin_sudo(&a, &me, &op).await?;
     let UserPatch { admin, disabled } = body(&b)?;
     Ok(Json(blocking(&a, move |a| a.update_user(&id, admin, disabled)).await?).into_response())
+}
+
+/// A person's security log, as an admin reads it from People (Okta's per-user System Log): the
+/// same events the person sees of themselves.
+async fn user_activity(State(a): S, me: Me, op: Op, Path(id): Path<String>, Query(q): Query<ActivityQuery>) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    let events = blocking(&a, move |a| {
+        a.user(&id)?;
+        Ok(a.activity(&id, q.before, q.limit.unwrap_or(50)))
+    })
+    .await?;
+    Ok(Json(json!({ "events": events })).into_response())
+}
+
+/// A person's signed-in sessions, for an admin (none is "current": it's not the admin's own).
+async fn user_sessions(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    Ok(Json(blocking(&a, move |a| {
+        a.user(&id)?;
+        a.sessions_of(&id, "")
+    })
+    .await?)
+    .into_response())
+}
+
+/// End one of a person's sessions (a lost laptop), leaving the others.
+async fn revoke_user_session(State(a): S, me: Me, op: Op, Path((id, session)): Path<(String, String)>) -> Result<StatusCode> {
+    admin(&a, &me, &op)?;
+    blocking(&a, move |a| a.revoke_session(&id, &session)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn revoke_user_sessions(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<StatusCode> {

@@ -685,6 +685,9 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 | `GET /v1/accounts/users` | | `User[]`, oldest first |
 | `PATCH /v1/accounts/users/{id}` | `{admin?, disabled?}` | `User`; disabling deletes the user's sessions and cuts off their roll code owner (its tokens are revoked and its machines' links closed; turning the account back on gives none of them back) |
 | `DELETE /v1/accounts/users/{id}/sessions` | | 204: signs the user out everywhere |
+| `GET /v1/accounts/users/{id}/sessions` | | `Session[]`: the person's sessions (none `current`) |
+| `DELETE /v1/accounts/users/{id}/sessions/{session}` | | 204: ends that one session (a lost laptop); 404 if it isn't theirs |
+| `GET /v1/accounts/users/{id}/activity` | query `before?`, `limit?` | `{events}`: the person's security log, the same events they see of themselves (Okta's per-user System Log); "Security log" on a person in People |
 | `GET /v1/accounts/sso` | | `SsoConnection[]` (`{id, name, issuer, client_id, domains, verified, enforce, provision, created_at, redirect_uri, dns: {name, value}, scim}`; never the secret) |
 | `POST /v1/accounts/sso` | `{name?, issuer, client_id, client_secret, domains, enforce?, provision?}` | 201 `SsoConnection`; 400 when the issuer's discovery doesn't answer, `public_domain`; 409 a domain has a connection already; 503 `{code: "secret_key"}` without `ROLL_SECRET_KEY` |
 | `POST /v1/accounts/sso/{id}/verify` | | `SsoConnection`: its claimed domains whose `_roll-sso.<domain>` TXT record has its value are verified |
