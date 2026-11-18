@@ -320,6 +320,8 @@ export interface PreviewSettings {
   paths: string[];
   /** …that none of these match. */
   ignore_paths: string[];
+  /** Globs on a change's author (a pull request's GitHub login, `*[bot]`): skipped unless asked. */
+  skip_authors?: string[];
   /** `"<kind>:<ref>"` → mode; resources not listed get `data`. A patch replaces the whole map. */
   resources: Record<string, ResourceRule>;
   data: "branch" | "schema";

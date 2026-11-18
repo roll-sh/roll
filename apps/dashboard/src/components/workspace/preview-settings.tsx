@@ -92,6 +92,7 @@ function Form({
   const [branches, setBranches] = useState(saved.branches.join(", "));
   const [paths, setPaths] = useState(saved.paths.join(", "));
   const [ignorePaths, setIgnorePaths] = useState(saved.ignore_paths.join(", "));
+  const [skipAuthors, setSkipAuthors] = useState((saved.skip_authors ?? []).join(", "));
   const [egressHosts, setEgressHosts] = useState((saved.egress_hosts ?? []).join(", "));
   const [pages, setPages] = useState((saved.github.pages ?? []).join(", "));
   const [widths, setWidths] = useState((saved.github.widths ?? []).join(", "));
@@ -107,13 +108,14 @@ function Form({
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof PreviewSettings>(k: K, v: PreviewSettings[K]) => setS((x) => ({ ...x, [k]: v }));
 
-  useEffect(() => setError(null), [s, branches, paths, ignorePaths, pages, widths, openapi, endpoints, states, hide, env, perBranch]);
+  useEffect(() => setError(null), [s, branches, paths, ignorePaths, skipAuthors, pages, widths, openapi, endpoints, states, hide, env, perBranch]);
 
   const next: PreviewSettings = {
     ...s,
     branches: words(branches),
     paths: words(paths),
     ignore_paths: words(ignorePaths),
+    skip_authors: words(skipAuthors),
     egress_hosts: s.egress === "roll" || (s.egress_forks ?? "roll") === "roll" ? words(egressHosts) : [],
     github: {
       ...s.github,
@@ -171,6 +173,9 @@ function Form({
         </Field>
         <Field label="Ignored paths" note="Touching only these doesn't count (docs/, *.md).">
           <input value={ignorePaths} onChange={(e) => setIgnorePaths(e.target.value)} className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
+        </Field>
+        <Field label="Skipped authors" note="Globs on who opened it (dependabot[bot], *[bot] for every bot account).">
+          <input value={skipAuthors} onChange={(e) => setSkipAuthors(e.target.value)} placeholder="nobody" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
         </Field>
         <p className="text-muted">
           A change's title overrides these: <span className="font-mono text-[12px]">[skip preview]</span> skips it, <span className="font-mono text-[12px]">[preview]</span> asks for one.
