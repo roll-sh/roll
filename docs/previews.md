@@ -1785,7 +1785,7 @@ Ranked by what a person notices first. Done so far:
    `team` is #300 on it: a visitor let in through roll (link or a live team session) gets it, and
    a note is posted from roll's dashboard as the signed-in person; a team preview's services on
    roll apps get no button yet (apps adds it only for link visitors).
-2. **`roll preview up`: a preview of the working tree** (Netlify's `netlify deploy`, Vercel's
+2. **`roll preview up`, in review** (#314): a preview of the working tree (Netlify's `netlify deploy`, Vercel's
    `vercel deploy`): from a checkout of a project's repo, uncommitted changes included, a commit
    made without touching the user's index or HEAD is pushed to a branch of their own
    (`preview/<user>/<name>`) and previewed, the URL printed once it's ready; again moves it,
