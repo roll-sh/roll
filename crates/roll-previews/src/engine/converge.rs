@@ -1109,7 +1109,7 @@ impl Engine {
         self.source.forget(&view, teardown.as_deref()).await;
         // A Git URL service's pull request too, unless another project's preview of it speaks
         // now (it carries the comment on; saying this one went could land after it).
-        let hands_over = matches!(self.refresh_voice(&r), Ok((_, false)));
+        let hands_over = matches!(self.refresh_voice(r), Ok((_, false)));
         if !hands_over && let Ok(s) = self.store.settings(&r.project_id) {
             self.report_on_git(&view, &s, Some(teardown.as_deref())).await;
         }
