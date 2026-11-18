@@ -190,9 +190,13 @@ pub enum Docs {
 
 #[derive(Subcommand)]
 pub enum Clusters {
-    /// List clusters.
+    /// List clusters (--deleted: recently deleted ones, kept for restoring).
     #[command(alias = "ls")]
-    List,
+    List {
+        /// Recently deleted clusters, with when each is purged.
+        #[arg(long)]
+        deleted: bool,
+    },
     /// Create a cluster. Its password is printed once.
     Create {
         name: String,
@@ -229,8 +233,17 @@ pub enum Clusters {
         #[arg(long)]
         destructive_requires_name: Option<bool>,
     },
-    /// Delete a cluster and its data (branches keep theirs).
+    /// Delete a cluster (restorable for the node's window, 7 days by default; branches keep
+    /// their data).
     Delete { cluster: String },
+    /// Bring a deleted cluster back as it was (`list --deleted` shows the id).
+    Restore {
+        /// The deleted cluster's id (`srch_…`).
+        id: String,
+        /// Restore under this name (its own is taken by another cluster).
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Branch a cluster: an instant copy, optionally of a past point in time.
     Branch {
         cluster: String,
@@ -630,7 +643,24 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
             v
         }
         Search::Clusters(cmd) => match cmd {
-            Clusters::List => {
+            Clusters::List { deleted: true } => {
+                let v = api.get("/v1/search/clusters?deleted=true").await?;
+                if !as_json {
+                    for c in v.as_array().into_iter().flatten() {
+                        println!(
+                            "{:<24} {:<18} {:>10}  deleted {}, purged {}",
+                            s(&c["name"]),
+                            s(&c["id"]),
+                            bytes(c["stored_bytes"].as_f64().unwrap_or(0.0)),
+                            ago(c["deleted_at"].as_i64().unwrap_or(0)),
+                            crate::access::date(c["purge_at"].as_i64().unwrap_or(0) * 1000),
+                        );
+                    }
+                    return Ok(());
+                }
+                v
+            }
+            Clusters::List { deleted: false } => {
                 let v = api.get("/v1/search/clusters").await?;
                 if !as_json {
                     for c in v.as_array().into_iter().flatten() {
@@ -685,8 +715,16 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
             Clusters::Delete { cluster } => {
                 let c = find(api, &cluster).await?;
                 api.call(reqwest::Method::DELETE, &format!("/v1/search/clusters/{}", s(&c["id"])), None).await?;
-                println!("deleted {}", s(&c["name"]));
+                println!("deleted {} (restore it with `roll search clusters restore {}` until it is purged)", s(&c["name"]), s(&c["id"]));
                 return Ok(());
+            }
+            Clusters::Restore { id, name } => {
+                let v = api.post(&format!("/v1/search/clusters/{}/restore", urlencoding::encode(&id)), json!({ "name": name })).await?;
+                if !as_json {
+                    println!("restored {} ({})", s(&v["name"]), s(&v["id"]));
+                    return Ok(());
+                }
+                v
             }
             Clusters::Branch { cluster, name, at: when } => {
                 let c = find(api, &cluster).await?;
@@ -826,7 +864,7 @@ mod tests {
         assert!(matches!(t.s, Search::Request { body: Some(ref b), .. } if b == "@bulk.ndjson"));
         let t = T::try_parse_from(["t", "keys", "create", "app", "worker"]).unwrap();
         assert!(matches!(t.s, Search::Keys(Keys::Create { ref access, .. }) if access == "data"), "keys default to data access");
-        for sub in ["create", "list", "show", "delete", "branch", "password", "unload", "url", "indices", "usage"] {
+        for sub in ["create", "list", "show", "delete", "restore", "branch", "password", "unload", "url", "indices", "usage"] {
             let e = T::try_parse_from(["t", "clusters", sub, "--help"]).err().unwrap();
             assert_eq!(e.kind(), clap::error::ErrorKind::DisplayHelp, "{sub}");
         }
