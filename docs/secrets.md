@@ -3620,7 +3620,9 @@ cache waited out. Ranked now:
    medium, six low, all being fixed (#277 4a23eabc2: answers stored literally, a per-request attempt
    count in its row, replays refused; #303 e4be05f1c: block fails closed; #304 3b1757d45; #290 6dd730cf8: a signed
    login used once, a server ID derived from the deployment key; #262 217be1314: the rotator's `url_wo`;
-   #274 e1e2a89e7: a user's URL built from parts; #248 2236e55d1: an LRU, not a clear-all). #281 gating. High: #281's verify (and the public JWKS) trusted any key a
+   #274 e1e2a89e7: a user's URL built from parts; #248 2236e55d1: an LRU, not a clear-all; #281 78e1c7c9d: only keys whose sealed half opens under the
+   deployment key sign, verify or reach the JWKS, a keyed MAC on the head, hourly digests with a
+   `stale` check, `verify --file` needs `--jwks`). All the findings are fixed. High: #281's verify (and the public JWKS) trusted any key a
    database writer added; now only keys whose sealed half opens under the deployment key. Medium:
    #281's head forgeable after a tail cut (a keyed MAC and hourly digests with a staleness check);
    #277's answer `${production.X}` became a reference (stored literally); #303's block mode failed open
