@@ -22,6 +22,7 @@ import (
 const (
 	fakePrivateKey = "-----BEGIN FAKE KEY-----\nnot-a-key\n-----END FAKE KEY-----\n"
 	fakeHECToken   = "fake-splunk-hec-token"
+	fakeHookToken  = "fake-rotator-hook-token"
 )
 
 // noneOf fails a plan that holds any of the credentials.
@@ -38,7 +39,8 @@ func (n noneOf) CheckPlan(_ context.Context, req plancheck.CheckPlanRequest, res
 
 // A rotator, audit sinks, a GitHub App, an AWS role and IAM user, GCP and Azure accounts, the
 // required keys and the KMS key, as code: made, changed in place where roll can, imported, destroyed,
-// and no credential sent in (the App's private key, the SIEM's token) in the plan or the state.
+// and no credential sent in (the App's private key, the SIEM's token, the token in the rotator's
+// URL) in the plan or the state.
 func TestMoreRegistrationsAsCode(t *testing.T) {
 	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
 	srv := httptest.NewServer(f)
@@ -65,10 +67,16 @@ variable "app_key" {
   sensitive = true
   ephemeral = true
 }
+variable "hook_token" {
+  type      = string
+  sensitive = true
+  ephemeral = true
+}
 resource "roll_secrets_rotator" "vendor" {
-  name          = "vendor-%[2]d"
-  url           = "https://rotate%[2]d.example/hook"
-  rotate_secret = { round = "%[2]d" }
+  name           = "vendor-%[2]d"
+  url_wo         = "https://rotate%[2]d.example/hook?token=${var.hook_token}"
+  url_wo_version = %[2]d
+  rotate_secret  = { round = "%[2]d" }
 }
 resource "roll_secrets_audit_sink" "splunk" {
   url              = "https://splunk.example/services/collector"
@@ -117,16 +125,16 @@ resource "roll_secrets_kms_key" "cmk" {
 }
 `, srv.URL, round, required)
 	}
-	credentials := noneOf{fakePrivateKey, fakeHECToken}
+	credentials := noneOf{fakePrivateKey, fakeHECToken, fakeHookToken}
 	sentButNotKept := func(s *terraform.State) error {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		got := strings.Join(f.received, "|")
-		if !strings.Contains(got, fakePrivateKey) || !strings.Contains(got, fakeHECToken) {
+		if !strings.Contains(got, fakePrivateKey) || !strings.Contains(got, fakeHECToken) || !strings.Contains(got, fakeHookToken) {
 			return fmt.Errorf("roll was sent %q", got)
 		}
 		state := fmt.Sprintf("%#v", s.RootModule().Resources)
-		if strings.Contains(state, "FAKE KEY") || strings.Contains(state, fakeHECToken) {
+		if strings.Contains(state, "FAKE KEY") || strings.Contains(state, fakeHECToken) || strings.Contains(state, fakeHookToken) {
 			return fmt.Errorf("a credential is in the state")
 		}
 		return nil
@@ -138,7 +146,7 @@ resource "roll_secrets_kms_key" "cmk" {
 		}
 		return checks
 	}
-	vars := config.Variables{"hec_token": config.StringVariable(fakeHECToken), "app_key": config.StringVariable(fakePrivateKey)}
+	vars := config.Variables{"hec_token": config.StringVariable(fakeHECToken), "app_key": config.StringVariable(fakePrivateKey), "hook_token": config.StringVariable(fakeHookToken)}
 	imported := func(name string, ignore ...string) resource.TestStep {
 		return resource.TestStep{ResourceName: name, ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: ignore, ConfigVariables: vars}
 	}
@@ -193,7 +201,7 @@ resource "roll_secrets_kms_key" "cmk" {
 				),
 			},
 			// What roll shows once, or never, isn't imported.
-			imported("roll_secrets_rotator.vendor", "url", "secret", "rotate_secret"),
+			imported("roll_secrets_rotator.vendor", "url_wo_version", "secret", "rotate_secret"),
 			imported("roll_secrets_audit_sink.splunk", "token_wo_version", "secret"),
 			imported("roll_secrets_github_app.deploy", "private_key_wo_version"),
 			imported("roll_secrets_aws_role.deploy"),

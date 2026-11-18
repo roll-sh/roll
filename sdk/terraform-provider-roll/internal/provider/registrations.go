@@ -42,8 +42,9 @@ type registration[M any] struct {
 	// guard refuses a delete with its reason (deletion protection), or "".
 	guard func(m *M) string
 	// update changes in place what roll can (a PATCH at `at`, the item's path), filling plan from
-	// the answer; prior is the state. None: the plan is kept as it is (only local settings change).
-	update func(ctx context.Context, c *client, at string, plan, prior *M, d *diag.Diagnostics)
+	// the answer; prior is the state, cfg reads a write-only attribute from the configuration.
+	// None: the plan is kept as it is (only local settings change).
+	update func(ctx context.Context, c *client, at string, plan, prior *M, cfg func(string) types.String, d *diag.Diagnostics)
 	// validate checks a configuration before any plan (an attribute that needs another).
 	validate func(ctx context.Context, cfg *M, d *diag.Diagnostics)
 }
@@ -141,7 +142,12 @@ func (r *registration[M]) Update(ctx context.Context, req resource.UpdateRequest
 	}
 	if r.update != nil {
 		proj, id := r.keys(&prior)
-		r.update(ctx, r.c, r.base(proj.ValueString())+"/"+url.PathEscape(id.ValueString()), &m, &prior, &resp.Diagnostics)
+		cfg := func(name string) types.String {
+			var v types.String
+			resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root(name), &v)...)
+			return v
+		}
+		r.update(ctx, r.c, r.base(proj.ValueString())+"/"+url.PathEscape(id.ValueString()), &m, &prior, cfg, &resp.Diagnostics)
 		if resp.Diagnostics.HasError() {
 			return
 		}

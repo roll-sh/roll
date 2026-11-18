@@ -75,6 +75,9 @@ resource "roll_secrets_rotator" "vendor" {
   name          = "vendor"
   url           = "https://rotate.example/roll"   # .secret: its signing secret, shown once
   rotate_secret = { round = "1" }                 # change it to rotate the signing secret
+  # A URL with a token in it goes in write-only instead of url:
+  #   url_wo         = "https://rotate.example/roll?token=${var.hook_token}"
+  #   url_wo_version = 1                            # bump it to send a new one (in place)
 }
 
 resource "roll_secrets_audit_sink" "splunk" {
@@ -220,11 +223,13 @@ resource "roll_machine_client" "web_ci" {
   `prj_…`. A write-only credential (`token_wo`, `private_key_wo`) and a once-shown `secret` aren't
   imported: the first apply after an import with a `…_wo_version` in the file registers it again
   (a replace), and a rotator's `rotate_secret` there rotates its secret into the state. A rotator's
-  URL isn't read back either (only its host): the first apply sends it again, in place.
+  URL isn't read back either (only its host): the first apply sends it again (`url`, or `url_wo`
+  with its `url_wo_version`), in place.
 - A rotator's name and URL, an AWS role's name, ARN and trust, and an AWS user's name and role
   change in place; their other attributes, and every attribute of a sink, an App or a cloud
-  account, replace them. A rotator's URL is in the state (sensitive), so keep a token out of it or
-  keep the state private.
+  account, replace them. A rotator's `url` is in the plan and the state (sensitive), so a URL that
+  carries a token goes in `url_wo` instead (write-only, Terraform 1.11+; bump `url_wo_version` to
+  send a new one, in place).
 - `roll_secrets_required_keys` owns the project's whole list: a key left out isn't required, and a
   second one on the same project undoes the first. Write folders without a trailing `/` (roll keeps
   them so, and an import reads them so). Destroying it requires nothing.

@@ -148,9 +148,11 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
 - **More of what a project registers**, each imported by `prj_…/<id>` (or the id alone, in the
   provider's project). Credentials going in are write-only (Terraform 1.11+), with a `…_wo_version`
   to send a new one:
-  - **`roll_secrets_rotator`**: its name and URL change in place (`PATCH`). Its signing secret is
-    shown once, so it's kept, sensitive, in `secret` from creation. Changing `rotate_secret` (a
-    keepers map) rotates it (`…/rotate-secret`) and keeps the new one.
+  - **`roll_secrets_rotator`**: its name and URL change in place (`PATCH`). A URL that carries a
+    token goes in `url_wo` (bump `url_wo_version` to send a new one, in place), never in `url`,
+    which is in the plan and the state. Its signing secret is shown once, so it's kept, sensitive,
+    in `secret` from creation. Changing `rotate_secret` (a keepers map) rotates it
+    (`…/rotate-secret`) and keeps the new one.
   - **`roll_secrets_audit_sink`**: an HTTPS endpoint, or `bucket:`, `search:` or `stream:` on the
     canvas. A SIEM `format` takes `token_wo`. A roll sink's signing secret is kept in `secret`.
   - **`roll_secrets_github_app`**: `private_key_wo`, never returned.

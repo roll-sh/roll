@@ -105,13 +105,15 @@ type rotatorModel struct {
 	Project      types.String `tfsdk:"project"`
 	Name         types.String `tfsdk:"name"`
 	URL          types.String `tfsdk:"url"`
+	URLWO        types.String `tfsdk:"url_wo"`
+	URLWOVersion types.Int64  `tfsdk:"url_wo_version"`
 	Host         types.String `tfsdk:"host"`
 	Secret       types.String `tfsdk:"secret"`
 	RotateSecret types.Map    `tfsdk:"rotate_secret"`
 }
 
 func fillRotator(m *rotatorModel, v map[string]any) {
-	m.ID, m.Name, m.Host = jStr(v, "id"), jStr(v, "name"), jStr(v, "host")
+	m.ID, m.Name, m.Host, m.URLWO = jStr(v, "id"), jStr(v, "name"), jStr(v, "host"), types.StringNull()
 	// Shown only by the answers that make one.
 	if s := jStr(v, "secret"); !s.IsNull() {
 		m.Secret = s
@@ -121,25 +123,49 @@ func fillRotator(m *rotatorModel, v map[string]any) {
 func newRotatorResource() resource.Resource {
 	return &registration[rotatorModel]{
 		typeName: "_secrets_rotator", route: "rotators", what: "rotator",
-		description: "A rotator (docs/secrets.md, \"Rotators\"): a URL roll calls, signed, to issue and revoke a value that lives outside roll. Link keys to it (`kind = \"rotator\"`, `mode = \"managed\"`). Its name and URL change in place.",
+		description: "A rotator (docs/secrets.md, \"Rotators\"): a URL roll calls, signed, to issue and revoke a value that lives outside roll. Link keys to it (`kind = \"rotator\"`, `mode = \"managed\"`). Its name and URL change in place. A URL that carries a token goes in url_wo (write-only, Terraform 1.11+).",
 		schema: map[string]schema.Attribute{
 			"name": inPlace("Its name: letters, digits, - and _."),
-			"url": schema.StringAttribute{Required: true, Sensitive: true,
-				Description: "The HTTPS endpoint roll calls (it may carry a token: it's sealed in roll and only its host is shown). It's in the state, as configured; roll never reads it back, so a change made outside Terraform is put back only when this changes."},
-			"host":   followsString("The URL's host, as roll shows it.", false, "url"),
-			"secret": followsString("The signing secret (whsec_…) roll signs every call with: shown once, so it's kept from the answer that made it (creating the rotator, or a rotate_secret change). Not imported.", true, "rotate_secret"),
+			"url": schema.StringAttribute{Optional: true, Sensitive: true,
+				Description: "The HTTPS endpoint roll calls, when it carries no secret: it's in the plan and the state, as configured. roll seals it and shows only its host, and never reads it back, so a change made outside Terraform is put back only when this changes. A URL with a token in it goes in url_wo instead."},
+			"url_wo": schema.StringAttribute{Optional: true, Sensitive: true, WriteOnly: true,
+				Description: "The endpoint, when it carries a token (in its query or path): write-only, so it's sent to roll (sealed there, only its host shown) and never in the plan or the state. Change url_wo_version to send a new one; the rotator changes in place.",
+				Validators:  []validator.String{stringvalidator.AlsoRequires(path.MatchRoot("url_wo_version")), stringvalidator.ConflictsWith(path.MatchRoot("url"))}},
+			"url_wo_version": schema.Int64Attribute{Optional: true, Description: "Bump it to send url_wo again (in place)."},
+			"host":           followsString("The URL's host, as roll shows it.", false, "url", "url_wo_version"),
+			"secret":         followsString("The signing secret (whsec_…) roll signs every call with: shown once, so it's kept from the answer that made it (creating the rotator, or a rotate_secret change). Not imported.", true, "rotate_secret"),
 			"rotate_secret": schema.MapAttribute{Optional: true, ElementType: types.StringType,
 				Description: "Any values (a keepers map): changing them rotates the signing secret in place (the new one is in secret, and signs every call from then on)."},
 		},
 		keys: func(m *rotatorModel) (*types.String, *types.String) { return &m.Project, &m.ID },
-		body: func(_ context.Context, m *rotatorModel, _ func(string) types.String, _ *diag.Diagnostics) map[string]any {
-			return map[string]any{"name": m.Name.ValueString(), "url": m.URL.ValueString()}
+		validate: func(_ context.Context, m *rotatorModel, d *diag.Diagnostics) {
+			if unset(m.URL) && unset(m.URLWO) {
+				d.AddAttributeError(path.Root("url"), "a rotator needs its URL", "set url, or url_wo (and url_wo_version) when the URL carries a token.")
+			}
+			if !unset(m.URLWOVersion) && unset(m.URLWO) {
+				d.AddAttributeError(path.Root("url_wo_version"), "url_wo_version goes with url_wo", "set url_wo, or drop url_wo_version.")
+			}
+		},
+		body: func(_ context.Context, m *rotatorModel, cfg func(string) types.String, _ *diag.Diagnostics) map[string]any {
+			u := m.URL
+			if u.IsNull() {
+				u = cfg("url_wo")
+			}
+			return map[string]any{"name": m.Name.ValueString(), "url": u.ValueString()}
 		},
 		fill: fillRotator,
-		update: func(ctx context.Context, c *client, at string, plan, prior *rotatorModel, d *diag.Diagnostics) {
+		update: func(ctx context.Context, c *client, at string, plan, prior *rotatorModel, cfg func(string) types.String, d *diag.Diagnostics) {
 			body := map[string]any{}
 			changed(body, "name", plan.Name, prior.Name)
-			changed(body, "url", plan.URL, prior.URL)
+			if plan.URL.IsNull() {
+				// A write-only URL is sent when its version changes (or it replaces a plain one).
+				if !plan.URLWOVersion.Equal(prior.URLWOVersion) || !prior.URL.IsNull() {
+					body["url"] = cfg("url_wo").ValueString()
+				}
+			} else {
+				changed(body, "url", plan.URL, prior.URL)
+			}
+			plan.URLWO = types.StringNull()
 			patch(ctx, c, at, body, plan, fillRotator, "rotator", d)
 			if d.HasError() || plan.RotateSecret.Equal(prior.RotateSecret) {
 				return
@@ -305,7 +331,7 @@ func newAwsRoleResource() resource.Resource {
 			return map[string]any{"name": m.Name.ValueString(), "role_arn": m.RoleARN.ValueString(), "trust": m.Trust.ValueString()}
 		},
 		fill: fillAwsRole,
-		update: func(ctx context.Context, c *client, at string, plan, prior *awsRoleModel, d *diag.Diagnostics) {
+		update: func(ctx context.Context, c *client, at string, plan, prior *awsRoleModel, _ func(string) types.String, d *diag.Diagnostics) {
 			body := map[string]any{}
 			changed(body, "name", plan.Name, prior.Name)
 			changed(body, "role_arn", plan.RoleARN, prior.RoleARN)
@@ -342,7 +368,7 @@ func newAwsUserResource() resource.Resource {
 			return map[string]any{"name": m.Name.ValueString(), "role": m.Role.ValueString(), "user": m.User.ValueString()}
 		},
 		fill: fillAwsUser,
-		update: func(ctx context.Context, c *client, at string, plan, prior *awsUserModel, d *diag.Diagnostics) {
+		update: func(ctx context.Context, c *client, at string, plan, prior *awsUserModel, _ func(string) types.String, d *diag.Diagnostics) {
 			body := map[string]any{}
 			changed(body, "name", plan.Name, prior.Name)
 			changed(body, "role", plan.Role, prior.Role)
