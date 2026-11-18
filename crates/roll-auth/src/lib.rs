@@ -277,6 +277,14 @@ pub trait Sessions: Send + Sync + 'static {
         let _ = id;
         Box::pin(async { Ok(None) })
     }
+    /// Whether session `session` (of `user`) proved who it is recently: sudo mode
+    /// (docs/accounts.md). A token made from a session needs it, so a stolen cookie can't mint a
+    /// long-lived token. True by default: an implementation without sudo mode keeps tokens as
+    /// they were. Never cached.
+    fn fresh<'a>(&'a self, user: &'a str, session: &'a str) -> BoxFuture<'a, Result<bool, String>> {
+        let _ = (user, session);
+        Box::pin(async { Ok(true) })
+    }
     /// [`Sessions::person`] for callers off the request path (a product's background work checking
     /// a stored grant): blocking, never cached. `None` by default: an implementation that can't
     /// say keeps a person's grants dead there.

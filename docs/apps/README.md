@@ -1902,7 +1902,10 @@ shares (`visit.rs`):
   app's host never sees roll's session cookie (another site), so the dashboard asks
   `POST …/visit` as the person for a one-use ticket (a minute) to the page they wanted. It's
   only for a URL at one of the environment's names (its hostname, an active custom domain), and
-  only for a person's session, never a token.
+  only for a person's own roll login (`ses_…`), never a token. The ticket's URL is built from
+  the environment's own scheme and port (roll's, as its URL is), with only the path and query
+  taken from the page asked for: `to=http://<host>:<another port>/` can't send the ticket over
+  plain HTTP or to whatever else listens on that address.
 - **A session of its own.** The ticket goes back to the environment's host
   (`/__roll/visit`), which trades it for a host-only HttpOnly cookie, `roll_visit_<env>`, for 12
   hours, and sends them on. The app never sees the cookie. Tickets and sessions are kept by
@@ -1911,14 +1914,18 @@ shares (`visit.rs`):
   admin; once roll apps serves people, it's whoever may open the project (rolld's
   `AccountsVisitors`, the one place that says). A ticket is only given to them, and a session
   asks again every 5 minutes (`visitor_recheck`): an account disabled, deleted or no longer an
-  admin is turned away at its next look after that, and its session is gone. Changing the
+  admin is turned away at its next look after that, and its session is gone. The ticket and the
+  session keep the roll login that asked for them, and the recheck asks that it's still live
+  (`Visitors::session_live`: signing out of roll, or revoking one's sessions after a lost laptop,
+  ends what it opened within the same 5 minutes); a session from before logins were kept ends. Changing the
   environment's access ends every session. A token (`access.token`) still works alongside it,
   as does the bypass header for CI.
 
 `api.rs::a_signed_in_person_gets_into_a_gated_environment` follows a page load to the
 dashboard, a ticket only for a person and only to the environment's names, the ticket used
-once, the session the app never sees, the person losing the project ending it, and a new
-access ending it.
+once, the session the app never sees, the person losing the project ending it, the roll login
+ending it, the ticket's URL on the environment's own scheme and port, and a new access ending
+it.
 
 ## Private services
 
