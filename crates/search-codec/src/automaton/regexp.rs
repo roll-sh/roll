@@ -946,13 +946,12 @@ mod tests {
             // Independent cycles: each operand is small, the product is a billion states.
             "(.{1009})*&(.{1013})*&(.{1019})*",
         ] {
-            let t = std::time::Instant::now();
-            let e = compile(p, ALL, false, DEFAULT_WORK_LIMIT).unwrap_err();
+            let (e, cpu) = search_test_support::cpu_time(|| compile(p, ALL, false, DEFAULT_WORK_LIMIT).unwrap_err());
             assert!(matches!(e, RegexpError::TooComplex(_)), "{p}: {e:?}");
             assert!(e.to_string().starts_with("Determinizing automaton with "), "{e}");
             // A guard against unbounded work (minutes before the work limit), not a benchmark:
-            // a debug build on a host at load 35 took 6.2 s for the hardest of these.
-            assert!(t.elapsed().as_secs() < 30, "{p} took {:?}", t.elapsed());
+            // CPU time, which a loaded host doesn't stretch (6.2 s of wall time at load 35).
+            assert!(cpu.as_secs() < 30, "{p} took {cpu:?} of CPU");
         }
     }
 
@@ -979,16 +978,15 @@ mod tests {
 
     #[test]
     fn wide_intervals_stay_small() {
-        let t = std::time::Instant::now();
-        let d = compile("<0-2147483647>", ALL, false, DEFAULT_WORK_LIMIT).unwrap();
+        let (d, cpu) = search_test_support::cpu_time(|| compile("<0-2147483647>", ALL, false, DEFAULT_WORK_LIMIT).unwrap());
         for (s, m) in [("0", true), ("2147483647", true), ("002147483647", true), ("2147483648", false), ("x", false)] {
             assert_eq!(d.matches(s.as_bytes()), m, "{s}");
         }
-        let d = compile("<0000000001-2147483647>", ALL, false, DEFAULT_WORK_LIMIT).unwrap();
+        let (d, cpu2) = search_test_support::cpu_time(|| compile("<0000000001-2147483647>", ALL, false, DEFAULT_WORK_LIMIT).unwrap());
         for (s, m) in [("0000000001", true), ("0999999999", true), ("1999999999", true), ("2147483647", true),
                        ("0000000000", false), ("2147483648", false), ("1", false)] {
             assert_eq!(d.matches(s.as_bytes()), m, "{s}");
         }
-        assert!(t.elapsed().as_millis() < 2000);
+        assert!((cpu + cpu2).as_millis() < 2000, "{cpu:?} and {cpu2:?} of CPU");
     }
 }

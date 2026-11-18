@@ -12,8 +12,8 @@
 //! [`Meter::count_requests`] by every metering pass; each request is billed once, also when its
 //! cluster unloaded in between.
 //!
-//! Request metrics and slow log entries (`search_server::Node::take_observations`) go to the
-//! catalog's rings with the same pass ([`Meter::observe`]): nothing per cluster runs for them
+//! Request metrics, slow log entries and search analytics (`search_server::Node::take_observations`)
+//! go to the catalog's rings with the same pass ([`Meter::observe`]): nothing per cluster runs for them
 //! either, and a cluster's history stays in the catalog wherever it loads next.
 //!
 //! The resident size of a loaded cluster is measured from its engine ([`resident_bytes`]): the
@@ -235,7 +235,9 @@ impl Meter {
         let Some(c) = self.store.by_name(name).await? else { return Ok(()) };
         self.store.record_metrics(&c.id, &o.minutes).await?;
         let entries: Vec<(i64, String)> = o.slow.iter().map(|e| (e.at_ms, e.to_json().to_string())).collect();
-        self.store.record_slowlog(&c.id, &entries).await
+        self.store.record_slowlog(&c.id, &entries).await?;
+        let a = &o.analytics;
+        self.store.record_analytics(&c.id, &a.cleared, a.enabled.as_deref(), &a.hours).await
     }
 
     /// The index count a cluster had when it unloaded (consumed).
