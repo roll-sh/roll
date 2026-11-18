@@ -3972,7 +3972,8 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if verbose && pipeline.is_none() {
         return Err(EsError::illegal_argument("The 'verbose pipeline' option requires a search pipeline to be defined."));
     }
-    if let Some(mut out) = crate::remote::links::search(ctx, &req, original.as_ref()).await? {
+    // Boxed: the remote fan-out stays off the request path's stack.
+    if let Some(mut out) = Box::pin(crate::remote::links::search(ctx, &req, original.as_ref())).await? {
         return Reply::ok(render_take(&mut out, &req));
     }
     let Some(pipeline) = pipeline else {
@@ -4329,7 +4330,7 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 // Queries that need inference, per search.
                 match crate::xpack::inference::query::rewrite_request(ctx, &mut req).await {
                     // Linked remote clusters' parts run there.
-                    Ok(()) => match crate::remote::links::search(ctx, &req, body.as_ref()).await {
+                    Ok(()) => match Box::pin(crate::remote::links::search(ctx, &req, body.as_ref())).await {
                         Ok(Some(out)) => Ok(out),
                         Ok(None) => run(ctx, req.clone()),
                         Err(e) => Err(e),

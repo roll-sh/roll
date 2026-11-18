@@ -630,7 +630,7 @@ pub async fn search(ctx: &Ctx<'_>, req: &SearchRequest, body: Option<&Value>) ->
         let mut seen: Vec<Value> = Vec::new();
         hits.retain(|h| {
             let key = h.pointer(&["fields", c.field.as_str()]).and_then(Value::as_array).and_then(|a| a.first()).cloned().unwrap_or(Value::Null);
-            if seen.iter().any(|s| *s == key) {
+            if seen.contains(&key) {
                 return false;
             }
             seen.push(key);

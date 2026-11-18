@@ -209,7 +209,8 @@ impl Control {
                 if r.status != 200 || v["api_key"]["id"].as_str() != Some(key_id.as_str()) {
                     return Err(ControlError::Invalid(format!("api_key isn't a valid cross-cluster API key of cluster {}", t.name)));
                 }
-                (key_id, base64::engine::general_purpose::STANDARD.encode(format!("{key_id}:{secret}")), false)
+                let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{key_id}:{secret}"));
+                (key_id, encoded, false)
             }
             None => {
                 let access = access.unwrap_or_else(|| json!({ "search": [{ "names": ["*"] }] }));

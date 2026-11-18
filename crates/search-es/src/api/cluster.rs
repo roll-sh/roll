@@ -1189,7 +1189,7 @@ pub async fn put_settings(ctx: &Ctx<'_>) -> EsResult<Reply> {
     cluster_settings::validate_update_in(ctx.cluster.dialect, "persistent", &persistent)?;
     cluster_settings::validate_update_in(ctx.cluster.dialect, "transient", &transient)?;
     // A remote naming a roll search cluster: only one of this cluster's owner.
-    crate::remote::links::check_settings(ctx.cluster, &[&persistent, &transient]).await?;
+    Box::pin(crate::remote::links::check_settings(ctx.cluster, &[&persistent, &transient])).await?;
     // `Setting.Property.Deprecated` (warned on every update, a reset included; `ctx.warn` is
     // Elasticsearch-only).
     for k in persistent.iter().chain(transient.iter()).map(|(k, _)| k.as_str()) {
