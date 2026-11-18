@@ -542,7 +542,7 @@ pub struct Partials<'a> {
     /// row's key as such bytes.
     bidx: hashbrown::HashMap<Box<[u8]>, u32, super::fasthash::FastState>,
     bkey: Vec<u8>,
-    /// `batch_run`'s: groups by their key packed in a word (`packed`), and its scratch.
+    /// `batch_run`'s: groups by their key packed in a word (`packed_run`), and its scratch.
     pidx: hashbrown::HashMap<u64, u32, super::fasthash::FastState>,
     run: RunScratch,
 }
@@ -552,7 +552,7 @@ enum NewGroup {
     /// The one group of an aggregation without keys.
     Only,
     /// Its key as groups compare it and its own (`batch_values`), its key's bytes
-    /// (`batch_key`) and packed word (`packed`).
+    /// (`batch_key`) and packed word (`packed_run`).
     Values(Vec<Value>, Vec<Value>, Box<[u8]>, Option<u64>),
     /// Its NULLs and key words (`Layout`).
     Words(Vec<u64>),
@@ -579,7 +579,13 @@ struct RunScratch {
     newg: Vec<NewGroup>,
     /// A words spec's states after the batch, by slot.
     wnew: Vec<u64>,
+    /// Each live row's packed key (`packed_run`) and its length in bytes (`NO_PACK`: none).
+    pks: Vec<u64>,
+    pkn: Vec<u8>,
 }
+
+/// `RunScratch::pkn` of a row whose key doesn't pack.
+const NO_PACK: u8 = u8::MAX;
 
 /// A kernel's value over `row`: a column's or constant's in place, else the next of the
 /// values computed before (`computed`, at `*at`).
@@ -1174,47 +1180,76 @@ impl<'a> Partials<'a> {
         true
     }
 
-    /// Row `r`'s group key packed in a word, when it fits in 8 bytes (each key a kind
-    /// byte and its bytes, a string's length first, bpchar's trimmed: equal words, equal
-    /// keys); None otherwise.
-    #[inline]
-    fn packed(&self, plan: &super::vector::AggPlan, b: &crate::storage::cols::ColBatch, r: usize) -> Option<u64> {
+    /// Each row of `live`'s group key packed in a word into `pks` (by position), when it fits
+    /// in 8 bytes (each key a kind byte and its bytes, a string's length first, bpchar's
+    /// trimmed: equal words, equal keys; `pkn` NO_PACK: it doesn't), a key column at a time.
+    /// False: no row's key packs (a key column of another kind).
+    fn packed_run(&self, plan: &super::vector::AggPlan, b: &crate::storage::cols::ColBatch, live: &[u32], pks: &mut Vec<u64>, pkn: &mut Vec<u8>) -> bool {
         use crate::storage::cols::ColData as D;
-        let mut w = [0u8; 8];
-        let mut n = 0;
-        let mut put = |x: &[u8]| -> Option<()> {
-            w.get_mut(n..n + x.len())?.copy_from_slice(x);
-            n += x.len();
-            Some(())
-        };
-        for (c, trim) in plan.keys.iter().zip(&self.spec.trim) {
-            let col = b.cols[*c].as_ref()?;
-            if col.nulls[r] {
-                put(&[0])?;
-                continue;
-            }
-            match &col.data {
-                D::I32(v) => {
-                    put(&[2])?;
-                    put(&v[r].to_le_bytes())?
-                }
-                D::Date(v) => {
-                    put(&[4])?;
-                    put(&v[r].to_le_bytes())?
-                }
-                D::Bool(v) => put(&[7, v[r] as u8])?,
-                D::Bytes(_) => {
-                    let mut t = col.bytes(b, r);
-                    if *trim {
-                        t = crate::storage::cols::trim_spaces(t);
-                    }
-                    put(&[8, u8::try_from(t.len()).ok()?])?;
-                    put(t)?
-                }
-                _ => return None,
+        pks.clear();
+        pks.resize(live.len(), 0);
+        pkn.clear();
+        pkn.resize(live.len(), 0);
+        // (`x`'s low `len` bytes after the row's key so far; past 8 bytes: no packed key.)
+        #[inline(always)]
+        fn put(w: &mut u64, n: &mut u8, x: u64, len: u8) {
+            if *n <= 8 - len {
+                *w |= x << (8 * *n as u32);
+                *n += len;
+            } else {
+                *n = NO_PACK;
             }
         }
-        Some(u64::from_le_bytes(w))
+        for (c, trim) in plan.keys.iter().zip(&self.spec.trim) {
+            let Some(col) = b.cols[*c].as_ref() else { return false };
+            let rows = live.iter().zip(pks.iter_mut().zip(pkn.iter_mut()));
+            macro_rules! fixed {
+                ($v:expr, $kind:expr) => {
+                    for (&r, (w, n)) in rows {
+                        let r = r as usize;
+                        match col.nulls[r] {
+                            true => put(w, n, 0, 1),
+                            false => put(w, n, $kind | ($v[r] as u32 as u64) << 8, 5),
+                        }
+                    }
+                };
+            }
+            match &col.data {
+                D::I32(v) => fixed!(v, 2),
+                D::Date(v) => fixed!(v, 4),
+                D::Bool(v) => {
+                    for (&r, (w, n)) in rows {
+                        let r = r as usize;
+                        match col.nulls[r] {
+                            true => put(w, n, 0, 1),
+                            false => put(w, n, 7 | (v[r] as u64) << 8, 2),
+                        }
+                    }
+                }
+                D::Bytes(_) => {
+                    for (&r, (w, n)) in rows {
+                        let r = r as usize;
+                        if col.nulls[r] {
+                            put(w, n, 0, 1);
+                            continue;
+                        }
+                        let mut t = col.bytes(b, r);
+                        if *trim {
+                            t = crate::storage::cols::trim_spaces(t);
+                        }
+                        // (Kind, length and bytes: at most 6 of them fit.)
+                        if t.len() > 6 {
+                            *n = NO_PACK;
+                            continue;
+                        }
+                        let x = t.iter().rev().fold(0u64, |x, &c| x << 8 | c as u64);
+                        put(w, n, 8 | (t.len() as u64) << 8 | x << 16, 2 + t.len() as u8);
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
     }
 
     /// The rows `live` of the column batch `b` (each one passed the filter, none odd),
@@ -1348,13 +1383,27 @@ impl<'a> Partials<'a> {
             }
             return true;
         }
+        // (Every row's packed key first, a column at a time.)
+        let (mut pks, mut pkn) = (std::mem::take(&mut run.pks), std::mem::take(&mut run.pkn));
+        if !self.packed_run(plan, b, live, &mut pks, &mut pkn) {
+            pkn.clear();
+            pkn.resize(live.len(), NO_PACK);
+        }
+        let ok = self.run_packed(plan, b, live, base, run, &pks, &pkn);
+        (run.pks, run.pkn) = (pks, pkn);
+        ok
+    }
+
+    /// `run_groups` by each row's packed key (`packed_run`'s).
+    #[allow(clippy::too_many_arguments)]
+    fn run_packed(&mut self, plan: &super::vector::AggPlan, b: &crate::storage::cols::ColBatch, live: &[u32], base: u32, run: &mut RunScratch, pks: &[u64], pkn: &[u8]) -> bool {
         // (The batch's packed keys seen, direct-mapped: a few groups never reach the map.
         // No packed key is all ones: its first byte is a kind, at most 8.)
         let mut seen = [(u64::MAX, 0u32); 32];
         let slot = |k: u64| (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 59) as usize;
-        for &r in live {
+        for (p, &r) in live.iter().enumerate() {
             let r = r as usize;
-            let pk = self.packed(plan, b, r);
+            let pk = (pkn[p] != NO_PACK).then_some(pks[p]);
             if let Some(k) = pk {
                 let (sk, sg) = seen[slot(k)];
                 if sk == k {
@@ -1470,17 +1519,25 @@ impl<'a> Partials<'a> {
                         continue;
                     }
                     let l = lanes.arg(i);
-                    if l.nulls.is_empty() {
-                        for (&s, &v) in run.slots.iter().zip(&l.v) {
-                            acc[s as usize * na + i] += v;
-                        }
-                        (0..nslots).for_each(|s| cnt[s * na + i] = run.rows[s]);
-                    } else {
-                        for ((&s, &v), &null) in run.slots.iter().zip(&l.v).zip(&l.nulls) {
-                            let j = s as usize * na + i;
-                            acc[j] += v;
-                            cnt[j] += !null as i64;
-                        }
+                    macro_rules! sums {
+                        ($v:expr) => {
+                            if l.nulls.is_empty() {
+                                for (&s, &v) in run.slots.iter().zip($v) {
+                                    acc[s as usize * na + i] += v as i128;
+                                }
+                                (0..nslots).for_each(|s| cnt[s * na + i] = run.rows[s]);
+                            } else {
+                                for ((&s, &v), &null) in run.slots.iter().zip($v).zip(&l.nulls) {
+                                    let j = s as usize * na + i;
+                                    acc[j] += v as i128;
+                                    cnt[j] += !null as i64;
+                                }
+                            }
+                        };
+                    }
+                    match l.vals() {
+                        super::vector::LaneVals::Narrow(v) => sums!(v),
+                        super::vector::LaneVals::Wide(v) => sums!(v),
                     }
                 }
             }

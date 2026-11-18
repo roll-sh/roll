@@ -82,20 +82,9 @@ impl ColData {
         }
     }
 
-    fn clear(&mut self) {
-        match self {
-            ColData::I32(v) | ColData::Date(v) => v.clear(),
-            ColData::I64(v) => v.clear(),
-            ColData::F64(v) => v.clear(),
-            ColData::Num(v) => v.clear(),
-            ColData::Bool(v) => v.clear(),
-            ColData::Bytes(v) => v.clear(),
-            ColData::Values(v) => v.clear(),
-        }
-    }
-
-    /// `n` slots, each a default (a NULL's, an odd row's).
-    fn fill_default(&mut self, n: usize) {
+    /// `n` slots: those it had kept as they are (every row writes its own, a NULL's and an
+    /// odd row's its default: `set_default`), new ones a default.
+    fn size(&mut self, n: usize) {
         match self {
             ColData::I32(v) | ColData::Date(v) => v.resize(n, 0),
             ColData::I64(v) => v.resize(n, 0),
@@ -104,6 +93,20 @@ impl ColData {
             ColData::Bool(v) => v.resize(n, false),
             ColData::Bytes(v) => v.resize(n, (0, 0, 0)),
             ColData::Values(v) => v.resize(n, Value::Null),
+        }
+    }
+
+    /// Slot `r` back to the default (a NULL's, an odd row's).
+    #[cold]
+    fn set_default(&mut self, r: usize) {
+        match self {
+            ColData::I32(v) | ColData::Date(v) => v[r] = 0,
+            ColData::I64(v) => v[r] = 0,
+            ColData::F64(v) => v[r] = 0.0,
+            ColData::Num(v) => v[r] = (0, 0),
+            ColData::Bool(v) => v[r] = false,
+            ColData::Bytes(v) => v[r] = (0, 0, 0),
+            ColData::Values(v) => v[r] = Value::Null,
         }
     }
 }
@@ -186,8 +189,9 @@ fn row_values(bytes: &[u8]) -> Option<&[u8]> {
 
 /// A numeric's unscaled value from its stored bytes at `data[at..at + n]` (two's
 /// complement, little-endian, as `to_signed_bytes_le` wrote it; None past an i128's 16).
-/// Up to 8 bytes with 8 of the row from there are one word load, sign-extended.
-#[inline]
+/// Up to 8 bytes with 8 of the row from there are one word load, sign-extended. (Inlined
+/// into the walks: a call returned its `Option<i128>` through memory, 8% of q01.)
+#[inline(always)]
 fn num_bytes(data: &[u8], at: usize, n: usize) -> Option<i128> {
     if n == 0 {
         return Some(0);
@@ -437,11 +441,11 @@ fn walk_row(steps: &mut [Step<'_>], r: usize, bytes: &[u8], buf: Option<(u32, us
     };
     // (A NULL's tag alone; a value of another tag stops the walk.)
     macro_rules! null_or {
-        ($nulls:expr) => {{
+        ($v:expr, $nulls:expr, $d:expr) => {{
             if data.get(pos) != Some(&tag::NULL) {
                 return false;
             }
-            $nulls[r] = true;
+            ($v[r], $nulls[r]) = ($d, true);
             pos += 1;
         }};
     }
@@ -452,7 +456,7 @@ fn walk_row(steps: &mut [Step<'_>], r: usize, bytes: &[u8], buf: Option<(u32, us
                     $v[r] = $conv(<$ty>::from_le_bytes(x[1..].try_into().unwrap()));
                     pos += 1 + $n;
                 }
-                _ => null_or!($nulls),
+                _ => null_or!($v, $nulls, Default::default()),
             }
         }};
     }
@@ -509,7 +513,7 @@ fn walk_row(steps: &mut [Step<'_>], r: usize, bytes: &[u8], buf: Option<(u32, us
                     v[r] = t == tag::TRUE;
                     pos += 1;
                 }
-                _ => null_or!(nulls),
+                _ => null_or!(v, nulls, Default::default()),
             },
             Step::Num { v, nulls } => match (data.get(pos), data.get(pos + 1), data.get(pos + 2)) {
                 (Some(&tag::NUMERIC), Some(&sc), Some(&n)) if sc < 0x80 && n < 0x80 && pos + 3 + n as usize <= data.len() => {
@@ -517,7 +521,7 @@ fn walk_row(steps: &mut [Step<'_>], r: usize, bytes: &[u8], buf: Option<(u32, us
                     v[r] = (x, sc as u32);
                     pos += 3 + n as usize;
                 }
-                _ => null_or!(nulls),
+                _ => null_or!(v, nulls, Default::default()),
             },
             Step::Bytes { tag, v, nulls } => match (data.get(pos), data.get(pos + 1), buf) {
                 (Some(t), Some(&l), Some((b, at))) if t == tag && l < 0x80 && pos + 2 + l as usize <= data.len() => {
@@ -525,7 +529,7 @@ fn walk_row(steps: &mut [Step<'_>], r: usize, bytes: &[u8], buf: Option<(u32, us
                     v[r] = (b, s, s + l as u32);
                     pos += 2 + l as usize;
                 }
-                _ => null_or!(nulls),
+                _ => null_or!(v, nulls, Default::default()),
             },
         }
     }
@@ -555,14 +559,14 @@ pub fn decode_cols(
         let want = data_for(&types[c]);
         match slot {
             Some(col) if col.data.kind() == want.kind() => {
-                col.data.clear();
                 col.nulls.clear();
                 col.odd.clear();
             }
             _ => *slot = Some(Col { data: want, nulls: Vec::new(), odd: Vec::new() }),
         }
+        // (A slot kept from the batch before is written by its row: not filled first.)
         let col = slot.as_mut().unwrap();
-        col.data.fill_default(len);
+        col.data.size(len);
         col.nulls.resize(len, false);
     }
     out.len = len;
@@ -638,6 +642,7 @@ pub fn decode_cols(
                 if t == Some(tag::NULL) {
                     pos += 1;
                     col.nulls[r] = true;
+                    col.data.set_default(r);
                     continue;
                 }
                 if put_typed(col, r, own, data, &mut pos, buf) {
@@ -649,6 +654,7 @@ pub fn decode_cols(
                     skip(data, &mut pos)?;
                 }
                 col.nulls[r] = true;
+                col.data.set_default(r);
                 continue;
             }
             let v = match present {
@@ -656,6 +662,7 @@ pub fn decode_cols(
                 false => missing.get(c).cloned().unwrap_or(Value::Null),
             };
             col.nulls[r] = v.is_null();
+            col.data.set_default(r);
             col.odd.push((r as u32, v));
         }
         Ok(())
