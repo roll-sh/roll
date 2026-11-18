@@ -414,6 +414,10 @@ impl Accounts {
         if !db.has_column("scim_users", "user_name")? {
             db.add_column("scim_users", "user_name", "TEXT")?;
         }
+        // A SCIM token found leaked: where, and it no longer opens anything.
+        if !db.has_column("scim_tokens", "leaked")? {
+            db.add_column("scim_tokens", "leaked", "TEXT")?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;

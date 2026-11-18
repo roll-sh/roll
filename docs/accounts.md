@@ -312,6 +312,11 @@ over SCIM 2.0 (RFC 7643 and 7644), so someone who leaves loses roll at once.
   base_url}` once (`rlp_…`, kept as a hash; a new one replaces it, `DELETE` turns SCIM off). The
   provider uses `base_url` (`<api>/v1/accounts/scim/v2`) and sends the token as `Authorization:
   Bearer`. It's looked up on every request.
+- The token is checksummed like roll's other secrets (`rlp_`, 34 random base32 characters and 6
+  of CRC-32), so leak scanning finds it: one found in a landing or reported by GitHub's secret
+  scanning stops at once (`Accounts::revoke_leaked_scim`, registered with roll-access's
+  `Access::on_leaked`), the audit log has it, and the connection shows where it was found
+  (`scim_leaked`) until an admin makes a new token. Tokens made before checksums still work.
 - It reaches only people whose email is in the connection's verified domains, and never an
   admin (admins are managed in roll): anyone else is a 404 to it. It never changes an email.
 - A person's roll address is their primary email (`emails`), else a `userName` that is an email.
