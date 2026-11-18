@@ -6948,6 +6948,7 @@ dependencies = [
  "roll-auth",
  "roll-cluster",
  "roll-fetch",
+ "roll-keyshares",
  "roll-previews",
  "roll-secrets",
  "roll-workspace",
@@ -7047,6 +7048,17 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "roll-keyshares"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.4.3",
+ "sha2 0.10.9",
+ "thiserror",
+ "zeroize",
 ]
 
 [[package]]
