@@ -95,16 +95,19 @@ class Client:
         # Never the token.
         return f"Client(api={self.api!r}, project={self.project!r})"
 
-    def __init__(self, api: str, token: str, project: Optional[str] = None, timeout: float = 30.0, cache_ttl: float = 0.0, clock: Callable[[], float] = time.monotonic):
+    def __init__(self, api: str, token: str, project: Optional[str] = None, timeout: float = 30.0, cache_ttl: float = 0.0, clock: Callable[[], float] = time.monotonic, cache_size: int = 0):
         """``cache_ttl`` (seconds) keeps ``values`` answers that long and answers from memory
         meanwhile; after that it asks again with the digest they were read against, and an
         unchanged folder costs a 304 that reads, issues and audits nothing. A folder holding dynamic
-        credentials is never kept (they end with their lease). ``clock`` is for tests."""
+        credentials is never kept (they end with their lease). ``cache_size`` caps how many
+        folders are kept (past it, the one read longest ago goes; 0: no cap). ``clock`` is for
+        tests."""
         self.api = api.rstrip("/")
         self.token = token
         self.project = project
         self.timeout = timeout
         self.cache_ttl = cache_ttl
+        self.cache_size = cache_size
         self._clock = clock
         self._cache: Dict[str, Any] = {}
         self._lock = threading.Lock()
@@ -249,6 +252,8 @@ class Client:
             if (v.dynamic and not keep_dynamic) or v.problems:
                 self._cache.pop(url, None)
             else:
+                if url not in self._cache and 0 < self.cache_size <= len(self._cache):
+                    del self._cache[min(self._cache, key=lambda k: self._cache[k][2])]
                 self._cache[url] = (v, etag.removeprefix("W/").strip('"'), self._clock())
         return v
 

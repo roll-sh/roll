@@ -343,13 +343,17 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     `roll secrets …` and `roll run` are `crates/roll-cli/src/secrets.rs`. Runtime clients:
     `packages/secrets` (TypeScript), `sdk/go/secrets` (Go, standard library only),
     `sdk/python/roll_secrets` (Python, `cryptography` only for sealed resolves),
-    `sdk/java/secrets` (Java 17, the JDK only) and
-    `sdk/dotnet/secrets` (.NET 8, the base class library only; X25519 its own); keep their
+    `sdk/java/secrets` (Java 17, the JDK only),
+    `sdk/dotnet/secrets` (.NET 8, the base class library only; X25519 its own) and
+    `sdk/ruby/roll_secrets` (Ruby, standard library only); keep their
     surfaces the same, and the sealed box test vector from the TypeScript one opening in the others.
     The Terraform provider is `sdk/terraform-provider-roll` (`TF_ACC=1 go test ./...` drives it
     against a fake rolld).
     The GitHub Action is `sdk/github-action` (no dependencies; every value masked before anything
     is printed).
+    The AWS Lambda extension (`sdk/lambda-extension`) builds on the Go client: values on
+    127.0.0.1 only, for the function's own `AWS_SESSION_TOKEN`, logged in through STS's
+    `GetWebIdentityToken`; never a value in a log or an error.
     The Kubernetes operator (`sdk/kubernetes-operator`) builds on the Go client and talks to the
     Kubernetes API over plain HTTP; it only ever writes Secrets its RollSecret owns.
     The Secrets Store CSI Driver provider (`sdk/csi-provider`) builds on the Go client too and

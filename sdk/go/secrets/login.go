@@ -22,6 +22,12 @@ func Login(ctx context.Context, api, identity, oidcToken string) (*Client, error
 	return login(ctx, api, identity, func(context.Context) (string, error) { return oidcToken, nil })
 }
 
+// LoginFunc is Login with the OIDC token from source, asked again for each login: for a token
+// that changes (a file Kubernetes rotates, one a cloud's API mints on demand).
+func LoginFunc(ctx context.Context, api, identity string, source func(context.Context) (string, error)) (*Client, error) {
+	return login(ctx, api, identity, source)
+}
+
 func login(ctx context.Context, api, identity string, source func(context.Context) (string, error)) (*Client, error) {
 	c := &Client{API: api, login: &relogin{identity: identity, source: source}}
 	if err := c.login.renew(ctx, c); err != nil {

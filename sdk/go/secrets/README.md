@@ -25,8 +25,12 @@ otp, err = secrets.TOTPAt(v.Values["REGISTRY_TOTP"], time.Now())
 // An encryption key (docs/secrets.md, "Encryption keys"): the key stays in roll.
 cards := c.Transit("cards")
 ct, err := cards.Encrypt(ctx, []byte(cardNumber), "order:42")
-// Read per request? Keep answers 30 s, then revalidate (a 304 while unchanged).
-c.CacheTTL = 30 * time.Second
+// Read per request? Keep answers 30 s, then revalidate (a 304 while unchanged), at most
+// 100 folders.
+c.CacheTTL, c.CacheSize = 30*time.Second, 100
+
+// An OIDC token that changes (a rotated file, one a cloud mints): asked for at each login.
+c, err = secrets.LoginFunc(ctx, api, "idn_…", func(ctx context.Context) (string, error) { return mint(ctx) })
 
 err = c.Watch(ctx, "production", secrets.Watch{OnChange: func(v *secrets.Values) error {
 	return reload(v.Values)
