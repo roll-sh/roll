@@ -399,18 +399,41 @@ impl ResolvedVars {
     pub fn secret_values(&self) -> Vec<String> {
         let mut out = Vec::new();
         for (k, v) in &self.vars {
-            let credential = ["PASSWORD", "SECRET", "TOKEN", "API_KEY", "PRIVATE_KEY", "ACCESS_KEY"].iter().any(|w| k.to_ascii_uppercase().contains(w));
-            let source = self.sources.get(k).copied();
-            // What roll secrets gave, unless the service's own variable took the name since.
-            let secret = source == Some("secret") && self.from_secrets.contains(k);
-            if self.sealed.contains(k) || (secret && !self.plain_secrets.contains(k)) || (credential && source == Some("link")) {
+            if self.is_secret(k) {
                 out.push(v.clone());
             }
-            if let Some(p) = url::Url::parse(v).ok().and_then(|u| u.password().map(|p| percent_encoding::percent_decode_str(p).decode_utf8_lossy().into_owned())) {
+            // A URL's password, as it's written in the URL (percent-encoded) and as it reads.
+            if let Some(p) = url::Url::parse(v).ok().and_then(|u| u.password().map(str::to_string)) {
+                let decoded = percent_encoding::percent_decode_str(&p).decode_utf8_lossy().into_owned();
+                if decoded != p {
+                    out.push(decoded);
+                }
                 out.push(p);
             }
         }
         out
+    }
+
+    /// Whether a variable is a secret by what it is: sealed, a roll secrets value that isn't
+    /// plain, a link's credential by name, or a URL that carries a password.
+    pub fn is_secret(&self, k: &str) -> bool {
+        let credential = ["PASSWORD", "SECRET", "TOKEN", "API_KEY", "PRIVATE_KEY", "ACCESS_KEY"].iter().any(|w| k.to_ascii_uppercase().contains(w));
+        let source = self.sources.get(k).copied();
+        // What roll secrets gave, unless the service's own variable took the name since.
+        let secret = source == Some("secret") && self.from_secrets.contains(k);
+        self.sealed.contains(k) || (secret && !self.plain_secrets.contains(k)) || (credential && source == Some("link"))
+    }
+
+    /// The variables a closed environment's build may have: none that is a secret
+    /// ([`Self::is_secret`]), none that carries a URL password, and none that holds a secret
+    /// value of eight characters or more (a reference that copied one).
+    pub fn without_secrets(&self) -> Vec<(String, String)> {
+        let long: Vec<String> = self.vars.iter().filter(|(k, _)| self.is_secret(k)).map(|(_, v)| v.clone()).filter(|v| v.len() >= 8).collect();
+        self.vars
+            .iter()
+            .filter(|(k, v)| !self.is_secret(k) && url::Url::parse(v).ok().and_then(|u| u.password().map(|_| ())).is_none() && !long.iter().any(|s| v.contains(s.as_str())))
+            .cloned()
+            .collect()
     }
 }
 
@@ -1371,7 +1394,12 @@ impl Apps {
             waiting_for_ci,
             build_closed: r.egress.closed(),
             base_updated: match r.active.clone() {
-                Some(a) => self.db(move |s| s.get_state(&format!("base_moved:{a}"))).await.ok().flatten().and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default(),
+                // What the watch found for the live deployment (a newer one starts with nothing).
+                Some(a) => {
+                    let k = format!("base_moved:{}/{}", r.service, r.name);
+                    let v: Option<Value> = self.db(move |s| s.get_state(&k)).await.ok().flatten().and_then(|v| serde_json::from_str(&v).ok());
+                    v.filter(|v| v["deployment"] == a.as_str()).and_then(|v| serde_json::from_value(v["images"].clone()).ok()).unwrap_or_default()
+                }
                 None => Vec::new(),
             },
             created_at: r.created_at,

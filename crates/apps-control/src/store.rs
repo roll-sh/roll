@@ -838,6 +838,7 @@ impl Store {
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
+            c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
@@ -955,6 +956,10 @@ impl Store {
             }
             for t in ["variables", "variable_files", "error_groups", "domains", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
+            }
+            // Its schedules', challenge's and base images' state goes with it.
+            for k in [format!("%:{service}/{env}"), format!("%:{service}/{env}/%"), format!("%:{service}/{env}:%")] {
+                c.execute("DELETE FROM state WHERE key LIKE ?", [k])?;
             }
             c.execute(
                 "UPDATE deployments SET status = 'removed', finished_at = COALESCE(finished_at, ?) WHERE service = ? AND env = ?",
@@ -1894,6 +1899,11 @@ impl Store {
 
     /// An error seen: whether it's the first time the environment has had it.
     pub fn remember_error(&self, service: &str, env: &str, fingerprint: &str, name: &str, at: i64) -> Result<bool> {
+        // At most 1,000 kept an environment: past that, nothing more is new.
+        let n: i64 = self.db.query_row("SELECT COUNT(*) FROM error_groups WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
+        if n >= 1000 {
+            return Ok(false);
+        }
         Ok(self.db.execute("INSERT INTO error_groups (service, env, fingerprint, name, first_seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, env, fingerprint) DO NOTHING", params![service, env, fingerprint, name, at])? > 0)
     }
 

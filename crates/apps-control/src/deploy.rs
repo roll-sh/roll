@@ -981,14 +981,15 @@ impl Apps {
                 continue;
             }
             // Held at this split until a person says, still judged as it goes.
+            // Someone has to say: they're told (`rollout.waiting`, once a step), before it shows as
+            // waiting, so whoever sees it waiting sees the event.
+            let (sid, en, did) = (service.to_string(), tpl.spec.env.clone(), id.to_string());
+            let data = serde_json::json!({ "share": share });
+            let _ = self.db(move |s| s.add_event("rollout.waiting", &sid, &en, Some(&did), &data)).await;
             let gate = Arc::new((parking_lot::Mutex::new(None), tokio::sync::Notify::new()));
             self.rollout_waits.lock().insert(id.to_string(), gate.clone());
             self.changed(service);
             sys.line(format!("canary: held at {share}% until someone advances it, puts it all live or rolls it back"));
-            // Someone has to say: they're told (`rollout.waiting`), once a step.
-            let (sid, en, did) = (service.to_string(), tpl.spec.env.clone(), id.to_string());
-            let data = serde_json::json!({ "share": share });
-            let _ = self.db(move |s| s.add_event("rollout.waiting", &sid, &en, Some(&did), &data)).await;
             let said = loop {
                 if let Some(a) = gate.0.lock().take() {
                     break a;
@@ -1224,15 +1225,15 @@ impl Apps {
         let resolved = self.resolve_vars(svc, &env_row, &d.id).await?;
         // Its secret values never reach the build's log, whatever a step prints.
         self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
-        let secrets = resolved.secret_values();
+        let closed_vars = env_row.egress.closed().then(|| resolved.without_secrets());
         let mut build_env = resolved.vars;
         // A closed environment's build still has the default network (BuildKit builds on no
         // other but `host` and `none`), so it gets no secret value: none of what roll's logs hide
         // (sealed and roll secrets values, links' credentials, URL passwords), nor a variable that
         // holds one. Its code can't send what it never has.
-        if env_row.egress.closed() {
+        if let Some(kept) = closed_vars {
             let before = build_env.len();
-            build_env.retain(|(_, v)| !secrets.iter().any(|s| !s.is_empty() && (v == s || (s.len() >= 4 && v.contains(s.as_str())))));
+            build_env = kept;
             if build_env.len() < before {
                 log.line(format!("a closed environment builds without its secret values ({} left out; its instances get them)", before - build_env.len()));
             }
@@ -1376,10 +1377,12 @@ impl Apps {
             }
             Err(e) => return Err(e),
         };
-        // Each base's digest as the registry says it now (what the build just resolved).
+        // Each base's digest as the registry says it now (what the build just resolved): all
+        // asked at once, ten seconds for the lot.
+        let asked = futures::future::join_all(bases.iter().map(|b| async move { (b, tokio::time::timeout(std::time::Duration::from_secs(10), self.deps.runtime.remote_digest(b, None)).await) })).await;
         let mut pinned = Vec::new();
-        for b in &bases {
-            if let Ok(Ok(p)) = tokio::time::timeout(std::time::Duration::from_secs(10), self.deps.runtime.remote_digest(b, None)).await
+        for (b, r) in asked {
+            if let Ok(Ok(p)) = r
                 && let Some((_, digest)) = p.rsplit_once('@')
             {
                 pinned.push(serde_json::json!({ "image": b, "digest": digest }));
@@ -1403,8 +1406,12 @@ impl Apps {
         let mut probe = svc.clone();
         probe.run.port = run.port;
         let resolved = self.resolve_vars(&probe, env, &dep.id).await?;
-        // Its secret values never reach the environment's log, whoever prints them.
-        self.logs.redact(&format!("env:{}/{}", svc.id, env.name), &dep.id, resolved.secret_values());
+        // Its secret values never reach any of the environment's logs, whoever prints them: its
+        // output, its requests' paths, its spans and its metrics.
+        let secrets = resolved.secret_values();
+        for k in [format!("env:{}/{}", svc.id, env.name), format!("http:{}/{}", svc.id, env.name), crate::traces::key(&svc.id, &env.name), crate::traces::metric_key(&svc.id, &env.name)] {
+            self.logs.redact(&k, &dep.id, secrets.clone());
+        }
         if !resolved.unresolved.is_empty() {
             self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(format!("references that name nothing, left empty: {}", resolved.unresolved.join(", ")));
         }
@@ -2320,7 +2327,8 @@ impl Apps {
         let Ok(all_envs) = self.db(|s| s.all_environments()).await else { return };
         for svc in services.iter().filter(|s| self.owns(&s.id) && !self.capped(&s.id)) {
             // A preview environment never runs production's schedules (one per open pull request).
-            for e in all_envs.iter().filter(|e| e.service == svc.id && e.active.is_some() && !e.ephemeral) {
+            // In maintenance, nothing is called on a schedule (it would be answered roll's page).
+            for e in all_envs.iter().filter(|e| e.service == svc.id && e.active.is_some() && !e.ephemeral && e.maintenance.is_none()) {
                 // What the live deployment runs with: roll.toml's `[[app.run.schedules]]` are in
                 // its template, not in the service's settings.
                 let (run, secret) = match self.lives.lock().get(&crate::env_key(&svc.id, &e.name)).and_then(|l| l.template()) {

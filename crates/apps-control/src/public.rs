@@ -58,8 +58,7 @@ async fn otlp(apps: Arc<Apps>, req: Request) -> Response {
         return (StatusCode::NOT_FOUND, "").into_response();
     }
     let (id, env, token) = (id.clone(), env.clone(), token.clone());
-    let sid = id.clone();
-    if apps.db(move |s| s.service(&sid)).await.is_err() {
+    if !apps.otlp_token_ok(&id, &env, &token).await {
         return (StatusCode::NOT_FOUND, "").into_response();
     }
     let cluster = apps.deps.cluster.clone();
@@ -1047,8 +1046,9 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     }
     // A private environment answers only visitors with its token, before anything wakes. A
     // site's rewrite (a header only roll sets) was let in by the site, by the project's own rule.
-    let rewritten = req.headers().contains_key(VIA_SITE) || ours;
-    if !rewritten && let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
+    // A site's rewrite was let in by the site; roll's own scheduled call by roll.
+    let rewritten = req.headers().contains_key(VIA_SITE);
+    if !rewritten && !ours && let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
         // The access link's own redirect is a way in, not a refusal.
         return match turned_away.status() {
             StatusCode::UNAUTHORIZED => by("private", turned_away),
@@ -1060,7 +1060,9 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // Its routes (Vercel's rewrites to another project): the first that takes the path sends the
     // request to that service's environment of the same name, the path as it came, past the
     // target's gates as a site's rewrite is (this environment's let it in). Never again from there.
+    // Never roll's own scheduled call: its `CRON_SECRET` is this service's, not the route's.
     if !req.headers().contains_key(VIA_SITE)
+        && !ours
         && let Some(r) = gate.routes.iter().find(|r| r.takes(req.uri().path()))
     {
         let pq = req.uri().path_and_query().map_or("/", |p| p.as_str()).to_string();
@@ -1143,6 +1145,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         && live.canary().is_none()
         && !feedback.feedback
         && !rewritten
+        && !ours
         && matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
         && !req.headers().contains_key(header::AUTHORIZATION)
         && !is_upgrade(req.headers())

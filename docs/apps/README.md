@@ -1026,7 +1026,9 @@ each opens whole), `roll apps errors [--sample]`.
   marks them as they come). Drains and stored chunks keep the mark.
 - **A new one tells someone** (Sentry's and Error Reporting's new-issue alerts): each minute
   the owner reads what's new in the log, and a fingerprint the environment has never had is an
-  `error.new` event, once ever (`error_groups` keeps them, so a restart doesn't repeat one), for
+  `error.new` event, once ever (`error_groups` keeps them, so a restart doesn't repeat one; at
+  most five said an environment a minute and 1,000 kept, so an error line whose words vary can't
+  flood anyone), for
   notifications (on by default) and webhooks. It names the error's type (`ValueError`, `panic`,
   `an error line`), never its message, as `alert.log` names its pattern and never a line.
 
@@ -1194,8 +1196,8 @@ or within 90 days of it. `api.rs::a_moved_base_image_is_said_and_built_again`.
 ## Secret values in logs
 
 A secret value never reaches a log (GitHub Actions' masking, Netlify's secret scanning): every
-line written to an environment's log, a build's and a job's (the app's output, a build step's,
-OTLP log records, roll's own lines) has the environment's sealed variables, every value roll
+line written to an environment's log, a build's and a job's, and its access log, spans and
+metrics (the app's output, a build step's, OTLP records, a request's path, roll's own lines) has the environment's sealed variables, every value roll
 secrets gives it (a secret is one whatever its name or tag, but for the linked fields it says
 are plain: a host, a port, a user, a database), its links' credentials (by name: `PASSWORD`, `SECRET`, `TOKEN`, `API_KEY` …)
 and the password in any URL variable taken out as `***` before it's kept, followed, stored or
@@ -2118,9 +2120,10 @@ sets it on a preview's environments from the project's `egress` and `egress_host
 roll and nothing else, so a fork's preview can't send its branched data anywhere:
 
 - **Builds without its secret values.** A build has Docker's default network (BuildKit builds
-  on no other but `host` and `none`), so a closed environment's build gets none of what roll's
-  logs hide (sealed and roll secrets values, links' credentials, URL passwords), nor a variable
-  that holds one: a fork's build step can't send them out. Its instances still get them all.
+  on no other but `host` and `none`), so a closed environment's build gets no variable that is a
+  secret (sealed, a roll secrets value that isn't plain, a link's credential), carries a URL
+  password, or holds a secret value of eight characters or more (a reference that copied one):
+  a fork's build step can't send them out (`ResolvedVars::without_secrets`). Its instances still get them all.
   The environment says `build_closed: true`, which roll previews checks before it builds a
   fork's head under `roll`. A build that needs one (a private registry's token) needs the
   environment open.
