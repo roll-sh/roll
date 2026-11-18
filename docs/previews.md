@@ -1672,31 +1672,39 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **What a preview's services use, in review** (branch `feature/roll-previews-metrics`): CPU and
-   memory against what each runs with, `GET …/metrics` and the sheet, as Render and Railway show.
-   From `docker stats` for roll's runtime and roll apps' metrics for its instances.
-2. **Roll only on roll apps' builds** (draft #234, after apps' #222, #238, #240 and #242): a closed
+1. **In review, for the next lock turn:** #232 (a Git URL preview reported on GitHub through
+   roll's GitHub App), #246 on it (one voice per change: a repo or service on two projects'
+   canvases is reported by the project that has had it longest; the other's sheet says so), #233
+   (a page's words masked whole before they're cut) and #245 (what a preview's services use: CPU
+   and memory against what each runs with, `GET …/metrics` and the sheet, as Render and Railway
+   show).
+2. **One comment across a handover:** with #246, when the speaking project lets a Git URL
+   service go, the next one posts a second comment on the pull request, and the first says its
+   preview went. Keep the comment with the pull request, not the preview, so the next speaker
+   edits the same one (Vercel keeps one comment per pull request).
+3. **A quiet preview in the list:** #246 says on the sheet that another project reports a
+   change. Say it in the Previews tab's row and on the canvas too, so nobody waits for a
+   `roll/preview` status that comes from the other project.
+4. **Roll only on roll apps' builds** (draft #234, after apps' #222, #238, #240 and #242): a closed
    environment's build gets none of its secrets and, with #238, no way out but the egress relay.
    rolld's adapter deploys nothing to a closed environment that doesn't say `build_closed`, and
    sends `closed: true` on each deploy, so an older node refuses it. A Git URL fork's head is
    approved under Roll only again.
-3. **In review:** #232 (a Git URL preview reported on GitHub through roll's GitHub App) and #233 (a
-   page's words masked whole before they're cut).
-4. **One GitHub voice per pull request** (with the apps thread): on a Git URL service's pull
-   request, roll apps posts its own `roll/apps/<svc>/pv-…` statuses and a Deployment next to
-   previews' `roll/preview`, where Vercel shows one. Have roll apps leave a `pv-` environment's
-   GitHub reporting to previews (a flag on the environment's PUT).
-5. **One project speaks for a service:** a service on two projects' canvases (the operator's and
-   an admin's) gets a preview in each, and both post `roll/preview` and a comment. Let only the
-   project the service was made in post, and the other say so on its sheet.
-6. **Deploy a preview's roll apps services at once** (measured twice and not landed; branch
+5. **One GitHub voice per pull request** (draft #251, after apps' #249 and #234): every `pv-`
+   environment carries `report: false`, so roll apps posts no status or Deployment next to
+   previews' `roll/preview`.
+6. **Search allowlists** (after search's #243): a preview service that calls an allowlisted search
+   cluster directly needs roll's outbound addresses listed (on one node, the host or the Docker
+   bridge's gateway; roll cloud has no fixed outbound addresses yet, apps' Next). Masking goes
+   through search's console route, so it's unaffected. Say so under "Branches per product".
+7. **Deploy a preview's roll apps services at once** (measured twice and not landed; branch
    `feature/roll-previews-deploy-at-once`). With cold builds it was within the noise, and with a
    second push's cached builds one run in two was faster. Try it on an idle host, or with more
    services.
-7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-8. **Watch: pg-control's recovery to a time seconds old** (unowned).
-9. **Watch: a cold start on a Docker name conflict.**
+9. **Watch: pg-control's recovery to a time seconds old** (unowned).
+10. **Watch: a cold start on a Docker name conflict.**
 
 Landed in previews' lock turn of 2026-11-17 (main 42a3bbe1b, one combined gate with both live
 checks):
