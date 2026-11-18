@@ -470,10 +470,12 @@ mod tests {
         assert!(wildcard("esm-*", "esm-u1") && wildcard("b?", "b1") && !wildcard("b?", "b12"));
         assert!(wildcard("/b[0-9]+/", "b12") && !wildcard("/b[0-9]+/", "c1"));
         assert!(wildcard("*", "") && wildcard("a*b?c*", "axxbycz") && !wildcard("a*b?c*", "axxbc") && wildcard("**a", "ba"));
-        // Linear in the stars: a mapping can't stall a request (or the node) on a long name.
-        let started = std::time::Instant::now();
+        // Linear in the name whatever the stars: a mapping can't stall a request (or the node)
+        // on a long name. A recursive match is a polynomial of the stars' degree here.
         assert!(!wildcard("*a*a*a*a*a*a*a*b", &"a".repeat(64)));
-        assert!(started.elapsed() < std::time::Duration::from_millis(100), "{:?}", started.elapsed());
+        search_test_support::assert_linear("a seven-star wildcard", 200_000, |n| "a".repeat(n), |name| {
+            assert!(!wildcard("*a*a*a*a*a*a*a*b", &name));
+        });
     }
 
     /// The configuration API opens only to roles that name its permission: a role with every
