@@ -4,6 +4,8 @@ use super::*;
 
 /// How long a preview's metrics are kept before they're read again (ms).
 const METRICS_FOR: i64 = 10_000;
+/// How long a preview's errors are kept before they're read again (ms).
+pub(super) const ERRORS_FOR: i64 = 10_000;
 
 /// The least time between two rebuilds by one deploy hook (ms).
 pub const HOOK_EVERY: i64 = 60_000;
@@ -617,6 +619,38 @@ impl Engine {
         read.retain(|_, (at, _)| now - *at < METRICS_FOR);
         read.insert(id.to_string(), (now, m.clone()));
         Ok(m)
+    }
+
+    /// Its services' errors in the last `minutes`, grouped, newest first (on its holder, which runs
+    /// them). Titles and samples masked as its logs are: its code can print its secrets. Read at
+    /// most once per [`ERRORS_FOR`] for a span, whoever asks.
+    pub async fn errors(&self, id: &str, minutes: i64) -> Result<Vec<crate::ErrorGroup>> {
+        self.store.row(id)?;
+        let now = self.store.now_ms()?;
+        let key = (id.to_string(), minutes);
+        if let Some((at, g)) = self.errors_read.lock().get(&key)
+            && now - at < ERRORS_FOR
+        {
+            return Ok(g.clone());
+        }
+        let services = self.store.services(id)?;
+        let got = futures::future::join_all(services.iter().map(|s| self.apps.errors(id, &s.name, minutes))).await;
+        let mut groups: Vec<crate::ErrorGroup> = services
+            .into_iter()
+            .zip(got)
+            .flat_map(|(s, gs)| gs.into_iter().map(move |g| crate::ErrorGroup { service: s.name.clone(), ..g }))
+            .collect();
+        groups.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(b.count.cmp(&a.count)));
+        let texts = groups.iter().flat_map(|g| [g.title.clone(), g.sample.clone()]).collect();
+        let mut masked = self.masked(id, texts).await?.into_iter();
+        for g in &mut groups {
+            g.title = masked.next().unwrap_or_default();
+            g.sample = masked.next().unwrap_or_default();
+        }
+        let mut read = self.errors_read.lock();
+        read.retain(|_, (at, _)| now - *at < ERRORS_FOR);
+        read.insert(key, (now, groups.clone()));
+        Ok(groups)
     }
 
     pub async fn logs(&self, id: &str, service: Option<&str>, lines: usize) -> Result<(String, Vec<String>)> {

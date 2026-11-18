@@ -47,6 +47,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/logs", get(logs))
                 .route("/v1/previews/{id}/requests", get(requests))
                 .route("/v1/previews/{id}/metrics", get(metrics))
+                .route("/v1/previews/{id}/errors", get(errors))
                 .route_layer(axum::middleware::from_fn_with_state(engine.clone(), on_leader))
                 .with_state(engine.clone()),
         )
@@ -540,6 +541,19 @@ struct LogsQuery {
 async fn metrics(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
     Ok(Json(json!({ "services": e.metrics(&id).await? })))
+}
+
+#[derive(Deserialize)]
+struct ErrorsQuery {
+    minutes: Option<i64>,
+}
+
+/// Its services' errors in the last 5–1,440 minutes (60 by default), grouped, newest first
+/// (`{groups: [...]}`; 404 for no such preview).
+async fn errors(AxState(e): S, Path(id): Path<String>, Query(q): Query<ErrorsQuery>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    let minutes = q.minutes.unwrap_or(60).clamp(5, 1440);
+    Ok(Json(json!({ "groups": e.errors(&id, minutes).await? })))
 }
 
 async fn requests(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {

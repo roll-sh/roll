@@ -196,6 +196,35 @@ pub fn cache_name(repo: &str) -> String {
     format!("roll-previews-cache-{}", crate::label_part(repo, 40))
 }
 
+/// The longest line [`Runtime::timed_lines`] keeps.
+const TIMED_LINE_MAX: usize = 16 << 10;
+
+fn cut_line(l: &str) -> String {
+    let mut end = l.len().min(TIMED_LINE_MAX);
+    while !l.is_char_boundary(end) {
+        end -= 1;
+    }
+    l[..end].to_string()
+}
+
+/// `docker logs --timestamps` output (`2026-11-18T10:00:00.123456789Z text`) as `(ms, stderr,
+/// text)`; a line without a stamp takes the one before's.
+fn parse_timed(out: &str, stderr: bool) -> Vec<(i64, bool, String)> {
+    let mut last = 0;
+    out.lines()
+        .map(|l| {
+            let (ts, text) = l.split_once(' ').unwrap_or((l, ""));
+            match humantime::parse_rfc3339(ts) {
+                Ok(t) => {
+                    last = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+                    (last, stderr, cut_line(text))
+                }
+                Err(_) => (last, stderr, cut_line(l)),
+            }
+        })
+        .collect()
+}
+
 /// The container of a service: every one roll previews makes starts with `roll-previews-`.
 pub fn container_name(host: &str) -> String {
     format!("roll-previews-{host}")
@@ -1186,6 +1215,28 @@ impl Apps for Runtime {
 }
 
 impl Runtime {
+    /// A service's output over the last `minutes` as `(ms, from stderr, text)`, oldest first, at
+    /// most its last `lines` (each cut at 16 KiB): what its errors are read from. Docker stamps
+    /// each line; a backend that can't gives its tail, every line stamped now.
+    pub async fn timed_lines(&self, preview: &str, service: &str, minutes: i64, lines: usize) -> Vec<(i64, bool, String)> {
+        let Ok(Some(host)) = self.store.services(preview).map(|v| v.into_iter().find(|s| s.name == service).map(|s| s.host)) else { return Vec::new() };
+        let name = container_name(&host);
+        if self.iso.name() != "docker" {
+            let now = self.store.now_ms().unwrap_or(0);
+            return self.iso.logs_tail(&name, lines).await.lines().map(|l| (now, false, cut_line(l))).collect();
+        }
+        let (since, tail) = (format!("{minutes}m"), lines.to_string());
+        let args = ["logs", "--timestamps", "--since", &since, "--tail", &tail, &name];
+        let Ok(out) = tokio::process::Command::new("docker").args(args).stdin(std::process::Stdio::null()).output().await else { return Vec::new() };
+        let mut all = parse_timed(&String::from_utf8_lossy(&out.stdout), false);
+        all.extend(parse_timed(&String::from_utf8_lossy(&out.stderr), true));
+        // Stable: each stream's lines stay in their order.
+        all.sort_by_key(|l| l.0);
+        let skip = all.len().saturating_sub(lines);
+        all.drain(..skip);
+        all
+    }
+
     /// A screenshot run in container `name`'s own network (its page at `127.0.0.1:<port>`, so the
     /// page's code reaches only what the service does): this runtime's containers, and roll
     /// apps' instances (rolld's `RollApps`, through roll apps' `reachable`). The container must

@@ -33,7 +33,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Kind::Python => "python",
             Kind::Java => "java",
@@ -255,6 +255,43 @@ pub fn name_of(o: &Occurrence) -> String {
     if name.is_empty() { "an error".into() } else { name }
 }
 
+/// The occurrences of one error: how many, first and last seen (ms), on which instances, and the
+/// newest one whole (its title the group's).
+#[derive(Debug)]
+pub struct Group {
+    pub fingerprint: String,
+    pub kind: Kind,
+    pub title: String,
+    pub count: usize,
+    pub first: i64,
+    pub last: i64,
+    pub instances: BTreeSet<String>,
+    pub sample: String,
+}
+
+/// The errors in some lines (oldest first), grouped by fingerprint: the most frequent first, at
+/// most 50.
+pub fn groups(lines: &[LogLine]) -> Vec<Group> {
+    let mut groups: HashMap<String, Group> = HashMap::new();
+    for o in occurrences(lines) {
+        let g = groups.entry(o.fingerprint.clone()).or_insert_with(|| Group { fingerprint: o.fingerprint.clone(), kind: o.kind, title: o.title.clone(), count: 0, first: o.at, last: o.at, instances: BTreeSet::new(), sample: String::new() });
+        g.count += 1;
+        g.first = g.first.min(o.at);
+        if o.at >= g.last {
+            g.last = o.at;
+            g.sample = o.text;
+            g.title = o.title;
+        }
+        if let Some(i) = o.instance {
+            g.instances.insert(i);
+        }
+    }
+    let mut list: Vec<Group> = groups.into_values().collect();
+    list.sort_by(|a, b| b.count.cmp(&a.count).then(b.last.cmp(&a.last)));
+    list.truncate(MAX_GROUPS);
+    list
+}
+
 impl Apps {
     /// New errors in an environment's log since it was last looked at (the alerts' pass, each
     /// minute on the owner): a fingerprint it has never had is an `error.new` event, once ever
@@ -303,36 +340,9 @@ impl Apps {
         // Oldest first, as a trace was written.
         let (lines, cut) = self.logs.read(&format!("env:{service}/{env}"), |l| matches!(l.stream, Stream::Stdout | Stream::Stderr), Some(since), None, MAX_LINES).await;
         let scanned = lines.len();
-        struct Group {
-            kind: Kind,
-            title: String,
-            count: usize,
-            first: i64,
-            last: i64,
-            instances: BTreeSet<String>,
-            sample: String,
-        }
-        let mut groups: HashMap<String, Group> = HashMap::new();
-        for o in occurrences(&lines) {
-            let g = groups.entry(o.fingerprint.clone()).or_insert_with(|| Group { kind: o.kind, title: o.title.clone(), count: 0, first: o.at, last: o.at, instances: BTreeSet::new(), sample: String::new() });
-            g.count += 1;
-            g.first = g.first.min(o.at);
-            // The newest one is the sample, and its title the group's.
-            if o.at >= g.last {
-                g.last = o.at;
-                g.sample = o.text;
-                g.title = o.title;
-            }
-            if let Some(i) = o.instance {
-                g.instances.insert(i);
-            }
-        }
-        let mut list: Vec<(String, Group)> = groups.into_iter().collect();
-        list.sort_by(|a, b| b.1.count.cmp(&a.1.count).then(b.1.last.cmp(&a.1.last)));
-        list.truncate(MAX_GROUPS);
-        let groups: Vec<Value> = list
+        let groups: Vec<Value> = groups(&lines)
             .into_iter()
-            .map(|(f, g)| json!({ "fingerprint": f, "kind": g.kind.name(), "title": g.title, "count": g.count, "first_seen": g.first, "last_seen": g.last, "instances": g.instances.len(), "sample": g.sample }))
+            .map(|g| json!({ "fingerprint": g.fingerprint, "kind": g.kind.name(), "title": g.title, "count": g.count, "first_seen": g.first, "last_seen": g.last, "instances": g.instances.len(), "sample": g.sample }))
             .collect();
         Ok(json!({ "minutes": minutes, "groups": groups, "scanned": scanned, "cut": cut || scanned >= MAX_LINES }))
     }

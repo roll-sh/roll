@@ -558,6 +558,23 @@ pub struct ServiceMetrics {
     pub memory_mb: i64,
 }
 
+/// One error in a preview's service's output, grouped (roll apps' Errors, Sentry's issues): a
+/// stack trace joined from its lines, or an error line, by its fingerprint (its type and first
+/// frames, with what varies taken out). How many, first and last seen (ms), and the newest one
+/// whole. Title and sample are masked as its logs are.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ErrorGroup {
+    #[serde(default)]
+    pub service: String,
+    pub fingerprint: String,
+    pub kind: String,
+    pub title: String,
+    pub count: u64,
+    pub first_seen: i64,
+    pub last_seen: i64,
+    pub sample: String,
+}
+
 /// `docker stats --no-stream --format '{{.CPUPerc}}|{{.MemUsage}}'` (`1.23%|84.2MiB / 256MiB`):
 /// cores and resident bytes.
 pub fn parse_docker_stats(line: &str) -> Option<(f64, u64)> {

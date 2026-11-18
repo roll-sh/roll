@@ -1,7 +1,7 @@
 import { ExternalLink, GitBranch, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { counts, matches, SHOW_LABEL, type PreviewShow } from "@/lib/preview-filter";
-import { checkSummary, openUrl, previewsApi, screenshotUrl, type Preview, type PreviewSettings, type PreviewUsage } from "@/lib/previews-api";
+import { checkSummary, openUrl, previewsApi, screenshotUrl, type ErrorGroup, type Preview, type PreviewSettings, type PreviewUsage } from "@/lib/previews-api";
 import type { WorkspaceProject } from "@/lib/workspace-api";
 import { resourceKey, type ResourceView } from "@/lib/workspace-resources";
 import { Inspector } from "./inspector";
@@ -284,6 +284,33 @@ function NewAgainstMain({ preview: p }: { preview: Preview }) {
   );
 }
 
+/** Its errors in the last hour, read once per row while it runs or sleeps (the sheet's Errors tab lists them). */
+function RecentErrors({ preview: p }: { preview: Preview }) {
+  const [groups, setGroups] = useState<ErrorGroup[]>([]);
+  const up = p.desired !== "deleted" && (p.state === "ready" || p.state === "sleeping");
+  useEffect(() => {
+    if (!up) {
+      setGroups([]);
+      return;
+    }
+    let live = true;
+    previewsApi.errors(p.id, 60).then(
+      (r) => live && setGroups(r.groups),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [p.id, up]);
+  if (!groups.length) return null;
+  const times = groups.reduce((n, g) => n + g.count, 0);
+  return (
+    <span className="shrink-0 rounded border border-danger/40 px-1 font-mono text-[10.5px] text-danger tabular-nums" title={`${groups.length} ${groups.length === 1 ? "error" : "different errors"}, ${times} ${times === 1 ? "time" : "times"} in the last hour: open it for which`}>
+      {groups.length} {groups.length === 1 ? "error" : "errors"}
+    </span>
+  );
+}
+
 function Row({ preview: p, open, onOpen }: { preview: Preview; open: boolean; onOpen: () => void }) {
   const what = previewOf(p);
   return (
@@ -300,6 +327,7 @@ function Row({ preview: p, open, onOpen }: { preview: Preview; open: boolean; on
             </span>
           )}
           <NewAgainstMain preview={p} />
+          <RecentErrors preview={p} />
           {p.reported_by && (
             <span className="shrink-0 rounded border border-line-2 px-1 text-[10.5px] text-muted" title={`${p.reported_by} reports this pull request (its roll/preview status and comment); this preview says nothing there`}>
               quiet

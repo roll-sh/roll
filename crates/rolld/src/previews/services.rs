@@ -320,6 +320,13 @@ impl roll_previews::ports::Apps for RollApps {
         (mem > 0).then_some((cpu, mem / instances))
     }
 
+    /// The `pv-` environment's errors, as roll apps groups them.
+    async fn errors(&self, preview: &str, service: &str, minutes: i64) -> Vec<roll_previews::ErrorGroup> {
+        let Ok(Some((id, env))) = self.find(preview, service).await else { return Vec::new() };
+        let Ok(v) = self.api.get(&format!("{}/errors?minutes={minutes}", Self::env_path(&id, &env))).await else { return Vec::new() };
+        serde_json::from_value(v["groups"].clone()).unwrap_or_default()
+    }
+
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String> {
         let Ok(Some((id, env))) = self.find(preview, service).await else { return Vec::new() };
         let v = self.api.get(&format!("{}/logs?tail={lines}", Self::env_path(&id, &env))).await.unwrap_or(Value::Null);
@@ -626,6 +633,15 @@ impl roll_previews::ports::Apps for Services {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.metrics(preview, service).await } else { self.runtime.metrics(preview, service).await }
     }
 
+    /// roll apps groups its own; a `roll.toml` service's are grouped here, from its last
+    /// [`ERROR_LINES`] lines in the span.
+    async fn errors(&self, preview: &str, service: &str, minutes: i64) -> Vec<roll_previews::ErrorGroup> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) {
+            return self.apps.errors(preview, service, minutes).await;
+        }
+        group_errors(&self.runtime.timed_lines(preview, service, minutes, ERROR_LINES).await)
+    }
+
     async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.follow(preview, service, lines).await }
     }
@@ -706,6 +722,23 @@ fn already(last: Option<&(String, String)>, key: &str, env: &Value) -> Already {
     }
 }
 
+/// The most lines of a runtime service's output its errors are read from.
+const ERROR_LINES: usize = 2_000;
+
+/// A runtime service's lines (`(ms, from stderr, text)`, oldest first) grouped as roll apps groups
+/// an environment's: traces joined per stream, then by fingerprint.
+fn group_errors(lines: &[(i64, bool, String)]) -> Vec<roll_previews::ErrorGroup> {
+    use apps_control::logs::{LogLine, Stream, level_of};
+    let lines: Vec<LogLine> = lines
+        .iter()
+        .map(|(t, stderr, text)| LogLine { t: *t, stream: if *stderr { Stream::Stderr } else { Stream::Stdout }, instance: None, deployment: None, level: level_of(text), text: text.clone(), trace: None })
+        .collect();
+    apps_control::errors::groups(&lines)
+        .into_iter()
+        .map(|g| roll_previews::ErrorGroup { service: String::new(), fingerprint: g.fingerprint, kind: g.kind.name().into(), title: g.title, count: g.count as u64, first_seen: g.first, last_seen: g.last, sample: g.sample })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     /// Every variable of a roll apps link to a branched resource comes from the branch, under
@@ -733,6 +766,29 @@ mod tests {
     }
 
     use super::*;
+
+    /// A `roll.toml` service's output is grouped from its stamped lines: a trace on stderr is one
+    /// error however stdout's lines fall between, and the same error again is counted, not listed.
+    #[test]
+    fn a_runtime_services_errors_are_grouped_from_its_stamped_lines() {
+        let trace = |t: i64, line: u32| {
+            vec![
+                (t, true, "Traceback (most recent call last):".to_string()),
+                (t, false, "GET / 200".to_string()),
+                (t, true, format!("  File \"/app/main.py\", line {line}, in handler")),
+                (t, true, "ZeroDivisionError: division by zero".to_string()),
+            ]
+        };
+        let mut lines = trace(1_000, 10);
+        lines.push((1_500, false, "ERROR payment 42 declined".into()));
+        lines.extend(trace(2_000, 11));
+        let g = group_errors(&lines);
+        assert_eq!(g.len(), 2, "{g:#?}");
+        assert_eq!((g[0].kind.as_str(), g[0].count, g[0].first_seen, g[0].last_seen), ("python", 2, 1_000, 2_000));
+        assert_eq!(g[0].title, "ZeroDivisionError: division by zero");
+        assert_eq!(g[0].sample.lines().count(), 3, "stdout's line isn't in it: {}", g[0].sample);
+        assert_eq!((g[1].kind.as_str(), g[1].count), ("line", 1));
+    }
 
     /// A poll while previews' own deploy is going waits on it, once it's live it's done, and only
     /// a different set of variables (or a deployment that replaced it) starts another: one
