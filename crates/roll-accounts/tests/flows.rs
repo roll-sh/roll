@@ -601,6 +601,12 @@ async fn sso_signs_people_in_by_their_domain() {
     assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/sso/{id}"), json!({ "enforce": true })).await.status, StatusCode::OK);
     assert_eq!(env.call(&mut ada, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED, "the email-code session ended");
     assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK, "the SSO session stays");
+    // Her company's sign-in decides who she is: she can't move her address off the domain or
+    // delete her account (her admin removes her).
+    // (The session answer carries the CSRF token, as the dashboard reads it after a redirect.)
+    let ada_handle = env.call(&mut b, Method::GET, "/v1/accounts/session", None).await.json["user"]["handle"].as_str().unwrap().to_string();
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/email", Some(json!({ "email": "ada@elsewhere.test" }))).await.json["code"], "sso_required");
+    assert_eq!(env.call(&mut b, Method::DELETE, "/v1/accounts/me", Some(json!({ "confirm": ada_handle }))).await.json["code"], "sso_required");
     for who in ["ada@acme.test", "nobody@acme.test"] {
         let a = env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/start", Some(json!({ "email": who }))).await;
         assert_eq!((a.status, a.json["code"].as_str()), (StatusCode::FORBIDDEN, Some("sso_required")), "{}", a.json);
@@ -662,7 +668,10 @@ async fn scim_provisions_and_deactivates_people() {
     // Carol signs in; deactivated by the provider (Entra's string), her session ends at once.
     let mut b = Browser::default();
     env.email_sign_in(&mut b, "carol@acme.test", None).await;
-    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
+    let carol_handle = env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.json["handle"].as_str().unwrap().to_string();
+    // The provider manages her: she can't move her account to another address or delete it.
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/email", Some(json!({ "email": "carol@elsewhere.test" }))).await.json["code"], "managed");
+    assert_eq!(env.call(&mut b, Method::DELETE, "/v1/accounts/me", Some(json!({ "confirm": carol_handle }))).await.json["code"], "managed");
     let off = scim(Method::PATCH, format!("/Users/{carol_id}"), Some(json!({ "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{ "op": "Replace", "path": "active", "value": "False" }] })), token.clone()).await;
     assert_eq!((off.status, off.json["active"].as_bool()), (StatusCode::OK, Some(false)), "{}", off.json);
     assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED, "her session ended");
