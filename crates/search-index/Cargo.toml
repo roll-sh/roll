@@ -19,5 +19,6 @@ thiserror.workspace = true
 unicode-segmentation.workspace = true
 
 [dev-dependencies]
+search-test-support.workspace = true
 rand.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
