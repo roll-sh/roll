@@ -149,6 +149,21 @@ impl LinkProvider for Provider {
     }
 }
 
+/// 409 while a key links to registration `id` of `kind`, or a credential it issued still waits out
+/// its grace period (it's revoked through the registration).
+pub(crate) fn in_use(c: &code_sql::Conn<'_>, project: &str, kind: &str, id: &str, name: &str) -> Result<()> {
+    let (kind_like, ref_like) = (format!("%\"kind\":\"{kind}\"%"), format!("%\"ref\":\"{id}\"%"));
+    let linked: Vec<String> = c.query("SELECT key FROM secrets WHERE project_id = ? AND link LIKE ? AND link LIKE ? ORDER BY key LIMIT 5", params![project, kind_like, ref_like], |r| r.get(0))?;
+    if !linked.is_empty() {
+        return Err(Error::Conflict("in_use", format!("{name} still issues {}: unlink them first", linked.join(", "))));
+    }
+    let waiting: i64 = c.query_row("SELECT COUNT(*) FROM leases WHERE project_id = ? AND revoked_at IS NULL AND link LIKE ? AND link LIKE ?", params![project, kind_like, ref_like], |r| r.get(0))?;
+    if waiting > 0 {
+        return Err(Error::Conflict("in_use", format!("{name} has {waiting} retired credential(s) still to revoke after their grace period: delete it once they're revoked")));
+    }
+    Ok(())
+}
+
 impl Secrets {
     pub fn rotators(&self, project: &str, caller: &Caller) -> Result<Vec<Rotator>> {
         caller.need(Action::Read, &Scope::whole(project))?;
@@ -265,23 +280,7 @@ impl Secrets {
         let now = self.db.now_ms()?;
         self.db.write(|c| {
             let name: String = c.query_row("SELECT name FROM rotators WHERE id = ? AND project_id = ?", [id, project], |r| r.get(0)).optional()?.ok_or_else(|| Error::NotFound(format!("no rotator {id}")))?;
-            let linked: Vec<String> = c.query(
-                "SELECT key FROM secrets WHERE project_id = ? AND link LIKE ? AND link LIKE ? ORDER BY key LIMIT 5",
-                params![project, format!("%\"kind\":\"{KIND}\"%"), format!("%\"ref\":\"{id}\"%")],
-                |r| r.get(0),
-            )?;
-            if !linked.is_empty() {
-                return Err(Error::Conflict("in_use", format!("{name} still issues {}: unlink them first", linked.join(", "))));
-            }
-            // A credential it issued that's still in its grace period is revoked through it.
-            let waiting: i64 = c.query_row(
-                "SELECT COUNT(*) FROM leases WHERE project_id = ? AND revoked_at IS NULL AND link LIKE ? AND link LIKE ?",
-                params![project, format!("%\"kind\":\"{KIND}\"%"), format!("%\"ref\":\"{id}\"%")],
-                |r| r.get(0),
-            )?;
-            if waiting > 0 {
-                return Err(Error::Conflict("in_use", format!("{name} has {waiting} retired credential(s) still to revoke after their grace period: delete it once they're revoked")));
-            }
+            in_use(c, project, KIND, id, &name)?;
             c.execute("DELETE FROM rotators WHERE id = ?", [id])?;
             audit::record(c, project, caller, "rotator.delete", None, None, &[], &format!("deleted rotator {name}"), now)
         })
