@@ -1106,7 +1106,7 @@ Neither has an expiry for a role: ending the lease gives the role a password nob
 `DROP ROLE IF EXISTS`. Cassandra caches each role's credentials on each node for up to
 `credentials_validity` (2 s by default), so a login with an ended lease's password can still work
 for that long, however the lease ends; set `credentials_validity` lower on the servers to shorten
-it (ScyllaDB has no such window). Registering checks that
+it (ScyllaDB took a new password at once in roll's live checks). Registering checks that
 both roles exist and can log in (`LIST ROLES OF`) and that the group exists; a server that lets
 anyone in (`AllowAllAuthenticator`) is refused. The admin needs a superuser, or `CREATE`, `ALTER`,
 `DROP`, `AUTHORIZE` and `DESCRIBE` on `ALL ROLES` and `SELECT` on `system_schema` for the keyspace check; the server needs `PasswordAuthenticator`,
