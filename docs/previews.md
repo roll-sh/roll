@@ -1689,25 +1689,22 @@ Ranked by what a person notices first. Done so far:
    and #259 (a preview made by hand is only of a repo the project stands for, and never another
    project's: both on main, found by an independent review) and #266 (`skip_authors`: no preview
    for a dependency bot's pull request unless asked, Netlify's and Vercel's ignored builds) and
-   #272 (deploy hooks: a secret URL a headless CMS calls to rebuild a branch's previews), #234
+   #272 (deploy hooks: a secret URL a headless CMS calls to rebuild a branch's previews), #280
+   (a preview's services deploy at once: a cached push live again in 4.2 s against 5.8 s), #234
    (Roll only on roll apps' builds: a closed build has no secrets and only a proxy to public
    hosts; `closed: true` on each deploy) and #251 on it (`report: false` on every `pv-`
    environment, so a pull request hears only previews' `roll/preview`). #234 and #251 passed
    `scripts/preview-apps.sh` on main with apps' socket-path fix (#271).
-2. **A project's own preview domain, apps' half** (previews' half is #275): roll apps' project
+2. **A project's own preview domain, apps' half** (previews' half is #275; apps' is #278, with a `PreviewRouter` hook previews wires in rolld once it's on main, plus a live check): roll apps' project
    preview domain (`POST/GET/DELETE /v1/apps/projects/{project}/preview-domain`, a verified
    wildcard) and `preview_host` routing in `host_target`, third in apps' queue. Then a live
    check in `scripts/preview-apps.sh`. TLS waits on wildcard certificates over DNS-01 on the edge.
 3. **Bots on Git URL services:** roll apps' `GitPull` carries no author, so `skip_authors` doesn't
    reach a Git URL service's pull requests (with the apps thread).
-4. **Deploy a preview's roll apps services at once** (measured twice and not landed; branch
-   `feature/roll-previews-deploy-at-once`). With cold builds it was within the noise, and with a
-   second push's cached builds one run in two was faster. Try it on an idle host, or with more
-   services.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
-7. **Watch: a cold start on a Docker name conflict.**
+5. **Watch: pg-control's recovery to a time seconds old** (unowned).
+6. **Watch: a cold start on a Docker name conflict.**
 
 Landed in previews' lock turn of 2026-11-17 (main 42a3bbe1b, one combined gate with both live
 checks):
