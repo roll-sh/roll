@@ -53,6 +53,9 @@ impl Row {
 }
 
 const ROW_COLUMNS: &str = "id, env_id, path, key, owner, version, value, fp, comment, tags, link, updated_at, updated_by, refs, project_id, expires_at, weak";
+/// [`ROW_COLUMNS`] as a digest reads them: what goes into its hash (key, id, version, link, the
+/// references), and the value only of a row from before references were kept. The rest are blank.
+const DIGEST_COLUMNS: &str = "id, env_id, path, key, owner, version, CASE WHEN refs IS NULL THEN value END, '', '', '[]', link, updated_at, '', refs, project_id, expires_at, NULL";
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     Ok(Row {
@@ -247,14 +250,15 @@ type Through<'a> = &'a dyn Fn(&str, &str) -> bool;
 
 /// The effective entries of `env`/`path` for `principal` (`None`: shared values only). Imports
 /// and the base count only where `through(environment, path)` allows: a caller never reads an
-/// environment through another that it couldn't read itself.
+/// environment through another that it couldn't read itself. `cols`: [`ROW_COLUMNS`], or
+/// [`DIGEST_COLUMNS`] for a digest.
 #[allow(clippy::too_many_arguments)]
-fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, untrusted: bool, depth: usize, seen: &mut HashSet<(String, String)>) -> Result<Vec<Entry>> {
+fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, through: Through<'_>, untrusted: bool, cols: &str, depth: usize, seen: &mut HashSet<(String, String)>) -> Result<Vec<Entry>> {
     if depth > DEPTH || !seen.insert((env.id.clone(), path.to_string())) {
         return Ok(vec![]);
     }
     let owner = principal.unwrap_or("");
-    let rows = c.query(&format!("SELECT {ROW_COLUMNS} FROM secrets WHERE env_id = ? AND path = ? AND (owner = '' OR owner = ?) ORDER BY key, owner"), [&env.id, path, owner], row)?;
+    let rows = c.query(&format!("SELECT {cols} FROM secrets WHERE env_id = ? AND path = ? AND (owner = '' OR owner = ?) ORDER BY key, owner"), [&env.id, path, owner], row)?;
     let mut out: Vec<Entry> = vec![];
     for r in rows {
         if !r.owner.is_empty() {
@@ -275,7 +279,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
                 if !through(&from.slug, &imp.path) {
                     continue;
                 }
-                view_in(c, &from, &imp.path, principal, through, untrusted, depth + 1, seen)?
+                view_in(c, &from, &imp.path, principal, through, untrusted, cols, depth + 1, seen)?
             }
             // Another project's folder, while it's shared with this one: its own stored values
             // (no personal ones, nothing it imports, no reference or live link, which would
@@ -286,7 +290,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
                 if (untrusted && from.protected) || !crate::exports::exported(c, &from.id, &imp.path, &env.project_id)? {
                     continue;
                 }
-                c.query(&format!("SELECT {ROW_COLUMNS} FROM secrets WHERE env_id = ? AND path = ? AND owner = '' ORDER BY key"), [&from.id, &imp.path], row)?
+                c.query(&format!("SELECT {cols} FROM secrets WHERE env_id = ? AND path = ? AND owner = '' ORDER BY key"), [&from.id, &imp.path], row)?
                     .into_iter()
                     .filter(|r| r.refs.as_ref().is_some_and(|x| x.is_empty()) && r.link.as_ref().is_none_or(|l| l.mode == Mode::Managed))
                     .map(|r| Entry { row: r, env: from.slug.clone(), source: Source::Own, overridden: false })
@@ -304,7 +308,7 @@ fn view_in(c: &Conn<'_>, env: &EnvRow, path: &str, principal: Option<&str>, thro
     }
     if let Some(base) = &env.base_id {
         let base = envs::by_id(c, base)?;
-        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, untrusted, depth + 1, seen)? } else { vec![] };
+        let inherited = if through(&base.slug, path) { view_in(c, &base, path, principal, through, untrusted, cols, depth + 1, seen)? } else { vec![] };
         for mut e in inherited {
             if have.insert(e.row.key.clone()) {
                 if e.source == Source::Own {
@@ -333,6 +337,81 @@ const LIVE_FP_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 /// watches, syncs and caches poll it.
 #[derive(Default)]
 pub(crate) struct LiveFps(std::sync::Mutex<HashMap<String, (Option<std::time::Instant>, String)>>);
+
+/// A folder's digest as computed, with what it depended on beyond [`digest_state`].
+pub(crate) struct Digested {
+    digest: String,
+    unvouched: Unvouched,
+    /// Every permission asked of the caller (action, environment, folder), with its answer.
+    asked: BTreeMap<(Action, String, String), bool>,
+    /// Every live link stamped, with its generation and its value's fingerprint then.
+    live: Vec<(Link, i64, String)>,
+    /// Whether it may be reused: nothing it read failed.
+    keep: bool,
+}
+
+/// By project, environment, folder, principal and whether the caller is untrusted.
+type DigestKey = (String, String, String, String, bool);
+
+/// Digests as last computed on this node, each with the [`digest_state`] it was computed from:
+/// what turns a poll of 9,900 keys that finds nothing changed into one read. Only ever reused
+/// while the database says the same (every node's writes move it at once) and `still` holds, so
+/// no node's memory decides whether a folder changed.
+#[derive(Default)]
+pub(crate) struct Digests(std::sync::Mutex<HashMap<DigestKey, (String, std::sync::Arc<Digested>)>>);
+
+impl Digests {
+    fn get(&self, key: &DigestKey, state: &str) -> Option<std::sync::Arc<Digested>> {
+        let m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        m.get(key).filter(|(s, _)| s == state).map(|(_, d)| d.clone())
+    }
+
+    fn put(&self, key: DigestKey, state: String, d: Digested) {
+        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if m.len() >= 10_000 && !m.contains_key(&key) {
+            m.clear();
+        }
+        m.insert(key, (state, std::sync::Arc::new(d)));
+    }
+}
+
+/// What every digest of `project`'s folders is computed from in the database, as one hash: its
+/// change number (every write of a stored value takes one: `write::apply`), its environments, their
+/// imports, its required keys, and for each folder another project shares into it, that project's
+/// change number and whether it still shares it.
+fn digest_state(c: &Conn<'_>, project: &str) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let seq = |p: &str| c.query_row("SELECT seq FROM projects WHERE project_id = ?", [p], |r| r.get::<_, i64>(0)).optional();
+    let mut h = Sha256::new();
+    h.update(format!("{:?}\n", seq(project)?));
+    for e in envs::all(c, project)? {
+        h.update(format!("{:?}\n", (e.id, e.slug, e.kind, e.base_id, e.protected, e.trusted, e.branches)));
+    }
+    // Each import as (the project it's from, its environment and folder, the whole row).
+    let imports = c.query(
+        "SELECT i.env_id, i.path, i.position, i.from_env_id, i.from_path, f.project_id, f.slug, f.protected FROM imports i
+         JOIN environments e ON e.id = i.env_id LEFT JOIN environments f ON f.id = i.from_env_id WHERE e.project_id = ? ORDER BY i.env_id, i.path, i.position",
+        [project],
+        |r| {
+            let (from, at, of): (String, String, Option<String>) = (r.get(3)?, r.get(4)?, r.get(5)?);
+            let row = format!("{:?}", (r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, &from, &at, &of, r.get::<_, Option<String>>(6)?, r.get::<_, Option<i64>>(7)?));
+            Ok((of, from, at, row))
+        },
+    )?;
+    for (of, from, at, row) in imports {
+        if let Some(other) = of.as_deref().filter(|p| *p != project) {
+            h.update(format!("{:?}\0{}\n", seq(other)?, crate::exports::exported(c, &from, &at, project)?));
+        }
+        h.update(format!("{row}\n"));
+    }
+    h.update(format!("{:?}\n", crate::required::of(c, project)?));
+    Ok(h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// How many times roll rotated a live link's resource (`source_changed`).
+fn generation(c: &Conn<'_>, l: &Link) -> Result<i64> {
+    Ok(c.query_row("SELECT generation FROM source_generations WHERE kind = ? AND ref = ?", [&l.kind, &l.r#ref], |r| r.get(0)).optional()?.unwrap_or(0))
+}
 
 impl Secrets {
     /// A product changed `kind ref`'s credential itself (a password reset, a restore): every folder
@@ -403,7 +482,7 @@ impl Secrets {
         let through = |e: &str, p: &str| caller.allows(action, &Scope::at(project, e, p));
         self.db.read(|c| {
             let env = envs::by_slug(c, project, slug)?;
-            view_in(c, &env, path, principal, &through, caller.grants.untrusted(), 0, &mut HashSet::new())
+            view_in(c, &env, path, principal, &through, caller.grants.untrusted(), ROW_COLUMNS, 0, &mut HashSet::new())
         })
     }
 
@@ -636,75 +715,162 @@ impl Secrets {
     /// doesn't move when its lease ends). A live link counts its value's fingerprint as its product answers (at most [`LIVE_FP_TTL`] old), so the digest moves
     /// however the credential changed: roll rotating it, a password reset through the product, SQL.
     pub(crate) fn digest_of(&self, project: &str, slug: &str, path: &str, caller: &Caller) -> Result<(String, Unvouched)> {
-        use sha2::{Digest, Sha256};
         let path = names::path(path)?;
         caller.need(Action::Read, &Scope::at(project, slug, &path))?;
         // As the values are read: an untrusted ephemeral environment's digest leaves its protected
         // base out, so a deploy compares like with like.
         let narrowed = self.caller_for(project, slug, caller)?;
         let caller = &narrowed;
-        self.project(project)?;
-        let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
-        let branches = self.db.read(|c| envs::by_slug(c, project, slug))?.branches;
         let dek = self.project(project)?;
+        // Read first: a digest computed after it reflects at least this state, so one kept with it
+        // is never newer than what it vouches for.
+        let state = self.db.read(|c| digest_state(c, project))?;
+        let key = (project.to_string(), slug.to_string(), path.clone(), caller.principal.clone(), caller.grants.untrusted());
+        if let Some(d) = self.digests.get(&key, &state)
+            && self.still(project, &dek, &d, caller)?
+        {
+            return Ok((d.digest.clone(), d.unvouched));
+        }
+        let d = self.compute_digest(project, slug, &path, &dek, caller)?;
+        let out = (d.digest.clone(), d.unvouched);
+        if d.keep {
+            self.digests.put(key, state, d);
+        }
+        Ok(out)
+    }
+
+    /// Whether a digest computed earlier from the same [`digest_state`] would come out the same
+    /// now: every permission it asked answers the same for `caller`, and every live link's
+    /// generation and fingerprint are as they were (the fingerprint read as a digest reads it).
+    fn still(&self, project: &str, dek: &Dek, d: &Digested, caller: &Caller) -> Result<bool> {
+        if !d.asked.iter().all(|((action, env, path), ok)| caller.allows(*action, &Scope::at(project, env, path)) == *ok) {
+            return Ok(false);
+        }
+        if d.live.is_empty() {
+            return Ok(true);
+        }
+        let generations = self.db.read(|c| d.live.iter().map(|(l, _, _)| generation(c, l)).collect::<Result<Vec<i64>>>())?;
+        let members = self.members(project).ok();
+        Ok(d.live.iter().zip(generations).all(|((l, generation, fp), now)| now == *generation && self.live_fp(project, dek, l, members.as_ref()) == *fp))
+    }
+
+    fn compute_digest(&self, project: &str, slug: &str, path: &str, dek: &Dek, caller: &Caller) -> Result<Digested> {
+        use sha2::{Digest, Sha256};
+        use std::cell::{Cell, OnceCell, RefCell};
+        use std::rc::Rc;
+        let principal = caller.personal().then_some(caller.principal.as_str());
+        let untrusted = caller.grants.untrusted();
+        // Every permission the digest depends on, with its answer: a kept digest is reused only
+        // for a caller who gets the same answers (`still`).
+        let asked: RefCell<BTreeMap<(Action, String, String), bool>> = RefCell::default();
+        let ask = |action: Action, env: &str, path: &str| *asked.borrow_mut().entry((action, env.to_string(), path.to_string())).or_insert_with(|| caller.allows(action, &Scope::at(project, env, path)));
+        // Read as `values` reads it: imports and the base where the caller may reveal them. Where
+        // each one it passed answers reading as it does revealing, that's also the folder as a
+        // reference reads it, so a reference into this folder doesn't read it again.
+        let same_for_read = Cell::new(true);
+        let reveal = |env: &str, path: &str| {
+            let reveal = ask(Action::Reveal, env, path);
+            if reveal != ask(Action::Read, env, path) {
+                same_for_read.set(false);
+            }
+            reveal
+        };
+        let read = |env: &str, path: &str| ask(Action::Read, env, path);
+        let (branches, entries) = self.db.read(|c| {
+            let env = envs::by_slug(c, project, slug)?;
+            let entries = view_in(c, &env, path, principal, &reveal, untrusted, DIGEST_COLUMNS, 0, &mut HashSet::new())?;
+            Ok::<_, Error>((env.branches, entries))
+        })?;
         let mut h = Sha256::new();
-        let dynamic = std::cell::Cell::new(false);
-        let members = std::cell::OnceCell::new();
-        // A live link's value is the resource's credential as it is: it moves when roll rotates it
-        // (at once, on every node), and its fingerprint when anything else changes it.
-        let generations: HashMap<(String, String), i64> = self.db.read(|c| c.query("SELECT kind, ref, generation FROM source_generations", (), |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?))))?.into_iter().collect();
+        let mut dynamic = false;
+        let mut live: Vec<(Link, i64, String)> = vec![];
+        let mut keep = true;
+        let members = OnceCell::new();
         // No stored value's fingerprint: a digest is readable without reveal, and a version moves
         // with every value. A live value's goes into the hash, which tells nothing of it.
-        let stamp = |h: &mut Sha256, e: &Entry| {
+        let mut stamp = |h: &mut Sha256, e: &Entry| -> Result<()> {
             // A followed key is the same stamp each read: its parent is never asked, issued for or
             // counted (its rotations are no change to the preview).
             if e.row.link.as_ref().is_some_and(|l| follows(&branches, l)) {
                 h.update(format!("{}\0{}\0{}\0{}\0{}\0followed\n", e.row.key, e.env, e.row.id, e.row.version, e.row.link.as_ref().map(json).unwrap_or_default()));
-                return;
+                return Ok(());
             }
-            let live = e.row.link.as_ref().filter(|l| l.mode == Mode::Live);
             if e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
-                dynamic.set(true);
+                dynamic = true;
             }
-            let generation = live.and_then(|l| generations.get(&(l.kind.clone(), l.r#ref.clone()))).copied().unwrap_or(0);
-            // Only once rotated, so a digest taken before there were generations stays the same.
-            let rotated = if generation > 0 { format!("\0{generation}") } else { String::new() };
-            let now = live.map(|l| format!("\0live:{}", self.live_fp(project, &dek, l, members.get_or_init(|| self.members(project).ok()).as_ref()))).unwrap_or_default();
-            h.update(format!("{}\0{}\0{}\0{}\0{}{rotated}{now}\n", e.row.key, e.env, e.row.id, e.row.version, e.row.link.as_ref().map(json).unwrap_or_default()))
+            // A live link's value is the resource's credential as it is: it moves when roll
+            // rotates it (at once, on every node), and its fingerprint when anything else changes it.
+            let (mut rotated, mut now) = (String::new(), String::new());
+            if let Some(l) = e.row.link.as_ref().filter(|l| l.mode == Mode::Live) {
+                let generation = self.db.read(|c| generation(c, l))?;
+                // Only once rotated, so a digest taken before there were generations stays the same.
+                if generation > 0 {
+                    rotated = format!("\0{generation}");
+                }
+                let fp = self.live_fp(project, dek, l, members.get_or_init(|| self.members(project).ok()).as_ref());
+                now = format!("\0live:{fp}");
+                live.push((l.clone(), generation, fp));
+            }
+            h.update(format!("{}\0{}\0{}\0{}\0{}{rotated}{now}\n", e.row.key, e.env, e.row.id, e.row.version, e.row.link.as_ref().map(json).unwrap_or_default()));
+            Ok(())
         };
         for e in &entries {
-            stamp(&mut h, e);
+            stamp(&mut h, e)?;
         }
-        // What references reach, in this environment or another, moves the digest too.
-        let mut views: HashMap<(String, String), Vec<Entry>> = HashMap::new();
+        // What references reach, in this environment or another, moves the digest too. A view is
+        // sorted by key, each key once.
+        let entries = Rc::new(entries);
+        let mut views: HashMap<(String, String), Rc<Vec<Entry>>> = HashMap::new();
+        if same_for_read.get() {
+            views.insert((slug.to_string(), path.to_string()), entries.clone());
+        }
         let mut seen: HashSet<String> = HashSet::new();
-        let mut todo: Vec<(Entry, usize)> = entries.iter().map(|e| (e.clone(), 0)).collect();
-        while let Some((e, depth)) = todo.pop() {
+        let mut todo: Vec<(Rc<Vec<Entry>>, usize, usize)> = (0..entries.len()).map(|i| (entries.clone(), i, 0)).collect();
+        while let Some((of, i, depth)) = todo.pop() {
             if depth >= DEPTH {
                 continue;
             }
-            for display in e.row.references(&dek, project) {
+            let e = &of[i];
+            for display in e.row.references(dek, project) {
                 let Some(r) = refs::refs(&format!("${{{display}}}")).into_iter().next() else { continue };
                 let (env, at) = match &r.env {
                     None => (e.env.clone(), e.row.path.clone()),
                     Some(x) => (x.clone(), r.path.clone()),
                 };
-                if !seen.insert(format!("{env}:{at}:{}", r.key)) || !caller.allows(Action::Read, &Scope::at(project, &env, &at)) {
+                if !seen.insert(format!("{env}:{at}:{}", r.key)) || !read(&env, &at) {
                     continue;
                 }
-                let view = views.entry((env.clone(), at.clone())).or_insert_with(|| self.view(project, &env, &at, caller, false, Action::Read).unwrap_or_default());
-                if let Some(t) = view.iter().find(|t| t.row.key == r.key) {
+                let view = match views.get(&(env.clone(), at.clone())) {
+                    Some(v) => v.clone(),
+                    None => {
+                        let v = match self.db.read(|c| view_in(c, &envs::by_slug(c, project, &env)?, &at, principal, &read, untrusted, DIGEST_COLUMNS, 0, &mut HashSet::new())) {
+                            Ok(v) => v,
+                            // A reference to an environment that isn't there reaches nothing.
+                            Err(Error::NotFound(_)) => vec![],
+                            // Nor does one that couldn't be read this time, and then the digest isn't kept.
+                            Err(_) => {
+                                keep = false;
+                                vec![]
+                            }
+                        };
+                        let v = Rc::new(v);
+                        views.insert((env, at), v.clone());
+                        v
+                    }
+                };
+                if let Ok(i) = view.binary_search_by(|t| t.row.key.as_str().cmp(&r.key)) {
                     h.update(b"ref\0");
-                    stamp(&mut h, t);
-                    todo.push((t.clone(), depth + 1));
+                    stamp(&mut h, &view[i])?;
+                    todo.push((view, i, depth + 1));
                 }
             }
         }
         let have: Vec<String> = entries.iter().map(|e| e.row.key.clone()).collect();
-        for m in self.missing_required(project, &path, &have)? {
+        for m in self.missing_required(project, path, &have)? {
             h.update(format!("required\0{}\n", m.key));
         }
-        Ok((h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect(), Unvouched { dynamic: dynamic.get() }))
+        let digest = h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect();
+        Ok(Digested { digest, unvouched: Unvouched { dynamic }, asked: asked.into_inner(), live, keep })
     }
 
     /// A conditional read (`If-None-Match`): `Some(digest)` when the folder's values are as they
@@ -833,7 +999,7 @@ impl Secrets {
             let mut folders = BTreeSet::new();
             for e in &envs {
                 let through = |x: &str, p: &str| caller.allows(Action::Read, &Scope::at(project, x, p));
-                views.push(view_in(c, e, &path, principal, &through, caller.grants.untrusted(), 0, &mut HashSet::new())?);
+                views.push(view_in(c, e, &path, principal, &through, caller.grants.untrusted(), ROW_COLUMNS, 0, &mut HashSet::new())?);
                 for f in c.query("SELECT path FROM folders WHERE env_id = ?", [&e.id], |r| r.get::<_, String>(0))? {
                     if f != path && names::parents(&f).last() == Some(&path) {
                         folders.insert(f);
