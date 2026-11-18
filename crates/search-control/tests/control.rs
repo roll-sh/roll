@@ -965,7 +965,7 @@ async fn the_audit_log_records_what_matters_for_security() {
     let all = audit_entries(&e, "aud", "").await;
     let failed = audited(&all, "authentication_failed", |x| x["user.name"] == "bob").expect("the wrong password");
     assert_eq!((&failed["event.type"], &failed["url.path"], &failed["request.method"]), (&json!("rest"), &json!("/open/_search"), &json!("GET")), "{failed}");
-    assert!(failed["origin.address"].as_str().is_some_and(|a| a.starts_with("127.0.0.1:")), "{failed}");
+    assert_eq!(failed["origin.address"], "127.0.0.1", "the address the allowlist checks: {failed}");
     let denied = audited(&all, "access_denied", |x| x["user.name"] == "bob").expect("the denied index");
     assert_eq!(
         (&denied["action"], &denied["indices"], &denied["user.realm"], &denied["authentication.type"], &denied["request.name"]),
