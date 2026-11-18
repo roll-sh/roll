@@ -255,6 +255,15 @@ pub fn call_ndjson<'a>(cluster: &'a Cluster, method: &str, uri: &str, body: Stri
     })
 }
 
+/// [`call_ndjson`] with the cluster's own authority (`POST <uri>`).
+pub fn call_ndjson_system<'a>(cluster: &'a Cluster, uri: &str, body: String) -> Call<'a> {
+    let mut req = EsRequest::new("POST", uri);
+    req.headers.push((SYSTEM_HEADER.into(), "true".into()));
+    req.body = bytes::Bytes::from(body);
+    req.headers.push(("Content-Type".into(), "application/x-ndjson".into()));
+    send(cluster, req)
+}
+
 /// Plain Java exceptions (not `ElasticsearchException`s), which root-cause guessing treats
 /// differently.
 const JAVA: &[&str] = &[

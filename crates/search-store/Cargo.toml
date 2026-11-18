@@ -22,3 +22,5 @@ memmap2.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+search-test-support.workspace = true

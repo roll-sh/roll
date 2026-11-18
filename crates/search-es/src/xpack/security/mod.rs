@@ -27,6 +27,7 @@
 
 pub mod actions;
 pub mod api_keys;
+pub mod audit;
 pub mod dls;
 pub mod opensearch;
 pub mod privileges;
@@ -295,7 +296,11 @@ fn run_as(ctx: &Ctx, authn: Principal, target: &str) -> EsResult<Principal> {
             user.authenticating = Some(Box::new(authn));
             Ok(user)
         }
-        None => Err(run_as_denied(&authn, &privileges::action_of(ctx.api.name()).1, target)),
+        None => {
+            let action = privileges::action_of(ctx.api.name()).1;
+            audit::run_as_denied(ctx, &authn, target, &action);
+            Err(run_as_denied(&authn, &action, target))
+        }
     }
 }
 
@@ -610,6 +615,7 @@ fn check_workflow(ctx: &Ctx, p: &Principal) -> EsResult<()> {
         let Some(allowed) = d.pointer(&["restriction", "workflows"]).and_then(Value::as_array) else { continue };
         if !current.is_some_and(|w| allowed.iter().any(|x| x.as_str() == Some(w))) {
             let action = privileges::action_of(ctx.api.name()).1;
+            audit::access_denied(p, &action, None);
             return Err(EsError::security(403, format!("action [{action}] is unauthorized for {}", who(p)))
                 .caused_by(EsError::new(403, "role_restriction_exception", "access restricted by workflow")));
         }
@@ -922,11 +928,16 @@ fn check_writes(p: &Principal, eff: &Effective, items: &[WriteItem]) -> Vec<Opti
         return items
             .iter()
             .map(|it| {
+                let names = std::slice::from_ref(&it.name);
                 if it.creates && !eff.allows_index("indices:admin/create", &it.name) {
+                    audit::access_denied(p, "indices:admin/create", Some(names));
                     return Some(opensearch::denied(p, id, "indices:admin/create"));
                 }
                 let missing: Vec<&str> = [SHARD, it.op.base_action()].into_iter().filter(|a| !eff.allows_index(a, &it.name)).collect();
-                (!missing.is_empty()).then(|| opensearch::denied(p, id, &missing.join(", ")))
+                (!missing.is_empty()).then(|| {
+                    audit::access_denied(p, &missing.join(", "), Some(names));
+                    opensearch::denied(p, id, &missing.join(", "))
+                })
             })
             .collect();
     }
@@ -1019,7 +1030,8 @@ fn check_all(ctx: &Ctx, p: &Principal, eff: &Effective, action: &str, exprs: Vec
             names.push(e.clone());
         }
     }
-    if names.iter().all(|n| eff.allows_index(action, n)) { Ok(()) } else { Err(denied(p, action, None)) }
+    // OpenSearch's 403 names no index (its audit entry does).
+    if names.iter().all(|n| eff.allows_index(action, n)) { Ok(()) } else { Err(denied(p, action, Some(&names))) }
 }
 
 /// Wildcards (and no index at all) expand to the matching indices the principal may access;
@@ -1183,6 +1195,7 @@ pub(crate) fn who(p: &Principal) -> String {
 
 /// Elasticsearch's 403 for an action the principal's roles don't grant.
 fn denied(p: &Principal, action: &str, indices: Option<&[String]>) -> EsError {
+    audit::access_denied(p, action, indices);
     if let Some(id) = p.os() {
         return opensearch::denied(p, id, action);
     }
@@ -1201,6 +1214,15 @@ fn denied(p: &Principal, action: &str, indices: Option<&[String]>) -> EsError {
         format!(", this action is granted by the {} privileges [{}]", if indices.is_none() { "cluster" } else { "index" }, by.join(","))
     };
     EsError::security(403, format!("action [{action}]{towards} is unauthorized for {who}{on}{grant}"))
+}
+
+/// The indices a request names, for audit entries: [`request_indices`] for APIs that target
+/// indices, none for the others.
+pub(crate) fn request_index_names(ctx: &Ctx) -> Vec<String> {
+    match privileges::action_of(ctx.api.name()).0 {
+        Scope::Index if !target_expressions(ctx).is_empty() => request_indices(ctx),
+        _ => Vec::new(),
+    }
 }
 
 /// The indices a request targets: its `{index}` path part (resolved; names that don't exist
