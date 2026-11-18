@@ -15,7 +15,7 @@ export interface PreviewService {
   name: string;
   repo: string;
   url: string;
-  /** `url` with the preview's access token (link access): the link to open and hand out. */
+  /** `url` with the preview's access token (link access; plain otherwise): the link to open and hand out. */
   share_url: string | null;
   /** The changeset it should run. */
   revision: string | null;
@@ -340,8 +340,8 @@ export interface PreviewSettings {
   /** A patch replaces the whole map. */
   env: Record<string, string>;
   github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };
-  /** "link": a preview's URLs need its link (its access token once, then a cookie). */
-  access: "link" | "public";
+  /** "link": a preview's URLs need its link (its access token once, then a cookie). "team": only people signed in to roll who may open the project (they sign in on the way; the link's token lets nobody in). */
+  access: "link" | "team" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */
   visual_review?: "off" | "check" | "required";
   /** `catch` (default): services send mail to roll's catcher, listed on the preview, never delivered; `deliver`: the project's own mail settings. */
@@ -463,6 +463,8 @@ export const previewsApi = {
   /** `head`: the screenshot's that was looked at (`visual_review.head`): refused (409) once a newer one came in. `path`: that page only (`""` the first), else every page. */
   /** Let one head of a fork's pull request on a Git URL service run (409 once it moved on). */
   approve: (id: string, head: string) => call<Preview>("POST", `${one(id)}/approve`, { head }),
+  /** As the person signed in (a session, never a token): a one-use URL into a team-access preview's page `to` (one of its service URLs), good for a minute. */
+  visit: (id: string, to: string) => call<{ url: string }>("POST", `${one(id)}/visit`, { to }),
   acceptVisual: (id: string, head?: string, path?: string) =>
     call<Preview>("POST", `${one(id)}/visual/accept`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}) }),
   /** Its share links (never their tokens). */

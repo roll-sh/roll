@@ -26,6 +26,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/keep", post(keep))
         .route("/v1/previews/{id}/visual/accept", post(accept_visual))
         .route("/v1/previews/{id}/approve", post(approve))
+        .route("/v1/previews/{id}/visit", post(visit))
         .route("/v1/previews/{id}/env", get(vars).put(put_vars))
         .route("/v1/previews/{id}/shares", get(shares).post(share))
         .route("/v1/previews/{id}/shares/{share}", axum::routing::delete(unshare))
@@ -197,6 +198,24 @@ async fn create(AxState(e): S, axum::Extension(visible): axum::Extension<Visible
     let (p, made) = e.create(&b.project, &b.repo, b.branch.as_deref(), b.change.as_deref(), &by).await?;
     let status = if made { StatusCode::CREATED } else { StatusCode::OK };
     Ok((status, Json(p)).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VisitBody {
+    to: String,
+}
+
+/// A signed-in person's one-use way into a team-access preview (roll's dashboard asks for it as
+/// them, then sends the browser there). A token isn't a person: only a session gets one.
+async fn visit(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, b: Bytes) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    let Some(axum::Extension(user)) = who else {
+        return Err(Error::Forbidden("signing in to a preview is for a person signed in to roll, not a token".into()));
+    };
+    let b: VisitBody = body(&b)?;
+    let url = blocking(e, move |e| e.visit_ticket(&id, &user.user, &user.session, &b.to)).await?;
+    Ok(Json(json!({ "url": url })))
 }
 
 async fn one(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Preview>> {

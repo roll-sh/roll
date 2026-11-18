@@ -802,6 +802,51 @@ as a private address.
     link, so a reviewer who comes from the pull request's plain URL gets in, and the token is
     never public. `access: "public"` opens a project's previews to anyone who
     can reach the domain.
+  - **Signed in to roll** (`access: "team"`, the rules' "Signed in to roll"; Vercel
+    Authentication, Netlify's team access): only people signed in to roll who may open the
+    project open its previews, as roll apps' sign-in-gated environments do (`visit.rs`, the same
+    design and names; docs/apps/README.md, "Signing in to an environment"):
+    - *Sent to sign in.* A page load with no session of the preview's own goes to
+      `/dashboard/previews/visit?preview=<id>&to=<the page>` on roll's dashboard; anything else
+      is a 401. The preview's host never sees roll's session cookie (another site), so the
+      dashboard asks `POST /v1/previews/{id}/visit {to}` as the person for a one-use ticket (a
+      minute) to the page they wanted: only for a URL at one of the preview's own service
+      hosts, and only for a person's session, never a token.
+    - *A session of its own.* The ticket goes back to the preview's host (`/__roll/visit`),
+      which trades it for a host-only `HttpOnly`, `SameSite=Lax` cookie, `roll_visit_<preview>`,
+      for 12 hours, and redirects to a path on the same host (no `//`, `/\` or control
+      characters). The ticket's URL is the service's own (its scheme, host and port, as roll
+      runs it); only the path and query come from `to`, so a crafted `to` can't send the ticket
+      over plain HTTP or to another port. A ticket only opens a session on its own preview. The
+      service never sees the cookie; when a browser sends several by that name (a sibling
+      preview's host can set one on the parent domain), any live one lets them in. Tickets and
+      sessions are kept by their SHA-256, and only while the project has team access: the write
+      that keeps one reads the project's access, so a change of access can't miss it.
+    - *Who.* rolld's `AccountsVisitors` (`crates/rolld/src/previews/mod.rs`) is the one place
+      that says for services roll runs itself: an account that still signs in and is an admin or
+      owns the project now, through the same roll session that asked for the ticket. rolld's
+      gate lets only admins into `/v1/previews` today, so today it's an admin. A ticket is only
+      given to them, and each session asks again every 5 minutes (`visitor_recheck`, off the
+      async workers): a roll session signed out, revoked or expired, or an account disabled,
+      deleted or that lost the project, is turned away at its next request after that, and its
+      session is gone. Changing the project's access ends every session.
+    - *The link's token lets nobody in.* The links roll hands out (`share_url`) are the plain
+      URLs, as the change's and the pull request's are. A URL that still carries
+      `?roll_access=` is redirected to the same URL without it, and the `roll_access_<preview>`
+      cookie never reaches a service under any access. Leaving `link` gives each of the
+      project's previews a new token, so going back to `link` doesn't revive the old links.
+      Share links and the bypass header for CI still work.
+    - *Services on roll apps.* They get `access: {signed_in: true, bypass_sha256}` on their `pv-`
+      environment, so roll apps' own sign-in flow and its own check decide (its
+      `AccountsVisitors` and `/dashboard/apps/visit`: admins only today), not previews'. roll
+      apps refuses `signed_in` on a node without roll's dashboard address (`web_url`), which
+      fails the deploy. Share links don't open services on roll apps, as under `link`.
+    - `visit.rs::a_signed_in_person_gets_into_a_team_preview` follows a page load to the
+      dashboard, a ticket only for a person, only to the preview's hosts and only on its own
+      preview, its URL at the service's scheme and port whatever `to` said, the ticket used
+      once, the session the app never sees (nor junk cookies by its name shutting it out), the
+      link's token taken off the URL, signing out of roll and the person losing the project each
+      ending it, and a new access ending it and replacing the link's token.
   - Never indexed: every response through a preview's host, the service's own and roll's 401
     alike, carries `X-Robots-Tag: noindex` (as Vercel's previews do), whatever the service
     sends, so a public preview, a share link or an earlier push's URL isn't what a search
@@ -844,7 +889,8 @@ as a private address.
     ```
 
     Services on roll apps get the secret's SHA-256 with the link's token (`access: {token,
-    bypass_sha256}`); their proxy checks it the same way. Rotating or removing the secret makes
+    bypass_sha256}`, or `{signed_in: true, bypass_sha256}` under team access); their proxy checks
+    it the same way. Rotating or removing the secret makes
     every preview of the project converge again, so they get the new one.
   - Services on roll apps get the same token (`PUT …/environments/pv-… {access: {token}}`), and
     roll apps' waking proxy checks it the same way: the token once, then a host-only cookie,
@@ -1088,6 +1134,7 @@ and admins see every project.
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each) | `{vars}`: the preview's own variables; its services redeploy with them |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |
+| `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
 | `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of its element is kept |
 | `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page; 404 until one has |
@@ -1131,7 +1178,7 @@ type Preview = {
   state: "queued" | "awaiting_approval" | "creating" | "ready" | "sleeping" | "updating" | "failed" | "deleting";
   error: string | null;
   url: string | null;                 // the first service's URL
-  share_url: string | null;           // url with its access token (link access): the one to hand out
+  share_url: string | null;           // url with its access token (link access; plain otherwise): the one to hand out
   services: Service[]; resources: Resource[];
   cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; bytes: number };
   schema_changes: string[] | null;    // "+ …"/"- …" against the parents, once read at `head`; null: not known
@@ -1170,7 +1217,7 @@ type Settings = {
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
   github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
-  access: "link" | "public";          // "link": a preview's URLs need its link ("link")
+  access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
   egress: "open" | "roll";            // what its services' code may reach: anything ("open"), or only roll's products on a network with no route out (see "Egress")
@@ -1492,7 +1539,7 @@ Ranked by what a person notices first. Done so far:
 - rolld's adapters for every product (Postgres resets in place and goes cold after an idle
   hour), the secrets, roll apps and search adapters;
 - seeds;
-- link access;
+- link access, and team access (people signed in to roll, `visit.rs`);
 - roll code and GitHub reporting;
 - `roll preview`;
 - the dashboard's Previews tab and canvas overlay;

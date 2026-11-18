@@ -125,10 +125,18 @@ impl roll_previews::ports::Apps for RollApps {
         let id = self.service_in(&t.project, &t.service).await?.ok_or_else(|| anyhow::anyhow!("roll apps has no service {} in the project", t.service))?;
         self.ids.lock().unwrap_or_else(|p| p.into_inner()).insert((t.preview.clone(), t.service.clone()), id.clone());
         let path = Self::env_path(&id, &t.environment);
-        // Private like the preview (link access): roll apps' proxy checks the same token.
-        let access = t.access_token.as_ref().map(|token| match &t.bypass_sha256 {
-            Some(hash) => json!({ "token": token, "bypass_sha256": hash }),
-            None => json!({ "token": token }),
+        // Private like the preview: roll apps' proxy checks the same token (link access), or
+        // signs people in through roll's dashboard (team access); the bypass opens either.
+        let access = match (&t.access_token, t.signed_in) {
+            (Some(token), _) => Some(json!({ "token": token })),
+            (None, true) => Some(json!({ "signed_in": true })),
+            (None, false) => None,
+        }
+        .map(|mut a| {
+            if let Some(hash) = &t.bypass_sha256 {
+                a["bypass_sha256"] = json!(hash);
+            }
+            a
         });
         // The project's egress: with `roll`, roll apps runs it on a network with no route out (a
         // runtime that can't is a 409, which fails the deploy rather than running it open).
@@ -201,7 +209,7 @@ impl roll_previews::ports::Apps for RollApps {
             "{}@{}@{h:016x}{}{}{}{}",
             t.environment,
             t.git.as_deref().unwrap_or("image"),
-            if t.access_token.is_some() { "p" } else { "" },
+            if t.access_token.is_some() { "p" } else if t.signed_in { "s" } else { "" },
             if self.feedback && t.feedback { "f" } else { "" },
             if closed { format!("e{}", t.egress_hosts.join(",")) } else { String::new() },
             t.rebuild.map(|n| format!("#r{n}")).unwrap_or_default()
