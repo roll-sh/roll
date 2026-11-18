@@ -71,6 +71,11 @@ impl Url {
     pub(super) fn with_password(&self, password: &str) -> Url {
         Url { password: password.to_string(), ..self.clone() }
     }
+
+    /// The same server, logging in as `user` with `password`.
+    pub(super) fn as_user(&self, user: &str, password: &str) -> Url {
+        Url { user: user.to_string(), ..self.with_password(password) }
+    }
 }
 
 fn name_ok(name: &str) -> bool {
@@ -275,14 +280,23 @@ pub(super) async fn set_own_password(c: &mut Conn, password: &str) -> Result<(),
 
 /// Cassandra keeps a role's credentials cached (`credentials_validity`, 2 s by default) and takes
 /// its old password, not the new one, until they expire: wait, at most [`SETTLE`], until `u` (the
-/// new password) logs in. The change is made either way, so this never fails: the caller checks.
+/// new password) logs in. The change is made either way, so this never fails: a login that still
+/// doesn't work is a warning naming the role.
 pub(super) async fn settled(u: &Url, ca: Option<&str>, via: &Via) {
     let until = tokio::time::Instant::now() + SETTLE;
     loop {
-        match tokio::time::timeout(TIMEOUT, connect(u, ca, via)).await {
-            Ok(Err(e)) if e.contains("bad credentials") && tokio::time::Instant::now() < until => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
-            _ => return,
-        }
+        let why = match tokio::time::timeout(TIMEOUT, connect(u, ca, via)).await {
+            Ok(Ok(_)) => return,
+            Ok(Err(e)) if e.contains("bad credentials") && tokio::time::Instant::now() < until => {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                continue;
+            }
+            // connect's errors never hold the password.
+            Ok(Err(e)) => e,
+            Err(_) => "timed out".to_string(),
+        };
+        tracing::warn!(role = %u.user, "roll secrets: {}'s new password didn't log in within {} s, kept anyway: {why}", u.user, SETTLE.as_secs());
+        return;
     }
 }
 
@@ -449,6 +463,19 @@ mod tests {
             g.set_password(&at(&admin, Some(&ca)), "app_blue", &second).unwrap();
             logs_in("app_blue", &second).unwrap();
             assert!(logs_in("app_blue", &first).is_err(), "the old password is refused");
+            // A turn hands its password out as soon as the rotation returns, while an app still
+            // logs in with the other role (which keeps Cassandra's credentials cache warm): the
+            // handed-out password logs in at once, every time.
+            let mut current = [second.clone(), start.clone()];
+            for turn in 0..4 {
+                let (i, next) = (turn % 2, pw());
+                let role = roles[i].as_str();
+                settle();
+                logs_in(role, &current[i]).unwrap();
+                g.set_password(&at(&admin, Some(&ca)), role, &next).unwrap();
+                logs_in(role, &next).unwrap_or_else(|e| panic!("turn {turn}: {role}'s handed-out password was refused right after the rotation: {e}"));
+                current[i] = next;
+            }
             // A dynamic login: made in the group, reads the keyspace and can't write it, then is
             // gone (twice: gone counts as dropped).
             let (name, upw) = ("roll_fakefakefakefake", pw());
