@@ -303,6 +303,11 @@ by their email's domain, as Linear's, Vercel's and GitHub's enterprise sign-in d
   that the provider didn't answer.
 - Removing a connection deletes its people's links; their accounts stay and sign in other ways.
 
+The same provider can sign people's agents in too (enterprise sign-in, docs/permissions.md,
+"Enterprise identity providers"): an enterprise identity provider with `sso` set to the
+connection's id vouches for the connection's verified domains, as they are at each sign-in
+(`roll_auth::Sessions::sso_trust`), so a domain is proven once for both.
+
 ### SCIM (the provider manages its people)
 
 A connection's provider (Okta, Entra ID, JumpCloud) creates, updates and deactivates its people
@@ -312,6 +317,11 @@ over SCIM 2.0 (RFC 7643 and 7644), so someone who leaves loses roll at once.
   base_url}` once (`rlp_…`, kept as a hash; a new one replaces it, `DELETE` turns SCIM off). The
   provider uses `base_url` (`<api>/v1/accounts/scim/v2`) and sends the token as `Authorization:
   Bearer`. It's looked up on every request.
+- The token is checksummed like roll's other secrets (`rlp_`, 34 random base32 characters and 6
+  of CRC-32), so leak scanning finds it: one found in a landing or reported by GitHub's secret
+  scanning stops at once (`Accounts::revoke_leaked_scim`, registered with roll-access's
+  `Access::on_leaked`), the audit log has it, and the connection shows where it was found
+  (`scim_leaked`) until an admin makes a new token. Tokens made before checksums still work.
 - It reaches only people whose email is in the connection's verified domains, and never an
   admin (admins are managed in roll): anyone else is a 404 to it. It never changes an email.
 - A person's roll address is their primary email (`emails`), else a `userName` that is an email.
@@ -447,7 +457,9 @@ Each person reads their own (`GET /v1/accounts/me/activity`, "Recent activity" o
 page, as GitHub's security log): their sign-ins, refused ones too, with the method, address and
 device, and every change to their account, whoever made it (them, an admin, SCIM). An event is
 theirs when it's about them: its resource is their id (a person's own routes, `/v1/accounts/me…`,
-are about them).
+are about them). A wrong email code for their account is theirs too (refused, by `anonymous`: whoever
+tried isn't known), so someone guessing at their sign-in shows up there; a sign-up's code, which no
+account has yet, is the operator's log only.
 
 ## Mail
 

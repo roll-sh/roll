@@ -2054,8 +2054,8 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
             dbs.insert(("redis".to_string(), s(&d["name"])), s(&d["id"]));
         }
     }
-    // Buckets go by their name; streams and NoSQL databases by their id.
-    for (kind, path, id) in [("bucket", "/v1/storage/buckets", "name"), ("stream", "/v1/streams", "id"), ("nosql", "/v1/nosql/databases", "id")] {
+    // Buckets go by their name; streams, NoSQL databases and search clusters by their id.
+    for (kind, path, id) in [("bucket", "/v1/storage/buckets", "name"), ("stream", "/v1/streams", "id"), ("nosql", "/v1/nosql/databases", "id"), ("search", "/v1/search/clusters", "id")] {
         if wants(kind) {
             for d in api.get(path).await?.as_array().into_iter().flatten().filter(|d| placed.contains(&(kind.to_string(), s(&d[id])))) {
                 dbs.insert((kind.to_string(), s(&d["name"])), s(&d[id]));
@@ -2099,11 +2099,16 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
             "redis" => api.post("/v1/redis/databases", json!({ "name": n })).await?,
             "bucket" => api.post("/v1/storage/buckets", json!({ "name": n })).await?,
             "stream" => api.post("/v1/streams", json!({ "name": n })).await?,
+            "search" => api.post("/v1/search/clusters", json!({ "name": n })).await?,
             _ => api.post("/v1/nosql/databases", json!({ "name": n })).await?,
         };
         let r = if d.kind == "bucket" { s(&made["name"]) } else { s(&made["id"]) };
         let _ = api.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/resources/{}/{}", enc(&project), d.kind, enc(&r)), Some(json!({ "x": 48 + 320 * i as i64, "y": 340 }))).await;
-        eprintln!("made {} {n}", if d.kind == "bucket" || d.kind == "stream" { d.kind.clone() } else { format!("{} database", d.kind) });
+        eprintln!("made {} {n}", match d.kind.as_str() {
+            "bucket" | "stream" => d.kind.clone(),
+            "search" => "search cluster".into(),
+            k => format!("{k} database"),
+        });
         dbs.insert((d.kind.clone(), n.clone()), r);
     }
     let mut out = Vec::new();

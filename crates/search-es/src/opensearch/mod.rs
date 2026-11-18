@@ -364,6 +364,7 @@ pub fn lookup_by_query(ctx: &crate::search::query::QueryCtx, l: &crate::query::t
     let mut source = crate::search_source::SearchSource { query: Some(q.clone()), size: Some(fetch as i32), ..Default::default() };
     source.source = Some(crate::search_source::FetchSource { fetch: true, includes: vec![l.path.clone()], excludes: Vec::new(), exclude_vectors: None });
     let req = crate::search::SearchRequest {
+        slowlog: Default::default(),
         indices: vec![l.index.clone()],
         opts: crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED,
         source,

@@ -170,9 +170,14 @@ function Scim({ connection: c, onChange, onError }: { connection: SsoConnection;
         </div>
       ) : (
         <span className="flex flex-wrap items-center gap-2">
+          {c.scim_leaked && (
+            <span className="w-full text-danger">
+              Its SCIM token was {c.scim_leaked}: roll revoked it. The provider stops provisioning people until you make a new token and give it there.
+            </span>
+          )}
           {c.scim ? "The provider manages its people over SCIM (it deactivates whoever leaves)." : "Let the provider create and deactivate its people (SCIM)."}
-          <button onClick={mint} className={btn}>
-            {c.scim ? "New token" : "Turn on SCIM"}
+          <button onClick={mint} className={c.scim_leaked ? `${btn} font-medium text-danger` : btn}>
+            {c.scim || c.scim_leaked ? "New token" : "Turn on SCIM"}
           </button>
           {c.scim && (
             <button onClick={() => accountsApi.scimOff(c.id).then(onChange, (e) => onError(errorText(e)))} className={btn}>

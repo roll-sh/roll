@@ -41,8 +41,11 @@ async fn node(id: &str, leases: &MemoryStore, objects: &search_store::Objects, c
         .merge(search_control::cluster::internal_router(control.clone(), cluster.clone()))
         .layer(axum::middleware::from_fn_with_state(cluster.clone(), roll_cluster::accept_forwarded));
     tokio::spawn(async move { axum::serve(api_listener, router).await });
-    let front = search_control::cluster::rest_router(control.clone());
-    tokio::spawn(async move { axum::serve(rest_listener, front).await });
+    // As rolld serves a fleet node's REST port; `x-test-client` from loopback (this test's
+    // "load balancer") names the client.
+    let opts = search_server::ListenOptions { client: search_server::ClientAddresses::new(Some("x-test-client"), Some("127.0.0.0/8")).unwrap(), ..Default::default() };
+    let front = control.clone();
+    tokio::spawn(async move { search_control::cluster::serve_front(rest_listener, front, &opts, std::future::pending()).await });
     Node { control, cluster, api, rest, _home: home }
 }
 
@@ -132,6 +135,12 @@ async fn a_cluster_runs_on_its_owner_and_moves_on_a_drain() {
     // The next request loads it again, under a newer epoch, with everything in it.
     let (s, v) = call(&http, reqwest::Method::GET, format!("{}/items/_count", other.rest), auth, None).await;
     assert_eq!((s, v["count"].as_i64()), (200, Some(4)), "{v}");
+    // Its request metrics followed it: each node hands what it recorded to the shared catalog.
+    a.control.sample().await.unwrap();
+    b.control.sample().await.unwrap();
+    let (s, m) = call(&http, reqwest::Method::GET, format!("{}/v1/search/clusters/shop/metrics?range=1h", owner.api), None, None).await;
+    assert_eq!((s, m["totals"]["index"]["requests"].as_u64()), (200, Some(4)), "{m}");
+    assert!(m["totals"]["search"]["requests"].as_u64().unwrap_or(0) >= 3, "{m}");
 }
 
 /// Every cluster on the fleet has roll's default repository: a snapshot lifecycle policy takes
@@ -184,4 +193,58 @@ async fn the_default_repository_snapshots_and_restores_on_the_fleet() {
 
     let (s, v) = call(&http, reqwest::Method::DELETE, format!("{}/_snapshot/found-snapshots", owner.rest), auth, None).await;
     assert_eq!((s, v["error"]["type"].as_str()), (400, Some("illegal_argument_exception")), "{v}");
+}
+
+/// A cluster's IP allowlist is checked on its owner against the client's own address, which the
+/// node the client reached carries in the signed forward (not the forwarding node's address),
+/// and the internal route the forwards arrive on takes signed requests only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forward_carries_the_clients_address_to_the_owner() {
+    let leases = MemoryStore::new();
+    let objects = search_store::test_objects("fleet-allow");
+    let catalog = Arc::new(search_control::store::Store::memory().unwrap());
+    let a = node("a", &leases, &objects, &catalog).await;
+    let b = node("b", &leases, &objects, &catalog).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while a.cluster.nodes().len() != 2 || b.cluster.nodes().len() != 2 {
+        assert!(tokio::time::Instant::now() < deadline, "the nodes never saw each other");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let http = reqwest::Client::new();
+    let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "vault", "ip_allowlist": ["203.0.113.0/24"]}))).await;
+    assert_eq!(s, 200, "{c}");
+    let pw = c["password"].as_str().unwrap().to_string();
+    let get = |base: &str, client: Option<&str>| {
+        let mut r = http.get(format!("{base}/")).basic_auth("vault", Some(&pw));
+        if let Some(ip) = client {
+            r = r.header("x-test-client", ip);
+        }
+        r.send()
+    };
+    // Loaded on whichever node takes it, from an allowed client.
+    assert_eq!(get(&a.rest, Some("203.0.113.5")).await.unwrap().status(), 200);
+    let key = search_control::cluster::key("vault");
+    let (owner, other) = if a.cluster.owns(&key) { (&a, &b) } else { (&b, &a) };
+    // Through the other node: the owner sees the client, not the node that forwarded it (127.0.0.1).
+    assert_eq!(get(&other.rest, Some("203.0.113.5")).await.unwrap().status(), 200);
+    let r = get(&other.rest, Some("198.51.100.1")).await.unwrap();
+    assert_eq!(r.status(), 403);
+    assert_eq!(r.text().await.unwrap(), r#"{"ok":false,"message":"Forbidden due to traffic filtering"}"#);
+    assert_eq!(get(&other.rest, None).await.unwrap().status(), 403, "the forwarding node's own address isn't on the list");
+    assert!(other.control.node.loaded().is_empty(), "checked on the owner");
+    // roll's own request through the other node (a link's key, made on the owner) isn't filtered.
+    other.control.mint_link("vault", "svc_1").await.unwrap();
+
+    // The internal route takes only signed forwards: a client can't name its own address there,
+    // nor reach an open cluster unsigned.
+    let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "open"}))).await;
+    assert_eq!(s, 200, "{c}");
+    let open_pw = c["password"].as_str().unwrap().to_string();
+    for (cluster, p) in [("open", open_pw.as_str()), ("vault", pw.as_str())] {
+        let r = http.get(format!("{}/internal/search/rest/", owner.api)).basic_auth(cluster, Some(p)).send().await.unwrap();
+        assert_eq!(r.status(), 401, "{cluster}");
+        assert!(r.text().await.unwrap().contains("signature"), "refused as unsigned, not by the cluster");
+    }
+    let r = http.get(format!("{}/internal/search/rest/", owner.api)).basic_auth("vault", Some(&pw)).header("x-roll-code-client", "203.0.113.5").send().await.unwrap();
+    assert_eq!(r.status(), 401, "a client's own x-roll-code-client");
 }
