@@ -3524,8 +3524,17 @@ async fn a_web_service_scales_on_its_cpu() {
         panic!("never {n} running: {:?}", w.fake.instances(id));
     }
     until(&w, &id, 1).await;
-    w.fake.set_busy(&running(&w, &id)[0], 0.9);
+    let busy = running(&w, &id)[0].clone();
+    w.fake.set_busy(&busy, 0.9);
     until(&w, &id, 2).await;
+    // Each instance's own CPU and memory, its last hour by minute (Railway's per replica).
+    let (_, m) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/metrics?minutes=60"), None).await;
+    let each = m["by_instance"].as_array().unwrap_or_else(|| panic!("{m}"));
+    let of = |n: &str| each.iter().find(|x| x["instance"] == n).cloned().unwrap_or_else(|| panic!("{n} in {m}"));
+    let hot = of(&busy);
+    assert!(hot["cpu"].as_array().unwrap().last().unwrap().as_f64().unwrap() > 0.1, "{hot}");
+    assert_eq!(hot["memory_bytes"].as_array().unwrap().last().unwrap().as_u64(), Some(64 << 20), "{hot}");
+    assert_eq!(hot["minutes"].as_array().unwrap().len(), hot["cpu"].as_array().unwrap().len());
     for n in running(&w, &id) {
         w.fake.set_busy(&n, 0.05);
     }
