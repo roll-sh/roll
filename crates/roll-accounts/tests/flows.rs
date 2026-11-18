@@ -1324,3 +1324,80 @@ async fn an_sso_connection_caps_its_sessions() {
     assert_eq!(hours(&mut by_sso).await, 1);
     assert_eq!(hours(&mut by_code).await, 30 * 24);
 }
+
+/// OIDC Back-Channel Logout (docs/accounts.md, "SSO"): the provider posts a signed logout token
+/// and the sessions it names end: by the provider's session (`sid`), else the person (`sub`).
+/// A replayed, unsigned, nonce-bearing or event-less token is refused; other sign-ins stay.
+#[tokio::test]
+async fn an_sso_providers_logout_ends_its_sessions() {
+    let env = Env::new().await;
+    let idp = fake_idp().await;
+    let issuer = idp.base.lock().unwrap().clone();
+    let txt = Arc::new(Txt::default());
+    env.accounts.set_txt_lookup(txt.clone());
+    let mut by_code = Browser::default();
+    env.email_sign_in(&mut by_code, "ada@acme.test", Some(&env.invite("ada@acme.test").await)).await;
+    let conn = env.operator(Method::POST, "/v1/accounts/sso", json!({ "name": "Acme Okta", "issuer": issuer, "client_id": "roll-sso", "client_secret": "s3cret", "domains": ["acme.test"] })).await.json;
+    let id = conn["id"].as_str().unwrap().to_string();
+    assert!(conn["backchannel_logout_uri"].as_str().unwrap().ends_with(&format!("/v1/accounts/sso/{id}/backchannel-logout")), "{conn}");
+    txt.0.lock().unwrap().insert("_roll-sso.acme.test".into(), vec![conn["dns"]["value"].as_str().unwrap().to_string()]);
+    env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/verify"), json!({})).await;
+    let mut laptop = Browser::default();
+    env.sso(&idp, &mut laptop, "ada@acme.test", json!({ "sub": "00u-ada", "email": "ada@acme.test", "sid": "okta-sid-1" })).await;
+    let mut phone = Browser::default();
+    env.sso(&idp, &mut phone, "ada@acme.test", json!({ "sub": "00u-ada", "email": "ada@acme.test", "sid": "okta-sid-2" })).await;
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let sign = |claims: Value, key: &[u8]| {
+        use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
+        let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        let input = format!("{}.{}", b64(json!({ "alg": "ES256", "kid": "k1", "typ": "logout+jwt" }).to_string().as_bytes()), b64(claims.to_string().as_bytes()));
+        let k = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, key, &ring::rand::SystemRandom::new()).unwrap();
+        format!("{input}.{}", b64(k.sign(&ring::rand::SystemRandom::new(), input.as_bytes()).unwrap().as_ref()))
+    };
+    let token = |extra: Value| {
+        let mut c = json!({ "iss": issuer, "aud": "roll-sso", "iat": now, "exp": now + 120, "jti": format!("j-{}", rand_hex()), "events": { "http://schemas.openid.net/event/backchannel-logout": {} } });
+        for (k, v) in extra.as_object().unwrap() {
+            if v.is_null() {
+                c.as_object_mut().unwrap().remove(k);
+            } else {
+                c[k] = v.clone();
+            }
+        }
+        c
+    };
+    let post = |t: String| {
+        let (env, id) = (&env, id.clone());
+        async move {
+            let req = Request::builder().method(Method::POST).uri(format!("/v1/accounts/sso/{id}/backchannel-logout")).header("content-type", "application/x-www-form-urlencoded");
+            env.send(req.body(Body::from(format!("logout_token={t}"))).unwrap()).await
+        }
+    };
+    let status = |b: &Browser| {
+        let env = &env;
+        let mut b = b.clone();
+        async move { env.call(&mut b, Method::GET, "/v1/accounts/session", None).await.json["status"].as_str().unwrap().to_string() }
+    };
+    // Its session, by sid: the laptop's SSO session ends; the phone's and the email code's stay.
+    let first = sign(token(json!({ "sid": "okta-sid-1" })), &idp.key);
+    let a = post(first.clone()).await;
+    assert_eq!(a.status, StatusCode::OK, "{}", a.json);
+    assert_eq!(a.headers.get(header::CACHE_CONTROL).and_then(|v| v.to_str().ok()), Some("no-store"));
+    assert_eq!((status(&laptop).await, status(&phone).await, status(&by_code).await), ("anonymous".into(), "signed_in".into(), "signed_in".into()));
+    // Refused: a replay, a nonce, no logout event, another key's signature.
+    assert_eq!(post(first).await.status, StatusCode::BAD_REQUEST, "used once");
+    assert_eq!(post(sign(token(json!({ "sub": "00u-ada", "nonce": "n" })), &idp.key)).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(post(sign(token(json!({ "sub": "00u-ada", "events": null })), &idp.key)).await.status, StatusCode::BAD_REQUEST);
+    let other = ring::signature::EcdsaKeyPair::generate_pkcs8(&ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING, &ring::rand::SystemRandom::new()).unwrap();
+    assert_eq!(post(sign(token(json!({ "sub": "00u-ada" })), other.as_ref())).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(status(&phone).await, "signed_in");
+    // The person, by sub: every session this connection signed in for them ends; the code's stays.
+    assert_eq!(post(sign(token(json!({ "sub": "00u-ada" })), &idp.key)).await.status, StatusCode::OK);
+    assert_eq!((status(&phone).await, status(&by_code).await), ("anonymous".into(), "signed_in".into()));
+}
+
+fn rand_hex() -> String {
+    let mut b = [0u8; 8];
+    getrandom::fill(&mut b).unwrap();
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}

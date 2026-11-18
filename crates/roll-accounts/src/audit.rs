@@ -215,6 +215,7 @@ fn recorded_elsewhere(route: &str) -> bool {
             "/v1/accounts/email/start" | "/v1/accounts/email/verify" | "/v1/accounts/oauth/{provider}/start" | "/v1/accounts/sso/start" | "/v1/accounts/signin/totp" | "/v1/accounts/signin/recovery" | "/v1/accounts/invites/peek"
                 | "/v1/accounts/signin/passkey" | "/v1/accounts/signin/passkey/options" | "/v1/accounts/me/passkeys/options"
                 | "/v1/accounts/me/reauth" | "/v1/accounts/me/reauth/email" | "/v1/accounts/me/reauth/passkey/options"
+                | "/v1/accounts/sso/{id}/backchannel-logout"
                 | "/v1/accounts/signin/reset-request" | "/v1/accounts/reset-requests/{id}/approve" | "/v1/accounts/reset-requests/{id}/deny"
                 | "/v1/accounts/me/export"
         )

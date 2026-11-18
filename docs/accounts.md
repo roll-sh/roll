@@ -262,6 +262,16 @@ needs the person signed in (`intent: "link"`).
 Okta, Entra ID, Google Workspace, JumpCloud or any OpenID Connect provider signs people in, chosen
 by their email's domain, as Linear's, Vercel's and GitHub's enterprise sign-in do.
 
+- **Back-channel logout** (OIDC Back-Channel Logout 1.0, Okta's and Entra's "sign out
+  everywhere"): register the connection's `backchannel_logout_uri`
+  (`<api>/v1/accounts/sso/{id}/backchannel-logout`) at the provider, and when a person signs out
+  there (or an admin ends their sessions), the provider posts a `logout_token`. It's verified as an
+  ID token is (the provider's keys, issuer, roll's client as audience, `exp`), must carry the
+  back-channel logout event and no `nonce`, name a `sid` or a `sub`, and is used once (`jti`, kept
+  until it expires). The sessions this connection signed in end: the one with the provider's
+  `sid` (kept on the session at sign-in), else every one of the person (`sub`). A form body, by
+  the spec: the one write here that isn't JSON, safe because it reads and sets no cookie and only
+  the provider's signature counts. Each one is in the person's security log (`session.end`).
 - **Session length** (`PATCH /v1/accounts/sso/{id} {session_hours}`, 1 to 720; 0 takes it off), as
   Okta's and Google Workspace's: a session the connection signs in lasts at most that long (kept
   past a second factor, as `sessions.cap_ms`), then the person signs in through it again. A

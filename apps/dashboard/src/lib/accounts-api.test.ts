@@ -70,3 +70,9 @@ describe("sudo mode", () => {
     await expect(accountsApi.removePasskey("pk_1")).rejects.toMatchObject({ code: "reauth_required" });
   });
 });
+
+describe("a provider's logout in the security log", () => {
+  it("says the provider signed the person out", () => {
+    expect(activityText({ at: 0, action: "session.end", actor: "sso:sso_okta", ok: true, status: 200 }, "usr_me")).toBe("Your company's provider signed you out (its back-channel logout)");
+  });
+});
