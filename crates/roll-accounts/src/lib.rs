@@ -15,6 +15,7 @@ mod mail;
 mod oauth;
 pub mod passkeys;
 mod export;
+pub mod attestation;
 mod places;
 pub mod recovery;
 mod sudo;
@@ -139,6 +140,10 @@ CREATE TABLE IF NOT EXISTS sign_in_places (
     last_at INTEGER NOT NULL,
     PRIMARY KEY (user_id, place)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS passkey_policy (
+    id INTEGER PRIMARY KEY,
+    policy TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS passkey_challenges (
     id TEXT PRIMARY KEY,
     user_id TEXT,
@@ -449,6 +454,11 @@ impl Accounts {
         // A SCIM token found leaked: where, and it no longer opens anything.
         if !db.has_column("scim_tokens", "leaked")? {
             db.add_column("scim_tokens", "leaked", "TEXT")?;
+        }
+        // A passkey's model, when a verified attestation proved it (hardware keys only).
+        if !db.has_column("passkeys", "aaguid")? {
+            db.add_column("passkeys", "aaguid", "TEXT")?;
+            db.add_column("passkeys", "model", "TEXT")?;
         }
         // Whether a passkey is synced to the person's other devices (its authenticator says so).
         if !db.has_column("passkeys", "synced")? {

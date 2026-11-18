@@ -173,6 +173,14 @@ export interface Passkey {
   created_at: number;
   last_used_at: number | null;
   synced: boolean;
+  /** Its model, when a verified attestation proved it (hardware keys only). */
+  model?: string;
+}
+
+/** Hardware keys only (docs/accounts.md, "Passkeys"): which authenticator models count. */
+export interface PasskeyPolicy {
+  require: boolean;
+  models: { aaguid: string; name: string; roots: string[] }[];
 }
 
 /** A passkey ceremony's options: its challenge's `id`, and what `navigator.credentials` takes (as JSON). */
@@ -239,6 +247,8 @@ export const accountsApi = {
     call<PasskeyOptions<{ challenge: string; user: { id: string; name: string; displayName: string }; excludeCredentials?: { type: "public-key"; id: string }[] }>>("POST", "/me/passkeys/options"),
   addPasskey: (id: string, name: string, credential: unknown) => call<Passkey>("POST", "/me/passkeys", { id, name, credential }),
   renamePasskey: (id: string, name: string) => call<Passkey>("PATCH", `/me/passkeys/${encodeURIComponent(id)}`, { name }),
+  passkeyPolicy: () => call<PasskeyPolicy>("GET", "/passkey-policy"),
+  setPasskeyPolicy: (p: PasskeyPolicy) => call<PasskeyPolicy>("PUT", "/passkey-policy", p),
   removePasskey: (id: string) => call<null>("DELETE", `/me/passkeys/${encodeURIComponent(id)}`),
   /** Your data as one JSON document (sudo mode): a file to save. */
   exportData: () => call<Record<string, unknown>>("POST", "/me/export"),

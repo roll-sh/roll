@@ -802,6 +802,8 @@ struct Authenticator {
     count: u32,
     /// Flags besides user presence: `UV` (0x04), `BS` (0x10, synced).
     flags: u8,
+    /// Its model (AAGUID).
+    aaguid: [u8; 16],
 }
 
 impl Authenticator {
@@ -810,7 +812,7 @@ impl Authenticator {
         let rng = ring::rand::SystemRandom::new();
         let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
         let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng).unwrap();
-        Authenticator { key, credential: (0..32).map(|i| i as u8 ^ 0x5a).collect(), count: 0, flags }
+        Authenticator { key, credential: (0..32).map(|i| i as u8 ^ 0x5a).collect(), count: 0, flags, aaguid: [0; 16] }
     }
     fn b64(b: &[u8]) -> String {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
@@ -830,7 +832,7 @@ impl Authenticator {
         d.push(0x01 | self.flags | if new { 0x40 } else { 0 });
         d.extend_from_slice(&self.count.to_be_bytes());
         if new {
-            d.extend_from_slice(&[0; 16]);
+            d.extend_from_slice(&self.aaguid);
             d.extend_from_slice(&(self.credential.len() as u16).to_be_bytes());
             d.extend_from_slice(&self.credential);
             d.extend_from_slice(&self.cose());
@@ -853,6 +855,43 @@ impl Authenticator {
         let id = Self::b64(&self.credential);
         json!({ "id": id, "rawId": id, "type": "public-key", "response": { "clientDataJSON": Self::b64(&Self::client("webauthn.create", options, WEB)), "attestationObject": Self::b64(&att) } })
     }
+    /// `navigator.credentials.create` with a `packed` attestation signed by `signer`, whose
+    /// certificate is `cert` (a hardware key proving its model).
+    fn create_packed(&mut self, options: &Value, signer: &ring::signature::EcdsaKeyPair, cert: &[u8]) -> Value {
+        let rp = options["publicKey"]["rp"]["id"].as_str().unwrap().to_string();
+        let data = self.auth_data(&rp, true);
+        let client = Self::client("webauthn.create", options, WEB);
+        let mut msg = data.clone();
+        msg.extend_from_slice(&Sha256::digest(&client));
+        let sig = signer.sign(&ring::rand::SystemRandom::new(), &msg).unwrap();
+        let bytes = |b: &[u8]| {
+            let mut v = if b.len() < 24 { vec![0x40 | b.len() as u8] } else if b.len() < 256 { vec![0x58, b.len() as u8] } else { let mut h = vec![0x59]; h.extend_from_slice(&(b.len() as u16).to_be_bytes()); h };
+            v.extend_from_slice(b);
+            v
+        };
+        let text = |t: &str| {
+            let mut v = vec![0x60 | t.len() as u8];
+            v.extend_from_slice(t.as_bytes());
+            v
+        };
+        let mut att = vec![0xa3];
+        att.extend(text("fmt"));
+        att.extend(text("packed"));
+        att.extend(text("attStmt"));
+        att.push(0xa3);
+        att.extend(text("alg"));
+        att.push(0x26);
+        att.extend(text("sig"));
+        att.extend(bytes(sig.as_ref()));
+        att.extend(text("x5c"));
+        att.push(0x81);
+        att.extend(bytes(cert));
+        att.extend(text("authData"));
+        att.extend(bytes(&data));
+        let id = Self::b64(&self.credential);
+        json!({ "id": id, "rawId": id, "type": "public-key", "response": { "clientDataJSON": Self::b64(&client), "attestationObject": Self::b64(&att) } })
+    }
+
     /// `navigator.credentials.get` at `origin`: the count goes up, the data is signed.
     fn get(&mut self, options: &Value, origin: &str) -> Value {
         self.count += 1;
@@ -1156,4 +1195,94 @@ async fn a_person_exports_their_own_data() {
     env.accounts.set_sudo_window(1);
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/export", None).await.json["code"], "reauth_required");
+}
+
+/// A maker's root and an attestation certificate it signed for model `aaguid` (OU "Authenticator
+/// Attestation", FIDO's AAGUID extension), with the certificate's signing key: the root's PEM, the
+/// certificate's DER, the key.
+fn attestation_chain(maker: &str, aaguid: [u8; 16]) -> (String, Vec<u8>, ring::signature::EcdsaKeyPair) {
+    use rcgen::{BasicConstraints, CertificateParams, CustomExtension, DnType, IsCa, Issuer, KeyPair};
+    let root_key = KeyPair::generate().unwrap();
+    let mut root = CertificateParams::new(Vec::<String>::new()).unwrap();
+    root.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    root.distinguished_name.push(DnType::CommonName, format!("{maker} Attestation Root"));
+    let root_cert = root.self_signed(&root_key).unwrap();
+    let issuer = Issuer::from_params(&root, &root_key);
+    let leaf_key = KeyPair::generate().unwrap();
+    let mut leaf = CertificateParams::new(Vec::<String>::new()).unwrap();
+    leaf.is_ca = IsCa::ExplicitNoCa;
+    leaf.distinguished_name.push(DnType::OrganizationName, maker);
+    leaf.distinguished_name.push(DnType::OrganizationalUnitName, "Authenticator Attestation");
+    leaf.distinguished_name.push(DnType::CommonName, format!("{maker} Key"));
+    let mut ext = vec![0x04, 16];
+    ext.extend_from_slice(&aaguid);
+    leaf.custom_extensions.push(CustomExtension::from_oid_content(&[1, 3, 6, 1, 4, 1, 45724, 1, 1, 4], ext));
+    let leaf_cert = leaf.signed_by(&leaf_key, &issuer).unwrap();
+    let signer = ring::signature::EcdsaKeyPair::from_pkcs8(&ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING, &leaf_key.serialize_der(), &ring::rand::SystemRandom::new()).unwrap();
+    (root_cert.pem(), leaf_cert.der().to_vec(), signer)
+}
+
+/// Hardware keys only (docs/accounts.md, "Passkeys"): with the policy on, registration asks for
+/// attestation and keeps only a listed model whose `packed` statement chains to its maker's root;
+/// no attestation, another model, or another maker's chain is refused, and an older passkey that
+/// proved nothing stops signing in. Off, nothing changes.
+#[tokio::test]
+async fn hardware_keys_only_takes_verified_listed_models() {
+    let env = Env::new().await;
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@example.com", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let mut b = Browser::default();
+    env.email_sign_in(&mut b, "root@example.com", Some(&root_invite)).await;
+    // Off: any passkey, no attestation asked.
+    let o = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys/options", None).await.json;
+    assert_eq!(o["publicKey"]["attestation"], "none");
+    let mut phone = Authenticator::new(0x04);
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys", Some(json!({ "id": o["id"], "name": "phone", "credential": phone.create(&o) }))).await.status, StatusCode::CREATED);
+
+    // On: one model, with its maker's root.
+    let yk: [u8; 16] = *b"yubikey-5-model!";
+    let (root_pem, cert, signer) = attestation_chain("Yubico", yk);
+    let model_id = roll_accounts::attestation::uuid(&yk);
+    let bad = env.call(&mut b, Method::PUT, "/v1/accounts/passkey-policy", Some(json!({ "require": true, "models": [] }))).await;
+    assert_eq!((bad.status, bad.json["code"].as_str()), (StatusCode::BAD_REQUEST, Some("policy")), "at least one model");
+    let set = env.call(&mut b, Method::PUT, "/v1/accounts/passkey-policy", Some(json!({ "require": true, "models": [{ "aaguid": model_id, "name": "YubiKey 5", "roots": [root_pem] }] }))).await;
+    assert_eq!(set.status, StatusCode::OK, "{}", set.json);
+
+    // A listed model, attested by its maker: kept, with its model's name.
+    let o = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys/options", None).await.json;
+    assert_eq!(o["publicKey"]["attestation"], "direct");
+    let mut key = Authenticator::new(0x04);
+    key.credential = vec![7; 32];
+    key.aaguid = yk;
+    let made = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys", Some(json!({ "id": o["id"], "name": "my key", "credential": key.create_packed(&o, &signer, &cert) }))).await;
+    assert_eq!((made.status, made.json["model"].as_str()), (StatusCode::CREATED, Some("YubiKey 5")), "{}", made.json);
+    // Refused: no attestation, an unlisted model, a chain to another maker's root.
+    let mut none = Authenticator::new(0x04);
+    none.credential = vec![8; 32];
+    none.aaguid = yk;
+    let o = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys/options", None).await.json;
+    let a = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys", Some(json!({ "id": o["id"], "name": "x", "credential": none.create(&o) }))).await;
+    assert!(a.json["error"].as_str().is_some_and(|e| e.contains("doesn't prove its model")), "no attestation: {}", a.json);
+    let mut other = Authenticator::new(0x04);
+    other.credential = vec![9; 32];
+    other.aaguid = *b"another-model-xx";
+    let (_, other_cert, other_signer) = attestation_chain("Yubico", other.aaguid);
+    let o = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys/options", None).await.json;
+    let a = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys", Some(json!({ "id": o["id"], "name": "x", "credential": other.create_packed(&o, &other_signer, &other_cert) }))).await;
+    assert!(a.json["error"].as_str().is_some_and(|e| e.contains("isn't one")), "unlisted model: {}", a.json);
+    let mut fake = Authenticator::new(0x04);
+    fake.credential = vec![10; 32];
+    fake.aaguid = yk;
+    let (_, fake_cert, fake_signer) = attestation_chain("Counterfeit", yk);
+    let o = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys/options", None).await.json;
+    let a = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys", Some(json!({ "id": o["id"], "name": "x", "credential": fake.create_packed(&o, &fake_signer, &fake_cert) }))).await;
+    assert!(a.json["error"].as_str().is_some_and(|e| e.contains("isn't from this model's maker")), "another maker's chain: {}", a.json);
+
+    // Signing in: the attested key works; the phone's passkey, which proved nothing, doesn't.
+    let mut c = Browser::default();
+    let o = env.call(&mut c, Method::POST, "/v1/accounts/signin/passkey/options", None).await.json;
+    assert_eq!(env.call(&mut c, Method::POST, "/v1/accounts/signin/passkey", Some(json!({ "id": o["id"], "credential": key.get(&o, WEB) }))).await.json["status"], "signed_in");
+    let mut d = Browser::default();
+    let o = env.call(&mut d, Method::POST, "/v1/accounts/signin/passkey/options", None).await.json;
+    let a = env.call(&mut d, Method::POST, "/v1/accounts/signin/passkey", Some(json!({ "id": o["id"], "credential": phone.get(&o, WEB) }))).await;
+    assert!(a.json["error"].as_str().is_some_and(|e| e.contains("isn't on one")), "{}", a.json);
 }

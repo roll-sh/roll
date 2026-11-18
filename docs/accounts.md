@@ -384,6 +384,19 @@ phished: a passkey works only on roll's own site.
 - Everything from the browser is hostile: the CBOR reader takes definite lengths only, believes
   a length or count only as far as the bytes present hold it, and stops at a small depth; a
   credential id is at most 1023 bytes; the blobs at most 16 KiB.
+- **Hardware keys only** (`src/attestation.rs`), for a company that requires its people's passkeys
+  on authenticators it chose: an admin lists models (`PUT /v1/accounts/passkey-policy {require,
+  models: [{aaguid, name, roots: [PEM]}]}`, sudo mode; "Hardware keys only" on the account page).
+  With `require` on, registration asks for `direct` attestation and keeps a passkey only when its
+  `packed` statement is verified (WebAuthn §8.2): the signature over the authenticator data and the
+  client data's hash by the attestation certificate; that certificate's version 3, OU
+  "Authenticator Attestation", not a CA, its FIDO AAGUID extension matching the authenticator data;
+  and its chain to one of the model's roots (webpki, at the current time). A self-attested or
+  unattested authenticator, an unlisted model, or another maker's chain is refused; the passkey
+  shows its model's name. A passkey that proved no listed model (made before, or its model taken
+  off the list) stops signing in while the policy is on; codes still work. An unverified AAGUID is
+  the authenticator's own say-so, so the list is never checked against one. Other formats (`tpm`,
+  `android-key`, `apple`, `fido-u2f`) are refused under the policy for now.
 - Anonymous challenges are throttled per address (60 every 10 minutes). Passkeys need
   `ROLL_WEB_URL` (503 `{code: "passkeys_off"}` without it); `GET /v1/accounts` says
   `providers.passkey`.
@@ -537,6 +550,8 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 
 | Route | Body | Answer |
 | --- | --- | --- |
+| `GET /v1/accounts/passkey-policy` | | `{require, models: [{aaguid, name, roots}]}` (hardware keys only) |
+| `PUT /v1/accounts/passkey-policy` | `{require, models}` | the policy, checked (UUIDs, names, PEM roots; a model when required); sudo mode; 400 `{code: "policy"}` |
 | `GET /v1/accounts/reset-requests` | | `ResetRequest[]`: `{id, user, email, handle, reason, ip, user_agent, created_at, state, decided_by, decided_at}`, pending first |
 | `POST /v1/accounts/reset-requests/{id}/approve` | | `ResetRequest`: TOTP and recovery codes gone (sudo mode; 403 `own_request` for your own; 409 decided) |
 | `POST /v1/accounts/reset-requests/{id}/deny` | | `ResetRequest` (sudo mode) |

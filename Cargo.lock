@@ -6870,11 +6870,14 @@ dependencies = [
  "hex",
  "http-body-util",
  "percent-encoding",
+ "rcgen",
  "reqwest",
  "ring",
  "roll-auth",
  "roll-net",
  "roll-oidc",
+ "rustls-pki-types",
+ "rustls-webpki 0.103.15",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6884,6 +6887,7 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "x509-parser",
  "zeroize",
 ]
 
