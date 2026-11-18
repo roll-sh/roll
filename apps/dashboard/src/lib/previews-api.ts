@@ -516,10 +516,10 @@ export function parseSse(rest: string, text: string): { events: { event: string;
   return { events, rest: left };
 }
 
-/** A request to a preview's service through roll: when (ms), the method, the path (never the query), the status, ms until the answer's headers. */
-/** A running service's use right now: cores of CPU, resident bytes, and the MB it runs with. */
+/** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */
 export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };
 
+/** A request to a preview's service through roll: when (ms), the method, the path (never the query), the status, ms until the answer's headers. */
 export type RequestLine = { at: number; service: string; method: string; path: string; status: number; ms: number };
 
 /** A service's last `lines`, then its output as it comes (`…/logs?follow=1`, read with the

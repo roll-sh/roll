@@ -532,8 +532,7 @@ struct LogsQuery {
     follow: Option<String>,
 }
 
-/// A service's last lines; with `follow`, server-sent events: `event: service` (its name), then
-/// one event per line as it comes, with keep-alives.
+/// What its running services use (`{services: [...]}`; 404 for no such preview).
 async fn metrics(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
     Ok(Json(json!({ "services": e.metrics(&id).await? })))
@@ -544,6 +543,8 @@ async fn requests(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<V
     Ok(Json(json!({ "requests": e.requests(&id).await? })))
 }
 
+/// A service's last lines; with `follow`, server-sent events: `event: service` (its name), then
+/// one event per line as it comes, with keep-alives.
 async fn logs(AxState(e): S, Path(id): Path<String>, Query(q): Query<LogsQuery>) -> crate::Result<Response> {
     check_id(&id)?;
     let lines = q.lines.unwrap_or(200).clamp(1, 2000);

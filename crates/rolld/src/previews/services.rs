@@ -261,9 +261,13 @@ impl roll_previews::ports::Apps for RollApps {
     async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
         let (id, env) = self.find(preview, service).await.ok()??;
         let m = self.api.get(&format!("{}/metrics?minutes=5", Self::env_path(&id, &env))).await.ok()?;
-        let last = |k: &str| m[k].as_array().and_then(|a| a.iter().rev().find(|v| !v.is_null()).cloned());
-        let (cpu, mem) = (last("cpu")?.as_f64()?, last("memory_bytes")?.as_u64()?);
-        (mem > 0).then_some((cpu, mem))
+        // The last finished minute: the one under way counts its CPU over the whole minute, so it
+        // reads low (and its memory is 0 in its first second). Memory is summed over instances, and
+        // shown against what one runs with: one instance's, on average.
+        let at = |k: &str| m[k].as_array().and_then(|a| a.get(a.len().saturating_sub(2)).cloned());
+        let (cpu, mem) = (at("cpu")?.as_f64()?, at("memory_bytes")?.as_u64()?);
+        let instances = at("instances").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+        (mem > 0).then_some((cpu, mem / instances))
     }
 
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String> {

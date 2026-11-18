@@ -334,11 +334,11 @@ async fn a_previews_metrics_are_what_its_running_services_use() {
     e.code.open(change("chg_u", 4));
     e.engine.pass().await.unwrap();
     let p = e.engine.store.row_by_change("chg_u").unwrap().unwrap();
-    assert!(e.engine.metrics(&p.id).await.unwrap().is_empty(), "nothing runs yet");
     let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap();
     e.apps.metrics.lock().insert(web.name.clone(), (0.25, 96 << 20));
     let m = e.engine.metrics(&p.id).await.unwrap();
-    assert_eq!(m, [roll_previews::ServiceMetrics { service: web.name.clone(), cpu: 0.25, memory_bytes: 96 << 20, memory_mb: web.memory_mb }]);
+    assert_eq!(m, [roll_previews::ServiceMetrics { service: web.name.clone(), cpu: 0.25, memory_bytes: 96 << 20, memory_mb: web.memory_mb }], "only the running one, against what it runs with");
+    assert!(matches!(e.engine.metrics("pv_nope").await, Err(roll_previews::Error::NotFound(_))));
 }
 
 /// A preview's output is read by anyone who can read the preview, and its code (a fork's too) can

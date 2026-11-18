@@ -142,6 +142,9 @@ pub struct Engine {
     /// In a cluster: requests that act on running services go to the reconciler's node.
     pub cluster: std::sync::OnceLock<Arc<roll_cluster::Cluster>>,
     usage_read: Mutex<HashMap<String, i64>>,
+    /// What each preview's services used, read at (ms): `GET …/metrics` reads them again only after
+    /// [`METRICS_FOR`], however many sheets poll.
+    metrics_read: Mutex<HashMap<String, (i64, Vec<crate::ServiceMetrics>)>>,
     /// Previews whose screenshot a converge asked for; taken after the pass (`pass`).
     shots_wanted: Mutex<std::collections::HashSet<String>>,
     /// Previews with a screenshot task queued or running, and whether it was asked again
@@ -216,6 +219,7 @@ impl Engine {
             kick: Notify::new(),
             cluster: std::sync::OnceLock::new(),
             usage_read: Mutex::new(HashMap::new()),
+            metrics_read: Mutex::new(HashMap::new()),
             secrets_told: Mutex::new(HashMap::new()),
             paths_seen: Mutex::new(HashMap::new()),
             shots_wanted: Mutex::new(std::collections::HashSet::new()),
