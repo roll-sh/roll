@@ -3011,8 +3011,8 @@ inconsistencies are fixed in #264:
 - R6. **roll queues as a link provider** (#274): live host, port and vhost; an AMQP URL with a user
   of its own, managed or dynamic, and only the access asked for (read, write, configure). It found
   roll queues checking a default-exchange publish against `""` rather than `amq.default`, fixed
-  for every protocol in one place as RabbitMQ does (#279, checked against real RabbitMQ); roll apps'
-  `RollResources` wiring for queues is apps' next step.
+  for every protocol in one place as RabbitMQ does (#279, checked against real RabbitMQ). roll apps
+  wires queue links into `RollResources` once #274 is on main: tell them when it lands.
 - R7. **AWS IAM login for EC2/ECS/EKS** (S–M; a signed `GetCallerIdentity`, as Vault's): an account to confirm.
 - R8. **A tamper-evident audit log** (building: `feature/roll-secrets-audit-chain`): a per-project hash
   chain written with each row, digests signed by roll's issuer key to the sinks, `audit verify`.
