@@ -11,6 +11,7 @@ import { withSession } from "./code-token";
 import { analyticsQuery, type AnalyticsRange, type SearchAnalytics } from "./search-analytics";
 import type { MetricsRange, SearchMetrics, SearchSlowLog } from "./search-performance";
 import type { AuditPage } from "./search-audit";
+import type { LinkBody, RemoteLink } from "./search-remotes";
 
 export type Flavor = "elasticsearch" | "opensearch";
 
@@ -254,6 +255,12 @@ export const searchApi = {
   createKey: (id: string, name: string, access: KeyAccess, expiresInS?: number) =>
     call<NewSearchKey>("POST", `${cl(id)}/keys`, { name, access, expires_in_s: expiresInS }),
   revokeKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/keys/${encodeURIComponent(key)}`),
+  /** The remote clusters roll holds credentials for (never wakes the cluster, never the key). */
+  remotes: (id: string) => call<{ remotes: RemoteLink[] }>("GET", `${cl(id)}/remotes`),
+  /** Links another of the person's clusters as remote `alias` (roll makes its cross-cluster key). */
+  linkRemote: (id: string, alias: string, body: LinkBody) => call<unknown>("PUT", `${cl(id)}/remotes/${encodeURIComponent(alias)}`, body),
+  /** Unlinks it: its settings and credentials go, a key roll made is revoked. */
+  unlinkRemote: (id: string, alias: string) => call<null>("DELETE", `${cl(id)}/remotes/${encodeURIComponent(alias)}`),
   /** The cluster's security audit log, newest first (never wakes it). `from`/`to`: Unix ms. */
   audit: (id: string, q: { from?: number; to?: number; event?: string; size?: number } = {}) => {
     const params = new URLSearchParams();

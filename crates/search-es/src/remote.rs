@@ -21,8 +21,8 @@ use crate::json::{Map, Value};
 use crate::meta::ClusterState;
 use crate::obj;
 
+pub mod contexts;
 pub mod links;
-pub mod merge;
 
 /// A configured remote cluster.
 #[derive(Clone, Debug, PartialEq)]
@@ -36,6 +36,13 @@ pub struct Remote {
 
 /// The remote clusters the cluster settings configure (transient over persistent), by alias.
 pub fn remotes(st: &ClusterState) -> Vec<Remote> {
+    remotes_in(crate::cluster::Dialect::Elasticsearch, st)
+}
+
+/// [`remotes`] as a dialect reads them: `skip_unavailable` defaults to `true` in Elasticsearch
+/// (since 8.15) and to `false` in OpenSearch.
+pub fn remotes_in(dialect: crate::cluster::Dialect, st: &ClusterState) -> Vec<Remote> {
+    let skip_default = dialect == crate::cluster::Dialect::Elasticsearch;
     let mut merged = st.metadata.persistent.by_prefix("cluster.remote.");
     for (k, v) in st.metadata.transient.by_prefix("cluster.remote.").iter() {
         merged.insert(k.clone(), v.clone());
@@ -52,7 +59,7 @@ pub fn remotes(st: &ClusterState) -> Vec<Remote> {
         if if proxy { proxy_address.is_none() } else { seeds.is_empty() } {
             continue;
         }
-        let skip_unavailable = get("skip_unavailable").is_none_or(|v| v != "false");
+        let skip_unavailable = get("skip_unavailable").map_or(skip_default, |v| v != "false");
         out.push(Remote { alias, proxy, seeds, proxy_address, skip_unavailable });
     }
     out
@@ -74,7 +81,7 @@ impl Remote {
 /// cluster it may link to (asking doesn't wake it); its credentials show redacted.
 pub async fn remote_info(cluster: &Cluster, st: &ClusterState) -> Value {
     let mut m = Map::new();
-    for r in remotes(st) {
+    for r in remotes_in(cluster.dialect, st) {
         let mut credentials = false;
         let connected = match (cluster.config.links.as_deref(), cluster.config.links.as_deref().and_then(|l| r.link(l))) {
             (Some(l), Some(target)) => {

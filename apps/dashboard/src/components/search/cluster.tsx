@@ -34,6 +34,7 @@ import { IndexBrowser } from "./index-browser";
 import { PerformanceTab } from "./performance";
 import { Playground } from "./playground";
 import { RelevanceTab } from "./relevance";
+import { Remotes } from "./remotes";
 import { CredentialsOnce, SearchStateDot, settingsOf, SettingsFields, stateLabel, useAction, useSearchClusters, type Run } from "./shared";
 
 const TABS = ["overview", "indices", "console", "playground", "analyze", "relevance", "inference", "branches", "performance", "usage", "settings"] as const;
@@ -1014,6 +1015,8 @@ function SettingsTab({
       <AllowedNetworks cluster={cluster} busy={busy} run={run} />
 
       <ApiKeys cluster={cluster} />
+
+      <Remotes cluster={cluster} />
 
       <AuditLog cluster={cluster} />
 

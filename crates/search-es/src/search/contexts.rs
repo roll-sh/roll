@@ -259,7 +259,7 @@ impl Contexts {
     }
 }
 
-fn missing(id: &str) -> EsError {
+pub(crate) fn missing(id: &str) -> EsError {
     let inner = EsError::new(404, "search_context_missing_exception", format!("No search context found for id [{id}]"));
     EsError::new(404, "search_phase_execution_exception", "all shards failed")
         .with_meta("phase", "query")
@@ -416,6 +416,13 @@ fn token(v: &Value) -> &'static str {
 
 /// `DELETE /_search/scroll`.
 pub fn clear_scroll(ctx: &Ctx) -> EsResult<Reply> {
+    let ids = clear_scroll_ids(ctx)?;
+    let freed = free_scrolls(ctx, &ids)?;
+    Ok(cleared(freed, &ids))
+}
+
+/// The ids a clear-scroll request names (`_all` among them for every scroll).
+pub(crate) fn clear_scroll_ids(ctx: &Ctx) -> EsResult<Vec<String>> {
     let body = ctx.body_map()?.unwrap_or_default();
     let mut ids: Vec<String> = ctx.param("scroll_id").map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
     // Ids in the body replace the URL's (`RestClearScrollAction`).
@@ -432,19 +439,29 @@ pub fn clear_scroll(ctx: &Ctx) -> EsResult<Reply> {
     if ids.is_empty() {
         return Err(EsError::action_request_validation(&["no scroll ids specified".into()]));
     }
+    Ok(ids)
+}
+
+/// Frees this cluster's scrolls `ids` names: how many shard contexts went.
+pub(crate) fn free_scrolls(ctx: &Ctx, ids: &[String]) -> EsResult<usize> {
     let mut freed = 0;
     if ids.iter().any(|i| i == "_all") {
         freed = ctx.cluster.contexts.close_all(false);
     } else {
-        for id in &ids {
+        for id in ids {
             check_scroll_id(id)?;
         }
-        for id in &ids {
+        for id in ids {
             freed += ctx.cluster.contexts.close_shards(id);
         }
     }
+    Ok(freed)
+}
+
+/// A clear-scroll's answer: 404 when nothing was freed (unless it named `_all`).
+pub(crate) fn cleared(freed: usize, ids: &[String]) -> Reply {
     let status = if freed == 0 && !ids.iter().any(|i| i == "_all") { 404 } else { 200 };
-    Ok(Reply::Body(status, obj! { "succeeded" => true, "num_freed" => freed as i64 }))
+    Reply::Body(status, obj! { "succeeded" => true, "num_freed" => freed as i64 })
 }
 
 /// `POST /{index}/_pit`.

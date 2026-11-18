@@ -1536,11 +1536,14 @@ the rest are skipped by the tests' own prerequisites.
   owner with API key based security (README.md, "Cross-cluster search"), or the node itself
   (the YAML suites' loopback); roll speaks no transport protocol, so a seed or proxy address
   outside roll is never connected. A remote's `credentials` are set through roll's API, not a
-  keystore. Searches merge as `ccs_minimize_roundtrips: true` does whatever the parameter says;
-  aggregations over several clusters merge from their JSON (bucket aggregations, `min`, `max`,
-  `sum`, `value_count`, `stats`; others are refused with a 400, and `histogram`s with calendar
-  intervals whose clusters' ranges don't overlap). Not across clusters yet: `scroll`, point in
-  time, suggesters, ES|QL `FROM <alias>:<index>`, and remotes of OpenSearch-flavor clusters.
+  keystore. Searches merge as `ccs_minimize_roundtrips: true` does whatever the parameter says
+  (aggregations from each cluster's partially reduced state, so they equal one cluster's; a
+  `geo_centroid` may differ in its last digit, as Elasticsearch's does). A scroll over several
+  clusters is a set of per-cluster scrolls under one id, paged as one cluster's would be, where
+  Elasticsearch scrolls across clusters without minimizing round trips; the pages hold the same
+  hits. Not across clusters yet: suggesters, ES|QL `FROM <alias>:<index>`, and links between
+  OpenSearch-flavor clusters (their `cluster.remote.*` and `_remote/info` follow OpenSearch 3.9:
+  `skip_unavailable` defaults to `false`, seeds are `host:port`).
 - Aggregations and sorting on keyed flattened sub-fields, `_index_mode` aggregations,
   nested sorts inside `top_hits`, and shard-level aggregation failures as partial results.
 - Compound retrievers (`rrf`, `linear`, `pinned`, `rule` and `rescorer` over them) follow
