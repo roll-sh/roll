@@ -333,23 +333,37 @@ public final class RollSecrets {
 
     /** {@code env}'s values under {@code path} ({@code ""} for the root), references resolved. */
     public Values values(String env, String path) {
-        String url = env(env) + "/values" + query(path);
+        return values(env, path, true);
+    }
+
+    /**
+     * {@link #values(String, String)}; with {@code dynamic} false, a dynamic key is left out (and
+     * named in {@link Values#dynamic()}) instead of issuing a fresh credential, for a reader that
+     * won't renew leases ({@code ?dynamic=false}).
+     */
+    public Values values(String env, String path, boolean dynamic) {
+        String url = valuesUrl(env, path, dynamic);
         if (cacheTtl.isZero() || cacheTtl.isNegative()) {
             return Values.of(call("GET", url, null), null);
         }
-        return cached(url);
+        return cached(url, dynamic);
+    }
+
+    private String valuesUrl(String env, String path, boolean dynamic) {
+        String q = query(path);
+        return env(env) + "/values" + q + (dynamic ? "" : (q.isEmpty() ? "?" : "&") + "dynamic=false");
     }
 
     /** A fresh read (a watch that saw the digest move): a kept answer for the folder goes. */
-    private Values freshValues(String env, String path) {
-        String url = env(env) + "/values" + query(path);
+    private Values freshValues(String env, String path, boolean dynamic) {
+        String url = valuesUrl(env, path, dynamic);
         Values v = Values.of(call("GET", url, null), null);
         cache.remove(url);
         return v;
     }
 
     /** From memory within cacheTtl, else revalidated with the digest (a 304 keeps the values). */
-    private Values cached(String url) {
+    private Values cached(String url, boolean dynamic) {
         Cached hit = cache.get(url);
         if (hit != null && clock.millis() - hit.at() < cacheTtl.toMillis()) {
             return hit.values();
@@ -364,7 +378,7 @@ public final class RollSecrets {
         Values v = Values.of(parse(a.body()), null);
         // Never kept: dynamic credentials (they end with their lease) or a key that didn't resolve
         // (the digest may not move when the link recovers).
-        if (!v.dynamic().isEmpty() || !v.problems().isEmpty() || a.etag() == null) {
+        if ((dynamic && !v.dynamic().isEmpty()) || !v.problems().isEmpty() || a.etag() == null) {
             cache.remove(url);
         } else {
             cache.put(url, new Cached(v, a.etag(), clock.millis()));
@@ -396,9 +410,17 @@ public final class RollSecrets {
      * log.
      */
     public Values resolve(String env, String path, String consumer) {
+        return resolve(env, path, consumer, true);
+    }
+
+    /** {@link #resolve(String, String, String)}; {@code dynamic} as in {@link #values(String, String, boolean)}. */
+    public Values resolve(String env, String path, String consumer, boolean dynamic) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("consumer", consumer);
         body.put("path", orRoot(path));
+        if (!dynamic) {
+            body.put("dynamic", false);
+        }
         return Values.of(call("POST", env(env) + "/resolve", body), null);
     }
 
@@ -490,7 +512,7 @@ public final class RollSecrets {
     }
 
     Values load(String env, WatchOptions o) {
-        return o.consumer != null ? resolve(env, o.path, o.consumer) : freshValues(env, o.path);
+        return o.consumer != null ? resolve(env, o.path, o.consumer, o.dynamic) : freshValues(env, o.path, o.dynamic);
     }
 
     // Workload identities.

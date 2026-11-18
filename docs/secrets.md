@@ -150,6 +150,13 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    Watch w = c.watch("production", WatchOptions.of(v -> reload(v.values())));
    ```
 
+   A Spring Boot app imports a folder into its `Environment` with `sdk/java/secrets-spring`
+   (`sh.roll:roll-secrets-spring`, Spring Boot 3): `spring.config.import=roll-secrets:production/api`
+   in `application.properties` (`optional:roll-secrets:…` starts without it when roll can't answer
+   or refuses), the `roll.secrets.*` settings or the variables above, dynamic keys left out unless
+   `roll.secrets.include-dynamic`, and with `roll.secrets.refresh=true` the watch swaps new values
+   in and publishes a `RollSecretsRefreshedEvent`.
+
    In .NET, `sdk/dotnet/secrets` (`Roll.Secrets`, .NET 8 and the base class library only, X25519
    its own), with `AddRollSecrets` for `IConfiguration` in `Roll.Secrets.Configuration`:
 
@@ -3607,7 +3614,9 @@ rotating a database's admin password and editing registrations in place (#75), s
    (`sdk/lambda-extension`, on `feature/roll-secrets-lambda`): values on localhost from a cache,
    logged in through STS's `GetWebIdentityToken`. Java is built
    (`sdk/java/secrets`, `feature/roll-secrets-java`: values, sealed resolves, long-polled watches,
-   the cache, transit); its Spring `PropertySource` adapter is next. .NET
+   the cache, transit), and so is its Spring integration (`sdk/java/secrets-spring`,
+   `feature/roll-secrets-spring`: `spring.config.import=roll-secrets:…`, optional imports,
+   refreshing through the watch). .NET
    is built (`sdk/dotnet/secrets`, `feature/roll-secrets-dotnet`: values, sealed resolves with its
    own X25519, long-polled watches, the cache, transit, and `AddRollSecrets` for `IConfiguration`).
    The Ansible collection is built (`sdk/ansible`, `roll.secrets`: a lookup and a module, as

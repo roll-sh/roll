@@ -9,6 +9,7 @@ public final class WatchOptions {
     final Consumer<Values> onChange;
     String path = "";
     String consumer;
+    boolean dynamic = true;
     Duration every = Duration.ofSeconds(5);
     Duration renewEvery = Duration.ofMinutes(10);
     Consumer<RuntimeException> onError = e -> { };
@@ -35,6 +36,15 @@ public final class WatchOptions {
     /** Resolve as this consumer ({@code app:web}) instead of reading: dynamic leases are the consumer's. */
     public WatchOptions consumer(String consumer) {
         this.consumer = consumer;
+        return this;
+    }
+
+    /**
+     * False: dynamic keys are left out (named in {@link Values#dynamic()}) instead of a fresh
+     * credential on each change. The default, true, issues them and renews their leases.
+     */
+    public WatchOptions dynamic(boolean dynamic) {
+        this.dynamic = dynamic;
         return this;
     }
 

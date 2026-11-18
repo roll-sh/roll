@@ -46,5 +46,12 @@ plaintext, ciphertext or input. Strings given to transit are sent as UTF-8; `byt
 (`…/digest?since=&wait=`, at most 25 s) and answers as soon as it moves. A server without long
 polls answers at once, and the watch then asks again every `WatchOptions.every` (5 s).
 
+A reader that won't renew leases asks for no dynamic credential: `values(env, path, false)`,
+`resolve(env, path, consumer, false)` or `WatchOptions.dynamic(false)` (`dynamic=false`: those keys
+are left out and named in `dynamic()`).
+
+Spring Boot apps import an environment with one line instead (`spring.config.import=roll-secrets:production/api`):
+see `sdk/java/secrets-spring`.
+
 Tests: `mvn -B -q test` here (CI's `sdk` job), or without Java installed:
 `docker run --rm -v "$PWD":/src -w /src maven:3.9-eclipse-temurin-17 mvn -B -q test`.
