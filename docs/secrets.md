@@ -3014,8 +3014,12 @@ inconsistencies are fixed in #264:
   for every protocol in one place as RabbitMQ does (#279, checked against real RabbitMQ). roll apps
   wires queue links into `RollResources` once #274 is on main: tell them when it lands.
 - R7. **AWS IAM login for EC2/ECS/EKS** (S–M; a signed `GetCallerIdentity`, as Vault's): an account to confirm.
-- R8. **A tamper-evident audit log** (building: `feature/roll-secrets-audit-chain`): a per-project hash
-  chain written with each row, digests signed by roll's issuer key to the sinks, `audit verify`.
+- R8. **A tamper-evident audit log** (#281): each row hashed onto a per-project chain in its own
+  transaction (one head row, a unique seq: no forks, checked with two racing nodes), hourly digests
+  signed by roll's issuer key and sent to the sinks, `audit verify` online or offline against an
+  export and a saved JWKS; retention cuts only at a signed digest. ~+0.1 ms per audited write on
+  SQLite, ~one round trip on Postgres. Known: rows cut from the end along with the head, after the
+  last delivered digest (≤1 h), aren't detectable without a sink.
 - R9. **Secret requests** (#277): `roll secrets request KEY…` or "Request a value…" makes a link;
   the answerer's browser seals each value to the request's own key, roll opens it only in the write
   that stores it (a change, or a change request the requester can't approve), once, rate-limited,
