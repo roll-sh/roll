@@ -302,6 +302,9 @@ pub struct GitPull {
     pub url: String,
     /// From another repository (its head repo isn't the base's): it runs only once approved.
     pub fork: bool,
+    /// Who opened it, as the provider says (GitHub's `user.login`): untrusted text, for
+    /// `skip_authors` only, never for trust.
+    pub author: Option<String>,
 }
 
 /// A note's element to crop in a screenshot run: its page and its selector, both checked.

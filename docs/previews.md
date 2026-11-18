@@ -71,8 +71,8 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   - With `skip_authors` set (globs on who opened the change: a pull request's GitHub login, so
     `dependabot[bot]`, or `*[bot]` for every bot account), a change by one of them gets no
     preview, as Netlify's and Vercel's users skip dependency bots with an ignored build step. A
-    `[preview]` title or a `preview` label still asks for one. A Git URL service's pull requests
-    on roll apps carry no author yet, so the rule doesn't reach them.
+    `[preview]` title or a `preview` label still asks for one (a Git URL service's pull requests carry no labels, so there only the title asks). A Git URL service's pull requests
+    on roll apps carry their opener too (roll apps' `GitPull.author`: GitHub's `user.login`, GitLab's `user.username`; Bitbucket's none yet), so the rule reaches them as well. A bot pushes its branch before it opens the pull request, so the pull request takes back the preview that push made, and the branch's later pushes make none until the pull request closes, the branch is deleted or its title asks.
   - With `paths` or `ignore_paths` set (gitignore-style patterns, as CODEOWNERS and
     `.roll/review.yaml` read them), a change also has to touch a path that `paths` matches (any
     path, when it's empty) and `ignore_paths` doesn't: Render's build filters, Vercel's ignored
