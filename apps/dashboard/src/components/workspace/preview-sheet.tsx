@@ -472,6 +472,7 @@ export function PreviewSheet({
                       : "with its change",
                 ],
                 ["created by", p.created_by],
+                ...(p.reported_by ? ([["reported by", `${p.reported_by}: the pull request hears from that project's preview, not this one`]] as [string, string][]) : []),
               ]}
             />
           </>

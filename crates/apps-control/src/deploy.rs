@@ -55,10 +55,11 @@ impl Apps {
         self.refuse_paused(service, env).await?;
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["revision", "image", "message", "no_traffic", "no_cache", "image_upload"].contains(&k.as_str()) {
+            if !["revision", "image", "message", "no_traffic", "no_cache", "image_upload", "closed"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
+        self.require_closed(service, env, &o).await?;
         let text = |k: &str| -> Result<Option<String>> {
             match o.get(k) {
                 None | Some(Value::Null) => Ok(None),
@@ -194,6 +195,24 @@ impl Apps {
         Ok(dep)
     }
 
+    /// `closed: true` in a deploy's body (roll previews' for a fork's head): refused unless the
+    /// environment is closed and this node builds it closed (its own network, no secret value).
+    /// A node that predates the field refuses it as unknown, so the request fails closed.
+    async fn require_closed(self: &Arc<Self>, service: &str, env: &str, o: &serde_json::Map<String, Value>) -> Result<()> {
+        match o.get("closed") {
+            None | Some(Value::Null | Value::Bool(false)) => Ok(()),
+            Some(Value::Bool(true)) => {
+                let (sid, e) = (service.to_string(), env.to_string());
+                let row = self.db(move |s| s.environment(&sid, &e)).await?;
+                if !row.egress.closed() || !self.deps.runtime.closes_egress() {
+                    return Err(Error::Conflict(format!("{env} isn't built closed here (egress roll, on a node that closes it)")));
+                }
+                Ok(())
+            }
+            Some(_) => Err(Error::BadRequest("closed is a boolean".into())),
+        }
+    }
+
     /// `POST …/redeploy`: the active deployment's image again, with the service's current run
     /// settings and variables (variables are read when its instances are made), without a build
     /// and without moving to another revision. What a change of variables or settings needs,
@@ -216,9 +235,10 @@ impl Apps {
             }
         }
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| k.as_str() != "message") {
+        if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "message" | "closed")) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
+        self.require_closed(service, env, &o).await?;
         let message = match o.get("message") {
             None | Some(Value::Null) => None,
             Some(Value::String(m)) => Some(m.chars().take(500).collect::<String>()),
@@ -457,8 +477,24 @@ impl Apps {
 
     /// Old deployments of the services this node owns, past what each environment keeps
     /// (`keep_deployments`): pruned in the store, then their images (once no deployment names
-    /// them), static sites and build logs go. Every ten minutes.
+    /// them), static sites and build logs go; and deleted services kept past
+    /// [`crate::DELETED_KEPT_MS`] are deleted for good (by their owner, a node taking the lease
+    /// of one nobody holds). Every ten minutes.
     pub async fn prune(self: &Arc<Self>) {
+        let now = code_sql::now_ms();
+        if let Ok(deleted) = self.db(|s| s.deleted_services(None)).await {
+            for (svc, at) in deleted.into_iter().filter(|(_, at)| now - at >= crate::DELETED_KEPT_MS) {
+                let key = lease_key(&svc.id);
+                if !self.deps.cluster.owns(&key) && self.deps.cluster.preferred(&key).is_none_or(|n| n.id == self.deps.cluster.node_id()) {
+                    let _ = self.deps.cluster.lease(&key).await;
+                }
+                if self.owns(&svc.id)
+                    && let Err(e) = self.purge_service(&svc.id).await
+                {
+                    warn!(service = %svc.id, deleted_at = at, error = %e, "apps: deleting a deleted service for good failed");
+                }
+            }
+        }
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         let (keep, day_ago) = (self.cfg.keep_deployments.max(1), code_sql::now_ms() - self.cfg.keep_recent.as_millis() as i64);
         for svc in services.into_iter().filter(|s| self.owns(&s.id)) {
@@ -602,6 +638,11 @@ impl Apps {
         let Some(rev) = d.revision.clone() else { return };
         let (sid, e) = (d.service.clone(), d.environment.clone());
         let Ok((svc, env)) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await else { return };
+        // Someone else reports this environment's deploys (roll previews: one voice on a pull
+        // request).
+        if !env.report {
+            return;
+        }
         let status = crate::integrations::CommitStatus {
             context: format!("roll/apps/{}/{}", svc.name, d.environment),
             state,
@@ -981,14 +1022,15 @@ impl Apps {
                 continue;
             }
             // Held at this split until a person says, still judged as it goes.
+            // Someone has to say: they're told (`rollout.waiting`, once a step), before it shows as
+            // waiting, so whoever sees it waiting sees the event.
+            let (sid, en, did) = (service.to_string(), tpl.spec.env.clone(), id.to_string());
+            let data = serde_json::json!({ "share": share });
+            let _ = self.db(move |s| s.add_event("rollout.waiting", &sid, &en, Some(&did), &data)).await;
             let gate = Arc::new((parking_lot::Mutex::new(None), tokio::sync::Notify::new()));
             self.rollout_waits.lock().insert(id.to_string(), gate.clone());
             self.changed(service);
             sys.line(format!("canary: held at {share}% until someone advances it, puts it all live or rolls it back"));
-            // Someone has to say: they're told (`rollout.waiting`), once a step.
-            let (sid, en, did) = (service.to_string(), tpl.spec.env.clone(), id.to_string());
-            let data = serde_json::json!({ "share": share });
-            let _ = self.db(move |s| s.add_event("rollout.waiting", &sid, &en, Some(&did), &data)).await;
             let said = loop {
                 if let Some(a) = gate.0.lock().take() {
                     break a;
@@ -1224,7 +1266,29 @@ impl Apps {
         let resolved = self.resolve_vars(svc, &env_row, &d.id).await?;
         // Its secret values never reach the build's log, whatever a step prints.
         self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
+        let closed_vars = env_row.egress.closed().then(|| resolved.without_secrets());
         let mut build_env = resolved.vars;
+        // A closed environment builds on a network of its project's own with no route out and no
+        // way to the host (`Runtime::build_egress`): its steps reach public hosts only, through
+        // roll's proxy (packages, base images), never the node's services, private ranges or its
+        // metadata. It still gets no secret value: none of what roll's logs hide (sealed and roll
+        // secrets values, links' credentials, URL passwords), nor a variable that holds one. Its
+        // code can't send what it never has.
+        let build_egress = match env_row.egress.closed() {
+            // Never on the default network instead: a node that can't build it closed fails it.
+            true => Some(self.deps.runtime.build_egress(&svc.project).await.map_err(|e| anyhow::anyhow!("a closed build's network: {e:#}"))?.ok_or_else(|| anyhow::anyhow!("this node can't build a closed environment (it needs Docker here)"))?),
+            false => None,
+        };
+        if build_egress.is_some() {
+            log.line("a closed environment builds on a network of its own: out only through roll's proxy, to public hosts");
+        }
+        if let Some(kept) = closed_vars {
+            let before = build_env.len();
+            build_env = kept;
+            if build_env.len() < before {
+                log.line(format!("a closed environment builds without its secret values ({} left out; its instances get them)", before - build_env.len()));
+            }
+        }
         // Per deployment (the cache would never hit) or only for the running app.
         build_env.retain(|(k, _)| k != "ROLL_DEPLOYMENT" && k != "PORT");
         // The commit changes every push: out of the hash and the secrets, or no build would hit
@@ -1327,7 +1391,10 @@ impl Apps {
             (dockerfile, log.clone(), None)
         };
         let log = &log;
-        let plan_json = serde_json::to_value(&plan)?;
+        let mut plan_json = serde_json::to_value(&plan)?;
+        // The images it builds on, to watch for their fixes (`watch_bases`).
+        let base_text = if plan.provider == apps_build::Provider::Dockerfile { std::fs::read_to_string(context.join(&dockerfile)).unwrap_or_default() } else { plan.dockerfile.clone() };
+        let bases = apps_build::base_images(&base_text);
         if plan.provider == apps_build::Provider::Dockerfile {
             build_env.extend(commit);
         }
@@ -1347,9 +1414,24 @@ impl Apps {
             // A stage of the tree's own Dockerfile; a generated one's are roll's.
             target: svc.build.target.clone().filter(|_| plan.provider == apps_build::Provider::Dockerfile),
             layers,
+            egress: build_egress,
         };
+        // The same inputs built before in this project (Railway's skipped builds): the same tree,
+        // Dockerfile, target and build variables, and its image still kept. Never with `no_cache`.
+        let build_key = if job.no_cache { None } else { Some(build_key(&job, &plan.dockerfile, self.deps.builder.name()).await?) };
+        let reused = match build_key.clone() {
+            Some(k) => {
+                let p = svc.project.clone();
+                self.db(move |s| s.built_image(&p, &k)).await?
+            }
+            None => None,
+        };
+        let image = if let Some((from, image)) = reused {
+            log.line(format!("{from} was built from the same source, settings and build variables: its image goes on, no build"));
+            image
+        } else {
         log.line(format!("building with {}", self.deps.builder.name()));
-        let image = match self.deps.builder.build(&job, log, cancel.clone()).await {
+        match self.deps.builder.build(&job, log, cancel.clone()).await {
             Ok(i) => i,
             // What failed, as BuildKit said it (the step, its last words), not only its exit code.
             Err(e) if !cancel.is_cancelled() => {
@@ -1360,9 +1442,31 @@ impl Apps {
                 });
             }
             Err(e) => return Err(e),
+        }
         };
+        // Each base's digest as the registry says it now (what the build just resolved): all
+        // asked at once, ten seconds for the lot.
+        let asked = futures::future::join_all(bases.iter().map(|b| async move { (b, tokio::time::timeout(std::time::Duration::from_secs(10), self.deps.runtime.remote_digest(b, None)).await) })).await;
+        let mut pinned = Vec::new();
+        for (b, r) in asked {
+            if let Ok(Ok(p)) = r
+                && let Some((_, digest)) = p.rsplit_once('@')
+            {
+                pinned.push(serde_json::json!({ "image": b, "digest": digest }));
+            }
+        }
+        if !pinned.is_empty() {
+            plan_json["bases"] = serde_json::Value::Array(pinned);
+        }
         let (id, img, r) = (d.id.clone(), image.clone(), run.clone());
-        self.db(move |s| s.set_built(&id, &img, Some(&plan_json), Some(&r))).await?;
+        self.db(move |s| {
+            s.set_built(&id, &img, Some(&plan_json), Some(&r))?;
+            match &build_key {
+                Some(k) => s.set_build_key(&id, k),
+                None => Ok(()),
+            }
+        })
+        .await?;
         Ok((image, run))
     }
 
@@ -1376,8 +1480,12 @@ impl Apps {
         let mut probe = svc.clone();
         probe.run.port = run.port;
         let resolved = self.resolve_vars(&probe, env, &dep.id).await?;
-        // Its secret values never reach the environment's log, whoever prints them.
-        self.logs.redact(&format!("env:{}/{}", svc.id, env.name), &dep.id, resolved.secret_values());
+        // Its secret values never reach any of the environment's logs, whoever prints them: its
+        // output, its requests' paths, its spans and its metrics.
+        let secrets = resolved.secret_values();
+        for k in [format!("env:{}/{}", svc.id, env.name), format!("http:{}/{}", svc.id, env.name), crate::traces::key(&svc.id, &env.name), crate::traces::metric_key(&svc.id, &env.name)] {
+            self.logs.redact(&k, &dep.id, secrets.clone());
+        }
         if !resolved.unresolved.is_empty() {
             self.logs.sink(format!("env:{}/{}", svc.id, env.name), Stream::System).line(format!("references that name nothing, left empty: {}", resolved.unresolved.join(", ")));
         }
@@ -1522,6 +1630,11 @@ impl Apps {
         // Lost again before this ran (a lease that changed hands twice): what runs is the next
         // owner's now, on a runtime the nodes share.
         if !self.owns(service) {
+            return;
+        }
+        // A deleted service runs nothing (its lease is held only to delete it for good).
+        let sid = service.to_string();
+        if self.db(move |s| s.service(&sid)).await.is_err() {
             return;
         }
         // The database's now: what started before is a previous owner's (or nobody's).
@@ -1888,6 +2001,13 @@ impl Apps {
                     this.watch_tags().await;
                     this.watch_git().await;
                     this.watching.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
+            }
+            if n.is_multiple_of(3600) && !self.watching_bases.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    this.watch_bases().await;
+                    this.watching_bases.store(false, std::sync::atomic::Ordering::SeqCst);
                 });
             }
             if n.is_multiple_of(3600) && !self.backing_up.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -2286,7 +2406,8 @@ impl Apps {
         let Ok(all_envs) = self.db(|s| s.all_environments()).await else { return };
         for svc in services.iter().filter(|s| self.owns(&s.id) && !self.capped(&s.id)) {
             // A preview environment never runs production's schedules (one per open pull request).
-            for e in all_envs.iter().filter(|e| e.service == svc.id && e.active.is_some() && !e.ephemeral) {
+            // In maintenance, nothing is called on a schedule (it would be answered roll's page).
+            for e in all_envs.iter().filter(|e| e.service == svc.id && e.active.is_some() && !e.ephemeral && e.maintenance.is_none()) {
                 // What the live deployment runs with: roll.toml's `[[app.run.schedules]]` are in
                 // its template, not in the service's settings.
                 let (run, secret) = match self.lives.lock().get(&crate::env_key(&svc.id, &e.name)).and_then(|l| l.template()) {
@@ -2339,11 +2460,11 @@ impl Apps {
                             let data = serde_json::json!({ "schedule": name, "path": path, "http_status": call.status, "error": call.error });
                             let _ = this
                                 .db(move |s| {
-                                    s.set_state(&k, &v)?;
+                                    // The event first: whoever sees the call's outcome sees it said.
                                     if failed {
                                         s.add_event("cron.failed", &sid, &en, None, &data)?;
                                     }
-                                    Ok(())
+                                    s.set_state(&k, &v)
                                 })
                                 .await;
                         });
@@ -2727,4 +2848,58 @@ mod skip_tests {
         assert_eq!(super::skip_tag("readme [deploy skip]"), Some("[deploy skip]"));
         assert_eq!(super::skip_tag("skip the cache"), None);
     }
+}
+
+/// What a build's image depends on: every file of its context (path, kind and bytes, in order),
+/// its Dockerfile, target, build variables and builder. Two builds with the same key make the
+/// same image, so the second reuses the first's. roll's names for the service itself
+/// (`ROLL_SERVICE`, `ROLL_SERVICE_ID`, `ROLL_PRIVATE_HOST`, `ROLL_PUBLIC_URL`) are left out, so a
+/// web service and a worker of one repository share a build; the environment's name
+/// (`ROLL_ENVIRONMENT`) is in, so a preview's build is never production's.
+async fn build_key(job: &BuildJob, dockerfile: &str, builder: &str) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+    let context = job.context.clone();
+    let mut h = tokio::task::spawn_blocking(move || -> anyhow::Result<Sha256> {
+        let mut h = Sha256::new();
+        let mut stack = vec![context.clone()];
+        let mut files = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir)? {
+                let e = e?;
+                let (p, t) = (e.path(), e.file_type()?);
+                if t.is_dir() {
+                    stack.push(p);
+                } else {
+                    files.push((p, t.is_symlink()));
+                }
+            }
+        }
+        files.sort();
+        for (p, link) in files {
+            h.update(p.strip_prefix(&context).unwrap_or(&p).to_string_lossy().as_bytes());
+            h.update([0, link as u8]);
+            if link {
+                h.update(std::fs::read_link(&p)?.to_string_lossy().as_bytes());
+            } else {
+                let mut f = std::fs::File::open(&p)?;
+                std::io::copy(&mut f, &mut h)?;
+            }
+            h.update([0]);
+        }
+        Ok(h)
+    })
+    .await??;
+    for part in [dockerfile, job.target.as_deref().unwrap_or(""), builder, if job.own_dockerfile { "own" } else { "generated" }] {
+        h.update(part.as_bytes());
+        h.update([0]);
+    }
+    let mut vars: Vec<&(String, String)> = job.env.iter().filter(|(k, _)| !["ROLL_SERVICE", "ROLL_SERVICE_ID", "ROLL_PRIVATE_HOST", "ROLL_PUBLIC_URL"].contains(&k.as_str())).collect();
+    vars.sort();
+    for (k, v) in vars {
+        h.update(k.as_bytes());
+        h.update([0]);
+        h.update(v.as_bytes());
+        h.update([0]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }

@@ -282,6 +282,12 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/oauth/devices/{code}", "only a person signs a device in, as on the consent screen"),
     ("/v1/access/notify", "where approvals go is the operator's choice"),
     ("/v1/access/policy", "the rules for every token are the operator's"),
+    ("/v1/access/enterprise", "which identity providers roll trusts is the operator's"),
+    ("/v1/access/enterprise/idps", "which identity providers roll trusts is the operator's"),
+    ("/v1/access/tokens/revoke", "an incident's cut-off of many tokens at once is the operator's"),
+    ("/v1/access/enterprise/apps", "which apps an identity provider may sign people in to is the operator's"),
+    ("/v1/access/enterprise/apps/{id}", "which apps an identity provider may sign people in to is the operator's"),
+    ("/v1/access/enterprise/apps/{id}/rotate", "an enterprise app's credential is the operator's"),
     ("/v1/access/clients", "a token makes no machine clients: the operator, or a person signed in, makes their own"),
     ("/v1/access/clients/{id}", "a token revokes no machine clients: the operator, or a person signed in, revokes their own"),
     ("/v1/access/clients/{id}/rotate", "a token rotates no machine client's credential: the operator, or a person signed in, rotates their own"),
@@ -861,6 +867,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/access/checkup", "access", R, Tgt::Product),
     row("POST", "/v1/access/tokens/{id}/tighten", "access", ADMIN, Tgt::Product),
     row("DELETE", "/v1/access/tokens/{id}/temporary/{approval}", "access", ADMIN, Tgt::Product),
+    // A token asks for more for itself (a person decides): any grant may ask, as it may ask whoami.
+    row("POST", "/v1/access/requests", "access", R, Tgt::AnyGrant),
     row("GET", "/v1/access/approvals", "access", R, Tgt::Product),
     // A grant waits on its own approvals (the handler checks it's its own, or access read).
     row("GET", "/v1/access/approvals/{id}", "access", R, Tgt::AnyGrant),
@@ -1109,6 +1117,10 @@ static ROWS: &[Row] = &[
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
+    // Request metrics and the slow logs (queries' and documents' sources, cut): reads of the
+    // cluster's data.
+    row("GET", "/v1/search/clusters/{id}/metrics", "search", R, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/slowlog", "search", R, one(PG, "cluster")),
     row("*", "/v1/search/clusters/{id}/", "search", M, one(PG, "cluster")),
     // An index's routes are about those indices (`{index}`: a name, or on reads an expression),
     // so a rule can grant some of a cluster's indices. The console (`request`) and the index list
@@ -1304,6 +1316,8 @@ static ROWS: &[Row] = &[
     // A worker scaled on a stream group's lag has apps read that stream for it: read there too.
     row("PATCH", "/v1/apps/services/{id}", "apps", Act::Body(apps_patch_action), one(PG, "service")).lends(Lend::Each(apps_patch_lends)),
     row("*", "/v1/apps/services/{id}/", "apps", M, one(PG, "service")),
+    // A restore puts a deleted service's deployments live again, production's too: a deploy.
+    row("POST", "/v1/apps/services/{id}/restore", "apps", DEPLOY, one(PG, "service")).env(EnvFrom::Fixed("production")),
     // `variables_from` copies another environment's values into this one: reveal there too.
     row("*", "/v1/apps/services/{id}/environments/{env}", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("variables_from")),
     row("GET", "/v1/apps/services/{id}/environments/{env}", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
@@ -1350,6 +1364,8 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/apps/import", "apps", R, Tgt::AnyGrant).lends(Lend::Each(apps_repo)),
     row("GET", "/v1/apps/projects/{project}/services", "apps", R, one(&["project"], "project")),
     row("GET", "/v1/apps/services/{id}/environments/{env}/variables/values", "apps", REVEAL, one(PG, "service")).env(EnvFrom::Param("env")),
+    // `copy_from` copies another environment's values into this one: reveal there too.
+    row("PATCH", "/v1/apps/services/{id}/environments/{env}/variables", "apps", Act::ProductionIf("env"), one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("copy_from")),
     // What the next deploy changes: names of variables and settings, never a value.
     row("GET", "/v1/apps/services/{id}/environments/{env}/pending", "apps", R, one(PG, "service")).env(EnvFrom::Param("env")),
     // A job is a command run with the environment's variables: its output can be them.
