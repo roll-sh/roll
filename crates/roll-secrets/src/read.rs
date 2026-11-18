@@ -358,20 +358,51 @@ type DigestKey = (String, String, String, String, bool);
 /// while the database says the same (every node's writes move it at once) and `still` holds, so
 /// no node's memory decides whether a folder changed.
 #[derive(Default)]
-pub(crate) struct Digests(std::sync::Mutex<HashMap<DigestKey, (String, std::sync::Arc<Digested>)>>);
+pub(crate) struct Digests(std::sync::Mutex<DigestCache>);
+
+/// The most digests a node keeps. Past it the least recently used one goes, so a reader polling
+/// many folders only pushes out what nobody polled since, never every poller's at once.
+const DIGESTS_MAX: usize = 10_000;
+
+/// Digests by key, each with when it was last used, and the keys in that order (an LRU).
+#[derive(Default)]
+pub(crate) struct DigestCache {
+    by_key: HashMap<DigestKey, (u64, String, std::sync::Arc<Digested>)>,
+    by_use: BTreeMap<u64, DigestKey>,
+    next: u64,
+}
+
+impl DigestCache {
+    /// `key`'s entry as just used.
+    fn touch(&mut self, key: &DigestKey) -> Option<&(u64, String, std::sync::Arc<Digested>)> {
+        let next = self.next;
+        let e = self.by_key.get_mut(key)?;
+        self.by_use.remove(&e.0);
+        e.0 = next;
+        self.by_use.insert(next, key.clone());
+        self.next += 1;
+        Some(e)
+    }
+}
 
 impl Digests {
     fn get(&self, key: &DigestKey, state: &str) -> Option<std::sync::Arc<Digested>> {
-        let m = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        m.get(key).filter(|(s, _)| s == state).map(|(_, d)| d.clone())
+        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        m.touch(key).filter(|(_, s, _)| s == state).map(|(_, _, d)| d.clone())
     }
 
     fn put(&self, key: DigestKey, state: String, d: Digested) {
         let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if m.len() >= 10_000 && !m.contains_key(&key) {
-            m.clear();
+        let used = m.next;
+        m.next += 1;
+        if let Some((was, ..)) = m.by_key.insert(key.clone(), (used, state, std::sync::Arc::new(d))) {
+            m.by_use.remove(&was);
         }
-        m.insert(key, (state, std::sync::Arc::new(d)));
+        m.by_use.insert(used, key);
+        while m.by_key.len() > DIGESTS_MAX {
+            let Some((_, oldest)) = m.by_use.pop_first() else { break };
+            m.by_key.remove(&oldest);
+        }
     }
 }
 
@@ -1400,5 +1431,26 @@ impl<'a> Resolver<'a> {
             return Err(e);
         }
         Ok(ids)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_digest_cache_drops_only_what_nobody_polled_lately() {
+        let key = |i: usize| ("prj".to_string(), "env".to_string(), format!("/f{i}"), "who".to_string(), false);
+        let digested = || Digested { digest: String::new(), unvouched: Unvouched::default(), asked: BTreeMap::new(), live: Vec::new(), keep: true };
+        let cache = Digests::default();
+        cache.put(key(0), "s".into(), digested());
+        // Another reader polls many folders; the first poller keeps polling its own.
+        for i in 1..=DIGESTS_MAX * 2 {
+            cache.put(key(i), "s".into(), digested());
+            assert!(cache.get(&key(0), "s").is_some(), "the poller's digest went at {i}");
+        }
+        let m = cache.0.lock().unwrap();
+        assert_eq!((m.by_key.len(), m.by_use.len()), (DIGESTS_MAX, DIGESTS_MAX));
+        assert!(!m.by_key.contains_key(&key(1)), "the least recently used went first");
     }
 }
