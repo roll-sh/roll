@@ -254,6 +254,7 @@ impl Lookup {
             keys,
             decode: Decode {
                 need,
+                late: None,
                 missing: s.table.columns.iter().map(|c| c.missing.clone()).collect(),
                 types: s.table.columns.iter().map(|c| c.ty.clone()).collect(),
                 with_key: false,

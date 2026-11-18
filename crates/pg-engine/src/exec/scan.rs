@@ -525,6 +525,8 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
     }
     let raw_need = need;
     let need = scan_need(s, need, ctx);
+    // (What the nodes above read, when the scan decodes a mask: before its filter's columns.)
+    let above: Option<Rc<[bool]>> = need.as_ref().and(raw_need).map(|n| Rc::from(&n[..n.len().min(s.table.columns.len())]));
     let epq = ctx.epq.borrow().clone();
     if let Some(test) = epq.as_ref().and_then(|m| m.get(&(s as *const ScanPlan as usize))) {
         return epq_scan(s, test.as_ref(), ctx);
@@ -636,6 +638,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             only: None,
             key: s as *const ScanPlan as usize,
             need: if matches!(s.access, Access::Bitmap(..)) && s.index.is_none() { need } else { None },
+            above: None,
             plan: super::planref::PlanRef::Own(Box::new(plan)),
             ranges: Vec::new(),
             cur_range: 0,
@@ -744,6 +747,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             only: None,
             key: s as *const ScanPlan as usize,
             need: None,
+            above: None,
             plan: super::planref::PlanRef::Own(Box::new(plan)),
             ranges: Vec::new(),
             cur_range: 0,
@@ -836,6 +840,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             // (Only the columns read above: a candidate the filter drops needn't have its
             // vector decoded.)
             need: need.clone(),
+            above: None,
             plan: super::planref::PlanRef::Own(Box::new(plan)),
             ranges: Vec::new(),
             cur_range: 0,
@@ -907,7 +912,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
         let mut fwd = s.clone();
         fwd.reverse = false;
         fwd.limit = None;
-        let inner = open_scan_as(&fwd, None, s as *const ScanPlan as usize, ranges, None, ctx)?;
+        let inner = open_scan_as(&fwd, None, s as *const ScanPlan as usize, ranges, None, None, ctx)?;
         // A GiST circle or polygon distance is lossy (rechecked on the heap row), which an
         // index-only scan can't do.
         let lossy_ios = matches!(s.access, Access::Index { only: true, .. })
@@ -938,7 +943,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
         let mut fwd = s.clone();
         fwd.reverse = false;
         fwd.limit = None;
-        let inner = open_scan_as(&fwd, None, s as *const ScanPlan as usize, ranges, need, ctx)?;
+        let inner = open_scan_as(&fwd, None, s as *const ScanPlan as usize, ranges, need, None, ctx)?;
         return Ok(Box::new(Backward {
             inner: Some(inner),
             rows: Vec::new(),
@@ -948,7 +953,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             fetches: None,
         }));
     }
-    open_scan_as(s, shared, s as *const ScanPlan as usize, ranges, need, ctx)
+    open_scan_as(s, shared, s as *const ScanPlan as usize, ranges, need, above, ctx)
 }
 
 /// A scan over `ranges`, counted (EXPLAIN ANALYZE) as the scan `key`.
@@ -958,6 +963,7 @@ fn open_scan_as(
     key: usize,
     ranges: Vec<(Vec<u8>, Vec<u8>)>,
     need: Option<Rc<[bool]>>,
+    above: Option<Rc<[bool]>>,
     ctx: &ExecCtx,
 ) -> Result<BoxNode> {
     let secondary = s.current_of.is_none() && s.index.as_ref().is_some_and(|(ix, _)| reads_entries(ix));
@@ -995,6 +1001,7 @@ fn open_scan_as(
         only,
         key,
         need,
+        above,
         plan: shared
             .and_then(super::planref::scan)
             .unwrap_or_else(|| super::planref::PlanRef::Own(Box::new(s.clone()))),
@@ -2039,6 +2046,7 @@ fn dense_bitmap_scan(
         only: None,
         key: s as *const ScanPlan as usize,
         need,
+        above: None,
         plan: super::planref::PlanRef::Own(Box::new(plan)),
         ranges: vec![(p.clone(), prefix_end(&p))],
         cur_range: 0,
@@ -2485,6 +2493,9 @@ struct ScanNode {
     key: usize,
     /// The table columns decoded (`scan_need`; None: all).
     need: Option<Rc<[bool]>>,
+    /// Of those, the ones the nodes above read (before the filter's were added; None: not
+    /// known): a row the filter passed in place needs no others (`Decode::late`).
+    above: Option<Rc<[bool]>>,
     stat: StatTarget,
     plan: super::planref::PlanRef<ScanPlan>,
     ranges: Vec<(Vec<u8>, Vec<u8>)>,
@@ -4281,6 +4292,7 @@ impl ScanNode {
             self.lazy = Some(filter.map(|f| {
                 let d = super::parscan::Decode {
                     need: self.need.as_deref().map(Arc::from),
+                    late: super::parscan::late_cols(self.need.as_deref(), self.above.as_deref(), &p.table.columns.iter().map(|c| c.ty.clone()).collect::<Vec<_>>()),
                     need_raw: None,
                     missing: p.table.columns.iter().map(|c| c.missing.clone()).collect(),
                     types: p.table.columns.iter().map(|c| c.ty.clone()).collect(),
@@ -4330,7 +4342,8 @@ impl ScanNode {
         if pass == Some(false) {
             return Ok(Some((None, true)));
         }
-        Ok(Some((Some(row.into_row()?), pass.is_some())))
+        let row = if pass.is_some() { row.into_row_passed()? } else { row.into_row()? };
+        Ok(Some((Some(row), pass.is_some())))
     }
 
     /// Whether the filter keeps the stored row `bytes` under `key` (count(*)'s rows: read
@@ -5077,8 +5090,14 @@ impl ScanNode {
             }
             Arc::from(n)
         });
+        // (No computed values: they read the row after the filter.)
+        let late = match computed.extra.is_empty() && computed.topk.is_none() && computed.raw.is_empty() {
+            true => super::parscan::late_cols(self.need.as_deref(), self.above.as_deref(), &p.table.columns.iter().map(|c| c.ty.clone()).collect::<Vec<_>>()),
+            false => None,
+        };
         let d = Decode {
             need: self.need.as_deref().map(Arc::from),
+            late,
             need_raw,
             missing: p.table.columns.iter().map(|c| c.missing.clone()).collect(),
             types: p.table.columns.iter().map(|c| c.ty.clone()).collect(),
@@ -5195,6 +5214,7 @@ impl ScanNode {
         };
         let d = Decode {
             need: self.need.as_deref().map(Arc::from),
+            late: None,
             missing: p.table.columns.iter().map(|c| c.missing.clone()).collect(),
             types: p.table.columns.iter().map(|c| c.ty.clone()).collect(),
             with_key: p.with_key,
@@ -5267,6 +5287,7 @@ impl ScanNode {
             .collect();
         let d = Decode {
             need: self.need.as_deref().map(Arc::from),
+            late: None,
             missing: p.table.columns.iter().map(|c| c.missing.clone()).collect(),
             types: p.table.columns.iter().map(|c| c.ty.clone()).collect(),
             with_key: p.with_key,
@@ -5705,6 +5726,7 @@ impl Node for ScanNode {
         let ScanNode {
             key: _,
             need: _,
+            above: _,
             stat: _,
             plan,
             ranges,
@@ -6970,6 +6992,7 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         only: None,
         key: s as *const ScanPlan as usize,
         need: None,
+        above: None,
         plan: super::planref::PlanRef::Own(Box::new(plan)),
         ranges: Vec::new(),
         cur_range: 0,
