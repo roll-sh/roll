@@ -25,6 +25,21 @@ mod github;
 mod outside;
 mod syncs;
 
+/// `X-Roll-Guard` (a credential guard's scan, audited apart as `secrets.guard`) is roll MCP's
+/// alone: kept only on a request its guard tool makes in process (`McpCall` with tool `guard`),
+/// removed from anyone else's, so no caller can file deliberate scans under the guard's name.
+pub async fn guard_header(req: Request<Body>) -> Request<Body> {
+    keep_guard_header(req)
+}
+
+fn keep_guard_header(mut req: Request<Body>) -> Request<Body> {
+    let from_guard = req.extensions().get::<roll_access::evaluate::McpCall>().is_some_and(|m| &*m.tool == "guard");
+    if !from_guard {
+        req.headers_mut().remove("x-roll-guard");
+    }
+    req
+}
+
 /// The router of every product's routes (no gate), set once rolld has built it.
 #[derive(Clone, Default)]
 pub struct Api(Arc<OnceLock<axum::Router>>);
@@ -73,6 +88,24 @@ impl Api {
             return Err(Error::Link(format!("{method} {}: {} {why}", path.split('?').next().unwrap_or(path), status.as_u16())));
         }
         Ok(v)
+    }
+
+    /// GET a product's route as the operator, reading at most `limit` bytes of its answer (JSON,
+    /// 2xx only): for objects whose size the caller knows, never the whole of whatever is there.
+    pub(crate) fn get_bounded(&self, path: &str, limit: usize) -> roll_secrets::Result<Json> {
+        let router = self.0.get().ok_or_else(|| Error::Link("the product APIs aren't up yet".into()))?.clone();
+        let mut req = Request::builder().method(Method::GET).uri(path);
+        req.extensions_mut().map(|e| e.insert(roll_auth::Operator));
+        let req = req.body(Body::empty()).map_err(|e| Error::Internal(e.to_string()))?;
+        let route = path.split('?').next().unwrap_or(path).to_string();
+        tokio::runtime::Handle::current().block_on(async move {
+            let resp = router.oneshot(req).await.map_err(|e| Error::Link(e.to_string()))?;
+            if !resp.status().is_success() {
+                return Err(Error::Link(format!("GET {route}: {}", resp.status().as_u16())));
+            }
+            let bytes = http_body_util::Limited::new(resp.into_body(), limit).collect().await.map_err(|_| Error::Link(format!("GET {route}: an answer over {limit} bytes")))?.to_bytes();
+            serde_json::from_slice(&bytes).map_err(|_| Error::Link(format!("GET {route}: not JSON")))
+        })
     }
 
     /// Delete a product's resource; one that's already gone (404) is done.
@@ -383,6 +416,10 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
+    // How many reads of values a token or a person makes a minute on this node (0: no limit).
+    if let Ok(n) = std::env::var("ROLL_SECRETS_READS_PER_MINUTE") {
+        secrets.set_reads_per_minute(n.trim().parse().map_err(|_| anyhow::anyhow!("ROLL_SECRETS_READS_PER_MINUTE is a number of reads a minute (0: no limit), not {n:?}"))?);
+    }
     // Where clients reach rolld: a CA's certificates name its CRL there.
     secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
     // A deleted project's secrets go with it.
@@ -879,7 +916,7 @@ impl LinkProvider for Search {
     }
     fn issue(&self, r#ref: &str, _: &str, _: &Link, label: &str, ttl: Option<u64>) -> roll_secrets::Result<Issued> {
         // Data access only (indices, templates, pipelines, lifecycle): a leaked app key can't make
-        // more keys or users. Builds of roll search before `access` ignore it.
+        // more keys or users.
         let mut body = json!({ "name": label.chars().take(64).collect::<String>(), "access": "data" });
         // A dynamic key expires by itself a little after its lease, should a revoke fail.
         if let Some(m) = ttl {
@@ -887,11 +924,12 @@ impl LinkProvider for Search {
         }
         let k = self.0.call(Method::POST, &format!("/v1/search/clusters/{}/keys", enc(r#ref)), Some(body))?;
         let id = text(&k, "/id")?;
-        // A build that says what it made must have made a data key; one that says nothing is
-        // taken as it is (docs/secrets.md, "Links": search).
-        if let Some(access) = k["access"].as_str().filter(|a| *a != "data") {
+        // roll search says what it made (#29): anything but a data key, or a key that doesn't
+        // say, is deleted and refused (docs/secrets.md, "Links": search).
+        if k["access"].as_str() != Some("data") {
             let _ = self.0.delete_gone(&format!("/v1/search/clusters/{}/keys/{}", enc(r#ref), enc(id.expose())));
-            return Err(Error::Link(format!("roll search made an {access} key, not a data one: refused (and deleted)")));
+            let made = k["access"].as_str().map_or("a key without its access".to_string(), |a| format!("an {a} key"));
+            return Err(Error::Link(format!("roll search made {made}, not a data one: refused (and deleted)")));
         }
         Ok(Issued { parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
     }
@@ -1278,6 +1316,19 @@ impl code_control::SecretEnv for ForCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_roll_mcps_guard_keeps_the_guard_header() {
+        let req = || super::Request::builder().uri("/v1/secrets/projects/p/leaks").header("x-roll-guard", "1").body(super::Body::empty()).unwrap();
+        assert!(super::keep_guard_header(req()).headers().get("x-roll-guard").is_none(), "a caller's own header is dropped");
+        let call = |tool: &str| roll_access::evaluate::McpCall { tool: tool.into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false };
+        let mut other = req();
+        other.extensions_mut().insert(call("secrets_scan"));
+        assert!(super::keep_guard_header(other).headers().get("x-roll-guard").is_none(), "another tool's isn't the guard");
+        let mut guard = req();
+        guard.extensions_mut().insert(call("guard"));
+        assert!(super::keep_guard_header(guard).headers().get("x-roll-guard").is_some(), "the guard's stays");
+    }
+
     use axum::http::HeaderMap;
     use serde_json::{Value as Json, json};
     use std::sync::{Arc, Mutex};

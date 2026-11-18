@@ -1,9 +1,11 @@
 // Package secrets is a client for roll secrets (docs/secrets.md, "Consumption"): an environment's
 // values, the runtime resolve (sealed to a key only this process holds, if asked), the digest that
-// changes when the values would, and a watch that follows it. It mirrors @roll/secrets.
+// changes when the values would, a watch that follows it, one key's record and stored value, and
+// one key's writes. It mirrors @roll/secrets.
 //
 // A client holds a roll token (`rlt_…`, roll-access's) with a rule on one project, the operator
-// token, or the short-lived token a workload identity's login gives (Login, FromEnv).
+// token, or the short-lived token a workload identity's login gives (Login, LoginWithIdentity,
+// FromEnv).
 package secrets
 
 import (
@@ -16,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +41,9 @@ type Client struct {
 	// issues and audits nothing. A folder holding dynamic credentials is never kept (they end with
 	// their lease). Zero: off.
 	CacheTTL time.Duration
+	// CacheSize caps how many folders CacheTTL keeps; past it, the one read longest ago goes. Zero:
+	// no cap.
+	CacheSize int
 	// Now is the clock CacheTTL is measured with (for tests); time.Now when nil.
 	Now func() time.Time
 
@@ -75,6 +81,27 @@ type Values struct {
 	Linked   []string          `json:"linked"`
 	Followed []Followed        `json:"followed,omitempty"`
 }
+
+// String names the keys only, never a value: a Values printed or logged with %v or %+v.
+func (v Values) String() string {
+	keys := make([]string, 0, len(v.Values))
+	for k := range v.Values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return fmt.Sprintf("Values{keys: %v, problems: %d, leases: %d}", keys, len(v.Problems), len(v.Leases))
+}
+
+// GoString is String, for %#v.
+func (v Values) GoString() string { return v.String() }
+
+// String never shows the token: a Client printed or logged with %v or %+v.
+func (c *Client) String() string {
+	return fmt.Sprintf("Client{API: %q, Project: %q}", c.API, c.Project)
+}
+
+// GoString is String, for %#v.
+func (c *Client) GoString() string { return c.String() }
 
 // Followed is a key left out because it links a resource the environment's preview branched.
 type Followed struct {
@@ -231,21 +258,246 @@ func orRoot(path string) string {
 	return path
 }
 
+// ValuesOption changes what Values reads.
+type ValuesOption func(*valuesOptions)
+
+type valuesOptions struct{ noDynamic bool }
+
+// WithoutDynamic reads without issuing dynamic credentials (`dynamic=false`), for a reader that
+// can't renew a lease: those keys are left out and named in Values.Dynamic, and such an answer can
+// be kept by CacheTTL.
+func WithoutDynamic() ValuesOption { return func(o *valuesOptions) { o.noDynamic = true } }
+
 // Values are env's values under path ("" for the root), references resolved.
-func (c *Client) Values(ctx context.Context, env, path string) (*Values, error) {
+func (c *Client) Values(ctx context.Context, env, path string, opts ...ValuesOption) (*Values, error) {
+	var o valuesOptions
+	for _, f := range opts {
+		f(&o)
+	}
 	e, err := c.env(ctx, env)
 	if err != nil {
 		return nil, err
 	}
+	u := e + "/values" + query(path)
+	if o.noDynamic {
+		if path == "" {
+			u += "?dynamic=false"
+		} else {
+			u += "&dynamic=false"
+		}
+	}
 	if c.CacheTTL > 0 {
-		v, err := c.cachedValues(ctx, e+"/values"+query(path))
+		v, err := c.cachedValues(ctx, u, o.noDynamic)
 		if err != nil {
 			return nil, err
 		}
 		return v.clone(), nil
 	}
 	var v Values
-	return &v, c.call(ctx, http.MethodGet, e+"/values"+query(path), nil, &v)
+	return &v, c.call(ctx, http.MethodGet, u, nil, &v)
+}
+
+// Change is one change to an environment: its number in the project, who made it and when.
+type Change struct {
+	Seq         int64  `json:"seq"`
+	Environment string `json:"environment"`
+	Path        string `json:"path"`
+	Message     string `json:"message"`
+	By          string `json:"by"`
+	At          int64  `json:"at"`
+	Keys        int    `json:"keys"`
+	Kind        string `json:"kind"`
+}
+
+// Secret is a key's record, never its value.
+type Secret struct {
+	ID        string   `json:"id"`
+	Key       string   `json:"key"`
+	Path      string   `json:"path"`
+	Type      string   `json:"type"`
+	Version   int64    `json:"version"`
+	Comment   string   `json:"comment"`
+	Tags      []string `json:"tags"`
+	FP        string   `json:"fp"`
+	UpdatedAt int64    `json:"updated_at"`
+	UpdatedBy string   `json:"updated_by"`
+	ExpiresAt *int64   `json:"expires_at"`
+}
+
+// SecretInfo is one key's record as a folder sees it, never its value.
+type SecretInfo struct {
+	Key     string
+	Path    string
+	Type    string
+	Version int64
+	Comment string
+	Tags    []string
+	// LinkKind is the kind of the link the value comes from (postgres, github…); "" for a value
+	// stored in roll.
+	LinkKind  string
+	Source    Source
+	UpdatedAt int64
+	UpdatedBy string
+	ExpiresAt *int64
+}
+
+// Source is where a key's record comes from: Kind "own" (set in the folder itself), "base" (the
+// environment's base, Environment) or "import" (an imported folder: Environment and Path, and
+// Project when another project shares it).
+type Source struct {
+	Kind        string `json:"kind"`
+	Environment string `json:"environment,omitempty"`
+	Path        string `json:"path,omitempty"`
+	Project     string `json:"project,omitempty"`
+}
+
+// Secret is key's record as path's folder ("" for the root) sees it, without its value: its
+// version, comment, link kind and where it's set (Source: its own, a base's or an import's). nil,
+// with no error, when the folder has no such key.
+func (c *Client) Secret(ctx context.Context, env, path, key string) (*SecretInfo, error) {
+	u, err := c.secretURL(ctx, env, path, key)
+	if err != nil {
+		return nil, err
+	}
+	var s struct {
+		Key     string   `json:"key"`
+		Path    string   `json:"path"`
+		Type    string   `json:"type"`
+		Version int64    `json:"version"`
+		Comment string   `json:"comment"`
+		Tags    []string `json:"tags"`
+		Link    *struct {
+			Kind string `json:"kind"`
+		} `json:"link"`
+		Source    Source `json:"source"`
+		UpdatedAt int64  `json:"updated_at"`
+		UpdatedBy string `json:"updated_by"`
+		ExpiresAt *int64 `json:"expires_at"`
+	}
+	if err := c.call(ctx, http.MethodGet, u, nil, &s); err != nil {
+		var e *Error
+		if errors.As(err, &e) && e.Status == http.StatusNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	info := &SecretInfo{Key: s.Key, Path: s.Path, Type: s.Type, Version: s.Version, Comment: s.Comment, Tags: s.Tags, Source: s.Source, UpdatedAt: s.UpdatedAt, UpdatedBy: s.UpdatedBy, ExpiresAt: s.ExpiresAt}
+	if s.Link != nil {
+		info.LinkKind = s.Link.Kind
+	}
+	return info, nil
+}
+
+// StoredValue is key's value as stored, references left as written (`resolve=false`). It's a
+// reveal: the token needs `reveal`, the read is audited, and CacheTTL never keeps it. A linked
+// key's value still comes from its link. A key that doesn't read (sensitive, a link that failed)
+// is an *Error with the Code `unresolved`; errors never hold the value.
+func (c *Client) StoredValue(ctx context.Context, env, path, key string) (string, error) {
+	e, err := c.env(ctx, env)
+	if err != nil {
+		return "", err
+	}
+	q := query(path)
+	if q == "" {
+		q = "?resolve=false"
+	} else {
+		q += "&resolve=false"
+	}
+	var r struct {
+		Value    *string   `json:"value"`
+		Problems []Problem `json:"problems"`
+	}
+	if err := c.call(ctx, http.MethodGet, e+"/secrets/"+url.PathEscape(key)+"/value"+q, nil, &r); err != nil {
+		return "", err
+	}
+	if len(r.Problems) > 0 {
+		return "", &Error{Status: 409, Code: "unresolved", Message: key + " doesn't read: " + r.Problems[0].Problem}
+	}
+	if r.Value == nil {
+		return "", &Error{Status: 502, Message: "the answer for " + key + " has no value"}
+	}
+	return *r.Value, nil
+}
+
+// Written is what a write answers: the change (nil when nothing changed) and the key now.
+type Written struct {
+	Change   *Change  `json:"change"`
+	Secret   *Secret  `json:"secret"`
+	Warnings []string `json:"warnings"`
+}
+
+// Deleted is what Delete answers: Deleted is false when the key wasn't there.
+type Deleted struct {
+	Deleted bool
+	Change  *Change
+}
+
+// SetOptions are Set's optional fields.
+type SetOptions struct {
+	// Comment replaces the key's comment; nil keeps it.
+	Comment *string
+	// Message is the change's.
+	Message string
+}
+
+func (c *Client) secretURL(ctx context.Context, env, path, key string) (string, error) {
+	e, err := c.env(ctx, env)
+	if err != nil {
+		return "", err
+	}
+	return e + "/secrets/" + url.PathEscape(key) + query(path), nil
+}
+
+// dropCache forgets every kept Values answer: a write may change any of them (a reference or an
+// import elsewhere may follow the key).
+func (c *Client) dropCache() {
+	c.cacheMu.Lock()
+	c.cache = nil
+	c.cacheMu.Unlock()
+}
+
+// Set sets key to value in path's folder ("" for the root), replacing a link the key had. The same
+// value again writes nothing (Written.Change is nil). A protected environment, or a folder that
+// needs approval, is an *Error with the Code `approval_required` (open a change request instead).
+// Errors never hold the value. Drops the kept Values answers.
+func (c *Client) Set(ctx context.Context, env, path, key, value string, o SetOptions) (*Written, error) {
+	u, err := c.secretURL(ctx, env, path, key)
+	if err != nil {
+		return nil, err
+	}
+	body := map[string]any{"value": value, "link": nil}
+	if o.Comment != nil {
+		body["comment"] = *o.Comment
+	}
+	if o.Message != "" {
+		body["message"] = o.Message
+	}
+	defer c.dropCache()
+	var w Written
+	if err := c.call(ctx, http.MethodPut, u, body, &w); err != nil {
+		return nil, err
+	}
+	return &w, nil
+}
+
+// Delete deletes key from path's folder. A key that isn't there (or only shows through a base or
+// an import) is Deleted false, not an error; `approval_required` as for Set. Drops the kept Values
+// answers.
+func (c *Client) Delete(ctx context.Context, env, path, key string) (*Deleted, error) {
+	u, err := c.secretURL(ctx, env, path, key)
+	if err != nil {
+		return nil, err
+	}
+	defer c.dropCache()
+	var w Written
+	if err := c.call(ctx, http.MethodDelete, u, nil, &w); err != nil {
+		var e *Error
+		if errors.As(err, &e) && e.Status == http.StatusNotFound {
+			return &Deleted{}, nil
+		}
+		return nil, err
+	}
+	return &Deleted{Deleted: true, Change: w.Change}, nil
 }
 
 // freshValues is Values without CacheTTL (a watch that saw the digest move reads anew); a kept
@@ -281,8 +533,9 @@ func (v *Values) clone() *Values {
 }
 
 // cachedValues answers from memory within CacheTTL, else revalidates with the digest (a 304
-// keeps the values) or reads them again.
-func (c *Client) cachedValues(ctx context.Context, path string) (*Values, error) {
+// keeps the values) or reads them again. noDynamic: read with `dynamic=false`, so naming dynamic
+// keys holds no credential.
+func (c *Client) cachedValues(ctx context.Context, path string, noDynamic bool) (*Values, error) {
 	now := time.Now
 	if c.Now != nil {
 		now = c.Now
@@ -295,14 +548,14 @@ func (c *Client) cachedValues(ctx context.Context, path string) (*Values, error)
 	}
 	var out *Values
 	err := c.authed(ctx, func(token string) (err error) {
-		out, err = c.revalidate(ctx, token, path, hit, ok, now)
+		out, err = c.revalidate(ctx, token, path, hit, ok, now, noDynamic)
 		return err
 	})
 	return out, err
 }
 
 // revalidate is one conditional read of path with token: a 304 keeps hit's values.
-func (c *Client) revalidate(ctx context.Context, token, path string, hit cached, ok bool, now func() time.Time) (*Values, error) {
+func (c *Client) revalidate(ctx context.Context, token, path string, hit cached, ok bool, now func() time.Time, noDynamic bool) (*Values, error) {
 	sep := "?"
 	if strings.Contains(path, "?") {
 		sep = "&"
@@ -354,13 +607,23 @@ func (c *Client) revalidate(ctx context.Context, token, path string, hit cached,
 	}
 	etag := strings.Trim(strings.TrimPrefix(res.Header.Get("ETag"), "W/"), `"`)
 	c.cacheMu.Lock()
-	// Never kept: dynamic credentials (they end with their lease) or a key that didn't resolve (the
-	// digest may not move when the link recovers).
-	if len(v.Dynamic) > 0 || len(v.Problems) > 0 {
+	// Never kept: dynamic credentials (they end with their lease; with `dynamic=false` there are
+	// none, only their names) or a key that didn't resolve (the digest may not move when the link
+	// recovers).
+	if (len(v.Dynamic) > 0 && !noDynamic) || len(v.Problems) > 0 {
 		delete(c.cache, path)
 	} else {
 		if c.cache == nil {
 			c.cache = map[string]cached{}
+		}
+		if _, kept := c.cache[path]; !kept && c.CacheSize > 0 && len(c.cache) >= c.CacheSize {
+			oldest := ""
+			for k, x := range c.cache {
+				if oldest == "" || x.at.Before(c.cache[oldest].at) {
+					oldest = k
+				}
+			}
+			delete(c.cache, oldest)
 		}
 		c.cache[path] = cached{values: &v, etag: etag, at: now()}
 	}
