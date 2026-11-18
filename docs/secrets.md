@@ -3670,8 +3670,23 @@ cache waited out. Ranked now:
    replay refusal beaten by changing the box's `v`. Low: #330 storing an outsider's credential, #290's
    duplicated `Signature=`, #329's source bucket choosing the reference's project (and its refusal
    text an oracle), #248's per-reader eviction. Sound: #303's fixes, #274, #262, #281's key provenance.
-5b. **The thirty-first product review** (running, 2026-11-18 23:05): after today's builds, weighted to
-   the first ten minutes (UX and adoption), test gaps, and integration with the other threads.
+5b. **The thirty-first product review** (2026-11-18 night): the store is level with or ahead of the
+   category; what's left is the first ten minutes, two test gaps and three products' own credential
+   copies. Ranked:
+   - P1–P4, **the first ten minutes** (building: `feature/roll-secrets-first-ten-minutes`): the CLI
+     keeps 127.0.0.1:7070 after `roll login`; the first `roll run` waits silently on an `ask` approval
+     it can't handle; the quick start has no install or login; the dashboard's commands dead-end.
+     Then a committed `[secrets]` in `roll.toml` and an interactive `setup` (Doppler's `doppler.yaml`).
+   - P5, CI snippets that work on a fresh runner (the GitHub Action, GitLab's `id_tokens`).
+   - P6, MCP tools for import, link, rollback, environments, secret requests and cut-off (roll MCP).
+   - P7–P8, **tests** (building: `feature/roll-secrets-test-gaps`): `roll run --watch`, the six links
+     to roll's own products, and a `pnpm test:secrets` gate.
+   - P9–P11, apps' variables, search's connectors and previews' variables as `roll://` references
+     (each with its thread; search's is building on #329).
+   - P12 members (R1, waits); P13 a CI token's defaults (all environments, no expiry: the user's call);
+     P14 a dashboard write-flow test; P15 R4 and real-account checks.
+   - Inconsistent: `roll://` is also the desktop app's deep-link scheme (`roll://agents/…` parses as a
+     reference), `doctor` suggests `export > .env`, GitLab is listed without a snippet.
 6. **R10, decoy keys** (building: `feature/roll-secrets-decoys`): a key holding a decoy `rlt_` token
    (#270) or a Postgres role, alerting `decoy_used` on any use; IAM users need an account;
    **R4** (GCP KMS, Azure Key Vault, HSM) and confirming #290, #284, #227, #229 on real accounts: the
