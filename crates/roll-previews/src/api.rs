@@ -55,6 +55,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/visitors", get(visitors))
         .route("/v1/previews/projects/{project}/settings", get(settings).put(put_settings))
         .route("/v1/previews/projects/{project}/usage", get(usage))
+        .route("/v1/previews/projects/{project}/mask-suggestions", get(mask_suggestions))
         .route("/v1/previews/projects/{project}/bypass", get(bypass).post(rotate_bypass).delete(delete_bypass))
         .route("/v1/previews/projects/{project}/hooks", get(hooks).post(create_hook))
         .route("/v1/previews/projects/{project}/hooks/{hook}", axum::routing::delete(delete_hook))
@@ -613,6 +614,21 @@ async fn settings(AxState(e): S, Path(project): Path<String>) -> crate::Result<J
     })
     .await
     .map(Json)
+}
+
+/// Columns of the project's data that look like people's data and aren't masked yet:
+/// `{suggestions: [{resource, path, rule, why}], unread: [{resource, why}]}`.
+/// A scoped token sees only resources its grant lets it read (the route's own check is
+/// `previews` read on the project): column names are the products' metadata.
+async fn mask_suggestions(AxState(e): S, Path(project): Path<String>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<Json<Value>> {
+    use roll_auth::scope::{Action, Outcome, Resource};
+    let may_read = |kind: crate::Kind, r#ref: &str| {
+        grant.as_ref().is_none_or(|axum::Extension(g)| {
+            let resource = Resource { product: kind.as_str().into(), id: Some(r#ref.into()), project: Some(project.clone()), ..Default::default() };
+            g.allows(&resource, Action::Read) == Outcome::Allow
+        })
+    };
+    e.mask_suggestions(&project, may_read).await.map(Json)
 }
 
 async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> crate::Result<Json<crate::Settings>> {

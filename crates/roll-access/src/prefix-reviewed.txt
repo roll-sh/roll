@@ -172,6 +172,7 @@ POST /v1/code/work/{id}/heartbeat
 POST /v1/code/work/{id}/release
 PUT /v1/previews/projects/{project}/settings
 GET /v1/previews/projects/{project}/usage
+GET /v1/previews/projects/{project}/mask-suggestions
 GET /v1/previews/projects/{project}/hooks
 GET /v1/previews/{id}/activity
 GET /v1/previews/{id}/visitors

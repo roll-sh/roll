@@ -214,6 +214,15 @@ pub enum Preview {
     Usage { project: String },
     /// Who opened a sign-in (`access: team`) preview lately, latest first.
     Visitors { preview: String },
+
+    /// Columns and fields in a project's branched data that look like personal data and aren't
+    /// masked, each with a rule that can't fail the masking; `--apply` adds them all to the
+    /// project's masks.
+    Masks {
+        project: String,
+        #[arg(long)]
+        apply: bool,
+    },
     /// The secret CI sends (header `x-roll-preview-bypass`) to reach a project's private
     /// previews: shows whether there is one, `--rotate` makes a new one (printed once), `--off`
     /// removes it.
@@ -1019,6 +1028,36 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 }
                 for x in who {
                     println!("{:>8}  {}", ago(x["last_at"].as_i64().unwrap_or(0) / 1000), s(&x["who"]));
+                }
+                return Ok(());
+            }
+            v
+        }
+
+        Preview::Masks { project, apply } => {
+            let id = project_id(api, &project).await?;
+            let v = api.get(&format!("/v1/previews/projects/{id}/mask-suggestions")).await?;
+            let suggestions = v["suggestions"].as_array().cloned().unwrap_or_default();
+            if apply && !suggestions.is_empty() {
+                let mut masking = serde_json::Map::new();
+                for x in &suggestions {
+                    let r = masking.entry(s(&x["resource"])).or_insert_with(|| json!({}));
+                    r[s(&x["path"])] = x["rule"].clone();
+                }
+                api.call(reqwest::Method::PUT, &format!("/v1/previews/projects/{id}/settings"), Some(json!({ "masking": masking }))).await?;
+            }
+            if !as_json {
+                if suggestions.is_empty() {
+                    println!("nothing unmasked looks like personal data");
+                }
+                for x in &suggestions {
+                    println!("{:<24} {:<40} {:<8} {}", s(&x["resource"]), s(&x["path"]), s(&x["rule"]), s(&x["why"]));
+                }
+                for u in v["unread"].as_array().into_iter().flatten() {
+                    eprintln!("{}: {}", s(&u["resource"]), s(&u["why"]));
+                }
+                if apply && !suggestions.is_empty() {
+                    eprintln!("added {} masks to the project's rules", suggestions.len());
                 }
                 return Ok(());
             }
