@@ -62,7 +62,11 @@ impl Apps {
     /// `POST …/environments/{env}/visit {to}`, as a person signed in to roll: a one-use ticket
     /// to `to` (a URL at one of the environment's names), as the URL that opens it. Only an
     /// environment that lets people in by signing in gives one.
-    pub async fn visit_ticket(self: &Arc<Self>, service: &str, env: &str, user: &str, to: &str) -> Result<String> {
+    pub async fn visit_ticket(self: &Arc<Self>, service: &str, env: &str, user: &str, login: &str, to: &str) -> Result<String> {
+        // A person's own roll login, whose end ends what it opens (never a token on their behalf).
+        if !login.starts_with("ses_") {
+            return Err(Error::Forbidden("signing in to an environment is for a person signed in to roll, not a token".into()));
+        }
         if !self.access(service, env).await?.is_some_and(|a| a.signed_in) {
             return Err(Error::BadRequest("this environment doesn't let people in by signing in (access.signed_in)".into()));
         }
@@ -78,16 +82,17 @@ impl Apps {
             return Err(Error::Forbidden("you can't open this project's environments".into()));
         }
         let token = format!("rlv_{}", crate::model::random(32));
-        let (hash, sid, e, u) = (crate::public::token_hash(&token), service.to_string(), env.to_string(), user.to_string());
+        let (hash, sid, e, u, l) = (crate::public::token_hash(&token), service.to_string(), env.to_string(), user.to_string(), login.to_string());
         let until = code_sql::now_ms() + TICKET_MS;
-        self.db(move |s| s.put_visit_ticket(&hash, &sid, &e, &u, until)).await?;
+        self.db(move |s| s.put_visit_ticket(&hash, &sid, &e, &u, &l, until)).await?;
         let mut path = url.path().to_string();
         if let Some(q) = url.query() {
             path = format!("{path}?{q}");
         }
         let q = |v: &str| percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC).to_string();
-        let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
-        Ok(format!("{}://{host}{port}{PATH}?ticket={token}&to={}", url.scheme(), q(&local_path(&path))))
+        // The environment's own scheme and port, never `to`'s: a ticket isn't sent over plain
+        // HTTP, nor to whatever else listens on another port of that address.
+        Ok(format!("{}{PATH}?ticket={token}&to={}", self.origin(&host), q(&local_path(&path))))
     }
 
     /// A ticket brought back to the environment: the session it opens (the cookie's value), or
@@ -95,10 +100,10 @@ impl Apps {
     pub(crate) async fn open_visit(self: &Arc<Self>, service: &str, env: &str, ticket: &str) -> Option<String> {
         let (hash, sid, e) = (crate::public::token_hash(ticket), service.to_string(), env.to_string());
         let now = code_sql::now_ms();
-        let user = self.db(move |s| s.take_visit_ticket(&hash, &sid, &e, now)).await.ok()??;
+        let (user, login) = self.db(move |s| s.take_visit_ticket(&hash, &sid, &e, now)).await.ok()??;
         let token = format!("rls_{}", crate::model::random(32));
         let (hash, sid, e) = (crate::public::token_hash(&token), service.to_string(), env.to_string());
-        self.db(move |s| s.put_visit_session(&hash, &sid, &e, &user, now + SESSION_S * 1000)).await.ok()?;
+        self.db(move |s| s.put_visit_session(&hash, &sid, &e, &user, &login, now + SESSION_S * 1000)).await.ok()?;
         Some(token)
     }
 
@@ -110,6 +115,25 @@ impl Apps {
         let Ok(svc) = self.db(move |s| s.service(&sid)).await else { return false };
         let user = user.to_string();
         tokio::task::spawn_blocking(move || v.may_open(&user, &svc.project)).await.unwrap_or(false)
+    }
+
+    /// Whether the roll login a session came from is still live (no [`crate::integrations::Visitors`]:
+    /// nothing to ask; a session from before logins were kept: no).
+    async fn login_live(self: &Arc<Self>, user: &str, login: Option<&str>) -> bool {
+        let Some(login) = login else { return false };
+        let Some(v) = self.visitors.get().cloned() else { return true };
+        let (user, login) = (user.to_string(), login.to_string());
+        tokio::task::spawn_blocking(move || v.session_live(&user, &login)).await.unwrap_or(false)
+    }
+
+    /// The scheme, host and port the environment's names answer on here (`https://shop.example`,
+    /// or `http://x.apps.localhost:7080` in development).
+    fn origin(&self, host: &str) -> String {
+        let port = self.cfg.url_port.filter(|p| !((self.cfg.scheme == "http" && *p == 80) || (self.cfg.scheme == "https" && *p == 443)));
+        match port {
+            Some(p) => format!("{}://{host}:{p}", self.cfg.scheme),
+            None => format!("{}://{host}", self.cfg.scheme),
+        }
     }
 
     /// Whose session `token` is in the environment, while it lasts and its person may still open
@@ -129,12 +153,13 @@ impl Apps {
             return (s.until > now).then_some(s.user);
         }
         let (h, sid, e) = (hash.clone(), service.to_string(), env.to_string());
-        let (user, until) = self.db(move |s| s.visit_session(&h, &sid, &e)).await.ok()??;
+        let (user, until, login) = self.db(move |s| s.visit_session(&h, &sid, &e)).await.ok()??;
         if until <= now {
             return None;
         }
-        // Their account went, or they may no longer open the project: the session ends now.
-        if !self.may_open(service, &user).await {
+        // Their account went, they may no longer open the project, or the roll login that let
+        // them in ended (they signed out, or revoked it): the session ends now.
+        if !self.may_open(service, &user).await || !self.login_live(&user, login.as_deref()).await {
             self.visits.lock().remove(&hash);
             let _ = self.db(move |s| s.delete_visit_session(&hash)).await;
             return None;

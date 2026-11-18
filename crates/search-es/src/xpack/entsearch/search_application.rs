@@ -628,12 +628,53 @@ pub async fn post_event(ctx: &Ctx<'_>) -> EsResult<Reply> {
     // Event data streams require routing: events are routed by session.
     let session_id = ev.pointer(&["session", "id"]).map(Value::to_es_string).unwrap_or_default();
     internal::call_system(ctx.cluster, "POST", &format!("/{}/_doc?op_type=create&routing={}", enc(&events_stream(&name)), enc(&session_id)), Some(&ev)).await?;
+    if ty == "search_click" {
+        record_click(ctx, &body);
+    }
     let mut out = Map::new();
     out.insert("accepted".into(), true.into());
     if debug {
         out.insert("event".into(), ev);
     }
     Ok(Reply::Body(202, Value::Obj(out)))
+}
+
+/// A `search_click` on a document of an index with search analytics on is a click on the
+/// event's search query ([`crate::analytics`]), at the document's position when the event lists
+/// the search's results (`search.results.items`, after `search.page`'s earlier pages).
+fn record_click(ctx: &Ctx, body: &Map) {
+    let a = &ctx.cluster.analytics;
+    if !a.on() {
+        return;
+    }
+    let doc = body.get("document");
+    let (Some(index), Some(query)) = (
+        doc.and_then(|d| d.get("index")).and_then(Value::as_str),
+        body.get("search").and_then(|s| s.get("query")).and_then(Value::as_str).and_then(crate::analytics::normalize),
+    ) else {
+        return;
+    };
+    // The index, or the one index an alias names.
+    let index = if a.is_on(index) {
+        index.to_string()
+    } else {
+        let names = crate::meta::resolve::resolve(&ctx.state(), &[index.to_string()], &crate::meta::resolve::IndicesOptions::LENIENT_EXPAND_OPEN, ctx.now_ms).unwrap_or_default();
+        match a.filter(&names).as_slice() {
+            [one] if names.len() == 1 => one.clone(),
+            _ => return,
+        }
+    };
+    let id = doc.and_then(|d| d.get("id")).map(Value::to_es_string);
+    let search = body.get("search");
+    let position = id.and_then(|id| {
+        let items = search?.get("results")?.get("items")?.as_array()?;
+        let at = items.iter().position(|it| it.get("document").and_then(|d| d.get("id")).map(Value::to_es_string).as_deref() == Some(id.as_str()))?;
+        let page = search.and_then(|s| s.get("page"));
+        let n = |k: &str| page.and_then(|p| p.get(k)).and_then(Value::as_i64).unwrap_or(0).max(0) as u64;
+        let before = n("current").saturating_sub(1).saturating_mul(n("size"));
+        u32::try_from(before.saturating_add(at as u64 + 1)).ok()
+    });
+    a.record_click(&index, &query, position);
 }
 
 #[cfg(test)]

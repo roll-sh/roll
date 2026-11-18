@@ -1,0 +1,82 @@
+# Run by test_playbook.py against the fake rolld (ROLL_API_URL, ROLL_TOKEN). Values are compared by
+# hash, so none is written here or printed.
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    new_value: "{{ lookup('ansible.builtin.env', 'FAKE_NEW_VALUE') }}"
+  tasks:
+    - name: One value
+      ansible.builtin.assert:
+        that:
+          - lookup('roll.secrets.secret', 'DB_URL', environment='production', path='/api', project='shop') | hash('sha1') == 'ca8deb472de92111b081a7d88e302e173273dbac'
+          - lookup('roll.secrets.secret', 'TEMPLATED', environment='production', path='/templates') | hash('sha1') == '636ac66543edc62c25aa921ecaab8fc18d05fb2d'
+
+    - name: The whole folder, without its dynamic key
+      ansible.builtin.assert:
+        that:
+          - (lookup('roll.secrets.secret', environment='production', path='/api', as_dict=true) | list | sort) == ['API_KEY', 'DB_URL', 'FROM_BASE']
+
+    - name: A missing key fails, naming it
+      ansible.builtin.set_fact:
+        missing: "{{ lookup('roll.secrets.secret', 'NOPE', environment='production', path='/api') }}"
+      register: missing
+      ignore_errors: true
+    - ansible.builtin.assert:
+        that:
+          - missing is failed
+          - "'no key NOPE in production:/api' in missing.msg"
+
+    - name: Set a key (check mode)
+      roll.secrets.secret: &new
+        environment: production
+        path: /api
+        project: shop
+        key: NEW_KEY
+        value: "{{ new_value }}"
+      check_mode: true
+      register: checked
+    - name: Set a key
+      roll.secrets.secret: *new
+      register: first
+    - name: Set it again
+      roll.secrets.secret: *new
+      register: second
+    - name: Set it again (check mode)
+      roll.secrets.secret: *new
+      check_mode: true
+      register: second_checked
+    - ansible.builtin.assert:
+        that:
+          - checked is changed
+          - first is changed
+          - first.version == 1
+          - second is not changed
+          - second_checked is not changed
+          - "'value' not in first and 'value' not in second"
+          - lookup('roll.secrets.secret', 'NEW_KEY', environment='production', path='/api') | hash('sha1') == '23943c0a16a49c49cdba2d8e143e6ad5923c5ed8'
+
+    - name: Delete it (check mode)
+      roll.secrets.secret: { environment: production, path: /api, key: NEW_KEY, state: absent }
+      check_mode: true
+      register: delete_checked
+    - name: Delete it
+      roll.secrets.secret: { environment: production, path: /api, key: NEW_KEY, state: absent }
+      register: deleted
+    - name: Delete it again
+      roll.secrets.secret: { environment: production, path: /api, key: NEW_KEY, state: absent }
+      register: deleted_again
+    - ansible.builtin.assert:
+        that:
+          - delete_checked is changed
+          - deleted is changed
+          - deleted_again is not changed
+
+    - name: A protected environment fails with roll's message
+      roll.secrets.secret: { environment: locked, key: K, value: "{{ new_value }}" }
+      register: locked
+      ignore_errors: true
+    - ansible.builtin.assert:
+        that:
+          - locked is failed
+          - "'approval_required' in locked.msg"
