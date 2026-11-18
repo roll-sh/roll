@@ -267,6 +267,24 @@ CREATE TABLE IF NOT EXISTS domains (
     created_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS domains_env ON domains (service, env);
+-- A project's own preview domain (`*.preview.acme.dev`, roll previews' preview deployment
+-- suffix), and the label each preview environment answers to under it.
+CREATE TABLE IF NOT EXISTS preview_domains (
+    project TEXT PRIMARY KEY,
+    hostname TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    token TEXT NOT NULL,
+    error TEXT,
+    created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS preview_hosts (
+    service TEXT NOT NULL,
+    env TEXT NOT NULL,
+    project TEXT NOT NULL,
+    label TEXT NOT NULL,
+    PRIMARY KEY (service, env),
+    UNIQUE (project, label)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY,
     service TEXT NOT NULL,
@@ -549,6 +567,9 @@ pub struct Store {
     db: Db,
     sealer: Sealer,
 }
+
+/// A project's preview domain: `(hostname, status, token, error, created_at)`.
+pub type PreviewDomainRow = (String, DomainStatus, String, Option<String>, i64);
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
 /// An environment's (or any row with a `service` column's) service isn't deleted.
@@ -889,7 +910,7 @@ impl Store {
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
             c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
-            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
+            for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "preview_hosts", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
             match c.execute("DELETE FROM services WHERE id = ?", [id])? {
@@ -1005,7 +1026,7 @@ impl Store {
             if n == 0 {
                 return Err(Error::NotFound(format!("service {service} has no environment {env}")));
             }
-            for t in ["variables", "variable_files", "error_groups", "domains", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions"] {
+            for t in ["variables", "variable_files", "error_groups", "domains", "preview_hosts", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
             }
             // Its schedules', challenge's and base images' state goes with it.
@@ -1726,6 +1747,88 @@ impl Store {
 
     /// The service and environment a hostname is a custom domain of.
     /// A custom domain's redirect (`None`: it serves the environment).
+    /// A project's preview domain.
+    pub fn preview_domain(&self, project: &str) -> Result<Option<PreviewDomainRow>> {
+        Ok(self
+            .db
+            .query_row("SELECT hostname, status, token, error, created_at FROM preview_domains WHERE project = ?", [project], |r| {
+                Ok((r.get(0)?, DomainStatus::parse(&r.get::<_, String>(1)?), r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .optional()?)
+    }
+
+    /// Give `project` its preview domain (pending until verified), replacing one it had; a
+    /// hostname another project's previews or any service's domain has is refused.
+    pub fn set_preview_domain(&self, project: &str, host: &str) -> Result<()> {
+        let (now, token) = (self.now()?, random(24));
+        self.db.write(|c| {
+            let other: Option<String> = c.query_row("SELECT project FROM preview_domains WHERE hostname = ?", [host], |r| r.get(0)).optional()?;
+            if other.is_some_and(|p| p != project) || c.query_row("SELECT 1 FROM domains WHERE hostname = ?", [host], |_| Ok(())).optional()?.is_some() {
+                return Err(Error::Conflict(format!("{host} is already a domain of roll apps")));
+            }
+            c.execute(
+                "INSERT INTO preview_domains (project, hostname, status, token, error, created_at) VALUES (?, ?, 'pending', ?, NULL, ?) \
+                 ON CONFLICT (project) DO UPDATE SET hostname = excluded.hostname, status = 'pending', token = excluded.token, error = NULL, created_at = excluded.created_at",
+                params![project, host, token, now],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn set_preview_domain_status(&self, project: &str, status: DomainStatus, error: Option<&str>) -> Result<()> {
+        self.db.execute("UPDATE preview_domains SET status = ?, error = ? WHERE project = ?", params![status.as_str(), error, project])?;
+        Ok(())
+    }
+
+    /// Remove the project's preview domain (the labels stay its environments', for another).
+    pub fn delete_preview_domain(&self, project: &str) -> Result<bool> {
+        Ok(self.db.execute("DELETE FROM preview_domains WHERE project = ?", [project])? > 0)
+    }
+
+    /// The service and environment `label` names under `wildcard` (`*.preview.acme.dev`), when
+    /// that's a project's active preview domain and a live service's environment has the label.
+    pub fn preview_target(&self, wildcard: &str, label: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .db
+            .query_row(
+                &format!(
+                    "SELECT h.service, h.env FROM preview_domains d JOIN preview_hosts h ON h.project = d.project \
+                     WHERE d.hostname = ? AND d.status = 'active' AND h.label = ? AND h.{NOT_DELETED}"
+                ),
+                [wildcard, label],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// The label an environment answers to under its project's preview domain.
+    pub fn preview_host(&self, service: &str, env: &str) -> Result<Option<String>> {
+        Ok(self.db.query_row("SELECT label FROM preview_hosts WHERE service = ? AND env = ?", [service, env], |r| r.get(0)).optional()?)
+    }
+
+    /// Set (or with `None` clear) the environment's label; one another environment of the
+    /// project has is refused.
+    pub fn set_preview_host(&self, service: &str, env: &str, project: &str, label: Option<&str>) -> Result<()> {
+        self.db.write(|c| {
+            match label {
+                None => {
+                    c.execute("DELETE FROM preview_hosts WHERE service = ? AND env = ?", [service, env])?;
+                }
+                Some(l) => {
+                    let other: Option<(String, String)> = c.query_row("SELECT service, env FROM preview_hosts WHERE project = ? AND label = ?", [project, l], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+                    if other.is_some_and(|(s2, e2)| s2 != service || e2 != env) {
+                        return Err(Error::Conflict(format!("another environment of the project answers to {l}")));
+                    }
+                    c.execute(
+                        "INSERT INTO preview_hosts (service, env, project, label) VALUES (?, ?, ?, ?) ON CONFLICT (service, env) DO UPDATE SET project = excluded.project, label = excluded.label",
+                        params![service, env, project, l],
+                    )?;
+                }
+            }
+            Ok(())
+        })
+    }
+
     pub fn set_domain_port(&self, host: &str, port: Option<u16>) -> Result<()> {
         self.db.execute("UPDATE domains SET port = ? WHERE hostname = ?", params![port.map(i64::from), host])?;
         Ok(())

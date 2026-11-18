@@ -698,6 +698,128 @@
         "x-roll-action": "write"
       }
     },
+    "/v1/apps/projects/{project}/preview-domain": {
+      "delete": {
+        "description": "Answers 204 (its names answer nothing; the environments keep their labels for another).",
+        "operationId": "deleteProjectsProjectPreviewDomain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "204 (its names answer nothing; the environments keep their labels for another)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete preview domain",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "delete"
+      },
+      "get": {
+        "description": "Answers `Domain` (404: none): the project's own preview domain, a wildcard its preview environments answer under by their `preview_host`; `tls` is `none` (plain HTTP until wildcard certificates, DNS-01, are issued here).",
+        "operationId": "getProjectsProjectPreviewDomain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Domain` (404: none): the project's own preview domain, a wildcard its preview environments answer under by their `preview_host`; `tls` is `none` (plain HTTP until wildcard certificates, DNS-01, are issued here)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Get preview domain",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "read"
+      },
+      "post": {
+        "description": "Answers 201 `Domain` (pending: the same CNAME, `target` its own, or `_roll-challenge` TXT a custom domain takes).",
+        "operationId": "postProjectsProjectPreviewDomain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ hostname: \"*.preview.acme.dev\" }` (a wildcard; one a project, a new one replaces it; 409 when another project's previews or any service's domain has it)"
+        },
+        "responses": {
+          "201": {
+            "description": "201 `Domain` (pending: the same CNAME, `target` its own, or `_roll-challenge` TXT a custom domain takes)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Preview domain project",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "write"
+      }
+    },
+    "/v1/apps/projects/{project}/preview-domain/verify": {
+      "post": {
+        "description": "Answers `Domain` (active once its DNS checks out, else pending with what DNS answered).",
+        "operationId": "postProjectsProjectPreviewDomainVerify",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Domain` (active once its DNS checks out, else pending with what DNS answered)"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Verify project",
+        "tags": [
+          "projects"
+        ],
+        "x-roll-action": "write"
+      }
+    },
     "/v1/apps/projects/{project}/services": {
       "get": {
         "description": "Answers `Service[]`.",

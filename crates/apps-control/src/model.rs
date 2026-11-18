@@ -1157,6 +1157,10 @@ pub struct Environment {
     /// someone else reports them (roll previews, for its `pv-` environments: one voice on a
     /// pull request).
     pub report: bool,
+    /// The label it answers to under its project's preview domain (`<label>.preview.acme.dev`),
+    /// when roll previews gave it one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_host: Option<String>,
     /// A preview's pages carry roll previews' feedback button for visitors who came in through
     /// its access link.
     pub feedback: bool,
