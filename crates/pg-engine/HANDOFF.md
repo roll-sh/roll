@@ -11112,6 +11112,19 @@ Base `6d3b7e9e5`; the candidate's four commits rebased without conflict onto `69
   and 44.6 s CPU, pgrust 84.6 G and 19.3 s: against pgrust 1.50x user instructions (from 1.74x)
   and 1.42x CPU (from 1.64x). With `cand/a251-2` q18 moves from 23.2 to about 16.8 G.
   `tools/quick-check.sh` green on `cand/a251-2`'s code (`ffd61e215`), as on `cand/a251`'s.
+- PGO, the same evening (`tools/dist-pgo.sh` of both; every engine pass above 1.0 foreign core,
+  so instructions only): `6913fd09c` 129.6 G against `cand/a251` 110.7 G over the 22 (-14.5%);
+  pgrust 85.2 G (1.30x, from 1.52x), PostgreSQL 159.4 G (0.69x). q04 +3.8%, q19 +2.4%, q14
+  +1.7%, q08 +1.6%, q22 +1.1% under PGO only (plain dist q04 -6.8%): the profiles' inlining.
+- Lane A point selects (8 clients, base `6d3b7e9e5` against `n5`, the candidate's code): the
+  lane's lock was held by other agents' pairs most of the night; one complete pair, +1.8% user
+  instructions a select (cycles +4.5%, at 0.27 / 0.80 foreign cores), and n5's second run 2.3%
+  below its first (31,794 against 32,540 a select by the server's per-thread counts, base
+  31,966): within a build's run-to-run spread. The only change on that path is the fast skip in
+  `decode_row_need_spare` / `row::decode_cols`: fewer instructions for fixed-size values and
+  short strings, a match more for those it hands on to the general skip (numerics, strings of
+  128 bytes or more).
+  Not settled: 5 pairs are still owed.
 - Dropped: the walk's rows in a non-inlined loop of their own with slice patterns and the
   numerics' word load inline (`n3`, `~/.cache/a251/patches/dropped-n2c-walk-rows-loop.patch`):
   user instructions +0.3 to +2.0% over 10 queries (q12 +2.0, q21 +2.1, q01 -1.3, q06 -1.7),

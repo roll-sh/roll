@@ -383,6 +383,49 @@ ones: b2 146.78-146.93 G, c1 126.41-126.50 G over the 22).
 - CPU s (medians summed): PostgreSQL 44.57, pgrust 19.27, b2 31.65, c1 27.35.
 - User cycles G (medians summed): PostgreSQL 141.0, pgrust 65.6, b2 110.8, c1 98.3.
 - Foreign load per engine pass, cores: b2 1.33, 0.94, 0.99, 1.61, 2.24; c1 0.82, 1.06, 0.57, 1.35, 2.62.
+
+### TPC-H SF1, the same day: PostgreSQL, pgrust, pb2 and pc1 (PGO; G user instructions a run / median s)
+
+**pb2** / **pc1**: `tools/dist-pgo.sh` of `6913fd09c` and of `cand/a251`'s code (training on CPUs
+0,1,18,19 and 2,3,20,21), the same evening, four rotated rounds. Every engine pass ran at
+1.05-2.63 foreign cores (the host at load 25-65), so the medians below are of all four passes:
+user instructions repeat within 0.3% from pass to pass (pb2 129.41-129.73 G, pc1 110.65-110.90 G over the 22), cycles, CPU and wall do not (shown for
+completeness). PostgreSQL and pgrust: four passes each.
+
+| query | PostgreSQL 18.6 | pgrust | pb2 | pc1 | pc1 / pb2 | pc1 / PostgreSQL | pc1 / pgrust |
+|---|---|---|---|---|---|---|---|
+| q01 | 45.15 / 3.248 | 6.72 / 0.687 | 11.72 / 0.732 | 8.47 / 0.525 | -27.8% | 0.19x | 1.26x |
+| q02 | 1.15 / 0.326 | 0.89 / 0.243 | 2.40 / 0.750 | 2.41 / 0.707 | +0.4% | 2.09x | 2.70x |
+| q03 | 4.00 / 0.684 | 3.39 / 0.486 | 5.26 / 0.619 | 5.06 / 0.475 | -3.7% | 1.27x | 1.49x |
+| q04 | 1.00 / 0.255 | 1.37 / 0.214 | 3.07 / 0.347 | 3.19 / 0.303 | +3.8% | 3.18x | 2.33x |
+| q05 | 1.97 / 0.473 | 1.54 / 0.283 | 3.54 / 0.506 | 3.31 / 0.385 | -6.6% | 1.68x | 2.14x |
+| q06 | 4.76 / 0.666 | 5.55 / 0.633 | 7.95 / 0.591 | 5.58 / 0.333 | -29.8% | 1.17x | 1.01x |
+| q07 | 2.56 / 0.581 | 3.15 / 0.618 | 4.21 / 0.693 | 4.23 / 0.528 | +0.4% | 1.65x | 1.34x |
+| q08 | 0.92 / 0.280 | 1.05 / 0.224 | 1.63 / 0.427 | 1.66 / 0.318 | +1.6% | 1.81x | 1.57x |
+| q09 | 13.20 / 1.988 | 14.14 / 2.399 | 9.72 / 1.688 | 9.72 / 1.411 | -0.0% | 0.74x | 0.69x |
+| q10 | 6.50 / 0.936 | 4.26 / 1.236 | 9.19 / 0.989 | 7.54 / 0.628 | -18.0% | 1.16x | 1.77x |
+| q11 | 0.37 / 0.120 | 0.32 / 0.080 | 0.75 / 0.251 | 0.74 / 0.168 | -0.1% | 2.01x | 2.36x |
+| q12 | 8.65 / 0.852 | 9.07 / 1.027 | 8.97 / 0.719 | 6.40 / 0.399 | -28.6% | 0.74x | 0.71x |
+| q13 | 6.76 / 1.071 | 3.67 / 0.637 | 6.11 / 1.408 | 6.05 / 1.127 | -1.0% | 0.89x | 1.65x |
+| q14 | 1.05 / 0.306 | 0.70 / 0.086 | 1.38 / 0.337 | 1.41 / 0.284 | +1.7% | 1.34x | 1.99x |
+| q15 | 3.09 / 0.515 | 2.89 / 0.347 | 6.95 / 0.536 | 5.25 / 0.344 | -24.5% | 1.70x | 1.82x |
+| q16 | 3.52 / 0.404 | 1.79 / 0.355 | 4.46 / 0.526 | 4.16 / 0.354 | -6.8% | 1.18x | 2.33x |
+| q17 | 4.54 / 1.088 | 2.20 / 0.790 | 5.45 / 0.903 | 4.86 / 0.726 | -10.7% | 1.07x | 2.21x |
+| q18 | 41.00 / 4.037 | 16.33 / 3.085 | 23.73 / 1.960 | 19.76 / 1.309 | -16.7% | 0.48x | 1.21x |
+| q19 | 0.39 / 0.087 | 0.40 / 0.042 | 0.74 / 0.084 | 0.76 / 0.089 | +2.4% | 1.94x | 1.87x |
+| q20 | 0.43 / 0.132 | 0.51 / 0.148 | 1.15 / 0.337 | 1.15 / 0.340 | +0.5% | 2.69x | 2.27x |
+| q21 | 7.31 / 0.776 | 4.66 / 0.649 | 9.85 / 0.819 | 7.68 / 0.624 | -22.1% | 1.05x | 1.65x |
+| q22 | 1.12 / 0.107 | 0.57 / 0.067 | 1.33 / 0.208 | 1.35 / 0.174 | +1.1% | 1.21x | 2.38x |
+| **all 22** | **159.4 / 18.93** | **85.2 / 14.34** | **129.6 / 15.43** | **110.7 / 11.55** | -14.5% | 0.69x | 1.30x |
+
+- Every pass's 22 result hashes are PostgreSQL's.
+- pc1 against pb2: user instructions -14.5% (129.6 -> 110.7 G). Against pgrust 1.30x (pb2
+  1.52x), against PostgreSQL 0.69x. Under PGO the scans gain more than plain (q01 -27.8, q06
+  -29.8, q12 -28.6%); q04 +3.8%, q19 +2.4%, q14 +1.7%, q08 +1.6%, q22 +1.1% rise where plain dist
+  fell or stayed (q04 -6.8% plain): the two profiles' inlining, not executed work (no changed
+  function runs more on them); worth a look by the PGO training's owners.
+- CPU s (medians, loaded): PostgreSQL 48.6, pgrust 22.0, pb2 34.9, pc1 28.6; user cycles G:
+  147.7, 71.0, 109.6, 92.3.
 - Every pass's 22 result hashes are PostgreSQL's. c1 against b2: user instructions -13.9%,
   cycles -11.3%, CPU -13.6%, wall -13.2% over the 22. Against pgrust: 1.50x user instructions
   (b2 1.74x), 1.42x CPU (b2 1.64x), 0.88x wall; fewer instructions than pgrust on q09 and q12,
