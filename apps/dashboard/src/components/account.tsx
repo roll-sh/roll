@@ -1,6 +1,7 @@
-import { Building2, Check, Copy, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
+import { Building2, Check, Copy, Fingerprint, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { accountsApi, activityText, refreshSession, useSession, type Activity, type Invite, type Provider, type Session, type User } from "@/lib/accounts-api";
+import { accountsApi, activityText, refreshSession, useSession, type Activity, type Invite, type Passkey, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
+import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } from "@/lib/webauthn";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { SsoSection } from "./account-sso";
 import { AppShell } from "./app-shell";
@@ -40,9 +41,11 @@ export function AccountPage() {
           <Profile user={user} onChange={setUser} />
           <Methods user={user} />
           <TwoFactor user={user} onChange={reload} />
+          <Passkeys />
           <Sessions />
           <RecentActivity me={user.id} />
           {user.admin && <Invites />}
+          {user.admin && <Resets me={user.id} />}
           {user.admin && <Users me={user.id} />}
           {user.admin && <SsoSection />}
         </div>
@@ -282,6 +285,96 @@ function TwoFactor({ user, onChange }: { user: User; onChange: () => void }) {
   );
 }
 
+/** Your passkeys (WebAuthn): sign in with one on its own, or use one as the second factor. */
+function Passkeys() {
+  const [on, setOn] = useState<boolean | null>(null);
+  const [list, setList] = useState<Passkey[] | null>(null);
+  const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => accountsApi.passkeys().then(setList, (e) => setError(errorText(e))), []);
+  useEffect(() => {
+    accountsApi.info().then(
+      (i) => {
+        const yes = Boolean(i.providers.passkey) && passkeysSupported();
+        setOn(yes);
+        if (yes) void load();
+      },
+      () => setOn(false),
+    );
+  }, [load]);
+  if (on === false) return null;
+  const add = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const o = await accountsApi.passkeyOptions();
+      const made = (await navigator.credentials.create({ publicKey: creationOptions(o.publicKey) })) as PublicKeyCredential | null;
+      if (!made) throw new Error("No passkey was made.");
+      await accountsApi.addPasskey(o.id, browser(navigator.userAgent), credentialJSON(made));
+      await load();
+    } catch (e) {
+      setError(passkeyProblem(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Section title="Passkeys" lead="Sign in with your fingerprint, face or device PIN instead of a code. A passkey can't be phished: it only works on roll.">
+      <div className={card}>
+        {!list ? (
+          <div className="grid h-14 place-items-center">
+            <LoaderCircle className="size-4 animate-spin text-subtle motion-reduce:animate-none" />
+          </div>
+        ) : (
+          list.map((p) => (
+            <div key={p.id} className="flex items-center gap-3 border-t border-line px-4 py-2.5 first:border-t-0">
+              <Fingerprint className="size-4 text-muted" />
+              <span className="min-w-0 flex-1 leading-tight">
+                {renaming?.id === p.id ? (
+                  <form
+                    className="flex gap-2"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      accountsApi.renamePasskey(p.id, renaming.name).then(() => (setRenaming(null), load()), (err) => setError(errorText(err)));
+                    }}
+                  >
+                    <input autoFocus value={renaming.name} maxLength={64} onChange={(e) => setRenaming({ id: p.id, name: e.target.value })} className={`${field} w-56`} />
+                    <button type="submit" className={btn}>
+                      Save
+                    </button>
+                  </form>
+                ) : (
+                  <span className="block truncate text-[12.5px]">{p.name}</span>
+                )}
+                <span className="block text-[11px] text-subtle">
+                  {p.synced ? "Synced across your devices" : "On one device"} · added {when(p.created_at)}
+                  {p.last_used_at ? ` · last used ${when(p.last_used_at)}` : " · not used yet"}
+                </span>
+              </span>
+              {renaming?.id !== p.id && (
+                <button onClick={() => setRenaming({ id: p.id, name: p.name })} className="text-[12px] text-muted hover:text-fg">
+                  Rename
+                </button>
+              )}
+              <button onClick={() => accountsApi.removePasskey(p.id).then(load, (e) => setError(errorText(e)))} className={`${btn} text-danger`}>
+                Remove
+              </button>
+            </div>
+          ))
+        )}
+        <div className="flex items-center gap-3 border-t border-line px-4 py-3 first:border-t-0">
+          <button disabled={busy || on === null} onClick={add} className={primary}>
+            Add a passkey
+          </button>
+          <span className="text-[11.5px] text-subtle">{list?.length ? "With one, you can skip the authenticator app's code too." : "Your browser or phone keeps it, synced if you use iCloud Keychain or Google Password Manager."}</span>
+        </div>
+        {error && <p className="px-4 pb-3 text-[12px] text-danger">{error}</p>}
+      </div>
+    </Section>
+  );
+}
+
 function Sessions() {
   const [list, setList] = useState<Session[] | null>(null);
   const load = useCallback(() => accountsApi.sessions().then(setList, () => setList([])), []);
@@ -350,7 +443,7 @@ function RecentActivity({ me }: { me: string }) {
           {list.map((e, i) => (
             <div key={`${e.at}-${i}`} className="flex items-baseline gap-3 border-t border-line px-4 py-2.5 first:border-t-0 text-[12.5px]">
               <span className={`min-w-0 flex-1 ${e.ok ? "" : "text-danger"}`}>{activityText(e, me)}</span>
-              <span className="hidden truncate font-mono text-[11px] text-subtle sm:inline">{[e.ip, e.user_agent?.split(" ")[0]].filter(Boolean).join(" · ")}</span>
+              <span className="hidden truncate font-mono text-[11px] text-subtle sm:inline">{[e.ip, e.user_agent ? browser(e.user_agent) : null].filter(Boolean).join(" · ")}</span>
               <span className="shrink-0 text-[11px] text-subtle">{when(e.at)}</span>
             </div>
           ))}
@@ -433,6 +526,53 @@ function Invites() {
           })}
         </div>
       )}
+    </Section>
+  );
+}
+
+/** Admins: second-factor resets people asked for (docs/accounts.md, "Recovery"). Shown when any were. */
+function Resets({ me }: { me: string }) {
+  const [list, setList] = useState<ResetRequest[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => accountsApi.resetRequests().then(setList, () => setList([])), []);
+  useEffect(() => void load(), [load]);
+  if (list.length === 0) return null;
+  const decide = (id: string, approve: boolean) => accountsApi.decideReset(id, approve).then(load, (e) => setError(errorText(e)));
+  return (
+    <Section id="recovery" title="Second-factor resets" lead="People who lost their authenticator app and recovery codes. Check it's them some other way first (a call, in person): their email code alone got them this far.">
+      <div className={card}>
+        {list.map((r) => (
+          <div key={r.id} className="flex flex-wrap items-start gap-3 border-t border-line px-4 py-3 first:border-t-0">
+            <ShieldCheck className={`mt-0.5 size-4 ${r.state === "pending" ? "text-accent" : "text-subtle"}`} />
+            <span className="min-w-0 flex-1 leading-snug">
+              <span className="block text-[12.5px]">
+                {r.handle} <span className="text-subtle">{r.email}</span>
+              </span>
+              <span className="mt-0.5 block whitespace-pre-wrap text-[12px] text-muted">{r.reason}</span>
+              <span className="mt-0.5 block text-[11px] text-subtle">
+                Asked {when(r.created_at)}
+                {r.ip ? ` from ${r.ip}` : ""}
+                {r.user_agent ? ` · ${browser(r.user_agent)}` : ""}
+                {r.state !== "pending" && r.decided_at ? ` · ${r.state} ${when(r.decided_at)}` : ""}
+              </span>
+            </span>
+            {r.state === "pending" &&
+              (r.user === me ? (
+                <span className="text-[11.5px] text-subtle">Another admin decides yours</span>
+              ) : (
+                <span className="flex gap-2">
+                  <button onClick={() => decide(r.id, true)} className={primary}>
+                    Reset it
+                  </button>
+                  <button onClick={() => decide(r.id, false)} className={btn}>
+                    Decline
+                  </button>
+                </span>
+              ))}
+          </div>
+        ))}
+        {error && <p className="px-4 pb-3 text-[12px] text-danger">{error}</p>}
+      </div>
     </Section>
   );
 }
