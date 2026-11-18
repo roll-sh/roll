@@ -190,9 +190,13 @@ pub enum Docs {
 
 #[derive(Subcommand)]
 pub enum Clusters {
-    /// List clusters.
+    /// List clusters (--deleted: recently deleted ones, kept for restoring).
     #[command(alias = "ls")]
-    List,
+    List {
+        /// Recently deleted clusters, with when each is purged.
+        #[arg(long)]
+        deleted: bool,
+    },
     /// Create a cluster. Its password is printed once.
     Create {
         name: String,
@@ -215,6 +219,7 @@ pub enum Clusters {
     /// Show a cluster: state, URL, indices, branches.
     Show { cluster: String },
     /// Change settings.
+    #[command(alias = "update")]
     Set {
         cluster: String,
         #[arg(long)]
@@ -228,9 +233,26 @@ pub enum Clusters {
         /// Default of `action.destructive_requires_name`.
         #[arg(long)]
         destructive_requires_name: Option<bool>,
+        /// Let only these networks reach the cluster's endpoint (repeat it; replaces the list):
+        /// a CIDR or an address, optionally `=description` (`--allow 203.0.113.0/24=office`).
+        /// The dashboard and `roll search` aren't filtered.
+        #[arg(long = "allow", value_name = "CIDR[=DESCRIPTION]", conflicts_with = "allow_any")]
+        allow: Vec<String>,
+        /// Let any address reach the endpoint again (clears the allowlist).
+        #[arg(long)]
+        allow_any: bool,
     },
-    /// Delete a cluster and its data (branches keep theirs).
+    /// Delete a cluster (restorable for the node's window, 7 days by default; branches keep
+    /// their data).
     Delete { cluster: String },
+    /// Bring a deleted cluster back as it was (`list --deleted` shows the id).
+    Restore {
+        /// The deleted cluster's id (`srch_…`).
+        id: String,
+        /// Restore under this name (its own is taken by another cluster).
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Branch a cluster: an instant copy, optionally of a past point in time.
     Branch {
         cluster: String,
@@ -307,6 +329,31 @@ pub fn url_with_password(url: &str, user: &str, password: &str) -> String {
     match url.split_once("://") {
         Some((scheme, rest)) => format!("{scheme}://{}:{}@{rest}", urlencoding::encode(user), urlencoding::encode(password)),
         None => url.to_string(),
+    }
+}
+
+/// `--allow` values (`CIDR` or `CIDR=description`) as the API's `ip_allowlist`.
+fn allow_rules(allow: &[String]) -> Value {
+    Value::Array(
+        allow
+            .iter()
+            .map(|a| match a.split_once('=') {
+                Some((cidr, d)) => json!({ "cidr": cidr.trim(), "description": d.trim() }),
+                None => json!({ "cidr": a.trim() }),
+            })
+            .collect(),
+    )
+}
+
+fn print_allowlist(v: &Value) {
+    let rules = v["ip_allowlist"].as_array().cloned().unwrap_or_default();
+    if rules.is_empty() {
+        println!("allowed   any address");
+        return;
+    }
+    for (i, r) in rules.iter().enumerate() {
+        let d = r["description"].as_str().map(|d| format!("  {d}")).unwrap_or_default();
+        println!("{}{}{d}", if i == 0 { "allowed   " } else { "          " }, s(&r["cidr"]));
     }
 }
 
@@ -630,7 +677,24 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
             v
         }
         Search::Clusters(cmd) => match cmd {
-            Clusters::List => {
+            Clusters::List { deleted: true } => {
+                let v = api.get("/v1/search/clusters?deleted=true").await?;
+                if !as_json {
+                    for c in v.as_array().into_iter().flatten() {
+                        println!(
+                            "{:<24} {:<18} {:>10}  deleted {}, purged {}",
+                            s(&c["name"]),
+                            s(&c["id"]),
+                            bytes(c["stored_bytes"].as_f64().unwrap_or(0.0)),
+                            ago(c["deleted_at"].as_i64().unwrap_or(0)),
+                            crate::access::date(c["purge_at"].as_i64().unwrap_or(0) * 1000),
+                        );
+                    }
+                    return Ok(());
+                }
+                v
+            }
+            Clusters::List { deleted: false } => {
                 let v = api.get("/v1/search/clusters").await?;
                 if !as_json {
                     for c in v.as_array().into_iter().flatten() {
@@ -661,6 +725,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                     let idle = v["idle_timeout_s"].as_i64().unwrap_or(0);
                     println!("idle      {}", if idle == 0 { "always loaded".to_string() } else { format!("{idle}s") });
                     println!("limits    {} in flight, {} MiB bodies", s(&v["max_in_flight"]), s(&v["max_body_mb"]));
+                    print_allowlist(&v);
                     println!("created   {}", ago(v["created_at"].as_i64().unwrap_or(0)));
                     for b in v["branches"].as_array().into_iter().flatten() {
                         println!("  branch {}  {}  as of {}", s(&b["name"]), s(&b["id"]), ago(b["parent_at"].as_i64().unwrap_or(0)));
@@ -669,15 +734,19 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 }
                 v
             }
-            Clusters::Set { cluster, flavor, idle, max_in_flight, max_body_mb, destructive_requires_name } => {
+            Clusters::Set { cluster, flavor, idle, max_in_flight, max_body_mb, destructive_requires_name, allow, allow_any } => {
                 let c = find(api, &cluster).await?;
-                let body = json!({
+                let mut body = json!({
                     "flavor": flavor, "idle_timeout_s": idle, "max_in_flight": max_in_flight, "max_body_mb": max_body_mb,
                     "destructive_requires_name": destructive_requires_name,
                 });
+                if allow_any || !allow.is_empty() {
+                    body["ip_allowlist"] = allow_rules(&allow);
+                }
                 let v = api.call(reqwest::Method::PATCH, &format!("/v1/search/clusters/{}", s(&c["id"])), Some(body)).await?;
                 if !as_json {
                     print_cluster(&v);
+                    print_allowlist(&v);
                     return Ok(());
                 }
                 v
@@ -685,8 +754,16 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
             Clusters::Delete { cluster } => {
                 let c = find(api, &cluster).await?;
                 api.call(reqwest::Method::DELETE, &format!("/v1/search/clusters/{}", s(&c["id"])), None).await?;
-                println!("deleted {}", s(&c["name"]));
+                println!("deleted {} (restore it with `roll search clusters restore {}` until it is purged)", s(&c["name"]), s(&c["id"]));
                 return Ok(());
+            }
+            Clusters::Restore { id, name } => {
+                let v = api.post(&format!("/v1/search/clusters/{}/restore", urlencoding::encode(&id)), json!({ "name": name })).await?;
+                if !as_json {
+                    println!("restored {} ({})", s(&v["name"]), s(&v["id"]));
+                    return Ok(());
+                }
+                v
             }
             Clusters::Branch { cluster, name, at: when } => {
                 let c = find(api, &cluster).await?;
@@ -826,7 +903,7 @@ mod tests {
         assert!(matches!(t.s, Search::Request { body: Some(ref b), .. } if b == "@bulk.ndjson"));
         let t = T::try_parse_from(["t", "keys", "create", "app", "worker"]).unwrap();
         assert!(matches!(t.s, Search::Keys(Keys::Create { ref access, .. }) if access == "data"), "keys default to data access");
-        for sub in ["create", "list", "show", "delete", "branch", "password", "unload", "url", "indices", "usage"] {
+        for sub in ["create", "list", "show", "delete", "restore", "branch", "password", "unload", "url", "indices", "usage"] {
             let e = T::try_parse_from(["t", "clusters", sub, "--help"]).err().unwrap();
             assert_eq!(e.kind(), clap::error::ErrorKind::DisplayHelp, "{sub}");
         }

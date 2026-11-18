@@ -1,12 +1,13 @@
 import { RollLogo, RollMark } from "@roll/brand";
-import { ArrowLeft, LoaderCircle, Mail } from "lucide-react";
+import { ArrowLeft, Fingerprint, LoaderCircle, Mail } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
-import { acceptSignIn, accountsApi, AccountsError, useSession, type Provider, type SignInAnswer } from "@/lib/accounts-api";
+import { acceptSignIn, accountsApi, AccountsError, useSession, type Provider, type Providers, type SignInAnswer } from "@/lib/accounts-api";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { TokenButton } from "./code/sign-in";
 import { useMarkState } from "./mark-state";
+import { credentialJSON, passkeyProblem, passkeysSupported, requestOptions } from "@/lib/webauthn";
 
 const ERRORS: Record<string, string> = {
   state: "That sign-in took too long or came from another browser. Try again.",
@@ -18,19 +19,22 @@ const ERRORS: Record<string, string> = {
   link_required: "You have an account with that email. Sign in another way, then link it in your account settings.",
   linked_elsewhere: "That identity belongs to another roll account.",
   disabled: "This account is disabled.",
+  domain: "Your company's sign-in vouched for an address outside its domains.",
+  sso_required: "Your organization signs you in through its own provider: continue with your work email.",
 };
 
 /** Where to go after: a path on this site only (not `//host` or `/\\host`, which browsers take as another host). */
 const safeReturn = (r: string | undefined) => (r && r.startsWith("/") && !/^\/[/\\]/.test(r) ? r : "/dashboard");
 
-type Step = { kind: "start" } | { kind: "code"; email: string; challenge: string } | { kind: "mfa"; recovery: boolean };
+type Step = { kind: "start" } | { kind: "code"; email: string; challenge: string } | { kind: "mfa"; recovery: boolean } | { kind: "reset"; sent: boolean };
 
-/** `/signin`: GitHub, Google or a code by email, then the second factor when the account has one. */
+/** `/signin`: GitHub, Google, a company's SSO (by the email's domain) or a code by email, then the
+ *  second factor when the account has one. */
 export function SignInPage({ invite, step, returnTo, error }: { invite?: string; step?: string; returnTo?: string; error?: string }) {
   const navigate = useNavigate();
   const session = useSession();
   const { play, state } = useMarkState();
-  const [providers, setProviders] = useState<{ email: boolean; github: boolean; google: boolean } | null>(null);
+  const [providers, setProviders] = useState<Providers | null>(null);
   const [invited, setInvited] = useState<{ email: string } | "invalid" | null>(null);
   const [current, setCurrent] = useState<Step>(step === "second_factor" ? { kind: "mfa", recovery: false } : { kind: "start" });
   const [problem, setProblem] = useState<string | null>(error ? (ERRORS[error] ?? "That didn't work. Try again.") : null);
@@ -46,7 +50,7 @@ export function SignInPage({ invite, step, returnTo, error }: { invite?: string;
   // Signed in already (or just now): on to where they were going. Owing a second factor: ask for it.
   useEffect(() => {
     if (session.status === "signed_in") navigate({ href: to });
-    if (session.status === "mfa_required" && current.kind !== "mfa") setCurrent({ kind: "mfa", recovery: false });
+    if (session.status === "mfa_required" && current.kind !== "mfa" && current.kind !== "reset") setCurrent({ kind: "mfa", recovery: false });
   }, [session.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const run = async (f: () => Promise<void>) => {
@@ -67,6 +71,20 @@ export function SignInPage({ invite, step, returnTo, error }: { invite?: string;
     else play([["success", 900]], "idle");
     acceptSignIn(a);
   };
+  // A passkey: on its own from the start page, or as the second factor a sign-in owes.
+  const passkey = () =>
+    run(async () => {
+      const o = await accountsApi.passkeySigninOptions();
+      let used: PublicKeyCredential | null;
+      try {
+        used = (await navigator.credentials.get({ publicKey: requestOptions(o.publicKey) })) as PublicKeyCredential | null;
+      } catch (e) {
+        throw new Error(passkeyProblem(e));
+      }
+      if (!used) throw new Error("No passkey was used.");
+      done(await accountsApi.passkeySignin(o.id, credentialJSON(used)));
+    });
+  const owedPasskey = session.status === "mfa_required" && session.methods.includes("passkey") && passkeysSupported();
   const oauth = (p: Provider) =>
     run(async () => {
       const { url } = await accountsApi.oauthStart(p, { invite, return_to: to });
@@ -82,10 +100,12 @@ export function SignInPage({ invite, step, returnTo, error }: { invite?: string;
       <div className="rise w-full max-w-[380px]">
         <div className="mb-6 flex flex-col items-center text-center">
           <RollMark size={88} state={busy ? "thinking" : state} />
-          <h1 className="mt-5 text-[22px] font-semibold tracking-[-0.045em]">{current.kind === "mfa" ? "One more step" : "Sign in to roll"}</h1>
+          <h1 className="mt-5 text-[22px] font-semibold tracking-[-0.045em]">{current.kind === "mfa" ? "One more step" : current.kind === "reset" ? "Ask an admin" : "Sign in to roll"}</h1>
           <p className="mt-1 text-[13px] text-muted">
             {current.kind === "mfa"
               ? "Enter the code from your authenticator app."
+              : current.kind === "reset"
+                ? "To reset your second factor."
               : invited && invited !== "invalid"
                 ? `You're invited as ${invited.email}.`
                 : "Databases, storage, agents: your projects in one place."}
@@ -102,8 +122,19 @@ export function SignInPage({ invite, step, returnTo, error }: { invite?: string;
               busy={busy}
               defaultEmail={invited && invited !== "invalid" ? invited.email : ""}
               onOauth={oauth}
+              onPasskey={passkey}
               onEmail={(email) =>
                 run(async () => {
+                  // A domain with SSO goes to the company's provider; any other gets a code.
+                  if (providers?.sso) {
+                    try {
+                      const { url } = await accountsApi.ssoStart(email, { invite, return_to: to });
+                      window.location.assign(url);
+                      return;
+                    } catch (e) {
+                      if (!(e instanceof AccountsError && e.code === "no_sso") || !providers.email) throw e;
+                    }
+                  }
                   const { challenge } = await accountsApi.emailStart(email, invite);
                   setCurrent({ kind: "code", email, challenge });
                 })
@@ -134,8 +165,33 @@ export function SignInPage({ invite, step, returnTo, error }: { invite?: string;
                 recovery={current.recovery}
                 onSubmit={(code) => run(async () => done(current.recovery ? await accountsApi.recoverySignin(code) : await accountsApi.totpSignin(code)))}
               />
+              {owedPasskey && (
+                <button disabled={busy} onClick={passkey} className={`${button} mt-3`}>
+                  <Fingerprint className="size-4" /> Use a passkey
+                </button>
+              )}
               <button onClick={() => setCurrent({ kind: "mfa", recovery: !current.recovery })} className="mt-3 text-[12px] text-muted hover:text-fg">
                 {current.recovery ? "Use the authenticator app" : "Lost your phone? Use a recovery code"}
+              </button>
+              {current.recovery && (
+                <button onClick={() => setCurrent({ kind: "reset", sent: false })} className="mt-1.5 block text-[12px] text-muted hover:text-fg">
+                  Lost your codes too? Ask an admin to reset it
+                </button>
+              )}
+            </>
+          )}
+          {current.kind === "reset" && (
+            <>
+              {current.sent ? (
+                <p className="text-[12.5px] leading-relaxed text-muted">
+                  Your admins have it. One of them will check it&apos;s you some other way (a call, in person), then reset your second factor: you&apos;ll get an email, and can sign in again
+                  with a code.
+                </p>
+              ) : (
+                <ResetAsk busy={busy} onSubmit={(reason) => run(async () => (await accountsApi.requestReset(reason), setCurrent({ kind: "reset", sent: true })))} />
+              )}
+              <button onClick={() => setCurrent({ kind: "mfa", recovery: false })} className="mt-3 text-[12px] text-muted hover:text-fg">
+                Back
               </button>
             </>
           )}
@@ -150,6 +206,34 @@ export function SignInPage({ invite, step, returnTo, error }: { invite?: string;
   );
 }
 
+/** What a person who lost every second factor tells their admins (they read it before calling). */
+function ResetAsk({ busy, onSubmit }: { busy: boolean; onSubmit: (reason: string) => void }) {
+  const [reason, setReason] = useState("");
+  return (
+    <form
+      className="space-y-2.5"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (reason.trim()) onSubmit(reason.trim());
+      }}
+    >
+      <p className="text-[12.5px] leading-relaxed text-muted">An admin can reset your second factor once they&apos;ve checked it&apos;s you. Tell them what happened and how to reach you.</p>
+      <textarea
+        autoFocus
+        rows={3}
+        maxLength={500}
+        value={reason}
+        onChange={(e) => setReason(e.target.value)}
+        placeholder="Lost my phone and my recovery codes. Call me on…"
+        className="w-full resize-none rounded-lg border border-line-2 bg-canvas px-3 py-2 text-[13px] outline-none transition-colors focus:border-accent/60"
+      />
+      <button type="submit" disabled={busy || !reason.trim()} className="flex h-10 w-full items-center justify-center rounded-lg bg-fg text-[13px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-40">
+        Ask an admin
+      </button>
+    </form>
+  );
+}
+
 const button =
   "flex h-10 w-full items-center justify-center gap-2.5 rounded-lg border border-line-2 bg-raised text-[13px] font-medium inset-shadow-highlight transition-colors hover:border-line-3 disabled:opacity-50";
 
@@ -159,12 +243,14 @@ function Start({
   defaultEmail,
   onOauth,
   onEmail,
+  onPasskey,
 }: {
-  providers: { email: boolean; github: boolean; google: boolean } | null;
+  providers: Providers | null;
   busy: boolean;
   defaultEmail: string;
   onOauth: (p: Provider) => void;
   onEmail: (email: string) => void;
+  onPasskey: () => void;
 }) {
   const [email, setEmail] = useState(defaultEmail);
   useEffect(() => setEmail((e) => e || defaultEmail), [defaultEmail]);
@@ -174,10 +260,18 @@ function Start({
         <LoaderCircle className="size-4 animate-spin text-subtle motion-reduce:animate-none" />
       </div>
     );
-  const social = providers.github || providers.google;
-  if (!social && !providers.email) return <p className="text-[12.5px] leading-relaxed text-muted">Sign-in isn't set up on this roll yet. An admin can still use their token below.</p>;
+  const withPasskey = Boolean(providers.passkey) && passkeysSupported();
+  const social = providers.github || providers.google || withPasskey;
+  // The email box serves a code, a company's SSO, or both.
+  const byEmail = providers.email || Boolean(providers.sso);
+  if (!social && !byEmail) return <p className="text-[12.5px] leading-relaxed text-muted">Sign-in isn't set up on this roll yet. An admin can still use their token below.</p>;
   return (
     <div className="space-y-2.5">
+      {withPasskey && (
+        <button disabled={busy} onClick={onPasskey} className={button}>
+          <Fingerprint className="size-4" /> Sign in with a passkey
+        </button>
+      )}
       {providers.github && (
         <button disabled={busy} onClick={() => onOauth("github")} className={button}>
           <GitHubMark className="size-4" /> Continue with GitHub
@@ -188,12 +282,12 @@ function Start({
           <GoogleMark className="size-4" /> Continue with Google
         </button>
       )}
-      {social && providers.email && (
+      {social && byEmail && (
         <div className="flex items-center gap-3 py-1 text-[11px] text-subtle">
           <span className="h-px flex-1 bg-line" /> or <span className="h-px flex-1 bg-line" />
         </div>
       )}
-      {providers.email && (
+      {byEmail && (
         <form
           className="space-y-2.5"
           onSubmit={(e) => {
@@ -211,7 +305,7 @@ function Start({
             className="h-10 w-full rounded-lg border border-line-2 bg-canvas px-3 text-[13px] outline-none transition-colors focus:border-accent/60"
           />
           <button type="submit" disabled={busy || !email.includes("@")} className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-fg text-[13px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-40">
-            <Mail className="size-4" /> Email me a code
+            <Mail className="size-4" /> {providers.sso ? "Continue with email" : "Email me a code"}
           </button>
         </form>
       )}
