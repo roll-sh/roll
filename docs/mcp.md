@@ -832,15 +832,20 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Built 2026-11-18, for the next turn (after search, secrets batch 2, apps #295):** a person's own
+1. **Built 2026-11-18, for the next turn (after apps #295 and secrets #79):** a person's own
    data export (#283, this PR), hardware keys only (#286), one provider for people and agents
    (#287), an SSO connection's session length (#289) with back-channel logout on it (#292),
-   allowed networks (#294) with a second factor for everyone (#298) and who has one (#299) on it.
-   Conflicts: appended tests (keep both) and #287×#289 in `account-sso.tsx`; build land commits
-   up front as the last turn did.
-2. **Next, ranked (now):** admin-set session idle timeout per company (Okta's "idle session
-   lifetime"); an account's email change with confirmation to the old and new address (GitHub's);
-   the security log's CSV export for admins across people (an org-wide sign-in report).
+   allowed networks (#294) with a second factor for everyone (#298), who has one (#299) and an
+   idle timeout (#302) on it; moving an account to another address (#306); downloads that send
+   the session, so signed-in people stop getting 401s on the audit export, apps' logs and
+   previews' QR codes, screenshots, mail and logs, plus the sign-in report link (#307).
+   Conflicts: appended tests (keep both), #287×#289 in `account-sso.tsx`, and #306×#302's stack
+   in `account.tsx`, `api.rs` and docs/accounts.md; build land commits up front as the last turn did.
+2. **Next, ranked (now):** a person deletes their own account (GitHub's: sudo mode, typed
+   confirmation, the last admin refused, sessions and tokens ended in the same write, what they
+   made in other products named first); the email change's SCIM and SSO refusals in the SSO flow
+   test; a real browser run of #306 and #307 (an admin's session downloads the report CSV) for
+   the review pack.
 3. **Landed 2026-11-18 (main 1a60b43be):** passkeys (#256), sudo mode (#257, #260), new-sign-in mail
    (#258), second-factor resets (#263), refused codes in the security log (#254); for roll secrets,
    `revoke_many` and the public detectors (#267) and decoy tokens (#270).
