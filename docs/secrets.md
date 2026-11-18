@@ -86,11 +86,25 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    // then a conditional read that costs a 304 (nothing read, issued or audited) while unchanged.
    const cached = createClient({ api: process.env.ROLL_API_URL!, token: process.env.ROLL_TOKEN!, cacheTtlMs: 30_000 });
 
+   // A reader that can't renew a lease (a playbook, a one-off script): no dynamic credential is
+   // issued, those keys are left out and named in `dynamic`, and the answer can be kept.
+   const { values: plain, dynamic } = await secrets.values("staging", { dynamic: false });
+
+   // One key's writes (`PUT`/`DELETE …/secrets/{key}`). A set replaces a link the key had; a
+   // delete of a key that isn't there is `{deleted: false}`. A protected environment, or a folder
+   // that needs approval, throws `SecretsError` with the code `approval_required` (open a change
+   // request instead). Errors never hold the value, and both drop the client's cached reads.
+   await secrets.set("staging", "FEATURE_FLAGS", "beta", { path: "/api", comment: "rollout" });
+   const { deleted } = await secrets.delete("staging", "OLD_KEY", { path: "/api" });
+
    // An encryption key (below, "Encryption keys"): the key stays in roll.
    const cards = secrets.transit("cards");
    const ct = await cards.encrypt(cardNumber, `order:${id}`);
    const index = await cards.hmac(email); // a lookup column over encrypted emails
    ```
+
+   The Go and Python clients name these `Values(…, secrets.WithoutDynamic())`, `Set` and
+   `Delete`, and `values(…, dynamic=False)`, `set` and `delete`.
 
    In Go, `sdk/go/secrets` has the same surface, and `FromEnv` logs a workload identity in with
    its own OIDC token as `roll run` does (`ROLL_IDENTITY`). It logs in again before the login's
@@ -108,6 +122,13 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    ```python
    c = roll_secrets.from_env()
    c.watch("production", lambda v: reload(v.values))
+   ```
+
+   In Java, `sdk/java/secrets` (`sh.roll:roll-secrets`, Java 17 and the JDK only):
+
+   ```java
+   RollSecrets c = RollSecrets.builder().build(); // ROLL_API_URL, ROLL_TOKEN or ROLL_IDENTITY, ROLL_PROJECT
+   Watch w = c.watch("production", WatchOptions.of(v -> reload(v.values())));
    ```
 8. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
@@ -154,6 +175,54 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
 
 `value` and the data source still land in Terraform's state, as with every provider: keep that
 state as private as the values, or use the two above.
+
+## Pulumi
+
+Pulumi runs the same provider through its [`terraform-provider`](https://www.pulumi.com/registry/packages/terraform-provider/)
+package, which bridges any Terraform provider from a local build, with no registry release
+(`sdk/pulumi`). In a Pulumi project:
+
+```sh
+(cd path/to/roll/sdk/terraform-provider-roll && go build -o "$OLDPWD/bin/terraform-provider-roll" .)
+pulumi package add terraform-provider ./bin/terraform-provider-roll   # sdks/roll: @pulumi/roll, pulumi_roll, Go
+pulumi config set roll:apiUrl https://api.roll.example
+pulumi config set roll:project prj_…
+pulumi config set --secret roll:token rlt_…
+```
+
+```ts
+import * as pulumi from "@pulumi/pulumi";
+import * as roll from "@pulumi/roll";
+
+const staging = new roll.SecretsEnvironment("staging", { slug: "staging", name: "staging" });
+new roll.Secret("stripe", {
+  environment: staging.slug,
+  key: "STRIPE_KEY",
+  valueWo: new pulumi.Config().requireSecret("stripeKey"),
+  valueWoVersion: 1,
+});
+const ci = new roll.SecretsToken("ci", { name: "ci", environments: [staging.slug], actions: ["read", "reveal"] });
+export const token = ci.token; // a Pulumi secret
+```
+
+Every resource and both data sources (`getSecretsValues`, `getAppService`) are there. Each machine
+that runs the program needs the binary at the path in `Pulumi.yaml`, and `pulumi install` generates
+the SDK from it. `sdk/pulumi/sdk.sh` generates the SDKs outside a project. Where Pulumi differs:
+
+- **No values out of the state.** Pulumi has no ephemeral resources, so there's no
+  `roll_secrets_values` for one run and no dynamic credential revoked when the run ends. Pulumi also
+  keeps every input in the stack's state, so `valueWo` is there as `value` is. Both are encrypted by
+  the stack's secrets provider, and `valueWo` is never read back. To keep values out of a state
+  entirely, read them where they're used (`roll run`, the clients) instead of through Pulumi.
+- **Secrets.** Anything the provider marks sensitive is a Pulumi secret, encrypted in the state: the
+  provider's token, `value`, `valueWo`, a token's `token`, a sync's `signingSecret`, an app variable's
+  value, a service's `gitToken` and a notification target's `url` and `secret`. A function's results
+  aren't: wrap `getSecretsValuesOutput(…).values` in `pulumi.secret()` before it reaches a stack
+  output or another resource.
+- **Names.** Pulumi auto-names an optional `name` (an environment's becomes `staging-1a2b3c4`): set
+  it.
+
+`sdk/pulumi/e2e.sh` runs `pulumi up` and `pulumi destroy` against the provider's fake rolld.
 ## GitHub Actions
 `sdk/github-action` puts an environment into a job, as Doppler's and Infisical's actions do:
 ```yaml
@@ -184,6 +253,46 @@ steps:
   candidates as `roll secrets scan` cuts them and checked with `POST …/leaks` (fingerprints; only
   values the token may reveal), and each stored value found fails the check with an annotation on
   its file and line naming the key and environment, never the value.
+## Azure Pipelines
+
+A pipeline logs in with its own OIDC token, as GitHub Actions' jobs do: nothing long-lived in its
+variables. Azure DevOps signs a pipeline's token as its organization
+(`iss` `https://vstoken.dev.azure.com/<organization id>`, the GUID in `$(System.CollectionId)`),
+for Azure's audience (`aud` `api://AzureADTokenExchange`; a pipeline can't ask for another), with
+the pipeline as its subject (`sub` `p://<organization>/<project>/<pipeline>`):
+
+```sh
+roll secrets identities add deploy --for-env production --audience api://AzureADTokenExchange \
+  --issuer https://vstoken.dev.azure.com/<organization id> --subject p://acme/shop/deploy
+```
+
+```yaml
+variables:
+  ROLL_API_URL: https://roll.example.com
+  ROLL_IDENTITY: idn_…
+steps:
+  - script: roll run --env production -- ./deploy.sh
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)   # a secret: a script sees it only when mapped
+```
+
+With `ROLL_IDENTITY` set and no `ROLL_TOKEN`, roll asks Azure for the token itself
+(`POST $(System.OidcRequestUri)?api-version=7.1` with the job's access token; the answer's
+`oidcToken`) and logs in. Elsewhere, put the token in `ROLL_OIDC_TOKEN` yourself. The dashboard's
+New identity has an Azure Pipelines choice that fills in the issuer and audience.
+
+- The audience is Azure's, not roll's, so a token the pipeline got for Azure itself would also
+  log in here: that's why the subject names one pipeline exactly. A pipeline's subject is its
+  name, and two pipelines in different folders of one project can share one, so whoever may
+  create a pipeline in that project could make another `deploy`. For production, use a service
+  connection instead, whose use its own pipeline permissions, approvals and checks guard: an Azure
+  Resource Manager connection with workload identity federation, `ROLL_AZURE_SERVICE_CONNECTION`
+  set to its id, and the identity's issuer and subject copied from the connection's "Workload
+  Identity federation details" (older connections: `sc://<organization>/<project>/<connection>`
+  from the organization's issuer; newer ones: Entra's issuer and an `/eid1/…/sc/<organization id>/<connection id>` subject).
+- Roll treats Azure's issuers like the shared ones: an identity whose subject could match more
+  than one pipeline or connection is refused.
+
 ## Kubernetes
 Three ways, as the best products offer:
 - **Mounted (`sdk/csi-provider`)**: a provider for the [Secrets Store CSI
@@ -234,6 +343,9 @@ Three ways, as the best products offer:
   be restarted waits in `status.pendingRestarts` and is tried again on every pass.
 - **Push (the `kubernetes` sync)**: roll writes a Secret with credentials for the cluster it holds,
   sealed. For clusters roll can reach and the operator can't run in.
+
+Access *to* a cluster is the other way round: roll issues short-lived service account tokens per
+lease (["Kubernetes service-account tokens"](#kubernetes-service-account-tokens)).
 ## Customer-managed keys
 A project's data key can be wrapped once more by a KMS key in the customer's own AWS account, as
 Infisical's external KMS does (`PUT …/kms {key: "arn:aws:kms:…"}`, `roll secrets kms set ARN`;
@@ -624,6 +736,18 @@ that doesn't fit (`misfit` on its cell, the rule it breaks), for a caller who ma
 The dashboard's add and edit forms check a typed key's value as it's typed, with the same rules
 and messages (`apps/dashboard/src/lib/secrets-required.ts`).
 
+**Password policies** (Vault's password policies, AWS Secrets Manager's generator rules). A
+required key can say what its values are made of: `password: {length, classes?, symbols?}`, a
+length of 8–256 every value has at least, and the classes (`lower`, `upper`, `digit`, `symbol`;
+default the first three) a value must use one of each of and nothing outside them. `symbols` says
+which characters `symbol` means (1–32 ASCII punctuation; default `!#%&*+-=?^_~`), for a target's own
+rules: no `@` or `:` in a connection URL's password, no quotes for a shell. Writes are checked as
+typed keys are (`DB_PASSWORD needs at least a digit`, never the value). The generators follow it:
+`roll secrets set KEY --generate` makes `length` characters of its classes, one of each (a longer
+`--generate N` if asked), and so do the dashboard's Generate and Health's New value buttons. Set one in
+Environments → Required keys (a length and a set of classes) or with `roll secrets
+required add DB_PASSWORD --password-length 32 --classes lower,upper,digit,symbol --symbols '-_'`.
+
 ### TOTP keys
 
 A key whose value is a TOTP seed (RFC 6238) hands out the current one-time code, as Vault's TOTP
@@ -887,7 +1011,7 @@ Revoking a role ends
 its sessions and gives what it made (a migration's tables) to `roll` before dropping it, so revoking
 a credential never drops data.
 
-| `search` | `url`, `host`, `port`, `username` | a credential of its own with data access only (no keys or users; `"access": "data"`: a key roll search says isn't a data one is deleted and refused; a build of roll search before `access` makes admin keys and doesn't say so), credential `key`: on an Elasticsearch cluster `api_key` (`Authorization: ApiKey …`), on an OpenSearch one an internal user, `user` (`<user>@<cluster>`, which the node routes) and `password`; a link to the field the cluster's flavor doesn't issue is refused when written, and switching a cluster's flavor carries no credential across (link the other fields again); an OpenSearch cluster's fields are offered and suggested under the names its clients read (`OPENSEARCH_URL`, `_HOST`, `_PORT`, `OPENSEARCH_USERNAME`/`_PASSWORD` for its user, `OPENSEARCH_CLUSTER` for the cluster's name); a dynamic one expires by itself 5 minutes after its lease | no (never the cluster's password) |
+| `search` | `url`, `host`, `port`, `username` | a credential of its own with data access only (no keys or users; `"access": "data"`: a key roll search doesn't say is a data one, whatever else it says or if it says nothing, is deleted and refused), credential `key`: on an Elasticsearch cluster `api_key` (`Authorization: ApiKey …`), on an OpenSearch one an internal user, `user` (`<user>@<cluster>`, which the node routes) and `password`; a link to the field the cluster's flavor doesn't issue is refused when written, and switching a cluster's flavor carries no credential across (link the other fields again); an OpenSearch cluster's fields are offered and suggested under the names its clients read (`OPENSEARCH_URL`, `_HOST`, `_PORT`, `OPENSEARCH_USERNAME`/`_PASSWORD` for its user, `OPENSEARCH_CLUSTER` for the cluster's name); a dynamic one expires by itself 5 minutes after its lease | no (never the cluster's password) |
 
 `search` resources are linkable once roll search's workspace kind lands (`feature/roll-search`).
 roll apps' services have a workspace kind (`service`, `svc_…`); they consume secrets (an app's
@@ -1134,6 +1258,42 @@ cloud trusts roll's token for one project the way it trusts GitHub Actions' toke
   early or extended: a lease that ends leaves it valid until it expires, an hour at most; resolve again for a
   new one. An account a key links to can't be deleted. `roll secrets clouds ls` prints the issuer and
   subject to trust; `roll secrets clouds add-gcp` / `add-azure` register one.
+### Kubernetes service-account tokens
+A short-lived token of a Kubernetes service account for each lease, as Vault's Kubernetes secrets
+engine gives, so a pod, a CI job or a person gets cluster access for minutes rather than a token
+that never expires.
+- **Register a cluster** (`POST …/kubernetes {name, api_url, ca_pem?, token}`, `admin`; `roll
+  secrets kubernetes-clusters add NAME API_URL [--ca FILE]` with the token on stdin, or the
+  dashboard's Syncs page). `token` is a service account token roll manages the cluster with: it
+  needs `create` on `serviceaccounts/token` in the namespaces links name, and nothing more (a
+  ClusterRole with that one rule, bound per namespace). `api_url` is the API server's `https://`
+  URL. It's a URL the tenant chose, so every call goes through rolld's guarded client: public
+  addresses only, no redirects, a 15 s timeout, a bounded answer. `ca_pem` is the cluster's CA
+  (PEM), when its API server's certificate isn't publicly trusted (most self-managed clusters,
+  EKS, GKE): then that cluster's calls trust only it, and nothing else's calls trust it. The token
+  and the CA are sealed with the project's data key; the answer (`KubernetesCluster`) shows the
+  URL and whether there's a CA, never either. Registering calls `GET /api` with the token first:
+  the address, the TLS trust and the token must all work. A cluster a key links to, or with a
+  lease still live, can't be deleted (409).
+- **Link a key** to the cluster in `dynamic` mode (the only mode), naming an existing service
+  account in the options: `{kind: "kubernetes", ref: "kube_…", field: "token", mode: "dynamic",
+  options: {namespace, service_account, audiences?, ttl_minutes?}}`. Each resolve that asks for
+  dynamic credentials calls the TokenRequest API (`POST
+  /api/v1/namespaces/{namespace}/serviceaccounts/{service_account}/token`, `expirationSeconds` the
+  lease's TTL, `audiences` when set, else the API server's own) and records a lease. The fields are
+  `token` (the credential), and `api_url` and `ca` (plain, from the registration), so a pod or a
+  CI job can build a kubeconfig; keys of one environment linked to the same cluster with the same
+  options share one token. Code nobody vetted (checks, sandboxes, previews) never gets one, as with
+  every dynamic link.
+- **A token lives until its expiry.** A bound service-account token can't be revoked on its own:
+  ending a lease (`DELETE …/leases/{id}`, or its expiry) records the revocation, and the audit row
+  says the token still works until it expires. So keep `ttl_minutes` short: 15 minutes at least
+  (roll's floor; Kubernetes' own is 10), a day at most, and leases don't renew (resolve again). roll
+  never hands out a token the API server made to outlive its lease. To cut access at once, delete
+  the service account or its RoleBinding in the cluster. Errors name the cluster's host and the
+  status (with roll's hint for 401, 403 and 404), never a token or the API server's message.
+- Not built yet: Vault's generated roles (`role_rules`: a temporary service account, Role and
+  RoleBinding per lease, deleted when it ends).
 ### Certificates
 A project's own certificate authority, as Vault's PKI engine and Infisical's PKI give: short-lived
 TLS certificates for services (mTLS between them), with no CA to run.
@@ -1352,6 +1512,7 @@ roll secrets leases  [--renew ID | --revoke ID]
 roll secrets databases ls | add NAME [--role A --role B] [--group G] [--ca FILE] (admin URL on stdin) | rm ID
 roll secrets aws-users ls | add NAME USER --role ROLE | rm ID
 roll secrets clouds  ls | add-gcp NAME --audience A --service-account SA | add-azure NAME --tenant T --client-id C [--scope S] | rm ID
+roll secrets kubernetes-clusters ls | add NAME API_URL [--ca FILE] (admin token on stdin) | rm ID
 roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
                      | certs ID | revoke ID SERIAL | rm ID
 roll secrets ssh-cas ls | add NAME [--principal P…] [--max-hours N] [--host-domain D…] [--max-host-days N] | key ID
@@ -1843,10 +2004,11 @@ open it.
 ## Syncs
 
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
-they change: GitHub Actions secrets, GitLab CI/CD variables, Vercel, Netlify, Render, Fly.io,
+they change: GitHub Actions secrets, GitLab CI/CD variables, Azure DevOps variable groups, Vercel, Netlify, Render, Fly.io,
 Railway, Heroku, DigitalOcean App Platform, CircleCI, Bitbucket Pipelines, Terraform Cloud, Cloudflare Workers, AWS Parameter Store and Secrets Manager, Google Secret Manager, Azure Key Vault, a Kubernetes Secret, an endpoint
-of the team's own, or a deploy hook that only hears that something changed. Infisical's "secret
-syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
+of the team's own, or a deploy hook that only hears that something changed; also Cloudflare Pages,
+Supabase Edge Functions, Azure App Configuration and a HashiCorp Vault (or OpenBao) KV secret.
+Infisical's "secret syncs" are the reference. roll secrets stays the source of truth: a sync never reads from its
 target, and a value edited there is overwritten at the next
 change of that key. Before one is added, `POST …/syncs/preview` (`roll secrets syncs add … --preview`, the form's
 Preview) says what it would push, names only, without calling the platform: its names after `keys`
@@ -1866,6 +2028,8 @@ pub trait SyncTarget: Send + Sync {
     fn credentials(&self, target: &Json) -> Vec<String> { vec![] } // keys holding its token
     // On create and before every push; `resources`: the project's canvas, as (kind, ref).
     fn check(&self, project: &str, resources: &Resources, target: &Json) -> Result<()>;
+    // A name the platform keeps for itself (Supabase's `SUPABASE_`): refused on create and preview.
+    fn refuses(&self, name: &str) -> Option<String> { None }
     // `push`: the values by target name, which names changed, which were removed, the digest,
     // the signing secret, the resolved credentials.
     fn push(&self, target: &Json, push: &Push) -> Result<()>;
@@ -1918,7 +2082,12 @@ last_synced_at, error}`:
 | `aws-ssm` | `{region, prefix: "/shop/production/", access_key_id_key, secret_access_key_key, kms_key_id?}` | Parameter Store `SecureString`s named `<prefix><name>` |
 | `google-secret-manager` | `{project, prefix?, service_account_key}` | one Secret Manager secret per key, `<prefix><KEY>`, each change a new version |
 | `azure-key-vault` | `{vault, tenant_id, client_id, client_secret_key}` | one Key Vault secret per key (`_` becomes `-`) |
+| `azure-devops` | `{organization, project, group, token_key}`, or `tenant_id, client_id, client_secret_key` instead of `token_key` | an Azure Pipelines variable group's variables, all secret |
 | `aws-secrets-manager` | `{region, secret_name: "shop/production", access_key_id_key, secret_access_key_key, kms_key_id?}` | one Secrets Manager secret: the environment's values as a JSON object |
+| `supabase` | `{project_ref, token_key}` | a Supabase project's Edge Function secrets |
+| `cloudflare-pages` | `{account, project, environment: "production" \| "preview", token_key}` | a Pages project's environment variables, as `secret_text` |
+| `azure-app-configuration` | `{store, label?, prefix?, tenant_id, client_id, client_secret_key}` | one App Configuration key-value per key, `<prefix><KEY>` under `label` |
+| `vault-kv` | `{address, mount?, path, namespace?, token_key}`, or `role_id, secret_id_key, approle_mount?` instead of `token_key`; `ca_key?` | one Vault (or OpenBao) KV v2 secret holding the folder's keys |
 
 ### `github`
 
@@ -1934,7 +2103,7 @@ last_synced_at, error}`:
 - GitHub's names are `[A-Za-z_][A-Za-z0-9_]*` and may not start with `GITHUB_`; a key that would is
   an error naming it (rename it or use `keys`/`prefix`).
 
-### Platform credentials (`vercel`, `cloudflare`, `aws-ssm`, `aws-secrets-manager`, `google-secret-manager`, `azure-key-vault`)
+### Platform credentials (`vercel`, `cloudflare`, `aws-ssm`, `aws-secrets-manager`, `google-secret-manager`, `azure-key-vault`, `supabase`, `cloudflare-pages`, `azure-app-configuration`, `vault-kv`)
 
 A platform's own credential is never in the sync. The target names **keys of the sync's own
 environment and folder** that hold it (`token_key`; for AWS `access_key_id_key` and
@@ -1982,6 +2151,77 @@ naming it. The calls go to the platforms' fixed hosts (`api.vercel.com`, `api.cl
   `managed-by=roll-secrets`) or `CreateSecret` (with that tag, and `KmsKeyId` when set); a secret
   that exists without the tag is someone else's, and roll never replaces it. Deleting the sync
   leaves the secret. Same SigV4 by hand (service `secretsmanager`); over 64 KB of JSON is an error.
+
+`supabase`, `cloudflare-pages`, `azure-app-configuration` and `vault-kv` call through rolld's
+guarded client (`roll_net::PublicOnly`, no proxy, no redirects, timeouts, at most 1 MiB of an
+answer read; private addresses only with `ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`, as webhooks). Their
+fixed hosts are `api.supabase.com`, `api.cloudflare.com`, `<store>.azconfig.io` and
+`login.microsoftonline.com`, and every part of the target that goes into a host or a path is
+checked strictly (a store name is 5–50 letters, digits and `-`, so nothing else reaches the host).
+An error carries the status and the vendor's error code where it has one, never an answer.
+
+- **`supabase`**, `{project_ref, token_key}`: a Supabase project's Edge Function secrets, through
+  the Management API with a personal access token (`sbp_…`; fine-grained:
+  `edge_functions_secrets_write`). Changed names are upserted in batches of 100
+  (`POST /v1/projects/{ref}/secrets`, `[{name, value}]`); removed names, the ones this sync pushed
+  before, go in one `DELETE` of the same path with their names. Functions read a new value at once,
+  no redeploy. Supabase keeps `SUPABASE_` for the variables it injects (`SUPABASE_URL`…), so a key
+  that would push as `SUPABASE_…` is refused when the sync is made (and named if one is added later):
+  leave it out with `keys`, or set a `prefix`. Supabase answers errors as a message without a code,
+  so its errors carry the status alone.
+  ```sh
+  roll secrets -e production syncs add supabase --target project_ref=abcdefghijklmnopqrst \
+    --target token_key=SUPABASE_ACCESS_TOKEN
+  ```
+- **`cloudflare-pages`**, `{account, project, environment, token_key}`: a Pages project's
+  environment variables for `production` or `preview` (its two environments), for builds and Pages
+  Functions. One `PATCH /client/v4/accounts/{account}/pages/projects/{project}` per push sets
+  `deployment_configs.{environment}.env_vars`: changed names as `{type: "secret_text", value}`,
+  removed ones (pushed by this sync before) as `null`, which is how Cloudflare deletes a variable;
+  every other variable stays as it is. The token is handled as `cloudflare`'s (a key holding an API
+  token, with Pages Write), and errors carry Cloudflare's error codes. A value is at most 5 KiB. A
+  change reaches the next deployment.
+  ```sh
+  roll secrets -e production syncs add cloudflare-pages --target account=023e105f4ecef8ad9ca31a8372d0c353 \
+    --target project=shop-web --target environment=production --target token_key=CLOUDFLARE_API_TOKEN
+  ```
+- **`azure-app-configuration`**, `{store, label?, prefix?, tenant_id, client_id,
+  client_secret_key}`: one key-value per key in an App Configuration store, named `<prefix><KEY>`
+  (`shop:DB_URL`), under `label` (no label by default). rolld signs in as `azure-key-vault` does
+  (client credentials at `login.microsoftonline.com`), for the scope
+  `https://<store>.azconfig.io/.default`; the app registration needs App Configuration Data Owner on
+  the store. Per changed key: `GET /kv/{key}?label=…`, then `PUT` the value tagged
+  `managed-by=roll-secrets` (API `2023-11-01`); per removed key, `DELETE` it only when it carries
+  the tag. A key-value that exists without the tag is someone else's: roll never writes to it, and
+  a refused read stops the push. A key-value is at most 10 KB. Errors carry App Configuration's
+  problem `type` (`key-locked`) or Entra's `error`. **Values are plain key-values.** App
+  Configuration's own guidance is to keep secrets in Key Vault and reference them from the store
+  (Key Vault references); roll writes the values themselves, which suits configuration and
+  non-critical values read through the store. For secrets, sync to Key Vault with `azure-key-vault`
+  and add references to those secrets in the store.
+- **`vault-kv`**, `{address, mount?, path, namespace?, token_key | role_id + secret_id_key,
+  approle_mount?, ca_key?}`: one secret on a HashiCorp Vault or OpenBao KV v2 mount (`secret` by
+  default) holding the folder's keys, written whole on each push
+  (`POST {address}/v1/{mount}/data/{path}` with `{"data": {…}}`), so a removed key is simply left
+  out of the next version. The address is the team's own server, fetched like a webhook: a public
+  `https://` URL (`PublicOnly`, no redirects), trusting the CA in `ca_key` (PEM, a key of this
+  environment and folder) when the server's certificate isn't publicly trusted. It signs in with a
+  token (`token_key`) or AppRole (`POST /v1/auth/{approle_mount}/login` with `role_id` and the
+  secret id in `secret_id_key`); `namespace` goes as `X-Vault-Namespace` (Vault Enterprise, HCP).
+  Before writing, roll reads the secret's metadata: a new secret is marked with the custom metadata
+  `managed-by=roll-secrets` first, and one that exists without that mark is someone else's, which
+  roll never replaces. The policy it needs: `create`, `update` on `{mount}/data/{path}`, and
+  `read`, `create`, `update` on `{mount}/metadata/{path}`. Vault's errors are messages, so roll's
+  carry the status alone. The synced values come to at most 512 KiB as JSON.
+  This is the way off Vault one service at a time: move a folder's values into roll (`roll secrets
+  import --from vault`), sync them to a path of roll's own, point the service at that path, and
+  later at roll itself (`roll run`, the SDKs) whenever it suits; Vault keeps serving current values
+  until then. A secret Vault's own tooling made is never touched: a sync writes only to its own.
+  ```sh
+  roll secrets -e production syncs add vault-kv --target address=https://vault.example.com:8200 \
+    --target path=shop/production --target role_id=db02de05-fa39-4855-059b-67221c5c2f63 \
+    --target secret_id_key=VAULT_SECRET_ID
+  ```
 
 ### `render`, `netlify`, `fly`, `railway`, `heroku`, `digitalocean`, `circleci`, `bitbucket` and `terraform-cloud`
 
@@ -2032,6 +2272,48 @@ this environment and folder holding an access token with the `api` scope, and a 
 instance's public URL (gitlab.com by default; fetched like a webhook, `PublicOnly`). A changed key
 is updated in that scope, or created; a removed one is deleted. Values are raw (no `$` expansion),
 and masked when GitLab can mask them (8 characters or more, no spaces), so they stay out of job logs.
+
+### `azure-devops`
+
+An Azure DevOps variable group's variables, `{organization, project, group}` (`dev.azure.com/acme`,
+its project's name or id, the group's name), all pushed as secret variables, which pipelines that
+link the group read (`variables: [{ group: shop-production }]`; a script gets a secret only
+through its step's `env:`, as Azure Pipelines does for every secret). It signs in one of two ways:
+
+- `token_key`: the key holding a personal access token with **Variable Groups (Read, create, &
+  manage)**, sent as Basic auth;
+- `tenant_id`, `client_id` and `client_secret_key`: a Microsoft Entra service principal (client
+  credentials at `login.microsoftonline.com`, for Azure DevOps' own resource
+  `499b84ac-1321-427f-aa17-267ca6975798`), as `azure-key-vault` signs in. Microsoft is phasing
+  personal access tokens down for automation; the principal has to be a user of the organization
+  with the Administrator role on the group (Pipelines → Library → the group's Security).
+
+```sh
+roll secrets -e production syncs add azure-devops --target organization=acme --target project=shop \
+  --target group=shop-production --target token_key=AZURE_DEVOPS_PAT
+```
+
+Each push finds the group by name (`GET …/{project}/_apis/distributedtask/variablegroups?groupName=`,
+the one whose name matches exactly) and puts it back whole (`PUT …/{organization}/_apis/distributedtask/variablegroups/{id}`,
+API 7.1), since Azure's update replaces every variable at once: every key this sync manages is
+set with its value and `isSecret: true` (all of them on each push, never a secret without its
+value), removed ones (keys this sync pushed before) are dropped, and the group's plain variables go
+back as they came, its description and project references too. **Give the sync a group of its
+own**: Azure never returns a secret variable's value, so a secret roll doesn't manage couldn't be
+written back as it was, and a group holding one is refused, naming it, rather than risk clearing
+it. Azure's variable names are case-insensitive, and so is the match. Roll creates no group: one that doesn't
+exist fails the push (create it in Pipelines → Library), and so does one linked to a Key Vault
+(sync to the vault instead). A key named with a prefix Azure Pipelines keeps for itself
+(`endpoint`, `input`, `secret`, `path`, `securefile`, any case: `SECRET_KEY` too) never reaches a
+task, so it's an error naming it: leave it out with `keys`, or set a `prefix`.
+
+`organization` is 1–50 letters, digits and `-`; `project` up to 64 letters, digits, spaces and
+`-_.`; `group` up to 128 characters without `*` (Azure's filter takes it as a wildcard). Calls go
+only to `dev.azure.com` (and `login.microsoftonline.com`), through the guarded client:
+`PublicOnly`, no redirects, at most 1 MiB of an answer, timeouts. Errors carry Azure's status and
+`typeKey`, never an answer. A refused token answers with a sign-in page (203), which the error
+says. Two writers can race: something that edits the group between roll's read and its write
+loses that edit (Azure's API has no precondition to send); the next push sets roll's keys again.
 
 ### `kubernetes`
 
@@ -2295,7 +2577,12 @@ minutes.
 - **Shared issuers.** GitHub Actions, GitLab.com, Terraform Cloud, Buildkite and Google sign for
   every tenant they host, so an identity of theirs must name one tenant literally in its subject
   (`repo:acme/web:…`, `project_path:group/project:…`, `organization:acme:…`, a Google service
-  account's numeric id exactly): `repo:*` would let anyone's job in. Narrow further with claims
+  account's numeric id exactly): `repo:*` would let anyone's job in. Azure's issuers are one per
+  organization (`https://vstoken.dev.azure.com/<organization id>`) or Entra tenant
+  (`https://login.microsoftonline.com/<tenant>/v2.0`), but every project, pipeline and app in it
+  shares them, so an identity names one pipeline (`p://acme/shop/deploy`) or service connection
+  (`sc://acme/shop/roll-prod`, or Entra's `/eid1/…` subject) exactly, without `*` (see "Azure
+  Pipelines" above). Narrow further with claims
   (`ref=refs/heads/main`, or GitHub's `environment`). A token that lives longer than a day is
   refused. Key fetches are one at a time per issuer, and a failed one isn't retried for 30 s.
   Logins are capped at 120 a minute per identity and 240 per client address (429 `rate_limited`),
@@ -2339,7 +2626,8 @@ minutes.
   audited.
 - **The CLI.** With `ROLL_IDENTITY=idn_…` and no `ROLL_TOKEN`, `roll secrets …` and `roll run` log
   in by themselves, with the token from `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes
-  projected service account token) or GitHub Actions' own endpoint (`permissions: id-token: write`;
+  projected service account token), Azure Pipelines' own endpoint (`SYSTEM_ACCESSTOKEN` mapped
+  into the step: "Azure Pipelines" above) or GitHub Actions' own endpoint (`permissions: id-token: write`;
   audience `ROLL_OIDC_AUDIENCE`, default the server's URL):
 
   ```sh
@@ -2542,7 +2830,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&codes=&name=&namespace=&seq=&at=` | | `Values` (`codes=1`: `<KEY>_CODE` beside each TOTP key, never a 304; `dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`); with `digest=1` or `If-None-Match` an `ETag` (the digest), and `If-None-Match` with the digest still current is a 304 that decrypts and issues nothing, and writes one `secrets.revalidate` row a day per caller and folder (so health and insights still see the folder read) (never for a folder holding a dynamic credential unless `dynamic=false`: a lease ends without moving the digest) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, projects it's shared with, folders that import it, readers in 30 days |
-| `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would; a live link counts its value's keyed fingerprint as the product answers, read at most every 10 s, and at once when roll rotates it or the product's own password, reset or restore route changes it) |
+| `GET /environments/{env}/digest?path=&since=&wait=` | | `{digest}` (read: changes when the values would; a live link counts its value's keyed fingerprint as the product answers, read at most every 10 s, and at once when roll rotates it or the product's own password, reset or restore route changes it). With `since` (a digest the caller has) and `wait` (seconds, at most 25), a long poll: it answers as soon as the digest differs, else with the same one when `wait` runs out (at most 32 held per principal and 4096 per node; past that it answers at once); `roll run --watch`, `roll secrets render --watch` and the TS, Go and Python watches use it (and roll apps' redeploys in process, through `SecretSource::wait_digest`: one held poll per environment), so a change to the project's own values reaches them in a second or two (a live link's product-side change, or another project's shared folder, within about 10 s) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?, codes?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked, followed}` (`dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`; a key linked to a resource the ephemeral environment branched is left out and named in `followed`, in the clear beside a sealed box: names only) |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
@@ -2586,7 +2874,7 @@ isn't in the workspace is 404.
 | `DELETE /audit/sinks/{id}` | | 204 |
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
-| `POST /leaks` | `{candidates: string[]}` (at most 20,000) | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
+| `POST /leaks` | `{candidates: string[]}` (at most 20,000); header `X-Roll-Guard: 1` from a credential guard (roll MCP's check of what a tool call would write), audited as `secrets.guard` instead of `secrets.scan`; rolld keeps the header only on a request roll MCP's guard tool makes in process, and removes anyone else's | `{index, key, environment, path}[]`: candidates that are values the caller may reveal (`read` on the project) |
 | `GET /kms` | | `{key: string \| null}`: the customer-managed key wrapping the project's data key (admin) |
 | `PUT /kms` | `{key}` (a KMS key's ARN) | `{key}` after encrypting and decrypting with it (admin; 400 when roll can't use it) |
 | `DELETE /kms` | | `{key: null}`: the data key sealed by roll's deployment key alone again (admin) |
@@ -2612,6 +2900,9 @@ isn't in the workspace is 404.
 | `GET /cloud-accounts` | | `CloudAccount[]` (`read` on the project) |
 | `POST /cloud-accounts` | `{name, cloud: "gcp", audience, service_account}` or `{name, cloud: "azure", tenant, client_id, scope?}` | 201 `CloudAccount` (`admin`; 400 when a made-up project's token is taken, or this project's isn't) |
 | `DELETE /cloud-accounts/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `GET /kubernetes` | | `KubernetesCluster[]` (`read` on the project; never the token or the CA) |
+| `POST /kubernetes` | `{name, api_url, ca_pem?, token}` | 201 `KubernetesCluster` (`admin`; calls `GET /api` with the token first: 400 with the host and status) |
+| `DELETE /kubernetes/{id}` | | 204; 409 while a key links to it or a lease is live (`admin`) |
 | `GET /github-apps` | | `GitHubApp[]` (`read` on the project; never the key) |
 | `POST /github-apps` | `{name, app_id, installation_id, private_key, repositories, permissions, api_base?}` | 201 `GitHubApp` (`admin`; gets and revokes a token first: 400 with GitHub's reason) |
 | `DELETE /github-apps/{id}` | | 204; 409 while a key links to it or a lease holds a token (`admin`) |
@@ -2704,7 +2995,7 @@ type Grid = { path: string; environments: string[]; rows: { key: string; cells: 
 type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
 type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };
 type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: { key: string; version: number; updated_at: number; updated_by: string; last_read_at: number | null; last_read_by: string | null; reads_30d: number; stale: boolean }[] };
-type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */ };
+type Required = { key: string; path: string; comment: string; type?: "url" | "int" | "port" | "bool" | "json" | "email"; pattern?: string; owner?: string /* who supplies it */; password?: { length: number; classes?: ("lower" | "upper" | "digit" | "symbol")[]; symbols?: string } };
 type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 type ProjectFindings = { project: string; project_name: string; findings: Finding[] };
 type Finding = { issue: "expired" | "missing" | "exposed" | "weak" | "expiring" | "certificate_expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
@@ -2712,6 +3003,7 @@ type Finding = { issue: "expired" | "rotation_failing" | "revoke_failing" | "mis
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Finding = { issue: "expired" | "missing" | "exposed" | "public" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
+type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
 type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to" | "hidden"; from: number | null; to: number | null }[] };
@@ -2771,6 +3063,30 @@ syncs(id PK, project_id, env_id, path, kind, target, keys, prefix, secret BLOB, 
 `owner` is `''` for a shared secret and the principal for a personal one. A deleted secret keeps its
 row with `op = 'delete'` in `versions` and is removed from `secrets`, so `(env, path, key, owner)` is
 free again and its history stays readable by key.
+
+## Metrics
+
+rolld's access metrics count roll secrets as its own product (`product: secrets`: `Latency`,
+`Requests`, `Http5xx`), and a line a minute (JSON logs, CloudWatch's Embedded Metric Format, beside
+the cluster's) carries what roll secrets did since the last one and how it stands, by `service`
+and `product`. Numbers only: never a value, a key's name or a project.
+
+| Metric | What |
+| --- | --- |
+| `SecretsReads` | Reads of values: a folder read or resolved, or a key revealed (people, tokens, runtimes) |
+| `SecretsDynamicIssued` | Dynamic credentials issued (a lease each) |
+| `SecretsLeasesRevoked`, `SecretsRevokeFailures` | Leases ended, and revocations a product refused (retried) |
+| `SecretsSyncsPushed`, `SecretsSyncFailures` | Sync pushes that worked and that failed |
+| `SecretsRotations`, `SecretsRotationFailures` | Scheduled rotations that worked and that failed |
+| `SecretsKmsRefusals` | A customer's KMS refusing to open a project's data key |
+| `SecretsLeasesLive`, `SecretsSyncsFailing`, `SecretsRotationsFailing` | Gauges: leases not ended, syncs whose last push failed, credentials whose last rotation failed |
+
+Each node counts what it did, so sum the counters across nodes. The gauges read the store every
+node shares, so every node reports the same number: read them with `Maximum`, never `Sum`.
+
+Alarms worth setting: `SecretsKmsRefusals` above zero (a customer's key policy changed),
+`SecretsRevokeFailures` and `SecretsRotationsFailing` staying above zero (health names them),
+`SecretsSyncsFailing` rising.
 
 ## Performance
 
@@ -3023,8 +3339,10 @@ rotating a database's admin password and editing registrations in place (#75), s
    lives), and Terraform updating registrations in place (#72, after #75).
 8. **More dynamic credentials**: Kubernetes service account tokens, Snowflake, LDAP and Active
    Directory passwords (Vault, Infisical).
-9. **Java and .NET clients, a Pulumi provider, a Lambda extension and an Ansible lookup** (Spring,
-   `IConfiguration`; AWS's Parameters and Secrets extension; Vault's and 1Password's Ansible).
+9. **.NET client, a Pulumi provider, a Lambda extension and an Ansible lookup** (`IConfiguration`;
+   AWS's Parameters and Secrets extension; Vault's and 1Password's Ansible). Java is built
+   (`sdk/java/secrets`, `feature/roll-secrets-java`: values, sealed resolves, long-polled watches,
+   the cache, transit); its Spring `PropertySource` adapter is next.
 10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
    CAs**.
 11. *The user's call:* land the stack (#62, then #63–#73; roll search before #62).
@@ -3032,8 +3350,7 @@ rotating a database's admin password and editing registrations in place (#75), s
    roll MCP's `feature/mcp-on-landing` is #25 with it, its gate passing), then a workload identity
    a person creates asks roll-access's policy (held until an admin approves), and the Access tab
    shows tokens waiting for approval and rotations that keep the old secret (`keep_old_for_s`).
-13. *Waits on other threads:* transit keys scoped by name (#24/#25 with #47), roll search's #29 (it
-   echoes a key's `access`: then a key that doesn't say `data` is refused), a live check of
+13. *Waits on other threads:* transit keys scoped by name (#24/#25 with #47), a live check of
    OpenSearch links (#29 with #51), roll redis and nosql keeping a rotated password a while,
    splitting the CLI's `secrets.rs` once the stack has landed.
 14. *Waits on linking chat users to roll accounts:* approving change requests from Slack.
