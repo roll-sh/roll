@@ -2501,7 +2501,7 @@ async fn a_log_drain_gets_the_runtime_output_signed() {
 /// A preview's services on roll's own runtime (rolld's previews) hand their masked lines to
 /// roll apps: they go to the project's drains that take previews' runtime output, in the
 /// preview's `pv-` environment, and to no drain that doesn't (`previews: false`, another
-/// environment, narrowed to services).
+/// environment, narrowed to services); its jobs' output only to drains of builds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_previews_runtime_lines_reach_only_drains_that_take_previews() {
     let w = world().await;
@@ -2519,17 +2519,18 @@ async fn a_previews_runtime_lines_reach_only_drains_that_take_previews() {
     tokio::spawn(axum::serve(l, app).into_future());
     image_service(&w, "api", json!({"port": 80})).await;
     let base = format!("/v1/apps/projects/{}/drains", w.project);
-    assert!(!w.apps.drains_take_previews(&w.project, None).await.unwrap());
-    for (to, body) in [("previews", json!({"previews": true})), ("off", json!({})), ("prod", json!({"previews": true, "environments": ["production"]})), ("api", json!({"previews": true, "services": ["api"]}))] {
+    assert!(!w.apps.drains_take_previews(&w.project, None, "runtime").await.unwrap());
+    for (to, body) in [("previews", json!({"previews": true})), ("off", json!({})), ("prod", json!({"previews": true, "environments": ["production"]})), ("api", json!({"previews": true, "services": ["api"]})), ("builds", json!({"previews": true, "sources": ["build"]}))] {
         let mut body = body;
         body["url"] = json!(format!("http://{at}/{to}"));
         assert_eq!(call(&w.api, "POST", &base, Some(body)).await.0, StatusCode::CREATED);
     }
-    assert!(w.apps.drains_take_previews(&w.project, None).await.unwrap());
+    assert!(w.apps.drains_take_previews(&w.project, None, "runtime").await.unwrap());
     let line = |t, stderr, text: &str| apps_control::drains::PreviewLine { t, stderr, text: text.into() };
-    w.apps.drain_preview_lines(&w.project, "pv-abc", "web", vec![line(1_794_996_000_000, false, "listening on :3000"), line(1_794_996_000_001, true, "charging with ***")]);
+    w.apps.drain_preview_lines(&w.project, "pv-abc", "web", "runtime", vec![line(1_794_996_000_000, false, "listening on :3000"), line(1_794_996_000_001, true, "charging with ***")]);
+    w.apps.drain_preview_lines(&w.project, "pv-abc", "release", "build", vec![line(1_794_996_000_002, false, "migrated 3 tables")]);
     for _ in 0..200 {
-        if got.lock().len() >= 2 {
+        if got.lock().len() >= 3 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -2537,8 +2538,10 @@ async fn a_previews_runtime_lines_reach_only_drains_that_take_previews() {
     // Long enough for a batch to any other drain (each goes after at most a second).
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let got = got.lock().clone();
-    assert_eq!(got.iter().map(|(to, _)| to.as_str()).collect::<Vec<_>>(), ["previews", "previews"], "{got:?}");
-    let l = &got[1].1;
+    let mut to: Vec<(&str, &str)> = got.iter().map(|(to, l)| (to.as_str(), l["source"].as_str().unwrap_or(""))).collect();
+    to.sort();
+    assert_eq!(to, [("builds", "build"), ("previews", "runtime"), ("previews", "runtime")], "{got:?}");
+    let l = &got.iter().filter(|(to, _)| to == "previews").nth(1).unwrap().1;
     assert_eq!((&l["environment"], &l["service_name"], &l["service"], &l["stream"], &l["text"], &l["t"]), (&json!("pv-abc"), &json!("web"), &Value::Null, &json!("stderr"), &json!("charging with ***"), &json!(1_794_996_000_001_i64)));
 }
 

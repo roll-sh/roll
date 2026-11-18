@@ -399,21 +399,21 @@ impl Apps for FakeApps {
 /// roll secrets as previews see it: every `ensure` (environment, trusted). With `dynamic`, each
 /// A Git URL service's repository: records each status and comment (a comment gets id 77,
 /// edits name it). `connected: false` posts nothing.
-/// A project's log drains: whether they take previews' output, and every line sent
-/// (environment, service, line).
+/// A project's log drains: whether they take previews' output (every source), and every line
+/// sent (environment, service, source, line).
 #[derive(Default)]
 pub struct FakeDrains {
     pub wanted: std::sync::atomic::AtomicBool,
-    pub sent: Mutex<Vec<(String, String, roll_previews::ports::DrainLine)>>,
+    pub sent: Mutex<Vec<(String, String, &'static str, roll_previews::ports::DrainLine)>>,
 }
 
 #[async_trait]
 impl roll_previews::ports::Drains for FakeDrains {
-    async fn wanted(&self, _: &str) -> bool {
+    async fn wanted(&self, _: &str, _: roll_previews::ports::DrainSource) -> bool {
         self.wanted.load(Ordering::SeqCst)
     }
-    fn send(&self, _: &str, environment: &str, service: &str, lines: Vec<roll_previews::ports::DrainLine>) {
-        self.sent.lock().extend(lines.into_iter().map(|l| (environment.to_string(), service.to_string(), l)));
+    fn send(&self, _: &str, environment: &str, service: &str, source: roll_previews::ports::DrainSource, lines: Vec<roll_previews::ports::DrainLine>) {
+        self.sent.lock().extend(lines.into_iter().map(|l| (environment.to_string(), service.to_string(), source.as_str(), l)));
     }
 }
 

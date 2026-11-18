@@ -16,8 +16,9 @@
 //! A preview's services on roll's own runtime (rolld's previews, `roll.toml`'s `[preview]`)
 //! aren't roll apps instances, so their output comes in through [`Apps::drain_preview_lines`],
 //! masked by previews, and goes to the drains that take previews' runtime output, in the
-//! preview's `pv-` environment as its roll apps services' would. Such a line has no service id,
-//! instance or deployment, so a drain narrowed to services never gets one.
+//! preview's `pv-` environment as its roll apps services' would; its jobs' output (`release`,
+//! `seed`, `teardown`) is the `build` source, the job's name its `service_name`. Such a line
+//! has no service id, instance or deployment, so a drain narrowed to services never gets one.
 
 use crate::model::{DRAIN_FORMATS, DRAIN_SOURCES, LogDrain};
 use crate::store::{DrainSettings, OpenedDrain};
@@ -47,17 +48,18 @@ pub struct PreviewLine {
     pub text: String,
 }
 
-/// A preview service's lines, with whose they are.
+/// A preview service's (or job's) lines, with whose they are and which source.
 pub(crate) struct PreviewBatch {
     project: String,
     environment: String,
     service: String,
+    source: &'static str,
     lines: Vec<PreviewLine>,
 }
 
-/// Whether `d` takes a preview's runtime output in `env` from roll's runtime (no service id).
-fn takes_runtime_preview(d: &LogDrain, env: &str) -> bool {
-    d.previews && d.sources.iter().any(|s| s == "runtime") && d.services.is_empty() && (d.environments.is_empty() || d.environments.iter().any(|e| e == env))
+/// Whether `d` takes a preview's `source` lines in `env` from roll's runtime (no service id).
+fn takes_runtime_preview(d: &LogDrain, env: &str, source: &str) -> bool {
+    d.previews && d.sources.iter().any(|s| s == source) && d.services.is_empty() && (d.environments.is_empty() || d.environments.iter().any(|e| e == env))
 }
 
 impl Apps {
@@ -107,25 +109,28 @@ impl Apps {
         self.db(move |s| s.drains(&p)).await
     }
 
-    /// Whether the project has a drain that takes a preview's runtime output from roll's runtime
-    /// (in `environment`, or in any `pv-` one when `None`).
-    pub async fn drains_take_previews(self: &Arc<Self>, project: &str, environment: Option<&str>) -> Result<bool> {
+    /// Whether the project has a drain that takes a preview's `source` lines (`runtime`, or
+    /// `build` for its jobs) from roll's runtime (in `environment`, or in any `pv-` one when
+    /// `None`).
+    pub async fn drains_take_previews(self: &Arc<Self>, project: &str, environment: Option<&str>, source: &str) -> Result<bool> {
         let list = self.drains(project).await?;
         Ok(list.iter().any(|d| match environment {
-            Some(e) => takes_runtime_preview(d, e),
-            None => d.previews && d.sources.iter().any(|s| s == "runtime") && d.services.is_empty() && (d.environments.is_empty() || d.environments.iter().any(|e| e.starts_with("pv-"))),
+            Some(e) => takes_runtime_preview(d, e, source),
+            None => d.previews && d.sources.iter().any(|s| s == source) && d.services.is_empty() && (d.environments.is_empty() || d.environments.iter().any(|e| e.starts_with("pv-"))),
         }))
     }
 
-    /// A preview service's lines from roll's runtime, already masked, to the project's drains that
-    /// take previews' runtime output (each drain's queue, batches, signature and format, as a
-    /// roll apps instance's lines). Never waits: past [`PREVIEW_BATCHES`] waiting, the batch is
-    /// dropped, as a drain that can't keep up loses its oldest lines.
-    pub fn drain_preview_lines(&self, project: &str, environment: &str, service: &str, lines: Vec<PreviewLine>) {
+    /// A preview service's lines from roll's runtime (`build`: a job's output, `service` the job's
+    /// name), already masked, to the project's drains that take previews' lines of that source
+    /// (each drain's queue, batches, signature and format, as a roll apps instance's lines). Never
+    /// waits: past [`PREVIEW_BATCHES`] waiting, the batch is dropped, as a drain that can't keep
+    /// up loses its oldest lines. Any source but `build` is `runtime`.
+    pub fn drain_preview_lines(&self, project: &str, environment: &str, service: &str, source: &str, lines: Vec<PreviewLine>) {
         if lines.is_empty() {
             return;
         }
-        let b = PreviewBatch { project: project.to_string(), environment: environment.to_string(), service: service.to_string(), lines };
+        let source = if source == "build" { "build" } else { "runtime" };
+        let b = PreviewBatch { project: project.to_string(), environment: environment.to_string(), service: service.to_string(), source, lines };
         if let Err(tokio::sync::mpsc::error::TrySendError::Full(b)) = self.preview_lines.try_send(b) {
             tracing::warn!(project = %b.project, environment = %b.environment, lines = b.lines.len(), "apps: log drains fell behind on previews' lines; a batch was dropped");
         }
@@ -264,11 +269,11 @@ impl Apps {
                     if self.drains_fresh(&mut drains, &b.project).await {
                         wanted_at = Instant::now() - REFRESH;
                     }
-                    let wanted: Vec<&OpenedDrain> = drains[&b.project].1.iter().filter(|o| takes_runtime_preview(&o.drain, &b.environment)).collect();
+                    let wanted: Vec<&OpenedDrain> = drains[&b.project].1.iter().filter(|o| takes_runtime_preview(&o.drain, &b.environment, b.source)).collect();
                     for o in wanted {
                         for l in &b.lines {
                             let stream = if l.stderr { "stderr" } else { "stdout" };
-                            enqueue(&mut queues, &o.drain.id, &b.project, json!({ "t": l.t, "source": "runtime", "service": null, "service_name": b.service, "environment": b.environment, "instance": null, "deployment": null, "stream": stream, "text": l.text }));
+                            enqueue(&mut queues, &o.drain.id, &b.project, json!({ "t": l.t, "source": b.source, "service": null, "service_name": b.service, "environment": b.environment, "instance": null, "deployment": null, "stream": stream, "text": l.text }));
                         }
                     }
                 }

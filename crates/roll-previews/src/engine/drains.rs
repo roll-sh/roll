@@ -5,7 +5,7 @@
 //! a restart or a redeploy loses no lines and repeats none.
 
 use super::{Engine, preview_key};
-use crate::ports::{DrainLine, Drains};
+use crate::ports::{DrainLine, DrainSource, Drains};
 use crate::{Desired, ServiceState};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -38,7 +38,7 @@ impl Engine {
         let mut kept: HashSet<String> = HashSet::new();
         for r in rows.iter().filter(|r| r.desired == Desired::Active) {
             if !wanted.contains_key(&r.project_id) {
-                wanted.insert(r.project_id.clone(), drains.wanted(&r.project_id).await);
+                wanted.insert(r.project_id.clone(), drains.wanted(&r.project_id, DrainSource::Runtime).await);
             }
             if !wanted[&r.project_id] {
                 continue;
@@ -110,7 +110,7 @@ impl Engine {
                 _ = tick.tick() => {
                     if checked.elapsed() >= RECHECK {
                         checked = Instant::now();
-                        if !drains.wanted(project).await {
+                        if !drains.wanted(project, DrainSource::Runtime).await {
                             return;
                         }
                     }
@@ -128,13 +128,32 @@ impl Engine {
                     }
                 };
                 let last = lines.last().map(|l| l.0.clone());
-                drains.send(project, &env, service, lines.into_iter().zip(masked).map(|((_, t, stderr, _), text)| DrainLine { t, stderr, text }).collect());
+                drains.send(project, &env, service, DrainSource::Runtime, lines.into_iter().zip(masked).map(|((_, t, stderr, _), text)| DrainLine { t, stderr, text }).collect());
                 *d.last.lock() = last;
             }
             if ended {
                 return;
             }
         }
+    }
+}
+
+impl Engine {
+    /// A job's output (`release`, `seed`, `teardown`), already masked with what it was given, to
+    /// the drains that take previews' builds, once it's done: its tail, masked again as the
+    /// preview's logs are, a line each, its name as the service's.
+    pub(super) async fn drain_job(&self, project: &str, id: &str, what: &str, output: &str) {
+        let Some(drains) = self.drains.get() else { return };
+        if !drains.wanted(project, DrainSource::Build).await {
+            return;
+        }
+        let lines: Vec<String> = output.lines().map(str::to_string).collect();
+        let Ok(masked) = self.masked(id, lines).await else {
+            warn!(preview = %id, job = %what, "previews: a job's output wasn't sent to the log drains: its masks couldn't be read");
+            return;
+        };
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        drains.send(project, &crate::branch_name(id), what, DrainSource::Build, masked.into_iter().map(|text| DrainLine { t, stderr: false, text }).collect());
     }
 }
 

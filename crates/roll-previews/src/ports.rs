@@ -532,15 +532,34 @@ pub struct DrainLine {
     pub text: String,
 }
 
+/// Which of a drain's sources a preview's lines are: a running service's output, or a job's
+/// (`release`, `seed`, `teardown`: roll apps' `build`, where deploy-time commands go).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DrainSource {
+    Runtime,
+    Build,
+}
+
+impl DrainSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DrainSource::Runtime => "runtime",
+            DrainSource::Build => "build",
+        }
+    }
+}
+
 /// A project's log drains (roll apps' `…/projects/{project}/drains`): the ones that take
 /// previews' runtime output get a preview's services on roll's runtime too, in its `pv-`
 /// environment, as roll apps' own preview environments' output.
 #[async_trait]
 pub trait Drains: Send + Sync {
-    /// Whether any of the project's drains takes previews' runtime output (cheap: asked each pass).
-    async fn wanted(&self, project: &str) -> bool;
-    /// A service's lines, masked, oldest first. Never waits (a drain that can't keep up loses lines).
-    fn send(&self, project: &str, environment: &str, service: &str, lines: Vec<DrainLine>);
+    /// Whether any of the project's drains takes previews' lines of `source` (cheap: asked each
+    /// pass).
+    async fn wanted(&self, project: &str, source: DrainSource) -> bool;
+    /// A service's (or a job's) lines, masked, oldest first. Never waits (a drain that can't keep
+    /// up loses lines).
+    fn send(&self, project: &str, environment: &str, service: &str, source: DrainSource, lines: Vec<DrainLine>);
 }
 
 /// Where services run: roll apps once it lands, [`crate::runtime::Runtime`] until then.
