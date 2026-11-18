@@ -351,6 +351,11 @@ pub enum Secrets {
     /// list, add (the admin user's private key from a file), remove.
     #[command(subcommand)]
     Snowflake(SnowflakeCmd),
+    /// MongoDB Atlas projects whose two database users roll rotates in turn, or that make a user
+    /// per lease, through Atlas's Admin API: list, add (the service account's secret on stdin),
+    /// remove.
+    #[command(subcommand)]
+    Atlas(AtlasCmd),
     /// Vendor credentials roll issues and revokes keys with (SendGrid, Twilio, Okta, Entra,
     /// Auth0): list, add (the credential on stdin), remove.
     #[command(subcommand)]
@@ -813,6 +818,31 @@ pub enum SnowflakeCmd {
         #[arg(long = "user")]
         managed_user: Option<String>,
         /// A role dynamic users are granted.
+        #[arg(long = "role", num_args = 1)]
+        roles: Vec<String>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum AtlasCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register an Atlas project: roll takes a token as the organization service account
+    /// `--client-id` (its secret on stdin); two users managed links rotate in turn (`--user`
+    /// twice), the roles dynamic users get (`--role role@db[.collection]`), or both.
+    Add {
+        name: String,
+        /// The Atlas project's id (24 hex digits; the Admin API's groupId).
+        #[arg(long)]
+        group_id: String,
+        /// The service account's client id (mdb_sa_id_…).
+        #[arg(long)]
+        client_id: String,
+        /// A database user managed links rotate (give two: they take turns).
+        #[arg(long = "user", num_args = 1)]
+        managed_users: Vec<String>,
+        /// A role dynamic users get, as role@db or role@db.collection.
         #[arg(long = "role", num_args = 1)]
         roles: Vec<String>,
     },
@@ -2037,6 +2067,38 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             DirectoriesCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/directories/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::Atlas(d) => match d {
+            AtlasCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/atlas-projects", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for a in v.as_array().into_iter().flatten() {
+                    let list = |k: &str| a[k].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(" ");
+                    let (users, roles) = (list("managed_users"), list("roles"));
+                    let roles = if roles.is_empty() { String::new() } else { format!("  dynamic as {roles}") };
+                    println!("{}  {:<16} {}  {:<24} {}{roles}", s(&a["id"]), s(&a["name"]), s(&a["group_id"]), s(&a["client_id"]), if users.is_empty() { "-" } else { &users });
+                }
+            }
+            AtlasCmd::Add { name, group_id, client_id, managed_users, roles } => {
+                // The service account's secret: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("Client secret for {client_id}, then Enter and Ctrl-D: ");
+                }
+                let mut secret = String::new();
+                std::io::stdin().read_to_string(&mut secret).context("reading the client secret from stdin")?;
+                let body = json!({ "name": name, "group_id": group_id, "client_id": client_id, "client_secret": secret.trim(), "managed_users": managed_users, "roles": roles });
+                let v = c.call(Method::POST, &format!("{}/atlas-projects", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link MONGODB_USERNAME and MONGODB_PASSWORD to it (and MONGODB_CONNECTION_STRING with a cluster), managed (its two users) or dynamic (a user per lease).", s(&v["name"]), s(&v["id"]));
+            }
+            AtlasCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/atlas-projects/{}", c.base(), enc(&id)), None).await?;
                 println!("Removed {id}");
             }
         },
