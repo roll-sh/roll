@@ -832,23 +832,18 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Accounts as GitHub has them, built 2026-11-18, stacked for the next turn:** #254 (refused
-   codes in the security log) → #256 passkeys → #257 sudo mode → #258 new-sign-in mail → #260
-   tokens from a session behind sudo mode, the dialog app-wide (checked end to end in a real
-   Chromium's virtual authenticator, `users-live/passkeys-shot.sh`) → #263 second-factor resets an
-   admin decides. Land them in one turn, in that order (each PR's base is the one before; retarget
-   each to main after its base squashes).
-2. **For roll secrets' incident tools (asked 2026-11-18; after the merge turn):**
-   `Access::revoke_many(ids, why)` and `POST /v1/access/tokens/revoke {ids, why}` (one write, all or
-   none, an admin row, an audit row per grant naming the incident; secrets' reach chooses the ids,
-   never a second scope matcher); `roll_auth::credentials::kind_in` public plus a bounded
-   `find_all(text)` with each match's kind and range, for roll code's landing blocker and
-   `roll secrets scan`; honeytokens (`decoy: true` grants: never allow, any use is a leak-style
-   audit row with mail to admins and the owner).
-3. **Accounts, after that:** WebAuthn attestation for companies that require hardware keys (an
-   AAGUID allowlist per roll, off by default, with the FIDO metadata's names shown on each
-   passkey); then a person's own data export (GitHub's account data export: their account, its
-   sessions, security log and tokens' names, as JSON).
+1. **A person's own data, exported** (now; GitHub's account data export, GDPR's portability):
+   `POST /v1/accounts/me/export` makes one JSON file of everything roll keeps about the person
+   (their account, sign-in methods without secrets, sessions, passkeys without keys, their
+   security log, their tokens' names and rules, never a secret or a hash), behind sudo mode,
+   mailed as a link that works once for a day; "Export your data" on the account page.
+2. **WebAuthn attestation for companies that require hardware keys:** an operator's allowlist of
+   authenticator models (AAGUIDs), off by default. Only a verified attestation counts (`packed` with
+   an x5c chain to the FIDO Metadata Service's roots, `tpm`, `apple`): an unverified AAGUID is
+   self-reported, so the allowlist is never checked against one. Each passkey shows its model's name.
+3. **Landed 2026-11-18 (main 1a60b43be):** passkeys (#256), sudo mode (#257, #260), new-sign-in mail
+   (#258), second-factor resets (#263), refused codes in the security log (#254); for roll secrets,
+   `revoke_many` and the public detectors (#267) and decoy tokens (#270).
 4. **Enterprise:** a provider made once in the dashboard for both people and agents (#252 picks
    an existing connection today).
 5. **People's accounts, enterprise-grade:** on main since 2026-11-18: SSO (#225), SCIM

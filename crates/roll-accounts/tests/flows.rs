@@ -1130,3 +1130,30 @@ async fn an_admin_resets_a_lost_second_factor() {
     let steps: Vec<(String, String, Option<String>)> = got.iter().filter(|e| e.action.starts_with("recovery.")).map(|e| (e.action.clone(), e.actor.clone(), e.target.clone())).collect();
     assert_eq!(steps, [("recovery.request".to_string(), bob.clone(), Some(bob.clone())), ("recovery.approve".to_string(), root_id.clone(), Some(bob.clone()))]);
 }
+
+/// A person's own data (docs/accounts.md, "Your data"): one JSON download of their account,
+/// sessions, passkeys, security log and more, behind sudo mode, with no secret or hash in it.
+#[tokio::test]
+async fn a_person_exports_their_own_data() {
+    let env = Env::new().await;
+    env.accounts.set_audit(Arc::new(Events::default()));
+    let invite = env.invite("ada@example.com").await;
+    let mut b = Browser::default();
+    env.email_sign_in(&mut b, "ada@example.com", Some(&invite)).await;
+    let t = env.call(&mut b, Method::POST, "/v1/accounts/me/totp", None).await.json;
+    let seed = t["secret"].as_str().unwrap().to_string();
+    let a = env.call(&mut b, Method::POST, "/v1/accounts/me/export", None).await;
+    assert_eq!(a.status, StatusCode::OK, "{}", a.json);
+    assert_eq!(a.headers.get(header::CONTENT_DISPOSITION).and_then(|v| v.to_str().ok()), Some("attachment; filename=\"roll-account-ada.json\""));
+    let d = &a.json;
+    assert_eq!(d["account"]["email"], "ada@example.com");
+    assert_eq!(d["sessions"].as_array().map(Vec::len), Some(1), "{d}");
+    assert!(d["security_log"].as_array().unwrap().iter().any(|e| e["action"] == "sign_in"), "{d}");
+    assert!(d["passkeys"].is_array() && d["tokens"].is_array() && d["sign_in_places"].is_array());
+    let all = d.to_string();
+    assert!(!all.contains(&seed) && !all.contains("token_hash") && !all.contains("code_hash") && !all.contains(&invite), "no secret in an export");
+    // Sudo mode: an old session can't take it.
+    env.accounts.set_sudo_window(1);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/export", None).await.json["code"], "reauth_required");
+}
