@@ -14,6 +14,28 @@ pub struct AccountPolicy {
     /// Everyone needs a second factor (an authenticator app or a passkey).
     #[serde(default)]
     pub require_second_factor: bool,
+    /// A session unused this long ends (Okta's idle session lifetime), in minutes: 15 to a week;
+    /// none is roll's week.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_minutes: Option<u32>,
+}
+
+/// The shortest idle timeout: a session's last use is noted every five minutes.
+const MIN_IDLE: u32 = 15;
+const MAX_IDLE: u32 = 7 * 24 * 60;
+
+impl AccountPolicy {
+    fn checked(self) -> Result<Self> {
+        if self.idle_minutes.is_some_and(|m| !(MIN_IDLE..=MAX_IDLE).contains(&m)) {
+            return Err(crate::Error::BadRequest(format!("an idle timeout is {MIN_IDLE} minutes to a week ({MAX_IDLE} minutes)"), Some("policy")));
+        }
+        Ok(self)
+    }
+
+    /// How long a session may go unused, in ms.
+    pub(crate) fn idle_ms(&self) -> i64 {
+        self.idle_minutes.map_or(crate::SESSION_IDLE_MS, |m| (m as i64 * 60_000).min(crate::SESSION_IDLE_MS))
+    }
 }
 
 impl Accounts {
@@ -23,6 +45,7 @@ impl Accounts {
     }
 
     pub fn set_account_policy(&self, p: AccountPolicy) -> Result<AccountPolicy> {
+        let p = p.checked()?;
         let s = serde_json::to_string(&p).map_err(|e| crate::Error::Internal(e.to_string()))?;
         self.db.write(|c| c.execute("INSERT INTO account_policy (id, policy) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET policy = excluded.policy", [s.as_str()]))?;
         Ok(p)

@@ -1476,3 +1476,21 @@ async fn sessions_are_used_only_from_allowed_networks() {
     assert_eq!(put(&mut office, json!({ "on": false, "networks": ["203.0.113.0/24"] })).await.status, StatusCode::OK);
     assert_eq!(env.call(&mut cafe, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
 }
+
+/// An idle timeout (docs/accounts.md): a session unused longer than the company's minutes ends;
+/// out-of-range values are refused.
+#[tokio::test]
+async fn a_company_sets_an_idle_timeout() {
+    let env = Env::new().await;
+    let invite = env.invite("ada@example.com").await;
+    let mut b = Browser::default();
+    env.email_sign_in(&mut b, "ada@example.com", Some(&invite)).await;
+    assert_eq!(env.operator(Method::PUT, "/v1/accounts/policy", json!({ "idle_minutes": 5 })).await.json["code"], "policy");
+    let set = env.operator(Method::PUT, "/v1/accounts/policy", json!({ "idle_minutes": 30 })).await;
+    assert_eq!(set.json["idle_minutes"], 30, "{}", set.json);
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK, "used just now");
+    // Unused for 31 minutes (as the database's clock sees it): gone.
+    let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(env._dir.path().join("accounts.db")), "accounts").unwrap();
+    db.write(|c| c.execute("UPDATE sessions SET seen_at = seen_at - 31 * 60000", ())).unwrap();
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
+}
