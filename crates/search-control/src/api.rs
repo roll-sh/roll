@@ -332,7 +332,7 @@ async fn restore(State(c): State<AppState>, caller: Caller, Path(id): Path<Strin
         serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?
     };
     let d = c.restore(&id, r.name.as_deref(), caller.caps(&c)).await?;
-    Ok(Json(view(&c, d, false).await?))
+    Ok(Json(view(&c, &caller, d, false).await?))
 }
 
 #[derive(Deserialize)]
