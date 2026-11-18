@@ -450,6 +450,8 @@ export interface EnvironmentPut {
   traces?: boolean;
   /** Its pages measure their Web Vitals (a tag roll adds). */
   vitals?: boolean;
+  /** Its deploys post commit statuses and GitHub Deployments (false: someone else reports them). */
+  report?: boolean;
   /** What its code may reach from the next deploy: roll and `hosts` only, or anything. null: open. */
   egress?: Egress | null;
   /** Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until false. */
@@ -547,6 +549,9 @@ export interface Environment extends EnvironmentSummary {
   traces?: boolean;
   /** Its pages measure their Web Vitals for roll. */
   vitals?: boolean;
+  /** Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
+   *  someone else reports them (roll previews' `pv-` environments). */
+  report?: boolean;
   /** People signed in to roll who can open its project get in. */
   signed_in?: boolean;
   /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */

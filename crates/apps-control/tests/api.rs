@@ -4943,6 +4943,17 @@ async fn a_git_url_service_connects_to_rolls_github_app() {
     assert_eq!(*gh.deployments.lock(), vec![(1, "production".to_string(), true)]);
     let states: Vec<_> = gh.deployment_states.lock().iter().map(|(id, s, u)| (*id, s.clone(), u.is_some())).collect();
     assert_eq!(states, vec![(1, "in_progress".to_string(), false), (1, "success".to_string(), true)]);
+    // An environment someone else reports (roll previews' `pv-` ones, `report: false`): its
+    // deploys post no status and no Deployment; reporting again, they do.
+    let prod = format!("/v1/apps/services/{id}/environments/production");
+    let (st, e) = call(&w.api, "PUT", &prod, Some(json!({"report": false}))).await;
+    assert_eq!((st, &e["report"]), (StatusCode::OK, &json!(false)), "{e}");
+    let before = (gh.statuses.lock().len(), gh.deployments.lock().len());
+    let (_, q) = call(&w.api, "POST", &format!("{prod}/deploys"), Some(json!({}))).await;
+    settled(&w, &id, "production", q["id"].as_str().unwrap()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!((gh.statuses.lock().len(), gh.deployments.lock().len()), before, "nothing reported");
+    assert_eq!(call(&w.api, "PUT", &prod, Some(json!({"report": true}))).await.0, StatusCode::OK);
     // The App's own (verified) push reaches it with no hook set: run on its owner, it deploys the
     // pushed head; another installation's, or another repository's, doesn't.
     let second = git.commit_saying(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v2")], "via the App");
