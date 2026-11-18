@@ -1536,6 +1536,9 @@ impl Apps {
             }
             _ => None,
         };
+        // Other ports its custom domains send to (Railway's target ports).
+        let (sid, en) = (svc.id.clone(), env.name.clone());
+        let domain_ports = self.db(move |s| s.domain_ports(&sid, &en)).await?;
         let spec = InstanceSpec {
             name: String::new(),
             service: svc.id.clone(),
@@ -1545,6 +1548,7 @@ impl Apps {
             command: run.start.clone(),
             vars,
             port: if run.kind == RunType::Web { run.port } else { None },
+            ports: if run.kind == RunType::Web && !closed { domain_ports } else { Vec::new() },
             cpu: run.cpu,
             memory_mb: run.memory_mb,
             network: Some(network),

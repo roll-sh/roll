@@ -40,6 +40,8 @@ struct FakeInstance {
     killed: tokio_util::sync::CancellationToken,
     /// Where it answers while running.
     addr: Option<SocketAddr>,
+    /// Where its other ports answer ([`InstanceSpec::ports`]), while running.
+    extra: HashMap<u16, SocketAddr>,
     /// An app that listens elsewhere: its port held, bound but not listening, so a connection is
     /// refused and no other test's server on this machine can be handed the port and answer.
     reserved: Option<tokio::net::TcpSocket>,
@@ -254,7 +256,7 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
         tokio::time::sleep(b).await;
     }
     log.line(format!("listening on {}", spec.port.unwrap_or(0)));
-    let (name, dep, kill) = (spec.name.clone(), spec.deployment.clone(), killed.clone());
+    let (name, dep, kill, port) = (spec.name.clone(), spec.deployment.clone(), killed.clone(), spec.port);
     let app = axum::Router::new().fallback(move |req: Request| {
         let (name, dep, echo, sick, missing, killed, cache, answered) = (name.clone(), dep.clone(), echo.clone(), sick.clone(), missing.clone(), kill.clone(), cache.clone(), answered.clone());
         async move {
@@ -291,7 +293,7 @@ async fn serve(spec: InstanceSpec, listener: tokio::net::TcpListener, log: LogSi
             let version = format!("{:?}", req.version());
             let te = req.headers().get("te").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
             let traceparent = req.headers().get("traceparent").and_then(|h| h.to_str().ok()).unwrap_or("").to_string();
-            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent }))).into_response();
+            let mut r = (status, axum::Json(serde_json::json!({ "instance": name, "deployment": dep, "port": port, "path": req.uri().path(), "vars": vars, "forwarded_host": host, "cookie": cookie, "version": version, "te": te, "traceparent": traceparent }))).into_response();
             if let Some(c) = cache {
                 r.headers_mut().insert(axum::http::header::CACHE_CONTROL, c);
                 let seg = req.uri().path().trim_start_matches('/').split('/').next().unwrap_or("").to_string();
@@ -361,7 +363,7 @@ impl Runtime for Fake {
         self.counts.creates.fetch_add(1, Ordering::SeqCst);
         let mut m = self.instances.lock();
         anyhow::ensure!(!m.contains_key(&spec.name), "{} exists", spec.name);
-        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, addr: None, reserved: None, exited: watch::channel(None).0, killed: Default::default() });
+        m.insert(spec.name.clone(), FakeInstance { spec: spec.clone(), state: FakeState::Created, server: None, addr: None, extra: HashMap::new(), reserved: None, exited: watch::channel(None).0, killed: Default::default() });
         Ok(())
     }
 
@@ -400,15 +402,23 @@ impl Runtime for Fake {
                 self.instances.lock().get_mut(name).expect("exists").reserved = Some(s);
                 Some(addr)
             }
-            Some(_) => {
+            Some(main) => {
                 let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
                 let addr = l.local_addr()?;
                 let killed = tokio_util::sync::CancellationToken::new();
+                // Its other ports: the same app, saying which port answered.
+                let mut extra = HashMap::new();
+                for p in spec.ports.iter().filter(|p| **p != main) {
+                    let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                    extra.insert(*p, l2.local_addr()?);
+                    tokio::spawn(serve(InstanceSpec { port: Some(*p), ..spec.clone() }, l2, log.clone(), self.sick.clone(), killed.clone()));
+                }
                 let server = tokio::spawn(serve(spec.clone(), l, log, self.sick.clone(), killed.clone()));
                 let mut m = self.instances.lock();
                 let i = m.get_mut(name).expect("exists");
                 i.server = Some(server);
                 i.killed = killed;
+                i.extra = extra;
                 Some(addr)
             }
             None => None,
@@ -419,6 +429,12 @@ impl Runtime for Fake {
         i.addr = addr;
         i.exited.send_replace(None);
         Ok(addr)
+    }
+
+    async fn port_address(&self, name: &str, port: u16) -> Option<SocketAddr> {
+        let m = self.instances.lock();
+        let i = m.get(name)?;
+        (i.state == FakeState::Running).then(|| i.extra.get(&port).copied()).flatten()
     }
 
     async fn suspend(&self, name: &str) -> anyhow::Result<()> {

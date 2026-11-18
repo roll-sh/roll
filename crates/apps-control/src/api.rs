@@ -1461,8 +1461,14 @@ async fn verify_domain(State(apps): S, Path((id, env, host)): Path<(String, Stri
 }
 
 async fn patch_domain(State(apps): S, Path((id, env, host)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
-    let d = apps.set_domain_redirect(&id, &env, &host, body(&b)?).await?;
-    apps.audit("domain.redirect", &id, &env, actor(&ext), json!({ "hostname": d.hostname, "redirect_to": d.redirect_to })).await;
+    let patch = body(&b)?;
+    let d = apps.patch_domain(&id, &env, &host, patch.clone()).await?;
+    if patch.get("redirect_to").is_some() {
+        apps.audit("domain.redirect", &id, &env, actor(&ext), json!({ "hostname": d.hostname, "redirect_to": d.redirect_to })).await;
+    }
+    if patch.get("port").is_some() {
+        apps.audit("domain.port", &id, &env, actor(&ext), json!({ "hostname": d.hostname, "port": d.port })).await;
+    }
     ok(d)
 }
 

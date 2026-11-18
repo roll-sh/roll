@@ -183,6 +183,14 @@ pub enum Domains {
         #[command(flatten)]
         target: Target,
     },
+    /// Send a custom domain to another of the app's ports (an admin UI on 9000), published from
+    /// the next deploy; `none`: the service's own port.
+    Port {
+        hostname: String,
+        port: String,
+        #[command(flatten)]
+        target: Target,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2406,6 +2414,11 @@ pub async fn domains(api: &Api, json_out: bool, d: Domains) -> anyhow::Result<()
             let svc = service(api, &target).await?;
             let to = if to == "none" { Value::Null } else { json!(to) };
             api.call(reqwest::Method::PATCH, &format!("{}/domains/{}", env_path(&svc, &target.env), enc(&hostname)), Some(json!({ "redirect_to": to }))).await?
+        }
+        Domains::Port { hostname, port, target } => {
+            let svc = service(api, &target).await?;
+            let port = if port == "none" { Value::Null } else { json!(port.parse::<u16>().map_err(|_| anyhow::anyhow!("the port is a number, or none"))?) };
+            api.call(reqwest::Method::PATCH, &format!("{}/domains/{}", env_path(&svc, &target.env), enc(&hostname)), Some(json!({ "port": port }))).await?
         }
     };
     if json_out {

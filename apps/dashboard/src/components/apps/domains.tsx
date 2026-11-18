@@ -34,6 +34,34 @@ function TlsBadge({ d }: { d: Domain }) {
 }
 
 /** The generated hostname, then custom domains: their DNS record, Verify and Remove. */
+/** A custom domain's own port (Railway's target port): an admin UI beside the app. Saved on
+ *  Enter or when it loses focus; empty is the service's own port. */
+function PortField({ port, busy, onSave }: { port?: number; busy: boolean; onSave: (p: number | null) => unknown }) {
+  const [v, setV] = useState(port ? String(port) : "");
+  const save = () => {
+    const n = v.trim() ? Number(v) : null;
+    if ((n ?? undefined) === port || (n !== null && !(Number.isInteger(n) && n >= 1 && n <= 65535))) return;
+    void onSave(n);
+  };
+  return (
+    <label className="flex flex-wrap items-center gap-2 text-[12px] text-muted">
+      On the app's port
+      <input
+        value={v}
+        inputMode="numeric"
+        placeholder="its own"
+        disabled={busy}
+        onChange={(e) => setV(e.target.value.replace(/\D/g, ""))}
+        onBlur={save}
+        onKeyDown={(e) => e.key === "Enter" && save()}
+        className="h-7 w-20 rounded-md border border-line bg-panel px-2 font-mono text-[12px] outline-none"
+        aria-label="The app's port this domain goes to"
+      />
+      {port ? <span className="text-subtle">from the deploy after it was set</span> : null}
+    </label>
+  );
+}
+
 export function DomainsTab({ service, env, runner }: { service: string; env: Environment; runner: Runner }) {
   const [host, setHost] = useState("");
   // Renaming the generated name: what's typed, while the field is open.
@@ -164,6 +192,9 @@ export function DomainsTab({ service, env, runner }: { service: string; env: Env
                         ))}
                     </select>
                   </label>
+                )}
+                {d.kind === "custom" && d.status === "active" && !d.redirect_to && env.egress?.mode !== "roll" && (
+                  <PortField key={`${d.hostname}:${d.port ?? ""}`} port={d.port} busy={runner.busy !== null} onSave={(p) => runner.run(`port:${d.hostname}`, () => appsApi.domainPort(service, env.name, d.hostname, p))} />
                 )}
                 {d.error && <p className="text-[12px] text-danger">{d.error}</p>}
                 {d.kind === "custom" && d.status !== "active" && (
