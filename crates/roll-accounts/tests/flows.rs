@@ -1512,6 +1512,10 @@ async fn a_company_sets_an_idle_timeout() {
     env.email_sign_in(&mut c, "ada@example.com", None).await;
     db.write(|c| c.execute("UPDATE sessions SET created_at = created_at - 7 * 3600000", ())).unwrap();
     assert_eq!(env.call(&mut c, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK, "7 hours in, in use");
+    // The session list says when it ends: 8 hours after its sign-in, not roll's 30 days.
+    let listed = env.call(&mut c, Method::GET, "/v1/accounts/me/sessions", None).await.json;
+    let s = &listed.as_array().unwrap()[0];
+    assert_eq!(s["expires_at"].as_i64().unwrap() - s["created_at"].as_i64().unwrap(), 8 * 3600000, "{listed}");
     db.write(|c| c.execute("UPDATE sessions SET created_at = created_at - 3600000", ())).unwrap();
     assert_eq!(env.call(&mut c, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED, "8 hours in");
 }

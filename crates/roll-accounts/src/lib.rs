@@ -693,7 +693,7 @@ impl Accounts {
 
     pub fn sessions_of(&self, user: &str, current: &str) -> Result<Vec<SessionInfo>> {
         let now = self.db.now_ms()?;
-        Ok(self.db.read(|c| {
+        let all = self.db.read(|c| {
             c.query(
                 "SELECT id, created_at, seen_at, expires_at, user_agent FROM sessions WHERE user_id = ? AND level = 'full' AND expires_at > ? ORDER BY created_at DESC, id",
                 params![user, now],
@@ -702,7 +702,18 @@ impl Accounts {
                     Ok(SessionInfo { current: id == current, id, created_at: r.get(1)?, seen_at: r.get(2)?, expires_at: r.get(3)?, user_agent: r.get(4)? })
                 },
             )
-        })?)
+        })?;
+        // As `resolve` sees them: the company's idle timeout and longest session end some early.
+        let policy = self.account_policy()?;
+        let (max, idle) = (policy.max_session_ms(), policy.idle_ms());
+        Ok(all
+            .into_iter()
+            .filter(|s| s.created_at + max > now && s.seen_at + idle > now)
+            .map(|mut s| {
+                s.expires_at = s.expires_at.min(s.created_at + max);
+                s
+            })
+            .collect())
     }
 
     pub(crate) fn session_info(&self, id: &str) -> Result<SessionInfo> {
