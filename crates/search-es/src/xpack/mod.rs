@@ -45,7 +45,7 @@ pub mod text_structure;
 pub mod transform;
 pub mod watcher;
 
-use crate::error::EsResult;
+use crate::api::Handler;
 use crate::json::Value;
 use crate::obj;
 use crate::rest::{Ctx, Reply};
@@ -124,16 +124,16 @@ macro_rules! handlers {
         /// ([`internal::call`]) are made as the client, so they read and write only what it may,
         /// under its document and field level security; work that needs the cluster's own
         /// authority (system indices) uses [`internal::call_system`].
-        pub async fn dispatch($ctx: &Ctx<'_>) -> EsResult<Reply> {
-            // Boxed: the handlers' futures are large, and a second copy inline would double the
-            // dispatch's stack.
-            internal::as_caller(internal::Caller::of($ctx), Box::pin(dispatch_api($ctx))).await
+        pub fn dispatch<'a>($ctx: &'a Ctx<'_>) -> Handler<'a> {
+            Box::pin(internal::as_caller(internal::Caller::of($ctx), dispatch_api($ctx)))
         }
 
-        async fn dispatch_api($ctx: &Ctx<'_>) -> EsResult<Reply> {
+        /// Picks the handler, as [`crate::api::dispatch`] does (each arm's future made in a
+        /// function of its own and boxed, so no frame holds every arm's).
+        fn dispatch_api<'a>($ctx: &'a Ctx<'_>) -> Handler<'a> {
             match $ctx.api {
-                $( $(Api::$api)|+ => $e, )*
-                other => Err(crate::error::EsError::not_implemented(other.name())),
+                $( $(Api::$api)|+ => crate::api::handler(move || async move { $e }), )*
+                other => Box::pin(std::future::ready(Err(crate::error::EsError::not_implemented(other.name())))),
             }
         }
 

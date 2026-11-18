@@ -616,8 +616,8 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest, admitted: Option<Admit
                 };
                 match admission {
                     Ok(admission) => {
-                        // Boxed: the dispatch future is large, and internal calls nest it.
-                        let r = crate::xpack::security::in_workflow(&ctx, Box::pin(dispatch_off_reactor(&ctx))).await;
+                        // Not boxed: the handler's future is (`crate::api::dispatch`).
+                        let r = crate::xpack::security::in_workflow(&ctx, dispatch_off_reactor(&ctx)).await;
                         drop(admission);
                         r
                     }
