@@ -34,7 +34,7 @@ impl Resolver for DefaultBranch {
 /// Signed-in people: a cookie `rls_<user>` is that user's session; a user taken out is disabled.
 /// The people accounts knows, and what they've been mailed (`user: subject`).
 #[derive(Default)]
-struct People(std::sync::Mutex<std::collections::HashMap<String, roll_auth::SignedIn>>, std::sync::Mutex<Vec<String>>);
+struct People(std::sync::Mutex<std::collections::HashMap<String, roll_auth::SignedIn>>, std::sync::Mutex<Vec<String>>, std::sync::Mutex<std::collections::HashSet<String>>);
 
 impl People {
     fn add(&self, user: &str, handle: &str) {
@@ -70,6 +70,11 @@ impl roll_auth::Sessions for People {
     fn person_by_email<'a>(&'a self, email: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SignedIn>, String>> {
         let p = self.0.lock().unwrap().values().find(|p| format!("{}@acme.test", p.handle) == email.to_lowercase()).cloned();
         Box::pin(async move { Ok(p) })
+    }
+    /// Fresh unless the test made the person's sessions stale.
+    fn fresh<'a>(&'a self, user: &'a str, _session: &'a str) -> roll_auth::BoxFuture<'a, Result<bool, String>> {
+        let stale = self.2.lock().unwrap().contains(user);
+        Box::pin(async move { Ok(!stale) })
     }
     fn admins(&self) -> roll_auth::BoxFuture<'_, Result<Vec<String>, String>> {
         Box::pin(async { Ok(vec!["usr_root".to_string()]) })
@@ -2399,4 +2404,19 @@ async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
     // Removing the app ends its people's tokens (alice's and root's; bob's was revoked already).
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/enterprise/apps/{client_id}"), None).await.1["revoked"], 2);
     assert_eq!(d.call(&token2, Method::GET, "/v1/access", None).await.0, StatusCode::UNAUTHORIZED);
+}
+
+/// Sudo mode (docs/accounts.md): a token made from a person's session needs a recent proof; the
+/// operator's token, which has no session, doesn't.
+#[tokio::test]
+async fn a_token_from_a_session_needs_a_recent_proof() {
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
+    d.people.2.lock().unwrap().insert("usr_alice".into());
+    let (s, e) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "ci", "rules": rules }))).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("reauth_required")), "{e}");
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "ci", "rules": rules }))).await.0, StatusCode::CREATED);
+    d.people.2.lock().unwrap().clear();
+    assert_eq!(d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "ci", "rules": rules }))).await.0, StatusCode::CREATED);
 }

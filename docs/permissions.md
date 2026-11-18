@@ -890,6 +890,10 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
 With accounts (docs/accounts.md), a signed-in person who isn't an admin makes tokens and connects
 MCP clients for themselves, as GitHub's fine-grained tokens act for the person who made them:
 
+- Sudo mode (docs/accounts.md): a token made from a session (a person's, or an admin's) needs a
+  sign-in or a confirmation in the last two hours, else 403 `{code: "reauth_required"}`; the
+  dashboard asks "Confirm it's you" and makes it then. The operator's token and a token's own
+  tokens have no session to prove.
 - `POST /v1/access/tokens` with their session makes a grant with `user: "usr_…"`, and so does the
   consent screen. A token theirs makes is theirs too.
 - **An admin approves what reaches far** (GitHub's organization approval of fine-grained tokens).
@@ -1113,7 +1117,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
 | `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}`; `?product=` (and `&resource=`) only those with a rule on that product by name (naming that `{id}` or `{project}`), as a product's page lists its own tokens; `?kind=workload` the workload tokens instead |
-| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?}` → 201 `{grant, token}`; `token` is shown this once |
+| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?}` → 201 `{grant, token}`; `token` is shown this once; 403 `reauth_required` from a session without a recent proof |
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |

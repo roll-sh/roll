@@ -406,7 +406,9 @@ or make someone an admin.
   a sign-in method. From an admin's session: changing a person's `admin` or `disabled`, an invite
   that makes an admin, and adding, changing or removing an SSO connection or its SCIM token. The
   operator's token has no session: it's exempt. Turning TOTP off and new recovery codes already
-  take a code.
+  take a code. Making a roll token from a session (`POST /v1/access/tokens`, a person's or an
+  admin's) needs it too: roll-access asks `roll_auth::Sessions::fresh`, so a stolen cookie can't
+  mint a long-lived token (a token a token makes is within that token).
 - Without a recent proof: 403 `{code: "reauth_required"}`. `GET /v1/accounts/me/reauth` says
   until when the session is fresh and how its person can confirm (`totp`, `passkey`, `email`),
   and `POST /v1/accounts/me/reauth` takes `{code}` (TOTP or a recovery code), `{challenge, code}`
@@ -414,7 +416,8 @@ or make someone an admin.
   proves nothing) or `{id, credential}` (a passkey, from `POST /me/reauth/passkey/options`, only
   their own). It's fresh for another two hours (`sessions.verified_at`).
 - The dashboard asks in place: the change's call answers `reauth_required`, a "Confirm it's you"
-  dialog takes the proof, and the call runs once more (`onReauthRequired` in `accounts-api.ts`).
+  dialog (mounted by the app shell) takes the proof, and the call runs once more (`withReauth` in
+  `lib/reauth.ts`, used by the accounts client and every product's `call` in `roll-api.ts`).
 - Each confirmation, and each refused one, is in the person's security log (`reauth`).
 
 ## Routes

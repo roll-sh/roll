@@ -53,6 +53,9 @@ pub enum Error {
     Conflict(String),
     #[error("{0}")]
     TooMany(String),
+    /// Sudo mode: the session must prove who it is again first (403 `reauth_required`).
+    #[error("{0}")]
+    ReauthRequired(String),
     /// An OAuth error (RFC 6749 §5.2): its code and description.
     #[error("{1}")]
     OAuth(&'static str, String),
@@ -71,6 +74,7 @@ impl IntoResponse for Error {
             Error::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             Error::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, "too_many"),
+            Error::ReauthRequired(_) => (StatusCode::FORBIDDEN, "reauth_required"),
             Error::OAuth(code, desc) => {
                 let status = if *code == "invalid_client" { StatusCode::UNAUTHORIZED } else { StatusCode::BAD_REQUEST };
                 return (status, [("cache-control", "no-store")], Json(serde_json::json!({ "error": code, "error_description": desc }))).into_response();

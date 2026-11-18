@@ -26,6 +26,13 @@ impl Accounts {
         Ok(at.map(|t| t + self.sudo_ms()).unwrap_or(0))
     }
 
+    /// Whether `user`'s session `session` proved who it is recently (for other products: a token
+    /// made from a session).
+    pub(crate) fn fresh_for(&self, user: &str, session: &str) -> Result<bool> {
+        let owner = self.db.read(|c| c.query_row("SELECT user_id FROM sessions WHERE id = ?", [session], |r| r.get::<_, String>(0)).optional())?;
+        Ok(owner.as_deref() == Some(user) && self.fresh_until(session)? > self.db.now_ms()?)
+    }
+
     /// Refused unless session `session` proved who it is recently.
     pub(crate) fn fresh(&self, session: &str) -> Result<()> {
         if self.fresh_until(session)? > self.db.now_ms()? {

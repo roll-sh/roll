@@ -7,6 +7,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { notifyTokenChanged, setCsrf, withSession } from "./code-token";
 import { ROLL_API } from "./roll-api";
+import { withReauth } from "./reauth";
 
 export type Provider = "github" | "google";
 
@@ -62,24 +63,11 @@ export class AccountsError extends Error {
   }
 }
 
-/**
- * Sudo mode (docs/accounts.md): a change to how an account is reached answers 403
- * `reauth_required` without a recent proof. A mounted `ReauthDialog` registers here: the call
- * waits for the person to confirm it's them, then runs once more.
- */
-let confirmIdentity: (() => Promise<void>) | null = null;
-export function onReauthRequired(f: (() => Promise<void>) | null) {
-  confirmIdentity = f;
-}
+export { onReauthRequired } from "./reauth";
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-  try {
-    return await callOnce<T>(method, path, body);
-  } catch (e) {
-    if (!(e instanceof AccountsError && e.code === "reauth_required" && confirmIdentity)) throw e;
-    await confirmIdentity();
-    return callOnce<T>(method, path, body);
-  }
+/** A call, asking the person to confirm it's them when sudo mode wants it (`lib/reauth.ts`). */
+function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  return withReauth(() => callOnce<T>(method, path, body));
 }
 
 async function callOnce<T>(method: string, path: string, body?: unknown): Promise<T> {
