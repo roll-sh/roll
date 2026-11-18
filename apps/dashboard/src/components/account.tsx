@@ -1,7 +1,8 @@
-import { Check, Copy, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
+import { Building2, Check, Copy, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { accountsApi, refreshSession, useSession, type Invite, type Provider, type Session, type User } from "@/lib/accounts-api";
+import { accountsApi, activityText, refreshSession, useSession, type Activity, type Invite, type Provider, type Session, type User } from "@/lib/accounts-api";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
+import { SsoSection } from "./account-sso";
 import { AppShell } from "./app-shell";
 
 const card = "rounded-xl border border-line-2 bg-sheet inset-shadow-highlight";
@@ -40,8 +41,10 @@ export function AccountPage() {
           <Methods user={user} />
           <TwoFactor user={user} onChange={reload} />
           <Sessions />
+          <RecentActivity me={user.id} />
           {user.admin && <Invites />}
           {user.admin && <Users me={user.id} />}
+          {user.admin && <SsoSection />}
         </div>
       )}
     </AppShell>
@@ -94,11 +97,12 @@ function Profile({ user, onChange }: { user: User; onChange: (u: User) => void }
 const PROVIDER: Record<Provider, { label: string; Mark: typeof GitHubMark }> = { github: { label: "GitHub", Mark: GitHubMark }, google: { label: "Google", Mark: GoogleMark } };
 
 function Methods({ user }: { user: User }) {
-  const [providers, setProviders] = useState<{ github: boolean; google: boolean } | null>(null);
+  const [providers, setProviders] = useState<{ github: boolean; google: boolean; sso?: boolean } | null>(null);
   const [error, setError] = useState<string | null>(new URLSearchParams(typeof window === "undefined" ? "" : window.location.search).get("error"));
   useEffect(() => {
     accountsApi.info().then((i) => setProviders(i.providers), () => setProviders({ github: false, google: false }));
   }, []);
+  const sso = user.identities.find((i) => i.provider.startsWith("sso:"));
   return (
     <Section title="Sign-in methods" lead="Codes by email always work. Link GitHub or Google to sign in with them too.">
       <div className={card}>
@@ -132,6 +136,24 @@ function Methods({ user }: { user: User }) {
               </div>
             );
           })}
+        {(providers?.sso || sso) && (
+          <div className="flex items-center gap-3 border-t border-line px-4 py-3 first:border-t-0">
+            <Building2 className="size-4 text-muted" strokeWidth={1.5} />
+            <span className="min-w-0 flex-1 text-[12.5px]">
+              Your company&apos;s sign-in
+              {sso && <span className="ml-2 text-subtle">{sso.email}</span>}
+            </span>
+            {sso ? (
+              <button onClick={() => accountsApi.unlink(sso.provider).then(() => refreshSession().then(() => window.location.reload()), (e) => setError(errorText(e)))} className={btn}>
+                Unlink
+              </button>
+            ) : (
+              <button onClick={() => accountsApi.ssoLink().then(({ url }) => window.location.assign(url), (e) => setError(errorText(e)))} className={btn}>
+                Link
+              </button>
+            )}
+          </div>
+        )}
         <div className="flex items-center gap-3 border-t border-line px-4 py-3 first:border-t-0">
           <KeyRound className="size-4 text-muted" />
           <span className="flex-1 text-[12.5px]">
@@ -139,7 +161,11 @@ function Methods({ user }: { user: User }) {
           </span>
         </div>
       </div>
-      {error && <p className="mt-2 text-[12px] text-danger">{error === "linked_elsewhere" ? "That identity belongs to another roll account." : error}</p>}
+      {error && <p className="mt-2 text-[12px] text-danger">{error === "linked_elsewhere"
+            ? "That identity belongs to another roll account."
+            : error === "link_email"
+              ? "Your company's sign-in signed in another address than this account's."
+              : error}</p>}
     </Section>
   );
 }
@@ -297,6 +323,47 @@ const browser = (ua: string) => {
   const os = /Mac OS X/.test(ua) ? "macOS" : /Windows/.test(ua) ? "Windows" : /Android/.test(ua) ? "Android" : /iPhone|iPad/.test(ua) ? "iOS" : /Linux/.test(ua) ? "Linux" : "";
   return os ? `${name} on ${os}` : name;
 };
+
+/** Your security log (GitHub's): sign-ins, refused ones too, and changes to your account. */
+function RecentActivity({ me }: { me: string }) {
+  const [list, setList] = useState<Activity[] | null>(null);
+  const [more, setMore] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(
+    (before?: number) =>
+      accountsApi.activity(before).then(
+        ({ events }) => {
+          setList((l) => (before && l ? [...l, ...events] : events));
+          setMore(events.length >= 50);
+        },
+        (e) => setError(errorText(e)),
+      ),
+    [],
+  );
+  useEffect(() => void load(), [load]);
+  return (
+    <Section id="activity" title="Recent activity" lead="Sign-ins to your account, refused ones too, and every change to it. Something you don't recognise? End your other sessions and tell an admin.">
+      {error && <p className="text-[12px] text-danger">{error}</p>}
+      {list && list.length === 0 && <p className="text-[12.5px] text-subtle">Nothing yet.</p>}
+      {list && list.length > 0 && (
+        <div className={card}>
+          {list.map((e, i) => (
+            <div key={`${e.at}-${i}`} className="flex items-baseline gap-3 border-t border-line px-4 py-2.5 first:border-t-0 text-[12.5px]">
+              <span className={`min-w-0 flex-1 ${e.ok ? "" : "text-danger"}`}>{activityText(e, me)}</span>
+              <span className="hidden truncate font-mono text-[11px] text-subtle sm:inline">{[e.ip, e.user_agent?.split(" ")[0]].filter(Boolean).join(" · ")}</span>
+              <span className="shrink-0 text-[11px] text-subtle">{when(e.at)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {more && list && (
+        <button onClick={() => void load(list[list.length - 1].at)} className={`${btn} mt-2`}>
+          Older
+        </button>
+      )}
+    </Section>
+  );
+}
 
 function Invites() {
   const [list, setList] = useState<Invite[] | null>(null);

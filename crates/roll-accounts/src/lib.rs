@@ -10,8 +10,11 @@
 //!   (`roll_auth::check`) resolves session cookies with.
 
 pub mod api;
+pub mod audit;
 mod mail;
 mod oauth;
+mod scim;
+pub mod sso;
 mod twofactor;
 
 use code_sql::{Db, OptionalExtension, Target, params};
@@ -117,6 +120,31 @@ CREATE TABLE IF NOT EXISTS throttle (
     key TEXT PRIMARY KEY,
     n INTEGER NOT NULL,
     since INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS sso_connections (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    issuer TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    client_secret TEXT NOT NULL,
+    domains TEXT NOT NULL,
+    verified TEXT NOT NULL,
+    enforce INTEGER NOT NULL,
+    provision INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    challenge TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS scim_tokens (
+    connection_id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS scim_users (
+    connection_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    external_id TEXT,
+    user_name TEXT,
+    PRIMARY KEY (connection_id, user_id)
 ) WITHOUT ROWID;
 ";
 
@@ -227,6 +255,9 @@ pub struct Config {
     /// The gate checks nothing (a daemon on loopback without `ROLL_ADMIN_TOKEN`): anyone may use
     /// the admin routes, as every other route.
     pub open: bool,
+    /// `ROLL_ACCOUNTS_SSO_ALLOW_PRIVATE`: SSO providers on private addresses and plain http
+    /// (local development and tests only; never on by itself).
+    pub sso_allow_private: bool,
 }
 
 impl Config {
@@ -247,6 +278,7 @@ impl Config {
             google: app("ROLL_ACCOUNTS_GOOGLE_CLIENT_ID", "ROLL_ACCOUNTS_GOOGLE_CLIENT_SECRET").map(|a| ProviderConfig::new(Provider::Google, a)),
             secret_key: var("ROLL_SECRET_KEY").map(|k| Secret::new(&k)),
             open,
+            sso_allow_private: var("ROLL_ACCOUNTS_SSO_ALLOW_PRIVATE").is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
         }
     }
 
@@ -344,6 +376,14 @@ pub struct Accounts {
     config: Config,
     mailer: Mailer,
     http: reqwest::Client,
+    /// SSO providers' URLs are the operator's choice: never a private address, never a redirect.
+    sso_http: reqwest::Client,
+    /// SSO providers' endpoints and keys (or that they didn't answer), by issuer, with when.
+    sso_discovery: std::sync::Mutex<std::collections::HashMap<String, (sso::Discovered, std::time::Instant)>>,
+    /// TXT records, for proving SSO domains (DNS over HTTPS; a table in tests).
+    txt: std::sync::RwLock<Arc<dyn sso::TxtLookup>>,
+    /// Where account events go (rolld: roll-access's audit log); none until it's set.
+    audit: std::sync::RwLock<Option<Arc<dyn audit::Audit>>>,
     owners: Option<Arc<dyn Owners>>,
 }
 
@@ -361,7 +401,35 @@ impl Accounts {
         db.ensure_schema(SCHEMA)?;
         let mailer = Mailer::new(&config.mail).await?;
         let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(10)).user_agent("roll").build()?;
-        Ok(Accounts { db, config, mailer, http, owners })
+        // No proxy: a proxy would resolve names itself, past the private-address guard.
+        let mut sso = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(10)).user_agent("roll").no_proxy();
+        if !config.sso_allow_private {
+            sso = sso.dns_resolver(Arc::new(roll_net::PublicOnly));
+        }
+        let sso_http = sso.build()?;
+        // Who disabled an account (`admin`, `scim:<connection>`): SCIM lifts only its own.
+        if !db.has_column("users", "disabled_by")? {
+            db.add_column("users", "disabled_by", "TEXT")?;
+        }
+        if !db.has_column("scim_users", "user_name")? {
+            db.add_column("scim_users", "user_name", "TEXT")?;
+        }
+        // How each session began (`sso`, or not): enforcing SSO ends the others.
+        if !db.has_column("sessions", "method")? {
+            db.add_column("sessions", "method", "TEXT")?;
+        }
+        let doh = std::env::var("ROLL_ACCOUNTS_DOH").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "https://cloudflare-dns.com/dns-query".into());
+        let txt: Arc<dyn sso::TxtLookup> = Arc::new(sso::Doh { client: sso_http.clone(), url: doh });
+        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners })
+    }
+
+    /// Where SSO domains' TXT records are read (tests answer from a table).
+    pub fn set_txt_lookup(&self, lookup: Arc<dyn sso::TxtLookup>) {
+        *self.txt.write().unwrap_or_else(|e| e.into_inner()) = lookup;
+    }
+
+    pub(crate) fn txt_lookup(&self) -> Arc<dyn sso::TxtLookup> {
+        self.txt.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn config(&self) -> &Config {
@@ -423,8 +491,20 @@ impl Accounts {
         Ok(row.filter(|(_, _, disabled, _)| !disabled).map(|(handle, admin, _, code_owner)| roll_auth::SignedIn { user: user.to_string(), handle, admin, code_owner, session: String::new() }))
     }
 
-    /// A new session for `user`: full, or owing a second factor when they have one on.
+    /// A new session for `user`: full, or owing a second factor when they have one on. Refused
+    /// for a person whose domain's SSO connection enforces it ([`Accounts::issue_sso`] signs them
+    /// in).
     pub fn issue(&self, user: &str, user_agent: &str) -> Result<Issued> {
+        self.sso_not_enforced(user)?;
+        self.issue_session(user, user_agent, None)
+    }
+
+    /// A session for a person their company's SSO provider just signed in.
+    pub(crate) fn issue_sso(&self, user: &str, user_agent: &str) -> Result<Issued> {
+        self.issue_session(user, user_agent, Some("sso"))
+    }
+
+    fn issue_session(&self, user: &str, user_agent: &str, method: Option<&str>) -> Result<Issued> {
         self.provision_owner(user);
         let now = self.db.now_ms()?;
         let token = new_token("rls");
@@ -441,8 +521,8 @@ impl Accounts {
             // The user's sessions that ended go with each new one: no sweeper needed.
             c.execute("DELETE FROM sessions WHERE user_id = ? AND (expires_at <= ? OR (level = 'full' AND seen_at <= ?))", params![user, now, now - SESSION_IDLE_MS])?;
             c.execute(
-                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                params![sha256_hex(&token), id, user, level, now, now, now + ttl, user_agent],
+                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![sha256_hex(&token), id, user, level, now, now, now + ttl, user_agent, method],
             )?;
             Ok(mfa)
         })?;
@@ -451,6 +531,12 @@ impl Accounts {
 
     /// The second factor passed: the owing session is replaced by a new, full one.
     pub(crate) fn complete(&self, owed: &roll_auth::SecondFactorOwed, user_agent: &str) -> Result<Issued> {
+        // A sign-in that began some other way while SSO was enforced (or before it was) doesn't
+        // finish: the provider signs those people in.
+        let method = self.db.read(|c| c.query_row("SELECT method FROM sessions WHERE id = ?", [owed.session.as_str()], |r| r.get::<_, Option<String>>(0)).optional())?.flatten();
+        if method.as_deref() != Some("sso") {
+            self.sso_not_enforced(&owed.user)?;
+        }
         let now = self.db.now_ms()?;
         let token = new_token("rls");
         let id = new_id("ses");
@@ -460,8 +546,8 @@ impl Accounts {
                 return Err(Error::signed_out());
             }
             c.execute(
-                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent) VALUES (?, ?, ?, 'full', ?, ?, ?, ?)",
-                params![sha256_hex(&token), id, owed.user, now, now, now + SESSION_TTL_MS, user_agent],
+                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method) VALUES (?, ?, ?, 'full', ?, ?, ?, ?, ?)",
+                params![sha256_hex(&token), id, owed.user, now, now, now + SESSION_TTL_MS, user_agent, method],
             )?;
             Ok(())
         })?;
@@ -531,6 +617,12 @@ impl Accounts {
 
     /// An admin's change to a user. Disabling one signs them out everywhere, in the same write.
     pub fn update_user(&self, id: &str, admin: Option<bool>, disabled: Option<bool>) -> Result<User> {
+        self.update_user_by(id, admin, disabled, "admin")
+    }
+
+    /// As [`Accounts::update_user`], saying who disables (`admin`, or `scim:<connection>`): SCIM
+    /// lifts only a disable of its own, never an admin's.
+    pub(crate) fn update_user_by(&self, id: &str, admin: Option<bool>, disabled: Option<bool>, by: &str) -> Result<User> {
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM users WHERE id = ?", [id], |_| Ok(())).optional()?.is_none() {
                 return Err(Error::NotFound(format!("no user {id}")));
@@ -539,7 +631,7 @@ impl Accounts {
                 c.execute("UPDATE users SET admin = ? WHERE id = ?", params![a, id])?;
             }
             if let Some(d) = disabled {
-                c.execute("UPDATE users SET disabled = ? WHERE id = ?", params![d, id])?;
+                c.execute("UPDATE users SET disabled = ?, disabled_by = ? WHERE id = ?", params![d, d.then_some(by), id])?;
                 if d {
                     c.execute("DELETE FROM sessions WHERE user_id = ?", [id])?;
                 }
@@ -602,7 +694,7 @@ impl Accounts {
 
     /// The first free handle from `hint` (else the email's local part): an owner name, unique
     /// among users and roll code's owners.
-    fn pick_handle(&self, hint: Option<&str>, email: &str) -> Result<String> {
+    pub(crate) fn pick_handle(&self, hint: Option<&str>, email: &str) -> Result<String> {
         let base = hint.map(slug).filter(|s| !s.is_empty()).unwrap_or_else(|| slug(email.split('@').next().unwrap_or_default()));
         let base = if base.is_empty() { "user".to_string() } else { base };
         for n in 1..=50 {
@@ -656,6 +748,30 @@ impl Accounts {
             Ok(())
         })?;
         tracing::info!(user = %id, "accounts: user created from an invite");
+        Ok(id)
+    }
+
+    /// A new account for a person an SSO connection vouched for (its sign-in with `provision`, or
+    /// its SCIM): never an admin, invited by `by`, linked to `identity` when there is one.
+    pub(crate) fn provision_user(&self, email: &str, name: Option<&str>, identity: Option<(&str, &str)>, by: &str) -> Result<String> {
+        let handle = self.pick_handle(None, email)?;
+        let id = new_id("usr");
+        let now = self.db.now_ms()?;
+        let name: String = name.map(str::trim).filter(|n| !n.is_empty()).unwrap_or(&handle).chars().take(100).collect();
+        self.db.write(|c| {
+            if c.query_row("SELECT 1 FROM users WHERE email = ? OR handle = ?", [email, handle.as_str()], |_| Ok(())).optional()?.is_some() {
+                return Err(Error::Conflict("an account has this email or handle; try again".into()));
+            }
+            c.execute(
+                "INSERT INTO users (id, email, handle, name, admin, disabled, code_owner_id, invited_by, created_at) VALUES (?, ?, ?, ?, 0, 0, NULL, ?, ?)",
+                params![id, email, handle, name, by, now],
+            )?;
+            if let Some((provider, subject)) = identity {
+                c.execute("INSERT INTO identities (provider, subject, user_id, email, login, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![provider, subject, id, email, email, now])?;
+            }
+            Ok(())
+        })?;
+        tracing::info!(user = %id, by = %by, "accounts: user provisioned by SSO");
         Ok(id)
     }
 
@@ -795,7 +911,8 @@ impl Accounts {
     }
 
     /// Check a challenge's code: the user it signs in (made from the invite on first sign-in).
-    pub fn email_verify(&self, challenge: &str, code: &str) -> Result<String> {
+    /// The person an email code signs in, and whether their account was made now (an invite).
+    pub fn email_verify(&self, challenge: &str, code: &str) -> Result<(String, bool)> {
         let now = self.db.now_ms()?;
         // A try is used up before the code is checked, in one write: guesses sent in parallel
         // can't share one.
@@ -819,8 +936,8 @@ impl Accounts {
         }
         self.forget(&key)?;
         match (user, invite) {
-            (Some(u), _) => Ok(u),
-            (None, Some(inv)) => self.create_user(NewUser { invite_id: &inv, email: &email, hint: None, name: None, identity: None }),
+            (Some(u), _) => Ok((u, false)),
+            (None, Some(inv)) => self.create_user(NewUser { invite_id: &inv, email: &email, hint: None, name: None, identity: None }).map(|u| (u, true)),
             (None, None) => Err(Error::bad_code()),
         }
     }
@@ -847,6 +964,23 @@ impl roll_auth::Sessions for Resolver {
 
     fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
         self.0.person(user).map_err(|e| e.to_string())
+    }
+
+    fn person_by_email<'a>(&'a self, email: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SignedIn>, String>> {
+        // As addresses are kept (ASCII, lower-cased): a look-alike letter never folds into one.
+        let (accounts, email) = (self.0.clone(), normalize_email(email).ok().filter(|e| e.is_ascii()));
+        Box::pin(async move {
+            let Some(email) = email else { return Ok(None) };
+            tokio::task::spawn_blocking(move || {
+                let id: Option<String> = accounts.db.read(|c| c.query_row("SELECT id FROM users WHERE email = ?", [email.as_str()], |r| r.get(0)).optional()).map_err(|e| e.to_string())?;
+                match id {
+                    Some(id) => accounts.person(&id).map_err(|e| e.to_string()),
+                    None => Ok(None),
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        })
     }
 
     fn tell<'a>(&'a self, user: &'a str, subject: &'a str, text: &'a str) -> roll_auth::BoxFuture<'a, Result<(), String>> {

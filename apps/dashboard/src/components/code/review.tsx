@@ -29,6 +29,7 @@ import {
   type Tone,
 } from "@/lib/review";
 import { stripAiHeader } from "@/lib/ai-review";
+import { noteCropUrl } from "@/lib/previews-api";
 import { btn, input, primary } from "../ui";
 import { AiReviewHeader } from "./ai";
 import { Markdown } from "./markdown";
@@ -249,6 +250,29 @@ const verdictIcon = (v: Verdict, dim: boolean) =>
   );
 
 /** Every review, oldest first: who, what verdict, stale or dismissed, and what they wrote. */
+/** The element a note on the preview's page is about, as the preview's screenshot run cropped it
+ * (nothing until one has, or for a viewer who can't see the preview). */
+function NoteCrop({ previewId, note }: { previewId: string; note: string }) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let url: string | null = null;
+    let live = true;
+    noteCropUrl(previewId, note).then(
+      (u) => {
+        url = u;
+        if (live) setSrc(u);
+        else if (u) URL.revokeObjectURL(u);
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [previewId, note]);
+  return src ? <img src={src} alt="The part of the preview's page the note is about" className="mt-2 max-h-56 max-w-full rounded-md border border-line" /> : null;
+}
+
 export function ReviewTimeline({
   reviews,
   status,
@@ -256,10 +280,13 @@ export function ReviewTimeline({
   canDismiss,
   onDismiss,
   busy = null,
+  previewId,
 }: {
   reviews: Review[];
   status: ReviewStatus | null;
   threads?: Thread[];
+  /** The change's preview: a note left with its page's Feedback button shows its element's picture. */
+  previewId?: string;
   /** Whether the viewer may dismiss a review (writers). */
   canDismiss?: boolean;
   /** Resolves to `undefined` when it failed. */
@@ -305,6 +332,7 @@ export function ReviewTimeline({
               )}
               {r.ai && <AiReviewHeader ai={r.ai} />}
               {r.body.trim() && <Markdown source={r.ai ? stripAiHeader(r.body) : r.body} />}
+              {previewId && r.body.startsWith("**Feedback on the preview** · ") && <NoteCrop previewId={previewId} note={r.id} />}
               {opened > 0 && (
                 <p className="text-[11px] text-subtle">
                   {opened} comment{opened === 1 ? "" : "s"} in the diff
