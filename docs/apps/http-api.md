@@ -458,6 +458,8 @@ type Environment = EnvironmentSummary & {
   scaling: { backlog: number | null; wanted: number } | null; // a worker following its work: the backlog last read (every 10 s) and the instances it wants
   wait_for_ci: boolean;
   waiting_for_ci: string | null; // the push (sha) waiting for its checks
+  build_closed?: true;      // egress roll: its builds get no secret values (a build has the default network)
+  base_updated?: string[];  // base images the live deployment was built on that have moved since in their registries
   created_at: number;
 };
 

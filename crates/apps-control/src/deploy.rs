@@ -1224,7 +1224,19 @@ impl Apps {
         let resolved = self.resolve_vars(svc, &env_row, &d.id).await?;
         // Its secret values never reach the build's log, whatever a step prints.
         self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
+        let secrets = resolved.secret_values();
         let mut build_env = resolved.vars;
+        // A closed environment's build still has the default network (BuildKit builds on no
+        // other but `host` and `none`), so it gets no secret value: none of what roll's logs hide
+        // (sealed and roll secrets values, links' credentials, URL passwords), nor a variable that
+        // holds one. Its code can't send what it never has.
+        if env_row.egress.closed() {
+            let before = build_env.len();
+            build_env.retain(|(_, v)| !secrets.iter().any(|s| !s.is_empty() && (v == s || (s.len() >= 4 && v.contains(s.as_str())))));
+            if build_env.len() < before {
+                log.line(format!("a closed environment builds without its secret values ({} left out; its instances get them)", before - build_env.len()));
+            }
+        }
         // Per deployment (the cache would never hit) or only for the running app.
         build_env.retain(|(k, _)| k != "ROLL_DEPLOYMENT" && k != "PORT");
         // The commit changes every push: out of the hash and the secrets, or no build would hit
@@ -2361,11 +2373,11 @@ impl Apps {
                             let data = serde_json::json!({ "schedule": name, "path": path, "http_status": call.status, "error": call.error });
                             let _ = this
                                 .db(move |s| {
-                                    s.set_state(&k, &v)?;
+                                    // The event first: whoever sees the call's outcome sees it said.
                                     if failed {
                                         s.add_event("cron.failed", &sid, &en, None, &data)?;
                                     }
-                                    Ok(())
+                                    s.set_state(&k, &v)
                                 })
                                 .await;
                         });

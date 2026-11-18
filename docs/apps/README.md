@@ -2117,6 +2117,13 @@ An environment with `egress: {mode: "roll", hosts}` (`PUT …/environments/{env}
 sets it on a preview's environments from the project's `egress` and `egress_hosts`) can reach
 roll and nothing else, so a fork's preview can't send its branched data anywhere:
 
+- **Builds without its secret values.** A build has Docker's default network (BuildKit builds
+  on no other but `host` and `none`), so a closed environment's build gets none of what roll's
+  logs hide (sealed and roll secrets values, links' credentials, URL passwords), nor a variable
+  that holds one: a fork's build step can't send them out. Its instances still get them all.
+  The environment says `build_closed: true`, which roll previews checks before it builds a
+  fork's head under `roll`. A build that needs one (a private registry's token) needs the
+  environment open.
 - **A network with no route out.** From its next deploy its instances run on
   `roll-apps-closed-<project>.<env>`, made `--internal` (the `.` is in no environment's name, so
   it's never another environment's open network, and a network already there with the wrong
