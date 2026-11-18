@@ -142,6 +142,21 @@ impl Accounts {
         self.sign_in_event(user.unwrap_or("anonymous"), user, method, refused, second_factor, who);
     }
 
+    /// A person confirmed it's them for sudo mode (or failed to).
+    pub(crate) fn record_reauth(&self, user: &str, method: &str, refused: Option<&Error>, who: &Who) {
+        self.record(AccountEvent {
+            actor: user.to_string(),
+            action: "reauth".into(),
+            method: "-".into(),
+            target: Some(user.to_string()),
+            ok: refused.is_none(),
+            status: refused.map(status_of).unwrap_or(200),
+            ip: who.ip,
+            user_agent: who.user_agent.clone(),
+            detail: json!({ "method": clean_id(method), "refused": refused.map(Error::redirect_code) }),
+        });
+    }
+
     /// A refused code for someone's account (`owner`, when the code was sent to one): in their
     /// security log, by nobody known, as GitHub shows failed attempts.
     pub(crate) fn record_code_refused(&self, owner: Option<&str>, method: &str, refused: &Error, who: &Who) {
@@ -189,6 +204,7 @@ fn recorded_elsewhere(route: &str) -> bool {
             route,
             "/v1/accounts/email/start" | "/v1/accounts/email/verify" | "/v1/accounts/oauth/{provider}/start" | "/v1/accounts/sso/start" | "/v1/accounts/signin/totp" | "/v1/accounts/signin/recovery" | "/v1/accounts/invites/peek"
                 | "/v1/accounts/signin/passkey" | "/v1/accounts/signin/passkey/options" | "/v1/accounts/me/passkeys/options"
+                | "/v1/accounts/me/reauth" | "/v1/accounts/me/reauth/email" | "/v1/accounts/me/reauth/passkey/options"
         )
 }
 

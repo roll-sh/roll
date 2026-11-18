@@ -490,12 +490,17 @@ impl Accounts {
     /// What `navigator.credentials.get` needs: for a sign-in owing a second factor, that person's
     /// passkeys; otherwise any passkey for roll (the browser offers its discoverable ones).
     pub fn passkey_signin_options(&self, owed: Option<&str>) -> Result<Value> {
+        self.passkey_assert_options(owed, "signin")
+    }
+
+    /// A passkey challenge for `purpose` (`signin`, or `reauth` for sudo mode: always a person's).
+    pub(crate) fn passkey_assert_options(&self, owed: Option<&str>, purpose: &str) -> Result<Value> {
         let (rp, _) = self.webauthn_site()?;
         let allow = match owed {
             Some(u) => self.credential_ids(u)?.into_iter().map(|c| json!({ "type": "public-key", "id": c })).collect(),
             None => Vec::new(),
         };
-        let (id, challenge) = self.new_challenge(owed, "signin")?;
+        let (id, challenge) = self.new_challenge(owed, purpose)?;
         Ok(json!({
             "id": id,
             "publicKey": {
@@ -522,8 +527,13 @@ impl Accounts {
     /// only preferred) never signs anyone in on its own, and an anonymous one never finishes
     /// someone's second factor with another person's passkey.
     pub(crate) fn passkey_check(&self, challenge_id: &str, credential: &Value, owed: Option<&str>) -> Result<String> {
+        self.passkey_check_for("signin", challenge_id, credential, owed)
+    }
+
+    /// [`Self::passkey_check`] for a challenge made for `purpose`.
+    pub(crate) fn passkey_check_for(&self, purpose: &str, challenge_id: &str, credential: &Value, owed: Option<&str>) -> Result<String> {
         let (rp, origin) = self.webauthn_site()?;
-        let (made_for, challenge) = self.take_challenge(challenge_id, "signin")?;
+        let (made_for, challenge) = self.take_challenge(challenge_id, purpose)?;
         if made_for.as_deref() != owed {
             return Err(Error::BadRequest("that passkey request was made for another sign-in: start again".into(), Some("passkey")));
         }
