@@ -90,7 +90,15 @@ pub struct Holder {
     /// An identity an incident's cut-off disabled: it doesn't log in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_at: Option<i64>,
+    /// Why this caller's cut-off would leave it: a token that reaches beyond this project is only
+    /// the operator's to revoke ([`BEYOND`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<&'static str>,
 }
+
+/// Why a cut-off leaves a token to the operator: its rules reach past this project
+/// ([`crate::access::confined_to`]), so revoking it would cut off other projects too.
+pub const BEYOND: &str = "reaches beyond this project: the operator revokes it";
 
 #[derive(Debug, Serialize)]
 pub struct SyncReach {
@@ -136,6 +144,8 @@ impl Secrets {
             Some(w) => w.grants()?,
             None => vec![],
         };
+        // A project's admin cuts off only what stays inside the project; the operator, anything.
+        let operator = caller.grants.everything();
         let tokens = all
             .into_iter()
             .filter_map(|g| {
@@ -143,15 +153,18 @@ impl Secrets {
                 // projects (a token that reaches nothing here isn't listed, nor its name or person).
                 let grants = self.grant_grants(&g).ok()?;
                 let actions: Vec<Action> = ACTIONS.into_iter().filter(|a| grants.allows(*a, &Scope::at(project, slug, &path))).collect();
-                (!actions.is_empty()).then(|| Holder { id: g.id.to_string(), name: g.name.to_string(), actions, expires_at: None, last_used_at: None, created_by: g.user.as_deref().unwrap_or("operator").to_string(), disabled_at: None })
+                let skipped = (!operator && !crate::access::confined_to(&g, project)).then_some(BEYOND);
+                (!actions.is_empty()).then(|| Holder { id: g.id.to_string(), name: g.name.to_string(), actions, expires_at: None, last_used_at: None, created_by: g.user.as_deref().unwrap_or("operator").to_string(), disabled_at: None, skipped })
             })
             .collect();
         let identities = self
             .identities(project, caller)?
             .into_iter()
+            // The project's own rows, and their logins carry one rule naming this project
+            // (`access::rule`): always confined, so any of its admins cuts them off.
             .filter_map(|i| {
                 let actions = here(project, &i.environments, &i.paths, &i.actions, slug, &path);
-                (!actions.is_empty()).then_some(Holder { id: i.id, name: format!("{} ({} {})", i.name, i.issuer, i.subject), actions, expires_at: None, last_used_at: i.last_used_at, created_by: i.created_by, disabled_at: i.disabled_at })
+                (!actions.is_empty()).then_some(Holder { id: i.id, name: format!("{} ({} {})", i.name, i.issuer, i.subject), actions, expires_at: None, last_used_at: i.last_used_at, created_by: i.created_by, disabled_at: i.disabled_at, skipped: None })
             })
             .collect();
         let projects = self.exports(project, slug, &path, caller)?.into_iter().map(|e| e.project).collect();

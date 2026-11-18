@@ -1645,6 +1645,9 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                         println!("{title:<18} {n}");
                     }
                 }
+                for x in r["skipped"].as_array().into_iter().flatten() {
+                    println!("{:<18} {} ({})", "left", s(&x["name"]), s(&x["why"]));
+                }
                 if r["logins"].as_u64().unwrap_or(0) > 0 {
                     println!("{:<18} {}", "revoked logins", r["logins"]);
                 }
@@ -1677,7 +1680,8 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 for h in list.as_array().into_iter().flatten() {
                     let actions = h["actions"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_default();
                     let used = h["last_used_at"].as_i64().map(|t| format!("used {}", ago(t))).unwrap_or_else(|| "never used".into());
-                    println!("  {:<10} {:<32} {actions:<22} {used}", &title[..title.len() - 1], s(&h["name"]));
+                    let skipped = h["skipped"].as_str().map(|w| format!(" ({w})")).unwrap_or_default();
+                    println!("  {:<10} {:<32} {actions:<22} {used}{skipped}", &title[..title.len() - 1], s(&h["name"]));
                 }
             }
             for sy in v["syncs"].as_array().into_iter().flatten() {
@@ -2618,7 +2622,9 @@ fn cut_off_plan(v: &Value, freeze: bool) -> Vec<String> {
             out.push(format!("{} {title}: {}", names.len(), names.join(", ")));
         }
     };
-    line("token(s) revoked", list("tokens", &|h| s(&h["name"])));
+    let tokens = |skipped: bool| v["tokens"].as_array().map(|a| a.iter().filter(|h| h["skipped"].is_string() == skipped).map(|h| s(&h["name"])).collect()).unwrap_or_default();
+    line("token(s) revoked", tokens(false));
+    line("token(s) left, reaching beyond this project: the operator revokes them", tokens(true));
     line("identity(ies) disabled, their logins revoked", list("identities", &|h| s(&h["name"])));
     line("lease(s) ended", list("leases", &|l| format!("{} for {}", s(&l["key"]), s(&l["consumer"]))));
     line("share(s) expired", list("shares", &|x| s(&x["id"])));

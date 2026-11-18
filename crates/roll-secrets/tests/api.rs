@@ -2851,6 +2851,38 @@ async fn a_cut_off_is_an_admins_and_revokes_the_tokens_that_reach_a_folder_and_n
 }
 
 #[tokio::test]
+async fn a_projects_admin_cuts_off_only_its_own_tokens_and_leaves_the_operators_to_the_operator() {
+    let api = Api::new().await;
+    let (_, mine) = api.as_ada(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "ada-shop" }))).await;
+    let mine = mine["id"].as_str().unwrap().to_string();
+    let at = |rest: &str| format!("/v1/secrets/projects/{mine}{rest}");
+    api.as_ada(Method::PUT, &at("/environments/production/secrets/STRIPE_KEY"), Some(json!({ "value": "sk_test_fake" }))).await;
+    // The operator's CI token reaches every project's secrets; hers names only her project.
+    let everywhere = roll_auth::scope::Rule { product: "secrets".into(), resources: roll_auth::scope::Resources::All, environments: None, paths: None, actions: BTreeMap::from([(roll_auth::scope::Action::Read, roll_auth::scope::Effect::Allow)]) };
+    let (_, ops) = api.gate.grant("operator-ci", everywhere, None);
+    let confined = |name: &str| api.gate.grant(name, roll_secrets::access::rule(&mine, None, None, &[roll_secrets::Action::Read]), None).1;
+    let ci = confined("ada-ci");
+    let live = |id: &str| api.gate.tokens.lock().unwrap().values().any(|g| &*g.id == id);
+    let beyond = "reaches beyond this project: the operator revokes it";
+    let (_, reach) = api.as_ada(Method::GET, &at("/environments/production/reach?path=/"), None).await;
+    let marked: Vec<(&str, &Value)> = reach["tokens"].as_array().unwrap().iter().map(|h| (h["name"].as_str().unwrap(), &h["skipped"])).collect();
+    assert_eq!(marked.len(), 2, "{reach}");
+    assert!(marked.contains(&("operator-ci", &json!(beyond))) && marked.contains(&("ada-ci", &Value::Null)), "{reach}");
+    // Her cut-off revokes her project's token and lists the operator's, which keeps working.
+    let (s, r) = api.as_ada(Method::POST, &at("/environments/production/reach/cut-off?path=/"), Some(json!({ "why": "fake incident" }))).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!((ids(&r["tokens"]), r["skipped"].clone()), (vec!["ada-ci"], json!([{ "id": ops, "name": "operator-ci", "why": beyond }])), "{r}");
+    assert!(live(&ops) && !live(&ci));
+    // The operator's same cut-off revokes both kinds.
+    let ci = confined("ada-ci-2");
+    let r = api.ok(Method::POST, &at("/environments/production/reach/cut-off?path=/"), Some(json!({ "why": "fake incident" }))).await;
+    let mut cut = ids(&r["tokens"]);
+    cut.sort();
+    assert_eq!((cut, r["skipped"].clone()), (vec!["ada-ci-2", "operator-ci"], json!([])), "{r}");
+    assert!(!live(&ops) && !live(&ci));
+}
+
+#[tokio::test]
 async fn a_cut_off_identity_doesnt_log_in_again_and_its_logins_end() {
     let api = Api::new().await;
     api.set("production", "API_KEY", "fake-prod-key").await;

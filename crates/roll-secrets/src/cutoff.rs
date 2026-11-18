@@ -3,7 +3,10 @@
 //! and the answer says what was cut and what couldn't be, and why.
 //!
 //! - **Tokens** (roll-access's grants reach lists) are revoked through [`Workloads::revoke_many`]
-//!   (rolld: `Access::revoke_many`), at most [`REVOKE_MAX`] a call: all or none per call.
+//!   (rolld: `Access::revoke_many`), at most [`REVOKE_MAX`] a call: all or none per call. A
+//!   project's admin revokes only tokens confined to the project
+//!   ([`confined_to`](crate::access::confined_to)); one that reaches beyond it (the operator's
+//!   all-projects token, say) is listed as `skipped`, for the operator, who revokes any of them.
 //! - **Identities** that reach it are disabled (they don't log in until an admin enables them),
 //!   and their live logins' grants go through `revoke_many` too.
 //! - **Leases** on its keys end, their credentials revoked outside the transaction, as ending one
@@ -84,6 +87,14 @@ pub struct Cut {
     pub name: String,
 }
 
+/// A token a cut-off left alone, and why (it reaches beyond the project: the operator's to revoke).
+#[derive(Debug, Serialize)]
+pub struct Skipped {
+    pub id: String,
+    pub name: String,
+    pub why: &'static str,
+}
+
 /// What couldn't be cut, and why; the rest went on.
 #[derive(Debug, Serialize)]
 pub struct Failure {
@@ -101,6 +112,8 @@ pub struct CutOff {
     pub key: Option<String>,
     pub why: String,
     pub tokens: Vec<Cut>,
+    /// Tokens that reach it but beyond the project too, left for the operator to revoke.
+    pub skipped: Vec<Skipped>,
     /// Identities disabled now.
     pub identities: Vec<Cut>,
     /// Live logins of the identities that reach it, revoked.
@@ -134,8 +147,13 @@ impl CutOff {
         .collect();
         let cut = if parts.is_empty() { "nothing left to cut".to_string() } else { format!("cut {}", parts.join(", ")) };
         let frozen = if self.frozen { ", frozen" } else { "" };
+        let skipped = match self.skipped.len() {
+            0 => String::new(),
+            1 => "; 1 token reaches beyond the project, left to the operator".into(),
+            k => format!("; {k} tokens reach beyond the project, left to the operator"),
+        };
         let failed = if self.failed.is_empty() { String::new() } else { format!("; failed: {}", self.failed.iter().map(|f| f.what).collect::<Vec<_>>().join(", ")) };
-        format!("{cut}{frozen}{failed}: {}", self.why).chars().take(1000).collect()
+        format!("{cut}{frozen}{skipped}{failed}: {}", self.why).chars().take(1000).collect()
     }
 }
 
@@ -144,7 +162,7 @@ type Refused = (Vec<String>, String);
 
 impl Secrets {
     /// Cut off everything that can read `slug:path` (or its `key`): see the module's doc. A
-    /// project admin's, as reach is.
+    /// project admin's, as reach is; tokens reaching beyond the project only the operator's.
     pub fn cut_off(&self, project: &str, slug: &str, path: &str, key: Option<&str>, req: CutOffRequest, caller: &Caller) -> Result<CutOff> {
         caller.need(Action::Admin, &Scope::project(project))?;
         let why: String = req.why.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(300).collect();
@@ -160,6 +178,7 @@ impl Secrets {
             key: key.map(String::from),
             why: why.clone(),
             tokens: vec![],
+            skipped: vec![],
             identities: vec![],
             logins: 0,
             batches: 0,
@@ -173,10 +192,13 @@ impl Secrets {
         let by = caller.principal.clone();
         let reason = format!("cut off from {slug}:{path}{}: {why}", key.map(|k| format!(" {k}")).unwrap_or_default());
 
-        // 1. Tokens first: they're what an attacker holding one uses now.
+        // 1. Tokens first: they're what an attacker holding one uses now. Reach marked those this
+        // caller may not revoke (they reach other projects too): they're listed, not revoked.
         if req.tokens && !reach.tokens.is_empty() {
-            let named: Vec<(String, String)> = reach.tokens.iter().map(|h| (h.id.clone(), h.name.clone())).collect();
-            let (done, failed) = self.revoke_grants(&named, &reason, &by, &mut out.batches);
+            let (named, skipped): (Vec<_>, Vec<_>) = reach.tokens.iter().partition(|h| h.skipped.is_none());
+            out.skipped = skipped.into_iter().map(|h| Skipped { id: h.id.clone(), name: h.name.clone(), why: h.skipped.unwrap_or(crate::reach::BEYOND) }).collect();
+            let named: Vec<(String, String)> = named.into_iter().map(|h| (h.id.clone(), h.name.clone())).collect();
+            let (done, failed) = if named.is_empty() { (vec![], vec![]) } else { self.revoke_grants(&named, &reason, &by, &mut out.batches) };
             out.tokens = done.into_iter().map(|(id, name)| Cut { id, name }).collect();
             out.failed.extend(failed.into_iter().map(|(ids, why)| Failure { what: "tokens", ids, why }));
         }

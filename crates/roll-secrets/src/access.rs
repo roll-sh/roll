@@ -241,6 +241,23 @@ pub fn rule(project: &str, environments: Option<Vec<String>>, paths: Option<Vec<
     }
 }
 
+/// Whether grant `g` stays inside `project`: every rule, of any product, names only this project
+/// (`{project}`, or secrets' own `{id}`, which is the project's id), never `*` or another project,
+/// and nothing it isn't allowed asks a person instead (`ask_otherwise`). Read from the rules as
+/// data, not evaluated: anything it can't prove confined reaches further. An incident's cut-off
+/// leaves those to the operator, so one project's admin can't cut off another's.
+pub fn confined_to(g: &roll_auth::Grant, project: &str) -> bool {
+    use roll_auth::scope::{Resources, Selector};
+    !g.ask_otherwise
+        && g.scope.0.iter().all(|r| match &r.resources {
+            Resources::All => false,
+            Resources::Some(sel) => sel.iter().all(|s| match s {
+                Selector::Project { project: p } => p == project,
+                Selector::Id { id, .. } => r.product == "secrets" && id == project,
+            }),
+        })
+}
+
 /// Short-lived roll-access tokens for workload identities' logins (rolld: `Access::mint_workload`).
 /// The login is the proof, so there's no caller to gate: roll-access checks the rule is within the
 /// identity's scope and that its owner can still sign in.

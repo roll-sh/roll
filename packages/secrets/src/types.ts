@@ -136,8 +136,8 @@ export type KeyInsight = { key: string; version: number; updated_at: number; upd
   weak?: string;
 };
 /** A token or identity that reaches a folder, with what it may do there. */
-/** `disabled_at`: an identity a cut-off disabled (it doesn't log in). */
-export type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string; disabled_at?: number };
+/** `disabled_at`: an identity a cut-off disabled (it doesn't log in). `skipped`: why the caller's cut-off would leave this token (it reaches beyond the project: only the operator revokes it). */
+export type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string; disabled_at?: number; skipped?: string };
 /** A frozen folder: reads of its values answer 423 `frozen` to all but its admins. */
 export type Freeze = { why: string; at: number; by: string };
 /** `GET …/reach` (a project admin's): every way a folder's (or one key's) values can leave roll. Names only. */
@@ -166,13 +166,14 @@ export type Reach = {
 /** `POST …/reach/cut-off`: what to cut (each on unless false; `freeze` off unless true), and why. */
 export type CutOffRequest = { why: string; tokens?: boolean; identities?: boolean; leases?: boolean; shares?: boolean; syncs?: boolean; freeze?: boolean };
 export type Cut = { id: string; name: string };
-/** What a cut-off did: what was cut, and what couldn't be with why (the rest went on). `batches`: calls to roll-access, 500 grants each at most. */
+/** What a cut-off did: what was cut, and what couldn't be with why (the rest went on). `skipped`: tokens that reach beyond the project, left for the operator to revoke. `batches`: calls to roll-access, 500 grants each at most. */
 export type CutOff = {
   environment: string;
   path: string;
   key: string | null;
   why: string;
   tokens: Cut[];
+  skipped: (Cut & { why: string })[];
   identities: Cut[];
   logins: number;
   batches: number;

@@ -2263,6 +2263,17 @@ reach as the caller sees it (the list the confirmation showed), then:
   all or none, at most 500 ids a call, each grant with `revoked_why` (`cut off from
   production:/ STRIPE_KEY: <why>`) and its own audit row in roll-access's log. More than 500 go in
   several calls; `batches` says how many.
+- **Who revokes which token.** A project's admin (a person who owns the project, or a token with
+  `admin` there) revokes only tokens confined to the project: every rule of the grant, for every
+  product, names this project (`{project}`, or secrets' `{id}`), with no `*`, no other project, and
+  no `ask_otherwise`. `access::confined_to` reads the rules as data; anything it can't prove
+  confined counts as reaching beyond. Those stay, listed under `skipped` (`{id, name, why}`, `why`
+  "reaches beyond this project: the operator revokes it"), so the admin can ask the operator, and
+  reach marks each with the same `skipped` before the confirmation. The operator (and an admin
+  person) revokes every token that reaches the folder, theirs included. Without this, one
+  project's admin could revoke the operator's all-projects tokens and cut off every other
+  project's CI. Identities and their logins are the project's own (each login is one rule naming
+  this project), so any of its admins cuts them off.
 - **Identities** that reach it are disabled (`disabled_at`, `disabled_why`): a login answers 403
   until an admin enables it again (`PATCH …/identities/{id}` with `{disabled: false}`). Their live
   logins' grants go through the same bulk revoke (`logins` counts them). A login that races the
@@ -2289,8 +2300,8 @@ reach as the caller sees it (the list the confirmation showed), then:
 What's roll secrets' own (identities, shares, exports, syncs, the freeze) changes in one
 transaction; revocations happen outside it. One audit row (`reach.cut_off`) names what was cut and
 why, beside the rows the revocations write themselves. The answer lists what was cut (`tokens`,
-`identities`, `logins`, `leases`, `shares`, `projects`, `syncs`, `frozen`) and what couldn't be,
-each with why (`failed`), without stopping the rest. It's idempotent: a second call cuts what's
+`identities`, `logins`, `leases`, `shares`, `projects`, `syncs`, `frozen`), what was left to the
+operator (`skipped`), and what couldn't be, each with why (`failed`), without stopping the rest. It's idempotent: a second call cuts what's
 left (a bulk revoke that failed, a lease its product refused).
 
 #### During an incident
@@ -2301,7 +2312,9 @@ A value leaked (a log, a laptop, a fork), or a credential that reads it did:
    it goes by itself, who did in the last 30 days.
 2. **Cut off.** `roll secrets reach KEY --cut-off --why "INC-123: STRIPE_KEY in a CI log"`. Add
    `--freeze` when nobody but the admins should read the folder until it's rotated (services that
-   read it start failing with 423, loudly).
+   read it start failing with 423, loudly). A project's admin revokes the project's own tokens; a
+   token that reaches other projects too is left and listed as `left` (`skipped`): hand those
+   names to the operator, who runs the same cut-off and revokes them.
 3. **Rotate.** A managed key: `roll secrets rotate KEY` (or the dashboard's Rotations). A plain
    value: issue a new one at its vendor and set it. Admins can do both while it's frozen.
 4. **Restore.** `roll secrets reach --unfreeze`, resume the syncs (`PATCH …/syncs/{id}`), enable
@@ -2575,7 +2588,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`); with `digest=1` or `If-None-Match` an `ETag` (the digest), and `If-None-Match` with the digest still current is a 304 that decrypts and issues nothing, and writes one `secrets.revalidate` row a day per caller and folder (so health and insights still see the folder read) (never for a folder holding a dynamic credential unless `dynamic=false`: a lease ends without moving the digest) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, live leases and attributed shares, projects it's shared with, folders that import it, readers in 30 days, `frozen` |
-| `POST /environments/{env}/reach/cut-off?path=&key=` | `{why, tokens?, identities?, leases?, shares?, syncs?, freeze?}` | `CutOff`: what was cut and what failed, with why (a project admin's; idempotent) |
+| `POST /environments/{env}/reach/cut-off?path=&key=` | `{why, tokens?, identities?, leases?, shares?, syncs?, freeze?}` | `CutOff`: what was cut, what was left to the operator (`skipped`: tokens reaching beyond the project) and what failed, with why (a project admin's; idempotent) |
 | `DELETE /environments/{env}/reach/cut-off?path=` | | 204: the folder's freeze lifted (a project admin's; 404 when it isn't frozen) |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would; a live link counts its value's keyed fingerprint as the product answers, read at most every 10 s, and at once when roll rotates it or the product's own password, reset or restore route changes it) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked, followed}` (`dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`; a key linked to a resource the ephemeral environment branched is left out and named in `followed`, in the clear beside a sealed box: names only) |

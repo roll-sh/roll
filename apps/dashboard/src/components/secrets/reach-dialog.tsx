@@ -11,7 +11,8 @@ type Step = { kind: "reach" } | { kind: "confirm" } | { kind: "done"; result: Cu
  * Reach (docs/secrets.md, "Reach"): who and what can read a key's value — tokens and identities
  * whose scope covers it, untrusted code, syncs, leases, shares, projects and folders it flows to —
  * and who read it in 30 days. Names only, a project admin's. "Cut off…" cuts all of it at once
- * (an incident), after a confirmation that lists exactly what goes; then the key is rotated.
+ * (an incident), after a confirmation that lists exactly what goes; then the key is rotated. A
+ * token that reaches beyond the project (`skipped`) only the operator revokes: it's listed apart.
  */
 export function ReachDialog({ open, onClose, env, path, keyName, link }: { open: boolean; onClose: () => void; env: Environment; path: string; keyName: string; link?: Link | null }) {
   const [step, setStep] = useState<Step>({ kind: "reach" });
@@ -93,7 +94,7 @@ function Body({ env, path, keyName, link, step, setStep, setBusy, onClose }: { e
 /** What a cut-off would cut, from reach: one line per kind with its count and names. */
 export function plan(r: Reach): { what: string; names: string[] }[] {
   const lines: [string, string, string[]][] = [
-    ["token revoked", "tokens revoked", r.tokens.map((h) => h.name)],
+    ["token revoked", "tokens revoked", r.tokens.filter((h) => !h.skipped).map((h) => h.name)],
     ["identity disabled, its logins revoked", "identities disabled, their logins revoked", r.identities.filter((h) => !h.disabled_at).map((h) => h.name)],
     ["lease ended, its credential revoked", "leases ended, their credentials revoked", r.leases.map((l) => `${l.key} for ${l.consumer}`)],
     ["one-time share expired", "one-time shares expired", r.shares.map((s) => s.note || s.id)],
@@ -140,6 +141,7 @@ function Confirm({ env, path, keyName, r, setBusy, onBack, onDone }: { env: Envi
       ) : (
         <p className="text-[12px] text-subtle">Nothing reaches {keyName} now. You can still freeze the folder.</p>
       )}
+      <Skipped names={r.tokens.filter((h) => h.skipped).map((h) => h.name)} />
       {r.unattributed_shares > 0 && (
         <p className="text-[11.5px] text-subtle">
           {r.unattributed_shares} other open {r.unattributed_shares === 1 ? "share doesn't" : "shares don't"} say where {r.unattributed_shares === 1 ? "its value" : "their values"} came from and {r.unattributed_shares === 1 ? "stays" : "stay"}: revoke them under Access if they might hold it.
@@ -218,6 +220,7 @@ function Done({ env, path, keyName, link, result: c, onClose }: { env: Environme
       ) : (
         <p className="text-[12px] text-subtle">Nothing was left to cut.</p>
       )}
+      <Skipped names={c.skipped.map((x) => x.name)} />
       {c.batches > 1 && <p className="text-[11.5px] text-subtle">The tokens were revoked in {c.batches} calls of at most 500.</p>}
       {c.failed.length > 0 && (
         <ErrorNote error={`Not everything was cut: ${c.failed.map((f) => `${f.what}${f.ids.length ? ` (${f.ids.join(", ")})` : ""}: ${f.why}`).join("; ")}. Run the cut-off again to cut what's left.`} />
@@ -286,6 +289,19 @@ function Frozen({ env, path, by, why, at, onLifted }: { env: Environment; path: 
   );
 }
 
+/** Tokens that reach beyond this project: a project's cut-off leaves them, for the operator. */
+function Skipped({ names }: { names: string[] }) {
+  if (!names.length) return null;
+  return (
+    <div className="rounded-lg border border-line-2 bg-panel px-3 py-2">
+      <p className="text-fg">
+        <span className="font-mono tabular-nums">{names.length}</span> {names.length === 1 ? "token stays" : "tokens stay"}: {names.length === 1 ? "it reaches" : "they reach"} beyond this project, so only the operator revokes {names.length === 1 ? "it" : "them"}. Ask them to.
+      </p>
+      <p className="mt-0.5 break-words font-mono text-[11.5px] text-subtle">{names.join(", ")}</p>
+    </div>
+  );
+}
+
 function Part({ title, empty, note, children }: { title: string; empty: string; note?: string; children: ReactNode[] }) {
   return (
     <section>
@@ -309,6 +325,11 @@ function HolderRow({ h }: { h: Holder }) {
               {a}
             </span>
           ))
+        )}
+        {h.skipped && (
+          <span title={h.skipped} className="rounded border border-line-2 px-1">
+            operator revokes
+          </span>
         )}
         <span>{h.last_used_at ? `used ${ago(h.last_used_at)}` : "never used"}</span>
         {h.expires_at && <span>· ends {until(h.expires_at)}</span>}
