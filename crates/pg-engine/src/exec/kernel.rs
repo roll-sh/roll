@@ -174,6 +174,16 @@ pub trait Cols {
         let v = self.col(i)?;
         if v.is_null() { Some(None) } else { small_num(v).map(Some) }
     }
+
+    /// Column `i` as a string (Some(None): NULL; None: absent, or not a string). A stored
+    /// row read in place gives it without making a value.
+    fn text(&self, i: usize) -> Option<Option<&str>> {
+        match self.col(i)? {
+            Value::Null => Some(None),
+            Value::Text(s) => Some(Some(s)),
+            _ => None,
+        }
+    }
 }
 
 impl Cols for [Value] {
@@ -788,6 +798,14 @@ impl K {
                     }
                 }
                 if saw_null { Value::Null } else { Value::Bool(*all) }
+            }
+            // (A column's string read where it is: a row read in place makes no value.)
+            K::Like(a, pat, neg) if matches!(**a, K::Col(_)) => {
+                let K::Col(i) = **a else { unreachable!("a column") };
+                match row.text(i)? {
+                    None => Value::Null,
+                    Some(s) => Value::Bool(pat.matches(s).ok()? != *neg),
+                }
             }
             K::Like(a, pat, neg) => {
                 let mut t = Value::Null;

@@ -1,0 +1,145 @@
+> CREATE TABLE a258_l (id int, cust int, note text, tag varchar(12), amt numeric(12,2)) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO a258_l SELECT s, s % 997,
+>   CASE WHEN s % 41 = 0 THEN NULL WHEN s % 9 = 0 THEN 'ab special é requests ' || s WHEN s % 1000 = 7 THEN repeat('special x requests ', 400) || s ELSE 'plain note ' || s END,
+>   CASE WHEN s % 13 = 0 THEN NULL ELSE 't' || (s % 17) END,
+>   (s % 777) * 0.5
+>   FROM generate_series(1, 90000) s
+-- INSERT 0 90000
+
+> CREATE TABLE a258_c (cust int, name text) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO a258_c SELECT s, 'c' || s FROM generate_series(0, 1199) s
+-- INSERT 0 1200
+
+> VACUUM ANALYZE a258_l
+-- VACUUM
+
+> VACUUM ANALYZE a258_c
+-- VACUUM
+
+> SELECT count(*), sum(amt), sum(cust) FROM a258_l WHERE note NOT LIKE '%special%requests%'
+count:int8 | sum:numeric | sum:int8
+77969 | 15113705.50 | 38773184
+-- SELECT 1
+
+> SELECT count(*), sum(amt) FROM a258_l WHERE note LIKE '%é%' OR tag LIKE 't1%'
+count:int8 | sum:numeric
+44615 | 8642591.00
+-- SELECT 1
+
+> SELECT tag, count(*), sum(amt) FROM a258_l WHERE note LIKE 'plain%' GROUP BY tag ORDER BY tag
+tag:varchar | count:int8 | sum:numeric
+t0 | 4233 | 819567.50
+t1 | 4232 | 820261.50
+t10 | 4233 | 821509.00
+t11 | 4233 | 820465.00
+t12 | 4235 | 821589.50
+t13 | 4234 | 819624.50
+t14 | 4233 | 821182.00
+t15 | 4234 | 820889.00
+t16 | 4234 | 821345.50
+t2 | 4235 | 819675.00
+t3 | 4233 | 819854.50
+t4 | 4232 | 820581.00
+t5 | 4234 | 821108.00
+t6 | 4234 | 820948.00
+t7 | 4233 | 820255.50
+t8 | 4235 | 821424.00
+t9 | 4234 | 820600.00
+NULL | 5998 | 1162826.00
+-- SELECT 18
+
+> SELECT c_count, count(*) AS custdist FROM (SELECT c.cust, count(l.id) FROM a258_c c LEFT JOIN a258_l l ON l.cust = c.cust AND l.note NOT LIKE '%special%requests%' GROUP BY c.cust) AS x (cust, c_count) GROUP BY c_count ORDER BY custdist DESC, c_count DESC LIMIT 15
+c_count:int8 | custdist:int8
+78 | 594
+79 | 264
+0 | 203
+77 | 113
+80 | 26
+-- SELECT 5
+
+> SELECT id, note FROM a258_l WHERE note LIKE '%special é%' AND id < 200 ORDER BY id
+id:int4 | note:text
+9 | ab special é requests 9
+18 | ab special é requests 18
+27 | ab special é requests 27
+36 | ab special é requests 36
+45 | ab special é requests 45
+54 | ab special é requests 54
+63 | ab special é requests 63
+72 | ab special é requests 72
+81 | ab special é requests 81
+90 | ab special é requests 90
+99 | ab special é requests 99
+108 | ab special é requests 108
+117 | ab special é requests 117
+126 | ab special é requests 126
+135 | ab special é requests 135
+144 | ab special é requests 144
+153 | ab special é requests 153
+162 | ab special é requests 162
+171 | ab special é requests 171
+180 | ab special é requests 180
+189 | ab special é requests 189
+198 | ab special é requests 198
+-- SELECT 22
+
+> SELECT id, length(note), tag FROM a258_l WHERE note LIKE '%requests 1007%' ORDER BY id
+id:int4 | length:int4 | tag:varchar
+1007 | 7604 | t4
+10071 | 27 | t7
+-- SELECT 2
+
+> SELECT id, cust FROM a258_l WHERE tag LIKE 't16' AND note NOT LIKE 'plain%' AND id < 2000 ORDER BY id
+id:int4 | cust:int4
+135 | 135
+288 | 288
+441 | 441
+594 | 594
+747 | 747
+900 | 900
+1206 | 209
+1359 | 362
+1512 | 515
+1665 | 668
+1818 | 821
+1971 | 974
+-- SELECT 12
+
+> SET max_parallel_workers_per_gather = 0
+-- SET
+
+> SELECT count(*), sum(amt) FROM a258_l WHERE note NOT LIKE '%special%requests%' AND tag IS NOT NULL
+count:int8 | sum:numeric
+71971 | 13950879.50
+-- SELECT 1
+
+> SELECT id, amt FROM a258_l WHERE note LIKE 'ab%' AND id < 120 ORDER BY id
+id:int4 | amt:numeric
+9 | 4.50
+18 | 9.00
+27 | 13.50
+36 | 18.00
+45 | 22.50
+54 | 27.00
+63 | 31.50
+72 | 36.00
+81 | 40.50
+90 | 45.00
+99 | 49.50
+108 | 54.00
+117 | 58.50
+-- SELECT 13
+
+> RESET max_parallel_workers_per_gather
+-- RESET
+
+> DROP TABLE a258_c
+-- DROP TABLE
+
+> DROP TABLE a258_l
+-- DROP TABLE
+

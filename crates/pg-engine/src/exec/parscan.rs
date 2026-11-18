@@ -121,6 +121,10 @@ pub struct Decode {
     pub raw: Vec<usize>,
     /// `need` without the `raw` columns (None: no raw columns).
     pub need_raw: Option<Arc<[bool]>>,
+    /// The columns of `need` only the filter reads (`late_cols`; None: none, or not known):
+    /// NULL in a row the filter passed where it was read (`Lazy::into_row_passed`), not
+    /// decoded (a comment a LIKE reads, then a string made per row only to be dropped).
+    pub late: Option<Arc<[bool]>>,
     /// A bounded sort's wish over computed value `topk.col` (`Node::topk_below`): each
     /// chunk's rows its own bounded heap discards are dropped (`Top`).
     pub topk: Option<super::TopK>,
@@ -130,6 +134,14 @@ pub struct Decode {
     /// The batch kernels (`Pre`), compiled by the first chunk for all of them (None
     /// inside: none fit).
     pub vplan: std::sync::OnceLock<Option<Arc<super::vector::AggPlan>>>,
+}
+
+/// `Decode::late`: the columns of `need` that `above` (what the nodes above the scan read)
+/// doesn't have: its filter's alone. None when there are none or either isn't known.
+pub fn late_cols(need: Option<&[bool]>, above: Option<&[bool]>) -> Option<Arc<[bool]>> {
+    let (need, above) = (need?, above?);
+    let late: Vec<bool> = need.iter().enumerate().map(|(i, &n)| n && !above.get(i).copied().unwrap_or(false)).collect();
+    late.contains(&true).then(|| Arc::from(late))
 }
 
 /// A chunk's bounded heap of a bounded sort's keys (`Decode::topk`). A row its heap
@@ -1146,6 +1158,23 @@ impl Lazy<'_> {
         }
     }
 
+    /// `into_row` of a row the filter passed here: the columns only the filter reads
+    /// (`Decode::late`) NULL, not decoded.
+    pub(super) fn into_row_passed(self) -> Result<Row> {
+        let Some(late) = self.d.late.as_deref() else { return self.into_row() };
+        let mut row = Vec::with_capacity(self.buf.cells.len() + self.d.extra.len());
+        for i in 0..self.buf.cells.len() {
+            let cell = self.buf.cells[i].take();
+            let v = match cell {
+                _ if late.get(i).copied().unwrap_or(false) => Value::Null,
+                Some(Some(v)) => v,
+                _ => self.decode(i)?,
+            };
+            row.push(v);
+        }
+        Ok(row)
+    }
+
     /// The scan's row (`Decode::row`'s), with the values already read.
     pub(super) fn into_row(self) -> Result<Row> {
         let mut row = Vec::with_capacity(self.buf.cells.len() + self.d.extra.len());
@@ -1163,6 +1192,29 @@ impl Lazy<'_> {
 impl super::kernel::Cols for Lazy<'_> {
     fn col(&self, i: usize) -> Option<&Value> {
         self.buf.cells.get(i)?.get_or_init(|| self.decode(i).ok()).as_ref()
+    }
+
+    /// A string column's value read in place, no value made (one decoded already: its own).
+    fn text(&self, i: usize) -> Option<Option<&str>> {
+        use crate::storage::row::tag;
+        let cell = self.buf.cells.get(i)?;
+        if cell.get().is_none() && i < self.buf.upto && self.needed(i) && self.buf.offs[i] != u32::MAX && !self.ext {
+            let p = self.buf.offs[i] as usize;
+            match self.data.get(p) {
+                Some(&tag::NULL) => return Some(None),
+                Some(&tag::TEXT) => {
+                    let mut q = p + 1;
+                    let n = crate::storage::sst::get_varint(self.data, &mut q).ok()? as usize;
+                    return std::str::from_utf8(self.data.get(q..q + n)?).ok().map(Some);
+                }
+                _ => {}
+            }
+        }
+        match self.col(i)? {
+            Value::Null => Some(None),
+            Value::Text(s) => Some(Some(s)),
+            _ => None,
+        }
     }
 
     fn num(&self, i: usize) -> Option<Option<(i128, u32)>> {
@@ -1407,7 +1459,7 @@ fn run_rows<'d>(
                                 return Ok(None);
                             }
                         }
-                        Ok(Some((lz.into_row()?, done)))
+                        Ok(Some((if done { lz.into_row_passed()? } else { lz.into_row()? }, done)))
                     })
                 };
                 match made {
@@ -1423,7 +1475,8 @@ fn run_rows<'d>(
                     (Some(f), true) => {
                         let made = lazy.read(d, key, bytes).and_then(|lz| match if passed { Some(true) } else { f.passes(&lz) } {
                             Some(false) => Ok(None),
-                            pass => Ok(Some((lz.into_row()?, pass.is_some()))),
+                            Some(_) => Ok(Some((lz.into_row_passed()?, true))),
+                            None => Ok(Some((lz.into_row()?, false))),
                         });
                         match made {
                             Ok(Some(r)) => r,
@@ -1806,6 +1859,7 @@ fn partial_row(
             match pass {
                 Some(false) => Ok(None),
                 Some(true) if d.stages.is_empty() && pa.row(&lazy) => Ok(None),
+                Some(true) => lazy.into_row_passed().map(|row| Some((row, pass))),
                 _ => lazy.into_row().map(|row| Some((row, pass))),
             }
         }),
