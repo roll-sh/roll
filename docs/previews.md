@@ -1785,17 +1785,22 @@ Ranked by what a person notices first. Done so far:
    `team` is #300 on it: a visitor let in through roll (link or a live team session) gets it, and
    a note is posted from roll's dashboard as the signed-in person; a team preview's services on
    roll apps get no button yet (apps adds it only for link visitors).
-2. **A project's own preview domain, the wiring** (previews' half #275 is on main): after apps'
+2. **`roll preview up`: a preview of the working tree** (Netlify's `netlify deploy`, Vercel's
+   `vercel deploy`): from a checkout of a project's repo, uncommitted changes included, a commit
+   made without touching the user's index or HEAD is pushed to a branch of their own
+   (`preview/<user>/<name>`) and previewed, the URL printed once it's ready; again moves it,
+   `roll preview down` deletes the branch and the preview.
+3. **A project's own preview domain, the wiring** (previews' half #275 is on main): after apps'
    #278, rolld hands apps' `PreviewRouter` previews' `runtime::serve_host`, and
    `scripts/preview-apps.sh` checks a verified domain over plain HTTP, a roll apps service and a
    runtime one by label. TLS waits on wildcard certificates over DNS-01 on the edge.
-3. **Bots on Git URL services** (draft #305, on apps' #282): previews' own `GitPull` carries the
+4. **Bots on Git URL services** (draft #305, on apps' #282): previews' own `GitPull` carries the
    opener and `skip_authors` reaches a Git URL service's pull requests. Undraft once #282 is on
    main.
-4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-5. **Watch: pg-control's recovery to a time seconds old** (unowned).
-6. **Watch: a cold start on a Docker name conflict.**
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+7. **Watch: a cold start on a Docker name conflict.**
 
 Landed in previews' lock turn of 2026-11-18 (main 440e13ebf; one combined tree, each step
 tagged and gated once with both live checks, then landed one at a time, each identical to its
