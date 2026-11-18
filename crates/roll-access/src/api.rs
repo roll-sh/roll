@@ -276,8 +276,12 @@ pub fn presets() -> Value {
         },
         {
             "id": "development", "name": "Dev environment only",
-            "description": "Everything in development environments; revealing secrets asks. Production is out of reach.",
-            "rules": [{ "product": "*", "resources": "project", "environments": ["development"], "actions": { "read": "allow", "write": "allow", "delete": "allow", "reveal": "ask" } }],
+            // `roll login`'s default: `roll run` reads development's values at once, as Doppler's and
+            // Infisical's CLIs do. The person approves these rules on the consent screen; nothing
+            // outside development is reachable, and roll secrets keeps its own rules (a key tagged
+            // sensitive is never returned; protected environments' writes become change requests).
+            "description": "Everything in development environments, their secrets' values too (what `roll run` needs). Production is out of reach.",
+            "rules": [{ "product": "*", "resources": "project", "environments": ["development"], "actions": { "read": "allow", "write": "allow", "delete": "allow", "reveal": "allow" } }],
         },
         {
             "id": "previews", "name": "Previews only",

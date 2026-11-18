@@ -576,7 +576,7 @@ them; `project` means the workspace project the user picks).
 | Read only | every product, `*`: `read` |
 | Agent, asks before destructive (the consent screen's default) | every product, `*`: `read` `write`; `delete` `reveal` `deploy` ask |
 | This project only | every product, the project: `read` `write`; `delete` `reveal` `deploy` ask |
-| Dev environment only | every product, the project, environments `development`: `read` `write` `delete`; `reveal` ask |
+| Dev environment only (`roll login`'s default) | every product, the project, environments `development`: `read` `write` `delete` `reveal` (so `roll run` reads development's values at once, as Doppler's and Infisical's CLIs do; production is out of reach, and the person approves the rules on the consent screen) |
 | Previews only | every product, `*`, environments `preview`: `read` `write` `delete`; `reveal` ask |
 | Full access | every product, `*`: every action (expiry still applies) |
 
