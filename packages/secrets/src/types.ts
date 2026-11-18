@@ -97,6 +97,14 @@ export type Change = { seq: number; environment: string; path: string; message: 
 /** `what`: added | changed | deleted | comment | tags | link | rotated */
 export type Item = { key: string; path: string; type: SecretType; what: string[]; from_fp: string | null; to_fp: string | null };
 export type Written = { change: Change | null; secret: Secret | null; warnings: string[] };
+/** The client's `delete`: `deleted` is false when the key wasn't there. */
+export type Deleted = { deleted: boolean; change: Change | null };
+/**
+ * The client's `secret`: one key's record as a folder sees it, never its value. `link_kind` is the
+ * kind of the link the value comes from (`postgres`, `github`…), null for a value stored in roll;
+ * `source` says where it's set (its own, a base's or an import's).
+ */
+export type SecretInfo = Pick<Secret, "key" | "path" | "type" | "version" | "comment" | "tags" | "source" | "updated_at" | "updated_by" | "expires_at"> & { link_kind: string | null };
 /** `change` is null when nothing changed. */
 /** `request`: the change request opened instead (a promotion into a protected environment). */
 export type Applied = { change: Change | null; items: Item[]; warnings: string[]; request?: ChangeRequest };
@@ -111,6 +119,8 @@ export type Problem = { key: string; problem: string };
 /** `digest` (with `?digest=1`): the folder's `…/digest`, taken just before this read (a watch compares from it). */
 /** `followed`: keys linked to a resource the ephemeral environment's preview branched, left out of `values`. */
 /** `plain`: of `linked`, keys whose link field isn't a credential (a host, a port): logs may show them; every other value is a secret. */
+/** `GET …/secrets/{key}/totp`: a TOTP key's code (a credential), valid until `expires_at` (ms: the end of its step). */
+export type Totp = { code: string; expires_at: number; period: number };
 export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld?: string[]; sensitive?: string[]; followed?: Followed[]; digest?: string };
 export type CellSource = "own" | "import" | "base";
 /** `misfit`: the typed-key rule the stored value breaks (shown only to whoever may reveal it). */
@@ -193,10 +203,13 @@ export type Token = {
 export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 /** `ciphertext`: base64url(nonce ‖ AES-256-GCM ciphertext) with `roll-share-v1` as associated data; `views` 1–10, `ttl_minutes` 5–10080. */
 export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number };
-export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email";
+export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email" | "totp";
 /** A key every standard environment must define in a folder; typed keys also say what its value must be. */
 /** `owner`: who supplies it (a person or team), named in health and the daily notice. */
-export type Required = { key: string; path: string; comment: string; type?: KeyType; pattern?: string; owner?: string };
+export type PasswordClass = "lower" | "upper" | "digit" | "symbol";
+/** What a key's values must be made of, and what generators make (`classes` defaults to letters and digits; `symbols` to `!#%&*+-=?^_~`). */
+export type PasswordPolicy = { length: number; classes?: PasswordClass[]; symbols?: string };
+export type Required = { key: string; path: string; comment: string; type?: KeyType; pattern?: string; owner?: string; password?: PasswordPolicy };
 /** A workload identity: CI jobs and clusters whose OIDC tokens match log in for a short-lived token. */
 export type Identity = {
   id: string;
@@ -313,6 +326,15 @@ export type NewDirectory = { name: string; url: string; bind_dn: string; bind_pa
 /** A GitHub App's installation; `repositories` and `permissions` are the most its tokens may reach. */
 export type GitHubApp = { id: string; name: string; app_id: number; installation_id: number; api_base: string; repositories: string[]; permissions: Record<string, string>; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
+/** A vendor roll issues and revokes keys at itself (`saas` links): its account, never the credential. */
+export type SaasVendor = "sendgrid" | "twilio" | "okta" | "entra" | "auth0";
+export type SaasRotator = { id: string; name: string; vendor: SaasVendor; target: Record<string, unknown>; created_at: number; created_by: string };
+/** `credential` is sealed at once and never answered. */
+export type NewSaasRotator = { name: string; vendor: SaasVendor; target: Record<string, unknown>; credential: string };
+/** A Kubernetes cluster whose service accounts get short-lived tokens per lease (dynamic `kubernetes` links); the admin token and the CA stay sealed. */
+export type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
+/** `token`: a service account token that may create tokens; `ca_pem`: the cluster's CA, when it isn't publicly trusted. */
+export type NewKubernetesCluster = { name: string; api_url: string; ca_pem?: string; token: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 
 /** A `roll-seal-v1` box (base64url fields): X25519 to the recipient, HKDF-SHA256, AES-256-GCM. */

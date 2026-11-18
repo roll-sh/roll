@@ -307,7 +307,7 @@ fn fnv(b: &[u8]) -> u64 {
 }
 
 /// The commit status, the deployment status and their description for a preview.
-fn preview_states(p: Option<&Preview>) -> (Option<&'static str>, Option<&'static str>, String) {
+pub fn preview_states(p: Option<&Preview>) -> (Option<&'static str>, Option<&'static str>, String) {
     let Some(p) = p else { return (None, Some("inactive"), "Preview deleted".into()) };
     let state = p.environment.as_ref().map(|e| e.state.as_str()).unwrap_or(match p.state {
         PreviewState::Creating => "creating",
@@ -776,8 +776,13 @@ fn output_fence(text: &str) -> String {
 }
 
 fn preview_comment(c: &Change, teardown: Option<&str>) -> String {
-    let marker = format!("<!-- roll-preview:{} -->", c.id);
-    let Some(p) = &c.preview else {
+    preview_comment_for(c.preview.as_ref(), &format!("<!-- roll-preview:{} -->", c.id), teardown)
+}
+
+/// The preview's pull request comment, for a change's preview or another one's (a Git URL
+/// service's on roll apps: roll previews posts it there itself), ended by `marker`.
+pub fn preview_comment_for(p: Option<&Preview>, marker: &str, teardown: Option<&str>) -> String {
+    let Some(p) = p else {
         return match teardown {
             // The job's output is the change's code's: one fence nothing in it can close.
             Some(t) => format!("**roll preview**: deleted. Its teardown failed:\n\n{}\n\n{marker}", output_fence(t)),

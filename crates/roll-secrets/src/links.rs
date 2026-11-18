@@ -129,8 +129,9 @@ pub trait LinkProvider: Send + Sync {
         let _ = (r#ref, label, link, ttl_minutes);
         Err(Error::BadRequest(format!("{} can't issue {credential} credentials", self.kind())))
     }
-    /// [`LinkProvider::issue`] for a dynamic credential, which will be recorded as lease `lease`
-    /// (a product that names what it makes can name it after the lease: a directory's user).
+    /// A `dynamic` field's credential for the lease `lease` (its id, chosen before the issue): a
+    /// product that makes objects per lease names and labels them after it, so leftovers can be
+    /// found. Others get [`LinkProvider::issue`].
     fn issue_lease(&self, r#ref: &str, credential: &str, link: &Link, label: &str, ttl_minutes: u64, lease: &str) -> Result<Issued> {
         let _ = lease;
         self.issue(r#ref, credential, link, label, Some(ttl_minutes))
@@ -138,6 +139,13 @@ pub trait LinkProvider: Send + Sync {
     fn revoke(&self, r#ref: &str, handle: &Json) -> Result<()> {
         let _ = (r#ref, handle);
         Ok(())
+    }
+    /// Whether revoking ends `link`'s credential at the product. `false`: it works until its own
+    /// expiry (a bound Kubernetes token for an existing service account), and revoking only ends
+    /// the lease, as its audit row says.
+    fn revocable(&self, link: &Link) -> bool {
+        let _ = link;
+        true
     }
     /// Keep a dynamic credential working until `until` (unix ms): a lease was renewed. Only a
     /// product that enforces an expiry of its own needs this (a Postgres role's `VALID UNTIL`);
@@ -156,6 +164,11 @@ pub trait LinkProvider: Send + Sync {
     /// as which of two roles is in use, can't be shared between environments).
     fn exclusive(&self) -> bool {
         false
+    }
+    /// [`LinkProvider::exclusive`] for one resource (a vendor that keeps one secret per app).
+    fn exclusive_for(&self, r#ref: &str) -> bool {
+        let _ = r#ref;
+        self.exclusive()
     }
     /// Refuse a link this kind can't serve as asked (its options, its mode, its resource's
     /// policy), when it's written rather than at its first issue.
@@ -213,7 +226,7 @@ impl Links {
             return Err(Error::BadRequest(format!("{} {} is {}, not {}", l.kind, l.field, f.modes.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(" or "), l.mode.as_str())));
         }
         for k in l.options.keys() {
-            if !["ttl_minutes", "grace_minutes", "rotate_days", "branch", "permission", "names", "principals", "repositories", "permissions"].contains(&k.as_str()) {
+            if !["ttl_minutes", "grace_minutes", "rotate_days", "branch", "permission", "names", "principals", "repositories", "permissions", "namespace", "service_account", "audiences", "role_rules", "cluster_wide"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown link option {k}")));
             }
         }
@@ -255,11 +268,17 @@ impl crate::Secrets {
         if let Some(provider) = self.links.0.get(crate::rotators::KIND) {
             out.extend(self.rotator_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::rotators::KIND.into(), r#ref: id.clone(), name, fields: provider.fields_for(&id) }));
         }
+        if let Some(provider) = self.links.0.get(crate::saas::KIND) {
+            out.extend(self.saas_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::saas::KIND.into(), fields: provider.fields_for(&id), r#ref: id, name }));
+        }
         if let Some(provider) = self.links.0.get(crate::outside::KIND) {
             out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::outside::KIND.into(), r#ref: id.clone(), name, fields: provider.fields_for(&id) }));
         }
         if let Some(provider) = self.links.0.get(crate::directories::KIND) {
             out.extend(self.directory_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::directories::KIND.into(), r#ref: id.clone(), name, fields: provider.fields_for(&id) }));
+        }
+        if let Some(provider) = self.links.0.get(crate::kubernetes::KIND) {
+            out.extend(self.kubernetes_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::kubernetes::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
         }
         for (kind, id, name) in self.cloud_refs(project)? {
             if let Some(provider) = self.links.0.get(kind.as_str()) {
