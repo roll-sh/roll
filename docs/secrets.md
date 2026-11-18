@@ -3001,7 +3001,10 @@ cache waited out. Ranked now:
 1. **The thirty-first security review** (running): today's PRs above, read cold, before they land.
 2. **Land batch 2** (24 PRs, gated; waiter `rs79-lock` behind search and apps' #295), then batch 3
    (the #132 stack, #144, #86) and batch 4 (today's PRs).
-3. **R2, cut off everything that reaches a folder** (building on roll MCP's #267).
+3. **R2, cut off everything that reaches a folder** (#304): tokens through roll-access's bulk revoke,
+   identities disabled, leases ended, shares and exports cut, syncs paused, an optional freeze (423).
+   Fixing: a project admin could revoke the operator's all-projects tokens (a cross-project denial
+   of service); only tokens confined to the project are revoked, the rest listed as skipped.
 4. **The dashboard's "Store in roll"** for #303's notices, and **R5, `roll://` wherever another roll
    product takes a key** (with each product's thread).
 5. **A sealed start for the deployment key** (#276's follow-up: holders unseal over the API, on a fleet).
