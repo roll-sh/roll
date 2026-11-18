@@ -219,6 +219,7 @@ pub enum Clusters {
     /// Show a cluster: state, URL, indices, branches.
     Show { cluster: String },
     /// Change settings.
+    #[command(alias = "update")]
     Set {
         cluster: String,
         #[arg(long)]
@@ -232,6 +233,14 @@ pub enum Clusters {
         /// Default of `action.destructive_requires_name`.
         #[arg(long)]
         destructive_requires_name: Option<bool>,
+        /// Let only these networks reach the cluster's endpoint (repeat it; replaces the list):
+        /// a CIDR or an address, optionally `=description` (`--allow 203.0.113.0/24=office`).
+        /// The dashboard and `roll search` aren't filtered.
+        #[arg(long = "allow", value_name = "CIDR[=DESCRIPTION]", conflicts_with = "allow_any")]
+        allow: Vec<String>,
+        /// Let any address reach the endpoint again (clears the allowlist).
+        #[arg(long)]
+        allow_any: bool,
     },
     /// Delete a cluster (restorable for the node's window, 7 days by default; branches keep
     /// their data).
@@ -320,6 +329,31 @@ pub fn url_with_password(url: &str, user: &str, password: &str) -> String {
     match url.split_once("://") {
         Some((scheme, rest)) => format!("{scheme}://{}:{}@{rest}", urlencoding::encode(user), urlencoding::encode(password)),
         None => url.to_string(),
+    }
+}
+
+/// `--allow` values (`CIDR` or `CIDR=description`) as the API's `ip_allowlist`.
+fn allow_rules(allow: &[String]) -> Value {
+    Value::Array(
+        allow
+            .iter()
+            .map(|a| match a.split_once('=') {
+                Some((cidr, d)) => json!({ "cidr": cidr.trim(), "description": d.trim() }),
+                None => json!({ "cidr": a.trim() }),
+            })
+            .collect(),
+    )
+}
+
+fn print_allowlist(v: &Value) {
+    let rules = v["ip_allowlist"].as_array().cloned().unwrap_or_default();
+    if rules.is_empty() {
+        println!("allowed   any address");
+        return;
+    }
+    for (i, r) in rules.iter().enumerate() {
+        let d = r["description"].as_str().map(|d| format!("  {d}")).unwrap_or_default();
+        println!("{}{}{d}", if i == 0 { "allowed   " } else { "          " }, s(&r["cidr"]));
     }
 }
 
@@ -691,6 +725,7 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                     let idle = v["idle_timeout_s"].as_i64().unwrap_or(0);
                     println!("idle      {}", if idle == 0 { "always loaded".to_string() } else { format!("{idle}s") });
                     println!("limits    {} in flight, {} MiB bodies", s(&v["max_in_flight"]), s(&v["max_body_mb"]));
+                    print_allowlist(&v);
                     println!("created   {}", ago(v["created_at"].as_i64().unwrap_or(0)));
                     for b in v["branches"].as_array().into_iter().flatten() {
                         println!("  branch {}  {}  as of {}", s(&b["name"]), s(&b["id"]), ago(b["parent_at"].as_i64().unwrap_or(0)));
@@ -699,15 +734,19 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
                 }
                 v
             }
-            Clusters::Set { cluster, flavor, idle, max_in_flight, max_body_mb, destructive_requires_name } => {
+            Clusters::Set { cluster, flavor, idle, max_in_flight, max_body_mb, destructive_requires_name, allow, allow_any } => {
                 let c = find(api, &cluster).await?;
-                let body = json!({
+                let mut body = json!({
                     "flavor": flavor, "idle_timeout_s": idle, "max_in_flight": max_in_flight, "max_body_mb": max_body_mb,
                     "destructive_requires_name": destructive_requires_name,
                 });
+                if allow_any || !allow.is_empty() {
+                    body["ip_allowlist"] = allow_rules(&allow);
+                }
                 let v = api.call(reqwest::Method::PATCH, &format!("/v1/search/clusters/{}", s(&c["id"])), Some(body)).await?;
                 if !as_json {
                     print_cluster(&v);
+                    print_allowlist(&v);
                     return Ok(());
                 }
                 v
