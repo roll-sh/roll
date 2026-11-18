@@ -53,6 +53,14 @@ const MODE_HELP: Record<LinkMode, string> = {
   dynamic: "Every resolve (roll run, an app's start) issues a short-lived credential, revoked when its lease ends.",
 };
 
+/** What a queue link's own user may do on its vhost (rolld's `Queue` provider, option `permission`). */
+type QueueAccess = "read" | "write" | "configure";
+const QUEUE_ACCESS: readonly { value: QueueAccess; label: string; title: string }[] = [
+  { value: "read", label: "Read", title: "Consume only" },
+  { value: "write", label: "Write", title: "Publish and consume" },
+  { value: "configure", label: "Configure", title: "Also declare and delete queues, exchanges and bindings" },
+];
+
 type Pick = { on: boolean; key: string; mode: LinkMode };
 type WriteFn = (run: () => Promise<{ warnings?: string[]; change?: { seq: number } | null }>, batch: Batch, done: string) => Promise<boolean>;
 
@@ -82,6 +90,7 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const [rotateDays, setRotateDays] = useState("30");
   const [repos, setRepos] = useState("");
   const [perms, setPerms] = useState("");
+  const [queueAccess, setQueueAccess] = useState<QueueAccess>("configure");
   const [busy, setBusy] = useState(false);
 
   const pickOf = (t: LinkTarget, f: LinkField): Pick => picks[`${t.kind}:${t.ref}:${f.field}`] ?? { on: false, key: f.suggest, mode: f.modes[0] };
@@ -116,6 +125,9 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const needsRotation = chosen.some((c) => c.t.kind === "pki" && c.p.mode === "managed");
   const rotate = Number(rotateDays);
   const rotateOk = !needsRotation || (Number.isInteger(rotate) && rotate >= 1 && rotate <= 198);
+  // A queue's issued user gets only the access asked for.
+  const queueUser = (c: { t: LinkTarget; p: Pick }) => c.t.kind === "queue" && c.p.mode !== "live";
+  const needsQueueAccess = chosen.some(queueUser);
 
   const submit = async () => {
     const ops: Op[] = chosen.map((c) => ({
@@ -126,11 +138,12 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
         ref: c.t.ref,
         field: c.f.field,
         mode: c.p.mode,
-        ...((c.p.mode === "dynamic" || c.t.kind === "pki" || c.t.kind === "ssh") && {
+        ...((c.p.mode === "dynamic" || c.t.kind === "pki" || c.t.kind === "ssh" || queueUser(c)) && {
           options: {
             ...(c.p.mode === "dynamic" && { ttl_minutes: ttlMinutes }),
             ...(c.t.kind === "pki" && { names, ...(c.p.mode === "managed" && { rotate_days: rotate }) }),
             ...(c.t.kind === "ssh" && { principals: logins }),
+            ...(queueUser(c) && { permission: queueAccess }),
             ...(c.t.kind === "github_app" && {
               ...(repositories.length > 0 && { repositories }),
               ...(permissions && Object.keys(permissions).length > 0 && { permissions }),
@@ -152,7 +165,7 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   if (!targets.data.length)
     return (
       <p className="py-6 text-center text-[12.5px] text-muted">
-        {project.name} has no linkable resources yet. Add a database, a bucket or a stream to its canvas, then link its credentials here.
+        {project.name} has no linkable resources yet. Add a database, a bucket, a stream or a queue to its canvas, then link its credentials here.
       </p>
     );
 
@@ -225,6 +238,12 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
               <input value={perms} onChange={(e) => setPerms(e.target.value)} placeholder="contents:read" spellCheck={false} className={`${sized} h-7 w-52 font-mono`} aria-label="GitHub permissions" />
             </label>
           </>
+        )}
+        {needsQueueAccess && (
+          <span className="flex items-center gap-1.5 text-[12px] text-muted">
+            Access
+            <Segmented label="Queue access" value={queueAccess} onChange={setQueueAccess} options={QUEUE_ACCESS.map((a) => ({ value: a.value, label: <span className="px-1 text-[11px]">{a.label}</span>, title: a.title }))} />
+          </span>
         )}
         {needsRotation && (
           <label className="flex items-center gap-1.5 text-[12px] text-muted">

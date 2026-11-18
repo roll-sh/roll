@@ -846,6 +846,7 @@ and in the table below.
 | `stream` | `bootstrap`, `security_protocol` | an API key, credential `key`: `username`, `password`, `properties` | no |
 | `bucket` | `bucket`, `endpoint`, `region` | an access key limited to the bucket, credential `key`: `access_key_id`, `secret_access_key` (option `permission` `read`, `write` or `admin`) | no |
 | `nosql` | `cql`, `username`, `password`, `http_token`, `alternator` | no | yes: a new password |
+| `queue` (a roll queues vhost, by name) | `host`, `port`, `vhost` | a user of its own on that vhost only, credential `user`: `url` (the AMQP URL with it), `username`, `password` (`PUT /v1/queues/users/{name}` with no tags, so no management sign-in, then `PUT /v1/queues/permissions/{vhost}/{name}`; option `permission` `read` (consume), `write` (publish and consume) or `configure`, the default: also declare and delete queues, exchanges and bindings). Rotating makes a new user and deletes the old one after the grace; revoking deletes it, which closes its connections. roll queues enforces no expiry of its own: a dynamic user lives until its lease is revoked | no (the vhost's own user is never readable: `…/credentials` shows a password once) |
 
 Secrets of one environment linked to the same resource and credential share one issue: linking
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` gives one access key, and rotating either rotates
@@ -861,8 +862,9 @@ a credential never drops data.
 `search` resources are linkable once roll search's workspace kind lands (`feature/roll-search`).
 roll apps' services have a workspace kind (`service`, `svc_…`); they consume secrets (an app's
 variables, `app:<svc>`) rather than issue credentials, so they have no link provider. Products
-without a workspace kind yet (queues, tasks) join by adding their kind to the workspace and
-registering a provider.
+without a link provider yet (tasks) join by registering one. Queues have no owners, so a person's
+project stands for a queue only when the person is an admin (`Workspace::trusts`), as for
+Postgres, Redis, streams, buckets and NoSQL.
 
 ### Rotators
 
