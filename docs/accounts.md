@@ -447,7 +447,9 @@ Each person reads their own (`GET /v1/accounts/me/activity`, "Recent activity" o
 page, as GitHub's security log): their sign-ins, refused ones too, with the method, address and
 device, and every change to their account, whoever made it (them, an admin, SCIM). An event is
 theirs when it's about them: its resource is their id (a person's own routes, `/v1/accounts/me…`,
-are about them).
+are about them). A wrong email code for their account is theirs too (refused, by `anonymous`: whoever
+tried isn't known), so someone guessing at their sign-in shows up there; a sign-up's code, which no
+account has yet, is the operator's log only.
 
 ## Mail
 

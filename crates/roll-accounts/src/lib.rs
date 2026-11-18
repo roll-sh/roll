@@ -925,6 +925,12 @@ impl Accounts {
         Ok(Some(mail))
     }
 
+    /// Whose account an email code was sent to (`None`: a sign-up's, or no such code): a wrong
+    /// code for it goes in that person's security log.
+    pub(crate) fn code_owner(&self, challenge: &str) -> Option<String> {
+        self.db.read(|c| c.query_row("SELECT user_id FROM email_codes WHERE id = ?", [challenge], |r| r.get::<_, Option<String>>(0)).optional()).ok().flatten().flatten()
+    }
+
     /// Check a challenge's code: the user it signs in (made from the invite on first sign-in).
     /// The person an email code signs in, and whether their account was made now (an invite).
     pub fn email_verify(&self, challenge: &str, code: &str) -> Result<(String, bool)> {
