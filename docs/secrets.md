@@ -3013,7 +3013,8 @@ inconsistencies are fixed in #264:
   roll queues checking a default-exchange publish against `""` rather than `amq.default`, fixed
   for every protocol in one place as RabbitMQ does (#279, checked against real RabbitMQ). roll apps
   wires queue links into `RollResources` once #274 is on main: tell them when it lands.
-- R7. **AWS IAM login for EC2/ECS/EKS** (S–M; a signed `GetCallerIdentity`, as Vault's): an account to confirm.
+- R7. **AWS IAM login for EC2/ECS/EKS** (building: `feature/roll-secrets-aws-login`; a signed
+  `GetCallerIdentity` forwarded to a pinned STS, as Vault's): an account to confirm.
 - R8. **A tamper-evident audit log** (#281): each row hashed onto a per-project chain in its own
   transaction (one head row, a unique seq: no forks, checked with two racing nodes), hourly digests
   signed by roll's issuer key and sent to the sinks, `audit verify` online or offline against an
@@ -3026,7 +3027,8 @@ inconsistencies are fixed in #264:
   audited. Screenshots in `~/.local/share/roll-review/secrets/requests/`.
 - R10. **Honeytokens** (M): decoy `rlt_` tokens are roll-access's (roll MCP's #270, `decoy: true`);
   database roles and IAM users that alert on use are this side's, once those land.
-- R11. **Moving in from 1Password, Bitwarden SM, Parameter Store, GCP, Azure and Akeyless** (S each).
+- R11. **Moving in from 1Password, Bitwarden SM, Parameter Store, GCP, Azure and Akeyless** (building:
+  `feature/roll-secrets-import-more`, each through its own CLI).
 - R12. **A split deployment key** (#276): `roll secrets key split/combine`, Shamir N of M in a small
   I/O-free crate (`roll-keyshares`), checksummed `rlks_` shares with a set id and a key check (a
   wrong mix is an error, never a wrong key); backup keys split the same way. Next: a Vault-style
