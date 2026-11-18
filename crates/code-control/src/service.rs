@@ -1046,8 +1046,7 @@ impl Code {
         let tree = self.checkout(&r.id, &head).await?;
         let preview = backend.create(r, c, tree.path()).await?;
         drop(tree);
-        self.db.set_change_preview(&c.id, Some(&preview))?;
-        self.emit(&r.id, "preview", json!({ "change": c.id, "preview": preview }));
+        self.report_environment(&c.id, Some(&preview))?;
         let c = self.change_or_404(&c.id)?;
         self.emit_change(&c);
         Ok(c)
@@ -1067,11 +1066,7 @@ impl Code {
     }
 
     fn report_environment_with(&self, change_id: &str, preview: Option<&Preview>, teardown: Option<&str>) -> Result<()> {
-        let Some((repo, mut promised)) = self.db.set_change_preview_promised(change_id, preview, teardown)? else { return Ok(()) };
-        let mut data = json!({ "change": change_id, "preview": preview });
-        if let Some(t) = teardown.filter(|_| preview.is_none()) {
-            data["teardown"] = json!(t);
-        }
+        let Some((repo, mut promised, data)) = self.db.set_change_preview_promised(change_id, preview, teardown)? else { return Ok(()) };
         self.emit_kept(&mut promised, &repo, "preview", data);
         Ok(())
     }

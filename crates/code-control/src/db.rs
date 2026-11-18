@@ -870,10 +870,10 @@ impl Db {
 
     /// Set a change's preview when it differs from the stored one, promising the `preview`
     /// event in the same transaction. `None` when the change doesn't exist or nothing changed;
-    /// else the change's repo and the promise.
+    /// else the change's repo, the promise and the event's data.
     /// `teardown`: with `None` (the preview went), what its teardown said when it failed, kept for
     /// the pull request's comment (a mark) and sent with the `preview` event.
-    pub fn set_change_preview_promised(&self, id: &str, preview: Option<&Preview>, teardown: Option<&str>) -> Result<Option<(String, crate::webhooks::Promises)>> {
+    pub fn set_change_preview_promised(&self, id: &str, preview: Option<&Preview>, teardown: Option<&str>) -> Result<Option<(String, crate::webhooks::Promises, Value)>> {
         let new = preview.map(json);
         self.write(|c| {
             let row: Option<(String, Option<String>)> =
@@ -891,13 +891,29 @@ impl Db {
             if preview.is_none() {
                 crate::github::set_mark_in(c, &format!("pv-teardown:{id}"), teardown.unwrap_or(""))?;
             }
+            // What this update reached that the stored preview hadn't at its head (`became`): an
+            // automation that posts "the preview is ready" filters on it, so it posts once a push,
+            // not at every state, cost or screenshot change (a sleeping preview counts as up, so
+            // waking isn't new either).
+            let old: Option<Preview> = old.as_deref().and_then(|o| serde_json::from_str(o).ok());
+            let mut became: Vec<&str> = Vec::new();
+            for (what, at) in [("ready", Preview::up_at as fn(&Preview) -> Option<&str>), ("failed", Preview::failed_at), ("visual_change", Preview::visual_change_at)] {
+                if let Some(head) = preview.and_then(at)
+                    && old.as_ref().and_then(at) != Some(head)
+                {
+                    became.push(what);
+                }
+            }
             let mut p = crate::webhooks::Promises::default();
             let mut data = serde_json::json!({ "change": id, "preview": preview });
+            if !became.is_empty() {
+                data["became"] = serde_json::json!(became);
+            }
             if let Some(t) = teardown.filter(|_| preview.is_none()) {
                 data["teardown"] = serde_json::json!(t);
             }
             p.promise(c, &repo, "preview", id, Some(&data))?;
-            Ok(Some((repo, p)))
+            Ok(Some((repo, p, data)))
         })
     }
 
