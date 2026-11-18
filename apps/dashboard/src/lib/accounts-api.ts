@@ -177,6 +177,8 @@ export interface AccountPolicy {
   require_second_factor: boolean;
   /** A session unused this many minutes ends (15 to a week; absent: a week). */
   idle_minutes?: number;
+  /** A session ends this many hours after its sign-in, however much it's used (1 to 720; absent: 30 days). */
+  max_session_hours?: number;
   /** Whose sessions must use a passkey (or come from their SSO): phishing-resistant sign-in. */
   phishing_resistant?: "admins" | "everyone";
 }
