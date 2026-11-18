@@ -42,6 +42,10 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/signin/recovery", post(signin_recovery))
         .route("/v1/accounts/signin/passkey/options", post(signin_passkey_options))
         .route("/v1/accounts/signin/passkey", post(signin_passkey))
+        .route("/v1/accounts/signin/reset-request", post(request_reset))
+        .route("/v1/accounts/reset-requests", get(list_resets))
+        .route("/v1/accounts/reset-requests/{id}/approve", post(approve_reset))
+        .route("/v1/accounts/reset-requests/{id}/deny", post(deny_reset))
         .route("/v1/accounts/me", get(me).patch(update_me))
         .route("/v1/accounts/me/sessions", get(my_sessions))
         .route("/v1/accounts/me/activity", get(my_activity))
@@ -593,6 +597,43 @@ async fn signin_passkey(State(a): S, owed: Owed, ip: Ip, headers: HeaderMap, b: 
         }
     })
     .await
+}
+
+// ── second-factor resets (docs/accounts.md, "Recovery") ──
+
+#[derive(Deserialize)]
+struct ResetAsk {
+    reason: String,
+}
+
+/// Someone signed in up to their second factor, who lost it, asks an admin to reset it.
+async fn request_reset(State(a): S, owed: Owed, ip: Ip, headers: HeaderMap, b: Bytes) -> Result<(StatusCode, Json<Value>)> {
+    let Some(Extension(owed)) = owed else { return Err(Error::Unauthorized("sign in with your first factor first (an email code, GitHub, Google)".into())) };
+    let ResetAsk { reason } = body(&b)?;
+    let who = Who::of(ip, &headers);
+    let a2 = a.clone();
+    let req = blocking(&a, move |_| a2.request_reset(&owed.user, &reason, &who)).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "id": req.id, "state": req.state, "created_at": req.created_at }))))
+}
+
+async fn list_resets(State(a): S, me: Me, op: Op) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    Ok(Json(blocking(&a, |a| a.reset_requests()).await?).into_response())
+}
+
+async fn decide(a: Arc<Accounts>, me: Me, op: Op, ip: Ip, headers: HeaderMap, id: String, approve: bool) -> Result<Response> {
+    let by = admin_sudo(&a, &me, &op).await?;
+    let who = Who::of(ip, &headers);
+    let a2 = a.clone();
+    Ok(Json(blocking(&a, move |_| a2.decide_reset(&id, approve, &by, &who)).await?).into_response())
+}
+
+async fn approve_reset(State(a): S, me: Me, op: Op, ip: Ip, headers: HeaderMap, Path(id): Path<String>) -> Result<Response> {
+    decide(a, me, op, ip, headers, id, true).await
+}
+
+async fn deny_reset(State(a): S, me: Me, op: Op, ip: Ip, headers: HeaderMap, Path(id): Path<String>) -> Result<Response> {
+    decide(a, me, op, ip, headers, id, false).await
 }
 
 // ── sudo mode (docs/accounts.md, "Sudo mode") ──

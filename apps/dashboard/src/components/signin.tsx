@@ -26,7 +26,7 @@ const ERRORS: Record<string, string> = {
 /** Where to go after: a path on this site only (not `//host` or `/\\host`, which browsers take as another host). */
 const safeReturn = (r: string | undefined) => (r && r.startsWith("/") && !/^\/[/\\]/.test(r) ? r : "/dashboard");
 
-type Step = { kind: "start" } | { kind: "code"; email: string; challenge: string } | { kind: "mfa"; recovery: boolean };
+type Step = { kind: "start" } | { kind: "code"; email: string; challenge: string } | { kind: "mfa"; recovery: boolean } | { kind: "reset"; sent: boolean };
 
 /** `/signin`: GitHub, Google, a company's SSO (by the email's domain) or a code by email, then the
  *  second factor when the account has one. */
@@ -50,7 +50,7 @@ export function SignInPage({ invite, step, returnTo, error }: { invite?: string;
   // Signed in already (or just now): on to where they were going. Owing a second factor: ask for it.
   useEffect(() => {
     if (session.status === "signed_in") navigate({ href: to });
-    if (session.status === "mfa_required" && current.kind !== "mfa") setCurrent({ kind: "mfa", recovery: false });
+    if (session.status === "mfa_required" && current.kind !== "mfa" && current.kind !== "reset") setCurrent({ kind: "mfa", recovery: false });
   }, [session.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const run = async (f: () => Promise<void>) => {
@@ -100,10 +100,12 @@ export function SignInPage({ invite, step, returnTo, error }: { invite?: string;
       <div className="rise w-full max-w-[380px]">
         <div className="mb-6 flex flex-col items-center text-center">
           <RollMark size={88} state={busy ? "thinking" : state} />
-          <h1 className="mt-5 text-[22px] font-semibold tracking-[-0.045em]">{current.kind === "mfa" ? "One more step" : "Sign in to roll"}</h1>
+          <h1 className="mt-5 text-[22px] font-semibold tracking-[-0.045em]">{current.kind === "mfa" ? "One more step" : current.kind === "reset" ? "Ask an admin" : "Sign in to roll"}</h1>
           <p className="mt-1 text-[13px] text-muted">
             {current.kind === "mfa"
               ? "Enter the code from your authenticator app."
+              : current.kind === "reset"
+                ? "To reset your second factor."
               : invited && invited !== "invalid"
                 ? `You're invited as ${invited.email}.`
                 : "Databases, storage, agents: your projects in one place."}
@@ -171,6 +173,26 @@ export function SignInPage({ invite, step, returnTo, error }: { invite?: string;
               <button onClick={() => setCurrent({ kind: "mfa", recovery: !current.recovery })} className="mt-3 text-[12px] text-muted hover:text-fg">
                 {current.recovery ? "Use the authenticator app" : "Lost your phone? Use a recovery code"}
               </button>
+              {current.recovery && (
+                <button onClick={() => setCurrent({ kind: "reset", sent: false })} className="mt-1.5 block text-[12px] text-muted hover:text-fg">
+                  Lost your codes too? Ask an admin to reset it
+                </button>
+              )}
+            </>
+          )}
+          {current.kind === "reset" && (
+            <>
+              {current.sent ? (
+                <p className="text-[12.5px] leading-relaxed text-muted">
+                  Your admins have it. One of them will check it&apos;s you some other way (a call, in person), then reset your second factor: you&apos;ll get an email, and can sign in again
+                  with a code.
+                </p>
+              ) : (
+                <ResetAsk busy={busy} onSubmit={(reason) => run(async () => (await accountsApi.requestReset(reason), setCurrent({ kind: "reset", sent: true })))} />
+              )}
+              <button onClick={() => setCurrent({ kind: "mfa", recovery: false })} className="mt-3 text-[12px] text-muted hover:text-fg">
+                Back
+              </button>
             </>
           )}
         </div>
@@ -181,6 +203,34 @@ export function SignInPage({ invite, step, returnTo, error }: { invite?: string;
         </div>
       </div>
     </main>
+  );
+}
+
+/** What a person who lost every second factor tells their admins (they read it before calling). */
+function ResetAsk({ busy, onSubmit }: { busy: boolean; onSubmit: (reason: string) => void }) {
+  const [reason, setReason] = useState("");
+  return (
+    <form
+      className="space-y-2.5"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (reason.trim()) onSubmit(reason.trim());
+      }}
+    >
+      <p className="text-[12.5px] leading-relaxed text-muted">An admin can reset your second factor once they&apos;ve checked it&apos;s you. Tell them what happened and how to reach you.</p>
+      <textarea
+        autoFocus
+        rows={3}
+        maxLength={500}
+        value={reason}
+        onChange={(e) => setReason(e.target.value)}
+        placeholder="Lost my phone and my recovery codes. Call me on…"
+        className="w-full resize-none rounded-lg border border-line-2 bg-canvas px-3 py-2 text-[13px] outline-none transition-colors focus:border-accent/60"
+      />
+      <button type="submit" disabled={busy || !reason.trim()} className="flex h-10 w-full items-center justify-center rounded-lg bg-fg text-[13px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-40">
+        Ask an admin
+      </button>
+    </form>
   );
 }
 

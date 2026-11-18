@@ -1,6 +1,6 @@
 import { Building2, Check, Copy, Fingerprint, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { accountsApi, activityText, refreshSession, useSession, type Activity, type Invite, type Passkey, type Provider, type Session, type User } from "@/lib/accounts-api";
+import { accountsApi, activityText, refreshSession, useSession, type Activity, type Invite, type Passkey, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
 import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } from "@/lib/webauthn";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { SsoSection } from "./account-sso";
@@ -45,6 +45,7 @@ export function AccountPage() {
           <Sessions />
           <RecentActivity me={user.id} />
           {user.admin && <Invites />}
+          {user.admin && <Resets me={user.id} />}
           {user.admin && <Users me={user.id} />}
           {user.admin && <SsoSection />}
         </div>
@@ -525,6 +526,53 @@ function Invites() {
           })}
         </div>
       )}
+    </Section>
+  );
+}
+
+/** Admins: second-factor resets people asked for (docs/accounts.md, "Recovery"). Shown when any were. */
+function Resets({ me }: { me: string }) {
+  const [list, setList] = useState<ResetRequest[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => accountsApi.resetRequests().then(setList, () => setList([])), []);
+  useEffect(() => void load(), [load]);
+  if (list.length === 0) return null;
+  const decide = (id: string, approve: boolean) => accountsApi.decideReset(id, approve).then(load, (e) => setError(errorText(e)));
+  return (
+    <Section id="recovery" title="Second-factor resets" lead="People who lost their authenticator app and recovery codes. Check it's them some other way first (a call, in person): their email code alone got them this far.">
+      <div className={card}>
+        {list.map((r) => (
+          <div key={r.id} className="flex flex-wrap items-start gap-3 border-t border-line px-4 py-3 first:border-t-0">
+            <ShieldCheck className={`mt-0.5 size-4 ${r.state === "pending" ? "text-accent" : "text-subtle"}`} />
+            <span className="min-w-0 flex-1 leading-snug">
+              <span className="block text-[12.5px]">
+                {r.handle} <span className="text-subtle">{r.email}</span>
+              </span>
+              <span className="mt-0.5 block whitespace-pre-wrap text-[12px] text-muted">{r.reason}</span>
+              <span className="mt-0.5 block text-[11px] text-subtle">
+                Asked {when(r.created_at)}
+                {r.ip ? ` from ${r.ip}` : ""}
+                {r.user_agent ? ` · ${browser(r.user_agent)}` : ""}
+                {r.state !== "pending" && r.decided_at ? ` · ${r.state} ${when(r.decided_at)}` : ""}
+              </span>
+            </span>
+            {r.state === "pending" &&
+              (r.user === me ? (
+                <span className="text-[11.5px] text-subtle">Another admin decides yours</span>
+              ) : (
+                <span className="flex gap-2">
+                  <button onClick={() => decide(r.id, true)} className={primary}>
+                    Reset it
+                  </button>
+                  <button onClick={() => decide(r.id, false)} className={btn}>
+                    Decline
+                  </button>
+                </span>
+              ))}
+          </div>
+        ))}
+        {error && <p className="px-4 pb-3 text-[12px] text-danger">{error}</p>}
+      </div>
     </Section>
   );
 }

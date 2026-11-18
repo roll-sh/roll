@@ -15,6 +15,7 @@ mod mail;
 mod oauth;
 pub mod passkeys;
 mod places;
+pub mod recovery;
 mod sudo;
 mod scim;
 pub mod sso;
@@ -118,6 +119,17 @@ CREATE TABLE IF NOT EXISTS passkeys (
     name TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     last_used_at INTEGER
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS reset_requests (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    ip TEXT,
+    user_agent TEXT,
+    created_at INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    decided_by TEXT,
+    decided_at INTEGER
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS sign_in_places (
     user_id TEXT NOT NULL,
