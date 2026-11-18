@@ -109,6 +109,9 @@ pub struct ClusterConfig {
     /// ([`crate::api::snapshots::install_default_repository`]): clusters whose snapshot
     /// contents are durable in roll's object storage (`None`: no default repository).
     pub default_repository: Option<String>,
+    /// Where the cluster's security audit entries go ([`crate::xpack::security::audit`]);
+    /// `None`: it records none.
+    pub audit: Option<crate::xpack::security::audit::AuditLog>,
 }
 
 impl ClusterConfig {
@@ -123,6 +126,7 @@ impl ClusterConfig {
             host_metrics: false,
             sealer: None,
             default_repository: None,
+            audit: None,
         }
     }
 

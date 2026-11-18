@@ -161,7 +161,8 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
   (GET, PUT, DELETE, PATCH with JSON patches), `api/account` (GET, and PUT for one's own
   password), `api/permissionsinfo`, `api/securityconfig` (GET; changes refused, as
   `allow_securityconfig_modification` is off by default), `api/audit` (GET, PUT, PATCH, with
-  `AuditConfig`'s defaults under a PUT and its validation; stored, roll writes no audit log),
+  `AuditConfig`'s defaults under a PUT and its validation; it decides what the cluster's audit
+  log records, below),
   `api/ssl/certs` and `api/ssl/*/reloadcerts` (refused: the plugin's super admin only), `whoami`
   (`No security data`: plain HTTP has no certificate), `api/cache` (DELETE forgets verified
   passwords), `authinfo` and `health`, also under `_opendistro/_security` (but `whoami`). Answers, validation (keys, types,
@@ -492,6 +493,47 @@ invalidated key never acts again: its jobs need setting up again by a user who c
 transform `_update`, a policy or watch `PUT`, a new rollup job).
 The `watcher` suite's webhooks and `http` inputs call the node itself: its test cluster sets
 `roll.watcher.allow_private_hosts` (a roll-only option in `extended.txt`), which nothing else does.
+
+The security audit log (README, "Audit log") writes Elasticsearch's entries: event names, field
+names and order, and the shapes of `security_config_change` entries (`put_user` with
+`has_password`, `put_role` with the normalized `role_descriptor`, `create_apikey` with its
+`role_descriptors` as a list, `invalidate_apikeys`, `change_password`, `change_disable_user`,
+`put_role_mapping`, `delete_*`), compared with a private Elasticsearch 9.5.5 with
+`xpack.security.audit.enabled`. As there, a Basic user that fails to authenticate is
+`authentication_failed` with `user.name`, while no credentials, or an API key or token that
+fails, is `anonymous_access_denied`; `enabled`, `include` and `exclude` are dynamic and take
+effect at once; event names are checked in any case. Differences:
+- roll records by default (Elasticsearch: `xpack.security.audit.enabled: false`), and its default
+  include list leaves out `access_granted` and `run_as_granted` (Elasticsearch's has them):
+  include them, or `_all`, to record every request. `_cluster/settings?include_defaults` shows
+  roll's defaults.
+- Entries go to roll's per-cluster log (the API and the dashboard), not to a log file; the
+  `logfile.emit_*` settings, `emit_request_body` and `ignore_filters` are accepted and have no
+  effect. A request body is never recorded.
+- Elasticsearch logs one `access_granted` per transport action, shard-level ones included
+  (`indices:data/read/search[phase/query]`); roll logs the request's action once. Requests a
+  cluster makes to itself (`_xpack`/`_system` users' actions, `system_access_granted`) aren't
+  recorded, and `connection_*`, `tampered_request` and `realm_authentication_failed` never
+  occur (no transport layer; one realm answer per request). A request the cluster's IP allowlist
+  refuses isn't `connection_denied`: like Elastic Cloud's traffic filters, which refuse at the
+  proxy, the allowlist turns it away before the cluster sees it.
+- An API key's entries carry `apikey.id` and `apikey.name` with the owner's `user.name`, without
+  the owner's `user.realm` and `user.roles`. `origin.address` is the client's IP without a port
+  (the address the IP allowlist checks), and is left out for roll's own control-plane requests.
+- User profile changes (`activate_user_profile`, `update_user_profile_data`, enable and disable)
+  aren't recorded yet.
+
+On OpenSearch-flavor clusters the entries are OpenSearch Security's (format version 4, compared
+with OpenSearch 3.9.0 writing to `security-auditlog-*`): `FAILED_LOGIN` (REST; the Basic user, or
+`<NONE>`), `MISSING_PRIVILEGES` (TRANSPORT with `audit_request_privilege` and
+`audit_trace_indices`; REST for the security REST API's refusal, with the plugin's reason),
+`COMPLIANCE_INTERNAL_CONFIG_WRITE` and `_READ` (the document: `internalusers`, `roles`,
+`rolesmapping`, `actiongroups`, `tenants`, `audit`), `INDEX_EVENT` for `indices:admin/*`,
+`GRANTED_PRIVILEGES` and `AUTHENTICATED`. The stored audit config takes effect at once.
+Differences: no `audit_rest_request_headers`, `audit_rest_request_params`, `audit_request_body`
+or diffs, whatever `log_request_body`, `exclude_sensitive_headers` and `write_log_diffs` say;
+compliance entries also name the REST method and path; the plugin's `plugins.security.audit.type`
+(where entries go) isn't a setting: they go to roll's log.
 
 ## Differential suite
 

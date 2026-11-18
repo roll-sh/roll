@@ -62,8 +62,8 @@ cargo test "${CRATES[@]}"
 # time) and run rolld with every product.
 cargo test -p roll-cli -p rolld
 
-# The dashboard's console completion, document helpers and playground requests.
-pnpm --filter dashboard exec vitest run src/lib/search-console.test.ts src/lib/search-docs.test.ts src/lib/search-playground.test.ts
+# The dashboard's console completion, document helpers, playground requests and audit rows.
+pnpm --filter dashboard exec vitest run src/lib/search-console.test.ts src/lib/search-docs.test.ts src/lib/search-playground.test.ts src/lib/search-audit.test.ts
 
 # Minimum pass count for a suite from docs/search/compatibility.md (0 when not set).
 threshold() {

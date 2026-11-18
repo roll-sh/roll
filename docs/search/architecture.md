@@ -194,6 +194,10 @@ Lucene can (the FSTs, smartcn's serialized tables), the FSTs are rebuilt with th
   cluster without jobs is never woken: the only standing cost is one catalog query per node.
 - **Local disk** is a cache with a byte budget (`--search-cache-bytes`). Evicting a segment is
   always safe: every segment in a manifest is already in object storage.
+- **The audit log** (README, "Audit log") writes nothing for a cluster nothing happens to: a
+  node's flusher runs only while entries wait (5 s batches, one object each, under
+  `search/c/<cluster>/audit/`), reading it never wakes the cluster, and a wrong cluster password
+  is recorded without waking it.
 
 ## Branching
 
