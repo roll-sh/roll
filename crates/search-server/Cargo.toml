@@ -22,6 +22,7 @@ futures.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+ipnet.workspace = true
 libc.workspace = true
 libmimalloc-sys.workspace = true
 mimalloc.workspace = true

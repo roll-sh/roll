@@ -769,8 +769,9 @@ whole. The environment's log
   through roll secrets' search provider like a bucket's (rolld's `secrets::Search`, through search's
   keys route with `access: "data"`): an API key with a data-only role, or on an OpenSearch-flavor
   cluster an internal user with a data-only role of its own. The keys route runs on the cluster's
-  owner on a fleet, wherever the service's owner is. roll.toml can't declare one, so
-  `roll apps export` names it in its notes.
+  owner on a fleet, wherever the service's owner is. roll.toml declares one as a
+  `[databases]` entry with `kind = "search"` (`roll up --all` makes the cluster if it's missing,
+  and `roll apps export` writes it).
 
 ### Secrets and environments
 
@@ -1355,7 +1356,7 @@ kind = "postgres"
 [databases.cache]
 kind = "redis"
 [databases.uploads]
-kind = "bucket"            # postgres, redis, bucket, stream or nosql
+kind = "bucket"            # postgres, redis, bucket, stream, nosql or search
 ```
 
 `[databases]` declares what a service links by name: Postgres and Redis give their URLs, a
