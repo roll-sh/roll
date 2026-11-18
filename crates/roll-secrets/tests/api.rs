@@ -105,7 +105,7 @@ impl SyncTarget for FakeSync {
 
 /// Audit deliveries, kept instead of sent; and an OIDC issuer's keys, served.
 #[derive(Default)]
-struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool);
+struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>);
 
 impl roll_secrets::Deliver for Sent {
     fn check(&self, url: &str) -> roll_secrets::Result<()> {
@@ -113,6 +113,14 @@ impl roll_secrets::Deliver for Sent {
     }
     fn post(&self, _: &str, _: &str, _: &Secret, body: &Value) -> roll_secrets::Result<()> {
         self.0.lock().unwrap().push(body.clone());
+        Ok(())
+    }
+    /// A SIEM's format: what it was sent with (the token as rolld would put it in a header).
+    fn post_format(&self, url: &str, id: &str, secret: &Secret, format: &str, token: Option<&Secret>, body: &Value) -> roll_secrets::Result<()> {
+        if format == "roll" {
+            return self.post(url, id, secret, body);
+        }
+        self.0.lock().unwrap().push(json!({ "format": format, "token": token.map(|t| t.expose().to_string()), "events": body["events"] }));
         Ok(())
     }
     fn get(&self, url: &str, _: usize) -> roll_secrets::Result<Vec<u8>> {
@@ -124,7 +132,8 @@ impl roll_secrets::Deliver for Sent {
         Ok(doc.to_string().into_bytes())
     }
     /// A rotator outside roll: each issue is a new vendor key.
-    fn call(&self, _: &str, _: &str, _: &Secret, body: &Value, _: usize) -> roll_secrets::Result<zeroize::Zeroizing<Vec<u8>>> {
+    fn call(&self, url: &str, _: &str, secret: &Secret, body: &Value, _: usize) -> roll_secrets::Result<zeroize::Zeroizing<Vec<u8>>> {
+        *self.3.lock().unwrap() = Some((url.to_string(), secret.expose().to_string()));
         if self.2.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(roll_secrets::Error::Link("rotator.example: connection refused".into()));
         }
@@ -178,10 +187,24 @@ impl roll_secrets::clouds::CloudTokens for FakeClouds {
 /// A Postgres server outside roll: each role's current password and, for a dynamic login, its
 /// group and `VALID UNTIL`; the flag refuses every change.
 #[derive(Default)]
-struct Outside(std::sync::Mutex<BTreeMap<String, String>>, std::sync::atomic::AtomicBool, std::sync::Mutex<BTreeMap<String, (String, i64)>>);
+struct Outside(std::sync::Mutex<BTreeMap<String, String>>, std::sync::atomic::AtomicBool, std::sync::Mutex<BTreeMap<String, (String, i64)>>, std::sync::atomic::AtomicBool, std::sync::atomic::AtomicBool);
+
+impl Outside {
+    /// The admin's password as the server has it.
+    fn admin(&self) -> String {
+        self.0.lock().unwrap().get("admin").cloned().unwrap_or_else(|| "hunter2".into())
+    }
+}
 
 impl roll_secrets::outside::OutsideDb for Outside {
     fn check(&self, url: &str, _: Option<&str>, roles: &[String], _: Option<&str>) -> Result<(), String> {
+        // With the flag set, the server can't be reached at all.
+        if self.4.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("connection timed out".into());
+        }
+        if !url.contains(&format!("admin:{}@", self.admin())) {
+            return Err("password authentication failed".into());
+        }
         if url.contains("@db.example") && roles.iter().all(|r| r.starts_with("app_")) { Ok(()) } else { Err("there's no role that can log in".into()) }
     }
     fn set_password(&self, _: &str, _: Option<&str>, role: &str, password: &str) -> Result<(), String> {
@@ -204,6 +227,42 @@ impl roll_secrets::outside::OutsideDb for Outside {
         self.0.lock().unwrap().remove(name);
         self.2.lock().unwrap().remove(name);
         Ok(())
+    }
+    fn set_own_password(&self, url: &str, _: Option<&str>, password: &str) -> Result<(), String> {
+        // The admin logs in with the password it has, which then changes; with the flag set, the
+        // reply is lost after the change.
+        if !url.contains(&format!(":{}@", self.admin())) {
+            return Err("password authentication failed".into());
+        }
+        self.0.lock().unwrap().insert("admin".into(), password.into());
+        if self.3.load(std::sync::atomic::Ordering::Relaxed) { Err("connection reset by peer".into()) } else { Ok(()) }
+    }
+}
+
+/// GitHub for App 1's installation 7: the live tokens, each with the repositories and
+/// permissions it was narrowed to.
+#[derive(Default)]
+struct FakeGitHub(std::sync::Mutex<BTreeMap<String, Narrowed>>);
+
+/// A token's repositories and permissions.
+type Narrowed = (Vec<String>, BTreeMap<String, String>);
+
+impl roll_secrets::github_app::GitHubApps for FakeGitHub {
+    fn token(&self, _: &str, app_id: u64, key: &roll_secrets::Value, installation: u64, repositories: &[String], permissions: &BTreeMap<String, String>) -> Result<(roll_secrets::Value, i64), String> {
+        if app_id != 1 || installation != 7 || !key.expose().contains("BEGIN RSA PRIVATE KEY") {
+            return Err("404 Not Found: Integration not found".into());
+        }
+        let mut live = self.0.lock().unwrap();
+        let token = format!("ghs_{}", live.len() + 100);
+        live.insert(token.clone(), (repositories.to_vec(), permissions.clone()));
+        Ok((roll_secrets::Value::new(token), 4_102_444_800_000))
+    }
+    fn revoke(&self, _: &str, token: &roll_secrets::Value) -> Result<(), String> {
+        self.0.lock().unwrap().remove(token.expose());
+        Ok(())
+    }
+    fn check(&self, api_base: &str) -> Result<(), String> {
+        if api_base.starts_with("https://") { Ok(()) } else { Err("api_base is an https:// URL".into()) }
     }
 }
 
@@ -431,6 +490,7 @@ struct Api {
     sync: Arc<FakeSync>,
     clouds: Arc<FakeClouds>,
     outside: Arc<Outside>,
+    github: Arc<FakeGitHub>,
     project: String,
     _dir: tempfile::TempDir,
 }
@@ -451,15 +511,16 @@ impl Api {
         let people = Arc::new(People::default());
         let kms = Arc::new(FakeKms::default());
         let outside = Arc::new(Outside::default());
+        let github = Arc::new(FakeGitHub::default());
         let sts = Arc::new(FakeSts::default());
         ws.set_owners(people.clone());
         let clouds = Arc::new(FakeClouds::default());
         let gate = Arc::new(Gate::default());
         let granted: Arc<dyn roll_auth::Grants> = Arc::new(Granted { gate: gate.clone(), people: people.clone() });
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }) };
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), github: Some(github.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }) };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));
-        let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, outside, clouds, project: String::new(), _dir: dir };
+        let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, outside, github, clouds, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -1256,10 +1317,13 @@ async fn a_sync_pushes_each_change_once_removes_deleted_keys_and_is_audited() {
     assert_eq!((changed, removed.len()), (vec!["DB_URL".to_string(), "STRIPE_KEY".into()], 0));
     api.secrets.sweep().unwrap();
     assert_eq!(api.sync.pushes.lock().unwrap().len(), 1, "an unchanged environment isn't pushed again");
+    assert_eq!(api.secrets.sweep_due_syncs().unwrap(), (0, 0), "nothing changed: nothing is due");
 
+    // A change marks the project's syncs due: the pass rolld runs every couple of seconds pushes it,
+    // without waiting for the sweep.
     api.set("staging", "DB_URL", "postgres://db2").await;
     api.ok(Method::DELETE, "/environments/staging/secrets/STRIPE_KEY", None).await;
-    api.secrets.sweep().unwrap();
+    assert_eq!(api.secrets.sweep_due_syncs().unwrap(), (1, 0));
     let (values, changed, removed) = pushes(1);
     assert_eq!((values.len(), changed, removed), (2, vec!["DB_URL".to_string()], vec!["STRIPE_KEY".to_string()]));
 
@@ -1310,6 +1374,19 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     let actions: Vec<&str> = sent[0]["events"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
     assert_eq!(actions, ["sink.create", "secrets.write", "secrets.export"]);
     assert!(!serde_json::to_string(&sent).unwrap().contains("sk_live_never_sent"));
+    // A SIEM's own format with its token, sealed: never shown again, sent only with the batch.
+    assert_eq!(api.call(Method::POST, "/audit/sinks", Some(json!({ "url": "https://splunk.example:8088/services/collector/event", "format": "splunk" }))).await.0, StatusCode::BAD_REQUEST, "a token is needed");
+    let splunk = api.ok(Method::POST, "/audit/sinks", Some(json!({ "url": "https://splunk.example:8088/services/collector/event", "format": "splunk", "token": "hec-token-1" }))).await;
+    assert_eq!(splunk["format"], "splunk");
+    assert!(!api.ok(Method::GET, "/audit/sinks", None).await.to_string().contains("hec-token-1") && !splunk.to_string().contains("hec-token-1"));
+    api.set("production", "AFTER", "x-after").await;
+    api.db.write(|c| c.execute("UPDATE audit SET at = at - 60000", ())).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    let sent = api.sent.0.lock().unwrap().clone();
+    let to_splunk = sent.iter().find(|b| b["format"] == "splunk").expect("a splunk batch");
+    assert_eq!(to_splunk["token"], "hec-token-1");
+    assert!(to_splunk["events"].as_array().unwrap().iter().any(|e| e["action"] == "secrets.write"));
     // Or a roll bucket: of the project's own canvas only.
     let (s, _) = api.call(Method::POST, "/audit/sinks", Some(json!({ "url": "bucket:audit-archive" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
@@ -1324,6 +1401,12 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     let (s, _) = api.call(Method::POST, "/audit/sinks", Some(json!({ "url": "stream:st_x/bad topic" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     api.ok(Method::POST, "/audit/sinks", Some(json!({ "url": "stream:st_x/audit" }))).await;
+    // An index of a search cluster on the canvas, the same way (and a name Elasticsearch takes).
+    assert_eq!(api.call(Method::POST, "/audit/sinks", Some(json!({ "url": "search:cl_x/roll-audit" }))).await.0, StatusCode::BAD_REQUEST);
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{p}/resources/search/cl_x"), Some(json!({ "x": 0, "y": 0 }))).await;
+    assert_eq!(api.call(Method::POST, "/audit/sinks", Some(json!({ "url": "search:cl_x/Roll Audit" }))).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(api.call(Method::POST, "/audit/sinks", Some(json!({ "url": "search:cl_x/.security" }))).await.0, StatusCode::BAD_REQUEST, "a system index");
+    api.ok(Method::POST, "/audit/sinks", Some(json!({ "url": "search:cl_x/roll-audit" }))).await;
     // Taken off the canvas later, it gets nothing more: checked at every delivery.
     api.ok(Method::DELETE, &format!("/v1/workspace/projects/{p}/resources/bucket/audit-archive"), None).await;
     api.set("production", "AFTER", "x").await;
@@ -1489,6 +1572,22 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
     // The key it issues keeps it.
     let (s, _) = api.call(Method::DELETE, &format!("/rotators/{}", r["id"].as_str().unwrap()), None).await;
     assert_eq!(s, StatusCode::CONFLICT);
+    // Moved and re-keyed in place: the next call goes to the new URL, signed with the new secret
+    // (shown once), and the link carries on.
+    let id = r["id"].as_str().unwrap();
+    // Not while a retired key waits to be revoked through the old endpoint.
+    assert_eq!(api.call(Method::PATCH, &format!("/rotators/{id}"), Some(json!({ "url": "https://rotator2.example/stripe" }))).await.0, StatusCode::CONFLICT);
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ?", [p.as_str()])).unwrap();
+    let sw = api.secrets.clone();
+    tokio::task::spawn_blocking(move || sw.sweep().unwrap()).await.unwrap();
+    let moved = api.ok(Method::PATCH, &format!("/rotators/{id}"), Some(json!({ "url": "https://rotator2.example/stripe" }))).await;
+    assert_eq!(moved["host"], "rotator2.example");
+    let rekeyed = api.ok(Method::POST, &format!("/rotators/{id}/rotate-secret"), None).await;
+    let secret = rekeyed["secret"].as_str().unwrap().to_string();
+    assert!(secret.starts_with("whsec_") && secret != r["secret"].as_str().unwrap());
+    api.ok(Method::POST, "/environments/production/secrets/STRIPE_KEY/rotate", None).await;
+    assert_eq!(api.sent.3.lock().unwrap().clone(), Some(("https://rotator2.example/stripe".to_string(), secret)));
 
     // A scheduled rotation and a revocation that fail show in health until they succeed.
     api.sent.2.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1543,6 +1642,38 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
     let revoked: Vec<Value> = api.sent.0.lock().unwrap().iter().filter(|b| b["action"] == "revoke").map(|b| b["handle"].clone()).collect();
     assert!(revoked.contains(&json!(2)), "the key in use when the project went is revoked: {revoked:?}");
     assert_eq!((count("rotators"), count("projects"), count("leases")), (0, 0, 0));
+}
+
+#[tokio::test]
+async fn a_github_app_gives_each_lease_a_narrowed_token_that_ends_with_it() {
+    let api = Api::new().await;
+    let key = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----";
+    let (s, e) = api.call(Method::POST, "/github-apps", Some(json!({ "name": "deploy", "app_id": 1, "installation_id": 8, "private_key": key, "repositories": ["web", "api"], "permissions": { "contents": "write" } }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("Integration not found") && !e.to_string().contains("MIIE"), "{e}");
+    let app = api.ok(Method::POST, "/github-apps", Some(json!({ "name": "deploy", "app_id": 1, "installation_id": 7, "private_key": key, "repositories": ["web", "api"], "permissions": { "contents": "write" } }))).await;
+    assert!(app.get("private_key").is_none() && app["api_base"] == "https://api.github.com", "{app}");
+    assert!(api.github.0.lock().unwrap().is_empty(), "the check's token is revoked at once");
+    let (s, e) = api.call(Method::POST, "/github-apps", Some(json!({ "name": "wide", "app_id": 1, "installation_id": 7, "private_key": key, "repositories": [], "permissions": {} }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "an App names the most its tokens may reach: {e}");
+
+    let link = |options: Value| json!({ "kind": "github_app", "ref": app["id"], "field": "token", "mode": "dynamic", "options": options });
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/GITHUB_TOKEN", Some(json!({ "link": link(json!({ "ttl_minutes": 120 })) }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a lease can't outlive GitHub's hour: {e}");
+    // A link narrows within the App's ceiling, never past it.
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/GITHUB_TOKEN", Some(json!({ "link": link(json!({ "permissions": { "administration": "write" } })) }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    let narrow = json!({ "repositories": ["web"], "permissions": { "contents": "read" } });
+    api.ok(Method::PUT, "/environments/staging/secrets/GITHUB_TOKEN", Some(json!({ "link": link(narrow) }))).await;
+    let a = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:release" }))).await;
+    let token = a["values"]["GITHUB_TOKEN"].as_str().unwrap().to_string();
+    let (repos, perms) = api.github.0.lock().unwrap()[&token].clone();
+    assert_eq!((repos, perms["contents"].as_str()), (vec!["web".to_string()], "read"));
+    let lease = a["leases"][0].as_str().unwrap();
+    api.ok(Method::DELETE, &format!("/leases/{lease}"), None).await;
+    assert!(!api.github.0.lock().unwrap().contains_key(&token), "ending the lease revoked the token");
+
+    let (s, _) = api.call(Method::DELETE, &format!("/github-apps/{}", app["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "its key keeps it");
 }
 
 #[tokio::test]
@@ -1640,6 +1771,44 @@ async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
 
     let (s, _) = api.call(Method::DELETE, &format!("/outside-databases/{}", d["id"].as_str().unwrap()), None).await;
     assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");
+
+    // The admin's own password rotates to one nobody knows but roll, which keeps using it; the
+    // registration is edited in place (a name, a URL whose password changed elsewhere), links intact.
+    let id = d["id"].as_str().unwrap();
+    api.ok(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await;
+    let admin = api.outside.0.lock().unwrap()["admin"].clone();
+    assert!(admin.len() == 40 && admin != "hunter2");
+    assert!(api.ok(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await["host"] == "db.example:5432", "a second rotation logs in with the first's password");
+    assert_ne!(api.outside.0.lock().unwrap()["admin"], admin);
+    // The server takes a new password but its reply is lost: roll keeps the one that logs in.
+    api.outside.3.store(true, std::sync::atomic::Ordering::Relaxed);
+    api.ok(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await;
+    api.outside.3.store(false, std::sync::atomic::Ordering::Relaxed);
+    api.ok(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await;
+    // Lost reply and an unreachable server: roll keeps both URLs. Another rotation meanwhile is
+    // refused (the first may still land), and the next use that finds only the new one logging in
+    // finishes the rotation.
+    let set = |flag: &std::sync::atomic::AtomicBool, on: bool| flag.store(on, std::sync::atomic::Ordering::Relaxed);
+    set(&api.outside.3, true);
+    set(&api.outside.4, true);
+    assert!(!api.call(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await.0.is_success());
+    set(&api.outside.3, false);
+    set(&api.outside.4, false);
+    assert_eq!(api.call(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await.0, StatusCode::CONFLICT, "another rotation is in flight");
+    let lease = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;
+    assert!(password(lease["values"]["TMP_USER"].as_str().unwrap()).is_some(), "issuing finished the interrupted rotation");
+    api.ok(Method::POST, &format!("/outside-databases/{id}/rotate-admin"), None).await;
+    // Its logins live on this server: it moves to another only once nothing links to it.
+    let (s, e) = api.call(Method::PATCH, &format!("/outside-databases/{id}"), Some(json!({ "url": "postgres://admin:x@other.example/app" }))).await;
+    assert!(s == StatusCode::CONFLICT && !e.to_string().contains(":x@"), "{e}");
+    // A password changed elsewhere: the registration takes the new URL, checked first.
+    api.outside.0.lock().unwrap().insert("admin".into(), "reset".into());
+    let (s, _) = api.call(Method::PATCH, &format!("/outside-databases/{id}"), Some(json!({ "url": "postgres://admin:wrong@db.example:5432/app" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a URL that doesn't log in isn't kept");
+    let renamed = api.ok(Method::PATCH, &format!("/outside-databases/{id}"), Some(json!({ "name": "billing-eu", "url": "postgres://admin:reset@db.example:5432/app" }))).await;
+    assert_eq!((renamed["name"].as_str(), renamed["host"].as_str()), (Some("billing-eu"), Some("db.example:5432")));
+    let lease = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;
+    assert!(password(lease["values"]["TMP_USER"].as_str().unwrap()).is_some(), "its links carry on through the new URL");
 }
 
 #[tokio::test]
@@ -1687,7 +1856,7 @@ async fn a_cloud_account_trusts_one_projects_token() {
     // The deployment key rotates: the issuer's key is resealed with the new one (health says when
     // the previous key can go), and keeps signing once the previous key is gone.
     let reopen = |current: &str, previous: Option<&str>| {
-        let opts = Options { keyring: Ok(Keyring::new(current, previous).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: api.clouds.clone() }), kms: None, sts: None, outside: None, workloads: None };
+        let opts = Options { keyring: Ok(Keyring::new(current, previous).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: api.clouds.clone() }), kms: None, sts: None, outside: None, github: None, workloads: None };
         Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap()
     };
     let (old, new) = ("k".repeat(32), "n".repeat(32));
@@ -2147,8 +2316,18 @@ async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
     let grant = roll_auth::Grant { scope: Arc::new(Scope(vec![by_id])), ..grant.clone() };
     let mut req = Request::builder().uri(format!("/v1/secrets/projects/{}/environments/development/values", api.project)).body(Body::empty()).unwrap();
     req.extensions_mut().insert(roll_auth::Operator);
-    req.extensions_mut().insert(grant);
+    req.extensions_mut().insert(grant.clone());
     assert_eq!(api.router.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+    // A request an approval let through (the gate puts `Approved` beside the grant): its audit row
+    // names the approval and who decided it, and the export has them as columns.
+    let mut req = Request::builder().uri(format!("/v1/secrets/projects/{}/environments/development/values", api.project)).body(Body::empty()).unwrap();
+    req.extensions_mut().insert(roll_auth::Operator);
+    req.extensions_mut().insert(grant);
+    req.extensions_mut().insert(roll_auth::Approved { id: "apr_fake1".into(), by: vec!["operator".into()], until: Some(4_102_444_800_000) });
+    assert_eq!(api.router.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+    let audit = api.ok(Method::GET, "/audit?actor=token:tok_ci", None).await;
+    assert_eq!(audit[0]["approval"], json!({ "id": "apr_fake1", "by": ["operator"], "until": 4_102_444_800_000i64 }));
+    assert!(audit[1].get("approval").is_none(), "a request no approval let through names none");
 }
 
 #[tokio::test]
@@ -2245,7 +2424,7 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
     let cert = api.values("production", "/").await["values"]["TLS_CERT"].clone();
     assert!(cert.as_str().is_some_and(|c| c.starts_with("-----BEGIN CERTIFICATE-----")), "{cert}");
     let node = |keyring: Keyring| {
-        let opts = Options { keyring: Ok(keyring), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, clouds: None, workloads: None };
+        let opts = Options { keyring: Ok(keyring), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, github: None, clouds: None, workloads: None };
         Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap())
     };
     // The deployment key rotates: health counts the wrapped project as not resealed until the
@@ -2272,7 +2451,7 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
     assert_eq!(roll_secrets::router(fresh).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::LOCKED);
     // Back with roll alone: no KMS needed any more.
     *api.kms.revoked.lock().unwrap() = false;
-    let opts = Options { keyring: Ok(Keyring::new(&"n".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, clouds: None, workloads: None };
+    let opts = Options { keyring: Ok(Keyring::new(&"n".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, github: None, clouds: None, workloads: None };
     let after = Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap());
     assert!(roll_secrets::router(after.clone()).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status().is_success());
     *api.kms.revoked.lock().unwrap() = true;

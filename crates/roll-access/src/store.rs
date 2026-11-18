@@ -241,7 +241,18 @@ pub struct Grant {
     /// OAuth connection's tokens change every hour.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// The access token it was looked up by is for roll's MCP server only (its audience, RFC 8707):
+    /// the gate honours it at `/v1/mcp` and for the calls that server makes, never on the API
+    /// directly. Set by [`Store::by_secret`]; never stored on the grant.
+    #[serde(skip)]
+    pub mcp_only: bool,
+    /// Narrowed to reading for this request (`scope=read-only`): never asks.
+    #[serde(skip)]
+    pub read_only: bool,
 }
+
+/// Who an access token is for (`grant_secrets.audience`): `None`, roll's whole API.
+pub const AUDIENCE_MCP: &str = "mcp";
 
 /// Why a live token isn't honoured yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,14 +272,31 @@ pub struct TempRule {
     /// The approval that allowed it (it can be taken back by this id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<String>,
+    /// Its approval met roll's policy's approval rules (an access request two people approved):
+    /// those gates don't make it ask again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gated: bool,
 }
 
 impl Grant {
     /// What it may do now: its rules, and the temporary ones still live. Decisions use this; making
     /// tokens (`check_within`) uses `rules` alone, so a while never becomes for good.
-    pub fn effective_rules(&self, now: i64) -> Scope {
+    ///
+    /// `asks_again`: a rule for a while that roll's policy now asks several people for (a gate
+    /// covers it) asks again instead of allowing, so a gate added later isn't skipped.
+    pub fn effective_rules(&self, now: i64, asks_again: impl Fn(&roll_auth::scope::Rule) -> bool) -> Scope {
         let mut s = self.rules.clone();
-        s.0.extend(self.temporary.iter().filter(|t| t.until > now).map(|t| t.rule.clone()));
+        s.0.extend(self.temporary.iter().filter(|t| t.until > now).filter_map(|t| {
+            let mut r = t.rule.clone();
+            if !t.gated && asks_again(&r) {
+                // A read-only token never asks: the rule just doesn't apply.
+                if self.read_only {
+                    return None;
+                }
+                r.actions.values_mut().for_each(|e| *e = roll_auth::scope::Effect::Ask);
+            }
+            Some(r)
+        }));
         s
     }
 
@@ -290,6 +318,7 @@ impl Grant {
         self.temporary.iter_mut().for_each(|t| narrow(&mut t.rule));
         self.temporary.retain(|t| !t.rule.actions.is_empty());
         self.ask_otherwise = false;
+        self.read_only = true;
     }
 
     /// Honoured now: live, and past its `not_before`.
@@ -352,9 +381,9 @@ fn insert_oauth_grant(c: &code_sql::Conn<'_>, grant_id: &str, client: &Client, n
 }
 
 /// A connection's first access and refresh tokens, inside a write.
-fn insert_oauth_secrets(c: &code_sql::Conn<'_>, grant_id: &str, client_id: &str, access: &str, refresh: &str, now: i64) -> Result<()> {
-    c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'access', ?, ?)", params![hash(access), grant_id, now + ACCESS_TTL_MS, now])?;
-    c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'refresh', ?, ?)", params![hash(refresh), grant_id, now + REFRESH_TTL_MS, now])?;
+fn insert_oauth_secrets(c: &code_sql::Conn<'_>, grant_id: &str, client_id: &str, access: &str, refresh: &str, audience: Option<&str>, now: i64) -> Result<()> {
+    c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at, audience) VALUES (?, ?, 'access', ?, ?, ?)", params![hash(access), grant_id, now + ACCESS_TTL_MS, now, audience])?;
+    c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at, audience) VALUES (?, ?, 'refresh', ?, ?, ?)", params![hash(refresh), grant_id, now + REFRESH_TTL_MS, now, audience])?;
     c.execute("UPDATE oauth_clients SET last_used_at = ? WHERE id = ?", params![now, client_id])?;
     Ok(())
 }
@@ -408,7 +437,7 @@ fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> std::res
     T::deserialize(d).map(Some)
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Approval {
     pub id: String,
     pub grant_id: String,
@@ -435,6 +464,23 @@ pub struct Approval {
     pub scope_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_index: Option<String>,
+    /// Who approved it so far, in order: one name once it's approved, more when roll's policy asks
+    /// for several people ("Two-person approvals"; it stays pending until they're enough).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub approved_by: Vec<String>,
+    /// While it's pending: what roll's policy asks of it, one gate per rule covering it (filled
+    /// when it's answered, from the policy as it is then; not stored).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<Gate>,
+}
+
+/// One rule an approval must pass: how many approvals from whom, and how many it has.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Gate {
+    pub approvals: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approvers: Option<Vec<String>>,
+    pub approved: usize,
 }
 
 /// A new approval, before it's stored.
@@ -661,6 +707,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         None => None,
     };
     Ok(Grant {
+        read_only: false,
         id: r.get(0)?,
         name: r.get(1)?,
         kind: match r.get::<_, String>(2)?.as_str() {
@@ -687,6 +734,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         revoked_why: r.get(19)?,
         temporary: r.get::<_, Option<String>>(20)?.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default(),
         ask_otherwise: r.get::<_, Option<bool>>(21)?.unwrap_or(false),
+        mcp_only: false,
     })
 }
 
@@ -716,8 +764,18 @@ pub(crate) fn audit_row(r: &code_sql::Row<'_>) -> code_sql::Result<AuditEvent> {
     })
 }
 
+/// A rule for a while added to a grant's temporary ones (the lapsed ones, and an older copy of the
+/// same rule, dropped), inside a write.
+fn push_temp(c: &code_sql::Conn<'_>, grant: &str, temp: Option<String>, add: TempRule, now: i64) -> code_sql::Result<()> {
+    let mut list: Vec<TempRule> = temp.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    list.retain(|t| t.until > now && t.rule != add.rule);
+    list.push(add);
+    c.execute("UPDATE grants SET temp_rules = ? WHERE id = ?", params![serde_json::to_string(&list).unwrap_or_default(), grant])?;
+    Ok(())
+}
+
 const APPROVAL_COLUMNS: &str =
-    "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash, environment, scope_path, scope_index";
+    "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash, environment, scope_path, scope_index, approved_by";
 
 fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
     let args: Option<String> = r.get(10)?;
@@ -744,6 +802,8 @@ fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
         environment: r.get(19)?,
         scope_path: r.get(20)?,
         scope_index: r.get(21)?,
+        approved_by: r.get::<_, Option<String>>(22)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+        gates: Vec::new(),
     })
 }
 
@@ -781,7 +841,7 @@ fn check_rate(rate: Option<u32>) -> Result<()> {
     }
 }
 
-fn check_rules(rules: &Scope) -> Result<()> {
+pub(crate) fn check_rules(rules: &Scope) -> Result<()> {
     let problems = rules.problems();
     if problems.is_empty() { Ok(()) } else { Err(Error::BadRequest(problems.join("; "))) }
 }
@@ -809,6 +869,11 @@ impl Store {
         // An access token a machine client asked to be read-only (`scope=read-only`): its grant's
         // rules narrowed to reading wherever the secret is looked up.
         db.add_column("grant_secrets", "read_only", "INTEGER NOT NULL DEFAULT 0")?;
+        // Who an access token is for (RFC 8707): `mcp` for an MCP client's (it asked for the MCP
+        // server), none for roll's whole API. A refresh token's is what its access tokens get.
+        if !db.has_column("grant_secrets", "audience")? {
+            db.add_column("grant_secrets", "audience", "TEXT")?;
+        }
         // Where an approval's chat card is (`{install, channel, ts}`), once posted.
         if !db.has_column("approvals", "chat")? {
             db.add_column("approvals", "chat", "TEXT")?;
@@ -816,8 +881,9 @@ impl Store {
         if !db.has_column("audit", "client")? {
             db.add_column("audit", "client", "TEXT")?;
         }
-        // What environment and path a request was about (a remembered approval keeps to them).
-        for col in ["environment", "scope_path", "scope_index"] {
+        // What environment and path a request was about (a remembered approval keeps to them), and
+        // who approved it so far (a policy can ask for several people).
+        for col in ["environment", "scope_path", "scope_index", "approved_by"] {
             if !db.has_column("approvals", col)? {
                 db.add_column("approvals", col, "TEXT")?;
             }
@@ -1086,13 +1152,14 @@ impl Store {
         let now = code_sql::now_ms();
         let h = hash(secret);
         let row = self.db.read(|c| {
-            c.query_row(                &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at, s.read_only FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
+            c.query_row(                &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at, s.read_only, s.audience FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
                 [&h],
                 |r| {
                     let mut g = grant_row(r)?;
                     if r.get::<_, i64>(after_grant(2))? != 0 {
                         g.read_only();
                     }
+                    g.mcp_only = r.get::<_, Option<String>>(after_grant(3))?.as_deref() == Some(AUDIENCE_MCP);
                     Ok((g, r.get::<_, String>(after_grant(0))?, r.get::<_, Option<i64>>(after_grant(1))?))
                 },
             )
@@ -1197,12 +1264,7 @@ impl Store {
                     }
                     c.execute("UPDATE grants SET rules = ? WHERE id = ?", params![serde_json::to_string(&rules).unwrap_or_default(), id])?;
                 }
-                Some(until) => {
-                    let mut temp: Vec<TempRule> = temp.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-                    temp.retain(|t| t.until > now && t.rule != *rule);
-                    temp.push(TempRule { rule: rule.clone(), until, approval: Some(approval.to_string()) });
-                    c.execute("UPDATE grants SET temp_rules = ? WHERE id = ?", params![serde_json::to_string(&temp).unwrap_or_default(), id])?;
-                }
+                Some(until) => push_temp(c, id, temp, TempRule { rule: rule.clone(), until, approval: Some(approval.to_string()), gated: false }, now)?,
             }
             Ok(())
         })?;
@@ -1375,7 +1437,7 @@ impl Store {
                 return Err(Error::TooMany("this token has 50 approvals waiting: decide some first".into()));
             }
             c.execute(
-                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?, ?, ?, ?)"),
+                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL)"),
                 params![
                     id,
                     a.grant.id,
@@ -1471,20 +1533,55 @@ impl Store {
             .collect())
     }
 
-    /// Approve or deny a pending approval (once).
-    pub fn decide(&self, id: &str, approve: bool, by: &str, reason: Option<&str>) -> Result<Approval> {
+    /// Decide a pending approval. Approving adds `by` to who approved it; it's approved once
+    /// `enough` says they are (one person when no policy rule covers it), and stays pending until
+    /// then. A person approves once. Denying decides at once.
+    ///
+    /// `grants`: an access request's rule, for how long, and whether gates covered it: added to the
+    /// token's rules for a while in the same write that approves it, however it was decided.
+    pub fn decide(&self, id: &str, approve: bool, by: &str, reason: Option<&str>, enough: &dyn Fn(&[String]) -> bool, grants: Option<(&roll_auth::scope::Rule, i64, bool)>) -> Result<Approval> {
         let now = code_sql::now_ms();
-        let state = if approve { "approved" } else { "denied" };
-        // An approved request may run within the next ten minutes, once.
-        let n = self.db.write(|c| {
-            c.execute(
-                "UPDATE approvals SET state = ?, decided_at = ?, decided_by = ?, reason = ?, expires_at = ? WHERE id = ? AND state = 'pending' AND expires_at > ?",
-                params![state, now, by, reason, now + APPROVAL_TTL_MS, id, now],
-            )
+        let changed = self.db.write(|c| {
+            let row: Option<(String, i64, Option<String>, String)> = c
+                .query_row("SELECT state, expires_at, approved_by, grant_id FROM approvals WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .optional()?;
+            let Some((state, expires_at, so_far, grant_id)) = row else { return Err(Error::NotFound(format!("no approval {id}"))) };
+            if state != "pending" || expires_at <= now {
+                return Ok(false);
+            }
+            if !approve {
+                c.execute(
+                    "UPDATE approvals SET state = 'denied', decided_at = ?, decided_by = ?, reason = ?, expires_at = ? WHERE id = ?",
+                    params![now, by, reason, now + APPROVAL_TTL_MS, id],
+                )?;
+                return Ok(true);
+            }
+            let mut who: Vec<String> = so_far.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            if who.iter().any(|w| w == by) {
+                return Err(Error::Conflict("you've approved this already: it needs someone else too".into()));
+            }
+            who.push(by.to_string());
+            let list = serde_json::to_string(&who).unwrap_or_default();
+            if enough(&who) {
+                // An approved request may run within the next ten minutes, once.
+                c.execute(
+                    "UPDATE approvals SET state = 'approved', decided_at = ?, decided_by = ?, approved_by = ?, expires_at = ? WHERE id = ?",
+                    params![now, by, list, now + APPROVAL_TTL_MS, id],
+                )?;
+                if let Some((rule, for_ms, gated)) = grants {
+                    let temp: Option<Option<String>> = c.query_row("SELECT temp_rules FROM grants WHERE id = ? AND revoked_at IS NULL", [&grant_id], |r| r.get(0)).optional()?;
+                    if let Some(temp) = temp {
+                        push_temp(c, &grant_id, temp, TempRule { rule: rule.clone(), until: now + for_ms, approval: Some(id.to_string()), gated }, now)?;
+                    }
+                }
+            } else {
+                c.execute("UPDATE approvals SET approved_by = ? WHERE id = ?", params![list, id])?;
+            }
+            Ok(true)
         })?;
         self.db.notify_after_commit(crate::APPROVALS_CHANNEL);
         let a = self.approval(id)?;
-        if n == 0 {
+        if !changed {
             return Err(Error::Conflict(format!("the approval is {}", a.state)));
         }
         Ok(a)
@@ -1828,7 +1925,10 @@ impl Store {
             {
                 return Err(Error::OAuth("invalid_target", "the code was issued for another resource".into()));
             }
-            insert_oauth_secrets(c, &grant_id, client_id, &access, &refresh, now)?;
+            // Asked for roll's MCP server (at authorization or now, RFC 8707): its tokens are for
+            // that server only. Neither (`roll login`): roll's API.
+            let audience = (res.is_some() || resource.is_some()).then_some(AUDIENCE_MCP);
+            insert_oauth_secrets(c, &grant_id, client_id, &access, &refresh, audience, now)?;
             Ok(grant_id)
         })?;
         Ok((self.get(&grant_id)?, access, refresh))
@@ -1852,7 +1952,7 @@ impl Store {
         let outcome = self.db.write(|c| {
             let row = c
                 .query_row(
-                    "SELECT s.grant_id, s.expires_at, g.client_id, g.revoked_at, g.expires_at, s.kind, s.created_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id WHERE s.hash = ? AND s.kind IN ('refresh', 'spent_refresh')",
+                    "SELECT s.grant_id, s.expires_at, g.client_id, g.revoked_at, g.expires_at, s.kind, s.created_at, s.audience FROM grant_secrets s JOIN grants g ON g.id = s.grant_id WHERE s.hash = ? AND s.kind IN ('refresh', 'spent_refresh')",
                     [&h],
                     |r| {
                         Ok((
@@ -1863,11 +1963,12 @@ impl Store {
                             r.get::<_, Option<i64>>(4)?,
                             r.get::<_, String>(5)?,
                             r.get::<_, i64>(6)?,
+                            r.get::<_, Option<String>>(7)?,
                         ))
                     },
                 )
                 .optional()?;
-            let Some((grant_id, exp, cid, revoked, grant_exp, kind, at)) = row else { return Ok(Outcome::Bad("unknown refresh token")) };
+            let Some((grant_id, exp, cid, revoked, grant_exp, kind, at, audience)) = row else { return Ok(Outcome::Bad("unknown refresh token")) };
             if cid.as_deref() != Some(client_id) {
                 return Ok(Outcome::Bad("the refresh token belongs to another client"));
             }
@@ -1886,8 +1987,9 @@ impl Store {
                 return Ok(Outcome::Bad("the connection expired or was revoked: connect again"));
             }
             c.execute("UPDATE grant_secrets SET kind = 'spent_refresh', created_at = ? WHERE hash = ?", params![now, h])?;
-            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'access', ?, ?)", params![hash(&access), grant_id, now + ACCESS_TTL_MS, now])?;
-            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'refresh', ?, ?)", params![hash(&refresh), grant_id, now + REFRESH_TTL_MS, now])?;
+            // The new pair is for whom the old one was.
+            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at, audience) VALUES (?, ?, 'access', ?, ?, ?)", params![hash(&access), grant_id, now + ACCESS_TTL_MS, now, audience])?;
+            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at, audience) VALUES (?, ?, 'refresh', ?, ?, ?)", params![hash(&refresh), grant_id, now + REFRESH_TTL_MS, now, audience])?;
             c.execute("UPDATE oauth_clients SET last_used_at = ? WHERE id = ?", params![now, client_id])?;
             Ok::<_, Error>(Outcome::Fresh(grant_id))
         })?;
