@@ -123,6 +123,14 @@ pub trait SecretSource: Send + Sync {
     async fn digest(&self, _project: &str, _env: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
+
+    /// The digest once it differs from `since`, or as it is after `wait` (at most 25 s): roll
+    /// secrets long-polls it, so a redeploy can follow a change within a second or two. By
+    /// default, the digest at once.
+    async fn wait_digest(&self, project: &str, env: &str, _since: &str, _wait: std::time::Duration) -> anyhow::Result<Option<String>> {
+        self.digest(project, env).await
+    }
+
     /// The project's `env` made in the store if it's missing (an apps environment named
     /// something roll secrets doesn't start with, `qa`), so its secrets have somewhere to go.
     /// Idempotent; never called for a preview's (previews make those, with their base).

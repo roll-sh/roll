@@ -115,6 +115,13 @@ pub trait SyncTarget: Send + Sync {
     }
     /// A target this kind can push to, for this project: on create and before every push.
     fn check(&self, project: &str, resources: &Resources, target: &Json) -> Result<()>;
+    /// Why the platform won't take `name` (prefix applied), if it won't: a name it keeps for
+    /// itself. Asked on create and preview for the names the sync would push then; `push` refuses
+    /// one added later.
+    fn refuses(&self, name: &str) -> Option<String> {
+        let _ = name;
+        None
+    }
     fn push(&self, target: &Json, push: &Push<'_>) -> Result<()>;
 }
 
@@ -321,7 +328,10 @@ impl Secrets {
         let all_creds: BTreeSet<String> = others.iter().filter_map(|(k, t)| self.syncs.get(k).ok().map(|tg| tg.credentials(t))).flatten().chain(creds.iter().cloned()).collect();
         let have: BTreeSet<String> = self.view(project, &n.environment, &path, caller, false, Action::Read)?.into_iter().filter(|e| e.row.owner.is_empty()).map(|e| e.row.key).collect();
         let prefix = n.prefix.clone().unwrap_or_default();
-        let names = have.iter().filter(|k| !all_creds.contains(*k) && n.keys.as_ref().is_none_or(|ks| ks.contains(k))).map(|k| format!("{prefix}{k}")).collect();
+        let names: Vec<String> = have.iter().filter(|k| !all_creds.contains(*k) && n.keys.as_ref().is_none_or(|ks| ks.contains(k))).map(|k| format!("{prefix}{k}")).collect();
+        if let Some(why) = names.iter().find_map(|n| target.refuses(n)) {
+            return Err(Error::BadRequest(why));
+        }
         let unknown_keys = n.keys.iter().flatten().filter(|k| !have.contains(*k)).cloned().collect();
         let missing_credentials = creds.iter().filter(|k| !have.contains(*k)).cloned().collect();
         Ok(SyncPreview { names, credentials: creds.into_iter().collect(), missing_credentials, unknown_keys })
@@ -358,6 +368,15 @@ impl Secrets {
             if keys.as_ref().is_some_and(|ks| ks.contains(&k)) {
                 return Err(Error::BadRequest(format!("{k} is the sync's credential: it's never pushed, so leave it out of keys")));
             }
+        }
+        // Names the platform keeps for itself: the listed keys, else the folder's keys now.
+        let creds = target.credentials(&n.target);
+        let wanted: Vec<String> = match &keys {
+            Some(ks) => ks.clone(),
+            None => self.view(project, &n.environment, &path, caller, false, Action::Read)?.into_iter().filter(|e| e.row.owner.is_empty()).map(|e| e.row.key).collect(),
+        };
+        if let Some(why) = wanted.iter().filter(|k| !creds.contains(*k)).find_map(|k| target.refuses(&format!("{prefix}{k}"))) {
+            return Err(Error::BadRequest(why));
         }
         let id = names::new_id("syn", 16);
         let secret = target.signed().then(|| Value::new(names::new_id("whsec", 40)));
@@ -441,7 +460,7 @@ impl Secrets {
     fn sync_caller(&self, r: &Row) -> Result<Caller> {
         let principal = format!("sync:{}", r.info.id);
         if r.info.created_by == "operator" {
-            return Ok(Caller { principal, grants: Arc::new(Everything), ip: None, runtime: false });
+            return Ok(Caller { principal, grants: Arc::new(Everything), ip: None, runtime: false, approval: None });
         }
         let gone = || Error::Forbidden(format!("{} made this sync and can't reach secrets any more: make the sync again", r.info.created_by));
         // A person's: as they are now, while their account can sign in.
@@ -454,15 +473,35 @@ impl Secrets {
         // A roll-access grant: as it is now, or gone once revoked or expired (a person's acts as them).
         let token = r.info.created_by.strip_prefix("token:").ok_or_else(gone)?;
         let g = self.grants.as_ref().and_then(|g| g.grant(token)).ok_or_else(gone)?;
-        Ok(Caller { principal, grants: self.grant_grants(&g)?, ip: None, runtime: false })
+        Ok(Caller { principal, grants: self.grant_grants(&g)?, ip: None, runtime: false, approval: None })
+    }
+
+    /// A pass over the syncs only when a change marked some due (`checked_at` NULL): what rolld
+    /// runs every couple of seconds, so a change reaches its targets in seconds, however many
+    /// syncs there are. One indexed read when nothing changed.
+    pub fn sweep_due_syncs(&self) -> Result<(usize, usize)> {
+        let now = self.db.now_ms()?;
+        let due = self.db.read(|c| c.query_row("SELECT 1 FROM syncs WHERE checked_at IS NULL AND retry_at <= ? AND running_until <= ? LIMIT 1", params![now, now], |_| Ok(())).optional())?;
+        if due.is_none() {
+            return Ok((0, 0));
+        }
+        // Only those a change marked: the rest wait for the sweep, so steady writes never turn
+        // this into a scan of every sync.
+        self.sweep_syncs_from(true)
     }
 
     /// One pass over the syncs (the sweeper): push those whose environment changed.
     /// Returns (pushed, failed).
     pub(crate) fn sweep_syncs(&self) -> Result<(usize, usize)> {
-        let now = self.db.now_ms()?;
         // Syncs of deleted environments and projects go with them.
         self.db.write(|c| c.execute("DELETE FROM syncs WHERE env_id NOT IN (SELECT id FROM environments)", ()))?;
+        self.sweep_syncs_from(false)
+    }
+
+    /// Check and push syncs, least recently checked first (`due_only`: only those a change marked).
+    fn sweep_syncs_from(&self, due_only: bool) -> Result<(usize, usize)> {
+        let now = self.db.now_ms()?;
+        let marked = if due_only { " AND s.checked_at IS NULL" } else { "" };
         let (mut pushed, mut failed) = (0, 0);
         // A digest of a large folder takes a tenth of a second: a sweep checks for so long, and
         // the next one goes on from the least recently checked. Every node sweeps: each claims a
@@ -478,7 +517,7 @@ impl Secrets {
             let batch: Vec<(Row, Option<i64>)> = self.db.write(|c| {
                 // Least recently checked first: every sync gets its turn, however many there are.
                 let rows = c.query(
-                    &format!("SELECT {COLUMNS}, s.checked_at FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.running_until <= ? AND s.retry_at <= ? AND COALESCE(s.checked_at, 0) < ? ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT {CLAIM}"),
+                    &format!("SELECT {COLUMNS}, s.checked_at FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.running_until <= ? AND s.retry_at <= ? AND COALESCE(s.checked_at, 0) < ?{marked} ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT {CLAIM}"),
                     params![now, now, now],
                     |r| Ok((row(r)?, r.get::<_, Option<i64>>(16)?)),
                 )?;
@@ -534,8 +573,9 @@ impl Secrets {
         let outcome = caller.and_then(|caller| self.push_once(&r, &caller, digest, force));
         let now = self.db.now_ms().unwrap_or(hold - HOLD_MS);
         let (project, id, env, path) = (r.project.as_str(), r.info.id.as_str(), r.info.environment.as_str(), r.info.path.as_str());
-        let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None, runtime: false };
+        let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None, runtime: false, approval: None };
         let ok = outcome.is_ok();
+        crate::metrics::Counters::add(if ok { &self.counters.syncs_pushed } else { &self.counters.sync_failures }, 1);
         let res = self.db.write(|c| {
             match &outcome {
                 Ok(o) => c.execute(
@@ -673,4 +713,13 @@ impl Secrets {
         let keys = changed.iter().chain(&removed).map(|n| n.strip_prefix(r.info.prefix.as_str()).unwrap_or(n).to_string()).collect();
         Ok(Outcome { digest, state, keys, summary, problems })
     }
+}
+
+/// A live link's resource changed its credential: the syncs of projects that link it check their
+/// digests next (in the transaction that records the change).
+pub(crate) fn due_for_source(c: &code_sql::Conn<'_>, kind: &str, r#ref: &str) -> code_sql::Result<usize> {
+    c.execute(
+        "UPDATE syncs SET checked_at = NULL WHERE checked_at IS NOT NULL AND project_id IN (SELECT DISTINCT project_id FROM secrets WHERE link LIKE ? AND link LIKE ?)",
+        params![format!("%\"kind\":\"{kind}\"%"), format!("%\"ref\":\"{ref}\"%", ref = r#ref)],
+    )
 }

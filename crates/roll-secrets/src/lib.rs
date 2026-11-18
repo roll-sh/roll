@@ -16,6 +16,7 @@ mod alerts;
 pub mod api;
 pub mod health;
 pub mod outside;
+pub mod github_app;
 pub mod aws;
 pub mod iam;
 pub mod rotators;
@@ -38,8 +39,10 @@ pub mod pki;
 pub mod ssh;
 pub mod clouds;
 pub mod issuer;
+pub mod kubernetes;
 mod oidc;
 mod read;
+mod metrics;
 pub mod reach;
 pub mod refs;
 mod notices;
@@ -55,13 +58,14 @@ mod caller;
 pub mod kms;
 mod write;
 
-pub use access::{Action, Caller, Minted, People, Person, Scope, Workloads, PREVIEWS};
+pub use access::{Action, Approval, Caller, Minted, People, Person, Scope, Workloads, PREVIEWS};
 pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter};
 pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
 pub use links::{Link, LinkProvider, Links, Mode};
+pub use metrics::Metrics;
 pub use read::{Followed, Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
 pub use exports::Export;
@@ -327,6 +331,9 @@ pub struct Options {
     pub clouds: Option<clouds::Clouds>,
     /// Sets passwords on Postgres servers outside roll (outside.rs); `None`: not on this server.
     pub outside: Option<std::sync::Arc<dyn outside::OutsideDb>>,
+    /// Calls GitHub for the installation tokens of Apps projects register (github_app.rs); `None`:
+    /// not on this server.
+    pub github: Option<std::sync::Arc<dyn github_app::GitHubApps>>,
 }
 
 /// The secrets store.
@@ -348,6 +355,7 @@ pub struct Secrets {
     web_url: Option<String>,
     clouds: Option<clouds::Clouds>,
     outside: Option<Arc<dyn outside::OutsideDb>>,
+    github: Option<Arc<dyn github_app::GitHubApps>>,
     /// OIDC issuers' public keys (identities.rs).
     oidc: oidc::Keys,
     /// Logins per identity and per client address in the last minute.
@@ -358,6 +366,8 @@ pub struct Secrets {
     public_api: Arc<std::sync::OnceLock<String>>,
     /// Signed CRLs by CA, with when they were made (pki.rs): the public route signs one a minute.
     crls: pki::Crls,
+    /// What rolld's metrics count (metrics.rs).
+    counters: metrics::Counters,
     /// Live links' fingerprints as last read (read.rs): what digests count.
     live_fps: read::LiveFps,
 }
@@ -394,7 +404,10 @@ impl Secrets {
         db.add_column("environments", "notify_url", "BLOB")?;
         db.add_column("environments", "notify_host", "TEXT")?;
         db.add_column("syncs", "checked_at", "INTEGER")?;
+        // Syncs a change marked due (checked_at NULL), found every couple of seconds (syncs.rs).
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS syncs_due ON syncs (retry_at) WHERE checked_at IS NULL;")?;
         db.add_column("leases", "path", "TEXT")?;
+        db.add_column("audit", "approval", "TEXT")?;
         // Workload identities (identities.rs); their logins' tokens are roll-access's.
         db.ensure_schema(identities::SCHEMA)?;
         // Secrets' own `rlst_` tokens are gone (roll-access's grants instead); never on main.
@@ -422,6 +435,7 @@ impl Secrets {
         db.add_column("secrets", "public", "TEXT")?;
         // Who supplies a required key (health and the daily notice name them).
         db.add_column("required", "owner", "TEXT")?;
+        db.add_column("required", "password", "TEXT")?;
         // Scheduled rotations and revocations that fail, for health (health.rs).
         db.add_column("secrets", "rotation_error", "TEXT")?;
         db.add_column("secrets", "rotation_failed_at", "INTEGER")?;
@@ -438,6 +452,9 @@ impl Secrets {
         db.ensure_schema(pki::SCHEMA)?;
         db.ensure_schema(ssh::SCHEMA)?;
         db.ensure_schema(aws::SCHEMA)?;
+        // An audit sink's format and its SIEM's token, sealed (sinks.rs): absent is roll's own.
+        db.add_column("audit_sinks", "format", "TEXT")?;
+        db.add_column("audit_sinks", "token", "BLOB")?;
         // How a role trusts roll (aws.rs): absent is the ExternalId, as before there were two.
         db.add_column("aws_roles", "trust", "TEXT")?;
         db.ensure_schema(issuer::SCHEMA)?;
@@ -461,8 +478,10 @@ impl Secrets {
                 links.register(Arc::new(clouds::Provider { kind, db: db.clone(), keys: keys.clone(), clouds: c.clone() }));
             }
         }
+        db.ensure_schema(kubernetes::SCHEMA)?;
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone() }));
+            links.register(Arc::new(kubernetes::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone() }));
         }
         // A project's CAs are roll secrets' own: nothing to reach outside.
         let public_api: Arc<std::sync::OnceLock<String>> = Default::default();
@@ -472,10 +491,20 @@ impl Secrets {
             links.register(Arc::new(ssh::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone() }));
         }
         db.ensure_schema(outside::SCHEMA)?;
+        // A rotation's new admin URL, kept until the server took it (outside.rs).
+        db.add_column("outside_dbs", "url_next", "BLOB")?;
+        db.add_column("outside_dbs", "url_next_at", "INTEGER")?;
         if let (Some(outside), Ok(keys)) = (&opts.outside, &opts.keyring) {
             links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), outside: outside.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default() })
+        db.ensure_schema(github_app::SCHEMA)?;
+        // An App's ceiling: the repositories and permissions its tokens may reach at most.
+        db.add_column("github_apps", "repositories", "TEXT")?;
+        db.add_column("github_apps", "permissions", "TEXT")?;
+        if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
+            links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
+        }
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, github: opts.github, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default(), counters: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -514,7 +543,11 @@ impl Secrets {
                 })?
             }
         };
-        let inner = self.unwrap.inner(project, &sealed)?;
+        let inner = self.unwrap.inner(project, &sealed).inspect_err(|e| {
+            if matches!(e, Error::KeyDenied(_)) {
+                metrics::Counters::add(&self.counters.kms_refusals, 1);
+            }
+        })?;
         let (dek, resealed) = keys.open_dek(project, &inner)?;
         // Sealed by the previous deployment key (a rotation): resealed with the current one. A
         // wrapped key stays wrapped by the same customer key; if KMS won't wrap it now, the key
@@ -617,7 +650,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "aws_users", "aws_roles", "cloud_accounts", "cas", "ca_certs", "ssh_cas"];
+const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "aws_users", "aws_roles", "cloud_accounts", "kubernetes_clusters", "cas", "ca_certs", "ssh_cas", "github_apps"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked, and no
 /// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,

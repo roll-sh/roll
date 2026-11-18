@@ -133,6 +133,11 @@ pub trait LinkProvider: Send + Sync {
         let _ = (r#ref, handle);
         Ok(())
     }
+    /// Whether revoking ends the credential at the product. `false`: it works until its own
+    /// expiry (a bound Kubernetes token), and revoking only ends the lease, as its audit row says.
+    fn revocable(&self) -> bool {
+        true
+    }
     /// Keep a dynamic credential working until `until` (unix ms): a lease was renewed. Only a
     /// product that enforces an expiry of its own needs this (a Postgres role's `VALID UNTIL`);
     /// for the rest, roll's lease is the expiry.
@@ -207,7 +212,7 @@ impl Links {
             return Err(Error::BadRequest(format!("{} {} is {}, not {}", l.kind, l.field, f.modes.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(" or "), l.mode.as_str())));
         }
         for k in l.options.keys() {
-            if !["ttl_minutes", "grace_minutes", "rotate_days", "branch", "permission", "names", "principals"].contains(&k.as_str()) {
+            if !["ttl_minutes", "grace_minutes", "rotate_days", "branch", "permission", "names", "principals", "repositories", "permissions", "namespace", "service_account", "audiences"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown link option {k}")));
             }
         }
@@ -252,6 +257,9 @@ impl crate::Secrets {
         if let Some(provider) = self.links.0.get(crate::outside::KIND) {
             out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::outside::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
         }
+        if let Some(provider) = self.links.0.get(crate::kubernetes::KIND) {
+            out.extend(self.kubernetes_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::kubernetes::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+        }
         for (kind, id, name) in self.cloud_refs(project)? {
             if let Some(provider) = self.links.0.get(kind.as_str()) {
                 out.push(Target { kind, r#ref: id, name, fields: provider.fields().to_vec() });
@@ -259,6 +267,9 @@ impl crate::Secrets {
         }
         if let Some(provider) = self.links.0.get(crate::pki::KIND) {
             out.extend(self.ca_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::pki::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+        }
+        if let Some(provider) = self.links.0.get(crate::github_app::KIND) {
+            out.extend(self.github_app_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::github_app::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
         }
         if let Some(provider) = self.links.0.get(crate::ssh::KIND) {
             out.extend(self.ssh_ca_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::ssh::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));

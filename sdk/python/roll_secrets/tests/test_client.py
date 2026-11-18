@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import unittest
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
@@ -67,7 +68,7 @@ class Rolld(BaseHTTPRequestHandler):
         env = "/v1/secrets/projects/prj_a/environments/production"
         if self.headers.get("Authorization") != "Bearer " + Rolld.state["token"]:
             return self.answer(401)
-        if self.path == env + "/digest":
+        if self.path.split("?")[0] == env + "/digest":
             return self.answer(200, {"digest": Rolld.state["digest"]})
         if self.path == env + "/values":
             return self.answer(200, {"values": {"A": Rolld.state["value"]}, "problems": [], "leases": []})
@@ -193,3 +194,79 @@ class ATransitKey(unittest.TestCase):
         self.assertEqual(Echo.sent[0], {"path": "/v1/secrets/projects/prj_1/transit/cards/encrypt", "plaintext": "aMOpbGxvIOKckw==", "context": "order:42"})
         self.assertEqual(cards.decrypt(ct, "order:42").decode(), "héllo ✓")
         self.assertEqual(cards.decrypt(cards.encrypt(bytes([0, 255, 128, 7]))), bytes([0, 255, 128, 7]))
+
+
+class Writes(BaseHTTPRequestHandler):
+    """rolld's one-key writes and a values route with a dynamic key (PW) that dynamic=false leaves
+    out; a protected environment answers approval_required."""
+
+    state = {"stored": {"A": "1"}, "generation": 0, "reads": 0, "protected": False, "writes": []}
+
+    def log_message(self, *_):
+        pass
+
+    def answer(self, code, body):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("ETag", '"g%d"' % Writes.state["generation"])
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def do_GET(self):
+        s, q = Writes.state, urllib.parse.urlsplit(self.path).query
+        s["reads"] += 1
+        no_dynamic = "dynamic=false" in q
+        values = dict(s["stored"]) if no_dynamic else {**s["stored"], "PW": "fake-issued"}
+        self.answer(200, {"values": values, "problems": [], "leases": [] if no_dynamic else ["lse_1"], "dynamic": ["PW"], "linked": []})
+
+    def write(self):
+        s, u = Writes.state, urllib.parse.urlsplit(self.path)
+        assert urllib.parse.parse_qs(u.query) == {"path": ["/api"]}, u.query
+        if s["protected"]:
+            return None, self.answer(409, {"error": "production is protected: open a change request", "code": "approval_required"})
+        s["generation"] += 1
+        return u.path.rsplit("/", 1)[1], {"seq": s["generation"], "environment": "production", "path": "/api", "kind": "write"}
+
+    def do_PUT(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        key, change = self.write()
+        if key:
+            Writes.state["writes"].append(body)
+            Writes.state["stored"][key] = body["value"]
+            self.answer(200, {"change": change, "secret": {"key": key, "version": 2}, "warnings": []})
+
+    def do_DELETE(self):
+        key, change = self.write()
+        if key and key not in Writes.state["stored"]:
+            self.answer(404, {"error": f"no secret {key} in production:/api"})
+        elif key:
+            del Writes.state["stored"][key]
+            self.answer(200, {"change": change, "secret": None, "warnings": []})
+
+
+class OneKeyWrites(unittest.TestCase):
+    def test_set_and_delete_write_one_key_and_drop_the_cache(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Writes)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        c = roll_secrets.Client(f"http://127.0.0.1:{server.server_address[1]}", "rlt_x", project="prj_1", cache_ttl=3600)
+        s = Writes.state
+
+        v = c.values("production", dynamic=False)
+        self.assertEqual((v.values, v.dynamic, v.leases), ({"A": "1"}, ["PW"], []), "dynamic=false leaves the dynamic key out")
+        c.values("production", dynamic=False)
+        self.assertEqual(s["reads"], 1, "and holds no credential, so it's kept")
+
+        w = c.set("production", "B", "fake-value-1", path="/api", comment="made up")
+        self.assertEqual((w["secret"]["version"], s["writes"]), (2, [{"value": "fake-value-1", "link": None, "comment": "made up"}]))
+        self.assertEqual(c.values("production", dynamic=False).values.get("B"), "fake-value-1", "a set drops the cache")
+
+        self.assertEqual(c.delete("production", "B", path="/api"), {"deleted": True, "change": {"seq": 2, "environment": "production", "path": "/api", "kind": "write"}})
+        self.assertNotIn("B", c.values("production", dynamic=False).values, "a delete drops the cache")
+        self.assertEqual(c.delete("production", "B", path="/api"), {"deleted": False, "change": None}, "a missing key is no change")
+
+        s["protected"] = True
+        with self.assertRaises(roll_secrets.SecretsError) as e:
+            c.set("production", "C", "fake-value-2", path="/api")
+        self.assertEqual((e.exception.code, e.exception.status), ("approval_required", 409))
+        self.assertNotIn("fake-value-2", repr(e.exception) + str(e.exception) + repr(e.exception.__cause__) + repr(e.exception.__context__))

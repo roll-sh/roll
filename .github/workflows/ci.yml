@@ -131,6 +131,23 @@ jobs:
           pip install -q cryptography
           PYTHONPATH=src python -m unittest discover -s tests
 
+  # roll secrets' Java client (sdk/java/secrets), in its own job so the sdk one stays quick.
+  java:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    defaults:
+      run:
+        working-directory: sdk/java/secrets
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: sdk/java/secrets/pom.xml
+      - run: mvn -B -q test
+
   # The roll Terraform provider (sdk/terraform-provider-roll): Terraform drives it against a fake
   # rolld in memory.
   terraform:
@@ -194,7 +211,7 @@ jobs:
           fi
 
   ci:
-    needs: [rust, web, dashboard, sdk, dotnet, scripts, terraform]
+    needs: [rust, web, dashboard, sdk, java, dotnet, scripts, terraform]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2
