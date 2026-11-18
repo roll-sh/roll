@@ -35,6 +35,7 @@ import { Route as DashboardAgentsIndexRouteImport } from './routes/dashboard/age
 import { Route as DashboardAgentsConnectRouteImport } from './routes/dashboard/agents/connect'
 import { Route as DashboardAgentsSharesRouteImport } from './routes/dashboard/agents/shares'
 import { Route as DashboardAppsIdRouteImport } from './routes/dashboard/apps/$id'
+import { Route as DashboardAppsVisitRouteImport } from './routes/dashboard/apps/visit'
 import { Route as DashboardCodeIndexRouteImport } from './routes/dashboard/code/index'
 import { Route as DashboardNosqlIndexRouteImport } from './routes/dashboard/nosql/index'
 import { Route as DashboardNosqlIdRouteImport } from './routes/dashboard/nosql/$id'
@@ -206,6 +207,11 @@ const DashboardAgentsSharesRoute = DashboardAgentsSharesRouteImport.update({
 const DashboardAppsIdRoute = DashboardAppsIdRouteImport.update({
   id: '/dashboard/apps/$id',
   path: '/dashboard/apps/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardAppsVisitRoute = DashboardAppsVisitRouteImport.update({
+  id: '/dashboard/apps/visit',
+  path: '/dashboard/apps/visit',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DashboardCodeIndexRoute = DashboardCodeIndexRouteImport.update({
@@ -451,6 +457,7 @@ export interface FileRoutesByFullPath {
   '/dashboard/agents/connect': typeof DashboardAgentsConnectRoute
   '/dashboard/agents/shares': typeof DashboardAgentsSharesRoute
   '/dashboard/apps/$id': typeof DashboardAppsIdRoute
+  '/dashboard/apps/visit': typeof DashboardAppsVisitRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
   '/dashboard/projects/$id': typeof DashboardProjectsIdRouteWithChildren
   '/dashboard/queues/connections': typeof DashboardQueuesConnectionsRoute
@@ -519,6 +526,7 @@ export interface FileRoutesByTo {
   '/dashboard/agents/connect': typeof DashboardAgentsConnectRoute
   '/dashboard/agents/shares': typeof DashboardAgentsSharesRoute
   '/dashboard/apps/$id': typeof DashboardAppsIdRoute
+  '/dashboard/apps/visit': typeof DashboardAppsVisitRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
   '/dashboard/projects/$id': typeof DashboardProjectsIdRouteWithChildren
   '/dashboard/queues/connections': typeof DashboardQueuesConnectionsRoute
@@ -589,6 +597,7 @@ export interface FileRoutesById {
   '/dashboard/agents/connect': typeof DashboardAgentsConnectRoute
   '/dashboard/agents/shares': typeof DashboardAgentsSharesRoute
   '/dashboard/apps/$id': typeof DashboardAppsIdRoute
+  '/dashboard/apps/visit': typeof DashboardAppsVisitRoute
   '/dashboard/nosql/$id': typeof DashboardNosqlIdRoute
   '/dashboard/projects/$id': typeof DashboardProjectsIdRouteWithChildren
   '/dashboard/queues/connections': typeof DashboardQueuesConnectionsRoute
@@ -660,6 +669,7 @@ export interface FileRouteTypes {
     | '/dashboard/agents/connect'
     | '/dashboard/agents/shares'
     | '/dashboard/apps/$id'
+    | '/dashboard/apps/visit'
     | '/dashboard/nosql/$id'
     | '/dashboard/projects/$id'
     | '/dashboard/queues/connections'
@@ -728,6 +738,7 @@ export interface FileRouteTypes {
     | '/dashboard/agents/connect'
     | '/dashboard/agents/shares'
     | '/dashboard/apps/$id'
+    | '/dashboard/apps/visit'
     | '/dashboard/nosql/$id'
     | '/dashboard/projects/$id'
     | '/dashboard/queues/connections'
@@ -797,6 +808,7 @@ export interface FileRouteTypes {
     | '/dashboard/agents/connect'
     | '/dashboard/agents/shares'
     | '/dashboard/apps/$id'
+    | '/dashboard/apps/visit'
     | '/dashboard/nosql/$id'
     | '/dashboard/projects/$id'
     | '/dashboard/queues/connections'
@@ -863,6 +875,7 @@ export interface RootRouteChildren {
   DashboardAgentsConnectRoute: typeof DashboardAgentsConnectRoute
   DashboardAgentsSharesRoute: typeof DashboardAgentsSharesRoute
   DashboardAppsIdRoute: typeof DashboardAppsIdRoute
+  DashboardAppsVisitRoute: typeof DashboardAppsVisitRoute
   DashboardNosqlIdRoute: typeof DashboardNosqlIdRoute
   DashboardProjectsIdRoute: typeof DashboardProjectsIdRouteWithChildren
   DashboardQueuesConnectionsRoute: typeof DashboardQueuesConnectionsRoute
@@ -1081,6 +1094,13 @@ declare module '@tanstack/react-router' {
       path: '/dashboard/apps/$id'
       fullPath: '/dashboard/apps/$id'
       preLoaderRoute: typeof DashboardAppsIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/dashboard/apps/visit': {
+      id: '/dashboard/apps/visit'
+      path: '/dashboard/apps/visit'
+      fullPath: '/dashboard/apps/visit'
+      preLoaderRoute: typeof DashboardAppsVisitRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/dashboard/code/': {
@@ -1440,6 +1460,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardAgentsConnectRoute: DashboardAgentsConnectRoute,
   DashboardAgentsSharesRoute: DashboardAgentsSharesRoute,
   DashboardAppsIdRoute: DashboardAppsIdRoute,
+  DashboardAppsVisitRoute: DashboardAppsVisitRoute,
   DashboardNosqlIdRoute: DashboardNosqlIdRoute,
   DashboardProjectsIdRoute: DashboardProjectsIdRouteWithChildren,
   DashboardQueuesConnectionsRoute: DashboardQueuesConnectionsRoute,

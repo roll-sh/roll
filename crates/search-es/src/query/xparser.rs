@@ -740,11 +740,16 @@ impl<'a> XParser<'a> {
                 )));
             }
         }
+        // Locations are found by scanning the body from its start (and a body parsed from a
+        // value is written out first), so they're only computed for the messages that use them.
         while let Some(name) = self.next_field_name() {
-            let name_loc = self.token_location();
             let idx = fields.iter().position(|f| f.name == name || f.deprecated.contains(&name));
+            // An unknown name is reported at the name, but only after its value token is read:
+            // the enclosing object's "failed to parse field" sits where the parser stopped.
+            let name_loc = idx.is_none().then(|| self.token_location());
             let token = self.next_token().unwrap_or(Token::EndObject);
             let Some(idx) = idx else {
+                let name_loc = name_loc.unwrap_or((1, 1));
                 let mut candidates: Vec<&str> = Vec::new();
                 for f in fields {
                     candidates.push(f.name);
@@ -757,9 +762,11 @@ impl<'a> XParser<'a> {
                 ));
             };
             let field = fields[idx];
-            // `ParseField.match` gets the location supplier after the value token was read.
-            let value_loc = self.token_location();
-            self.matches_in(name, &field, Some((parser_name, value_loc)));
+            // `ParseField.match` gets the location supplier after the value token was read; only
+            // a deprecated name's warning reads it.
+            let warns = field.all_deprecated.is_some() || name != field.name;
+            let ctx = warns.then(|| (parser_name, self.token_location()));
+            self.matches_in(name, &field, ctx);
             if !field.tokens.contains(token) {
                 return Err(self.xcontent_error(format!("[{parser_name}] {name} doesn't support values of type: {token}")));
             }

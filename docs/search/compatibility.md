@@ -26,18 +26,19 @@ Reproduce the YAML numbers with `scripts/search-yaml-suites.sh roll` (set `ROLL_
 - Of the 3808 tests that pass on Elasticsearch 9.5.5 (and run here), roll passes **3808** (100%); every x-pack clients test passes.
   <!-- test-search: roll >= 3810 -->
 - Elasticsearch's module, plugin and x-pack YAML suites outside `test/free` (67 suites, 6,349 tests;
-  [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 5,235, **5,074 of
+  [Extended suites](#extended-suites-modules-plugins-x-pack) below): roll passes 5,244, **5,083 of
   the 5,541** that pass on Elasticsearch 9.5.5 (92%), each run like its suite's own test cluster (a
   full run of every suite at `1dce30b61` plus the dot-prefix warnings, 2026-11-14; `lang-mustache`,
   `rank-eval`, `ilm`, `eql`, `slm`, `searchable-snapshots` and `snapshot-repo-test-kit` rerun since, and the `analysis-phonetic`, `-stempel`, `-ukrainian`,
-  `-kuromoji`, `-nori`, `-smartcn` and `-icu` plugins added). 45 suites pass every test
+  `-kuromoji`, `-nori`, `-smartcn` and `-icu` plugins added; `logsdb` and runtime fields rerun on
+  2026-11-17). 46 suites pass every test
   Elasticsearch passes. What's left, largest first: x-pack
   `platinum` (1,065 of 1,412; machine learning is most of it), plugins roll doesn't ship
   (`mapper-annotated-text`, `-murmur3` and `-size`, `ingest-attachment`, `ingest-otel`, `prometheus`), `apm-data`'s templates and
   pipelines (1 of 26), cross-cluster replication (none),
   `mapper-unsigned-long` (33 of 34: a `terms` aggregation across `long` and `unsigned_long`
-  indices), `logsdb` (225 of 234: `_ignored_source` binary entries, the `@timestamp` doc values
-  skipper), runtime fields (247 of 248: highlighting them). In `platinum` besides machine learning:
+  indices), `logsdb` (233 of 234: the `@timestamp` doc values skipper, measured and declined; see
+  [`logsdb` and runtime fields](#logsdb-and-runtime-fields)). In `platinum` besides machine learning:
   `geo_shape` runtime fields, `geo_bounds` of shapes crossing the dateline, dateline-crossing
   `geohex` cells in the `geo_grid` processor, synthetic `_source` order of `counted_keyword` values.
 - The OpenSearch 3.9.0 suite (opensearch dialect): 1455 of 1506 pass — every test that passes
@@ -231,7 +232,7 @@ the discovery/store plugins.
 | `reindex-management` | `modules/reindex-management` | plain | 11 | 11 | 11 | 11 | 0 |
 | `repository-url` | `modules/repository-url` | plain | 9 | 1 | 0 | 0 | 1 |
 | `rest-root` | `modules/rest-root` | plain | 4 | 4 | 4 | 4 | 0 |
-| `runtime-fields-common` | `modules/runtime-fields-common` | plain | 248 | 248 | 247 | 247 | 1 |
+| `runtime-fields-common` | `modules/runtime-fields-common` | plain | 248 | 248 | 248 | 248 | 0 |
 | `streams` | `modules/streams` | plain | 25 | 25 | 25 | 25 | 0 |
 | `transport-netty4` | `modules/transport-netty4` | plain | 1 | 1 | 1 | 1 | 0 |
 | `user-agent` | `modules/user-agent` | plain | 1 | 1 | 1 | 1 | 0 |
@@ -248,7 +249,7 @@ the discovery/store plugins.
 | `fleet` | `x-pack/plugin/fleet` | security-basic | 21 | 21 | 21 | 21 | 0 |
 | `ilm` | `x-pack/plugin/ilm` | plain | 27 | 27 | 27 | 27 | 0 |
 | `kql` | `x-pack/plugin/kql` | plain | 34 | 34 | 34 | 34 | 0 |
-| `logsdb` | `x-pack/plugin/logsdb` | security | 236 | 234 | 225 | 225 | 9 |
+| `logsdb` | `x-pack/plugin/logsdb` | security | 236 | 234 | 233 | 233 | 1 |
 | `mapper-constant-keyword` | `x-pack/plugin/mapper-constant-keyword` | plain | 5 | 5 | 5 | 5 | 0 |
 | `mapper-unsigned-long` | `x-pack/plugin/mapper-unsigned-long` | plain | 34 | 34 | 33 | 33 | 1 |
 | `mapper-version` | `x-pack/plugin/mapper-version` | plain | 6 | 6 | 6 | 6 | 0 |
@@ -277,7 +278,7 @@ the discovery/store plugins.
 | `mapper-annotated-text` | `plugins/mapper-annotated-text` | plugins | 13 | 13 | 0 | 0 | 13 |
 | `mapper-murmur3` | `plugins/mapper-murmur3` | plugins | 5 | 5 | 0 | 0 | 5 |
 | `mapper-size` | `plugins/mapper-size` | plugins | 1 | 1 | 0 | 0 | 1 |
-| **total** | | | **6,349** | **5,541** | **5,235** | **5,074** | **467** |
+| **total** | | | **6,349** | **5,541** | **5,244** | **5,083** | **458** |
 
 <!-- test-search: aggregations >= 640 -->
 <!-- test-search: analysis-common >= 164 -->
@@ -294,7 +295,7 @@ the discovery/store plugins.
 <!-- test-search: reindex >= 184 -->
 <!-- test-search: reindex-management >= 11 -->
 <!-- test-search: rest-root >= 4 -->
-<!-- test-search: runtime-fields-common >= 247 -->
+<!-- test-search: runtime-fields-common >= 248 -->
 <!-- test-search: streams >= 25 -->
 <!-- test-search: apm-data >= 1 -->
 <!-- test-search: async-search >= 1 -->
@@ -306,7 +307,7 @@ the discovery/store plugins.
 <!-- test-search: fleet >= 21 -->
 <!-- test-search: ilm >= 27 -->
 <!-- test-search: kql >= 34 -->
-<!-- test-search: logsdb >= 225 -->
+<!-- test-search: logsdb >= 233 -->
 <!-- test-search: mapper-constant-keyword >= 5 -->
 <!-- test-search: mapper-unsigned-long >= 33 -->
 <!-- test-search: mapper-version >= 6 -->
@@ -355,6 +356,85 @@ privileges of `manage_autoscaling`, `manage_search_application`, `watcher_manage
 x-pack cluster privileges don't map to their actions (`autoscaling`, `ent-search` run as such
 users). `platinum`'s `security` misses one downsampling test (its task fails on roll).
 
+### `logsdb` and runtime fields
+
+Runtime fields pass all 248 tests and `logsdb` 233 of 234. Two of the decisions below were open
+questions before (2026-11-17).
+
+**Highlighting runtime fields.** A highlighted runtime `keyword` field reads its values from its
+script, as Elasticsearch's value fetcher does. The highlighted terms come from the runtime queries
+on that field: `term`, `terms`, `prefix`, `wildcard`, `regexp`, `fuzzy`, `range` and single-term
+`match` report what they match, as `StringScriptFieldTermQuery.visit` and its siblings do. An
+`exists` query and runtime fields of other types report no terms, so they highlight nothing,
+which is what Elasticsearch does too. Wildcard field patterns include runtime `keyword` fields.
+With `require_field_match: false` a runtime query highlights other fields too. A hit's
+`highlight` object lists its fields in the order of a Java `HashMap`, as `HighlightPhase` builds
+it, whatever order the request names them in.
+
+**`_ignored_source` (decided: give Elasticsearch's output).** With synthetic `_source`,
+Elasticsearch keeps the values it can't rebuild from columns (disabled objects, `dynamic: false`
+fields, fields past the field limits, `synthetic_source_keep`) as binary `_ignored_source`
+entries. `stored_fields` or `fields` naming `_ignored_source` returns them, base64 in JSON. A
+pattern never matches it. The tests read the entries' bytes. These are internal, but clients can
+see them, so roll writes the same bytes rather than declaring the tests out of scope:
+- The encoding is `XContentDataHelper`'s: a type byte, then the value. Strings, ints, longs,
+  `BigInteger`s, doubles, booleans and `null` have their own bytes. Objects and arrays are written
+  again by the document's content type: JSON, YAML (Jackson's YAML) or CBOR.
+- The layout follows `index.use_time_series_doc_values_format`, the default in `logsdb` and time
+  series. With it on, there is one entry per value, in document order. With it off there is one
+  entry per field name: the values in document order, the names in the order of a `HashMap` that
+  received them last value first.
+- Every case was compared byte for byte with 9.5.5 (fixture
+  `ignored_source_and_runtime_highlight.json`, unit tests in `engine::ignored_source`).
+- The entries are stored with the document, as byte values of the `_ignored` stored field (its
+  names stay strings), and `_disk_usage` reports them as `_ignored_source`. This duplicates values
+  the stored synthetic `_source` already holds. The duplicates sit next to each other in the same
+  compressed stored-fields block. Rebuilding the entries from the synthetic `_source` instead
+  would lose document order and the grouping of arrays of objects, so the tests' exact bytes
+  would not come back.
+- A disabled object now keeps a `null` or scalar value it is given, in synthetic `_source` and as
+  an entry, as Elasticsearch does. Before, roll dropped it.
+- Index requests with YAML or CBOR bodies are parsed as such. Before, roll read every document
+  body as JSON. The document is kept as JSON, and its content type goes to the entries.
+- Known differences:
+  - YAML and CBOR responses carry the entries as base64 strings. Elasticsearch writes `!!binary`
+    and CBOR byte strings, but roll's values have no binary type.
+  - A CBOR half or single float comes back as a double.
+  - The operation log keeps the document as JSON. So a YAML or CBOR document replayed from it
+    after a crash gets its objects encoded as JSON.
+  - A snapshot keeps only the synthetic `_source`, so a restore derives the entries from it again.
+    That can change their order and how arrays of objects group. A reindex does the same in
+    Elasticsearch too. Clones, splits and shrinks copy the entries as they are.
+
+**`index.mapping.use_doc_values_skipper` (decided: accept and report it, no skip index).**
+Elasticsearch 9.5.5 drops the points of a `logsdb` index's `@timestamp` and the terms of its
+primary sort field (`host.name`) when the setting is on. Range and term queries then go through
+the doc values and their skip index (`SortedNumericDocValuesRangeQuery`). roll accepts the setting
+and reports it, `logsdb_columnar` defaults it to true, and roll keeps the points. Only
+`70_doc_values_skipper`'s `points_in_bytes: 0` assertion fails because of this. The skip index
+was built and measured before deciding. roll's doc values already carry per-4096-document
+min/max skip data. A prototype `DocValuesRangeIterator` used it: it skipped blocks outside the
+range, matched blocks inside without reading values, and checked the rest. The test data was
+2,000,000 logs on one segment, sorted like `logsdb` (host ascending, timestamp descending), with a
+day of timestamps per host. 50 windows per width, best of three runs:
+
+| hosts | window | points: count | skip index: count | skip index / points |
+| --- | --- | --- | --- | --- |
+| 10 | 15 min | 320 µs | 4,352 µs | 13.6× |
+| 10 | 1 h | 746 µs | 6,603 µs | 8.9× |
+| 10 | 6 h | 3,193 µs | 12,822 µs | 4.0× |
+| 100 | 15 min | 344 µs | 28,906 µs | 84× |
+| 100 | 6 h | 3,548 µs | 46,795 µs | 13× |
+| 1,000 | 15 min | 337 µs | 75,083 µs | 223× |
+| 1,000 | 6 h | 3,421 µs | 80,492 µs | 24× |
+
+Top 10 with totals counted to 10,000 (Elasticsearch's default) gave the same picture: 6× to 187×
+slower. Points answer counts from the BKD tree without visiting documents. The skip index has to
+check every document in the blocks a window crosses, and with many hosts nearly every block
+crosses. The skip index would save the points' bytes, but every time-range query, the most common
+logs query, would be several times slower. So nothing ships, and the setting stays a reported
+value.
+
 The analysis plugins bound work that Elasticsearch leaves to the input, so one tenant's
 settings or text can't exhaust a shared node. Ordinary input gives Elasticsearch's output
 (10,047 geonames names and prefix chains compared with the Java classes). Pathological input
@@ -386,6 +466,30 @@ a search application's `_search`, with the searches it makes), anything else fai
 `role_restriction_exception` ("access restricted by workflow"), `_authenticate` included. A search with `ignore_unavailable`
 leaves out the explicitly named indices its user may not read (without it they are refused);
 ES|QL and SQL name their indices strictly either way.
+Background jobs run as the user or API key that set them up, and roll checks that user or key
+again before each run (`internal::principal_problem`, with the lookups that authenticate
+requests). Elasticsearch doesn't: it runs a job with the authentication it stored, and never
+authenticates that again. Checked on 9.5.5: after its API key was invalidated, a continuous
+transform still wrote its next checkpoint and a watch still indexed every second. roll differs
+on purpose, so that revoking a
+leaked key or deleting a user stops everything they left behind. The check fails when an API key
+is gone, invalidated or expired, or when a file, native or reserved user (an internal user, on
+the OpenSearch dialect) is gone or disabled. Service accounts pass, and so do roll's index
+scopes. Then the job runs nothing and fails as its type does. The reason names the user or key,
+never a secret:
+- a transform goes to `failed` at once, also when it is `unattended`, with "task encountered
+  irrecoverable failure: …";
+- an ILM step moves to `ERROR` with the reason in `step_info`, and doesn't retry while the
+  principal can't act;
+- an SLM run records a failure in `last_failure` and in the SLM history;
+- a watch's execution is `failed`, with a `security_exception` in the record;
+- a rollup job is `stopped`, counts a search failure and shows the reason as `status.reason`,
+  which Elasticsearch's status doesn't have. Starting the job again clears it.
+
+A refused transform or rollup job stays stopped. Watches and SLM policies are checked again on
+every run, and ILM steps retry, so they resume when a disabled user is enabled again. An
+invalidated key never acts again: its jobs need setting up again by a user who can act (a
+transform `_update`, a policy or watch `PUT`, a new rollup job).
 The `watcher` suite's webhooks and `http` inputs call the node itself: its test cluster sets
 `roll.watcher.allow_private_hosts` (a roll-only option in `extended.txt`), which nothing else does.
 

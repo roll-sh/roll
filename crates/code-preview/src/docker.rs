@@ -300,10 +300,28 @@ impl Isolation for Docker {
         if let Some(h) = home_label() {
             args.extend(["--label".into(), h]);
         }
+        // The app's port, said on the container: on a network of its own nothing is published,
+        // and what the image exposes may be more than the app.
+        if let (Kind::Preview, Some(port)) = (job.kind, job.port) {
+            args.extend(["--label".into(), format!("{LABEL}.port={port}")]);
+        }
         match &job.network {
             // Its own network, no route out: nothing published (the host reaches it at its
-            // address there), roll's products at the network's gateway.
-            Some(n) => args.extend(["--network".into(), n.name.clone(), "--workdir".into(), workdir.into(), "--add-host".into(), format!("host.docker.internal:{}", n.gateway)]),
+            // address there), roll's products at the network's gateway. Its resolver is
+            // TEST-NET-1 (RFC 5737, never routed): Docker's embedded DNS still answers the
+            // network's own names, and an outside name (`<secret>.attacker.example`) is never
+            // forwarded anywhere it could be read, whatever the Docker version (from 26 Docker
+            // doesn't forward from an internal network; before, it did, from the host).
+            Some(n) => args.extend([
+                "--network".into(),
+                n.name.clone(),
+                "--dns".into(),
+                "192.0.2.1".into(),
+                "--workdir".into(),
+                workdir.into(),
+                "--add-host".into(),
+                format!("host.docker.internal:{}", n.gateway),
+            ]),
             None => {
                 if let (Kind::Preview, Some(port)) = (job.kind, job.port) {
                     args.extend(["--publish".into(), format!("127.0.0.1::{port}")]);

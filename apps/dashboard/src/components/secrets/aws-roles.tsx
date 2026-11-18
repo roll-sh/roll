@@ -1,13 +1,14 @@
 import { Cloud, KeyRound, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
-import type { AwsRole, AwsUser } from "@/lib/secrets-api";
+import { secretsIssuer, type AwsRole, type AwsUser } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, useLoad } from "./ui";
 
 /**
  * AWS roles (docs/secrets.md, "AWS"): a role in the project's own AWS account that roll assumes for
- * each lease of a dynamic link, so a service gets AWS credentials that end with it. Registering one
- * assumes it once, and refuses a role whose trust policy doesn't pin this project's ExternalId.
+ * each lease of a dynamic link, so a service gets AWS credentials that end with it. It trusts roll's
+ * AWS role with this project's ExternalId, or roll's own issuer (no AWS credential of roll's at all).
+ * Registering one assumes it once, and refuses a role whose trust doesn't pin this project.
  */
 export function AwsRoles() {
   const { api, project } = useSecrets();
@@ -15,6 +16,8 @@ export function AwsRoles() {
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [arn, setArn] = useState("");
+  const [trust, setTrust] = useState<"external_id" | "oidc">("oidc");
+  const issuer = useLoad(() => secretsIssuer(), []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -25,7 +28,7 @@ export function AwsRoles() {
     setBusy(true);
     setError(null);
     try {
-      await api.addAwsRole({ name, role_arn: arn.trim() });
+      await api.addAwsRole({ name, role_arn: arn.trim(), trust });
       setAdding(false);
       setName("");
       setArn("");
@@ -54,8 +57,7 @@ export function AwsRoles() {
     >
       <p className="mb-2 text-[11.5px] text-muted">
         Short-lived AWS credentials for each lease: link <span className="font-mono">AWS_ACCESS_KEY_ID</span>, <span className="font-mono">AWS_SECRET_ACCESS_KEY</span> and{" "}
-        <span className="font-mono">AWS_SESSION_TOKEN</span> to a role (Link a resource, dynamic) and every resolve gets a session of its own. The role&apos;s trust policy lets roll&apos;s role assume
-        it with the condition <span className="font-mono">sts:ExternalId</span> = <span className="font-mono select-all">{externalId}</span>.
+        <span className="font-mono">AWS_SESSION_TOKEN</span> to a role (Link a resource, dynamic) and every resolve gets a session of its own.
       </p>
       <ErrorNote error={error ?? list.error} onDismiss={error ? () => setError(null) : undefined} className="mb-2" />
       {adding && (
@@ -74,6 +76,31 @@ export function AwsRoles() {
             <span className="mb-1 block text-[11px] font-medium text-subtle">Role ARN</span>
             <input value={arn} onChange={(e) => setArn(e.target.value)} placeholder="arn:aws:iam::123456789012:role/roll-deploy" spellCheck={false} className={`${field} font-mono text-[12px]`} />
           </label>
+          <label className="w-56">
+            <span className="mb-1 block text-[11px] font-medium text-subtle">It trusts</span>
+            <select value={trust} onChange={(e) => setTrust(e.target.value as "external_id" | "oidc")} className={`${field} text-[12px]`}>
+              <option value="oidc">roll&apos;s issuer (no AWS key of roll&apos;s)</option>
+              <option value="external_id">roll&apos;s AWS role, by ExternalId</option>
+            </select>
+          </label>
+          <p className="w-full text-[11.5px] text-muted">
+            {trust === "oidc" ? (
+              <>
+                Add an IAM OIDC identity provider for <span className="font-mono select-all">{issuer.data?.issuer ?? "…"}</span> (audience <span className="font-mono">sts.amazonaws.com</span>), and let
+                the role trust it with the conditions <span className="font-mono">aud</span> = <span className="font-mono">sts.amazonaws.com</span> and <span className="font-mono">sub</span> ={" "}
+                <span className="font-mono select-all">{externalId}</span>.
+                {issuer.data && !issuer.data.issuer.startsWith("https://") && (
+                  <span className="mt-2 block rounded-lg border border-line-2 bg-panel px-3 py-2">
+                    AWS reaches roll&apos;s issuer only over HTTPS at a public address: this server&apos;s is {issuer.data.issuer}. Set rolld&apos;s <span className="font-mono">ROLL_CODE_PUBLIC_URL</span> first, or trust by ExternalId.
+                  </span>
+                )}
+              </>
+            ) : (
+              <>
+                Let roll&apos;s AWS role assume the role with the condition <span className="font-mono">sts:ExternalId</span> = <span className="font-mono select-all">{externalId}</span>.
+              </>
+            )}
+          </p>
           <button type="submit" className={primary} disabled={!ok || busy}>
             {busy ? "Assuming it…" : "Add role"}
           </button>
@@ -92,6 +119,7 @@ export function AwsRoles() {
                 <Cloud className="size-3.5 text-muted" />
                 <span className="font-mono text-[12px]">{r.name}</span>
                 <span className="min-w-0 truncate font-mono text-[11.5px] text-subtle">{r.role_arn}</span>
+                <span className="rounded-full border border-line-2 px-1.5 text-[10.5px] text-muted">{r.trust === "oidc" ? "roll's issuer" : "ExternalId"}</span>
                 <span className="ml-auto text-[11px] text-subtle">
                   added {ago(r.created_at)} · <ActorMark who={r.created_by} />
                 </span>

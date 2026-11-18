@@ -26,7 +26,9 @@ pub mod scale;
 pub mod registry;
 pub mod config;
 pub mod cron;
+pub mod ci_hosts;
 pub mod deploy;
+pub mod errors;
 pub mod drains;
 pub mod export;
 pub mod git_source;
@@ -40,11 +42,16 @@ pub mod metrics;
 pub mod model;
 pub mod net;
 pub mod notify;
+pub mod otlp;
 pub mod public;
+pub mod resp_cache;
 pub mod runtime;
 pub mod shell;
 pub mod spend;
 pub mod store;
+pub mod traces;
+pub mod visit;
+pub mod vitals;
 pub mod traffic;
 
 use integrations::{DomainTls, Resolver, Resources, SecretSource, Sources};
@@ -131,6 +138,13 @@ pub struct AppsConfig {
     pub upload_max: usize,
     /// The dashboard (roll code's `web_url`): a private preview's 401 page links into it.
     pub web_url: Option<String>,
+    /// How long a sign-in-gated environment trusts a visitor's session before it asks again
+    /// whether they may still open the project ([`integrations::Visitors`]).
+    pub visitor_recheck: Duration,
+    /// Where an instance sends its traces (OTLP/HTTP): the apps listener's base (public traffic's,
+    /// never the API's: `http://127.0.0.1:7080`, made reachable from instances by the runtime), or
+    /// the public apps address on a fleet. None: traces can't be turned on.
+    pub otlp_base: Option<String>,
     /// URLs a tenant chooses may be private addresses and plain HTTP: notification targets, and
     /// registries whose names resolve to one (local development and tests only:
     /// `ROLL_APPS_ALLOW_PRIVATE`).
@@ -164,6 +178,8 @@ impl AppsConfig {
             prices: Prices::default(),
             upload_max: 512 << 20,
             web_url: None,
+            visitor_recheck: Duration::from_secs(300),
+            otlp_base: None,
             allow_private: false,
             spend_every: Duration::from_secs(30),
             cron_retry_after: Duration::from_secs(30),
@@ -216,8 +232,12 @@ pub struct Apps {
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
     /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
     pub(crate) pushes: std::sync::OnceLock<Arc<dyn integrations::GitPushes>>,
+    /// roll's GitHub App ([`Apps::set_github_app`]).
+    github: std::sync::OnceLock<Arc<dyn integrations::GitHubApp>>,
     /// Email to projects' owners (`notify`), once rolld has accounts.
     mail: std::sync::OnceLock<Arc<dyn integrations::Mailbox>>,
+    /// Who may still open a project's environments ([`Apps::set_visitors`]).
+    pub(crate) visitors: std::sync::OnceLock<Arc<dyn integrations::Visitors>>,
     /// Log drains whose batch came back (the drainer sends the next).
     drain_done: Arc<Mutex<Vec<String>>>,
     /// Projects whose drains changed on this node: the drainer reads theirs again (only theirs).
@@ -227,6 +247,17 @@ pub struct Apps {
     /// Bumped by every change to the access cache: a cold read caches what it read only if
     /// nothing changed meanwhile (a token rotated while it read would otherwise come back).
     access_gen: std::sync::atomic::AtomicU64,
+    /// Signed-in visitors' sessions this node has looked up, by their hash.
+    visits: Mutex<HashMap<String, visit::Seen>>,
+    /// Web Vitals beacons kept this minute, by environment: (minute, count).
+    pub(crate) vitals_seen: Mutex<HashMap<String, (i64, u32)>>,
+    /// When each environment's log was last looked at for new errors ([`errors`]).
+    pub(crate) errors_seen: Mutex<HashMap<String, i64>>,
+    /// Manual rollouts waiting for a person, by deployment: what they say, and the wake.
+    pub(crate) rollout_waits: Mutex<HashMap<String, deploy::RolloutGate>>,
+    /// Path schedules whose call is still out (`sched:<service>/<env>/<name>`): the next due
+    /// time is skipped, as a command's is while its job runs.
+    pub(crate) calling: Mutex<std::collections::HashSet<String>>,
     /// Each environment's `needs_deploy` as last worked out (it decrypts every variable and asks
     /// each linked product for its own): when, the settings generation and active deployment it
     /// was for, and the answer. Good for a minute, or until either moves.
@@ -243,6 +274,10 @@ pub struct Apps {
     watching_secrets: std::sync::atomic::AtomicBool,
     /// Scaling workers' backlogs are being read (on their own task).
     scaling: std::sync::atomic::AtomicBool,
+    /// The App's queued events are being run on this node.
+    github_running: std::sync::atomic::AtomicBool,
+    /// Web services' answers a shared cache may keep, per environment (`resp_cache`).
+    pub(crate) responses: resp_cache::ResponseCache,
     /// Static sites' file indexes, by image digest, as this node read them.
     sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Per environment, for the live site's key: its earlier static deployments' site keys.
@@ -349,6 +384,32 @@ pub struct ResolvedVars {
     pub unresolved: Vec<String>,
     /// Never shown again: the environment's own sealed variables, and references that read one.
     pub sealed: BTreeSet<String>,
+    /// Those roll secrets gave (a secret is one whatever its name or tag), and of them those it
+    /// says are plain (`SecretVar::plain`: a linked resource's host, port, user or database),
+    /// which logs may show but for a URL's password.
+    pub from_secrets: BTreeSet<String>,
+    pub plain_secrets: BTreeSet<String>,
+}
+
+impl ResolvedVars {
+    /// What its logs never show ([`logs::Redact`]): sealed and sensitive values, a link's
+    /// credentials (by their names), and the password in any URL that carries one.
+    pub fn secret_values(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (k, v) in &self.vars {
+            let credential = ["PASSWORD", "SECRET", "TOKEN", "API_KEY", "PRIVATE_KEY", "ACCESS_KEY"].iter().any(|w| k.to_ascii_uppercase().contains(w));
+            let source = self.sources.get(k).copied();
+            // What roll secrets gave, unless the service's own variable took the name since.
+            let secret = source == Some("secret") && self.from_secrets.contains(k);
+            if self.sealed.contains(k) || (secret && !self.plain_secrets.contains(k)) || (credential && source == Some("link")) {
+                out.push(v.clone());
+            }
+            if let Some(p) = url::Url::parse(v).ok().and_then(|u| u.password().map(|p| percent_encoding::percent_decode_str(p).decode_utf8_lossy().into_owned())) {
+                out.push(p);
+            }
+        }
+        out
+    }
 }
 
 impl Apps {
@@ -372,11 +433,18 @@ impl Apps {
             capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
             pushes: std::sync::OnceLock::new(),
+            github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
+            visitors: std::sync::OnceLock::new(),
             drain_done: Arc::new(Mutex::new(Vec::new())),
             drains_dirty: Mutex::new(Default::default()),
             access: Mutex::new(HashMap::new()),
             access_gen: std::sync::atomic::AtomicU64::new(0),
+            visits: Mutex::new(HashMap::new()),
+            vitals_seen: Mutex::new(HashMap::new()),
+            errors_seen: Mutex::new(HashMap::new()),
+            rollout_waits: Mutex::new(HashMap::new()),
+            calling: Mutex::new(std::collections::HashSet::new()),
             needs: Mutex::new(HashMap::new()),
             settings_gen: std::sync::atomic::AtomicU64::new(0),
             changes: tokio::sync::broadcast::channel(256).0,
@@ -384,6 +452,8 @@ impl Apps {
             watching: std::sync::atomic::AtomicBool::new(false),
             watching_secrets: std::sync::atomic::AtomicBool::new(false),
             scaling: std::sync::atomic::AtomicBool::new(false),
+            github_running: std::sync::atomic::AtomicBool::new(false),
+            responses: resp_cache::ResponseCache::default(),
             sites: Mutex::new(HashMap::new()),
             earlier_sites: Mutex::new(HashMap::new()),
             site_loads: Mutex::new(HashMap::new()),
@@ -522,6 +592,7 @@ impl Apps {
             Some(Value::String(b)) if matches!(source, Source::Repo { .. } | Source::Git { .. }) && !b.is_empty() && b.len() <= 255 => Some(b.clone()),
             Some(_) => return Err(Error::BadRequest("branch is a repo or Git source's branch name".into())),
         };
+        let mut await_connection = false;
         let branch = match (&source, &self.deps.sources) {
             (Source::Repo { repo, .. }, Some(src)) => {
                 let _ = src.resolve(repo, named.as_deref()).await.map_err(|e| Error::BadRequest(format!("repo {repo}: {e}")))?;
@@ -534,8 +605,17 @@ impl Apps {
             // A Git URL's branch must exist now (its default when none is named), as a repo's must.
             (Source::Git { url, .. }, _) => {
                 let remote = git_source::Remote::new(self.cfg.allow_private, url, git_login.as_ref().map(|(_, l)| l.clone()));
-                let (_, b) = git_source::head(&remote, named.as_deref()).await.map_err(|e| Error::BadRequest(format!("{url}: {e}")))?;
-                Some(b)
+                match git_source::head(&remote, named.as_deref()).await {
+                    Ok((_, b)) => Some(b),
+                    // A private repository on roll's GitHub App's host: made without its first
+                    // deploy, to be connected to the App (the operator's) or given a login. The
+                    // App isn't asked here: whether it sees a repository is no tenant's to learn.
+                    Err(_) if git_login.is_none() && self.github.get().and_then(|a| a.host()).is_some_and(|h| git_host(url).as_ref() == Some(&h)) => {
+                        await_connection = true;
+                        Some(named.clone().unwrap_or_else(|| "main".into()))
+                    }
+                    Err(e) => return Err(Error::BadRequest(format!("{url}: {e}"))),
+                }
             }
             _ => None,
         };
@@ -580,8 +660,9 @@ impl Apps {
         }
         // The project's owner hears what needs someone from its first service on.
         self.offer_email(&row.project).await;
-        // A repo, a Git URL or an image deploys at once; an upload waits for `roll up`.
-        if !matches!(source, Source::Upload) {
+        // A repo, a Git URL or an image deploys at once; an upload waits for `roll up`, a private
+        // repository on the GitHub App's host for its connection or login.
+        if !matches!(source, Source::Upload) && !await_connection {
             self.deploy(&row.id, PRODUCTION, json!({}), By { trigger: Trigger::Api, actor: actor.clone() }, None, None).await?;
         }
         self.service(&row.id).await
@@ -642,9 +723,9 @@ impl Apps {
             summaries.push(self.summary(e).await?);
         }
         let id = r.id.clone();
-        let (registry, git_login, links) = self.db(move |s| Ok((s.registry(&id)?, s.git_login(&id)?, s.links(&id)?))).await?;
+        let (registry, git_login, github, links) = self.db(move |s| Ok((s.registry(&id)?, s.git_login(&id)?, s.git_github(&id)?, s.links(&id)?))).await?;
         let links = links.into_iter().map(|(kind, r#ref, _)| LinkRef { kind, r#ref }).collect();
-        Ok(Service { id: r.id, project: r.project, name: r.name, source: r.source, build: r.build, run: r.run, registry, git_login, links, created_at: r.created_at, environments: summaries })
+        Ok(Service { id: r.id, project: r.project, name: r.name, source: r.source, build: r.build, run: r.run, registry, git_login, github, links, created_at: r.created_at, environments: summaries })
     }
 
     /// `PUT …/registry`: the login a service's image pulls with. `server` defaults to the image's
@@ -685,7 +766,7 @@ impl Apps {
     /// host. The URL itself stays without credentials.
     pub async fn put_git_login(self: &Arc<Self>, service: &str, body: Value) -> Result<Service> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| !["username", "password"].contains(&k.as_str())) {
+        if let Some(k) = o.keys().find(|k| !["username", "password", "secret"].contains(&k.as_str())) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
         let text = |k: &str, max: usize| -> Result<String> {
@@ -694,13 +775,24 @@ impl Apps {
                 _ => Err(Error::BadRequest(format!("{k} is 1–{max} characters on one line"))),
             }
         };
-        let (username, password) = (text("username", 200)?, text("password", 4096)?);
+        let username = text("username", 200)?;
+        // The password itself (sealed here), or the name of the project's secret that holds it,
+        // read at each fetch (a rotated token just works; roll secrets audits the read).
+        let (password, secret) = match (o.contains_key("password"), o.contains_key("secret")) {
+            (true, false) => (text("password", 4096)?, None),
+            (false, true) => {
+                let name = text("secret", 128)?;
+                check_var_name(&name)?;
+                (String::new(), Some(name))
+            }
+            _ => return Err(Error::BadRequest("a Git login takes a password, or the secret that holds it (not both)".into())),
+        };
         let sid = service.to_string();
         let svc = self.db(move |s| s.service(&sid)).await?;
         let Source::Git { url, .. } = &svc.source else { return Err(Error::Conflict("only a Git URL source fetches with a login".into())) };
         let host = git_host(url).ok_or_else(|| Error::BadRequest("the source URL has no host".into()))?;
         let sid = service.to_string();
-        self.db(move |s| s.set_git_login(&sid, &host, &username, &password)).await?;
+        self.db(move |s| s.set_git_login(&sid, &host, &username, &password, secret.as_deref())).await?;
         self.service(service).await
     }
 
@@ -710,12 +802,173 @@ impl Apps {
         self.service(service).await
     }
 
-    /// The repository a Git URL service fetches from: with its login when the login is for this
-    /// URL's host (a login never goes to another host).
-    pub(crate) async fn git_remote<'a>(self: &Arc<Self>, service: &str, url: &'a str) -> git_source::Remote<'a> {
+    /// `PUT …/github`: connect a Git URL service on the App's host to roll's GitHub App, through
+    /// the installation that sees its repository (admin: installations span tenants). Fetches
+    /// then use the installation's short-lived tokens, and deploys post commit statuses.
+    pub async fn put_github(self: &Arc<Self>, service: &str) -> Result<Service> {
+        let app = self.github.get().cloned().ok_or_else(|| Error::Conflict("roll's GitHub App isn't set up on this node".into()))?;
         let sid = service.to_string();
-        let login = self.db(move |s| s.git_login_secret(&sid)).await.ok().flatten();
-        let login = login.filter(|(l, _)| Some(&l.host) == git_host(url).as_ref()).map(|(l, password)| (l.username, password));
+        let svc = self.db(move |s| s.service(&sid)).await?;
+        let Source::Git { url, .. } = &svc.source else { return Err(Error::Conflict("only a Git URL source connects to GitHub".into())) };
+        let host = app.host().ok_or_else(|| Error::Conflict("roll's GitHub App isn't set up on this node".into()))?;
+        let (owner, repo) = github_repo(url, &host).ok_or_else(|| Error::BadRequest(format!("{url} isn't a repository on {host}")))?;
+        let installation = app
+            .installation_for(&owner, &repo)
+            .await
+            .map_err(|e| Error::Internal(format!("asking GitHub: {e:#}")))?
+            .ok_or_else(|| Error::Conflict(format!("roll's GitHub App isn't installed on {owner}/{repo}: install it there first")))?;
+        let (sid, full) = (service.to_string(), format!("{owner}/{repo}"));
+        self.db(move |s| s.set_git_github(&sid, installation, &full)).await?;
+        self.service(service).await
+    }
+
+    pub async fn delete_github(self: &Arc<Self>, service: &str) -> Result<Service> {
+        let sid = service.to_string();
+        self.db(move |s| s.delete_git_github(&sid)).await?;
+        self.service(service).await
+    }
+
+    /// One of roll's GitHub App's verified `push` or `pull_request` deliveries (roll code passes
+    /// them on, signature checked): queued for each Git URL service connected to its repository
+    /// through its installation, run on the service's owner as the service's own hook's would be
+    /// (so a connected service needs no hook). Only what deciding reads is kept.
+    pub fn github_event(&self, event: &str, body: &[u8]) {
+        // In the webhook's own call, before GitHub hears back: a crash after the answer loses
+        // nothing (the store is the queue).
+        let Ok(p) = serde_json::from_slice::<Value>(body) else { return };
+        let (Some(repo), Some(installation)) = (p["repository"]["full_name"].as_str(), p["installation"]["id"].as_u64()) else { return };
+        let Ok(services) = self.store.connected_to(installation, repo) else { return };
+        if services.is_empty() {
+            return;
+        }
+        let pr = &p["pull_request"];
+        let kept = match event {
+            "push" => json!({ "ref": p["ref"], "after": p["after"], "head_commit": { "message": p["head_commit"]["message"] } }),
+            "pull_request" => json!({ "action": p["action"], "number": p["number"], "pull_request": {
+                "number": pr["number"], "title": pr["title"],
+                "head": { "ref": pr["head"]["ref"], "sha": pr["head"]["sha"], "repo": { "id": pr["head"]["repo"]["id"] } },
+                "base": { "repo": { "id": pr["base"]["repo"]["id"] } },
+            } }),
+            _ => return,
+        }
+        .to_string();
+        for svc in services {
+            if let Err(err) = self.store.queue_github_event(&svc, event, &kept) {
+                tracing::warn!(error = %err, "apps: a GitHub App event couldn't be queued");
+            }
+        }
+    }
+
+    /// Run the queued App events of the services this node owns (each claimed before it runs).
+    pub(crate) async fn run_github_events(self: &Arc<Self>) {
+        // An hour unrun (a service that's gone, an owner that never came): dropped.
+        let _ = self.db(|s| s.expire_github_events(code_sql::now_ms() - 3_600_000)).await;
+        let _ = self.db(|s| s.expire_visits(code_sql::now_ms())).await;
+        // Each service this node owns, its own oldest first: one nobody owns yet (asleep; the
+        // keeper gives it an owner) never holds up the rest.
+        let Ok(waiting) = self.db(|s| s.github_event_services()).await else { return };
+        let mut queued = Vec::new();
+        for service in waiting.into_iter().filter(|s| self.owns(s)) {
+            if let Ok(rows) = self.db(move |s| s.github_events_of(&service)).await {
+                queued.extend(rows);
+            }
+        }
+        for (id, service, event, body) in queued {
+            let claimed = id.clone();
+            if !self.db(move |s| s.take_github_event(&claimed)).await.unwrap_or(false) {
+                continue;
+            }
+            let sid = service.clone();
+            let Ok(svc) = self.db(move |s| s.service(&sid)).await else { continue };
+            let Ok(body) = serde_json::from_str::<Value>(&body) else { continue };
+            let w = hooks::Webhook { body, event: Some(event) };
+            match self.git_event(&service, &svc, &w, None, "github app").await {
+                Ok(hooks::HookOutcome::Ignored(why)) => self.logs.sink(format!("env:{service}/production"), crate::logs::Stream::System).line(format!("GitHub: {why}")),
+                Ok(_) => {}
+                Err(e) => self.logs.sink(format!("env:{service}/production"), crate::logs::Stream::System).line(format!("GitHub: {e}")),
+            }
+        }
+    }
+
+    /// `POST …/cache/purge {paths?, tags?}`: the environment's kept answers for those paths (a
+    /// trailing `*` is a prefix; at most 100) and with those tags (at most 100), or all of them.
+    /// Runs on the owner, which keeps them.
+    pub async fn purge_cache(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Value> {
+        self.service_env(service, env).await?;
+        let paths = match body.get("paths") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(a)) if !a.is_empty() && a.len() <= 100 => Some(
+                a.iter()
+                    .map(|p| p.as_str().filter(|p| p.starts_with('/') && p.len() <= 2048).map(str::to_string).ok_or_else(|| Error::BadRequest("paths are absolute paths (`/blog/*` for a prefix)".into())))
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            Some(_) => return Err(Error::BadRequest("paths is 1–100 paths, or left out for everything".into())),
+        };
+        let tags = match body.get("tags") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(a)) if !a.is_empty() && a.len() <= 100 => Some(
+                a.iter()
+                    .map(|t| {
+                        t.as_str()
+                            .map(|t| t.trim().to_ascii_lowercase())
+                            .filter(|t| !t.is_empty() && t.len() <= crate::resp_cache::MAX_TAG && !t.contains(',') && !t.chars().any(char::is_whitespace))
+                            .ok_or_else(|| Error::BadRequest("tags are what the app's Cache-Tag or Surrogate-Key named (no commas or spaces, at most 1,024 bytes)".into()))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            Some(_) => return Err(Error::BadRequest("tags is 1–100 tags, or left out".into())),
+        };
+        let n = self.responses.purge(&env_key(service, env), paths.as_deref(), tags.as_deref());
+        Ok(json!({ "purged": n }))
+    }
+
+    /// Where roll's GitHub App is, once rolld has it. Set once.
+    pub fn set_github_app(&self, app: Arc<dyn integrations::GitHubApp>) {
+        let _ = self.github.set(app);
+    }
+
+    /// A Git URL service's GitHub connection still for this URL's repository, with the App.
+    pub(crate) async fn github_for(self: &Arc<Self>, service: &str, url: &str) -> Option<(Arc<dyn integrations::GitHubApp>, u64, String, String)> {
+        let app = self.github.get().cloned()?;
+        let sid = service.to_string();
+        let link = self.db(move |s| s.git_github(&sid)).await.ok().flatten()?;
+        let (owner, repo) = github_repo(url, &app.host()?)?;
+        link.repo.eq_ignore_ascii_case(&format!("{owner}/{repo}")).then_some((app, link.installation, owner, repo))
+    }
+
+    /// The repository a Git URL service fetches from: through roll's GitHub App when it's
+    /// connected (a short-lived installation token), else with its login when the login is for
+    /// this URL's host (a login never goes to another host).
+    pub(crate) async fn git_remote<'a>(self: &Arc<Self>, service: &str, url: &'a str) -> git_source::Remote<'a> {
+        if let Some((app, installation, owner, repo)) = self.github_for(service, url).await {
+            match app.git_login(installation, &owner, &repo).await {
+                Ok(login) => return git_source::Remote::new(self.cfg.allow_private, url, Some(login)),
+                Err(e) => tracing::warn!(service, error = %e, "apps: roll's GitHub App gave no token; fetching without it"),
+            }
+        }
+        let sid = service.to_string();
+        let login = self.db(move |s| s.git_login_secret(&sid)).await.ok().flatten().filter(|(l, _)| Some(&l.host) == git_host(url).as_ref());
+        let login = match login {
+            // Read from the project's production secrets (what the service runs with), each use.
+            Some((l, _)) if l.secret.is_some() => {
+                let key = l.secret.clone().expect("matched");
+                let sid = service.to_string();
+                let project = self.db(move |s| s.service(&sid)).await.ok().map(|s| s.project);
+                let read = match project {
+                    Some(p) => self.deps.secrets.resolve(&p, crate::model::PRODUCTION, service).await.ok(),
+                    None => None,
+                };
+                match read.and_then(|vars| vars.into_iter().find(|v| v.name == key)) {
+                    Some(v) => Some((l.username, v.value)),
+                    None => {
+                        tracing::warn!(service, secret = %key, "apps: a Git login's secret couldn't be read; fetching without it");
+                        None
+                    }
+                }
+            }
+            Some((l, password)) => Some((l.username, password)),
+            None => None,
+        };
         git_source::Remote::new(self.cfg.allow_private, url, login)
     }
 
@@ -834,6 +1087,7 @@ impl Apps {
             }
             if forget_git {
                 s.delete_git_login(&r.id)?;
+                s.delete_git_github(&r.id)?;
             }
             Ok(())
         })
@@ -1046,7 +1300,7 @@ impl Apps {
             Some(l) => (
                 l.instances().iter().map(|i| Instance { id: i.name.clone(), deployment: i.deployment.clone(), state: i.state(), started_at: i.started_at(), in_flight: i.in_flight() }).collect(),
                 l.crash_loop(),
-                l.canary().map(|(deployment, share)| crate::model::Canary { deployment, share }),
+                l.canary().map(|(deployment, share)| crate::model::Canary { waiting: self.rollout_waits.lock().contains_key(&deployment), deployment, share }),
                 l.scaling().map(|(backlog, wanted)| crate::model::Scaling { backlog, wanted }),
             ),
             None => (Vec::new(), None, None, None),
@@ -1063,7 +1317,8 @@ impl Apps {
             Some(a) => self.needs_deploy(&svc, &r, a).await?,
             None => false,
         };
-        let private = self.access(&r.service, &r.name).await?.is_some();
+        let gate = self.access(&r.service, &r.name).await?;
+        let (private, signed_in) = (gate.is_some(), gate.is_some_and(|a| a.signed_in));
         let (sid, e) = (r.service.clone(), r.name.clone());
         let waiting_for_ci = self.db(move |s| s.ci_waits()).await?.into_iter().find(|(w, _)| w.service == sid && w.env == e).map(|(w, _)| w.sha);
         Ok(Environment {
@@ -1077,6 +1332,7 @@ impl Apps {
             tcp: r.tcp_port.filter(|_| svc.run.tcp && svc.run.public && !private).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
             needs_deploy,
             private,
+            signed_in,
             next_run_at,
             schedules: self.schedule_states(&svc, &r).await,
             volume_used: match svc.run.volume {
@@ -1089,15 +1345,24 @@ impl Apps {
             hook: r.hook_hash.is_some(),
             follow_tag: r.follow_tag,
             redeploy_on_secrets: r.redeploy_on_secrets,
+            traces: {
+                let (sid, e) = (r.service.clone(), r.name.clone());
+                self.db(move |s| s.trace_token(&sid, &e)).await.ok().flatten().is_some()
+            },
             feedback: r.feedback,
+            vitals: r.vitals,
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             paused: r.paused,
-            held_after: r.held_by.clone(),
+            held_after: r.held_by.clone().filter(|h| h != crate::deploy::MANUAL_HOLD),
+            held: r.held_by.as_deref() == Some(crate::deploy::MANUAL_HOLD),
             pages: r.pages.clone(),
             allow_ips: r.allow_ips.clone(),
             rate_limit: r.rate_limit,
             firewall: r.firewall.clone(),
             headers: r.headers.clone(),
+            routes: r.routes.clone(),
+            egress_refused: if r.egress.closed() { self.deps.runtime.egress_refused(&closed_network_name(&svc.project, &r.name), &r.egress.hosts) } else { Vec::new() },
+            egress: r.egress.clone(),
             scaling,
             wait_for_ci: r.wait_for_ci,
             waiting_for_ci,
@@ -1128,7 +1393,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "paused", "held", "hostname"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "paused", "held", "hostname", "traces", "egress", "vitals"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1141,11 +1406,12 @@ impl Apps {
             }
             Some(_) => return Err(Error::BadRequest("hostname is the environment's name on the roll domain".into())),
         };
-        // Resume deploys held after a rollback (`false`); a hold is only ever a rollback's.
-        let resume = match o.get("held") {
-            None => false,
-            Some(Value::Bool(false)) => true,
-            Some(_) => return Err(Error::BadRequest("held is false (deploys resume); a rollback holds them".into())),
+        // Hold deploys (`true`: pushes, hooks and tag moves build to `ready` for a person to put
+        // live) or resume them (`false`: a person's hold, or a rollback's).
+        let hold = match o.get("held") {
+            None => None,
+            Some(Value::Bool(b)) => Some(*b),
+            Some(_) => return Err(Error::BadRequest("held is true (deploys wait for a person) or false (they resume)".into())),
         };
         let paused = match o.get("paused") {
             None => None,
@@ -1224,6 +1490,37 @@ impl Apps {
             ),
             Some(_) => return Err(Error::BadRequest(format!("headers is at most {} rules, or null", crate::model::MAX_HEADER_RULES))),
         };
+        // Paths another service of the project answers: each named service must be there (and
+        // not this one: it would answer itself).
+        let routes = match o.get("routes") {
+            None => None,
+            Some(Value::Null) => Some(Vec::new()),
+            Some(Value::Array(a)) if a.len() <= crate::model::MAX_ROUTES => {
+                let rs = a
+                    .iter()
+                    .map(|r| serde_json::from_value::<crate::model::Route>(r.clone()).map_err(|e| Error::BadRequest(format!("routes: {e}"))).and_then(crate::model::Route::check))
+                    .collect::<Result<Vec<_>>>()?;
+                for r in &rs {
+                    match self.project_service(service, &r.service).await {
+                        Some(id) if id == service => return Err(Error::BadRequest(format!("routes: {} is this service", r.service))),
+                        Some(_) => {}
+                        None => return Err(Error::BadRequest(format!("routes: the project has no service named {}", r.service))),
+                    }
+                }
+                Some(rs)
+            }
+            Some(_) => return Err(Error::BadRequest(format!("routes is at most {} routes, or null", crate::model::MAX_ROUTES))),
+        };
+        // What its code may reach: `{mode: "roll", hosts?}` closes its network, null or
+        // `{mode: "open"}` opens it.
+        let egress = match o.get("egress") {
+            None => None,
+            Some(Value::Null) => Some(crate::model::Egress::default()),
+            Some(v) => Some(serde_json::from_value::<crate::model::Egress>(v.clone()).map_err(|e| Error::BadRequest(format!("egress is {{mode: \"roll\" | \"open\", hosts?}} or null: {e}")))?.check()?),
+        };
+        if egress.as_ref().is_some_and(crate::model::Egress::closed) && !self.deps.runtime.closes_egress() {
+            return Err(Error::Conflict("egress \"roll\" needs a runtime that can close an environment's network (Docker on this host); this node's can't".into()));
+        }
         let branch = match o.get("branch") {
             None => None,
             Some(Value::Null) => Some(None),
@@ -1235,25 +1532,37 @@ impl Apps {
             Some(Value::Bool(b)) => Some(*b),
             Some(_) => return Err(Error::BadRequest("ephemeral is a boolean".into())),
         };
-        // A private environment (a preview): its hostname answers only visitors with the token.
+        // A private environment: its hostname answers only visitors with the token (a preview's
+        // link), people signed in to roll who may open the project (`signed_in`), or either.
         // `bypass_sha256`: an automation's secret (a CI run's end-to-end tests), only its SHA-256.
         let access: Option<Option<Access>> = match o.get("access") {
             None => None,
             Some(Value::Null) => Some(None),
             Some(Value::Object(a)) => {
-                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256"].contains(&k.as_str())) {
+                if let Some(k) = a.keys().find(|k| !["token", "bypass_sha256", "signed_in"].contains(&k.as_str())) {
                     return Err(Error::BadRequest(format!("access.{k} isn't a field")));
                 }
-                let token = a.get("token").and_then(Value::as_str).filter(|t| (20..=200).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)));
-                let Some(token) = token else { return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _".into())) };
+                let signed_in = match a.get("signed_in") {
+                    None | Some(Value::Null) => false,
+                    Some(Value::Bool(b)) => *b,
+                    Some(_) => return Err(Error::BadRequest("access.signed_in is a boolean".into())),
+                };
+                let token = match a.get("token") {
+                    None | Some(Value::Null) if signed_in => None,
+                    Some(Value::String(t)) if (20..=200).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)) => Some(t.as_str()),
+                    _ => return Err(Error::BadRequest("access.token is 20–200 of A-Z, a-z, 0-9, - and _ (or access.signed_in is true)".into())),
+                };
+                if signed_in && self.cfg.web_url.is_none() {
+                    return Err(Error::Conflict("signing in needs roll's dashboard address on this node (web_url)".into()));
+                }
                 let bypass = match a.get("bypass_sha256") {
                     None | Some(Value::Null) => None,
                     Some(Value::String(h)) if h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()) => Some(h.to_ascii_lowercase()),
                     Some(_) => return Err(Error::BadRequest("access.bypass_sha256 is a SHA-256 in hex".into())),
                 };
-                Some(Some(Access { token_hash: crate::public::token_hash(token), bypass_hash: bypass }))
+                Some(Some(Access { token_hash: token.map(crate::public::token_hash), bypass_hash: bypass, signed_in }))
             }
-            Some(_) => return Err(Error::BadRequest("access is {token, bypass_sha256?} or null".into())),
+            Some(_) => return Err(Error::BadRequest("access is {token?, signed_in?, bypass_sha256?} or null".into())),
         };
         // A new environment may start with another's variables (cloning staging from production).
         let variables_from = match o.get("variables_from") {
@@ -1304,10 +1613,13 @@ impl Apps {
                 svc.for_env(&row).map_err(|e| Error::BadRequest(e.to_string().replace("no longer fit", "don't fit")))?;
             }
         }
-        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets"] {
+        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals"] {
             if !matches!(o.get(k), None | Some(Value::Null | Value::Bool(_))) {
                 return Err(Error::BadRequest(format!("{k} is a boolean")));
             }
+        }
+        if o.get("traces") == Some(&Value::Bool(true)) && self.cfg.otlp_base.is_none() {
+            return Err(Error::Conflict("traces aren't set up on this node (no OTLP address)".into()));
         }
         if o.get("feedback") == Some(&Value::Bool(true)) && !ephemeral.unwrap_or(existing.as_ref().is_some_and(|r| r.ephemeral)) {
             return Err(Error::BadRequest("feedback is for a preview environment (ephemeral)".into()));
@@ -1316,8 +1628,15 @@ impl Apps {
             return Err(Error::BadRequest("follow_tag is for an image service whose image has a tag (not a digest)".into()));
         }
         // Only a roll code repo's pushes wait for their commit's checks (its statuses are roll's).
-        if o.get("wait_for_ci") == Some(&Value::Bool(true)) && !matches!(&svc.source, Source::Repo { .. }) {
-            return Err(Error::BadRequest("wait_for_ci is for a roll code repo's service: a Git URL's checks aren't roll's to read (deploy from the workflow after its tests instead: sdk/apps-github-action, with the environment's branch unset)".into()));
+        // A roll code repo's checks are roll's; a Git URL's are GitHub's, read through roll's
+        // GitHub App once the service is connected to it.
+        // GitLab's and Bitbucket's with the service's Git login.
+        let readable = match &svc.source {
+            Source::Git { url, .. } => self.github_for(&svc.id, url).await.is_some() || (crate::ci_hosts::host_of(url).is_some() && self.git_remote(&svc.id, url).await.login().is_some()),
+            _ => false,
+        };
+        if o.get("wait_for_ci") == Some(&Value::Bool(true)) && !matches!(&svc.source, Source::Repo { .. }) && !readable {
+            return Err(Error::BadRequest("wait_for_ci is for a roll code repo's service, a Git URL service on roll's GitHub App (PUT …/github), or one on GitLab or Bitbucket with a Git login: another Git host's checks aren't roll's to read (deploy from the workflow after its tests instead: sdk/apps-github-action, with the environment's branch unset)".into()));
         }
         // A name another environment has is refused before anything is made or changed.
         if let Some(h) = hostname.clone() {
@@ -1331,9 +1650,9 @@ impl Apps {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.change_variables(&sid, &e, &vars, &[], &BTreeSet::new())).await?;
         }
-        if resume {
+        if let Some(on) = hold {
             let (sid, e) = (service.to_string(), env.to_string());
-            self.db(move |s| s.set_hold(&sid, &e, None)).await?;
+            self.db(move |s| s.set_hold(&sid, &e, on.then_some(crate::deploy::MANUAL_HOLD))).await?;
             self.changed(service);
         }
         if let Some(h) = hostname {
@@ -1419,9 +1738,22 @@ impl Apps {
             self.live(service, env).forget_gate();
             self.changed(service);
         }
+        // Instances are made from the next deploy on with it (a network of their own, the proxy's
+        // variables); what runs keeps its way out until then.
+        if let Some(eg) = egress {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_egress(&sid, &e, &eg)).await?;
+            self.changed(service);
+        }
         if let Some(rules) = headers {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_headers(&sid, &e, &rules)).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        if let Some(routes) = routes {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_routes(&sid, &e, &routes)).await?;
             self.live(service, env).forget_gate();
             self.changed(service);
         }
@@ -1431,9 +1763,33 @@ impl Apps {
             self.live(service, env).forget_gate();
             self.changed(service);
         }
+        // Web Vitals: the proxy tags its pages from the next request on.
+        if let Some(Value::Bool(on)) = o.get("vitals") {
+            let (sid, e, on) = (service.to_string(), env.to_string(), *on);
+            self.db(move |s| s.set_vitals(&sid, &e, on)).await?;
+            self.live(service, env).forget_gate();
+            self.changed(service);
+        }
         if let Some(Value::Bool(on)) = o.get("redeploy_on_secrets") {
             let (sid, e, on) = (service.to_string(), env.to_string(), *on);
             self.db(move |s| s.set_redeploy_on_secrets(&sid, &e, on)).await?;
+        }
+        // Traces: a token of the environment's own (kept sealed: it goes into every deploy's
+        // variables), or none. Its variables reach instances at the next deploy.
+        match o.get("traces") {
+            Some(Value::Bool(true)) => {
+                let (sid, e) = (service.to_string(), env.to_string());
+                self.db(move |s| s.ensure_trace_token(&sid, &e)).await?;
+                self.live(service, env).forget_gate();
+                self.changed(service);
+            }
+            Some(Value::Bool(false)) => {
+                let (sid, e) = (service.to_string(), env.to_string());
+                self.db(move |s| s.delete_trace_token(&sid, &e)).await?;
+                self.live(service, env).forget_gate();
+                self.changed(service);
+            }
+            _ => {}
         }
         match o.get("follow_tag") {
             None | Some(Value::Null) => {}
@@ -1498,6 +1854,7 @@ impl Apps {
         let (p, e, l) = (project.to_string(), env.to_string(), leaving.to_string());
         if let Ok(false) = self.db(move |s| s.env_in_use(&p, &e, &l)).await {
             self.deps.runtime.remove_network(&network_name(project, env)).await;
+            self.deps.runtime.remove_network(&closed_network_name(project, env)).await;
         }
     }
 
@@ -1528,6 +1885,7 @@ impl Apps {
 
     async fn teardown_live(&self, service: &str, env: &str) {
         self.cancel_jobs(service, env);
+        self.responses.clear(&env_key(service, env));
         let live = self.lives.lock().remove(&env_key(service, env));
         if let Some(l) = live {
             l.shutdown().await;
@@ -1657,9 +2015,33 @@ impl Apps {
             }
             vars.insert("ROLL_GIT_URL".into(), (url.clone(), "roll"));
         }
+        // Traces turned on: the OpenTelemetry SDK's own variables, to this environment's address.
+        let mut trace_endpoint = false;
+        if let Some(base) = &self.cfg.otlp_base {
+            let (sid, e) = (svc.id.clone(), env.name.clone());
+            if let Some(token) = self.db(move |s| s.trace_token(&sid, &e)).await? {
+                let url = format!("{}{}{}/{}/{token}", base.trim_end_matches('/'), crate::public::OTLP, svc.id, env.name);
+                vars.insert("OTEL_EXPORTER_OTLP_ENDPOINT".into(), (self.deps.runtime.reach(&url), "roll"));
+                vars.insert("OTEL_EXPORTER_OTLP_PROTOCOL".into(), ("http/protobuf".into(), "roll"));
+                vars.insert("OTEL_TRACES_EXPORTER".into(), ("otlp".into(), "roll"));
+                // Traces and metrics go to roll; logs only when the app says so
+                // (`OTEL_LOGS_EXPORTER=otlp` of its own): most apps also print them, and the
+                // environment's log would hold each twice.
+                vars.insert("OTEL_METRICS_EXPORTER".into(), ("otlp".into(), "roll"));
+                vars.insert("OTEL_LOGS_EXPORTER".into(), ("none".into(), "roll"));
+                vars.insert("OTEL_SERVICE_NAME".into(), (svc.name.clone(), "roll"));
+                // Its token is a credential: never shown, as a sealed variable.
+                trace_endpoint = true;
+            }
+        }
         let sid = svc.id.clone();
         let links = self.db(move |s| s.links_minted(&sid)).await?;
         for (kind, r, prefix, minted) in links {
+            // A preview (an ephemeral environment) never gets a resource's production variables:
+            // roll previews sets the branched ones itself, by name; another service's URLs stay.
+            if env.ephemeral && kind != LinkKind::Service {
+                continue;
+            }
             let read = self.link_values(svc, kind, &r, &env.name, minted).await;
             match read {
                 Ok(vs) => {
@@ -1673,11 +2055,16 @@ impl Apps {
             }
         }
         let mut sensitive = BTreeSet::new();
+        let (mut from_secrets, mut plain_secrets) = (BTreeSet::new(), BTreeSet::new());
         match self.deps.secrets.resolve(&svc.project, &env.name, &svc.id).await {
             Ok(secrets) => {
                 for s in secrets {
                     if s.sensitive {
                         sensitive.insert(s.name.clone());
+                    }
+                    from_secrets.insert(s.name.clone());
+                    if s.plain {
+                        plain_secrets.insert(s.name.clone());
                     }
                     // A linked resource's address, rewritten for the container as apps' own links.
                     let v = if s.linked { self.deps.runtime.reach(&s.value) } else { s.value };
@@ -1688,6 +2075,9 @@ impl Apps {
         }
         let (sid, e) = (svc.id.clone(), env.name.clone());
         let (own, mut sealed) = self.db(move |s| Ok((s.variables(&sid, &e)?, s.sealed_variables(&sid, &e)?))).await?;
+        if trace_endpoint {
+            sealed.insert("OTEL_EXPORTER_OTLP_ENDPOINT".into());
+        }
         for (k, v) in own {
             vars.insert(k, (v, "service"));
         }
@@ -1696,7 +2086,7 @@ impl Apps {
         // Reference variables, one level deep: against what resolved above, and other services'.
         let unresolved = self.fill_references(svc, &env.name, &mut vars, &mut sealed).await;
         let sources = vars.iter().map(|(k, (_, s))| (k.clone(), *s)).collect();
-        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, sealed })
+        Ok(ResolvedVars { vars: vars.into_iter().map(|(k, (v, _))| (k, v)).collect(), sources, unresolved, sealed, from_secrets, plain_secrets })
     }
 
     /// Fill the `${{ … }}` in the service's own variables ([`refs`]); what named nothing. A
@@ -1845,7 +2235,7 @@ impl Apps {
         }
         // A reference's template is names, not a value: shown, and what an edit starts from.
         let (sid, e) = (service.to_string(), env.to_string());
-        let raw = self.db(move |s| s.variables(&sid, &e)).await?;
+        let (raw, files) = self.db(move |s| Ok((s.variables(&sid, &e)?, s.variable_files(&sid, &e)?))).await?;
         let vars: Vec<VarView> = r
             .vars
             .iter()
@@ -1855,7 +2245,7 @@ impl Apps {
                 let sealed = r.sealed.contains(k);
                 let masked = if sealed { SEALED_MASK.to_string() } else if source == "roll" { v.clone() } else { mask(v) };
                 let reference = (source == "reference").then(|| raw.get(k).cloned()).flatten();
-                VarView { name: k.clone(), masked, source, reference, sealed }
+                VarView { name: k.clone(), masked, source, reference, sealed, file: files.get(k).cloned() }
             })
             .collect();
         Ok(json!({ "vars": vars }))
@@ -1888,16 +2278,53 @@ impl Apps {
                 seal.insert(n.as_str().ok_or_else(|| Error::BadRequest("seal is a list of names".into()))?.to_string());
             }
         }
-        if set.len() + unset.len() + seal.len() > 500 {
+        // Kept as files (Render's secret files): a name to an absolute path, or null for the
+        // environment again.
+        let mut files: Vec<(String, Option<String>)> = Vec::new();
+        if let Some(f) = o.get("files") {
+            for (k, p) in f.as_object().ok_or_else(|| Error::BadRequest("files is an object of names to paths (or null)".into()))? {
+                files.push((k.clone(), match p {
+                    Value::Null => None,
+                    Value::String(p) => Some(check_file_path(p)?),
+                    _ => return Err(Error::BadRequest(format!("files.{k} is an absolute path, or null"))),
+                }));
+            }
+        }
+        if set.len() + unset.len() + seal.len() + files.len() > 500 {
             return Err(Error::BadRequest("at most 500 variables at once".into()));
         }
         let (sid, e) = (service.to_string(), env.to_string());
-        let have = self.db(move |s| s.variables(&sid, &e)).await?;
+        let (have, mut kept) = self.db(move |s| Ok((s.variables(&sid, &e)?, s.variable_files(&sid, &e)?))).await?;
         if let Some(n) = seal.iter().find(|n| unset.contains(n) || !(set.contains_key(*n) || have.contains_key(*n))) {
             return Err(Error::BadRequest(format!("{n} isn't one of the environment's own variables to seal")));
         }
-        let (sid, e) = (service.to_string(), env.to_string());
+        if let Some((n, _)) = files.iter().find(|(n, p)| p.is_some() && (unset.contains(n) || !(set.contains_key(n) || have.contains_key(n)))) {
+            return Err(Error::BadRequest(format!("{n} isn't one of the environment's own variables to keep as a file")));
+        }
+        for (n, p) in &files {
+            match p {
+                Some(p) => kept.insert(n.clone(), p.clone()),
+                None => kept.remove(n),
+            };
+        }
+        for n in &unset {
+            kept.remove(n);
+        }
+        if kept.len() > MAX_FILES {
+            return Err(Error::BadRequest(format!("at most {MAX_FILES} variables as files")));
+        }
+        let mut paths: Vec<&String> = kept.values().collect();
+        paths.sort();
+        if paths.windows(2).any(|w| w[0] == w[1]) {
+            return Err(Error::BadRequest("two variables can't be the same file".into()));
+        }
+        let (sid, e, gone) = (service.to_string(), env.to_string(), unset.clone());
         self.db(move |s| s.change_variables(&sid, &e, &set, &unset, &seal)).await?;
+        // Unset ones' files go with them.
+        for (n, p) in files.into_iter().chain(gone.into_iter().map(|n| (n, None))) {
+            let (sid, e) = (service.to_string(), env.to_string());
+            self.db(move |s| s.set_variable_file(&sid, &e, &n, p.as_deref())).await?;
+        }
         self.variables(service, env, None).await
     }
 
@@ -2372,9 +2799,9 @@ impl Apps {
         }
         let seen = live.gate_gen();
         let (sid, e) = (live.service.clone(), live.env.clone());
-        let row = self.db(move |s| s.environment(&sid, &e)).await?;
+        let (row, traces) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.traces_on(&sid, &e)?))).await?;
         let allow = row.allow_ips.iter().filter_map(|r| r.cidr.parse::<ipnet::IpNet>().ok()).collect();
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers });
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }
@@ -2392,6 +2819,11 @@ impl Apps {
     /// Where a Git URL service's pushes to branches it doesn't follow go (roll previews). Set once.
     pub fn set_git_pushes(&self, pushes: Arc<dyn integrations::GitPushes>) {
         let _ = self.pushes.set(pushes);
+    }
+
+    /// Who may still open a project's environments (roll-accounts). Set once.
+    pub fn set_visitors(&self, v: Arc<dyn integrations::Visitors>) {
+        let _ = self.visitors.set(v);
     }
 
     /// How email reaches people (roll-accounts' mailer). Set once.
@@ -2619,8 +3051,33 @@ pub fn volume_name(service: &str, env: &str) -> String {
     format!("roll-apps-vol-{}-{env}", service.strip_prefix("svc_").unwrap_or(service))
 }
 
+/// The most variables an environment keeps as files.
+pub const MAX_FILES: usize = 20;
+
+/// A path a variable may be written to in an instance: absolute, at most 256 characters, no `..`
+/// or empty segment, no control character, not in the system's own trees (`/proc`, `/sys`,
+/// `/dev`), and not a folder.
+pub fn check_file_path(p: &str) -> Result<String> {
+    let bad = || Error::BadRequest(format!("{p:?} isn't a path a file can go to (absolute, e.g. /etc/secrets/key.json; not under /proc, /sys or /dev)"));
+    let segs: Vec<&str> = p.split('/').skip(1).collect();
+    if !p.starts_with('/') || p.len() > 256 || p.ends_with('/') || p.chars().any(char::is_control) || segs.iter().any(|s| s.is_empty() || *s == "." || *s == "..") {
+        return Err(bad());
+    }
+    if matches!(segs.first(), Some(&("proc" | "sys" | "dev"))) {
+        return Err(bad());
+    }
+    Ok(p.to_string())
+}
+
 pub fn network_name(project: &str, env: &str) -> String {
     format!("roll-apps-net-{}-{env}", project.strip_prefix("prj_").unwrap_or(project))
+}
+
+/// The project environment's network with no route out (its services with `egress` `roll`):
+/// they reach each other there, and the open ones on [`network_name`]. Its `.` is a character no
+/// environment's name has, so it's never another environment's open network.
+pub fn closed_network_name(project: &str, env: &str) -> String {
+    format!("roll-apps-closed-{}.{env}", project.strip_prefix("prj_").unwrap_or(project))
 }
 
 /// A free spot on a project's canvas for a new card (the same grid the dashboard uses).
@@ -2636,6 +3093,18 @@ fn free_spot(ws: &roll_workspace::Workspace, project: &str) -> (f64, f64) {
         }
     }
     (48.0, 48.0)
+}
+
+/// `owner` and `repo` of a Git URL on `host` (`https://github.com/owner/repo[.git]`), if it's one.
+fn github_repo(url: &str, host: &str) -> Option<(String, String)> {
+    if git_host(url)?.as_str() != host {
+        return None;
+    }
+    let u = url::Url::parse(url).ok()?;
+    let path = u.path().trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, repo) = path.split_once('/')?;
+    (!owner.is_empty() && !repo.is_empty() && !repo.contains('/')).then(|| (owner.to_string(), repo.to_string()))
 }
 
 /// A Git URL's repository, to compare: its host and path, without a trailing `/` or `.git`.

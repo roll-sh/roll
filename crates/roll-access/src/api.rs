@@ -41,6 +41,9 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/audit/sinks/{id}/retry", post(retry_sink))
         .route("/v1/access/notify", get(notify).put(set_notify))
         .route("/v1/access/policy", get(policy).put(set_policy))
+        .route("/v1/access/clients", get(crate::clients_api::list).post(crate::clients_api::create))
+        .route("/v1/access/clients/{id}", axum::routing::delete(crate::clients_api::revoke))
+        .route("/v1/access/clients/{id}/rotate", post(crate::clients_api::rotate))
         .route("/v1/access/oauth/clients", get(clients))
         .route("/v1/access/oauth/clients/{id}", get(client))
         .route("/v1/access/oauth/authorize", post(crate::oauth::authorize))
@@ -71,6 +74,9 @@ fn change_name(method: &axum::http::Method, route: &str) -> String {
         (&Method::PUT, "/v1/access/notify") => "notify".into(),
         (&Method::POST, "/v1/access/audit/sinks") => "add_sink".into(),
         (&Method::DELETE, "/v1/access/audit/sinks/{id}") => "remove_sink".into(),
+        (&Method::POST, "/v1/access/clients") => "create_client".into(),
+        (&Method::DELETE, "/v1/access/clients/{id}") => "revoke_client".into(),
+        (&Method::POST, "/v1/access/clients/{id}/rotate") => "rotate_client".into(),
         // …/rotate, …/approve, …/deny, …/tighten, …/retry.
         _ => last.trim_matches(|c| c == '{' || c == '}').to_string(),
     }
@@ -195,7 +201,7 @@ pub(crate) fn actor(ext: &Extensions) -> String {
     ext.get::<roll_auth::SignedIn>().map_or_else(|| "operator".to_string(), |u| u.user.clone())
 }
 
-fn operator_only(access: &Access, ext: &Extensions, what: &str) -> crate::Result<()> {
+pub(crate) fn operator_only(access: &Access, ext: &Extensions, what: &str) -> crate::Result<()> {
     match who(access, ext)? {
         Who::Operator => Ok(()),
         Who::Grant(_) | Who::User(_) => Err(Error::Forbidden(format!("only the operator can {what}"))),
@@ -413,6 +419,7 @@ async fn checkup(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
     let out = blocking(a, move |a| {
         let now = code_sql::now_ms();
         let counts = a.store.network_counts()?;
+        let machines: std::collections::HashMap<String, crate::store::ListedClient> = a.store.machine_clients()?.into_iter().map(|c| (c.grant_id.clone(), c)).collect();
         let since = now - crate::checkup::UNUSED_DAYS * 86_400_000;
         let mut checked = 0;
         let mut out = Vec::new();
@@ -426,7 +433,8 @@ async fn checkup(State(a): S, ext: Extensions) -> crate::Result<Json<Value>> {
             } else {
                 false
             };
-            let seen = crate::checkup::Seen { networks: counts.get(&g.id).copied().unwrap_or(0), narrower };
+            let machine = machines.get(&g.id).map(|c| crate::checkup::Machine { secret: !c.signs_with_key && c.trusts.is_none(), last_sign_in: c.last_sign_in });
+            let seen = crate::checkup::Seen { networks: counts.get(&g.id).copied().unwrap_or(0), narrower, machine };
             let mut findings = crate::checkup::findings(&g, &seen, now);
             // A person sees that their own waits elsewhere; deciding it isn't theirs.
             if matches!(who, Who::User(_)) {
@@ -581,6 +589,10 @@ impl Access {
                 let client = crate::mail_name(client);
                 (format!("{client} was connected to your roll account"), format!("{client} was connected to your roll account{from}, as \"{name}\" ({})", g.id))
             }
+            Added::Machine => (
+                format!("A machine client was added to your roll account: \"{name}\""),
+                format!("The machine client \"{name}\" ({}) was made on your roll account{from}: automation that signs in with its key or secret acts as you", g.id),
+            ),
             Added::Device { client, asked_from } => {
                 let client = crate::mail_name(client);
                 let asked = asked_from.map(|n| format!(", asked from {n}")).unwrap_or_default();
@@ -601,6 +613,8 @@ pub(crate) enum Added<'a> {
     /// A device, by its client's name, with a code, and the network the device asked from (the
     /// request's network is the approver's own browser: a phished victim's).
     Device { client: &'a str, asked_from: Option<&'a str> },
+    /// A machine client (automation's OAuth client credentials).
+    Machine,
 }
 
 /// What a grant may do, a line a product, for mail: products and actions, never a resource (a

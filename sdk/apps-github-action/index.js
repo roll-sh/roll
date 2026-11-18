@@ -1,6 +1,8 @@
 // The roll apps deploy GitHub Action (docs/apps/README.md, "GitHub Actions"): deploy a service
 // from a workflow once its tests pass, wait for the deployment, and say where it runs (and, on a
-// pull request, in a comment). No dependencies: Node's own fetch, and git for an upload.
+// pull request, in a comment). It signs in with a roll token, or with the job's own OIDC token as
+// a trusted machine client (`client-id`, docs/permissions.md: nothing stored in the repository).
+// No dependencies: Node's own fetch, and git for an upload.
 "use strict";
 
 const childProcess = require("node:child_process");
@@ -32,6 +34,39 @@ async function call(fetchFn, api, method, path, token, body, headers = {}) {
 }
 
 const seg = encodeURIComponent;
+
+/** The job's OIDC token from GitHub Actions for `audience` (the job needs `id-token: write`). */
+async function oidcToken(fetchFn, env, audience) {
+  const url = env.ACTIONS_ID_TOKEN_REQUEST_URL;
+  const bearer = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+  if (!url || !bearer) throw new Error("no OIDC token: give the job `permissions: id-token: write`, or pass `token`");
+  const res = await fetchFn(`${url}${url.includes("?") ? "&" : "?"}audience=${encodeURIComponent(audience)}`, { headers: { authorization: `Bearer ${bearer}` } });
+  if (!res.ok) throw new Error(`GitHub Actions answered ${res.status} for its OIDC token`);
+  const value = (await res.json()).value;
+  if (!value) throw new Error("GitHub Actions' OIDC answer has no value");
+  return value;
+}
+
+/**
+ * The job signed in as trusted machine client `clientId` with its OIDC token (RFC 7523's
+ * `jwt-bearer` grant): roll's access token. Fails with roll's `error_description` (which claim
+ * didn't match), never the token or the assertion.
+ */
+async function signIn(fetchFn, api, clientId, oidc) {
+  const body = new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", client_id: clientId, assertion: oidc });
+  const res = await fetchFn(`${api}/v1/access/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: body.toString() });
+  let answer = {};
+  try {
+    answer = JSON.parse(await res.text());
+  } catch {
+    // not JSON: the status says it
+  }
+  if (!res.ok || !answer.access_token) {
+    const why = [answer.error, answer.error_description].filter(Boolean).join(": ") || `${res.status} ${res.statusText}`.trim();
+    throw new Error(`roll didn't sign the job in as ${clientId}: ${why}`);
+  }
+  return answer.access_token;
+}
 
 /** The commit's subject, or none outside a checkout. */
 function subject(exec, cwd) {
@@ -77,14 +112,22 @@ function delimiter(value) {
 async function run(env, out, fetchFn = fetch, exec = childProcess.execFileSync, sleep = (ms) => new Promise((r) => setTimeout(r, ms))) {
   const input = (name) => (env[`INPUT_${name.replace(/ /g, "_").toUpperCase()}`] || "").trim();
   const api = input("api-url").replace(/\/+$/, "");
-  const token = input("token");
+  let token = input("token");
+  const clientId = input("client-id");
   const service = input("service");
   const environment = input("environment") || "production";
   if (!api) throw new Error("api-url is rolld's API, e.g. https://api.roll.example");
-  if (!token) {
+  if (clientId && token) throw new Error("pass client-id (the job signs in with its own OIDC token) or token, not both");
+  if (clientId) {
+    if (!/^mcl_[A-Za-z0-9_-]+$/.test(clientId)) throw new Error("client-id is a trusted machine client's id (mcl_…)");
+    const oidc = await oidcToken(fetchFn, env, input("audience") || api);
+    out.write(`::add-mask::${oidc}\n`);
+    token = await signIn(fetchFn, api, clientId, oidc);
+  } else if (!token) {
     const fork = env.GITHUB_EVENT_NAME === "pull_request" ? " (a fork's pull request doesn't get the repository's secrets, and isn't deployed)" : "";
-    throw new Error(`no token: pass a roll token that may deploy the service${fork}`);
+    throw new Error(`no token: pass a roll token that may deploy the service, or client-id to sign in with the job's OIDC token${fork}`);
   }
+  // Masked before it's used or anything is printed.
   out.write(`::add-mask::${token}\n`);
   if (!/^svc_[A-Za-z0-9]+$/.test(service)) throw new Error("service is the service's id (svc_…)");
   const envPath = `/v1/apps/services/${seg(service)}/environments/${seg(environment)}`;

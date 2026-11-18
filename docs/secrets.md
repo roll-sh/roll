@@ -135,6 +135,14 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
   project's secrets, made through `POST /v1/access/tokens` as the dashboard's New token. Its
   secret is in the state (sensitive). Any change replaces it, and destroying it revokes it.
 - **`data.roll_secrets_values`** is an environment's resolved values, for another provider.
+- **What a project registers itself**: **`roll_secrets_ca`** (domains, `allow_ip`, `max_days`; the
+  CA's `certificate` out), **`roll_secrets_ssh_ca`** (principals, host domains; its `public_key` and
+  `known_hosts` out), **`roll_secrets_transit_key`** (an encryption key, with `deletion_protection` on by
+  default: what it encrypted can't be read once it's destroyed, so a rename or removal fails until
+  it's turned off) and **`roll_secrets_outside_database`**
+  (roles, group, CA; its admin URL `admin_url_wo` is write-only, Terraform 1.11+: sent once and
+  sealed in roll, never in the state, and bumping `admin_url_wo_version` registers it again). roll
+  changes none in place, so every attribute replaces them; keys link to them as to any resource.
 - **Without values in the state** (Terraform 1.10 and 1.11+), as Vault's and AWS' providers allow:
   - **`ephemeral "roll_secrets_values"`** reads an environment for one run, never into the plan or
     the state; it feeds another provider's configuration or a write-only argument. Strict: a key
@@ -167,6 +175,10 @@ steps:
   (a PEM key) arrives whole and can't add variables of its own. A key that doesn't resolve fails
   the step, naming it.
 - No dependencies: Node's own `fetch`, nothing to bundle or audit.
+- **`client-id: mcl_…`** signs the job in to roll for any product as a trusted machine client
+  (docs/permissions.md, "Machine clients": `roll token client create --github owner/repo`), with
+  the same OIDC token, and exports that token, masked first, as `ROLL_TOKEN`; with an
+  `environment` it then reads the values with it. It can't be combined with `identity` or `token`.
 - **`scan: true`** guards a repository on GitHub the way roll code guards the ones it hosts: the
   lines a pull request adds (`git diff base...HEAD`; check out with `fetch-depth: 0`) are cut into
   candidates as `roll secrets scan` cuts them and checked with `POST …/leaks` (fingerprints; only
@@ -215,7 +227,11 @@ Three ways, as the best products offer:
   Secret as it was. Its status says what happened. Outside the operator's own namespaces a
   RollSecret logs in as a service account of its own namespace (`spec.serviceAccountName`, a
   10-minute token the operator requests), so creating a RollSecret never reaches what the
-  operator's identity, or another team's, reaches.
+  operator's identity, or another team's, reaches. `spec.rolloutRestart` names the Deployments,
+  StatefulSets and DaemonSets that read the Secret: a change restarts them (`kubectl rollout
+  restart`'s annotation), each one that opts in with a `roll.sh/restart-on` annotation naming the
+  RollSecret (so a RollSecret's author can't restart a workload that didn't ask). One that couldn't
+  be restarted waits in `status.pendingRestarts` and is tried again on every pass.
 - **Push (the `kubernetes` sync)**: roll writes a Secret with credentials for the cluster it holds,
   sealed. For clusters roll can reach and the operator can't run in.
 ## Customer-managed keys
@@ -245,15 +261,22 @@ key. The values themselves aren't re-encrypted; only the data key is wrapped.
   in the audit log (`project.kms`).
 ## AWS
 Short-lived AWS credentials for each lease, as Vault's AWS engine and Infisical's dynamic secrets
-give: a project registers a role in its own account (`POST …/aws-roles {name, role_arn}`,
+give: a project registers a role in its own account (`POST …/aws-roles {name, role_arn, trust?}`,
 `roll secrets aws-roles add`, the Integrations tab; admin), and three keys link to it in `dynamic`
 mode (`access_key_id`, `secret_access_key`, `session_token`: one credential, so they share one
-session per resolve). Each resolve assumes the role (STS AssumeRole with roll's own credentials) for
-the lease's TTL plus five minutes (15 minutes to 12 hours, within the role's own maximum).
-- **The trust policy** lets roll's role assume it with the condition `sts:ExternalId =
-  roll-secrets:<project>`. Registering a role assumes it once, and first tries a made-up project's
-  ExternalId: a role that takes any (another customer's that trusts roll, say) is refused, so no
-  tenant can register and assume someone else's role.
+session per resolve). Each resolve assumes the role for the lease's TTL plus five minutes (15
+minutes to 12 hours, within the role's own maximum). The role trusts roll one of two ways:
+- **roll's issuer** (`trust: "oidc"`, the dashboard's default), as GCP and Azure work: an IAM OIDC
+  identity provider for roll's issuer (`/v1/secrets/oidc`, audience `sts.amazonaws.com`), and a
+  trust policy with the conditions `aud = sts.amazonaws.com` and `sub = roll-secrets:<project>`.
+  Each session is `AssumeRoleWithWebIdentity` with a token roll's issuer signs for the project:
+  roll holds no AWS credential at all. The issuer must be public over HTTPS
+  (`ROLL_CODE_PUBLIC_URL`).
+- **ExternalId** (`trust: "external_id"`, the API's default): roll's own AWS role assumes it (STS
+  AssumeRole with roll's credentials) with the condition `sts:ExternalId = roll-secrets:<project>`.
+- **Either way** registering a role assumes it once, and first tries a made-up project (its
+  ExternalId, or a token for it): a role that takes any (another customer's that trusts roll, say)
+  is refused, so no tenant can register and assume someone else's role.
 - **Ending a lease** doesn't end its session early (STS can't revoke one session): it stays valid at
   AWS until it expires, the TTL plus five minutes at most. To cut every session at once, revoke the
   role's older sessions in IAM. A session can't be renewed: resolve again for a new one.
@@ -262,8 +285,8 @@ the lease's TTL plus five minutes (15 minutes to 12 hours, within the role's own
 **IAM users' access keys**, rotated by roll as Infisical's AWS IAM rotation does, for what can't
 use a role's sessions (a vendor that takes only a key pair, an old CI). A project registers an IAM
 user next to one of its roles (`POST …/aws-users {name, role, user}`, `roll secrets aws-users add
-NAME USER --role ROLE`, the Integrations tab; admin): roll acts as that role (with the project's
-ExternalId), whose policy allows `iam:ListAccessKeys`, `iam:CreateAccessKey` and
+NAME USER --role ROLE`, the Integrations tab; admin): roll acts as that role (one that trusts roll
+by the project's ExternalId), whose policy allows `iam:ListAccessKeys`, `iam:CreateAccessKey` and
 `iam:DeleteAccessKey` on the user, and registering lists the user's keys to check. It's the link kind
 `aws_iam_user`, `managed` (`access_key_id` and `secret_access_key`, one credential `key`).
 
@@ -369,12 +392,33 @@ environment is a first-class kind, built to be cheap:
 - One call creates the environment together with its first secrets and links. roll previews
   writes its branched resources' addresses (the preview's Postgres branch, its Redis branch) as
   plain values: a branch is the preview's own resource, not a link to a parent on the canvas.
+- **Links to what the preview branched aren't followed.** An ephemeral environment carries
+  **branches**, `[{kind, parent}]`: the resources its preview branched (`{"kind": "postgres",
+  "parent": "pg_staging"}`). A key it reads, from its base or anywhere else (a reference, an import),
+  whose link names `(kind, ref)` with `ref` a branch's `parent` never resolves there: roll secrets
+  doesn't ask the product, issues nothing, takes no lease and decrypts no managed credential, in
+  any mode (`live`, `managed`, `dynamic`, a role's fields too). The key is left out of the values
+  and named in the answer's `followed`, `[{name, kind, parent, field}]` (`field`: the provider
+  field it's linked to, `url`, `password`, `role_url`…), and roll previews sets each from its
+  branch by field, blanking one its branch has no value for. So a preview's code, a fork's
+  included, never gets staging's database password through the base. A value of the
+  environment's own that references a followed key doesn't resolve either (a problem). This holds
+  for every read that returns values or tells of them (`…/values` and its formats, `…/resolve`
+  sealed or not, a key's reveal, a sync, roll apps' resolve, `…/digest` and the watches, caches,
+  External Secrets Operator, the operator and the CSI provider that read through these): a
+  followed key's part of the digest is fixed, so its parent rotating moves nothing and isn't
+  asked. Ensure sets the list with `branches`: given, it replaces the list; absent, it keeps it. A
+  standard environment refuses it (400). Only roll previews changes it (the operator, as its
+  adapter calls the API, or its in-process consumer `roll:previews`; 403 `forbidden` otherwise):
+  an added entry changes what previews must fill, and a removed one would hand the preview's code
+  the parent's values. An ensure that gives the same list, or none, needs nothing more. A backup keeps the list, and a
+  restore that can't set it doesn't restore the environment.
 - It is hidden from the overview grid's columns (the grid shows a "Previews" count instead), is
   never a promotion target, and can't be protected. Its slug is any free slug (`pr-117`).
 - **Ensuring one** is a single idempotent call, `PUT …/environments/{env}` with what it should be
   (`{base?, kind?, name?, labels?, expires_at? | ttl_minutes?, trusted?, path?, secrets?: Op[],
-  replace?}`). If the environment is missing, it's created (201). Otherwise its labels, expiry and
-  name are brought to what's given, and `secrets` are applied to its own keys at `path` as one
+  replace?, branches?}`). If the environment is missing, it's created (201). Otherwise its labels,
+  expiry, name and branches are brought to what's given, and `secrets` are applied to its own keys at `path` as one
   change, with `replace` also deleting the folder's other own keys (never a linked or personal
   one). An unchanged value is no change, so ensuring what's there records nothing (`change: null`).
   Its kind, base and trust aren't changed in place: 409 `mismatch`, delete it and ensure it again.
@@ -383,6 +427,54 @@ environment is a first-class kind, built to be cheap:
   runs a change's code, so reading it never reaches a protected environment (its base, an import, a
   reference), whoever reads it. A preview of a same-repo change in a project that allows it is made
   trusted; a fork's never is. `Environment.trusted` says which.
+
+#### For roll previews: branches and `followed`
+
+Each converge's ensure names what the preview branched, from the base's links (`ref` is the
+parent's id as the link names it):
+
+```json
+PUT /v1/secrets/projects/prj_1/environments/pv-42
+{
+  "base": "staging",
+  "labels": { "preview": "pv-42" },
+  "ttl_minutes": 1440,
+  "trusted": false,
+  "secrets": [{ "op": "set", "key": "DATABASE_URL", "value": "postgres://…pv-42…" }],
+  "replace": true,
+  "branches": [
+    { "kind": "postgres", "parent": "pg_staging" },
+    { "kind": "bucket", "parent": "assets" }
+  ]
+}
+```
+
+A resolve then leaves every key linked to those parents out of `values` (none of them was read or
+issued) and names it:
+
+```json
+POST /v1/secrets/projects/prj_1/environments/pv-42/resolve
+{ "path": "/", "consumer": "preview:pv-42/web", "untrusted": true, "dynamic": false }
+
+{
+  "values": { "API_URL": "https://staging.example.com", "DATABASE_URL": "postgres://…pv-42…" },
+  "problems": [],
+  "leases": [],
+  "dynamic": [],
+  "linked": [],
+  "withheld": [],
+  "sensitive": [],
+  "followed": [
+    { "name": "PGHOST", "kind": "postgres", "parent": "pg_staging", "field": "host" },
+    { "name": "PGPASSWORD", "kind": "postgres", "parent": "pg_staging", "field": "password" },
+    { "name": "S3_SECRET", "kind": "bucket", "parent": "assets", "field": "secret_access_key" }
+  ]
+}
+```
+
+Previews sets each `name` from its branch's `field` (blank where the branch has none). A sealed
+resolve carries the same `followed` beside the box, in the clear. An own key (`DATABASE_URL`
+above) wins over the base's as always, so a key previews already writes isn't followed.
 
 ### Folders
 
@@ -798,6 +890,12 @@ only the host is shown. An answer is read once, never logged, and never part of 
 a key still links to can't be deleted, nor one with a retired credential still waiting out its
 grace period (its revocation goes through the rotator).
 
+A rotator is edited in place (`PATCH …/rotators/{id} {name?, url?}`, the pencil; a new URL is
+checked as adding one is) and its signing secret rotated (`POST …/rotators/{id}/rotate-secret`,
+the key button): the new `whsec_…` is shown once and signs every call from then on. Put it in the
+endpoint right away; a call the endpoint refuses in between fails, changes nothing (the value in
+use stays) and is retried, as any failed rotation or revocation is.
+
 ### Databases outside roll
 
 A Postgres, MySQL, Redis or MongoDB server roll doesn't run (Amazon RDS, Supabase, Neon, PlanetScale, ElastiCache, Upstash, MongoDB Atlas, a server of the customer's own)
@@ -812,6 +910,23 @@ roles and create roles in the group), sealed with the project's data key like a 
 two login roles that take turns (managed links); `group` is a role whose grants dynamic logins get;
 one or both. `ca` is the server's CA certificates (PEM) when the system's don't cover it (RDS).
 Registering connects once and checks the roles exist (and can log in).
+
+The admin credential rotates too, as Vault's `rotate-root` does (`POST …/outside-databases/{id}/rotate-admin`,
+`roll secrets databases rotate-admin ID`, or the key button in the dashboard): roll sets a password
+nobody chose on the user the admin URL logs in as (`ALTER ROLE CURRENT_USER`, MySQL's
+`ALTER USER CURRENT_USER()`, SQL Server's `ALTER LOGIN`, Redis' `ACL SETUSER`, MongoDB's
+`updateUser`, ClickHouse's `ALTER USER`, RabbitMQ's user API) and keeps it sealed, so after it
+nobody knows the admin password but roll. Whatever else uses that admin login breaks: give roll
+an admin of its own. Redis' `default` user is refused (its password is every client's
+`requirepass`), and so is a Redis server that can't keep an ACL change across a restart. The new
+URL is stored before the server changes; a rotation whose answer is lost keeps whichever password
+logs in, an interrupted one is finished on the next use, and an unfinished one is dropped only
+once the stored URL is shown to log in, so roll never forgets the only working password. A
+registration moves to another server (host or engine) only once no key links to it and no lease
+is live: its logins are on the old one. A
+registration is edited in place (`PATCH …/outside-databases/{id} {name?, url?, ca?}`, `roll
+secrets databases set ID --name … --url < new-url`): a new URL is connected to and checked as
+registering checks it before it's kept, and links, their roles and their leases carry on.
 
 It's the link kind `outside_database` with fields `username` and `password`, one credential
 (`login`), `managed` or `dynamic`.
@@ -930,6 +1045,35 @@ rotation (the rotated login signs in), a dynamic login that signs in with the gr
 can't once dropped, and an untrusted certificate refused. With TLS 1.3 enabled on the server as
 well (`tlsprotocols = 1.2,1.3`), SQL Server 2022 on Linux refused TDS 7.4 logins, Microsoft's own
 `sqlcmd` included: such a server needs TLS 1.2 allowed.
+### GitHub App tokens
+A short-lived GitHub token per lease, from the project's own GitHub App, as Akeyless and Vault's
+GitHub plugin give: a release job gets `GITHUB_TOKEN` that reads one repository and opens pull
+requests in it, and nothing else, for as long as the job runs. Nobody keeps a personal access token
+in a secret.
+
+A project admin registers the App's installation (`POST …/github-apps {name, app_id,
+installation_id, private_key, repositories, permissions, api_base?}`, `roll secrets github-apps
+add deploy --app-id 123 --installation 456 --repo web --permission contents:write < key.pem`, or
+the Syncs tab): the App's private key, as GitHub gave it, is sealed with the project's key and
+bound to its row, and never shown again. `repositories` and `permissions` are the most any token
+may reach, as Vault and Akeyless put the ceiling on the role: a link narrows within them, never
+past them, so an environment's admin can't mint a token the project's admin didn't allow, and no
+token ever reaches every repository with all the App's power. roll gets one token with the
+ceiling first, and revokes it at once, so a wrong id, key or a ceiling wider than the installation
+is refused with GitHub's own reason. `api_base` names a GitHub
+Enterprise Server's API (`https://github.example.com/api/v3`); rolld reaches it as it does every
+URL a tenant chose (public addresses only, no redirects, at most 64 KiB read).
+
+A key links to it `dynamic`, with field `token`. `options.repositories` names some of the App's
+repositories (`["web"]`; none: all of the App's), and `options.permissions` maps permission names
+to `read`, `write` or `admin` within the App's (`{"contents": "read"}`; none: the App's). Code
+nobody vetted (checks, sandboxes, untrusted previews) never gets a token: an untrusted resolve
+issues no dynamic credential. Each resolve signs a JWT as the App and gets an installation token narrowed that way
+(`POST /app/installations/{id}/access_tokens`); the token is sealed in its lease, and the lease
+ending (revoked, expired or swept) ends the token (`DELETE /installation/token`). GitHub ends one
+after an hour on its own, so a link's `ttl_minutes` is 60 at most, and a lease can't be renewed:
+resolve again for a new token. An App is deleted only once no key links to it and no lease holds a
+token of it.
 ### GCP and Azure
 Short-lived GCP and Azure access tokens for each lease, as Vault's GCP and Azure engines give, with
 no key of the customer's stored anywhere: **roll is an OpenID Connect issuer**, and the customer's
@@ -1171,7 +1315,7 @@ roll secrets diff    --from development --to staging | --file .env   # two envir
 roll secrets promote --from development --to staging [KEY…]
 roll secrets audit   [--key KEY] [--format csv|jsonl]
 roll secrets syncs   ls | add KIND --target name=value… | run ID | rm ID
-roll secrets sinks   ls | add URL [--from-start] | rm ID
+roll secrets sinks   ls | add URL [--from-start] [--format splunk|datadog|bearer] (token on stdin) | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
 roll secrets insights [--unused]             roll secrets shares [--revoke ID]
 roll secrets leases  [--renew ID | --revoke ID]
@@ -1706,11 +1850,17 @@ last_synced_at, error}`:
   in front of every name at the target (`prefix: "APP_"` pushes `DB_URL` as `APP_DB_URL`). Personal
   values never sync, and neither do dynamic links (a short-lived credential would expire at the
   target): a dynamic key, or a reference that can't resolve, is left out and named in `error`.
-- **When.** The sweeper (every node, every 30 s) compares each sync's environment `digest` (the
-  hash `roll run --watch` polls) with the sync's `last_digest`. A sync whose digest moved is
-  claimed with a compare-and-swap on its `running_until` (5 minutes), so two nodes never push one
-  sync at once. A new sync first pushes at the next sweep. `POST …/syncs/{id}/run` pushes now, every key, whatever the digest says (also after
-  a live link's resource rotated, which moves no digest).
+- **When.** A change marks its project's syncs due in the same transaction (as does roll rotating
+  a live link's resource), and every node looks for due syncs every 2 seconds (one indexed read
+  when there are none), so a change reaches its targets in seconds however many syncs there are,
+  as Doppler's and Infisical's do. The sweeper (every node, every 30 s) still goes through the
+  rest, least recently checked first, each node claiming a batch of its own. Either compares the
+  sync's environment `digest` (the hash `roll run --watch` polls) with the sync's
+  `last_digest`. A sync whose digest moved is claimed with a compare-and-swap on its
+  `running_until` (5 minutes), so two nodes never push one sync at once. A new sync first pushes
+  within seconds. `POST …/syncs/{id}/run` pushes now, every key, whatever the digest says. The
+  2-second pass takes only the syncs a change marked; a credential changed where roll doesn't see
+  it (SQL, a product's own automation) reaches syncs at the next 30 s sweep, through the digest.
 - **Only what changed.** A sync remembers a stamp per name it pushed (the secret's id, version,
   fingerprint and link: no value). A push carries the values of every synced key and says which
   names `changed` since the last push, and which were `removed`: synced before, gone now (deleted,
@@ -2269,26 +2419,44 @@ Every read of values and every write is recorded: time, principal (`operator`, `
 `app:…`), action, environment, path, keys, a summary and the client address (as rolld's gate saw
 it, MCP's calls included; else the peer's, or with `ROLL_CODE_TRUST_FORWARDED_FOR` the last
 `X-Forwarded-For` entry, the one the trusted proxy appended: earlier ones are the client's to
-write). A value never is.
+write). A value never is. A request that roll-access's gate let through because a person approved
+it (a token's `ask`, approved once or remembered for a while) also names the approval: its id, who
+approved it (in order: two people when a policy asks for two), and until when a remembered rule
+allows it. The dashboard's audit log and an environment's
+activity show it as "approved by …". This is how roll secrets does access requests (a time-boxed
+`reveal` an approver grants, as Infisical's and 1Password's): a token that asks for `reveal`.
 Listing metadata isn't audited. Revealing, exporting, resolving and every write are.
 `GET …/audit?env=&key=&actor=&action=&before=&limit=` reads it newest first. Rows are kept for 400
 days.
 
 - **Export**: `GET …/audit?format=csv` or `format=jsonl` (with the same filters, `since` too)
   answers up to 10,000 rows as a file.
-- **Streaming to a SIEM**: an audit sink (`POST …/audit/sinks {url, from_start?}`, `admin`) is a
+- **Streaming to a SIEM**: an audit sink (`POST …/audit/sinks {url, from_start?, format?, token?}`, `admin`) is a
   public HTTPS URL that receives the project's new rows in order, in batches of up to 200:
   `{sink, project, events: AuditEntry[]}`, signed like syncs and every roll webhook (`X-Roll-Sink`, `X-Roll-Timestamp`,
   `X-Roll-Signature-256: sha256=HMAC(secret, "ts.body")`, `X-Roll-Delivery`; the `whsec_…` secret is shown once and kept
   sealed). Each sink keeps a cursor; the sweeper claims a sink in a write before delivering, so no
   two nodes send one batch, and a failed batch is sent again 5 minutes later. Deliveries go through
   the same `PublicOnly` client as syncs. At most 10 sinks a project.
+- **In a SIEM's own format**, as Doppler's and Infisical's log streams offer: `format` `splunk`
+  (HTTP Event Collector: one event per line, `time` in seconds, `sourcetype` `roll:audit`,
+  `Authorization: Splunk <token>`), `datadog` (the Logs intake: a JSON array of logs, `message` the
+  summary, `ddtags` the project and action, `DD-API-KEY`) or `bearer` (roll's JSON with
+  `Authorization: Bearer <token>`, for other collectors). The `token` is sealed with the project's
+  key and never shown again (`roll secrets sinks add URL --format splunk` reads it from stdin);
+  such batches carry it instead of roll's signature, and each event names its project.
 - **Into a roll bucket**: a sink whose URL is `bucket:<name>`, a bucket on the project's own canvas
   (any other is refused, and a bucket moved off the canvas later gets nothing more: it's checked at
 every delivery), writes each batch as an object `roll-secrets/audit/<sink>/<delivery>.json`
   there, through roll storage in process: a compliance archive with the bucket's own lifecycle,
   versioning and Object Lock. A retried batch is the same delivery, so it writes the same object
   again, never a second one.
+- **Into roll search**: a sink whose URL is `search:<cluster id>/<index>`, a cluster on the
+  project's canvas (checked the same way), indexes each event as a document through the cluster's
+  bulk route in process, its id the audit id, so a retried batch writes the same documents again;
+  each names its project. Search and dashboards over the audit log with roll search's own
+  Kibana-compatible API. A per-document error (a mapping that refuses a field) fails the batch,
+  which is sent again later.
 - **Into a roll stream**: a sink `stream:<stream id>/<topic>` (a stream on the canvas, checked at
   every delivery like a bucket) produces each audit event to that topic as one record, keyed by its
   audit `id`, through roll streams in process: consumers react as it's written. A retried batch can
@@ -2313,7 +2481,7 @@ isn't in the workspace is 404.
 | `DELETE /environments?label=k=v` | | `{deleted: string[]}` (ephemeral only) |
 | `PUT /environments/order` | `{order: slug[]}` | `Environment[]` |
 | `GET /environments/{env}` | | `Environment` |
-| `PUT /environments/{env}` | `Ensure` | 201 or 200 `{environment, created, change}` (409 `mismatch`) |
+| `PUT /environments/{env}` | `Ensure` | 201 or 200 `{environment, created, change}` (409 `mismatch`; `branches` on a standard environment is a 400, an addition by anyone but roll previews or the operator a 403) |
 | `PATCH /environments/{env}` | `{slug?, name?, expires_at?, max_age_days?}` | `Environment` |
 | `DELETE /environments/{env}?confirm=` | | 204 |
 | `PUT /environments/{env}/policy` | `{protected, approvals?, approvers?, notify_url?}` | `Environment` |
@@ -2344,7 +2512,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
 | `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, projects it's shared with, folders that import it, readers in 30 days |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would; a live link counts its value's keyed fingerprint as the product answers, read at most every 10 s, and at once when roll rotates it or the product's own password, reset or restore route changes it) |
-| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked}` (`dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`) |
+| `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked, followed}` (`dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`; a key linked to a resource the ephemeral environment branched is left out and named in `followed`, in the clear beside a sealed box: names only) |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
 | `POST /environments/{env}/diff` | `{dotenv} \| {json}, path?` | `{added, changed, same, missing, references, linked}`: a local copy against the folder by fingerprint, names only (`reveal`, audited) |
@@ -2383,7 +2551,7 @@ isn't in the workspace is 404.
 | `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |
 | `POST /v1/secrets/shares/{id}/open` (public) | | `{ciphertext}` (one open used) |
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
-| `POST /audit/sinks` | `{url, from_start?}` (an HTTPS endpoint, `bucket:<name>` or `stream:<id>/<topic>` on the canvas) | 201 `Sink & {secret}` (shown once) |
+| `POST /audit/sinks` | `{url, from_start?, format?, token?}` (an HTTPS endpoint, or on the canvas `bucket:<name>`, `search:<cluster>/<index>` or `stream:<id>/<topic>`; `format` `splunk`, `datadog` or `bearer` takes an HTTPS endpoint and its `token`, sealed) | 201 `Sink & {secret}` (shown once; a `Sink` names its `format`, never its token) |
 | `DELETE /audit/sinks/{id}` | | 204 |
 | `GET /v1/secrets/findings` | | `{project, project_name, findings: Finding[]}[]`: every project's findings the caller may read, projects with none left out |
 | `GET /health?code=` | | `Finding[]`, worst first: every standard environment's findings the caller may read (`read` on the project) |
@@ -2394,19 +2562,28 @@ isn't in the workspace is 404.
 | `GET /aws-roles` | | `AwsRole[]` (`read` on the project) |
 | `POST /aws-roles` | `{name, role_arn}` | 201 `AwsRole` after assuming it (admin; 400 when its trust policy doesn't pin `sts:ExternalId`) |
 | `DELETE /aws-roles/{id}` | | 204 (admin; 409 `in_use` while a key links to it) |
+| `PATCH /aws-roles/{id}` | `{name?, role_arn?, trust?}` | `AwsRole` (admin; a new ARN or trust is proved as a new role's is, before anything changes; 409 `in_use` switching a role IAM users rotate through away from `external_id`; leases already issued run out) |
 | `GET /aws-users` | | `AwsUser[]` (`read` on the project) |
 | `POST /aws-users` | `{name, role, user}` | 201 `AwsUser` (`admin`; lists the user's keys as the role first: 400 with AWS's code) |
 | `DELETE /aws-users/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
+| `PATCH /aws-users/{id}` | `{name?, role?}` | `AwsUser` (admin; another ExternalId role of the project, proved by listing the user's keys through it; keys already issued keep working) |
 | `GET /rotations` | | `Rotation[]`: every managed credential the caller may read (environment, keys, resource, `rotate_days`, `rotate_window`, `issued_at`, `next_due`: with a window, its next opening once due, `last_error`) |
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `PATCH /rotators/{id}` | `{name?, url?}` | `Rotator` (`admin`; a new URL is checked first) |
+| `POST /rotators/{id}/rotate-secret` | | `Rotator & {secret}` (`admin`; the new signing secret, shown once) |
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
+| `PATCH /outside-databases/{id}` | `{name?, url?, ca?}` (`ca: ""` clears it) | `OutsideDatabase` (`admin`; a new URL is checked first: 400 with the server's reason) |
+| `POST /outside-databases/{id}/rotate-admin` | | `OutsideDatabase` (`admin`; 400 when the server refuses, 409 while another rotation runs, 502 when the new password was kept but doesn't log in) |
 | `GET /cloud-accounts` | | `CloudAccount[]` (`read` on the project) |
 | `POST /cloud-accounts` | `{name, cloud: "gcp", audience, service_account}` or `{name, cloud: "azure", tenant, client_id, scope?}` | 201 `CloudAccount` (`admin`; 400 when a made-up project's token is taken, or this project's isn't) |
 | `DELETE /cloud-accounts/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `GET /github-apps` | | `GitHubApp[]` (`read` on the project; never the key) |
+| `POST /github-apps` | `{name, app_id, installation_id, private_key, repositories, permissions, api_base?}` | 201 `GitHubApp` (`admin`; gets and revokes a token first: 400 with GitHub's reason) |
+| `DELETE /github-apps/{id}` | | 204; 409 while a key links to it or a lease holds a token (`admin`) |
 | `GET /v1/secrets/oidc/.well-known/openid-configuration` | | roll's issuer's discovery document (public) |
 | `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public) |
 | `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
@@ -2456,12 +2633,16 @@ type Environment = {
   base: string | null; labels: Record<string, string>; expires_at: number | null;
   protected: boolean; approvals: number; approvers: string[]; created_at: number; secrets: number;
   max_age_days: number | null; notify: string | null; trusted: boolean; // trusted: an ephemeral one that may read a protected base
+  branches?: Branch[]; // an ephemeral one's branched resources (absent: none)
 };
-type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean }; // PUT /environments/{env}
+type Branch = { kind: string; parent: string }; // a resource a preview branched: links to it aren't followed
+type Followed = { name: string; kind: string; parent: string; field: string }; // a key left out for roll previews to set from its branch
+type Ensure = Omit<NewEnvironment, "slug"> & { replace?: boolean }; // PUT /environments/{env}; branches: replaces the list, absent keeps it
 type NewEnvironment = {
   slug: string; name?: string; kind?: "standard" | "ephemeral"; base?: string; labels?: Record<string, string>;
   expires_at?: number; ttl_minutes?: number; secrets?: Op[]; // ephemeral: created in one call with its overrides
   trusted?: boolean; // ephemeral: may read a protected base (admin on it)
+  branches?: Branch[]; // ephemeral: the resources its preview branched (roll previews or the operator)
 };
 type Folder = { path: string; name: string; secrets: number; folders: number };
 type Import = { project?: string; environment: string; path: string }; // project: another project's shared folder
@@ -2486,8 +2667,8 @@ type Change = { seq: number; environment: string; path: string; message: string;
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; withheld: string[]; sensitive: string[] }; // leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; digest?: string }; // digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld: string[]; sensitive: string[]; followed: Followed[] }; // plain: of linked, keys whose link field isn't a credential (a host, a port), which a consumer hiding secret values in logs may show (every other value is a secret); followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; followed: Followed[]; digest?: string }; // plain: as above; digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
 type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };
@@ -2522,7 +2703,12 @@ type Sync = {
 };
 type NewSync = { environment: string; path?: string; kind: string; target: Record<string, unknown>; keys?: string[]; prefix?: string };
 type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: { name: string; label: string; required: boolean; placeholder: string }[] };
-type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null };
+type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval };
+// The approval that let the request through roll-access's gate (docs/permissions.md, "What a
+// product is told about an approval"): an `ask` approved (no `until`), or a rule an approval
+// remembered for a while (`until`: when it lapses). CSV exports carry `approval` and `approved_by`
+// (the approvers joined with ", ").
+type Approval = { id: string; by?: string[]; until?: number }; // by: who approved, in order
 ```
 
 ## Tables

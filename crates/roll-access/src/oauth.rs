@@ -10,7 +10,7 @@
 use crate::store::{ACCESS_TTL_MS, NewGrant};
 use crate::{Access, Error};
 use axum::extract::State;
-use axum::http::{Extensions, HeaderMap, StatusCode, header};
+use axum::http::{Extensions, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Form, Json, Router};
@@ -73,9 +73,11 @@ async fn server_metadata(State(a): S) -> Json<Value> {
         "device_authorization_endpoint": format!("{api}/v1/access/oauth/device_authorization"),
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
-        "grant_types_supported": ["authorization_code", "refresh_token", DEVICE_GRANT],
+        "grant_types_supported": ["authorization_code", "refresh_token", DEVICE_GRANT, crate::client_credentials::GRANT, crate::client_credentials::JWT_GRANT],
         "code_challenge_methods_supported": ["S256"],
-        "token_endpoint_auth_methods_supported": ["none"],
+        // Public clients (none); machine clients by secret or by a key they sign with.
+        "token_endpoint_auth_methods_supported": ["none", "client_secret_basic", "client_secret_post", "private_key_jwt"],
+        "token_endpoint_auth_signing_alg_values_supported": crate::client_credentials::ALGS,
         "revocation_endpoint_auth_methods_supported": ["none"],
         "scopes_supported": SCOPES,
         "authorization_response_iss_parameter_supported": true,
@@ -395,9 +397,32 @@ fn token_answer(grant: &crate::store::Grant, access: String, refresh: String) ->
         .into_response()
 }
 
-async fn token(State(a): S, headers: HeaderMap, Form(f): Form<HashMap<String, String>>) -> Response {
-    let _ = headers;
+async fn token(State(a): S, req: axum::extract::Request) -> Response {
+    // The caller's address (a machine client's sign-in is audited with it), then the form.
+    let ip = crate::evaluate::client_ip(&req, &a.config);
+    let headers = req.headers().clone();
+    let Ok(body) = axum::body::to_bytes(req.into_body(), 64 << 10).await else { return Error::OAuth("invalid_request", "the request is too large".into()).into_response() };
+    let f: HashMap<String, String> = url::form_urlencoded::parse(&body).into_owned().collect();
     let get = |k: &str| f.get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    // A machine client, with no person (its id may be in a header or its assertion).
+    let grant = get("grant_type");
+    if matches!(grant.as_deref(), Some(crate::client_credentials::GRANT | crate::client_credentials::JWT_GRANT)) {
+        let scope = if crate::client_credentials::read_only_scope(&f).unwrap_or(false) { "read-only" } else { "granted" };
+        let made = if grant.as_deref() == Some(crate::client_credentials::JWT_GRANT) {
+            crate::client_credentials::federated(a, &f, ip).await
+        } else {
+            crate::client_credentials::token(a, &headers, &f, ip).await
+        };
+        return match made {
+            // No refresh token: the client trades its credential again for the next one.
+            Ok((_, access)) => (
+                [(header::CACHE_CONTROL, "no-store"), (header::PRAGMA, "no-cache")],
+                Json(json!({ "access_token": access, "token_type": "Bearer", "expires_in": ACCESS_TTL_MS / 1000, "scope": scope })),
+            )
+                .into_response(),
+            Err(e) => e.into_response(),
+        };
+    }
     let Some(client_id) = get("client_id") else { return Error::OAuth("invalid_client", "client_id is required".into()).into_response() };
     let r = match get("grant_type").as_deref() {
         Some("authorization_code") => {

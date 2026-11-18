@@ -78,6 +78,11 @@ pub enum Token {
     Whoami,
     /// The products, actions and presets the builder offers.
     Presets,
+    /// Machine clients: automation with no person (CI, a scheduled agent) that trades a JWT it
+    /// signed with its key, or a secret, for an hour's token its rules bound (OAuth client
+    /// credentials). The operator's, or, signed in, a person's own acting as them.
+    #[command(subcommand)]
+    Client(MachineCmd),
     /// roll's rules for every token: `--max-days 90`, `--require-expiry`, `--no-limit`,
     /// `--max-idle-days 60` (`0` for no idle limit); nothing to show them.
     Policy {
@@ -114,6 +119,310 @@ pub struct Create {
     /// What the rules don't allow asks you instead of being refused.
     #[arg(long)]
     ask_otherwise: bool,
+}
+
+#[derive(Subcommand)]
+pub enum MachineCmd {
+    /// Make a machine client with rules, as a token has. With --public-key it proves itself with
+    /// JWTs its private key signs (nothing secret is kept); without, roll makes a secret, shown once.
+    ///
+    /// Examples:
+    ///   roll token client create nightly --preset read-only --public-key ci.pub.pem
+    ///   roll token client create deploy --product apps --allow read,deploy --expires 90d
+    Create(Box<ClientCreate>),
+    /// List machine clients, newest first.
+    #[command(alias = "ls")]
+    List,
+    /// Revoke a machine client: its tokens stop working at once, and it gets no more.
+    Revoke { id: String },
+    /// A new credential for a machine client, keeping its id and rules: a new key with
+    /// --public-key, CI's own identity with --github, --gitlab or --issuer, else a new secret
+    /// (shown once). The old one stops now, with the tokens it
+    /// got, unless --keep-old keeps it working while the automation moves over.
+    ///
+    /// Examples:
+    ///   roll token client rotate mcl_… --keep-old 1h
+    ///   roll token client rotate mcl_… --public-key ci-2026.pub.pem
+    ///   roll token client rotate mcl_… --github acme/web --ref refs/heads/main   (CI's own identity)
+    Rotate(Box<ClientRotate>),
+}
+
+/// CI's own identity as a machine client's credential (`create` and `rotate`): GitHub Actions,
+/// GitLab CI, or any issuer.
+#[derive(Args)]
+pub struct IdentityArgs {
+    /// Trust this repository's GitHub Actions instead: its jobs sign in with their own OIDC token
+    /// (`permissions: id-token: write`), so nothing is stored in GitHub (owner/repo).
+    #[arg(long, conflicts_with_all = ["gitlab", "issuer"])]
+    github: Option<String>,
+    /// Trust this GitLab.com project's CI jobs instead (`id_tokens`), so nothing is stored in
+    /// GitLab (group/project, subgroups too).
+    #[arg(long, conflicts_with = "issuer")]
+    gitlab: Option<String>,
+    /// Trust any CI system's OIDC tokens instead (Buildkite, CircleCI, Terraform Cloud, a
+    /// cluster's own): its issuer URL, the token's `iss`. With --subject.
+    #[arg(long, requires = "subject")]
+    issuer: Option<String>,
+    /// With --issuer: the token's `sub`, or a pattern of it with `*` (a shared issuer's must name
+    /// one tenant: Buildkite's `organization:acme:…`).
+    #[arg(long, requires = "issuer")]
+    subject: Option<String>,
+    /// With --issuer: another claim the token must carry, `name=value` (`*` patterns too);
+    /// repeatable.
+    #[arg(long = "claim", requires = "issuer")]
+    claims: Vec<String>,
+    /// With --issuer: the audience its tokens are minted for (default roll's API URL).
+    #[arg(long, requires = "issuer")]
+    audience: Option<String>,
+    /// With --issuer: the issuer's keys, pinned, for one roll can't reach (a JWKS file:
+    /// `kubectl get --raw /openid/v1/jwks`).
+    #[arg(long, requires = "issuer")]
+    jwks: Option<std::path::PathBuf>,
+    /// With --github or --gitlab: only jobs on this ref (GitHub: refs/heads/main; GitLab: the
+    /// branch, main).
+    #[arg(long, conflicts_with = "environment")]
+    r#ref: Option<String>,
+    /// With --github or --gitlab: only jobs in this environment (production).
+    #[arg(long)]
+    environment: Option<String>,
+}
+
+impl IdentityArgs {
+    /// The identity these flags describe, if any.
+    fn identity(&self) -> anyhow::Result<Option<Value>> {
+        if (self.r#ref.is_some() || self.environment.is_some()) && self.github.is_none() && self.gitlab.is_none() {
+            bail!("--ref and --environment narrow --github or --gitlab");
+        }
+        Ok(match (&self.github, &self.gitlab, &self.issuer) {
+            (Some(repo), ..) => Some(github_identity(repo, self.r#ref.as_deref(), self.environment.as_deref())?),
+            (None, Some(project), _) => Some(gitlab_identity(project, self.r#ref.as_deref(), self.environment.as_deref())?),
+            (None, None, Some(issuer)) => {
+                let mut claims = serde_json::Map::new();
+                for kv in &self.claims {
+                    let (k, v) = kv.split_once('=').filter(|(k, v)| !k.is_empty() && !v.is_empty()).with_context(|| format!("--claim {kv}: name=value"))?;
+                    claims.insert(k.to_string(), json!(v));
+                }
+                let jwks = match &self.jwks {
+                    Some(path) => Some(std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?),
+                    None => None,
+                };
+                Some(json!({ "issuer": issuer, "subject": self.subject, "claims": claims, "audience": self.audience, "jwks": jwks }))
+            }
+            _ => None,
+        })
+    }
+}
+
+#[derive(Args)]
+pub struct ClientRotate {
+    id: String,
+    /// Its new public key: a PEM file (Ed25519 or P-256) or a JWK.
+    #[arg(long, conflicts_with_all = ["github", "gitlab", "issuer"])]
+    public_key: Option<std::path::PathBuf>,
+    /// Or trust CI's own identity from now on (nothing stored in CI).
+    #[command(flatten)]
+    identity: IdentityArgs,
+    /// The old credential keeps working this long (1h, 2d; at most 7d).
+    #[arg(long)]
+    keep_old: Option<String>,
+}
+
+#[derive(Args)]
+pub struct ClientCreate {
+    /// A name you'll recognise it by ("nightly report", "deploy from CI").
+    name: String,
+    #[command(flatten)]
+    rules: RuleArgs,
+    /// Lifetime: 30d, 12h, 90m, or never (default 30d).
+    #[arg(long, default_value = "30d")]
+    expires: String,
+    /// Its public key: a PEM file (Ed25519 or P-256) or a JWK (Ed25519, P-256 or RSA).
+    #[arg(long, conflicts_with_all = ["github", "gitlab", "issuer"])]
+    public_key: Option<std::path::PathBuf>,
+    #[command(flatten)]
+    identity: IdentityArgs,
+    /// Addresses its tokens may be used from (CIDRs), repeatable.
+    #[arg(long = "ip", value_delimiter = ',')]
+    ip_allow: Vec<String>,
+    /// Requests a minute its tokens may make (per node).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    rate: Option<u32>,
+}
+
+/// A public key file as a JWK: a JWK as is, or a PEM `PUBLIC KEY` (SubjectPublicKeyInfo) for
+/// Ed25519 or P-256, whose encodings are fixed: a known prefix, then the key's bytes.
+fn public_jwk(text: &str) -> anyhow::Result<Value> {
+    use base64::Engine;
+    let text = text.trim();
+    if text.starts_with('{') {
+        return serde_json::from_str(text).context("a JWK is a JSON object");
+    }
+    if text.contains("PRIVATE KEY") {
+        bail!("that's a private key: give roll only the public one (openssl pkey -in key.pem -pubout)");
+    }
+    let body: String = text.lines().filter(|l| !l.starts_with("-----")).collect();
+    let der = base64::engine::general_purpose::STANDARD.decode(body.trim()).context("not a PEM public key")?;
+    let url = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    const ED25519: &[u8] = &[0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+    const P256: &[u8] = &[0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04];
+    if let Some(x) = der.strip_prefix(ED25519).filter(|x| x.len() == 32) {
+        return Ok(json!({ "kty": "OKP", "crv": "Ed25519", "x": url(x) }));
+    }
+    if let Some(xy) = der.strip_prefix(P256).filter(|xy| xy.len() == 64) {
+        return Ok(json!({ "kty": "EC", "crv": "P-256", "x": url(&xy[..32]), "y": url(&xy[32..]) }));
+    }
+    bail!("an Ed25519 or P-256 PEM public key (for RSA, give its JWK)")
+}
+
+/// GitHub Actions as a trusted identity: the repository's jobs (on a ref, or in an environment).
+fn github_identity(repo: &str, git_ref: Option<&str>, environment: Option<&str>) -> anyhow::Result<Value> {
+    let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    let Some((owner, name)) = repo.split_once('/').filter(|(o, n)| ok(o) && ok(n)) else {
+        bail!("--github is owner/repo");
+    };
+    // GitHub's `sub`: repo:<owner>/<repo>:ref:<ref>, or :environment:<name> for an environment's jobs.
+    let subject = match (git_ref, environment) {
+        (_, Some(env)) => format!("repo:{owner}/{name}:environment:{env}"),
+        (Some(r), None) => format!("repo:{owner}/{name}:ref:{r}"),
+        (None, None) => format!("repo:{owner}/{name}:*"),
+    };
+    Ok(json!({ "issuer": "https://token.actions.githubusercontent.com", "subject": subject }))
+}
+
+/// GitLab.com's CI as a trusted identity: a project's jobs (on a branch, or in an environment).
+fn gitlab_identity(project: &str, branch: Option<&str>, environment: Option<&str>) -> anyhow::Result<Value> {
+    let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !project.contains('/') || !project.split('/').all(ok) {
+        bail!("--gitlab is group/project (subgroups too)");
+    }
+    // GitLab's `sub`: project_path:<group>/<project>:ref_type:branch:ref:<branch>; an environment
+    // is its own claim.
+    let subject = match branch {
+        Some(b) => format!("project_path:{project}:ref_type:branch:ref:{b}"),
+        None => format!("project_path:{project}:*"),
+    };
+    let mut identity = json!({ "issuer": "https://gitlab.com", "subject": subject });
+    if let Some(env) = environment {
+        identity["claims"] = json!({ "environment": env });
+    }
+    Ok(identity)
+}
+
+/// The `.gitlab-ci.yml` job lines that trade the job's ID token for a roll token.
+fn gitlab_step(client_id: &str, endpoint: &str, audience: &str) -> String {
+    format!(
+        "  id_tokens:\n\
+         \x20   ROLL_OIDC:\n\
+         \x20     aud: {audience}\n\
+         \x20 before_script:\n\
+         \x20   - export ROLL_TOKEN=$(curl -sSf {endpoint} -d grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer -d client_id={client_id} --data-urlencode \"assertion=$ROLL_OIDC\" | jq -r .access_token)"
+    )
+}
+
+/// The workflow step that trades a job's OIDC token for a roll token, masked, as `ROLL_TOKEN`.
+fn github_step(client_id: &str, endpoint: &str, audience: &str) -> String {
+    format!(
+        "      - name: Sign in to roll\n\
+         \x20       run: |\n\
+         \x20         oidc=$(curl -sSf -H \"Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN\" \"$ACTIONS_ID_TOKEN_REQUEST_URL&audience={audience}\" | jq -r .value)\n\
+         \x20         token=$(curl -sSf {endpoint} -d grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer -d client_id={client_id} --data-urlencode \"assertion=$oidc\" | jq -r .access_token)\n\
+         \x20         echo \"::add-mask::$token\"\n\
+         \x20         echo \"ROLL_TOKEN=$token\" >> \"$GITHUB_ENV\""
+    )
+}
+
+async fn machine(api: &Api, json_out: bool, cmd: MachineCmd) -> anyhow::Result<()> {
+    match cmd {
+        MachineCmd::Create(c) => {
+            let jwk = match &c.public_key {
+                Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
+                None => None,
+            };
+            let oidc = c.identity.identity()?;
+            let body = json!({ "name": c.name, "rules": rules(api, &c.rules).await?, "expires_at": expiry(&c.expires)?, "ip_allow": c.ip_allow, "rate_per_minute": c.rate, "public_jwk": jwk, "oidc": oidc });
+            let made = api.post("/v1/access/clients", body).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&made)?);
+                return Ok(());
+            }
+            print_grant(&made["grant"]);
+            println!("client_id:      {}\ntoken endpoint: {}", s(&made["client_id"]), s(&made["token_endpoint"]));
+            let endpoint = s(&made["token_endpoint"]);
+            let audience = endpoint.trim_end_matches("/v1/access/oauth/token");
+            if c.identity.github.is_some() {
+                eprintln!("Nothing to store in GitHub. In the workflow, give the job `permissions: id-token: write`, then:\n");
+                println!("{}", github_step(&s(&made["client_id"]), &endpoint, audience));
+            } else if c.identity.gitlab.is_some() {
+                eprintln!("Nothing to store in GitLab. In .gitlab-ci.yml, add to the job:\n");
+                println!("{}", gitlab_step(&s(&made["client_id"]), &endpoint, audience));
+            } else if c.identity.issuer.is_some() {
+                println!("client_id:      {}\ntoken endpoint: {}", s(&made["client_id"]), endpoint);
+                eprintln!(
+                    "Nothing to store in CI. Get the job's OIDC token for audience {}, then trade it:\n  curl -sSf {endpoint} -d grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer -d client_id={} --data-urlencode \"assertion=$OIDC_TOKEN\"",
+                    c.identity.audience.as_deref().unwrap_or(audience),
+                    s(&made["client_id"])
+                );
+            } else if let Some(secret) = made["client_secret"].as_str() {
+                println!("\n{secret}\n");
+                eprintln!("Copy the secret now: it isn't shown again. Trade it for a token with grant_type=client_credentials (client_secret_basic or client_secret_post).");
+            } else {
+                eprintln!("Sign a JWT with its private key (iss and sub the client_id, aud the token endpoint, a new jti, at most 5 minutes to live) and send it as client_assertion with grant_type=client_credentials.");
+            }
+        }
+        MachineCmd::List => {
+            let list = api.get("/v1/access/clients").await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&list)?);
+                return Ok(());
+            }
+            let list = list.as_array().cloned().unwrap_or_default();
+            if list.is_empty() {
+                println!("no machine clients yet: roll token client create <name> --preset read-only --public-key key.pub.pem");
+            }
+            for c in &list {
+                let how = match &c["trusts"] {
+                    t if t.is_object() => format!("trusts {}: {}", s(&t["issuer"]).trim_start_matches("https://"), s(&t["subject"])),
+                    _ if c["signs_with_key"] == true => "signs with a key".to_string(),
+                    _ => "signs with a secret".to_string(),
+                };
+                let last = c["last_sign_in"].as_i64().map(|t| format!("last sign-in {}", ago(t / 1000))).unwrap_or_else(|| "never signed in".into());
+                println!("{}  {how}  ({last})", s(&c["client_id"]));
+                print_grant(&c["grant"]);
+            }
+        }
+        MachineCmd::Rotate(r) => {
+            let ClientRotate { id, public_key, identity, keep_old } = *r;
+            let oidc = identity.identity()?;
+            let jwk = match &public_key {
+                Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
+                None => None,
+            };
+            let keep = keep_old.as_deref().map(|k| span(k, "--keep-old")).transpose()?.flatten().map(|ms| ms / 1000);
+            let made = api.post(&format!("/v1/access/clients/{}/rotate", urlencoding::encode(&id)), json!({ "public_jwk": jwk, "oidc": oidc, "keep_old_for_s": keep })).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&made)?);
+                return Ok(());
+            }
+            let old = if keep.is_some_and(|s| s > 0) { "The old one keeps working for now." } else { "The old one stopped working, with the tokens it got." };
+            match made["client_secret"].as_str() {
+                Some(secret) => {
+                    println!("{secret}");
+                    eprintln!("{old} Copy the new secret now: it isn't shown again.");
+                }
+                None if oidc.is_some() => eprintln!("{id} trusts CI's own identity now: nothing to store in CI. {old}"),
+                None => eprintln!("{id} signs with the new key now. {old}"),
+            }
+        }
+        MachineCmd::Revoke { id } => {
+            let r = api.call(reqwest::Method::DELETE, &format!("/v1/access/clients/{}", urlencoding::encode(&id)), None).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+            } else {
+                println!("revoked {id}: its tokens stopped working");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What a token may do, as flags (`create` and `edit`).
@@ -583,6 +892,7 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
                         "tighten" => format!("roll token tighten {} --apply", s(&c["grant"]["id"])),
                         "expire" => format!("roll token edit {} --expires 30d", s(&c["grant"]["id"])),
                         "limit_addresses" => format!("roll token edit {} --ip <cidr>", s(&c["grant"]["id"])),
+                        "rotate_client" => "roll token client list, then roll token client rotate <mcl_…> --github owner/repo (or --public-key key.pub.pem)".to_string(),
                         other => other.to_string(),
                     };
                     println!("  {}: {fix}", s(&f["why"]));
@@ -688,6 +998,7 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
                 println!("tokens live {days}{must}{idle}");
             }
         }
+        Token::Client(cmd) => machine(api, json_out, cmd).await?,
         Token::Presets => {
             let c = api.get("/v1/access/catalog").await?;
             if json_out {
