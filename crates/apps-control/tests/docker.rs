@@ -65,6 +65,8 @@ struct World {
     project: String,
     db: code_sql::Db,
     ws: Arc<roll_workspace::Workspace>,
+    /// Its Docker objects go when it does ([`Cleanup`]).
+    _cleanup: Cleanup,
 }
 
 impl World {
@@ -91,6 +93,33 @@ impl World {
         let apps = Apps::new(cfg, store, deps);
         apps.start();
         (self.api, self.public, self.apps) = (apps_control::api::router(apps.clone()), apps_control::public::router(apps.clone()), apps);
+    }
+}
+
+/// What a test made on Docker goes with it, a failing one's too (a [`World`]'s guard): its services' containers and its
+/// project's networks (a network left behind holds one of Docker's address pools, and a host
+/// whose pools run out refuses every network after it). Only this test's: the services in its own
+/// store, the networks named for its own project.
+struct Cleanup {
+    db: code_sql::Db,
+    project: String,
+}
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let docker = |args: &[&str]| std::process::Command::new("docker").args(args).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        let services = Store::new(self.db.clone(), Sealer::new("0123456789abcdef0123456789abcdef").unwrap()).and_then(|s| s.services(None)).unwrap_or_default();
+        for svc in services {
+            let ids = docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={}", svc.id)]);
+            let ids: Vec<&str> = ids.split_whitespace().collect();
+            if !ids.is_empty() {
+                docker(&[&["rm", "-f", "-v"][..], &ids].concat());
+            }
+        }
+        let p = self.project.strip_prefix("prj_").unwrap_or(&self.project);
+        for net in docker(&["network", "ls", "--filter", &format!("name={p}"), "--format", "{{.Name}}"]).lines().filter(|n| n.starts_with("roll-apps-") && n.contains(p)) {
+            docker(&["network", "rm", net]);
+        }
     }
 }
 
@@ -140,12 +169,13 @@ async fn docker_world_with(netns: Option<bool>, setup: impl FnOnce(&mut AppsConf
     apps.start();
     let api = apps_control::api::router(apps.clone());
     let public = apps_control::public::router(apps.clone());
-    Some(World { _dir: dir, apps, api, public, project, db, ws })
+    let _cleanup = Cleanup { db: db.clone(), project: project.clone() };
+    Some(World { _dir: dir, apps, api, public, project, db, ws, _cleanup })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_static_site_builds_and_its_cold_starts_are_measured() {
-    let Some(World { _dir, apps, api, public, project, .. }) = docker_world().await else { return };
+    let Some(World { _dir, apps, api, public, project, _cleanup, .. }) = docker_world().await else { return };
     // A pull through the Engine API with a login header (an empty one is anonymous): what a
     // private registry's pull runs, its progress read off the stream.
     {
