@@ -1329,6 +1329,11 @@ impl Apps for Runtime {
         self.iso.follow(&container_name(&host), lines.clamp(1, 2000)).await
     }
 
+    async fn drain_from(&self, preview: &str, service: &str, since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        let host = self.store.services(preview).ok()?.into_iter().find(|s| s.name == service)?.host;
+        self.iso.follow_since(&container_name(&host), since).await
+    }
+
     /// Its running container's use, from Docker (a sleeping or frozen service has none).
     async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
         if self.iso.name() != "docker" {

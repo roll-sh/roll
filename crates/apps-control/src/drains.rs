@@ -12,6 +12,12 @@
 //! environment) or `syslog` (RFC 5424 messages over TLS with RFC 5425's octet counting, to
 //! `syslog+tls://host:port`, as Heroku's and Papertrail's drains take them; a connection a batch,
 //! public addresses only, checked as the HTTP client's resolver checks them).
+//!
+//! A preview's services on roll's own runtime (rolld's previews, `roll.toml`'s `[preview]`)
+//! aren't roll apps instances, so their output comes in through [`Apps::drain_preview_lines`],
+//! masked by previews, and goes to the drains that take previews' runtime output, in the
+//! preview's `pv-` environment as its roll apps services' would. Such a line has no service id,
+//! instance or deployment, so a drain narrowed to services never gets one.
 
 use crate::model::{DRAIN_FORMATS, DRAIN_SOURCES, LogDrain};
 use crate::store::{DrainSettings, OpenedDrain};
@@ -30,6 +36,29 @@ const BATCH: usize = 500;
 const LINGER: Duration = Duration::from_secs(1);
 /// How long a node keeps a project's drains (and a service's project) before reading again.
 const REFRESH: Duration = Duration::from_secs(30);
+/// Previews' batches waiting for the drainer; past it, a batch is dropped (counted).
+pub(crate) const PREVIEW_BATCHES: usize = 256;
+
+/// A line a preview's service on roll's runtime wrote: when (ms), on stderr or not, what (masked).
+#[derive(Clone, Debug)]
+pub struct PreviewLine {
+    pub t: i64,
+    pub stderr: bool,
+    pub text: String,
+}
+
+/// A preview service's lines, with whose they are.
+pub(crate) struct PreviewBatch {
+    project: String,
+    environment: String,
+    service: String,
+    lines: Vec<PreviewLine>,
+}
+
+/// Whether `d` takes a preview's runtime output in `env` from roll's runtime (no service id).
+fn takes_runtime_preview(d: &LogDrain, env: &str) -> bool {
+    d.previews && d.sources.iter().any(|s| s == "runtime") && d.services.is_empty() && (d.environments.is_empty() || d.environments.iter().any(|e| e == env))
+}
 
 impl Apps {
     /// `POST …/projects/{project}/drains {url}`: a drain; its signing secret is in the answer
@@ -76,6 +105,30 @@ impl Apps {
     pub async fn drains(self: &Arc<Self>, project: &str) -> Result<Vec<LogDrain>> {
         let p = project.to_string();
         self.db(move |s| s.drains(&p)).await
+    }
+
+    /// Whether the project has a drain that takes a preview's runtime output from roll's runtime
+    /// (in `environment`, or in any `pv-` one when `None`).
+    pub async fn drains_take_previews(self: &Arc<Self>, project: &str, environment: Option<&str>) -> Result<bool> {
+        let list = self.drains(project).await?;
+        Ok(list.iter().any(|d| match environment {
+            Some(e) => takes_runtime_preview(d, e),
+            None => d.previews && d.sources.iter().any(|s| s == "runtime") && d.services.is_empty() && (d.environments.is_empty() || d.environments.iter().any(|e| e.starts_with("pv-"))),
+        }))
+    }
+
+    /// A preview service's lines from roll's runtime, already masked, to the project's drains that
+    /// take previews' runtime output (each drain's queue, batches, signature and format, as a
+    /// roll apps instance's lines). Never waits: past [`PREVIEW_BATCHES`] waiting, the batch is
+    /// dropped, as a drain that can't keep up loses its oldest lines.
+    pub fn drain_preview_lines(&self, project: &str, environment: &str, service: &str, lines: Vec<PreviewLine>) {
+        if lines.is_empty() {
+            return;
+        }
+        let b = PreviewBatch { project: project.to_string(), environment: environment.to_string(), service: service.to_string(), lines };
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(b)) = self.preview_lines.try_send(b) {
+            tracing::warn!(project = %b.project, environment = %b.environment, lines = b.lines.len(), "apps: log drains fell behind on previews' lines; a batch was dropped");
+        }
     }
 
     /// A drain's sources, filters and headers from a body: what's absent is `current`'s (an
@@ -203,8 +256,22 @@ impl Apps {
         let mut wanted_at = Instant::now() - REFRESH;
         let mut queues: HashMap<String, Queue> = HashMap::new();
         let mut tick = tokio::time::interval(Duration::from_millis(250));
+        let mut preview_rx = self.preview_lines_rx.lock().take();
         loop {
             tokio::select! {
+                got = async { match preview_rx.as_mut() { Some(rx) => rx.recv().await, None => std::future::pending().await } } => {
+                    let Some(b) = got else { preview_rx = None; continue };
+                    if self.drains_fresh(&mut drains, &b.project).await {
+                        wanted_at = Instant::now() - REFRESH;
+                    }
+                    let wanted: Vec<&OpenedDrain> = drains[&b.project].1.iter().filter(|o| takes_runtime_preview(&o.drain, &b.environment)).collect();
+                    for o in wanted {
+                        for l in &b.lines {
+                            let stream = if l.stderr { "stderr" } else { "stdout" };
+                            enqueue(&mut queues, &o.drain.id, &b.project, json!({ "t": l.t, "source": "runtime", "service": null, "service_name": b.service, "environment": b.environment, "instance": null, "deployment": null, "stream": stream, "text": l.text }));
+                        }
+                    }
+                }
                 got = tap.recv() => {
                     let Some((key, line)) = got else { return };
                     // Which of a drain's sources the line is, and whose.
@@ -226,13 +293,6 @@ impl Apps {
                     } else {
                         continue;
                     };
-                    let dirty = std::mem::take(&mut *self.drains_dirty.lock());
-                    if !dirty.is_empty() {
-                        for p in &dirty {
-                            drains.remove(p);
-                        }
-                        wanted_at = Instant::now() - REFRESH;
-                    }
                     let fresh = |at: &Instant| at.elapsed() < REFRESH;
                     // Bounded, as `builds` is: read again rather than kept forever.
                     if services.len() > 5000 {
@@ -247,10 +307,8 @@ impl Apps {
                         services.insert(service.clone(), (Instant::now(), found));
                     }
                     let Some((project, name)) = services[&service].1.clone() else { continue };
-                    if !drains.get(&project).is_some_and(|(at, _)| fresh(at)) {
-                        let p = project.clone();
-                        let list = self.db(move |s| s.drain_secrets(&p)).await.unwrap_or_default();
-                        drains.insert(project.clone(), (Instant::now(), list));
+                    if self.drains_fresh(&mut drains, &project).await {
+                        wanted_at = Instant::now() - REFRESH;
                     }
                     let wanted: Vec<&OpenedDrain> = drains[&project].1.iter().filter(|o| {
                         let d = &o.drain;
@@ -268,16 +326,7 @@ impl Apps {
                     }
                     let preview = previews[&k].1;
                     for o in wanted.into_iter().filter(|o| !preview || o.drain.previews) {
-                        let d = &o.drain;
-                        let q = queues.entry(d.id.clone()).or_insert_with(|| Queue::new(&project));
-                        if q.lines.is_empty() {
-                            q.first = Instant::now();
-                        }
-                        if q.lines.len() == BUFFER {
-                            q.lines.pop_front();
-                            q.dropped += 1;
-                        }
-                        q.lines.push_back(json!({ "t": line.t, "source": source, "service": service, "service_name": name, "environment": env, "instance": line.instance, "deployment": line.deployment, "stream": line.stream, "text": line.text }));
+                        enqueue(&mut queues, &o.drain.id, &project, json!({ "t": line.t, "source": source, "service": service, "service_name": name, "environment": env, "instance": line.instance, "deployment": line.deployment, "stream": line.stream, "text": line.text }));
                     }
                 }
                 _ = tick.tick() => {
@@ -321,6 +370,21 @@ impl Apps {
                 _ = self.stop.cancelled() => return,
             }
         }
+    }
+
+    /// `project`'s drains in `drains`, read again when older than [`REFRESH`] or changed on this
+    /// node. True when some project's drains had changed (what the tap is asked for is read again).
+    async fn drains_fresh(self: &Arc<Self>, drains: &mut HashMap<String, (Instant, Vec<OpenedDrain>)>, project: &str) -> bool {
+        let dirty = std::mem::take(&mut *self.drains_dirty.lock());
+        for p in &dirty {
+            drains.remove(p);
+        }
+        if !drains.get(project).is_some_and(|(at, _)| at.elapsed() < REFRESH) {
+            let p = project.to_string();
+            let list = self.db(move |s| s.drain_secrets(&p)).await.unwrap_or_default();
+            drains.insert(project.to_string(), (Instant::now(), list));
+        }
+        !dirty.is_empty()
     }
 
     /// One batch, tried three times (1 s, then 5 s apart), then dropped.
@@ -500,6 +564,19 @@ fn otlp_logs(batch: &[Value]) -> Value {
         })
         .collect();
     json!({ "resourceLogs": resource_logs })
+}
+
+/// `line` onto drain `id`'s queue: past [`BUFFER`], its oldest line goes (counted).
+fn enqueue(queues: &mut HashMap<String, Queue>, id: &str, project: &str, line: Value) {
+    let q = queues.entry(id.to_string()).or_insert_with(|| Queue::new(project));
+    if q.lines.is_empty() {
+        q.first = Instant::now();
+    }
+    if q.lines.len() == BUFFER {
+        q.lines.pop_front();
+        q.dropped += 1;
+    }
+    q.lines.push_back(line);
 }
 
 /// One drain's lines waiting for their batch.

@@ -578,6 +578,38 @@ impl apps_control::integrations::FeedbackNotes for Notes {
 }
 
 /// roll apps' own (`Apps::reachable`): the instance's container and port, its lease held.
+/// roll apps' log drains, for previews' services on roll's runtime: whether a project's take
+/// previews' output is read again after [`DRAINS_FOR`].
+pub struct AppsDrains {
+    pub apps: Arc<apps_control::Apps>,
+    pub wanted: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, bool)>>,
+}
+
+const DRAINS_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[async_trait]
+impl roll_previews::ports::Drains for AppsDrains {
+    async fn wanted(&self, project: &str) -> bool {
+        if let Some((at, w)) = self.wanted.lock().unwrap_or_else(|e| e.into_inner()).get(project)
+            && at.elapsed() < DRAINS_FOR
+        {
+            return *w;
+        }
+        let w = self.apps.drains_take_previews(project, None).await.unwrap_or(false);
+        let mut m = self.wanted.lock().unwrap_or_else(|e| e.into_inner());
+        if m.len() > 5000 {
+            m.clear();
+        }
+        m.insert(project.to_string(), (std::time::Instant::now(), w));
+        w
+    }
+
+    fn send(&self, project: &str, environment: &str, service: &str, lines: Vec<roll_previews::ports::DrainLine>) {
+        let lines = lines.into_iter().map(|l| apps_control::drains::PreviewLine { t: l.t, stderr: l.stderr, text: l.text }).collect();
+        self.apps.drain_preview_lines(project, environment, service, lines);
+    }
+}
+
 pub struct AppsReach(pub Arc<apps_control::Apps>);
 
 #[async_trait]
@@ -671,6 +703,11 @@ impl roll_previews::ports::Apps for Services {
 
     async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.follow(preview, service, lines).await }
+    }
+
+    /// roll apps drains its own instances' output (a drain's `previews`).
+    async fn drain_from(&self, preview: &str, service: &str, since: &str) -> Option<tokio::sync::mpsc::Receiver<(bool, String)>> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.drain_from(preview, service, since).await }
     }
 
     async fn seed(&self, job: &roll_previews::ports::SeedJob) -> anyhow::Result<(i32, String)> {
