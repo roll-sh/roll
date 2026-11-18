@@ -126,8 +126,9 @@ describe("automations: the catalog and samples", () => {
     const withIntegrations = withChatops(withBuiltIns(LINEAR_CATALOG));
     for (const t of TEMPLATES) {
       const spec = t.build(ctx);
-      // Only what the owner alone knows is left to fill (the Slack DM template's member id).
-      const left = t.id === "slack-agent-needs-me" ? { "steps.0.config.to": expect.any(String) } : {};
+      // Only what the owner alone knows is left to fill (the Slack DM template's member id, the
+      // channel previews are posted to).
+      const left = t.id === "slack-agent-needs-me" ? { "steps.0.config.to": expect.any(String) } : t.id === "slack-preview-ready" ? { "steps.0.config.channel": expect.any(String) } : {};
       expect(validate(spec, t.integration ? withIntegrations : catalog), t.id).toEqual(left);
       expect(spec.steps.map((s) => s.kind), t.id).toEqual(t.steps);
     }

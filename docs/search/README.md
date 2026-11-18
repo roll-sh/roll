@@ -31,6 +31,7 @@ pnpm dev                                # dashboard: /dashboard/search
 | `--search-proxy-protocol`                          | off               | PROXY protocol headers (behind an NLB or HAProxy) |
 | `--search-history` (`ROLL_SEARCH_HISTORY`)         | `86400`           | point-in-time branching window, seconds (0: off) |
 | `--search-gc-interval`                             | `3600`            | garbage collection of unreferenced objects (0: off; one node per bucket) |
+| `--search-deleted-retention-days` (`ROLL_SEARCH_DELETED_RETENTION_DAYS`) | `7` | days a deleted cluster can be restored, its storage billed meanwhile (0: deleted at once) |
 | `--search-test-features`                           | off               | publish Elasticsearch's test features (YAML suites through `--cluster-hook`; test deployments only) |
 | `--search-max-clusters-per-person` (`ROLL_SEARCH_MAX_CLUSTERS_PER_PERSON`) | `50` | clusters a signed-in person may own, branches included (0: no cap; the operator and admins aren't capped) |
 | `--search-max-always-on-per-person` (`ROLL_SEARCH_MAX_ALWAYS_ON_PER_PERSON`) | `2` | of those, always-on ones (`idle_timeout_s` 0) (0: no cap) |
@@ -60,6 +61,8 @@ roll search clusters branch app app-yesterday --at 1d    # as of a day ago
 roll search clusters indices app
 roll search clusters usage app                           # cost vs Elastic Cloud / Amazon OpenSearch
 roll search clusters password app | unload app | delete app | url app | show app | list
+roll search clusters list --deleted                      # deleted in the last 7 days, with purge dates
+roll search clusters restore srch_… [--name app-2]       # back as it was (under another name if app is taken)
 roll search index create app books '{"mappings":{"properties":{"title":{"type":"text"}}}}'
 roll search docs put app books 1 '{"title":"dune"}' --refresh
 roll search index bulk app books @books.ndjson --refresh
@@ -82,7 +85,7 @@ roll search inference list app | test app emb "some text" | delete app emb
 
 A cluster's name is its identity: the Basic auth user, the host label under `--search-domain`,
 `cluster_name` in `GET /`. Names are DNS labels (lowercase letters, digits, `-`) and can't
-change. Clients authenticate with Basic auth (`<name>:<password>`, or any user at the cluster's
+change, except by restoring a deleted cluster under another name when its own was taken. Clients authenticate with Basic auth (`<name>:<password>`, or any user at the cluster's
 own host), `Authorization: ApiKey base64(<name>:<password>)` or
 `Authorization: Bearer <name>_<password>`.
 
@@ -134,11 +137,12 @@ them (`api::Caller`):
 | method | path | |
 | ------ | ---- | - |
 | GET | `/v1/search` | version, endpoint, defaults, pricing; for a person their `caps`; for the operator and admins also `storage`, `loaded` clusters and the `cache` |
-| GET | `/v1/search/clusters` | list (a person: their own) |
+| GET | `/v1/search/clusters` | list (a person: their own); `?deleted=true`: recently deleted clusters kept for restoring, newest first, with `deleted_at` and `purge_at` (Unix seconds), the name each had and its last figures (`stored_bytes` is still billed) |
 | POST | `/v1/search/clusters` | create `{name, flavor?, parent?, at?, idle_timeout_s?, max_in_flight?, max_body_mb?, destructive_requires_name?}`; answers with `url`, `username`, `password` (once) and `id` — the shape `search-yaml run --cluster-hook` expects; `owner` is the signed-in person who isn't an admin, and a branch's is its parent's |
 | GET | `/v1/search/clusters/{id or name}` | settings, `status` (`loaded` with live index count and requests in flight, and live `docs` once every index is open, or `asleep` with `wakes_at`, unix seconds, when a background job is due to wake it), last metered `indices`/`docs`/`stored_bytes` and `own_bytes` (what a branch references that its parent's latest commit points don't; all of `stored_bytes` for a cluster that isn't a branch), `url`, `branches` |
 | PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`; the idle timeout, body limit and `max_in_flight` apply at once (also to a cluster that is waking up); a new flavor or `destructive_requires_name` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
-| DELETE | `/v1/search/clusters/{id}` | waits for running requests and for a wake in progress (which is locked out and unloaded, never left serving); branches keep working |
+| DELETE | `/v1/search/clusters/{id}` | waits for running requests and for a wake in progress (which is locked out and unloaded, never left serving); the cluster leaves the list, its REST endpoint answers as for a missing cluster and its name is free at once, but its storage is kept for `--search-deleted-retention-days` (7) and billed as storage, for `restore` (0 days: removed at once); branches keep working |
+| POST | `/v1/search/clusters/{id}/restore` | a deleted cluster (by its id) back as it was within its window: data, snapshots, settings, owner, password and API keys; under its own name, else 409 and `{"name": "…"}` restores it under another (the new name is its Basic auth user, API key id suffix and host label; the password stays). Scoped like every per-cluster route (owner, admins, the operator); 404 once purged |
 | GET, POST | `/v1/search/clusters/{id}/branches` | list; branch `{name, at?}` (`at`: Unix seconds within `--search-history`) |
 | POST | `/v1/search/clusters/{id}/password` | rotate; the new password is in the answer, once. From the answer on, the old one fails, also on a cluster that was waking up |
 | POST | `/v1/search/clusters/{id}/unload` | sleep now (`{"unloaded": false}` while requests run) |
@@ -146,7 +150,7 @@ them (`api::Caller`):
 | POST | `/v1/search/clusters/{id}/request` | console: `{method, path, body?}` (a JSON body, sent byte for byte so `_source` keeps its key order, or a string such as NDJSON, sent as is) → `{status, headers, body, took_ms, truncated}`. Accepts bodies up to the cluster's `max_body_mb` (the request may be up to twice that plus 1 MiB, for JSON escapes) |
 | GET | `/v1/search/clusters/{id}/usage?days=30` | loaded seconds, GiB-hours, requests, stored GiB-months, cost, and the same workload on Elastic Cloud Hosted, an Amazon OpenSearch Service domain and OpenSearch Serverless |
 | POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?}` (`access`: `admin`, the default, or `data`: a link's role, data, templates, pipelines and lifecycle policies without security) → `{id, name, access, api_key, url, expires_at?}` (`access`: the access the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
-| DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone) |
+| DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone). On a deleted cluster (by its id) the revoke is kept and applied by its restore (204) |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}` | Elasticsearch's `GET`/`PUT`/`DELETE /<index>`: mappings, settings and aliases; create (body: `mappings`, `settings`); delete |
 | GET, PUT | `/v1/search/clusters/{id}/indices/{index}/mapping` | `GET`/`PUT /<index>/_mapping` |
 | GET | `/v1/search/clusters/{id}/indices/{index}/settings` | `GET /<index>/_settings` |
@@ -237,7 +241,8 @@ its document count is the engine's (unflushed writes included); otherwise it com
 commit points. Both count Lucene documents (nested ones included), as `_stats` does, so the figure
 doesn't jump when the cluster unloads. Stored bytes are re-read from the cluster's commit points after every load and
 unload and every 10 minutes while loaded; storage accrues from a change log, so a sleeping
-cluster adds no rows. Prices are AWS list prices in `crates/search-control/src/pricing.rs`, each
+cluster adds no rows. A deleted cluster kept for restoring keeps its last size in the log, so its
+storage is billed until it is purged, when its rows go. Prices are AWS list prices in `crates/search-control/src/pricing.rs`, each
 with its source.
 
 ## Tests
@@ -356,7 +361,25 @@ create with a `parent` needs `write` on the parent (#188).
    "0.57 ms" was an error). Still open from before: one-client indexing CPU (51.8 against 34.6
    µs/doc on the ECS log), BP only for time-series and log indices, the request path's
    allocations, one allocator policy.
-4. **Snapshots on the fleet.** Landed: every cluster whose data is in object storage (the fleet
+4. **IP allowlists per cluster** (Elastic Cloud's traffic filters; AWS OpenSearch's IP and VPC
+   policies): a cluster's endpoint takes any address with valid credentials today. Decided
+   2026-11-17: a per-cluster list of CIDRs (settings, CLI, dashboard; empty: open, as now), checked
+   on the data plane before authentication, on the client address a trusted front gives (PROXY
+   protocol, or a configured header from configured proxy addresses only, never a client's own
+   `X-Forwarded-For`); the control plane (`/v1/search`) stays behind roll's own sign-in. In progress.
+5. **Cluster observability** (Elastic Cloud's Performance tab and Stack Monitoring; OpenSearch
+   Service's CloudWatch metrics): request rate, latency percentiles, errors and rejections per
+   cluster over time in the dashboard, from what the node already counts; and the search and
+   indexing slow logs (`index.search.slowlog.threshold.*`, `index.indexing.slowlog.*`) kept per
+   cluster and readable from the dashboard, as Elastic Cloud's logs are.
+6. **An audit log** (Elastic Cloud's security audit logging; OpenSearch Security's audit log, whose
+   config roll stores but doesn't act on): authentication failures, access denials, API key and
+   user changes per cluster, kept for a window and readable by the owner; never a password,
+   key or document in it.
+7. **Search analytics** (Algolia's and Elastic App Search's): top queries, queries with no results,
+   and click-through when the client reports clicks, per index, so the Relevance tab's synonyms and
+   rules can be aimed at real searches.
+8. **Snapshots on the fleet.** Landed: every cluster whose data is in object storage (the fleet
    and a single rolld) has a default repository, `found-snapshots` as on Elastic Cloud
    (`--search-default-repository`), so `_snapshot` and snapshot lifecycle policies work without
    setup; it can't be changed or unregistered, costs an idle cluster nothing (registered in
@@ -380,7 +403,7 @@ create with a `parent` needs `write` on the parent (#188).
    the logsdb and time-series default, `_source.enabled: false`) can't come back that way.
    Decided 2026-11-17: not now. A live cluster moves by reindex from remote; build it once tenants
    ask to move by backup alone.
-5. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
+9. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
    Elasticsearch 9.5.5 and OpenSearch 3.9). Roll leads on indexing (4,735 docs/s against 3,585
    and 2,978 at 8 clients), merged `knn` (1.9 ms CPU against 6.1 and 4.9), `rrf` (3.2 against 13.8
    and 8.3), cold start (36 ms to the first `knn` against a ~25-29 s node start) and memory
@@ -406,7 +429,7 @@ create with a `parent` needs `write` on the parent (#188).
    candidate is rescored); float construction on CPUs without AVX-512 downclocking.
    Decided 2026-11-17: concurrent knn segments stay on (lower latency for 3-25% more CPU on
    unmerged indices); the vector rerun under Rally (in progress) decides what to cut next.
-6. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress). Landed: the
+10. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress). Landed: the
    index browser and console on the per-index routes, an API keys panel in Settings, the mapping
    view as a field table, OpenSearch-flavor clusters' own clients and `OPENSEARCH_*` variables,
    and importing a file into an index from the Indices tab (Kibana's "Upload a file"): NDJSON, a
@@ -429,7 +452,7 @@ create with a `parent` needs `write` on the parent (#188).
    over for the retention, so the write index is never deleted; new backing indices join through
    its `ism_template`). The console keeps each cluster's recent requests in the
    browser (credentials redacted), as Dev Tools keeps its history; named saves are left, low. Signed-in users who aren't admins see and manage their own clusters (#127), within their caps (#162).
-7. **Compatibility gaps** from the extended suites (5,083 of the 5,541 Elasticsearch passes, 5,244 in all, 46 suites at 100%; #187),
+11. **Compatibility gaps** from the extended suites (5,083 of the 5,541 Elasticsearch passes, 5,244 in all, 46 suites at 100%; #187),
    largest first. Landed: ent-search's last 5 (a `rule` retriever over `rrf`/`linear`, inference
    inside a rule query's organic, workflow-restricted API keys), ES|QL's last 5 (`TOP_SNIPPETS`,
    `CATEGORIZE`, approximation's columns, `LIMIT n BY`, `unsigned_long` past `i64::MAX`),
@@ -445,7 +468,7 @@ create with a `parent` needs `write` on the parent (#188).
    cost (its values are stored twice; measure on a logs corpus); downsample's last one (allocation filtering). In the opensearch dialect, pick
    `auto_date_histogram`'s rounding from the bounds as OpenSearch's rewrite does where it differs
    from collecting (roll counts with Elasticsearch's choice in both dialects).
-8. **Language analysis: what's left.** Every analysis plugin Elastic Cloud ships runs now (42 of 42
+12. **Language analysis: what's left.** Every analysis plugin Elastic Cloud ships runs now (42 of 42
    tests). Landed: `analysis-phonetic` (every encoder, Commons Codec's algorithms ported: identical
    codes to Java on 150,000 geonames names), `analysis-stempel` (Polish: Lucene's Egothor stemmer
    and table, identical on 121,000 words) and `analysis-ukrainian` (the Morfologik dictionary
@@ -476,7 +499,7 @@ create with a `parent` needs `write` on the parent (#188).
    `Han-Latin`, `Latin-ASCII`: ICU's transliteration rule data and its rule features beyond plain
    conversions), custom collation `rules` and `rule_files` for the tokenizer (both need ICU's rule
    compilers); then smartcn's speed.
-9. **Elasticsearch's lifecycles: what's left.** The data stream lifecycle (rollover, retention,
+13. **Elasticsearch's lifecycles: what's left.** The data stream lifecycle (rollover, retention,
    failure stores, the error store), ILM and snapshot lifecycle management (scheduled snapshots,
    retention, `.slm-history-7`, ILM's `wait_for_snapshot`) run now (`api/data_stream_lifecycle.rs`,
    `xpack/ilm_run.rs`, `xpack/slm.rs`; compatibility.md, "Known gaps"). They run time-based work
@@ -484,14 +507,14 @@ create with a `parent` needs `write` on the parent (#188).
    and `downsample` (roll has both APIs; the steps that swap the new index in aren't written),
    `searchable_snapshot`, and the `ilm-history-*` data stream.
    The data stream lifecycle's force merges and downsampling rounds aren't run either.
-10. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
+14. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
    endpoints, creates them (OpenAI or any compatible URL, Cohere, Anthropic; the API key sent
    once, sealed, never shown back), tests them with a sample, deletes them, and opens a
    `semantic_text` quickstart in the console. The index browser's mapping view is a field table
    (type, inference endpoint, vector dims, similarity and index type, analyzers, what isn't
    indexed; the JSON a toggle away). Left: a roll secret as an endpoint's key (after #20), MCP
    tools (they follow the routes; the MCP thread).
-11. **Semantic search** (the largest gap against Elasticsearch 9 and Elastic Cloud after machine
+15. **Semantic search** (the largest gap against Elasticsearch 9 and Elastic Cloud after machine
    learning). Landed (compatibility.md, "Inference" and "`semantic_text`"): the `_inference` API
    (`openai` with `url`, `cohere`, `anthropic`; keys sealed, `roll_net::PublicOnly`; `rate_limit`
    enforced; the preconfigured endpoints as a cluster without ML nodes; the test plugin's services
@@ -502,7 +525,7 @@ create with a `parent` needs `write` on the parent (#188).
    multi-field, `index_options` validation, the `embedding` task type and `semantic` field type,
    `random_reranker`, rerankers inside compound retrievers (landed 2026-11-14; the rest is low
    priority).
-12. **Integration with the other threads**: on main since #29: previews branch search clusters
+16. **Integration with the other threads**: on main since #29: previews branch search clusters
    (`scripts/preview-cost.sh`: the branch reads the parent's document, its writes stay in it, the
    service gets its `ELASTICSEARCH_URL`, landing deletes it; previews mask search fields), and
    roll secrets' search link asks for `access: "data"` keys and refuses anything else (#97). On
@@ -519,11 +542,11 @@ create with a `parent` needs `write` on the parent (#188).
    an OpenSearch user): links made before one are reissued. The fleet test with every product on
    passed (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall
    1.2 s in the rolling restart).
-13. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
+17. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
-14. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
+18. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
    main's cache: under the minute, no room for another crate). (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
@@ -537,7 +560,7 @@ create with a `parent` needs `write` on the parent (#188).
    (`test_support::assert_linear`), not wall time. Wall-clock bounds left to convert:
    `search-es` OpenSearch security (100 ms) and dynamic mappings (1 s), `search-painless` grok
    (5 s), `search-store`'s WAL.
-15. **Security**: a second review of what landed since the first (the `_inference` API, `semantic_text`,
+19. **Security**: a second review of what landed since the first (the `_inference` API, `semantic_text`,
    the new retrievers, workflow-restricted keys, service tokens, OpenSearch Security's new
    endpoints, ES|QL's new functions) landed in 7288684b9: `semantic_text` under field level
    security (queries and the semantic highlighter, `copy_to` sources included), an inference key

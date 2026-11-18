@@ -180,6 +180,7 @@ POST /v1/previews/{id}/notes/{note}/resolve
 GET /v1/previews/{id}/notes/{note}/crop
 GET /v1/previews/{id}/logs
 POST /v1/previews/{id}/refresh
+GET /v1/previews/{id}/requests
 GET /v1/previews/{id}/screenshot
 GET /v1/previews/{id}/shares
 DELETE /v1/previews/{id}/shares/{share}
