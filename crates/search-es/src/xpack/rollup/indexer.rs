@@ -37,9 +37,11 @@ pub(super) async fn trigger(cluster: &Cluster, id: &str) {
         && state_of(&job) == "started"
     {
         let owner = job.get("user").and_then(internal::principal_of);
-        let outcome = match job_config(&job) {
-            Some(cfg) => internal::as_principal(owner, run(cluster, &cfg, job.get("position").filter(|p| p.as_object().is_some()).cloned())).await,
-            None => Err(EsError::illegal_state(format!("the configuration of rollup job [{id}] can't be read"))),
+        let outcome = match (internal::principal_refusal(cluster, owner.as_ref()), job_config(&job)) {
+            // Its user or API key can no longer act: the job stops without running.
+            (Some(e), _) => Err(e),
+            (None, Some(cfg)) => internal::as_principal(owner, run(cluster, &cfg, job.get("position").filter(|p| p.as_object().is_some()).cloned())).await,
+            (None, None) => Err(EsError::illegal_state(format!("the configuration of rollup job [{id}] can't be read"))),
         };
         // A store refusing the write (a cluster unloading) leaves the trigger due: the
         // scheduler runs it again.
@@ -291,7 +293,15 @@ async fn record(cluster: &Cluster, id: &str, outcome: EsResult<Pass>) -> EsResul
                 Err(_) => add("search_failures", 1),
             }
             j.insert("stats".into(), Value::Obj(s));
-            if j.get("state").and_then(Value::as_str) == Some("started") {
+            if let Err(e) = &outcome
+                && e.status == 401
+            {
+                // Its user or API key can no longer act ([`internal::principal_refusal`]): stopped,
+                // with the reason in its status until it is started again.
+                j.insert("state".into(), "stopped".into());
+                j.shift_remove("next_run");
+                j.insert("reason".into(), e.reason.clone().unwrap_or_default().into());
+            } else if j.get("state").and_then(Value::as_str) == Some("started") {
                 let cron = config_str(&j, "cron");
                 match next_cron(&cron, end) {
                     Some(t) => j.insert("next_run".into(), t.into()),

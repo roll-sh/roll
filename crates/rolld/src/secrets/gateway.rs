@@ -57,6 +57,7 @@ pub(crate) enum Call {
     DbCreateLogin { url: String, ca: Option<String>, name: String, password: String, group: String, until: i64 },
     DbExtendLogin { url: String, ca: Option<String>, name: String, until: i64 },
     DbDropLogin { url: String, ca: Option<String>, name: String },
+    DbSetOwnPassword { url: String, ca: Option<String>, password: String },
     Dir { url: String, flavor: Flavor, bind_dn: String, bind_password: String, ca: Option<String>, op: DirOp },
     /// Check the link's credential and the gateway's record now, closing it if either is gone
     /// (a gateway deleted, a credential revoked through roll secrets). Needs no link.
@@ -89,6 +90,7 @@ impl Call {
             Call::DbCreateLogin { url, ca, name, password, group, until } => db.create_login(&Target { url: &url, ca: ca.as_deref(), gateway: None }, &name, &password, &group, until).map(|_| Json::Null),
             Call::DbExtendLogin { url, ca, name, until } => db.extend_login(&Target { url: &url, ca: ca.as_deref(), gateway: None }, &name, until).map(|_| Json::Null),
             Call::DbDropLogin { url, ca, name } => db.drop_login(&Target { url: &url, ca: ca.as_deref(), gateway: None }, &name).map(|_| Json::Null),
+            Call::DbSetOwnPassword { url, ca, password } => db.set_own_password(&Target { url: &url, ca: ca.as_deref(), gateway: None }, &password).map(|_| Json::Null),
             Call::Dir { url, flavor, bind_dn, bind_password, ca, op } => {
                 let d = super::directory::Engine { via };
                 let b = Bind { url: &url, flavor, bind_dn: &bind_dn, bind_password: &bind_password, ca: ca.as_deref(), gateway: None };
@@ -697,6 +699,7 @@ mod tests {
                 sts: None,
                 outside: Some(Arc::new(super::super::outside::Guarded { allow_private: true, gateways: hub.clone() })),
                 directory: None,
+                github: None,
                 clouds: None,
                 workloads: Some(tokens.clone()),
                 gateways: Some(hub.clone()),

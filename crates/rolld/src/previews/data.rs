@@ -275,7 +275,13 @@ impl Brancher for Redis {
 
     async fn connect(&self, _parent: &str, branch: &str, _kept: Option<&str>) -> anyhow::Result<Vec<(String, String)>> {
         let d = self.0.get(&format!("/v1/redis/databases/{}", seg(branch))).await?;
-        Ok(vec![("REDIS_URL".into(), s(&d["redis_url"]).ok_or_else(|| anyhow::anyhow!("no redis_url"))?)])
+        let mut v = vec![("REDIS_URL".into(), s(&d["redis_url"]).ok_or_else(|| anyhow::anyhow!("no redis_url"))?)];
+        // Its HTTP API too (Upstash's REST names, as roll apps' link gives them).
+        if let Some(u) = s(&d["rest_url"]) {
+            v.push(("REDIS_REST_URL".into(), u));
+            v.push(("REDIS_REST_TOKEN".into(), s(&d["rest_token"]).unwrap_or_default()));
+        }
+        Ok(v)
     }
 
     async fn usage(&self, _parent: &str, branch: &str) -> anyhow::Result<Usage> {
@@ -784,6 +790,36 @@ impl Search {
         };
         Ok(json!({ "ELASTICSEARCH_URL": with }).to_string())
     }
+
+    /// [`Self::kept`], plus a data-only credential of the branch, as production's link to the
+    /// cluster gets (roll search's keys route, `access: data`: indices, templates, pipelines,
+    /// lifecycle; no keys or users): `ELASTICSEARCH_API_KEY`, or for an OpenSearch cluster a
+    /// data-only user (`OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD`). So code that needs more
+    /// than production's link gives fails in its preview too. It goes with the branch. A build of
+    /// roll search that can't make one leaves the branch's own login (said in the log).
+    async fn kept_with_key(&self, v: &Value, name: &str) -> anyhow::Result<String> {
+        let mut kept: serde_json::Map<String, Value> = serde_json::from_str(&Self::kept(v)?)?;
+        let id = s(&v["id"]).unwrap_or_default();
+        match self.0.post(&format!("/v1/search/clusters/{}/keys", seg(&id)), json!({ "name": format!("roll preview {name}"), "access": "data" })).await {
+            Ok(k) if k["access"].as_str().is_some_and(|a| a != "data") => {
+                // Never kept: revoked at once, as roll secrets does with one.
+                if let Some(key) = s(&k["id"]) {
+                    let _ = self.0.delete(&format!("/v1/search/clusters/{}/keys/{}", seg(&id), seg(&key))).await;
+                }
+                tracing::warn!(branch = %name, "previews: roll search made a {} key, not a data one: revoked, and the branch's own login stays", k["access"]);
+            }
+            Ok(k) => {
+                if let Some(key) = s(&k["api_key"]) {
+                    kept.insert("ELASTICSEARCH_API_KEY".into(), json!(key));
+                } else if let (Some(u), Some(p)) = (s(&k["username"]), s(&k["password"])) {
+                    kept.insert("OPENSEARCH_USERNAME".into(), json!(u));
+                    kept.insert("OPENSEARCH_PASSWORD".into(), json!(p));
+                }
+            }
+            Err(e) => tracing::warn!(branch = %name, error = %e, "previews: a data key for the search branch"),
+        }
+        Ok(Value::Object(kept).to_string())
+    }
 }
 
 #[async_trait]
@@ -831,14 +867,14 @@ impl Brancher for Search {
     async fn branch(&self, parent: &str, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         let path = format!("/v1/search/clusters/{}/branches", seg(parent));
         match self.0.post(&path, json!({ "name": name })).await {
-            Ok(v) => Ok(Branched { r#ref: s(&v["id"]).ok_or_else(|| anyhow::anyhow!("a search branch without an id"))?, kept: Some(Self::kept(&v)?) }),
+            Ok(v) => Ok(Branched { r#ref: s(&v["id"]).ok_or_else(|| anyhow::anyhow!("a search branch without an id"))?, kept: Some(self.kept_with_key(&v, name).await?) }),
             // From before a crash: its password is gone, and it holds nothing yet. Make it again.
             Err(e) if conflict_is_ours(&e) => {
                 let c = self.0.get(&format!("/v1/search/clusters/{}", seg(name))).await?;
                 self.delete(parent, &s(&c["id"]).unwrap_or_default(), name).await?;
                 let v = self.0.post(&path, json!({ "name": name })).await?;
                 let _ = mode;
-                Ok(Branched { r#ref: s(&v["id"]).unwrap_or_default(), kept: Some(Self::kept(&v)?) })
+                Ok(Branched { r#ref: s(&v["id"]).unwrap_or_default(), kept: Some(self.kept_with_key(&v, name).await?) })
             }
             Err(e) => Err(e),
         }

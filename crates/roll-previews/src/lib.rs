@@ -19,6 +19,7 @@ pub mod glob;
 pub mod ports;
 pub mod mail;
 pub mod mask;
+pub mod names;
 pub mod notes;
 pub mod openapi;
 pub mod runtime;
@@ -135,6 +136,17 @@ impl Mode {
     }
 }
 
+/// A Git URL service's pull request, as its preview shows it. A fork's runs only at the head a
+/// writer approved (`POST …/approve`); a new head waits again.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GitPullView {
+    pub number: i64,
+    pub url: String,
+    pub fork: bool,
+    pub approved_head: Option<String>,
+    pub approved_by: Option<String>,
+}
+
 /// Where a preview is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -213,6 +225,13 @@ pub struct Preview {
     pub release: Option<ReleaseRun>,
     /// Kept past its TTL until then (`POST …/keep`); a landed or closed change still ends it.
     pub kept_until: Option<i64>,
+    /// What its code may reach (`Settings::egress_for`): a fork's is `roll` by default though the
+    /// project's previews reach anything, so a call outside roll failing is explained on it.
+    pub reaches: crate::settings::EgressRule,
+    /// The pull request a Git URL service's preview is of (roll apps' push hook): `None` for a
+    /// branch's and for roll code's (theirs is `number`/`github_pr`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pull: Option<GitPullView>,
     /// When it goes unless it's used or kept, said once that's close (a day, or a quarter of a
     /// shorter TTL): the change, its pull request and the sheet warn.
     pub goes_at: Option<i64>,
@@ -487,6 +506,19 @@ impl PageA11y {
             }
         }
     }
+}
+
+/// A request to a preview's service through roll (Vercel's request log): when, which service,
+/// the method and path (never the query: it can carry a token), the status, and how long until
+/// the answer's headers.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct RequestLine {
+    pub at: i64,
+    pub service: String,
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub ms: u64,
 }
 
 /// The page's speed at the latest screenshot's head, and at the one before (to compare).

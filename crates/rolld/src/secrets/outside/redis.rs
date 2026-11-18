@@ -236,6 +236,30 @@ pub(super) async fn set_password(c: &mut Conn, role: &str, password: &str) -> Re
 /// file (failing loudly, or a restart would bring back a retired password), else `CONFIG REWRITE`
 /// where there's a config file. A server that keeps neither (or a managed one that manages
 /// persistence itself and refuses both) keeps ACLs in memory only, which is its configuration.
+/// The admin user's own password (rotate-admin). Not the `default` user's: that's the
+/// `requirepass` every other client shares. Only on a server that keeps ACL changes across a
+/// restart (an ACL file, or a config file `CONFIG REWRITE` writes), checked before anything
+/// changes: a password lost in a restart would lock roll out.
+pub(super) async fn set_own_password(c: &mut Conn, user: &str, password: &str) -> Result<(), String> {
+    if user.is_empty() || user == "default" {
+        return Err("the URL logs in as Redis' default user, whose password every other client shares: register a user of its own (ACL SETUSER) to rotate".into());
+    }
+    let aclfile = match c.call(&[b"CONFIG", b"GET", b"aclfile"]).await {
+        Ok(Reply::Array(kv)) => matches!(kv.get(1), Some(Reply::Bulk(f)) if !f.is_empty()),
+        _ => false,
+    };
+    if !aclfile {
+        c.call(&[b"CONFIG", b"REWRITE"]).await.map_err(|e| format!("the server can't keep a new password across a restart (no ACL file, and CONFIG REWRITE fails: {e})"))?;
+    }
+    c.call(&[b"ACL", b"SETUSER", user.as_bytes(), b"resetpass", &hashed(password)]).await?;
+    if aclfile {
+        c.call(&[b"ACL", b"SAVE"]).await.map_err(|e| format!("saving the ACL file: {e}"))?;
+    } else {
+        c.call(&[b"CONFIG", b"REWRITE"]).await.map_err(|e| format!("CONFIG REWRITE: {e}"))?;
+    }
+    Ok(())
+}
+
 async fn persist(c: &mut Conn) -> Result<(), String> {
     let aclfile = match c.call(&[b"CONFIG", b"GET", b"aclfile"]).await {
         Ok(Reply::Array(kv)) => matches!(kv.get(1), Some(Reply::Bulk(f)) if !f.is_empty()),

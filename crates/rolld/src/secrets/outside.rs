@@ -126,6 +126,13 @@ impl roll_secrets::outside::OutsideDb for Guarded {
             None => self.here().drop_login(at, name),
         }
     }
+
+    fn set_own_password(&self, at: &Target<'_>, password: &str) -> Result<(), String> {
+        match at.gateway {
+            Some(g) => self.gateways.call(g, super::gateway::Call::DbSetOwnPassword { url: at.url.into(), ca: at.ca.map(Into::into), password: password.into() }).map(drop),
+            None => self.here().set_own_password(at, password),
+        }
+    }
 }
 
 /// One conversation's way to the server, and the deployment's rule on plain text
@@ -267,6 +274,42 @@ impl roll_secrets::outside::OutsideDb for Engine {
             })
         })
     }
+
+    fn set_own_password(&self, at: &Target<'_>, password: &str) -> Result<(), String> {
+        let (url, ca) = (at.url, at.ca);
+        // MySQL's account carries a host the URL doesn't say: the server knows which it is.
+        if let Some(u) = self.mysql(url)? {
+            return self.my(u, ca, async move |c| mysql::set_own_password(c, password).await);
+        }
+        let user = url_user(url)?;
+        if let Some(u) = self.redis(url)? {
+            return self.rd(u, ca, async move |c| redis::set_own_password(c, &user, password).await);
+        }
+        if user.is_empty() {
+            return Err("the admin URL names no user".into());
+        }
+        if let Some(u) = self.mongo(url)? {
+            return self.mg(u, ca, async move |c| mongo::set_password(c, &user, password).await);
+        }
+        if let Some(u) = self.mssql(url)? {
+            return self.ms(u, ca, async move |c| mssql::set_password(c, &user, password).await);
+        }
+        if let Some(u) = self.clickhouse(url)? {
+            return self.ch(u, ca, async move |c| clickhouse::set_password(c, &user, password).await);
+        }
+        if let Some(u) = self.rabbitmq(url)? {
+            return self.rq(u, ca, async move |c| rabbitmq::set_password(c, &user, password).await);
+        }
+        let sql = format!("ALTER ROLE CURRENT_USER PASSWORD '{}'", postgres_protocol::password::scram_sha_256(password.as_bytes()));
+        self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
+    }
+}
+
+/// The user name a URL logs in as (percent-decoded; empty when it names none).
+fn url_user(url: &str) -> Result<String, String> {
+    let rest = url.split_once("://").map_or("", |(_, r)| r);
+    let user = rest.rsplit_once('@').map_or("", |(info, _)| info.split_once(':').map_or(info, |(u, _)| u));
+    urlencoding::decode(user).map(|u| u.into_owned()).map_err(|_| "the admin URL's user name isn't valid UTF-8".to_string())
 }
 
 /// A quoted identifier (roll-secrets checked it: lowercase letters, digits and _).

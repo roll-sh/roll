@@ -340,17 +340,44 @@ pub struct Caller {
     /// A machine roll runs or trusts (apps, previews, checks, sandboxes, syncs, a workload
     /// identity's login): the only callers a sensitive key's value reaches.
     pub runtime: bool,
+    /// The person's approval that let this request through roll-access's gate (an `ask` approved,
+    /// or a rule an approval remembered for a while), for the audit log.
+    pub approval: Option<Approval>,
 }
+
+/// An approval from roll-access's gate (`roll_auth::Approved`), as the audit log records it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Approval {
+    /// `apr_…`
+    pub id: String,
+    /// Who approved it, in order (`operator`, a person's `usr_…`, a chat approver's `slack:U…`):
+    /// more than one when a policy asks for two people. Empty when it wasn't recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by: Vec<String>,
+    /// Unix ms: the remembered rule that allowed it lasts until then; absent when it was approved
+    /// for this request alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<i64>,
+}
+
+impl From<&roll_auth::Approved> for Approval {
+    fn from(a: &roll_auth::Approved) -> Approval {
+        Approval { id: a.id.to_string(), by: a.by.iter().map(|b| b.to_string()).collect(), until: a.until }
+    }
+}
+
+/// roll previews' in-process consumer: the operator's equal for an environment's branches.
+pub const PREVIEWS: &str = "roll:previews";
 
 impl Caller {
     pub fn operator() -> Caller {
-        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false }
+        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false, approval: None }
     }
 
     /// An in-process consumer (roll apps, previews, sandboxes, tasks): everything the caller
     /// handing out the call may do, named for the audit log.
     pub fn consumer(name: &str) -> Caller {
-        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true }
+        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true, approval: None }
     }
 
     /// Whether this caller may learn anything of a row's value: reveal it, see its fingerprint, or
@@ -368,7 +395,7 @@ impl Caller {
     /// This caller, kept out of `except` (a project's protected environments) whatever it may
     /// otherwise do.
     pub fn without(&self, except: Vec<String>) -> Caller {
-        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime }
+        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime, approval: self.approval.clone() }
     }
 
     pub fn allows(&self, action: Action, at: &Scope<'_>) -> bool {

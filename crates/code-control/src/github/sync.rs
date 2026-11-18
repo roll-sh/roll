@@ -580,6 +580,13 @@ pub async fn webhook(code: Arc<Code>, headers: HeaderMap, body: Bytes) -> Result
     let Some((receipt, parts, claimed_until)) = super::inbox::persist(&code, &hub, delivery.as_deref(), &event_name, &body, &repos)? else {
         return Ok(StatusCode::OK);
     };
+    // Another product's ear (roll apps' Git URL services): pushes and pull requests, once per
+    // delivery, whether roll code has the repository or not.
+    if matches!(event_name.as_str(), "push" | "pull_request")
+        && let Some(listener) = code.github_listener.get()
+    {
+        listener(&event_name, &body);
+    }
     let task = tokio::spawn({
         let code = code.clone();
         async move {

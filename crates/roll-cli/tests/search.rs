@@ -241,10 +241,17 @@ async fn clusters_and_requests() {
 
     // delete
     let out = e.roll(&["search", "clusters", "delete", "app-past"]).await;
-    assert_eq!(out.trim(), "deleted app-past");
+    assert!(out.starts_with("deleted app-past"), "{out}");
     assert!(e.control.get("app-past").await.is_err());
     let names: Vec<String> = e.roll_json(&["search", "clusters", "list"]).await.as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_string()).collect();
     assert_eq!(names.len(), 2, "{names:?}");
+    // Kept for restoring: listed with --deleted, and back with restore.
+    let gone = e.roll_json(&["search", "clusters", "list", "--deleted"]).await;
+    assert_eq!(gone[0]["name"], "app-past", "{gone}");
+    let id = gone[0]["id"].as_str().unwrap().to_string();
+    let out = e.roll(&["search", "clusters", "restore", &id]).await;
+    assert!(out.starts_with("restored app-past"), "{out}");
+    assert!(e.control.get("app-past").await.is_ok());
     e.control.shutdown().await.unwrap();
 }
 

@@ -172,6 +172,7 @@ roll-gateway = { path = "crates/roll-gateway" }
 apps-build = { path = "crates/apps-build" }
 apps-control = { path = "crates/apps-control" }
 roll-access = { path = "crates/roll-access" }
+roll-oidc = { path = "crates/roll-oidc" }
 roll-mcp = { path = "crates/roll-mcp" }
 roll-net = { path = "crates/roll-net" }
 roll-secrets = { path = "crates/roll-secrets" }

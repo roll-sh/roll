@@ -7,6 +7,7 @@ import { Cas } from "./cas";
 import { SshCas } from "./ssh-cas";
 import { CloudAccounts } from "./cloud-accounts";
 import { Gateways } from "./gateways";
+import { GitHubApps } from "./github-apps";
 import { OutsideDatabases } from "./outside-databases";
 import { Directories } from "./directories";
 import { AwsRoles } from "./aws-roles";
@@ -76,6 +77,7 @@ export function SyncsView() {
       <Gateways />
       <OutsideDatabases />
       <Directories />
+      <GitHubApps />
       <Rotators />
       <TransitKeys />
       <Cas />
