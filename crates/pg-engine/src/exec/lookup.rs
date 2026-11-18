@@ -657,9 +657,11 @@ impl Lookup {
                 f(Joined::Row(o));
             }
             _ => {
-                for r in rows {
+                let Some((last, rest)) = rows.split_last() else { return };
+                for r in rest {
                     f(Joined::Pair { l: &l, r: super::pipe::Inner::plain(r), keep: self.keep.as_deref() });
                 }
+                f(Joined::Last { l, r: super::pipe::Inner::plain(last), keep: self.keep.as_deref() });
             }
         }
     }

@@ -1,0 +1,179 @@
+> CREATE TABLE a258_k (id int, f char(1), s char(1), c char(10), v varchar(20), d date, b bool, q numeric(15,2), p numeric(15,2), t numeric(15,2), big numeric(30,2), k int) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO a258_k SELECT s,
+>   CASE WHEN s % 97 = 0 THEN NULL ELSE substr('ANR', 1 + s % 3, 1) END,
+>   CASE WHEN s % 89 = 0 THEN NULL ELSE substr('FO', 1 + s % 2, 1) END,
+>   CASE WHEN s % 83 = 0 THEN NULL ELSE (ARRAY['13-55', 'é1-x', '31', 'ab cd ef', 'zz', ' 1', '29-éé-00', '17'])[1 + s % 8] END,
+>   CASE WHEN s % 79 = 0 THEN NULL ELSE (ARRAY['ü', 'üü', 'abcdef', 'abcdefg', '', 'x y'])[1 + s % 6] END,
+>   CASE WHEN s % 73 = 0 THEN NULL ELSE date '1992-01-01' + (s % 2500) END,
+>   CASE WHEN s % 71 = 0 THEN NULL ELSE s % 2 = 0 END,
+>   CASE WHEN s % 67 = 0 THEN NULL ELSE ((s % 5000) - 1000) * 0.01 END,
+>   (s % 104950) + 900.5,
+>   (s % 11) * 0.01,
+>   CASE WHEN s % 5 = 0 THEN 123456789012345678.91 + s ELSE s * 1.5 END,
+>   s % 40
+>   FROM generate_series(1, 120000) s
+-- INSERT 0 120000
+
+> VACUUM ANALYZE a258_k
+-- VACUUM
+
+> CREATE TABLE a258_dim (k int, name text, pad text, w numeric(15,2)) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO a258_dim SELECT s % 40, 'n' || s, repeat('p', 20 + s % 30), s * 0.25 FROM generate_series(1, 120) s
+-- INSERT 0 120
+
+> CREATE INDEX ON a258_dim (k)
+-- CREATE INDEX
+
+> VACUUM ANALYZE a258_dim
+-- VACUUM
+
+> SELECT d.name, count(*), sum(x.q), min(x.c) FROM a258_k x JOIN a258_dim d ON d.k = x.k WHERE x.id % 7 = 0 GROUP BY d.name ORDER BY d.name LIMIT 20
+name:text | count:int8 | sum:numeric | min:bpchar
+n1 | 428 | 6247.42 | é1-x      
+n10 | 428 | 6229.30 | 31        
+n100 | 429 | 6350.60 | zz        
+n101 | 429 | 6291.82 |  1        
+n102 | 428 | 6384.04 | 29-éé-00  
+n103 | 429 | 6373.29 | 17        
+n104 | 428 | 6382.88 | 13-55     
+n105 | 429 | 6333.50 | é1-x      
+n106 | 428 | 6306.12 | 31        
+n107 | 429 | 6396.21 | ab cd ef  
+n108 | 429 | 6323.36 | zz        
+n109 | 428 | 6384.89 |  1        
+n11 | 429 | 6305.73 | ab cd ef  
+n110 | 429 | 6368.90 | 29-éé-00  
+n111 | 428 | 6378.42 | 17        
+n112 | 429 | 6415.04 | 13-55     
+n113 | 428 | 6351.66 | é1-x      
+n114 | 429 | 6441.82 | 31        
+n115 | 429 | 6354.90 | ab cd ef  
+n116 | 428 | 6416.36 | zz        
+-- SELECT 20
+
+> SELECT x.f, count(*), sum(d.w), sum(e.w) FROM a258_k x JOIN a258_dim d ON d.k = x.k JOIN a258_dim e ON e.k = (x.k + 1) % 40 WHERE x.id < 30000 GROUP BY x.f ORDER BY x.f
+f:bpchar | count:int8 | sum:numeric | sum:numeric
+A | 89064 | 1347129.00 | 1347165.00
+N | 89073 | 1347178.50 | 1347216.75
+R | 89073 | 1347198.75 | 1347147.00
+NULL | 2781 | 42063.75 | 42129.00
+-- SELECT 4
+
+> SELECT x.id, x.c, d.name FROM a258_k x JOIN a258_dim d ON d.k = x.k AND d.w > x.t * 1000 WHERE x.id < 200 ORDER BY x.id, d.name LIMIT 40
+id:int4 | c:bpchar | name:text
+1 | é1-x       | n41
+1 | é1-x       | n81
+2 | 31         | n82
+11 | ab cd ef   | n11
+11 | ab cd ef   | n51
+11 | ab cd ef   | n91
+12 | zz         | n52
+12 | zz         | n92
+13 |  1         | n93
+22 | 29-éé-00   | n102
+22 | 29-éé-00   | n22
+22 | 29-éé-00   | n62
+23 | 17         | n103
+23 | 17         | n63
+24 | 13-55      | n104
+33 | é1-x       | n113
+33 | é1-x       | n33
+33 | é1-x       | n73
+34 | 31         | n114
+34 | 31         | n74
+35 | ab cd ef   | n115
+44 | zz         | n4
+44 | zz         | n44
+44 | zz         | n84
+45 |  1         | n45
+45 |  1         | n85
+46 | 29-éé-00   | n86
+55 | 17         | n15
+55 | 17         | n55
+55 | 17         | n95
+56 | 13-55      | n56
+56 | 13-55      | n96
+57 | é1-x       | n97
+66 | 31         | n106
+66 | 31         | n26
+66 | 31         | n66
+67 | ab cd ef   | n107
+67 | ab cd ef   | n67
+68 | zz         | n108
+77 |  1         | n117
+-- SELECT 40
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> SELECT x.id, d.name FROM a258_k x JOIN a258_dim d ON d.k = x.k AND d.pad <> x.v WHERE x.id < 120 ORDER BY x.id, d.name LIMIT 30
+id:int4 | name:text
+1 | n1
+1 | n41
+1 | n81
+2 | n2
+2 | n42
+2 | n82
+3 | n3
+3 | n43
+3 | n83
+4 | n4
+4 | n44
+4 | n84
+5 | n45
+5 | n5
+5 | n85
+6 | n46
+6 | n6
+6 | n86
+7 | n47
+7 | n7
+7 | n87
+8 | n48
+8 | n8
+8 | n88
+9 | n49
+9 | n89
+9 | n9
+10 | n10
+10 | n50
+10 | n90
+-- SELECT 30
+
+> SELECT x.id, d.name, d.w FROM a258_k x LEFT JOIN a258_dim d ON d.k = x.k + 100 WHERE x.id < 10 ORDER BY x.id
+id:int4 | name:text | w:numeric
+1 | NULL | NULL
+2 | NULL | NULL
+3 | NULL | NULL
+4 | NULL | NULL
+5 | NULL | NULL
+6 | NULL | NULL
+7 | NULL | NULL
+8 | NULL | NULL
+9 | NULL | NULL
+-- SELECT 9
+
+> SELECT count(*), sum(length(d.pad)), sum(x.q) FROM a258_k x JOIN a258_dim d ON d.k = x.k WHERE x.id < 3000
+count:int8 | sum:int8 | sum:numeric
+8997 | 310410 | 44315.10
+-- SELECT 1
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> DROP TABLE a258_dim
+-- DROP TABLE
+
+> DROP TABLE a258_k
+-- DROP TABLE
+

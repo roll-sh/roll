@@ -335,6 +335,30 @@ impl<'a> Inner<'a> {
     }
 }
 
+/// `joined` of `l`'s own row: its values moved, not copied (those `keep` leaves out made NULL),
+/// then `r`'s.
+pub fn joined_from(mut l: Row, r: Inner, keep: Option<&[bool]>) -> Row {
+    let n = l.len();
+    l.reserve(r.width());
+    match (keep, r.map) {
+        (None, None) => l.extend_from_slice(r.vals),
+        (None, Some(_)) => l.extend((0..r.width()).map(|i| r.get(i).cloned().unwrap_or(Value::Null))),
+        (Some(k), _) => {
+            let kept = |i: usize| k.get(i).copied().unwrap_or(false);
+            for (i, v) in l.iter_mut().enumerate() {
+                if !kept(i) {
+                    *v = Value::Null;
+                }
+            }
+            l.extend((0..r.width()).map(|i| match r.get(i) {
+                Some(v) if kept(n + i) => v.clone(),
+                _ => Value::Null,
+            }));
+        }
+    }
+    l
+}
+
 /// A row of `l`'s columns then `r`'s, copying only the columns in `keep` (None: all;
 /// the others are NULL: nothing above reads them).
 pub fn joined(l: &[Value], r: Inner, keep: Option<&[bool]>) -> Row {
@@ -385,6 +409,9 @@ pub struct Probe {
 pub enum Joined<'a> {
     Row(Row),
     Pair { l: &'a [Value], r: Inner<'a>, keep: Option<&'a [bool]> },
+    /// A pair whose outer row no other joined row needs (its last match's): made a row by
+    /// moving its values.
+    Last { l: Row, r: Inner<'a>, keep: Option<&'a [bool]> },
 }
 
 impl Joined<'_> {
@@ -393,6 +420,7 @@ impl Joined<'_> {
         match self {
             Joined::Row(r) => r,
             Joined::Pair { l, r, keep } => joined(l, r, keep),
+            Joined::Last { l, r, keep } => joined_from(l, r, keep),
         }
     }
 }
@@ -403,6 +431,13 @@ impl super::kernel::Cols for Joined<'_> {
         match self {
             Joined::Row(r) => r.get(i),
             Joined::Pair { l, r, .. } => {
+                if i < l.len() {
+                    l.get(i)
+                } else {
+                    r.get(i - l.len())
+                }
+            }
+            Joined::Last { l, r, .. } => {
                 if i < l.len() {
                     l.get(i)
                 } else {
@@ -481,9 +516,11 @@ impl Probe {
                 f(Joined::Row(o));
             }
             _ => {
-                for &j in matches {
+                let Some((&last, rest)) = matches.split_last() else { return };
+                for &j in rest {
                     f(Joined::Pair { l: &l, r: t.inner(j as usize), keep: self.keep.as_deref() });
                 }
+                f(Joined::Last { l, r: t.inner(last as usize), keep: self.keep.as_deref() });
             }
         }
     }

@@ -5230,9 +5230,11 @@ impl NestLoopNode {
                 };
                 let pair = Pair(l, r);
                 let early = self.cond_kernel.as_ref().and_then(|k| k.passes(&pair));
+                // (Only the columns something reads copied: the condition's and those above
+                // the join, `keep`; the others NULL, as a hash join's rows.)
                 let combined = match early {
                     Some(false) => None,
-                    _ => Some(concat_rows(l, r)),
+                    _ => Some(super::pipe::joined(l, super::pipe::Inner::plain(r), self.keep.as_deref())),
                 };
                 let ok = match (&self.cond, early, &combined) {
                     (_, Some(b), _) => b,
