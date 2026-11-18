@@ -97,7 +97,7 @@ export function ConnectorsTab({ cluster, onOpenConsole }: { cluster: SearchClust
   return (
     <>
       <ErrorNote error={actionError} />
-      <Panel title="Connectors" aside={rows && rows.length > 0 && createButton} className="mt-0">
+      <Panel title="Connectors" aside={rows && rows.length > 0 && createButton}>
         {error ? (
           <LoadError error={error} onRetry={reload} />
         ) : !rows ? (
@@ -112,7 +112,7 @@ export function ConnectorsTab({ cluster, onOpenConsole }: { cluster: SearchClust
           </Empty>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-[13px]">
+            <table className="w-full min-w-[760px] text-[13px]">
               <thead>
                 <tr className="border-b border-line text-left text-[12px] text-subtle">
                   <th className="px-5 py-2 font-normal">Connector</th>
