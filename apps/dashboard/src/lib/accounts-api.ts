@@ -19,7 +19,8 @@ export interface User {
   disabled: boolean;
   created_at: number;
   totp: boolean;
-  identities: { provider: Provider; login: string; email: string }[];
+  /** GitHub, Google, or an SSO connection's link (`sso:<id>`). */
+  identities: { provider: Provider | `sso:${string}`; login: string; email: string }[];
 }
 
 export interface Session {
@@ -45,7 +46,7 @@ export interface Invite {
 
 export type SessionState =
   | { status: "anonymous" }
-  | { status: "mfa_required"; methods: ("totp" | "recovery")[]; csrf: string }
+  | { status: "mfa_required"; methods: ("totp" | "recovery" | "passkey")[]; csrf: string }
   | { status: "signed_in"; user: User; session: Session; csrf: string };
 
 export type SignInAnswer = Exclude<SessionState, { status: "anonymous" }>;
@@ -61,7 +62,27 @@ export class AccountsError extends Error {
   }
 }
 
+/**
+ * Sudo mode (docs/accounts.md): a change to how an account is reached answers 403
+ * `reauth_required` without a recent proof. A mounted `ReauthDialog` registers here: the call
+ * waits for the person to confirm it's them, then runs once more.
+ */
+let confirmIdentity: (() => Promise<void>) | null = null;
+export function onReauthRequired(f: (() => Promise<void>) | null) {
+  confirmIdentity = f;
+}
+
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  try {
+    return await callOnce<T>(method, path, body);
+  } catch (e) {
+    if (!(e instanceof AccountsError && e.code === "reauth_required" && confirmIdentity)) throw e;
+    await confirmIdentity();
+    return callOnce<T>(method, path, body);
+  }
+}
+
+async function callOnce<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(
     `${ROLL_API}/v1/accounts${path}`,
     withSession({
@@ -82,8 +103,100 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return data as T;
 }
 
+/** One line of your security log (docs/accounts.md, "Audit"). */
+export interface Activity {
+  at: number;
+  /** `sign_in`, `user.create`, `identity.link`, `scim.update`, or `METHOD /route`. */
+  action: string;
+  /** You (your id), `operator`, an admin's id, or `scim:<connection>`. */
+  actor: string;
+  ok: boolean;
+  status: number;
+  ip?: string | null;
+  user_agent?: string | null;
+  detail?: { method?: string; refused?: string | null; second_factor?: string | null; via?: string; set?: Record<string, unknown>; active?: boolean | null } | null;
+}
+
+const METHODS: Record<string, string> = { email: "an email code", github: "GitHub", google: "Google", totp: "your authenticator app", recovery_code: "a recovery code", passkey: "a passkey" };
+
+/** A security log line in words: what happened, by whom (`me`: your own id). */
+export function activityText(e: Activity, me: string): string {
+  const d = e.detail ?? {};
+  const how = (m?: string) => (m ? (METHODS[m] ?? (m.startsWith("sso:") ? "your company's sign-in" : m)) : "");
+  const by = e.actor === me ? "you" : e.actor === "operator" ? "the operator" : e.actor.startsWith("scim:") ? "your company's provider (SCIM)" : "an admin";
+  switch (e.action) {
+    case "sign_in":
+      if (!e.ok) return `A sign-in with ${how(d.method)} was refused${d.refused ? ` (${d.refused.replace(/_/g, " ")})` : ""}`;
+      return d.second_factor === "owed" ? `Signed in with ${how(d.method)}, then asked for your second factor` : `Signed in with ${how(d.method)}`;
+    case "user.create":
+      return d.via === "provisioned" ? "Your account was made by your company's sign-in" : "Your account was made from your invite";
+    case "identity.link":
+      return e.ok ? `${how(d.method) || "A sign-in"} was linked to your account` : `Linking ${how(d.method)} was refused`;
+    case "reauth":
+      return e.ok ? `You confirmed it's you with ${how(d.method)}` : `Confirming it's you with ${how(d.method)} was refused`;
+    case "scim.update":
+      return d.active === false ? "Your company's provider deactivated your account" : d.active === true ? "Your company's provider reactivated your account" : "Your company's provider updated your account";
+  }
+  const set = d.set ?? {};
+  if ("disabled" in set) return `Your account was ${set.disabled ? "disabled" : "turned back on"} by ${by}`;
+  if ("admin" in set) return `${by === "you" ? "You" : by[0].toUpperCase() + by.slice(1)} ${set.admin ? "made you an admin" : "removed your admin rights"}`;
+  if (e.action.includes("/me/totp")) return e.action.startsWith("DELETE") ? "Your authenticator app was turned off" : "Your authenticator app was set up";
+  if (e.action.includes("/me/recovery-codes")) return "New recovery codes were made";
+  if (e.action.includes("/me/passkeys")) return e.action.startsWith("DELETE") ? "A passkey was removed" : e.action.startsWith("PATCH") ? "A passkey was renamed" : "A passkey was added";
+  if (e.action.includes("/me/identities")) return "A sign-in method was unlinked";
+  if (e.action.includes("/me/sessions") || e.action.endsWith("/sessions")) return `Sessions were ended by ${by}`;
+  if (e.action === "PATCH /v1/accounts/me") return "Your profile was changed";
+  return `${e.action} by ${by}`;
+}
+
+/** Which sign-ins this roll offers (`sso`: a company's provider answers for some domains). */
+export type Providers = { email: boolean; github: boolean; google: boolean; sso?: boolean; passkey?: boolean };
+
+/** A passkey of yours (never its key): `synced` when your devices share it (iCloud, Google). */
+export interface Passkey {
+  id: string;
+  name: string;
+  created_at: number;
+  last_used_at: number | null;
+  synced: boolean;
+}
+
+/** A passkey ceremony's options: its challenge's `id`, and what `navigator.credentials` takes (as JSON). */
+export interface PasskeyOptions<T> {
+  id: string;
+  publicKey: T;
+}
+
+/** A company's OpenID Connect provider (docs/accounts.md, "SSO"): never its secret. */
+export interface SsoConnection {
+  id: string;
+  name: string;
+  issuer: string;
+  client_id: string;
+  domains: string[];
+  /** People of these domains sign in only through it. */
+  enforce: boolean;
+  /** A verified person of these domains with no account gets one (never an admin). */
+  provision: boolean;
+  created_at: number;
+  /** What to register at the provider as the sign-in redirect. */
+  redirect_uri: string;
+  /** Domains a TXT record proved: only these route sign-ins, link, provision or enforce. */
+  verified: string[];
+  /** The TXT record that proves a domain (`name` with the domain in place of `<domain>`). */
+  dns: { name: string; value: string };
+  /** Its provider provisions people over SCIM (it has a live token). */
+  scim: boolean;
+  /** Its SCIM token was found leaked and revoked: where (until an admin makes a new one). */
+  scim_leaked: string | null;
+}
+
 export const accountsApi = {
-  info: () => call<{ providers: { email: boolean; github: boolean; google: boolean } }>("GET", ""),
+  info: () => call<{ providers: Providers }>("GET", ""),
+  /** Sign in through the SSO connection for the email's domain (`no_sso` when none answers). */
+  ssoStart: (email: string, opts: { invite?: string; return_to?: string } = {}) => call<{ url: string }>("POST", "/sso/start", { email, ...opts }),
+  /** Link the signed-in account through the SSO connection for its own email. */
+  ssoLink: () => call<{ url: string }>("POST", "/sso/start", { intent: "link", return_to: "/dashboard/account" }),
   session: () => call<SessionState>("GET", "/session"),
   peekInvite: (token: string) => call<{ email: string; expires_at: number }>("POST", "/invites/peek", { token }),
   emailStart: (email: string, invite?: string) => call<{ challenge: string }>("POST", "/email/start", { email, invite }),
@@ -93,16 +206,30 @@ export const accountsApi = {
   signout: () => call<null>("POST", "/signout"),
   totpSignin: (code: string) => call<SignInAnswer>("POST", "/signin/totp", { code }),
   recoverySignin: (code: string) => call<SignInAnswer>("POST", "/signin/recovery", { code }),
+  passkeySigninOptions: () => call<PasskeyOptions<{ challenge: string; rpId: string; allowCredentials?: { type: "public-key"; id: string }[] }>>("POST", "/signin/passkey/options"),
+  passkeySignin: (id: string, credential: unknown) => call<SignInAnswer>("POST", "/signin/passkey", { id, credential }),
 
   me: () => call<User>("GET", "/me"),
+  /** Your own security log: sign-ins and changes to your account, newest first. */
+  activity: (before?: number) => call<{ events: Activity[] }>("GET", `/me/activity${before ? `?before=${before}` : ""}`),
   updateMe: (name: string) => call<User>("PATCH", "/me", { name }),
   sessions: () => call<Session[]>("GET", "/me/sessions"),
   revokeSession: (id: string) => call<null>("DELETE", `/me/sessions/${encodeURIComponent(id)}`),
-  unlink: (provider: Provider) => call<null>("DELETE", `/me/identities/${provider}`),
+  unlink: (provider: Provider | `sso:${string}`) => call<null>("DELETE", `/me/identities/${encodeURIComponent(provider)}`),
   totpBegin: () => call<{ secret: string; otpauth_url: string; qr_png: string }>("POST", "/me/totp"),
   totpConfirm: (code: string) => call<{ recovery_codes: string[] }>("POST", "/me/totp/confirm", { code }),
   totpDisable: (code: string) => call<null>("DELETE", "/me/totp", { code }),
   newRecoveryCodes: (code: string) => call<{ recovery_codes: string[] }>("POST", "/me/recovery-codes", { code }),
+  passkeys: () => call<{ passkeys: Passkey[] }>("GET", "/me/passkeys").then((r) => r.passkeys),
+  passkeyOptions: () =>
+    call<PasskeyOptions<{ challenge: string; user: { id: string; name: string; displayName: string }; excludeCredentials?: { type: "public-key"; id: string }[] }>>("POST", "/me/passkeys/options"),
+  addPasskey: (id: string, name: string, credential: unknown) => call<Passkey>("POST", "/me/passkeys", { id, name, credential }),
+  renamePasskey: (id: string, name: string) => call<Passkey>("PATCH", `/me/passkeys/${encodeURIComponent(id)}`, { name }),
+  removePasskey: (id: string) => call<null>("DELETE", `/me/passkeys/${encodeURIComponent(id)}`),
+  reauthInfo: () => call<{ fresh_until: number; methods: ("totp" | "passkey" | "email")[] }>("GET", "/me/reauth"),
+  reauthEmail: () => call<{ challenge: string }>("POST", "/me/reauth/email"),
+  reauthPasskeyOptions: () => call<PasskeyOptions<{ challenge: string; rpId: string; allowCredentials?: { type: "public-key"; id: string }[] }>>("POST", "/me/reauth/passkey/options"),
+  reauth: (proof: { code: string } | { challenge: string; code: string } | { id: string; credential: unknown }) => call<{ fresh_until: number }>("POST", "/me/reauth", proof),
 
   invites: () => call<Invite[]>("GET", "/invites"),
   invite: (email: string, opts: { admin?: boolean; handle?: string } = {}) => call<Invite & { token: string; url: string }>("POST", "/invites", { email, ...opts }),
@@ -110,7 +237,27 @@ export const accountsApi = {
   users: () => call<User[]>("GET", "/users"),
   updateUser: (id: string, patch: { admin?: boolean; disabled?: boolean }) => call<User>("PATCH", `/users/${encodeURIComponent(id)}`, patch),
   signOutUser: (id: string) => call<null>("DELETE", `/users/${encodeURIComponent(id)}/sessions`),
+
+  ssoConnections: () => call<SsoConnection[]>("GET", "/sso"),
+  addSso: (c: { name?: string; issuer: string; client_id: string; client_secret: string; domains: string[]; enforce?: boolean; provision?: boolean }) =>
+    call<SsoConnection>("POST", "/sso", c),
+  updateSso: (id: string, c: { name?: string; client_id?: string; client_secret?: string; domains?: string[]; enforce?: boolean; provision?: boolean }) =>
+    call<SsoConnection>("PATCH", `/sso/${encodeURIComponent(id)}`, c),
+  removeSso: (id: string) => call<null>("DELETE", `/sso/${encodeURIComponent(id)}`),
+  /** A SCIM token for the connection (replacing its old one), shown this once. */
+  scimToken: (id: string) => call<{ token: string; base_url: string }>("POST", `/sso/${encodeURIComponent(id)}/scim`),
+  scimOff: (id: string) => call<null>("DELETE", `/sso/${encodeURIComponent(id)}/scim`),
+  /** Check the connection's domains' TXT records now. */
+  verifySso: (id: string) => call<SsoConnection>("POST", `/sso/${encodeURIComponent(id)}/verify`),
 };
+
+/** "acme.com, @acme.co.uk" as domains, or what's wrong with it (the API checks again). */
+export function ssoDomains(text: string): { domains: string[] } | { problem: string } {
+  const domains = [...new Set(text.split(/[\s,]+/).map((d) => d.trim().toLowerCase().replace(/^@/, "")).filter(Boolean))];
+  if (domains.length === 0) return { problem: "Name the email domains it answers for" };
+  const bad = domains.find((d) => !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d));
+  return bad ? { problem: `${bad} isn't a domain` } : { domains };
+}
 
 // ── the session, for every component ──
 

@@ -10,7 +10,7 @@
 //! search scopes them ([`Caller`], docs/accounts.md "Phase 2"): the operator and admins see every
 //! cluster; anyone else sees, creates and branches only their own (`SearchCluster::owner`), and
 //! every `/v1/search/clusters/{id}/…` call about another's answers 404, as for a cluster that
-//! doesn't exist. A person's creates, branches and switches to always-on are held to the node's
+//! doesn't exist, and their clusters' `status` doesn't say which node of the fleet holds them. A person's creates, branches and switches to always-on are held to the node's
 //! per-person caps (`SearchConfig::person_caps`), counted in the write's own transaction. A person's own token reaches search as them (roll-access hands it on with
 //! `SignedIn`, without `Operator`). On a fleet, calls about one cluster run on its owner
 //! (`crate::cluster::on_owner`), and so does creating a branch (on its parent's owner); the
@@ -62,6 +62,8 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices", get(indices))
         .route("/v1/search/clusters/{id}/request", post(request))
         .route("/v1/search/clusters/{id}/usage", get(usage))
+        .route("/v1/search/clusters/{id}/metrics", get(metrics))
+        .route("/v1/search/clusters/{id}/slowlog", get(slowlog))
         .route("/v1/search/clusters/{id}/analytics", get(analytics))
         .route("/v1/search/clusters/{id}/keys", post(create_key))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
@@ -252,7 +254,7 @@ struct ClusterView {
     password: Option<String>,
 }
 
-async fn view(c: &Control, mut d: SearchCluster, with_password: bool) -> Result<ClusterView, ControlError> {
+async fn view(c: &Control, caller: &Caller, mut d: SearchCluster, with_password: bool) -> Result<ClusterView, ControlError> {
     // The catalog's figures are metering's (refreshed every `stats_interval` while loaded); a
     // cluster loaded here shows its live index and document counts. Stored bytes stay the
     // billed object-store figure.
@@ -274,9 +276,16 @@ async fn view(c: &Control, mut d: SearchCluster, with_password: bool) -> Result<
         Some(p) => c.store.get(p).await?.map(|p| p.name),
         None => None,
     };
+    let mut status = c.status(&d).await;
+    // Which node of the fleet holds it is the operator's (and admins') to know.
+    if *caller != Caller::All
+        && let Some(o) = status.as_object_mut()
+    {
+        o.remove("node");
+    }
     Ok(ClusterView {
         connection: c.connection(&d),
-        status: c.status(&d).await,
+        status,
         parent_name,
         branches,
         password: with_password.then(|| d.password.clone()),
@@ -284,10 +293,10 @@ async fn view(c: &Control, mut d: SearchCluster, with_password: bool) -> Result<
     })
 }
 
-async fn views(c: &Control, list: Vec<SearchCluster>) -> Result<Vec<ClusterView>, ControlError> {
+async fn views(c: &Control, caller: &Caller, list: Vec<SearchCluster>) -> Result<Vec<ClusterView>, ControlError> {
     let mut out = Vec::with_capacity(list.len());
     for d in list {
-        out.push(view(c, d, false).await?);
+        out.push(view(c, caller, d, false).await?);
     }
     Ok(out)
 }
@@ -307,7 +316,7 @@ async fn list(State(c): State<AppState>, caller: Caller, Query(q): Query<ListQue
         Caller::All => c.list().await?,
         Caller::Person(u) => c.store.list_owned(u).await?,
     };
-    Ok(Json(views(&c, list).await?).into_response())
+    Ok(Json(views(&c, &caller, list).await?).into_response())
 }
 
 #[derive(Deserialize, Default)]
@@ -324,7 +333,7 @@ async fn restore(State(c): State<AppState>, caller: Caller, Path(id): Path<Strin
         serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?
     };
     let d = c.restore(&id, r.name.as_deref(), caller.caps(&c)).await?;
-    Ok(Json(view(&c, d, false).await?))
+    Ok(Json(view(&c, &caller, d, false).await?))
 }
 
 #[derive(Deserialize)]
@@ -353,17 +362,17 @@ async fn create(State(c): State<AppState>, caller: Caller, method: Method, heade
         None if r.at.is_some() => return Err(ControlError::Invalid("at needs a parent".into())),
         None => c.create(&r.name, r.opts, caller.owner(), caller.caps(&c)).await?,
     };
-    Ok(Json(view(&c, d, true).await?).into_response())
+    Ok(Json(view(&c, &caller, d, true).await?).into_response())
 }
 
-async fn show(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<ClusterView> {
+async fn show(State(c): State<AppState>, caller: Caller, Path(id): Path<String>) -> ApiResult<ClusterView> {
     let d = c.get(&id).await?;
-    Ok(Json(view(&c, d, false).await?))
+    Ok(Json(view(&c, &caller, d, false).await?))
 }
 
 async fn update(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, Json(o): Json<ClusterOptions>) -> ApiResult<ClusterView> {
     let d = c.update(&id, o, caller.caps(&c)).await?;
-    Ok(Json(view(&c, d, false).await?))
+    Ok(Json(view(&c, &caller, d, false).await?))
 }
 
 async fn remove(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
@@ -388,18 +397,18 @@ async fn branch(State(c): State<AppState>, caller: Caller, Path(id): Path<String
         return Ok(resp);
     }
     let d = c.branch(&id, &r.name, r.at, r.opts, caller.caps(&c)).await?;
-    Ok(Json(view(&c, d, true).await?).into_response())
+    Ok(Json(view(&c, &caller, d, true).await?).into_response())
 }
 
 async fn branches(State(c): State<AppState>, caller: Caller, Path(id): Path<String>) -> ApiResult<Vec<ClusterView>> {
     let p = c.get(&id).await?;
     let list = c.store.children(&p.id).await?.into_iter().filter(|b| caller.sees(b)).collect();
-    Ok(Json(views(&c, list).await?))
+    Ok(Json(views(&c, &caller, list).await?))
 }
 
-async fn rotate(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<ClusterView> {
+async fn rotate(State(c): State<AppState>, caller: Caller, Path(id): Path<String>) -> ApiResult<ClusterView> {
     let d = c.rotate_password(&id).await?;
-    Ok(Json(view(&c, d, true).await?))
+    Ok(Json(view(&c, &caller, d, true).await?))
 }
 
 async fn unload(State(c): State<AppState>, Path(id): Path<String>, method: Method, headers: HeaderMap) -> Result<Response, ControlError> {
@@ -596,6 +605,22 @@ struct UsageQuery {
 
 async fn usage(State(c): State<AppState>, Path(id): Path<String>, Query(q): Query<UsageQuery>) -> ApiResult<Usage> {
     Ok(Json(c.usage(&id, q.days.unwrap_or(30).clamp(1, 366)).await?))
+}
+
+#[derive(Deserialize)]
+struct MetricsQuery {
+    range: Option<String>,
+}
+
+/// Request rate, latency percentiles, errors and rejections by kind (`?range=1h|24h|14d`). Runs
+/// on the cluster's owner (`per_cluster`), which adds what it recorded since the last pass.
+async fn metrics(State(c): State<AppState>, Path(id): Path<String>, Query(q): Query<MetricsQuery>) -> ApiResult<Value> {
+    Ok(Json(c.metrics(&id, q.range.as_deref().unwrap_or("1h")).await?))
+}
+
+/// The search and indexing slow logs, newest first, as Elasticsearch's JSON lines.
+async fn slowlog(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    Ok(Json(c.slowlog(&id).await?))
 }
 
 #[derive(Deserialize)]

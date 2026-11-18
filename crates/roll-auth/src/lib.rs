@@ -33,6 +33,7 @@
 //! whatever the route and whether or not the operator's token is set, so a token's limits hold
 //! everywhere. It sends allowed requests on with [`Operator`] and a [`Grant`] in their extensions.
 
+pub mod credentials;
 pub mod scope;
 pub mod totp;
 
@@ -180,7 +181,8 @@ impl Approved {
 
 /// In an allowed grant's request: the client's address as the gate saw it. Requests a product
 /// makes on the caller's behalf (roll code's agents relay) carry it on, so an IP allowlist holds
-/// for them too. Set only by the gate: extensions never come from the wire.
+/// for them too. Set only by the gate, and by roll-accounts' audit layer on its own routes (the
+/// same reading, through rolld's hook, for its events): extensions never come from the wire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClientIp(pub std::net::IpAddr);
 
@@ -206,6 +208,17 @@ pub trait Authorizer: Send + Sync + 'static {
     fn claims(&self, token: &str) -> bool;
     /// Decide the request: answer it, or run it through `next`.
     fn handle(&self, req: Request, next: Next) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
+}
+
+/// One of roll accounts' SSO connections (docs/accounts.md, "SSO"), as it is now: what enterprise
+/// sign-in reads when an identity provider is tied to it ([`Sessions::sso_trust`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SsoTrust {
+    pub name: String,
+    /// Its issuer (`iss`).
+    pub issuer: String,
+    /// The email domains a DNS TXT record proved it speaks for.
+    pub verified: Vec<String>,
 }
 
 /// A signed-in user, in a request's extensions: the gate resolved the session cookie. Products
@@ -250,6 +263,18 @@ pub trait Sessions: Send + Sync + 'static {
     /// disabled or gone. Never cached.
     fn person<'a>(&'a self, user: &'a str) -> BoxFuture<'a, Result<Option<SignedIn>, String>> {
         let _ = user;
+        Box::pin(async { Ok(None) })
+    }
+    /// The person whose account has this email, as they are now (`None`: no such account, or
+    /// disabled): an enterprise identity assertion names a person by email. Never cached.
+    fn person_by_email<'a>(&'a self, email: &'a str) -> BoxFuture<'a, Result<Option<SignedIn>, String>> {
+        let _ = email;
+        Box::pin(async { Ok(None) })
+    }
+    /// The SSO connection `id` (`sso_…`), as it is now (`None`: no such connection). Enterprise
+    /// sign-in trusts a provider tied to one for its verified domains only. Never cached.
+    fn sso_trust<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<SsoTrust>, String>> {
+        let _ = id;
         Box::pin(async { Ok(None) })
     }
     /// [`Sessions::person`] for callers off the request path (a product's background work checking

@@ -983,6 +983,19 @@ Checked against Elasticsearch 9.5.5 (captures in
   answers; later heads on a kept-alive connection are hyper's (it closes on the malformed
   ones and frames a `Content-Length` next to `Transfer-Encoding` by the latter); and roll sends
   `Content-Length` where Elasticsearch streams some responses chunked (`_cat`).
+- Slow logs: `index.search.slowlog.threshold.{query,fetch}.*` and
+  `index.indexing.slowlog.threshold.index.*` log a shard's query or fetch phase, or an index
+  operation on the primary, that took longer than a threshold (`took > threshold`, the highest
+  level passed), as Elasticsearch's JSON slow log lines; they are read through
+  `GET /v1/search/clusters/{id}/slowlog` (the newest 500), not from a node's log files. Still
+  different: a search's source is cut at 1,000 characters where Elasticsearch logs all of it
+  (9.5.5 has no `index.search.slowlog.source` and refuses it as unknown, so roll doesn't add
+  one), and is the request body as sent rather than Elasticsearch's re-serialized source (a
+  search with no body logs no source); `index.indexing.slowlog.source: true` keeps at most
+  1,000 characters too; indexing entries don't carry `X-Opaque-Id`;
+  `index.search.slowlog.include.user`, `.level` and `index.indexing.slowlog.reformat` are
+  accepted and have no effect; searches an API runs inside roll (by-query, terms enum, ES|QL's
+  reads) aren't logged.
 - A request waiting for its pool holds no node-wide running slot (`max_running`): the server
   queues it for the pool between the tenant's in-flight permit and the running slot. A pool
   slot is taken per request where Elasticsearch takes one per shard and phase.
@@ -1000,6 +1013,29 @@ Checked against Elasticsearch 9.5.5 (captures in
   before round 6 report one 227-byte file per shard. Still different: a started shard reports
   no file counts until it is captured (Elasticsearch lists its files first, then `processed`
   grows), and deleting a running snapshot answers 404 where Elasticsearch aborts it.
+- `s3` repositories take `chunk_size`, `buffer_size` and `max_multipart_parts` with
+  Elasticsearch 9.5.5's bounds and messages (checked against it), and every blob store type
+  validates `max_snapshot_bytes_per_sec` and `max_restore_bytes_per_sec` first, as it does. The
+  throttles pace bucket traffic at no more than the set rate, restores also at
+  `indices.recovery.max_bytes_per_sec` (measured on a release build of the throttling test, 6.3 MB
+  against MinIO and an in-memory bucket: snapshots at 0.97-0.98 of a 2mb setting, restores at
+  0.94 of 2mb and 0.89-0.90 of a 4mb recovery limit, the rest being reindexing; never faster),
+  and `_nodes/stats/repositories` has Elasticsearch's
+  fields (throttled read and write time, shard snapshots, uploaded blobs and bytes, upload and
+  read time). Still different: roll's objects are its own (a segment's records, gzipped), so
+  file counts, `uploaded_blobs` and sizes differ from Elasticsearch's for the same index, and
+  dangling multipart uploads are also aborted by `_cleanup` (Elasticsearch aborts them only
+  after snapshot deletions).
+- Repository analysis (`_analyze`) on an `s3` repository writes, reads, overwrites, lists and
+  deletes real blobs with Elasticsearch's blob sizes (`summary.write.total_size` matches it for
+  the same parameters), register and overwrite-protection checks, and its failure chain
+  (`repository_verification_exception`: the S3-compatible-storage text, then `failure processing
+  [blob analysis [...]]`, then the node's finding, as Elasticsearch 9.5.5 answers on a bucket
+  that drops writes); the request is validated in Elasticsearch's order (`blob_count` at most
+  100,000, `early_read_node_count` may be 0). Still different: the order of blobs and which
+  ones get the rare actions follow roll's generator, not Java's `Random`, so `details` differ
+  for the same `seed`; there is one node, so each blob is read once; and roll runs at most 16
+  blobs at once whatever `concurrency` asks.
 - Circuit breakers: every request body is charged to `inflight_requests`
   (`network.breaker.inflight_requests.limit`, 100% of the heap, overhead 2) until it is
   answered, refused past the limit with Elasticsearch's 429 `circuit_breaking_exception`, text

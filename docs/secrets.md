@@ -134,6 +134,8 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
 - **`roll_secrets_token`** is a token for CI or a service: a roll token with one rule on the
   project's secrets, made through `POST /v1/access/tokens` as the dashboard's New token. Its
   secret is in the state (sensitive). Any change replaces it, and destroying it revokes it.
+- **`roll_machine_client`** is roll-access's: a machine client that signs in with CI's own OIDC
+  token or a public key, never a secret (docs/permissions.md, "Machine clients"). It needs the operator's token.
 - **`data.roll_secrets_values`** is an environment's resolved values, for another provider.
 - **What a project registers itself**: **`roll_secrets_ca`** (domains, `allow_ip`, `max_days`; the
   CA's `certificate` out), **`roll_secrets_ssh_ca`** (principals, host domains; its `public_key` and
@@ -2415,7 +2417,12 @@ Every read of values and every write is recorded: time, principal (`operator`, `
 `app:…`), action, environment, path, keys, a summary and the client address (as rolld's gate saw
 it, MCP's calls included; else the peer's, or with `ROLL_CODE_TRUST_FORWARDED_FOR` the last
 `X-Forwarded-For` entry, the one the trusted proxy appended: earlier ones are the client's to
-write). A value never is.
+write). A value never is. A request that roll-access's gate let through because a person approved
+it (a token's `ask`, approved once or remembered for a while) also names the approval: its id, who
+approved it (in order: two people when a policy asks for two), and until when a remembered rule
+allows it. The dashboard's audit log and an environment's
+activity show it as "approved by …". This is how roll secrets does access requests (a time-boxed
+`reveal` an approver grants, as Infisical's and 1Password's): a token that asks for `reveal`.
 Listing metadata isn't audited. Revealing, exporting, resolving and every write are.
 `GET …/audit?env=&key=&actor=&action=&before=&limit=` reads it newest first. Rows are kept for 400
 days.
@@ -2694,7 +2701,12 @@ type Sync = {
 };
 type NewSync = { environment: string; path?: string; kind: string; target: Record<string, unknown>; keys?: string[]; prefix?: string };
 type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: { name: string; label: string; required: boolean; placeholder: string }[] };
-type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null };
+type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval };
+// The approval that let the request through roll-access's gate (docs/permissions.md, "What a
+// product is told about an approval"): an `ask` approved (no `until`), or a rule an approval
+// remembered for a while (`until`: when it lapses). CSV exports carry `approval` and `approved_by`
+// (the approvers joined with ", ").
+type Approval = { id: string; by?: string[]; until?: number }; // by: who approved, in order
 ```
 
 ## Tables

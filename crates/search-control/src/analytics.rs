@@ -1,5 +1,6 @@
-//! Search analytics in the control plane: the metering pass stores what the node handed on
-//! ([`Control::store_analytics`]) in the catalog's rings (`crate::store`, `search_analytics`),
+//! Search analytics in the control plane: the metering pass stores what the node handed on with
+//! its other observations (`crate::meter::Meter::observe`) in the catalog's rings
+//! (`crate::store`, `search_analytics`),
 //! and `GET /v1/search/clusters/{id}/analytics` reads them ([`Control::analytics`]) with what
 //! the cluster's owner (this node) recorded since the last pass. See `search_es::analytics` for
 //! what is recorded and docs/search/README.md, "Search analytics", for the privacy design.
@@ -51,22 +52,6 @@ fn query_json(q: &str, s: &QueryStats) -> Value {
 }
 
 impl Control {
-    /// One metering pass's analytics: what the node handed on, into the catalog. A cluster
-    /// deleted meanwhile is skipped.
-    pub(crate) async fn store_analytics(&self) {
-        for (name, t) in self.node.take_analytics() {
-            let r = async {
-                let Some(c) = self.store.by_name(&name).await? else { return Ok(()) };
-                self.store.record_analytics(&c.id, &t.cleared, t.enabled.as_deref(), &t.hours).await
-            };
-            // Lost if the catalog can't take them now: they are a picture, not a bill. A clear
-            // is handed on again by the cluster's next load (its enabled list).
-            if let Err(e) = r.await {
-                tracing::warn!(cluster = name, error = %e, "storing search analytics failed");
-            }
-        }
-    }
-
     /// A cluster's search analytics over `range` (`24h`, `7d` or `30d`), of index `index` or of
     /// every index: totals, top queries, queries with no results and queries with a low
     /// click-through. Runs on the cluster's owner (`per_cluster`), which adds what it recorded
@@ -81,7 +66,7 @@ impl Control {
             t - t.rem_euclid(r.res) + r.res
         };
         // Turned off or deleted and not handed on yet: the catalog's rows are gone already.
-        let pending = self.node.peek_analytics(&c.name);
+        let pending = self.node.peek_observations(&c.name).analytics;
         let gone = |i: &str| pending.cleared.iter().any(|c| c == i) || pending.enabled.as_ref().is_some_and(|on| !on.iter().any(|o| o == i));
         let mut total = Bucket::new(4 * LIST_ROWS, 2 * LIST_ROWS);
         let mut indices: Vec<String> = Vec::new();

@@ -7,6 +7,7 @@ import { since, type Runner } from "./shared";
 const EVENTS: { value: NotifyEvent; label: string }[] = [
   { value: "deploy.failed", label: "Deploy failed" },
   { value: "rollout.waiting", label: "Rollout waits for you" },
+  { value: "deploy.base_updated", label: "Base image updated" },
   { value: "deploy.ready", label: "Built, waits to go live" },
   { value: "crash_loop", label: "Crash loop" },
   { value: "deploy.active", label: "Deployed" },
