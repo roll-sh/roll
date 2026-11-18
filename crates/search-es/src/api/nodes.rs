@@ -700,7 +700,7 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
                 .metadata
                 .repositories
                 .keys()
-                .map(|k| (k.clone(), obj! { "total_read_throttled_time_nanos" => 0, "total_write_throttled_time_nanos" => 0 }))
+                .map(|k| (k.clone(), ctx.cluster.snapshot_data.repository_stats(k, ctx.human)))
                 .collect();
             n.insert("repositories".into(), Value::Obj(repos));
         }

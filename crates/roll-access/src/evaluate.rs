@@ -296,6 +296,16 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         blocking(move || a.store.by_secret(&t)).await
     };
     let grant = match lookup {
+        // A decoy (docs/permissions.md, "Decoy tokens"): nobody should ever use it, so whoever did
+        // found it where it was planted. It answers as an unknown token does (they learn nothing),
+        // and its owner and the admins are told. Before the idle rule: a decoy is never used.
+        Ok(Some(g)) if g.decoy => {
+            let ip = client_ip(&req, &access.config);
+            let route = req.extensions().get::<MatchedPath>().map_or_else(|| "unmatched".to_string(), |m| m.as_str().to_string());
+            let ua = req.headers().get(header::USER_AGENT).and_then(|v| v.to_str().ok()).map(|s| s.chars().filter(|c| !c.is_control()).take(120).collect::<String>());
+            access.decoy_tripped(&g, ip.map(|i| i.to_string()), &route, ua);
+            return invalid_token(&access);
+        }
         // Unused longer than the operator's policy allows: it stops (making it again is a person's
         // choice, not an agent's).
         Ok(Some(g)) if access.policy_now().idle(&g, code_sql::now_ms()) => return invalid_token(&access),
@@ -331,6 +341,17 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // Forwarded by a node that decided it for this grant already (a signed hop to an owner): a
     // person isn't asked twice, and the first node logs it. Everything else is decided again.
     let decided_before = req.extensions().get::<roll_cluster::Forwarded>().and_then(|f| f.decided.as_deref()) == Some(grant.id.as_str());
+    // A token for roll's MCP server (an MCP client's, RFC 8707) works there and in the calls that
+    // server makes for it (or a hop another node decided), never on the API directly: what the
+    // server adds (lockdown, the credential guard, a read-only connection URL) can't be stepped
+    // around with its token.
+    if grant.mcp_only && route != "/v1/mcp" && !route.starts_with("/v1/mcp/") && req.extensions().get::<McpCall>().is_none() && !decided_before {
+        let mut r = deny(StatusCode::UNAUTHORIZED, "invalid_token", "this token is for roll's MCP server (/v1/mcp) only: call the API with a token made for it".into(), json!({}));
+        if let Ok(v) = HeaderValue::from_str("Bearer error=\"invalid_token\", error_description=\"the token's audience is roll's MCP server\"") {
+            r.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+        }
+        return r;
+    }
     // A grant's request limit: every request counts, an MCP tool call too (as the route it calls),
     // but not the MCP envelope around it (a batch of calls is each call); a hop counts where it was
     // decided. Over it, nothing is written: a flood stays cheap.
@@ -427,7 +448,8 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     if found.params.is_some() {
         ctx.route = row.route.to_string();
     }
-    let scope = Arc::new(ctx.grant.effective_rules(code_sql::now_ms()));
+    let policy = access.policy_now();
+    let scope = Arc::new(ctx.grant.effective_rules(code_sql::now_ms(), |r| policy.asks_again(r)));
     let (mut parts, body) = req.into_parts();
     let params: Vec<(String, String)> = match found.params {
         Some(p) => p,
@@ -565,11 +587,21 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
                 }
                 format!("{}/dashboard/access/tokens/{}?{}", access.web_url(), ctx.grant.id, q.finish())
             });
+            // What the token itself may ask for (an access request), when it was made to ask people
+            // and it's not about tokens and approvals.
+            let asks = ctx.grant.ask_otherwise || ctx.grant.rules.0.iter().any(|r| r.actions.values().any(|e| *e == roll_auth::scope::Effect::Ask));
+            let request = (widen.is_some() && asks && about != "access").then(|| {
+                let mut r = json!({ "product": about, "action": action, "for": "1h", "reason": "<why you need it>" });
+                if let Some(id) = &resource {
+                    r["resource"] = json!(id);
+                }
+                r
+            });
             return deny(
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 format!("this token can't {action} {what}"),
-                json!({ "needs": { "product": about, "action": action, "resource": resource }, "widen": widen }),
+                json!({ "needs": { "product": about, "action": action, "resource": resource }, "widen": widen, "request": request }),
             );
         }
         Outcome::Ask if decided_before => {}
@@ -608,7 +640,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             };
             let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path, scope_index, product: about };
             match ask(&ctx, row, action, resource.clone(), asked).await {
-                Ok(a) => approved = Some(roll_auth::Approved { id: a.id.into(), by: a.decided_by.into_iter().map(Into::into).collect(), until: None }),
+                Ok(a) => approved = Some(roll_auth::Approved { by: approvers(&a), id: a.id.into(), until: None }),
                 Err(resp) => return *resp,
             }
         }
@@ -905,8 +937,14 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
             if found.grant_id != ctx.grant.id || found.request_hash != request_hash {
                 return Err(Box::new(deny(StatusCode::FORBIDDEN, "approval_mismatch", format!("{id} was asked for another request"), json!({}))));
             }
-            found
+            Some(found)
         }
+        None => None,
+    };
+    // Approved by fewer people than roll's policy asks now (a gate came since): it asks again.
+    let approval = approval.filter(|a| a.state != "approved" || access.policy_now().gates(a).iter().all(|g| g.met(&approvers(a).iter().map(|b| b.to_string()).collect::<Vec<_>>())));
+    let approval = match approval {
+        Some(found) => found,
         None => {
             let args = args.unwrap_or_else(|| redact::body(row, body));
             let summary = redact::summary(row, action, &ctx.method, resource.as_deref(), ctx.mcp.as_ref().map(|m| &*m.tool));
@@ -980,12 +1018,17 @@ async fn remembered(access: &Arc<Access>, grant: &Grant, scope: &Scope, target: 
     let t = grant
         .temporary
         .iter()
-        .filter(|t| t.until > now && t.approval.is_some() && Scope(vec![t.rule.clone()]).outcome(target, action) == Outcome::Allow)
+        .filter(|t| t.until > now && t.approval.is_some() && (t.gated || !access.policy_now().asks_again(&t.rule)) && Scope(vec![t.rule.clone()]).outcome(target, action) == Outcome::Allow)
         .max_by_key(|t| t.until)?;
     let (id, until) = (t.approval.clone()?, t.until);
     let (a, id2) = (access.clone(), id.clone());
-    let by = blocking(move || a.store.approval(&id2)).await.ok().and_then(|a| a.decided_by);
-    Some(roll_auth::Approved { id: id.into(), by: by.into_iter().map(Into::into).collect(), until: Some(until) })
+    let by = blocking(move || a.store.approval(&id2)).await.map(|a| approvers(&a)).unwrap_or_default();
+    Some(roll_auth::Approved { id: id.into(), by, until: Some(until) })
+}
+
+/// Who approved it, in order (approvals from before the list was kept name one).
+fn approvers(a: &crate::store::Approval) -> Vec<Arc<str>> {
+    if a.approved_by.is_empty() { a.decided_by.iter().map(|b| b.as_str().into()).collect() } else { a.approved_by.iter().map(|b| b.as_str().into()).collect() }
 }
 
 /// An approval once it's decided, or as it is after `max`.
