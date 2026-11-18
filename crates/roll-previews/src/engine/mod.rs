@@ -709,7 +709,7 @@ fn wants(s: &Settings, c: &ChangeInfo) -> bool {
     }
     match asks(c) {
         Some(asked) => asked,
-        None => !s.manual && (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*")),
+        None => !s.manual && (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*")) && !crate::glob::any(&s.skip_authors, &c.author),
     }
 }
 
@@ -823,6 +823,11 @@ mod tests {
         assert!(!wants(&s, &ChangeInfo { branch: Some("fix/x".into()), ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { draft: true, ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { title: "Fix typo [Skip Preview]".into(), ..ch.clone() }));
+        // A dependency bot's pull request is skipped by its author, unless a person asks.
+        let bots = Settings { skip_authors: vec!["*[bot]".into()], ..s.clone() };
+        let bump = ChangeInfo { author: "dependabot[bot]".into(), ..ch.clone() };
+        assert!(wants(&bots, &ChangeInfo { author: "ada".into(), ..ch.clone() }) && !wants(&bots, &bump));
+        assert!(wants(&bots, &ChangeInfo { labels: vec!["preview".into()], ..bump.clone() }), "a label asks");
         assert!(wants(&s, &ChangeInfo { title: "[preview] try the new nav".into(), branch: Some("fix/x".into()), draft: true, ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { title: "[preview]".into(), open: false, ..ch.clone() }));
         // Unused for 6 of a week's hours: quiet; within a day: when. A 4-hour TTL warns an hour ahead.
