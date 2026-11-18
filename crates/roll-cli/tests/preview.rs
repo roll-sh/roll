@@ -109,3 +109,23 @@ fn settings_create_list_and_remove_a_branch_preview() {
     let (ok, _, err) = s.roll(&["wait", &id]);
     assert!(!ok && err.contains("being deleted"), "{err}");
 }
+
+/// `roll preview hooks` makes a deploy hook (its URL printed once), lists it without its
+/// secret and deletes it; `roll preview metrics` answers a preview's running services (none
+/// here: the reconciler doesn't run).
+#[test]
+fn deploy_hooks_and_metrics_from_the_cli() {
+    let s = server();
+    s.ok(&["settings", "shop", "--set", "enabled=true"]);
+    let url = s.ok(&["hooks", "shop", "--add", "CMS", "--branches", "feat/*"]);
+    assert!(url.trim().contains("/v1/previews/hooks/rlb_"), "{url}");
+    let hooks = s.json(&["hooks", "shop"]);
+    let hook = &hooks["hooks"][0];
+    assert_eq!((hook["name"].as_str(), hook["branches"][0].as_str()), (Some("CMS"), Some("feat/*")));
+    assert!(!hooks.to_string().contains("rlb_"), "never the secret again");
+    s.ok(&["hooks", "shop", "--rm", hook["id"].as_str().unwrap()]);
+    assert_eq!(s.json(&["hooks", "shop"])["hooks"].as_array().map(Vec::len), Some(0));
+    let created = s.json(&["create", "--project", "shop", "--repo", "acme/web", "--branch", "main"]);
+    let id = created["id"].as_str().unwrap();
+    assert!(s.ok(&["metrics", id]).contains("no service is running"));
+}

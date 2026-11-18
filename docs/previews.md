@@ -1475,7 +1475,7 @@ type Settings = {
   Awake, Asleep with their counts; `lib/preview-filter.ts`), status, cost, logs, and open,
   sleep, wake, reset and delete actions, plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
-- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|settings|usage|bypass|wait`.
+- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|settings|usage|bypass|metrics|hooks|wait`. `roll preview metrics <preview>` prints each running service's CPU and memory against what it runs with; `roll preview hooks <project>` lists a project's deploy hooks, `--add NAME [--branches GLOB…]` makes one (its URL printed once) and `--rm HOOK` deletes one.
   For CI outside GitHub, `roll preview wait --change chg_…` (or `create … --wait`) blocks until
   the preview is ready and prints its URL (`--service` for another), exiting 1 if it fails, is
   deleted or isn't ready within `--timeout` (600 s): the next step tests that URL with the
