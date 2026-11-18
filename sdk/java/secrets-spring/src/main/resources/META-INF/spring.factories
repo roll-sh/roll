@@ -1,0 +1,2 @@
+org.springframework.boot.context.config.ConfigDataLocationResolver=sh.roll.secrets.spring.RollSecretsConfigDataLocationResolver
+org.springframework.boot.context.config.ConfigDataLoader=sh.roll.secrets.spring.RollSecretsConfigDataLoader

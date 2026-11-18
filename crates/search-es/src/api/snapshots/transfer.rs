@@ -1,10 +1,12 @@
-//! How bytes move between a cluster and an `s3` repository's bucket: the repository's throttles
-//! (`max_snapshot_bytes_per_sec`, `max_restore_bytes_per_sec`, and for restores the cluster's
-//! `indices.recovery.max_bytes_per_sec`), the counters `_nodes/stats/repositories` reports, and
-//! objects written in parts (`chunk_size`, `buffer_size`, `max_multipart_parts`).
+//! How bytes move between a cluster and a bucket repository's store (`s3`, `gcs`, `azure`): the
+//! repository's throttles (`max_snapshot_bytes_per_sec`, `max_restore_bytes_per_sec`, and for
+//! restores the cluster's `indices.recovery.max_bytes_per_sec`), the counters
+//! `_nodes/stats/repositories` reports, and objects written in parts (`chunk_size`,
+//! `buffer_size`, `max_multipart_parts`).
 //!
 //! Elasticsearch splits a file into `chunk_size` blobs and uploads a blob larger than
-//! `buffer_size` as a multipart upload of `buffer_size` parts. roll's files are a segment's
+//! `buffer_size` as a multipart upload of `buffer_size` parts (S3; GCS's resumable uploads and
+//! Azure's staged blocks the same way, in parts of a size of their own, [`crate::blob`]). roll's files are a segment's
 //! records, gzipped as one stream: [`Upload`] writes one object of it, holding at most one part
 //! in memory (charged to the `request` breaker), and aborts its upload when it fails. An upload
 //! a crash left behind is aborted by `_cleanup` and after snapshot deletions
@@ -13,6 +15,7 @@
 use crate::error::EsResult;
 use crate::json::Value;
 use crate::meta::settings::Settings;
+use crate::blob::Store;
 use crate::s3 as client;
 use crate::units::ByteSize;
 use bytes::Bytes;
@@ -189,10 +192,10 @@ pub(super) fn bounded_size(settings: &Settings, key: &str, default: i64, min: i6
     let Some(raw) = settings.get(key) else { return Ok(default) };
     let v = ByteSize::parse(raw, key).map_err(|e| crate::error::EsError::illegal_argument(e.reason().to_string()).caused_by(e))?;
     if v.bytes() < min {
-        return Err(crate::error::EsError::illegal_argument(format!("failed to parse value [{raw}] for setting [{key}], must be >= [{}]", ByteSize(min).human())));
+        return Err(crate::error::EsError::illegal_argument(format!("failed to parse value [{raw}] for setting [{key}], must be >= [{}]", ByteSize(min).exact())));
     }
     if v.bytes() > max {
-        return Err(crate::error::EsError::illegal_argument(format!("failed to parse value [{raw}] for setting [{key}], must be <= [{}]", ByteSize(max).human())));
+        return Err(crate::error::EsError::illegal_argument(format!("failed to parse value [{raw}] for setting [{key}], must be <= [{}]", ByteSize(max).exact())));
     }
     Ok(v.bytes())
 }
@@ -260,7 +263,7 @@ pub(super) fn upload_cleanup_limit(settings: &Settings) -> usize {
 /// Why an object couldn't be written: the bucket's error, or the `request` breaker refusing the
 /// part buffer. Either way its multipart upload has been aborted.
 pub(super) enum Failed {
-    S3(client::Error),
+    Store(client::Error),
     Breaker(crate::error::EsError),
 }
 
@@ -269,7 +272,7 @@ pub(super) enum Failed {
 /// Bytes pay the repository's snapshot throttle as they are written in (as Elasticsearch
 /// throttles the stream it reads), so producing them overlaps the wait.
 pub(super) struct Upload<'a> {
-    s3: &'a client::Client,
+    store: &'a Store,
     io: &'a RepoIo,
     key: String,
     part: usize,
@@ -288,6 +291,7 @@ pub(super) struct Upload<'a> {
 
 struct Multipart<'a> {
     id: String,
+    /// What completing the upload needs of each part.
     etags: Vec<String>,
     io: &'a RepoIo,
 }
@@ -299,9 +303,9 @@ impl Drop for Multipart<'_> {
 }
 
 impl<'a> Upload<'a> {
-    pub fn new(s3: &'a client::Client, io: &'a RepoIo, budget: Arc<search_aggs::memory::MemoryBudget>, key: String, part: u64) -> Upload<'a> {
+    pub fn new(store: &'a Store, io: &'a RepoIo, budget: Arc<search_aggs::memory::MemoryBudget>, key: String, part: u64) -> Upload<'a> {
         let held = crate::breaker::Reservation::new(budget);
-        Upload { s3, io, key, part: part as usize, buf: Vec::new(), held, charged: 0, multipart: None, size: 0, parts: 0, throttled_nanos: 0, elapsed: Duration::ZERO }
+        Upload { store, io, key, part: part as usize, buf: Vec::new(), held, charged: 0, multipart: None, size: 0, parts: 0, throttled_nanos: 0, elapsed: Duration::ZERO }
     }
 
     pub fn key(&self) -> &str {
@@ -320,9 +324,9 @@ impl<'a> Upload<'a> {
         self.elapsed += Duration::from_nanos(paid);
         while !data.is_empty() {
             if self.buf.len() == self.part
-                && let Err(e) = self.flush_part().await
+                && let Err(e) = self.flush_part(None).await
             {
-                return Err(self.abort_with(Failed::S3(e)).await);
+                return Err(self.abort_with(Failed::Store(e)).await);
             }
             let n = (self.part - self.buf.len()).min(data.len());
             let need = self.buf.len() + n;
@@ -341,16 +345,18 @@ impl<'a> Upload<'a> {
         Ok(())
     }
 
-    async fn flush_part(&mut self) -> Result<(), client::Error> {
+    /// Sends the part held; `last` is the object's size when no more follow.
+    async fn flush_part(&mut self, last: Option<u64>) -> Result<(), client::Error> {
         let started = Instant::now();
         if self.multipart.is_none() {
-            let id = self.s3.create_multipart(&self.key).await?;
+            let id = self.store.begin(&self.key).await?;
             self.io.uploads.lock().insert(id.clone());
             self.multipart = Some(Multipart { id, etags: Vec::new(), io: self.io });
         }
         let body = Bytes::copy_from_slice(&self.buf);
+        let offset = self.size - self.buf.len() as u64;
         let Some(m) = self.multipart.as_mut() else { return Ok(()) };
-        let etag = self.s3.upload_part(&self.key, &m.id, m.etags.len() as u32 + 1, body).await?;
+        let etag = self.store.upload_part(&self.key, &m.id, m.etags.len() as u32 + 1, offset, body, last).await?;
         m.etags.push(etag);
         self.parts += 1;
         self.buf.clear();
@@ -364,14 +370,13 @@ impl<'a> Upload<'a> {
         let done = match self.multipart.is_some() {
             false => {
                 let body = Bytes::from(std::mem::take(&mut self.buf));
-                self.s3.put(&self.key, body).await
+                self.store.put(&self.key, body).await
             }
             true => async {
-                if !self.buf.is_empty() {
-                    self.flush_part().await?;
-                }
+                // Parts are sent only when more bytes follow, so the last is still held.
+                self.flush_part(Some(self.size)).await?;
                 match self.multipart.as_ref() {
-                    Some(m) => self.s3.complete_multipart(&self.key, &m.id, &m.etags).await,
+                    Some(m) => self.store.complete(&self.key, &m.id, &m.etags).await,
                     None => Ok(()),
                 }
             }
@@ -379,7 +384,7 @@ impl<'a> Upload<'a> {
         };
         self.elapsed += started.elapsed();
         if let Err(e) = done {
-            return Err(self.abort_with(Failed::S3(e)).await);
+            return Err(self.abort_with(Failed::Store(e)).await);
         }
         self.multipart = None;
         self.io.uploaded_blobs.fetch_add(1, Ordering::Relaxed);
@@ -396,7 +401,7 @@ impl<'a> Upload<'a> {
     /// Abandons the object: its multipart upload, if one was started, is aborted.
     pub async fn abort(&mut self) {
         if let Some(m) = self.multipart.take() {
-            let _ = self.s3.abort_multipart(&self.key, &m.id).await;
+            let _ = self.store.abort(&self.key, &m.id).await;
         }
     }
 }
