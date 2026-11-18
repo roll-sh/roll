@@ -150,6 +150,15 @@ pub struct Note {
     pub at: i64,
 }
 
+/// What answers a name under a project's preview domain that no roll apps environment holds (a
+/// preview on roll's own runtime, from roll.toml's `[preview]`): rolld fills it with roll
+/// previews' router, called in process with the request as it came (its Host unchanged).
+/// Unset: those names are a 404.
+#[async_trait]
+pub trait PreviewRouter: Send + Sync {
+    async fn serve(&self, req: axum::extract::Request) -> axum::response::Response;
+}
+
 /// roll previews' notes, for a preview environment's own host (rolld fills it with
 /// `roll_previews::Engine::notes_for`). Unset: no list, only the button.
 #[async_trait]
@@ -173,6 +182,10 @@ pub struct GitPush {
     pub sha: Option<String>,
     /// The pushed commit's message, as the push said it (`[skip ci]` is the receiver's to read).
     pub message: String,
+    /// Who pushed or acted, as the event says (GitHub's and Gitea's `sender.login`, GitLab's
+    /// `user_username` or `user.username`, Bitbucket's `actor.nickname`): untrusted text, at
+    /// most 100 characters, for rules like roll previews' `skip_authors`, never for trust.
+    pub pusher: Option<String>,
     /// A pull request's (or merge request's) push, opening or closing: `branch` is its own for a
     /// same-repository one, `pull/<number>` for a fork's.
     pub pull: Option<GitPull>,
@@ -189,6 +202,11 @@ pub struct GitPull {
     pub url: String,
     /// From another repository (head and base repository ids differ): its code is untrusted.
     pub fork: bool,
+    /// Who opened it, as the event says (GitHub's `pull_request.user.login`; GitLab's
+    /// `user.username` only when that actor is the opener, `author_id`, since GitLab's hook names
+    /// no opener otherwise: None on another person's push to it): untrusted text, for rules like
+    /// roll previews' `skip_authors` (`*[bot]`), never for trust.
+    pub author: Option<String>,
 }
 
 /// Where pushes to branches roll apps doesn't follow go (rolld fills it with roll previews).

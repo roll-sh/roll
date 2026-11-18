@@ -29,6 +29,7 @@ import { Inspector, ResourceSheet, StagedSheet } from "./inspector";
 import { ProjectAgents, threadsOf, useAgents } from "./agents";
 import { KindTile } from "./kind";
 import { ProjectIcon } from "./project-icon";
+import { DeployChanges, stagedChanges } from "./deploy-changes";
 import { ProjectSettings } from "./project-settings";
 import { PreviewsOverlay } from "./previews-overlay";
 
@@ -72,6 +73,10 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
   const live = useProjectServices(project.id, ws.kinds.has("service"));
   const staged = ws.staged[project.id] ?? [];
   const busy = staged.some((s) => s.phase === "creating");
+  // Services whose environments changed since their live deployment: staged too (Railway's).
+  const changed = stagedChanges(ws, project);
+  const [reviewing, setReviewing] = useState(false);
+  const pending = staged.length + changed.length;
   const repos = useMemo(() => new Set(project.resources.filter((r) => r.kind === "repo").map((r) => r.ref)), [project.resources]);
   const agents = useAgents();
   const working = agents ? threadsOf(agents, repos).filter((t) => t.status !== "idle").length : 0;
@@ -126,7 +131,9 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
   };
   const deploy = () => {
     setSelected(null);
-    void workspace.deploy(project.id);
+    // Redeploys are read before they're fired: what changed in each, in one sheet.
+    if (changed.length) setReviewing(true);
+    else void workspace.deploy(project.id);
   };
 
   const month = monthOf(new Date());
@@ -145,19 +152,21 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
       }
       actions={
         <>
-          {staged.length > 0 && (
+          {pending > 0 && (
             <span className="flex items-center gap-2 border-r border-line pr-2 text-[12px] text-muted">
-              <span className="rounded border border-accent/40 px-1.5 font-mono text-[10.5px] text-accent">{staged.length}</span>
-              <span className="max-md:hidden">{staged.length === 1 ? "staged change" : "staged changes"}</span>
-              <button disabled={busy} onClick={() => workspace.unstage(project.id)} className="rounded px-1.5 py-1 hover:bg-white/[0.05] hover:text-fg disabled:opacity-50">
-                Discard
-              </button>
+              <span className="rounded border border-accent/40 px-1.5 font-mono text-[10.5px] text-accent">{pending}</span>
+              <span className="max-md:hidden">{pending === 1 ? "staged change" : "staged changes"}</span>
+              {staged.length > 0 && (
+                <button disabled={busy} onClick={() => workspace.unstage(project.id)} className="rounded px-1.5 py-1 hover:bg-white/[0.05] hover:text-fg disabled:opacity-50">
+                  Discard
+                </button>
+              )}
               <button
                 disabled={busy}
                 onClick={deploy}
                 className="h-7 rounded-md bg-fg px-2.5 text-[12px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50"
               >
-                {busy ? "Deploying…" : "Deploy"}
+                {busy ? "Deploying…" : changed.length ? "Review and deploy" : "Deploy"}
               </button>
             </span>
           )}
@@ -325,6 +334,7 @@ function Project({ ws, project, tab, children }: { ws: WorkspaceState; project: 
           {usd(spend.usd)} this month · ≈ {usd(projectMonth(spend.usd, month))} by {month.end}
         </span>
       </footer>
+      <DeployChanges ws={ws} project={project} open={reviewing} onClose={() => setReviewing(false)} />
       <ProjectSettings project={project} open={settings} initialTab={asked === "services" ? "apps" : "general"} onClose={() => setSettings(false)} />
     </AppShell>
   );
