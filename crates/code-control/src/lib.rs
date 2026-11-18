@@ -396,6 +396,10 @@ impl<K: Hash + Eq, V: Clone> Cache<K, V> {
 /// A repo's landing settings and the default-branch head they were read at.
 pub(crate) type SettingsAt = (Option<ChangesetId>, Arc<settings::Settings>);
 
+/// Called with a GitHub App delivery's event name and body, once its signature checked out and
+/// once per delivery (a redelivery of one already taken isn't passed on).
+pub type GitHubListener = Arc<dyn Fn(&str, &[u8]) + Send + Sync>;
+
 pub struct Code {
     pub config: Config,
     pub store: Arc<Store>,
@@ -412,6 +416,9 @@ pub struct Code {
     pub runner: RwLock<Option<Arc<dyn Runner>>>,
     /// The GitHub App, once [`github::enable`] ran.
     pub(crate) github: std::sync::OnceLock<Arc<github::Hub>>,
+    /// Another product's ear on the App's verified push and pull request events
+    /// ([`Code::on_github_event`]).
+    pub(crate) github_listener: std::sync::OnceLock<GitHubListener>,
     /// roll secrets, once rolld plugged it in ([`Code::set_secret_env`]).
     pub(crate) secret_env: std::sync::OnceLock<Arc<dyn SecretEnv>>,
     pub(crate) queues: queue::Queues,
@@ -555,6 +562,7 @@ impl Code {
             previews: RwLock::new(None),
             runner: RwLock::new(None),
             github: std::sync::OnceLock::new(),
+            github_listener: std::sync::OnceLock::new(),
             secret_env: std::sync::OnceLock::new(),
             queues: queue::Queues::default(),
             settings_cache: Mutex::new(HashMap::new()),

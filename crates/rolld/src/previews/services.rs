@@ -107,7 +107,13 @@ impl roll_previews::ports::Apps for RollApps {
                 .filter(|x| x["source"]["kind"] != "upload")
                 .map(|x| roll_previews::ports::CatalogService {
                     name: s(&x["name"]).unwrap_or_default(),
-                    repo: (x["source"]["kind"] == "repo").then(|| s(&x["source"]["repo"])).flatten(),
+                    // A Git URL service is `git:<its id>`: its branch previews are made by roll apps'
+                    // pushes (`Engine::git_push`), at the pushed commit.
+                    repo: match x["source"]["kind"].as_str() {
+                        Some("repo") => s(&x["source"]["repo"]),
+                        Some("git") => s(&x["id"]).map(|id| format!("git:{id}")),
+                        _ => None,
+                    },
                     root: s(&x["source"]["root"]).unwrap_or_default(),
                     memory_mb: x["run"]["memory_mb"].as_u64().unwrap_or(512) as u32,
                 })
@@ -124,7 +130,11 @@ impl roll_previews::ports::Apps for RollApps {
             Some(hash) => json!({ "token": token, "bypass_sha256": hash }),
             None => json!({ "token": token }),
         });
-        let mut body = json!({ "branch": null, "ephemeral": true, "access": access });
+        // The project's egress: with `roll`, roll apps runs it on a network with no route out (a
+        // runtime that can't is a 409, which fails the deploy rather than running it open).
+        let closed = t.egress == roll_previews::settings::EgressRule::Roll;
+        let egress = if closed { json!({ "mode": "roll", "hosts": t.egress_hosts }) } else { json!({ "mode": "open" }) };
+        let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress });
         if self.feedback {
             body["feedback"] = json!(t.feedback);
         }
@@ -162,12 +172,14 @@ impl roll_previews::ports::Apps for RollApps {
                 h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
             }
         }
+        // What it may reach is part of what's deployed: a changed rule deploys again.
         let key = format!(
-            "{}@{}@{h:016x}{}{}",
+            "{}@{}@{h:016x}{}{}{}",
             t.environment,
             t.git.as_deref().unwrap_or("image"),
             if t.access_token.is_some() { "p" } else { "" },
-            if self.feedback && t.feedback { "f" } else { "" }
+            if self.feedback && t.feedback { "f" } else { "" },
+            if closed { format!("e{}", t.egress_hosts.join(",")) } else { String::new() }
         );
         // The deployment previews last started for exactly this, still under way or live: wait on
         // it (or it's done). The engine asks again while a deploy is in flight, and a redeploy
@@ -254,13 +266,37 @@ impl roll_previews::ports::Apps for RollApps {
         None
     }
 
-    // roll apps' instances don't freeze and have no egress proxy.
+    // roll apps' instances don't freeze.
     fn warm(&self, _preview: &str, _service: &str) -> bool {
         false
     }
 
-    async fn egress_refused(&self, _preview: &str) -> Vec<String> {
-        Vec::new()
+    /// What the preview's environments' egress proxies refused, each host once: `<host>`, or
+    /// `<host> private` for a listed one that resolves only to private addresses.
+    async fn egress_refused(&self, preview: &str) -> Vec<String> {
+        // Every service with the preview's environment, as roll apps has them (not only those this
+        // process deployed: after a restart a preview that doesn't redeploy still says).
+        let env = roll_previews::engine::env_name(preview);
+        let all = self.api.get("/v1/apps/services").await.unwrap_or(Value::Null);
+        let ids: Vec<String> = all
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|x| x["environments"].as_array().is_some_and(|e| e.iter().any(|e| e["name"] == env.as_str())))
+            .filter_map(|x| s(&x["id"]))
+            .collect();
+        let mut out: Vec<String> = Vec::new();
+        for id in ids {
+            let Ok(e) = self.api.get(&Self::env_path(&id, &env)).await else { continue };
+            for r in e["egress_refused"].as_array().into_iter().flatten() {
+                let Some(host) = s(&r["host"]) else { continue };
+                let line = if r["private"] == true { format!("{host} private") } else { host };
+                if !out.contains(&line) {
+                    out.push(line);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -271,10 +307,29 @@ impl roll_previews::ports::Apps for RollApps {
 /// branch has nothing for it.
 fn link_value(name: &str, vars: &[(String, String)]) -> Option<String> {
     let get = |k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let search = || get("ELASTICSEARCH_URL").and_then(|u| url::Url::parse(&u).ok());
+    // With the branch's data-only credential (as production's link has), the URL carries none
+    // of the branch's own login: the key, or the data user, is what the service gets.
+    match name {
+        "ELASTICSEARCH_URL" if get("ELASTICSEARCH_API_KEY").is_some() => {
+            return search().map(|mut u| {
+                let _ = (u.set_username(""), u.set_password(None));
+                u.to_string().trim_end_matches('/').to_string()
+            });
+        }
+        "OPENSEARCH_URL" => {
+            if let (Some(user), Some(pass)) = (get("OPENSEARCH_USERNAME"), get("OPENSEARCH_PASSWORD")) {
+                return search().map(|mut u| {
+                    let _ = (u.set_username(&user), u.set_password(Some(&pass)));
+                    u.to_string().trim_end_matches('/').to_string()
+                });
+            }
+        }
+        _ => {}
+    }
     if let Some(v) = get(name) {
         return Some(v);
     }
-    let search = || get("ELASTICSEARCH_URL").and_then(|u| url::Url::parse(&u).ok());
     let decode = |s: &str| urlencoding::decode(s).map(|c| c.into_owned()).unwrap_or_else(|_| s.to_string());
     match name {
         "AWS_ENDPOINT_URL" => get("AWS_ENDPOINT_URL_S3"),
@@ -300,12 +355,16 @@ const SET_BY_ROLL: &str = "ROLL_PREVIEW_SET";
 
 /// roll apps' variables `PATCH` for a preview environment whose values are `before`: `set`, the
 /// names roll set last time (its `SET_BY_ROLL`) and no longer wants unset, and the new list.
+/// Every value roll sets is sealed (the branches' credentials, the project's overrides, the
+/// preview's own variables): roll apps hides sealed values in its logs and never returns them
+/// (previews' own `…/env` is where they're revealed). Sealing is one-way, so sending it again is
+/// harmless.
 fn variables_patch(before: &Value, mut set: serde_json::Map<String, Value>) -> Value {
     let prev = before[SET_BY_ROLL].as_str().unwrap_or("");
     let unset: Vec<&str> = prev.split(',').map(str::trim).filter(|n| !n.is_empty() && *n != SET_BY_ROLL && !set.contains_key(*n)).collect();
     let names: Vec<String> = set.keys().cloned().collect();
     set.insert(SET_BY_ROLL.into(), json!(names.join(",")));
-    json!({ "set": set, "unset": unset })
+    json!({ "set": set, "unset": unset, "seal": names })
 }
 
 
@@ -313,9 +372,28 @@ fn variables_patch(before: &Value, mut set: serde_json::Map<String, Value>) -> V
 pub struct Services {
     pub apps: RollApps,
     pub runtime: Arc<roll_previews::runtime::Runtime>,
-    /// Where roll apps' instances can be screenshotted (`None`: they can't, so a project on roll
-    /// apps gets no screenshots and no baseline).
-    pub reach: Option<Arc<dyn Reach>>,
+    /// Screenshots of roll apps' instances that run on this node (`None`: no roll apps here, so a
+    /// project on roll apps gets no screenshots and no baseline).
+    pub shots: Option<Arc<dyn super::fleet::Shoot>>,
+    /// On a fleet: an instance runs on its service's holder, where its screenshot is taken.
+    pub fleet: Option<Arc<roll_cluster::Cluster>>,
+}
+
+/// A screenshot of a roll apps instance on this node: the same browser run as roll.toml's
+/// services, in the instance's own network, held awake meanwhile.
+pub struct AppsShots {
+    pub reach: Arc<dyn Reach>,
+    pub runtime: Arc<roll_previews::runtime::Runtime>,
+}
+
+#[async_trait]
+impl super::fleet::Shoot for AppsShots {
+    async fn shoot(&self, service: &str, env: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
+        let Some(at) = self.reach.reach(service, env).await? else { return Ok(None) };
+        let shot = self.runtime.screenshot_in(&at.container, at.port, opts).await;
+        drop(at.hold);
+        shot.map(Some)
+    }
 }
 
 /// Where a roll apps instance can be screenshotted (roll apps' `Apps::reachable`): its container
@@ -327,6 +405,30 @@ pub trait Reach: Send + Sync {
 }
 
 /// roll previews' notes for roll apps' feedback button, by the preview's environment name.
+/// roll apps' pushes to branches of a Git URL service that none of its environments follows: each
+/// branch's preview (`Engine::git_push`). Handed off at once, the hook is waiting.
+pub struct GitPushes(pub std::sync::Weak<roll_previews::Engine>);
+
+#[async_trait]
+impl apps_control::integrations::GitPushes for GitPushes {
+    /// Pull requests too: previews names a same-repo one's branch preview, and runs a fork's only
+    /// at a head a writer approved.
+    fn takes_pulls(&self) -> bool {
+        true
+    }
+
+    async fn pushed(&self, push: apps_control::integrations::GitPush) {
+        let Some(engine) = self.0.upgrade() else { return };
+        let pull = push.pull.map(|p| roll_previews::ports::GitPull { number: p.number, title: p.title, url: p.url, fork: p.fork });
+        let p = roll_previews::ports::GitPush { service: push.service, url: push.url, branch: push.branch, sha: push.sha, message: push.message, pull };
+        tokio::spawn(async move {
+            if let Err(e) = engine.git_push(&p).await {
+                tracing::warn!(service = %p.service, branch = %p.branch, error = %e, "previews: a Git URL service's push");
+            }
+        });
+    }
+}
+
 pub struct Notes(pub std::sync::Weak<roll_previews::Engine>);
 
 #[async_trait]
@@ -406,6 +508,11 @@ impl roll_previews::ports::Apps for Services {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.logs(preview, service, lines).await } else { self.runtime.logs(preview, service, lines).await }
     }
 
+    /// The requests roll's runtime proxied (roll apps' instances are served by roll apps' own).
+    fn requests(&self, preview: &str) -> Vec<roll_previews::RequestLine> {
+        self.runtime.requests(preview)
+    }
+
     async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
         if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { None } else { self.runtime.follow(preview, service, lines).await }
     }
@@ -424,16 +531,13 @@ impl roll_previews::ports::Apps for Services {
 
     async fn screenshot(&self, preview: &str, service: &str, opts: &roll_previews::ports::ShotOptions) -> anyhow::Result<Option<roll_previews::ports::Shot>> {
         let Some((id, env)) = self.apps.find(preview, service).await? else { return self.runtime.screenshot(preview, service, opts).await };
-        // A roll apps instance: the same browser run, in its own network, held awake meanwhile.
-        let Some(reach) = &self.reach else { return Ok(None) };
-        let Some(at) = reach.reach(&id, &env).await? else { return Ok(None) };
-        let shot = self.runtime.screenshot_in(&at.container, at.port, opts).await;
-        drop(at.hold);
-        shot.map(Some)
+        // A roll apps instance: taken where it runs (its service's holder on a fleet).
+        let Some(shots) = &self.shots else { return Ok(None) };
+        super::fleet::shoot(self.fleet.as_ref(), shots.as_ref(), &id, &env, opts).await
     }
 
     fn screenshots_apps(&self) -> bool {
-        self.reach.is_some()
+        self.shots.is_some()
     }
 
     fn status(&self, preview: &str, service: &str) -> Option<roll_previews::ServiceState> {
@@ -446,8 +550,16 @@ impl roll_previews::ports::Apps for Services {
         self.runtime.warm(preview, service)
     }
 
+    /// What roll's runtime's proxy refused and what roll apps' did (its `pv-` environments):
+    /// a preview's services can be on either.
     async fn egress_refused(&self, preview: &str) -> Vec<String> {
-        self.runtime.egress_refused(preview).await
+        let mut out = self.runtime.egress_refused(preview).await;
+        for h in self.apps.egress_refused(preview).await {
+            if !out.contains(&h) {
+                out.push(h);
+            }
+        }
+        out
     }
 }
 
@@ -497,6 +609,13 @@ mod tests {
         assert_eq!(super::link_value("OPENSEARCH_PASSWORD", &es).as_deref(), Some("p@ss"));
         assert_eq!(super::link_value("ELASTICSEARCH_API_KEY", &es).as_deref(), Some("YnItMTpwQHNz"), "base64(br-1:p@ss)");
         assert_eq!(super::link_value("ELASTICSEARCH_API_KEY", &v(&[("ELASTICSEARCH_URL", "https://u%40br-1:p@search.test")])), None, "a user@cluster login has no key form");
+        // The branch's data-only credential, as production's link has: the URL without the
+        // branch's own login, the key (or the data user, for OpenSearch) instead.
+        let keyed = v(&[("ELASTICSEARCH_URL", "https://br-1:p@search.test"), ("ELASTICSEARCH_API_KEY", "ZGF0YQ==")]);
+        assert_eq!(super::link_value("ELASTICSEARCH_URL", &keyed).as_deref(), Some("https://search.test"));
+        assert_eq!(super::link_value("ELASTICSEARCH_API_KEY", &keyed).as_deref(), Some("ZGF0YQ=="));
+        let os = v(&[("ELASTICSEARCH_URL", "https://br-1:p@search.test"), ("OPENSEARCH_USERNAME", "link@br-1"), ("OPENSEARCH_PASSWORD", "d")]);
+        assert_eq!(super::link_value("OPENSEARCH_URL", &os).as_deref(), Some("https://link%40br-1:d@search.test"));
         assert_eq!(super::link_value("CASSANDRA_KEYSPACE", &v(&[("CASSANDRA_USERNAME", "pv")])), None, "nothing for it: blank, not production's");
     }
 
@@ -522,7 +641,8 @@ mod tests {
         assert!(redeploy_key(v1, "dep_123456789abc").len() <= 200, "roll apps' limit");
     }
 
-    /// What roll set and no longer wants goes; what a person set stays; the list follows.
+    /// What roll set and no longer wants goes; what a person set stays; the list follows; what
+    /// roll sets is sealed.
     #[test]
     fn a_removed_variable_is_unset_and_a_persons_own_kept() {
         let before = json!({ "ROLL_PREVIEW_SET": "FEATURE,DATABASE_URL", "FEATURE": "on", "DATABASE_URL": "x", "MINE": "set by hand" });
@@ -530,6 +650,8 @@ mod tests {
         let patch = variables_patch(&before, set);
         assert_eq!(patch["unset"], json!(["FEATURE"]));
         assert_eq!(patch["set"], json!({ "DATABASE_URL": "y", "ROLL_PREVIEW_SET": "DATABASE_URL" }));
+        // Sealed (roll apps' logs hide it, its API never returns it), but not the list of names.
+        assert_eq!(patch["seal"], json!(["DATABASE_URL"]));
         // A first deploy (nothing recorded): nothing unset.
         let first = variables_patch(&Value::Null, [("A".to_string(), json!("1"))].into_iter().collect());
         assert_eq!((first["unset"].clone(), first["set"]["ROLL_PREVIEW_SET"].clone()), (json!([]), json!("A")));
