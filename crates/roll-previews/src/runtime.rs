@@ -1572,8 +1572,28 @@ fn page_shots<'a>(asked: &[&String], said: &str, pngs: impl Iterator<Item = &'a 
 /// Middleware for the API listener: requests for a preview service's host go to it, the rest
 /// pass through.
 pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> Response {
+    match named(&rt, &req) {
+        Some((preview, service)) => serve_named(rt, preview, service, req).await,
+        None => next.run(req).await,
+    }
+}
+
+/// A request roll apps' ingress hands on (a name under a project's own preview domain that no
+/// `pv-` environment holds): the preview service it names, or a 404.
+pub async fn serve_host(rt: Arc<Runtime>, req: Request) -> Response {
+    match named(&rt, &req) {
+        Some((preview, service)) => serve_named(rt, preview, service, req).await,
+        None => (StatusCode::NOT_FOUND, "no such preview").into_response(),
+    }
+}
+
+/// The preview and service a request's Host names.
+fn named(rt: &Runtime, req: &Request) -> Option<(String, String)> {
     let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| req.uri().host().map(str::to_string));
-    let Some((preview, service)) = host.and_then(|h| rt.service_for_host(&h)) else { return next.run(req).await };
+    host.and_then(|h| rt.service_for_host(&h))
+}
+
+async fn serve_named(rt: Arc<Runtime>, preview: String, service: String, req: Request) -> Response {
     let mut resp = serve(rt, preview, service, req).await;
     // Kept out of search engines, whatever the service says (as Vercel's previews are): a public
     // preview, a share link or an earlier push's URL is never what a search should land on.
