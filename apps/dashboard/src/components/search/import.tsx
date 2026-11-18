@@ -1,5 +1,5 @@
 import { FileUp, X } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { formatBytes } from "@/lib/roll-api";
 import { esRaw, formatCount, indexPath, type SearchCluster } from "@/lib/search-api";
 import {
@@ -40,6 +40,8 @@ interface Picked {
   /** JSON: every document (the file was parsed whole). */
   docs?: Record<string, unknown>[];
   readErrors: ReadError[];
+  /** JSON: how many elements weren't documents (`readErrors` holds the first few). */
+  unreadable?: number;
 }
 
 interface Progress {
@@ -64,9 +66,9 @@ async function readPreview(file: File): Promise<Picked> {
   const format = detectFormat(file.name, head);
   if (format === "json") {
     if (file.size > JSON_MAX_BYTES) throw new Error(`JSON files over ${formatBytes(JSON_MAX_BYTES)} are read whole: save it as NDJSON (one document per line) instead.`);
-    const { docs, errors } = jsonDocuments(await file.text());
+    const { docs, errors, errorCount } = jsonDocuments(await file.text());
     if (docs.length === 0) throw new Error("The file holds no JSON objects.");
-    return { file, format, preview: docs.slice(0, 5), columns: columnsOf(docs.slice(0, 50)), docs, readErrors: errors };
+    return { file, format, preview: docs.slice(0, 5), columns: columnsOf(docs.slice(0, 50)), docs, readErrors: errors, unreadable: errorCount };
   }
   if (format === "ndjson") {
     const r = new NdjsonReader();
@@ -107,6 +109,13 @@ export function ImportPanel({ cluster, existing, onClose, onImported }: { cluste
   const [dragging, setDragging] = useState(false);
   const cancel = useRef(false);
   const running = progress !== null && !progress.done;
+  // An import still running stops when the panel goes (closed, or the page left).
+  useEffect(
+    () => () => {
+      cancel.current = true;
+    },
+    [],
+  );
 
   const pick = async (file: File | undefined) => {
     if (!file) return;
@@ -133,7 +142,7 @@ export function ImportPanel({ cluster, existing, onClose, onImported }: { cluste
     const id = idField || null;
     cancel.current = false;
     setError(null);
-    const state: Progress = { read: 0, sent: 0, failed: 0, failures: [], readErrors: p.format === "json" ? p.readErrors.slice(0, 5) : [], unreadable: p.format === "json" ? p.readErrors.length : 0, done: false, cancelled: false };
+    const state: Progress = { read: 0, sent: 0, failed: 0, failures: [], readErrors: p.format === "json" ? p.readErrors.slice(0, 5) : [], unreadable: p.format === "json" ? (p.unreadable ?? p.readErrors.length) : 0, done: false, cancelled: false };
     const show = () => setProgress({ ...state, failures: [...state.failures], readErrors: [...state.readErrors] });
     show();
     // Half the cluster's body limit, at most 4 MiB a batch: small enough to keep the progress moving.
@@ -149,9 +158,19 @@ export function ImportPanel({ cluster, existing, onClose, onImported }: { cluste
       state.sent += b.docs;
       show();
     };
+    // Documents that can't be sent (an id that's an object): counted as unreadable, the rest go on.
+    let refused = 0;
     const add = async (doc: Record<string, unknown>) => {
       docNo++;
-      await send(batcher.add(bulkLines(doc, id)));
+      const b = bulkLines(doc, id);
+      if ("error" in b) {
+        refused++;
+        // NDJSON's count is the reader's plus these; the others count here.
+        if (p.format !== "ndjson") state.unreadable++;
+        if (state.readErrors.length < 5) state.readErrors.push({ at: docNo, message: b.error });
+        return;
+      }
+      await send(batcher.add(b.lines));
     };
     try {
       if (p.docs) {
@@ -169,8 +188,8 @@ export function ImportPanel({ cluster, existing, onClose, onImported }: { cluste
         const take = async (text: string, last: boolean) => {
           if (nd) {
             for (const d of last ? [...nd.push(text), ...nd.end()] : nd.push(text)) await add(d);
-            state.readErrors = [...nd.errors];
-            state.unreadable = nd.errorCount;
+            state.readErrors = [...nd.errors, ...state.readErrors.filter((e) => !nd.errors.includes(e))].slice(0, 5);
+            state.unreadable = nd.errorCount + refused;
           } else if (csv && p.csv) {
             for (const r of last ? [...csv.push(text), ...csv.end()] : csv.push(text)) {
               if (header) {

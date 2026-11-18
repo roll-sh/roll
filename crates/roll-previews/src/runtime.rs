@@ -33,7 +33,8 @@ pub trait Trees: Send + Sync {
     async fn prepare(&self, iso: &dyn Isolation, job: &Job, repo: &str, revision: &str) -> anyhow::Result<()>;
     /// Run a check-like job on a revision's tree (seeds): a pooled work tree, leased while the
     /// job's container is made.
-    async fn run(&self, iso: &Arc<dyn Isolation>, spec: &code_preview::config::CheckSpec, repo: &str, revision: &str, env: &[(String, String)]) -> anyhow::Result<code_preview::runner::RunOutput>;
+    /// On `network` (the preview's own) when one is given.
+    async fn run(&self, iso: &Arc<dyn Isolation>, spec: &code_preview::config::CheckSpec, repo: &str, revision: &str, env: &[(String, String)], network: Option<code_preview::isolation::Network>) -> anyhow::Result<code_preview::runner::RunOutput>;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -148,7 +149,7 @@ impl Default for RuntimeConfig {
             dashboard: None,
             screenshot_image: SCREENSHOT_IMAGE.into(),
             screenshot_command: SCREENSHOT_COMMAND.into(),
-            warm_for: Duration::from_secs(30 * 60),
+            warm_for: Duration::from_secs(8 * 3600),
             warm_max: 32,
         }
     }
@@ -171,7 +172,16 @@ pub struct Runtime {
     browsers_failed: Mutex<Option<std::time::Instant>>,
     /// One build of [`BROWSERS_IMAGE`] at a time (screenshots may run side by side).
     browsers_building: tokio::sync::Mutex<()>,
+    /// Held while a preview's egress proxy is checked and (re)made: its services start at once,
+    /// and two makes under the one name would refuse each other (or one remove the other's).
+    egress_making: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The latest requests to each preview's services through this node (newest last), at most
+    /// [`REQUESTS_KEPT`] a preview, gone with its last service.
+    requests: Mutex<HashMap<String, std::collections::VecDeque<crate::RequestLine>>>,
 }
+
+/// How many of a preview's latest requests are kept.
+pub const REQUESTS_KEPT: usize = 200;
 
 const BROWSERS_RETRY: Duration = Duration::from_secs(3600);
 
@@ -198,6 +208,8 @@ impl Runtime {
             live: Mutex::new(HashMap::new()),
             browsers_failed: Mutex::new(None),
             browsers_building: tokio::sync::Mutex::new(()),
+            egress_making: Mutex::new(HashMap::new()),
+            requests: Mutex::new(HashMap::new()),
             client: Client::builder(TokioExecutor::new()).build_http(),
         })
     }
@@ -234,6 +246,8 @@ impl Runtime {
                     rt.stop(&p, &s, &live, None).await;
                     rt.forget(&(p, s), live);
                 }
+                // Its request log is the new holder's now.
+                rt.requests.lock().remove(preview);
             }
         });
     }
@@ -463,7 +477,14 @@ impl Runtime {
                     self.iso.release(&name).await;
                 }
                 live.started.lock().take();
-                let error = if tail.trim().is_empty() { e } else { format!("{e}\n\n{}", tail.trim_end()) };
+                let error = if tail.trim().is_empty() { e.clone() } else { format!("{e}\n\n{}", tail.trim_end()) };
+                // Its output's tail is its code's words: masked as its logs are before it's kept
+                // (the preview's view, the pull request's comment), or left out when the masks
+                // can't be read.
+                let error = match self.engine() {
+                    Ok(en) => en.mask_text(preview, &error).await.unwrap_or(e),
+                    Err(_) => e,
+                };
                 warn!(%preview, %service, error = %error.lines().next().unwrap_or(""), "preview service failed to start");
                 live.phase.send_replace(Phase::Failed(error.clone()));
                 if let Ok(en) = self.engine() {
@@ -501,6 +522,23 @@ impl Runtime {
             // The project limits what its previews' code reaches: the preview's own network.
             network: if t.egress == crate::settings::EgressRule::Roll && self.iso.name() == "docker" { Some(preview_network(preview).await?) } else { None },
         };
+        // Hosts outside roll it may still reach: through the preview's egress proxy, the one way
+        // out of its network (code that ignores the variables still can't get out).
+        let mut job = job;
+        // No hosts listed (any more): no proxy left on the network with an old list.
+        if job.network.is_some() && t.egress_hosts.is_empty() {
+            self.drop_egress_proxy(preview).await;
+        }
+        if let Some(n) = job.network.as_ref().filter(|_| !t.egress_hosts.is_empty()) {
+            self.egress_proxy(preview, &n.name, &t.egress_hosts).await?;
+            let proxy = format!("http://{EGRESS_ALIAS}:3128");
+            for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+                job.env.push((k.into(), proxy.clone()));
+            }
+            for k in ["NO_PROXY", "no_proxy"] {
+                job.env.push((k.into(), "host.docker.internal,localhost,127.0.0.1".into()));
+            }
+        }
         self.trees.prepare(&*self.iso, &job, &t.repo, &t.revision).await?;
         let addr = self.iso.start(&name, t.spec.port).await?;
         // Stopped (slept, redeployed, removed) while it was starting: don't leave it running.
@@ -635,7 +673,26 @@ impl Runtime {
         Some(private_page(through.as_deref()))
     }
 
-    async fn proxy(self: &Arc<Self>, preview: &str, service: &str, mut req: Request, feedback: bool) -> Response {
+    /// [`Runtime::proxy_to`], kept in the preview's request log.
+    async fn proxy(self: &Arc<Self>, preview: &str, service: &str, req: Request, feedback: bool) -> Response {
+        let started = std::time::Instant::now();
+        let (method, path) = (req.method().to_string(), req.uri().path().chars().take(300).collect::<String>());
+        let resp = self.proxy_to(preview, service, req, feedback).await;
+        // Not after its services went (removed, or moved to another node meanwhile).
+        if !self.live.lock().keys().any(|(p, _)| p == preview) {
+            return resp;
+        }
+        let line = crate::RequestLine { at: self.store.now_ms().unwrap_or(0), service: service.into(), method, path, status: resp.status().as_u16(), ms: started.elapsed().as_millis() as u64 };
+        let mut all = self.requests.lock();
+        let kept = all.entry(preview.to_string()).or_default();
+        kept.push_back(line);
+        if kept.len() > REQUESTS_KEPT {
+            kept.pop_front();
+        }
+        resp
+    }
+
+    async fn proxy_to(self: &Arc<Self>, preview: &str, service: &str, mut req: Request, feedback: bool) -> Response {
         let mut retried = false;
         let addr = loop {
             let addr = match self.ready(preview, service, self.cfg.wait).await {
@@ -922,7 +979,8 @@ impl IntoResponse for Unavailable {
                 r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
                 r
             }
-            Unavailable::Failed(e) => page(StatusCode::BAD_GATEWAY, "The preview didn't start", &e, false),
+            // A visitor sees why, never its output (that's in its logs, for who can read them).
+            Unavailable::Failed(e) => page(StatusCode::BAD_GATEWAY, "The preview didn't start", e.lines().next().unwrap_or(""), false),
         }
     }
 }
@@ -957,8 +1015,16 @@ impl Apps for Runtime {
         }
     }
 
+    fn requests(&self, preview: &str) -> Vec<crate::RequestLine> {
+        self.requests.lock().get(preview).map(|k| k.iter().rev().cloned().collect()).unwrap_or_default()
+    }
+
     async fn remove(&self, preview: &str, service: &str) -> anyhow::Result<()> {
         let key = (preview.to_string(), service.to_string());
+        // Its request log goes with its last service.
+        if !self.live.lock().keys().any(|(p, s)| p == preview && s != service) {
+            self.requests.lock().remove(preview);
+        }
         let live = self.live.lock().get(&key).cloned();
         if let Some(live) = live {
             self.stop(preview, service, &live, None).await;
@@ -968,8 +1034,14 @@ impl Apps for Runtime {
             // Whichever node started it.
             self.iso.remove(&container_name(&host)).await;
         }
-        // The preview's own network goes with its last container (refused while one's attached).
+        // The preview's own network goes with its last container (refused while one's attached),
+        // its egress proxy first when no service of the preview is left.
         if self.iso.name() == "docker" {
+            let others = self.live.lock().keys().any(|(p, s)| p == preview && s != service);
+            if !others {
+                code_preview::docker::remove(&egress_name(preview)).await;
+                self.egress_making.lock().remove(preview);
+            }
             let _ = code_preview::docker::docker(&["network", "rm", &network_name(preview)]).await;
         }
         // The repo's cache goes with its last preview service.
@@ -1020,7 +1092,8 @@ impl Apps for Runtime {
             }
         })
         .await;
-        let first = String::from_utf8_lossy(&said[..said.len().min(4096)]).lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().filter(|c| !c.is_control()).take(200).collect();
+        // Cut wide here: the engine masks it whole and then cuts it to 200 (a value isn't left half shown).
+        let first = String::from_utf8_lossy(&said[..said.len().min(4096)]).lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().filter(|c| !c.is_control()).take(2000).collect();
         Ok(Some((status, first)))
     }
 
@@ -1036,9 +1109,11 @@ impl Apps for Runtime {
             Err(_) => anyhow::bail!("the service didn't start in time"),
         }
         let name = container_name(&host);
-        // The port the runtime published (the service's own), not whatever else its image exposes.
-        let ports = code_preview::docker::docker(&["inspect", "-f", "{{range $p, $_ := .HostConfig.PortBindings}}{{$p}} {{end}}", &name]).await?;
-        let port = ports.split_whitespace().next().and_then(|p| p.split('/').next()).and_then(|p| p.parse::<u16>().ok()).ok_or_else(|| anyhow::anyhow!("the service publishes no port"))?;
+        // The service's own port, as its container says (`sh.roll.code.port`: with `egress: roll`
+        // it's on a network of its own and publishes nothing), else the one the runtime published
+        // (a container made before the label), never whatever else its image exposes.
+        let said = code_preview::docker::docker(&["inspect", "-f", &format!("{{{{index .Config.Labels \"{}.port\"}}}} {{{{range $p, $_ := .HostConfig.PortBindings}}}}{{{{$p}}}} {{{{end}}}}", code_preview::docker::LABEL), &name]).await?;
+        let port = said.split_whitespace().find_map(|p| p.split('/').next().and_then(|p| p.parse::<u16>().ok())).ok_or_else(|| anyhow::anyhow!("the service says no port"))?;
         self.screenshot_in(&name, port, opts).await.map(Some)
     }
 
@@ -1048,6 +1123,20 @@ impl Apps for Runtime {
 
     fn status(&self, preview: &str, service: &str) -> Option<ServiceState> {
         self.service_status(preview, service)
+    }
+
+    async fn egress_refused(&self, preview: &str) -> Vec<String> {
+        if self.iso.name() != "docker" {
+            return Vec::new();
+        }
+        let tail = code_preview::docker::logs_tail(&egress_name(preview), 200).await;
+        let mut out: Vec<String> = Vec::new();
+        for h in tail.lines().filter_map(|l| l.strip_prefix("refused ")).map(|h| h.trim().chars().take(262).collect::<String>()) {
+            if !h.is_empty() && !out.contains(&h) {
+                out.push(h);
+            }
+        }
+        out
     }
 
     fn warm(&self, preview: &str, service: &str) -> bool {
@@ -1278,7 +1367,21 @@ impl Runtime {
             // A seed's variables come from the preview (`job.env`), not a secrets environment.
             secrets: None,
         };
-        let out = self.trees.run(&self.iso, &spec, &job.repo, &job.revision, &env).await?;
+        // Held to what the preview's services reach: on its own network under Roll only, the
+        // listed hosts through its egress proxy (a fork's migrations can't post its data out).
+        let mut env = env;
+        let network = if job.egress == crate::settings::EgressRule::Roll && docker { Some(preview_network(&job.preview).await?) } else { None };
+        if let Some(n) = network.as_ref().filter(|_| !job.egress_hosts.is_empty()) {
+            self.egress_proxy(&job.preview, &n.name, &job.egress_hosts).await?;
+            let proxy = format!("http://{EGRESS_ALIAS}:3128");
+            for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+                env.push((k.into(), proxy.clone()));
+            }
+            for k in ["NO_PROXY", "no_proxy"] {
+                env.push((k.into(), "host.docker.internal,localhost,127.0.0.1".into()));
+            }
+        }
+        let out = self.trees.run(&self.iso, &spec, &job.repo, &job.revision, &env, network).await?;
         match out.result {
             Outcome::Exited(code) => Ok((code, out.log)),
             Outcome::TimedOut => Ok((124, format!("timed out after {}s\n{}", job.seed.timeout_s, out.log))),
@@ -1323,6 +1426,53 @@ fn note_crops<'a>(asked: &[&str], said: &str, pngs: impl Iterator<Item = &'a str
         }
     }
     out
+}
+
+const EGRESS_JS: &str = include_str!("egress.js");
+/// The egress proxy's name on a preview's network.
+const EGRESS_ALIAS: &str = "roll-egress";
+
+fn egress_name(preview: &str) -> String {
+    format!("roll-previews-egress-{}", preview.trim_start_matches("pv_"))
+}
+
+impl Runtime {
+    /// The preview's egress proxy running with `hosts` (made again when they changed): on the
+    /// preview's network as [`EGRESS_ALIAS`] and on Docker's default one, its way out.
+    /// Remove the preview's egress proxy (its project lists no hosts any more), under the same
+    /// lock as making it.
+    async fn drop_egress_proxy(&self, preview: &str) {
+        let turn = self.egress_making.lock().entry(preview.to_string()).or_default().clone();
+        let _turn = turn.lock().await;
+        code_preview::docker::remove(&egress_name(preview)).await;
+    }
+
+    async fn egress_proxy(&self, preview: &str, network: &str, hosts: &[String]) -> anyhow::Result<()> {
+        let hosts: Vec<&String> = hosts.iter().filter(|h| crate::settings::egress_host_ok(h)).take(crate::settings::MAX_EGRESS_HOSTS).collect();
+        let list = serde_json::to_string(&hosts)?;
+        let digest = format!("{:016x}", list.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)));
+        let name = egress_name(preview);
+        let turn = self.egress_making.lock().entry(preview.to_string()).or_default().clone();
+        let _turn = turn.lock().await;
+        let running = code_preview::docker::docker(&["inspect", "-f", "{{.State.Running}} {{index .Config.Labels \"sh.roll.egress\"}}", &name]).await.ok();
+        if running.as_deref() == Some(format!("true {digest}").as_str()) {
+            return Ok(());
+        }
+        code_preview::docker::remove(&name).await;
+        let mut args: Vec<String> = vec!["run".into(), "-d".into(), "--name".into(), name.clone(), "--network".into(), network.into(), "--network-alias".into(), EGRESS_ALIAS.into()];
+        args.extend(["--label".into(), format!("{}=preview", code_preview::docker::LABEL), "--label".into(), format!("sh.roll.egress={digest}")]);
+        if let Some(l) = code_preview::docker::home_label() {
+            args.extend(["--label".into(), l]);
+        }
+        args.extend(["--cap-drop".into(), "ALL".into(), "--security-opt".into(), "no-new-privileges".into(), "--read-only".into(), "--tmpfs".into(), "/tmp:rw,size=16m".into()]);
+        args.extend(code_preview::docker::limits(128, 0.25));
+        args.extend(["--env".into(), format!("HOSTS={list}"), "--env".into(), format!("ROLL_EGRESS_JS={EGRESS_JS}"), self.cfg.screenshot_image.clone(), "sh".into(), "-c".into(), r#"node -e "$ROLL_EGRESS_JS""#.into()]);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        code_preview::docker::docker(&argv).await?;
+        // Its way out: Docker's default network too.
+        code_preview::docker::docker(&["network", "connect", "bridge", &name]).await?;
+        Ok(())
+    }
 }
 
 /// The network a preview whose project limits egress runs on (docs/previews.md, "Egress").
@@ -1457,7 +1607,7 @@ mod tests {
         async fn prepare(&self, _: &dyn Isolation, _: &Job, _: &str, _: &str) -> anyhow::Result<()> {
             anyhow::bail!("not in this test")
         }
-        async fn run(&self, _: &Arc<dyn Isolation>, _: &code_preview::config::CheckSpec, _: &str, _: &str, _: &[(String, String)]) -> anyhow::Result<code_preview::runner::RunOutput> {
+        async fn run(&self, _: &Arc<dyn Isolation>, _: &code_preview::config::CheckSpec, _: &str, _: &str, _: &[(String, String)], _: Option<code_preview::isolation::Network>) -> anyhow::Result<code_preview::runner::RunOutput> {
             anyhow::bail!("not in this test")
         }
     }

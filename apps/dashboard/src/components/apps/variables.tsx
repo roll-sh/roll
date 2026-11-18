@@ -19,10 +19,11 @@ const SOURCE_TONE: Record<VariableSource, string> = {
 };
 
 /**
- * Workspace kinds a service can link to, by their link kind: databases give their URLs, a bucket
- * and a stream credentials of their own, a NoSQL database its login, another service its URLs.
+ * Workspace kinds a service can link to, by their link kind: databases give their URLs, a bucket,
+ * a stream and a search cluster credentials of their own (a search key has data access only), a
+ * NoSQL database its login, another service its URLs.
  */
-export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", bucket: "bucket", stream: "stream", nosql: "nosql", service: "service" };
+export const LINKABLE: Partial<Record<ResourceView["kind"], LinkKind>> = { postgres: "postgres", redis: "redis", bucket: "bucket", stream: "stream", nosql: "nosql", search: "search", service: "service" };
 
 /** `sealSet`: the seal was chosen by hand (a secret-looking name no longer decides it). */
 type Edit = { name: string; value: string; seal?: boolean; sealSet?: boolean };
@@ -71,6 +72,15 @@ export function VariablesTab({
   const [removed, setRemoved] = useState<Set<string>>(new Set());
   // Existing variables to seal at Save: for good, so staged until then.
   const [sealing, setSealing] = useState<Set<string>>(new Set());
+  // A variable being kept as a file (or put back): its name and the path typed.
+  const [filing, setFiling] = useState<{ name: string; path: string } | null>(null);
+  const keepAsFile = async (name: string, path: string | null) => {
+    const v = await runner.run("file", () => appsApi.setVariables(service, env.name, { files: { [name]: path } }));
+    if (v) {
+      setVars(v);
+      setFiling(null);
+    }
+  };
   const [added, setAdded] = useState<Edit[]>([]);
   const [pasting, setPasting] = useState(false);
   const [pasted, setPasted] = useState("");
@@ -283,6 +293,11 @@ export function VariablesTab({
                       <Lock className="size-3" strokeWidth={1.5} /> sealed
                     </span>
                   )}
+                  {v.file && (
+                    <span className="inline-flex max-w-full items-center gap-1 truncate font-mono text-[11px] text-subtle" title="Kept as a file in its instances, not in their environment">
+                      <FileText className="size-3 shrink-0" strokeWidth={1.5} /> {v.file}
+                    </span>
+                  )}
                   {editing ? (
                     <RefInput
                       autoFocus
@@ -312,6 +327,37 @@ export function VariablesTab({
                     >
                       {sealing.has(v.name) ? <Lock className="size-3.5" /> : <LockOpen className="size-3.5" />}
                     </button>
+                  )}
+                  {editable && !gone && (
+                    <button
+                      onClick={() => setFiling(filing?.name === v.name ? null : { name: v.name, path: v.file ?? `/etc/secrets/${v.name.toLowerCase().replace(/_/g, "-")}` })}
+                      className={`p-1 hover:text-fg ${v.file ? "text-fg" : "text-subtle"}`}
+                      aria-label={`Keep ${v.name} as a file`}
+                      title="Keep as a file in its instances (a key file, a certificate) instead of in their environment"
+                    >
+                      <FileText className="size-3.5" />
+                    </button>
+                  )}
+                  {filing?.name === v.name && (
+                    <span className="flex w-full flex-wrap items-center gap-2 pl-0 sm:pl-[14.75rem]">
+                      <input
+                        autoFocus
+                        value={filing.path}
+                        onChange={(e) => setFiling({ name: v.name, path: e.target.value })}
+                        placeholder="/etc/secrets/key.json"
+                        aria-label={`Where ${v.name} is written`}
+                        className={`${input} w-72 max-w-full font-mono text-[12px]`}
+                      />
+                      <button className={btn} disabled={runner.busy !== null || !filing.path.startsWith("/")} onClick={() => keepAsFile(v.name, filing.path)}>
+                        Keep as file
+                      </button>
+                      {v.file && (
+                        <button className={btn} disabled={runner.busy !== null} onClick={() => keepAsFile(v.name, null)}>
+                          Back in the environment
+                        </button>
+                      )}
+                      <span className="text-[11px] text-subtle">From the next deploy.</span>
+                    </span>
                   )}
                   {editable && (
                     <button
@@ -418,7 +464,7 @@ function Links({ service, project, runner, onChange }: { service: string; projec
     <section className={panel}>
       <div className="flex min-h-14 items-center justify-between gap-3 border-b border-line px-5 py-3">
         <h2 className="text-[15px] font-medium">Links</h2>
-        <span className="text-[12px] text-subtle">A link adds a database's connection variables, or another service's URLs.</span>
+        <span className="text-[12px] text-subtle">A link adds a resource's connection variables, or another service's URLs.</span>
       </div>
       <ul className="divide-y divide-line">
         {links?.length === 0 && <li className="px-5 py-4 text-[13px] text-muted">Nothing linked.</li>}

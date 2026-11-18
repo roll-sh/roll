@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/ecdh"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -186,5 +189,172 @@ func TestValuesAreCachedAndRevalidatedWithTheirDigest(t *testing.T) {
 	mu.Unlock()
 	if get() != "2" || get() != "2" || len(asked) != 4 {
 		t.Fatalf("a change, then dynamic credentials read every time: %q", asked)
+	}
+	// CacheSize: past it, the folder read longest ago goes.
+	mu.Lock()
+	dynamic = []string{}
+	mu.Unlock()
+	c = &Client{API: srv.URL, Token: "rlt_x", Project: "prj_1", CacheTTL: 20 * time.Second, CacheSize: 1, Now: func() time.Time { return clock }}
+	for _, env := range []string{"production", "production", "staging", "production"} {
+		if _, err := c.Values(ctx, env, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(asked) != 7 {
+		t.Fatalf("one folder kept: %q", asked)
+	}
+}
+
+// Transit sends bytes as base64 and decrypts back to the same bytes, as @roll/secrets' does.
+func TestTransitSendsBase64AndDecryptsBackToTheSameBytes(t *testing.T) {
+	var sent []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		b["path"] = r.URL.Path
+		sent = append(sent, b)
+		// A server that "encrypts" by echoing: enough to check the encoding both ways.
+		if r.URL.Path == "/v1/secrets/projects/prj_1/transit/cards/encrypt" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"ciphertext": "roll:v1:" + b["plaintext"].(string)})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"plaintext": b["ciphertext"].(string)[len("roll:v1:"):]})
+	}))
+	defer srv.Close()
+	cards := (&Client{API: srv.URL, Token: "rlt_x", Project: "prj_1"}).Transit("cards")
+	ctx := context.Background()
+	ct, err := cards.Encrypt(ctx, []byte("héllo ✓"), "order:42")
+	if err != nil || sent[0]["plaintext"] != "aMOpbGxvIOKckw==" || sent[0]["context"] != "order:42" {
+		t.Fatalf("sent %v (%v)", sent, err)
+	}
+	if got, err := cards.Decrypt(ctx, ct, "order:42"); err != nil || string(got) != "héllo ✓" {
+		t.Fatalf("decrypted %q (%v)", got, err)
+	}
+	raw := []byte{0, 255, 128, 7}
+	ct, _ = cards.Encrypt(ctx, raw, "")
+	if got, _ := cards.Decrypt(ctx, ct, ""); string(got) != string(raw) || sent[2]["context"] != nil {
+		t.Fatalf("bytes: %v, context %v", got, sent[2]["context"])
+	}
+}
+
+// Set and Delete write one key and drop what CacheTTL kept; a protected environment's
+// approval_required is an error without the value; WithoutDynamic leaves a dynamic key out.
+func TestSetAndDeleteWriteOneKeyAndDropTheCache(t *testing.T) {
+	var mu sync.Mutex
+	stored, reads, generation, protected := map[string]string{"A": "1"}, 0, 0, false
+	var writes []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		w.Header().Set("ETag", fmt.Sprintf(`"g%d"`, generation))
+		answer := func(status int, v any) {
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(v)
+		}
+		if strings.HasSuffix(r.URL.Path, "/values") {
+			reads++
+			// PW is a dynamic link's: dynamic=false leaves it out and names it.
+			vals, leases := map[string]string{"PW": "fake-issued"}, []string{"lse_1"}
+			if r.URL.Query().Get("dynamic") == "false" {
+				vals, leases = map[string]string{}, []string{}
+			}
+			for k, v := range stored {
+				vals[k] = v
+			}
+			answer(200, map[string]any{"values": vals, "problems": []any{}, "leases": leases, "dynamic": []string{"PW"}, "linked": []string{}})
+			return
+		}
+		key := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		if r.URL.Query().Get("path") != "/api" {
+			t.Errorf("path %q", r.URL.RawQuery)
+		}
+		if protected {
+			answer(409, map[string]string{"error": "production is protected: open a change request", "code": "approval_required"})
+			return
+		}
+		generation++
+		change := map[string]any{"seq": generation, "environment": "production", "path": "/api", "kind": "write"}
+		switch r.Method {
+		case http.MethodPut:
+			var b map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			writes = append(writes, b)
+			stored[key] = b["value"].(string)
+			answer(200, map[string]any{"change": change, "secret": map[string]any{"key": key, "version": 2}, "warnings": []string{}})
+		case http.MethodDelete:
+			if _, ok := stored[key]; !ok {
+				answer(404, map[string]string{"error": "no secret " + key + " in production:/api"})
+				return
+			}
+			delete(stored, key)
+			answer(200, map[string]any{"change": change, "secret": nil, "warnings": []string{}})
+		}
+	}))
+	defer srv.Close()
+	c := &Client{API: srv.URL, Token: "rlt_x", Project: "prj_1", CacheTTL: time.Hour}
+	ctx := context.Background()
+	read := func() *Values {
+		v, err := c.Values(ctx, "production", "", WithoutDynamic())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+
+	if v := read(); len(v.Values) != 1 || len(v.Leases) != 0 || len(v.Dynamic) != 1 || v.Dynamic[0] != "PW" {
+		t.Fatalf("dynamic=false leaves the dynamic key out: %+v", v)
+	}
+	read()
+	mu.Lock()
+	if reads != 1 {
+		t.Fatalf("and holds no credential, so it's kept: %d reads", reads)
+	}
+	mu.Unlock()
+
+	comment := "made up"
+	w, err := c.Set(ctx, "production", "/api", "B", "fake-value-1", SetOptions{Comment: &comment})
+	if err != nil || w.Secret.Version != 2 || w.Change.Seq != 1 {
+		t.Fatalf("%+v %v", w, err)
+	}
+	mu.Lock()
+	if b := writes[0]; b["value"] != "fake-value-1" || b["comment"] != "made up" || b["link"] != nil || len(b) != 3 {
+		t.Fatalf("body %v", b)
+	}
+	mu.Unlock()
+	if read().Values["B"] != "fake-value-1" {
+		t.Fatal("a set drops the cache")
+	}
+
+	if d, err := c.Delete(ctx, "production", "/api", "B"); err != nil || !d.Deleted || d.Change.Seq != 2 {
+		t.Fatalf("%+v %v", d, err)
+	}
+	if _, ok := read().Values["B"]; ok {
+		t.Fatal("a delete drops the cache")
+	}
+	if d, err := c.Delete(ctx, "production", "/api", "B"); err != nil || d.Deleted || d.Change != nil {
+		t.Fatalf("a missing key is no change: %+v %v", d, err)
+	}
+
+	mu.Lock()
+	protected = true
+	mu.Unlock()
+	_, err = c.Set(ctx, "production", "/api", "C", "fake-value-2", SetOptions{})
+	var e *Error
+	if !errors.As(err, &e) || e.Code != "approval_required" || e.Status != 409 || strings.Contains(fmt.Sprintf("%v %+v", err, e), "fake-value-2") {
+		t.Fatalf("%#v", err)
+	}
+}
+
+// A Values or a Client printed or logged shows no value and no token.
+func TestPrintingNeverShowsAValueOrTheToken(t *testing.T) {
+	v := Values{Values: map[string]string{"DB_PASSWORD": "fake-pw-not-real"}}
+	c := &Client{API: "https://api.roll.example", Token: "rlt_fake_token_not_real", Project: "prj_1"}
+	for _, s := range []string{fmt.Sprintf("%v", v), fmt.Sprintf("%+v", v), fmt.Sprintf("%#v", v), fmt.Sprintf("%v", c), fmt.Sprintf("%+v", c), fmt.Sprintf("%#v", c)} {
+		if strings.Contains(s, "fake-pw-not-real") || strings.Contains(s, "rlt_fake_token_not_real") {
+			t.Fatalf("printed a secret: %s", s)
+		}
+	}
+	if !strings.Contains(fmt.Sprint(v), "DB_PASSWORD") {
+		t.Fatalf("keys should still show: %s", fmt.Sprint(v))
 	}
 }

@@ -1,7 +1,7 @@
 """A client for roll secrets (docs/secrets.md, "Consumption"), with the same surface as
 @roll/secrets and sdk/go/secrets: an environment's values, the runtime resolve (sealed to a key only
-this process holds, if asked), the digest that moves when the values would, and a watch that follows
-it and renews dynamic leases.
+this process holds, if asked), the digest that moves when the values would, a watch that follows
+it and renews dynamic leases, and one key's writes.
 
 The standard library only, but for sealed resolves, which need ``cryptography`` (the ``seal``
 extra).
@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
+import hmac as _hmac
 import json
 import os
 import threading
@@ -24,7 +26,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-__all__ = ["Client", "Values", "Problem", "SecretsError", "login", "from_env", "generate_key", "public_key", "open_sealed"]
+__all__ = ["Client", "Values", "Problem", "SecretsError", "Totp", "totp_at", "login", "from_env", "generate_key", "public_key", "open_sealed"]
 
 
 class SecretsError(Exception):
@@ -43,15 +45,32 @@ class Problem:
 
 
 @dataclass
+class Followed:
+    """A key left out because it links a resource the environment's preview branched: roll
+    previews sets ``name`` from its branch's ``field``."""
+
+    name: str
+    kind: str
+    parent: str
+    field: str
+
+
+@dataclass(repr=False)
 class Values:
     """An environment's values. ``dynamic`` keys hold a credential that ends with its lease
-    (``leases``; ``renew`` keeps it); ``linked`` keys come from a link to a resource."""
+    (``leases``; ``renew`` keeps it); ``linked`` keys come from a link to a resource; ``followed``
+    keys link a resource a preview branched, and aren't in ``values``."""
 
     values: Dict[str, str]
     problems: List[Problem] = field(default_factory=list)
     leases: List[str] = field(default_factory=list)
     dynamic: List[str] = field(default_factory=list)
     linked: List[str] = field(default_factory=list)
+    followed: List[Followed] = field(default_factory=list)
+
+    def __repr__(self) -> str:
+        # Never a value: a logged or printed Values names its keys only.
+        return f"Values(keys={sorted(self.values)!r}, problems={len(self.problems)}, leases={len(self.leases)})"
 
     @staticmethod
     def _of(d: Dict[str, Any], values: Optional[Dict[str, str]] = None) -> "Values":
@@ -61,6 +80,7 @@ class Values:
             leases=list(d.get("leases") or []),
             dynamic=list(d.get("dynamic") or []),
             linked=list(d.get("linked") or []),
+            followed=[Followed(f["name"], f["kind"], f["parent"], f["field"]) for f in d.get("followed") or []],
         )
 
 
@@ -71,16 +91,23 @@ def _q(path: str) -> str:
 class Client:
     """Reads one project's secrets."""
 
-    def __init__(self, api: str, token: str, project: Optional[str] = None, timeout: float = 30.0, cache_ttl: float = 0.0, clock: Callable[[], float] = time.monotonic):
+    def __repr__(self) -> str:
+        # Never the token.
+        return f"Client(api={self.api!r}, project={self.project!r})"
+
+    def __init__(self, api: str, token: str, project: Optional[str] = None, timeout: float = 30.0, cache_ttl: float = 0.0, clock: Callable[[], float] = time.monotonic, cache_size: int = 0):
         """``cache_ttl`` (seconds) keeps ``values`` answers that long and answers from memory
         meanwhile; after that it asks again with the digest they were read against, and an
         unchanged folder costs a 304 that reads, issues and audits nothing. A folder holding dynamic
-        credentials is never kept (they end with their lease). ``clock`` is for tests."""
+        credentials is never kept (they end with their lease). ``cache_size`` caps how many
+        folders are kept (past it, the one read longest ago goes; 0: no cap). ``clock`` is for
+        tests."""
         self.api = api.rstrip("/")
         self.token = token
         self.project = project
         self.timeout = timeout
         self.cache_ttl = cache_ttl
+        self.cache_size = cache_size
         self._clock = clock
         self._cache: Dict[str, Any] = {}
         self._lock = threading.Lock()
@@ -134,27 +161,70 @@ class Client:
     def _env(self, env: str) -> str:
         return f"/v1/secrets/projects/{urllib.parse.quote(self.project_id(), safe='')}/environments/{urllib.parse.quote(env, safe='')}"
 
-    def values(self, env: str, path: str = "", fresh: bool = False) -> Values:
+    def values(self, env: str, path: str = "", fresh: bool = False, dynamic: bool = True) -> Values:
         """``env``'s values under ``path`` (the root by default), references resolved. ``fresh``
-        skips ``cache_ttl`` (a watch that saw the digest move reads anew)."""
+        skips ``cache_ttl`` (a watch that saw the digest move reads anew). ``dynamic=False`` issues
+        no dynamic credential (for a reader that can't renew a lease): those keys are left out and
+        named in ``Values.dynamic``, and such an answer can be kept."""
         url = self._env(env) + "/values" + _q(path)
+        if not dynamic:
+            url += ("&" if "?" in url else "?") + "dynamic=false"
         if self.cache_ttl <= 0 or fresh:
             v = Values._of(self._call("GET", url))
             if fresh:
                 with self._lock:
                     self._cache.pop(url, None)
             return v
-        return copy.deepcopy(self._cached(url))
+        return copy.deepcopy(self._cached(url, keep_dynamic=not dynamic))
 
-    def _cached(self, url: str) -> Values:
-        """Kept for ``cache_ttl``, then revalidated with the digest (a 304 keeps them)."""
+    def _cached(self, url: str, keep_dynamic: bool = False) -> Values:
+        """Kept for ``cache_ttl``, then revalidated with the digest (a 304 keeps them).
+        ``keep_dynamic``: read with ``dynamic=false``, so naming dynamic keys holds no credential."""
         with self._lock:
             hit = self._cache.get(url)
         if hit and self._clock() - hit[2] < self.cache_ttl:
             return hit[0]
-        return self._authed(lambda token: self._revalidate(url, token, hit))
+        return self._authed(lambda token: self._revalidate(url, token, hit, keep_dynamic))
 
-    def _revalidate(self, url: str, token: str, hit: Any) -> Values:
+    def _secret(self, env: str, key: str, path: str) -> str:
+        return self._env(env) + "/secrets/" + urllib.parse.quote(key, safe="") + _q(path)
+
+    def set(self, env: str, key: str, value: str, path: str = "", comment: Optional[str] = None, message: Optional[str] = None) -> Dict[str, Any]:
+        """Sets ``key`` to ``value`` in ``path``'s folder (the root by default), replacing a link the
+        key had. Answers ``{change, secret, warnings}``: the change (None when the same value writes
+        nothing) and the key's new version. A protected environment, or a folder that needs
+        approval, is a ``SecretsError`` with the code ``approval_required`` (open a change request
+        instead). Errors never hold the value. Drops the cached reads."""
+        body: Dict[str, Any] = {"value": value, "link": None}
+        if comment is not None:
+            body["comment"] = comment
+        if message:
+            body["message"] = message
+        try:
+            return self._call("PUT", self._secret(env, key, path), body) or {}
+        finally:
+            self._drop_cache()
+
+    def delete(self, env: str, key: str, path: str = "") -> Dict[str, Any]:
+        """Deletes ``key`` from ``path``'s folder. Answers ``{deleted, change}``: a key that isn't
+        there (or only shows through a base or an import) is ``deleted: False``, not an error;
+        ``approval_required`` as for ``set``. Drops the cached reads."""
+        try:
+            w = self._call("DELETE", self._secret(env, key, path)) or {}
+        except SecretsError as e:
+            if e.status != 404:
+                raise
+            return {"deleted": False, "change": None}
+        finally:
+            self._drop_cache()
+        return {"deleted": True, "change": w.get("change")}
+
+    def _drop_cache(self) -> None:
+        # Every kept read: a reference or an import elsewhere may follow the key.
+        with self._lock:
+            self._cache.clear()
+
+    def _revalidate(self, url: str, token: str, hit: Any, keep_dynamic: bool = False) -> Values:
         """One conditional read of ``url`` with ``token``: a 304 keeps ``hit``'s values."""
         req = urllib.request.Request(self.api + url + ("&" if "?" in url else "?") + "digest=1", method="GET")
         if token:
@@ -176,11 +246,14 @@ class Client:
             raise SecretsError(err.get("error") or f"{e.code} {e.reason}", e.code, err.get("code")) from None
         v = Values._of(json.loads(text))
         with self._lock:
-            # Never kept: dynamic credentials (they end with their lease) or a key that didn't
-            # resolve (the digest may not move when the link recovers).
-            if v.dynamic or v.problems:
+            # Never kept: dynamic credentials (they end with their lease; with dynamic=false there
+            # are none, only their names) or a key that didn't resolve (the digest may not move
+            # when the link recovers).
+            if (v.dynamic and not keep_dynamic) or v.problems:
                 self._cache.pop(url, None)
             else:
+                if url not in self._cache and 0 < self.cache_size <= len(self._cache):
+                    del self._cache[min(self._cache, key=lambda k: self._cache[k][2])]
                 self._cache[url] = (v, etag.removeprefix("W/").strip('"'), self._clock())
         return v
 
@@ -196,9 +269,26 @@ class Client:
         opened = json.loads(open_sealed(r["sealed"], key, r["context"]))
         return Values._of(r, values=opened)
 
-    def digest(self, env: str, path: str = "") -> str:
-        """Moves whenever ``env``'s values under ``path`` would; reads no value."""
-        return self._call("GET", self._env(env) + "/digest" + _q(path))["digest"]
+    def digest(self, env: str, path: str = "", since: Optional[str] = None, wait: float = 0) -> str:
+        """Moves whenever ``env``'s values under ``path`` would; reads no value. With ``since`` and
+        ``wait`` (seconds, at most 60), a long poll: it answers as soon as the digest differs from
+        ``since``, or with the same one when ``wait`` runs out."""
+        q = _q(path)
+        if since and wait >= 1:
+            # Under this client's own timeout, and the server's 25.
+            q += ("&" if q else "?") + "since=" + urllib.parse.quote(since, safe="") + "&wait=" + str(int(max(1, min(wait, 25, self.timeout - 5))))
+        return self._call("GET", self._env(env) + "/digest" + q)["digest"]
+
+    def totp(self, env: str, key: str, path: str = "") -> "Totp":
+        """The current one-time code of ``env``'s TOTP key ``key`` (docs/secrets.md, "TOTP keys").
+        It needs reveal, as reading the seed does, and is audited without the code."""
+        d = self._call("GET", self._env(env) + "/secrets/" + urllib.parse.quote(key, safe="") + "/totp" + _q(path))
+        return Totp(code=d["code"], expires_at=d["expires_at"], period=d["period"])
+
+    def transit(self, name: str) -> "Transit":
+        """The project's encryption key ``name`` (docs/secrets.md, "Encryption keys"): data is
+        encrypted, signed and HMACed by roll, and the key never leaves it."""
+        return Transit(self, name)
 
     def renew(self, lease: str, ttl_minutes: Optional[int] = None) -> Dict[str, Any]:
         """Pushes a dynamic lease's expiry out by ``ttl_minutes`` (its link's TTL by default)."""
@@ -224,11 +314,18 @@ class Client:
         fail = on_error or (lambda _e: None)
         last: Optional[str] = None
         leases: List[str] = []
-        renewed = 0.0
-        waited = 0.0
+        renewed = time.monotonic()
         while not stop.is_set():
+            # A long poll: a change arrives within a second or two; ``every`` paces a server
+            # without them. It never outlasts the next renewal.
+            held = False
+            asked = time.monotonic()
             try:
-                now = self.digest(env, path)
+                until_renew = max(1.0, renew_every - (asked - renewed))
+                now = self.digest(env, path, since=last, wait=min(25.0, until_renew)) if last else self.digest(env, path)
+                held = last is not None and (now != last or time.monotonic() - asked >= 1)
+                if stop.is_set():
+                    break  # stopped while the poll was held: nothing more is called back
                 if now != last:
                     v = self.resolve(env, consumer, path) if consumer else self.values(env, path, fresh=True)
                     before, last = last, now
@@ -241,16 +338,105 @@ class Client:
                     on_change(v)
             except Exception as e:  # noqa: BLE001 - the watch goes on, as documented
                 fail(e)
-            if stop.wait(every):
+            if not held and stop.wait(every):
                 break
-            waited += every
-            if waited - renewed >= renew_every:
-                renewed = waited
+            if time.monotonic() - renewed >= renew_every:
+                renewed = time.monotonic()
                 for lease in leases:
                     try:
                         self.renew(lease)
                     except Exception as e:  # noqa: BLE001
                         fail(e)
+
+
+@dataclass(frozen=True)
+class Totp:
+    """A TOTP key's code and when it stops being valid (``expires_at`` in ms since the epoch: the
+    end of its step). The code is a credential: don't log it."""
+
+    code: str = field(repr=False)
+    expires_at: int
+    period: int
+
+
+_TOTP_ALGORITHMS = {"SHA1": hashlib.sha1, "SHA256": hashlib.sha256, "SHA512": hashlib.sha512}
+
+
+def totp_at(seed: str, at: Optional[float] = None) -> Totp:
+    """The code of ``seed`` (an ``otpauth://totp/`` URI or bare base32: SHA1, 6 digits, 30 s) at
+    ``at`` (Unix seconds; now by default), as the server computes it (RFC 6238): for a seed a sealed
+    resolve already gave. Errors never quote the seed."""
+    seed = seed.strip()
+    alg, digits, period, raw = "SHA1", 6, 30, seed
+    if seed[:10].lower() == "otpauth://":
+        if seed[:15].lower() != "otpauth://totp/":
+            raise ValueError("an otpauth URI must be otpauth://totp/… (HOTP isn't supported)")
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(seed).query)
+        raw = (q.get("secret") or [""])[0]
+        if not raw:
+            raise ValueError("an otpauth URI needs ?secret=")
+        alg = (q.get("algorithm") or ["SHA1"])[0].upper()
+        if alg not in _TOTP_ALGORITHMS:
+            raise ValueError("algorithm must be SHA1, SHA256 or SHA512")
+        try:
+            digits = int((q.get("digits") or ["6"])[0])
+            period = int((q.get("period") or ["30"])[0])
+        except ValueError:
+            raise ValueError("digits and period are numbers") from None
+        if not 6 <= digits <= 8:
+            raise ValueError("digits must be 6–8")
+        if not 15 <= period <= 120:
+            raise ValueError("period must be 15–120 seconds")
+    raw = raw.replace(" ", "").upper().rstrip("=")
+    try:
+        secret = base64.b32decode(raw + "=" * (-len(raw) % 8))
+    except (ValueError, TypeError):
+        raise ValueError("a TOTP seed is an otpauth://totp/ URI or base32") from None
+    if not 10 <= len(secret) <= 128:
+        raise ValueError("a TOTP secret is 16–205 base32 characters (80–1024 bits)")
+    unix = int(time.time() if at is None else at)
+    h = _hmac.new(secret, (unix // period).to_bytes(8, "big"), _TOTP_ALGORITHMS[alg]).digest()
+    o = h[-1] & 0x0F
+    n = (int.from_bytes(h[o : o + 4], "big") & 0x7FFFFFFF) % 10**digits
+    return Totp(code=str(n).zfill(digits), expires_at=(unix // period + 1) * period * 1000, period=period)
+
+
+class Transit:
+    """One encryption key, as ``@roll/secrets``' ``transit(name)``: bytes or text in, base64 on the
+    wire, bytes back from ``decrypt``."""
+
+    def __init__(self, client: Client, name: str):
+        self._client, self.name = client, name
+
+    def _at(self, op: str) -> str:
+        return f"/v1/secrets/projects/{urllib.parse.quote(self._client.project_id(), safe='')}/transit/{urllib.parse.quote(self.name, safe='')}/{op}"
+
+    @staticmethod
+    def _bytes(data: Any) -> bytes:
+        return data.encode() if isinstance(data, str) else bytes(data)
+
+    def encrypt(self, data: Any, context: Optional[str] = None) -> str:
+        """The ciphertext (``roll:v<n>:…``); ``context``, when given, must be given to decrypt it."""
+        return self._client._call("POST", self._at("encrypt"), {"plaintext": base64.b64encode(self._bytes(data)).decode(), "context": context})["ciphertext"]
+
+    def decrypt(self, ciphertext: str, context: Optional[str] = None) -> bytes:
+        """The plaintext (audited, as a reveal)."""
+        return base64.b64decode(self._client._call("POST", self._at("decrypt"), {"ciphertext": ciphertext, "context": context})["plaintext"])
+
+    def sign(self, data: Any) -> str:
+        """An Ed25519 signature over the bytes as given: anyone with ``public_keys`` checks it."""
+        return self._client._call("POST", self._at("sign"), {"input": base64.b64encode(self._bytes(data)).decode()})["signature"]
+
+    def verify(self, data: Any, signature: str) -> bool:
+        return bool(self._client._call("POST", self._at("verify"), {"input": base64.b64encode(self._bytes(data)).decode(), "signature": signature})["valid"])
+
+    def hmac(self, data: Any) -> str:
+        """HMAC-SHA256, the same for the same input: a lookup column over encrypted fields."""
+        return self._client._call("POST", self._at("hmac"), {"input": base64.b64encode(self._bytes(data)).decode()})["hmac"]
+
+    def public_keys(self) -> List[Dict[str, Any]]:
+        """An Ed25519 key's public halves, every version (``public_key``, ``pem``, ``jwk``)."""
+        return self._client._call("GET", self._at("public"))
 
 
 def login(api: str, identity: str, oidc_token: str) -> Client:

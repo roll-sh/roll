@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfversion"
 )
 
 // rolld's secrets API in memory: environments, keys (a value or a link) and values, for one
@@ -24,6 +27,12 @@ type fakeRolld struct {
 	identities map[string]map[string]any
 	syncs      map[string]map[string]any
 	tokens     map[string]map[string]any // roll-access's grants, kept when revoked
+	// Dynamic credentials' leases a read with dynamic=true issued, and those revoked since.
+	issued, revoked []string
+	// What a project registers itself: cas, ssh-cas, transit, outside-databases.
+	regs map[string]map[string]map[string]any
+	// The admin URLs databases were registered with (never listed back).
+	adminURLs []string
 }
 
 // grants serves roll-access's tokens: made with their rules, read, revoked.
@@ -58,6 +67,28 @@ func (f *fakeRolld) rest(w http.ResponseWriter, r *http.Request, kind string, it
 		if kind == "identities" && b["ttl_minutes"] == nil {
 			b["ttl_minutes"] = 15
 		}
+		switch kind {
+		case "cas":
+			b["certificate"], b["max_days"] = "-----BEGIN CERTIFICATE-----", 90
+			// As roll keeps them: lowercase, without a trailing dot.
+			var ds []any
+			for _, d := range b["domains"].([]any) {
+				ds = append(ds, strings.TrimSuffix(strings.ToLower(d.(string)), "."))
+			}
+			b["domains"] = ds
+		case "ssh-cas":
+			b["public_key"], b["max_hours"], b["max_host_days"] = "ssh-ed25519 AAAA roll-secrets:"+b["name"].(string), 24, 90
+		case "transit":
+			b["latest_version"] = 1
+		case "outside-databases":
+			f.adminURLs = append(f.adminURLs, b["url"].(string))
+			delete(b, "url")
+			b["host"] = "db.example.com"
+			// Trimmed, as roll keeps it.
+			if ca, ok := b["ca"].(string); ok {
+				b["ca"] = strings.TrimSpace(ca)
+			}
+		}
 		items[b["id"].(string)] = b
 		answer := map[string]any{}
 		for k, v := range b {
@@ -80,6 +111,16 @@ func (f *fakeRolld) rest(w http.ResponseWriter, r *http.Request, kind string, it
 	case r.Method == http.MethodDelete && items[id] != nil:
 		delete(items, id)
 		write(204, nil)
+	case r.Method == http.MethodDelete && kind == "transit" && r.URL.Query().Get("confirm") == id:
+		// Encryption keys go by name, with the name as confirmation.
+		for k, v := range items {
+			if v["name"] == id {
+				delete(items, k)
+				write(204, nil)
+				return
+			}
+		}
+		write(404, map[string]string{"error": "no key " + id})
 	default:
 		write(404, map[string]string{"error": "no " + kind + " " + id})
 	}
@@ -103,12 +144,26 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.grants(r, write)
 		return
 	}
-	for _, kind := range []string{"identities", "syncs"} {
-		if strings.HasPrefix(r.URL.Path, "/v1/secrets/projects/prj_a/"+kind) {
+	for _, kind := range []string{"identities", "syncs", "cas", "ssh-cas", "transit", "outside-databases"} {
+		if r.URL.Path == "/v1/secrets/projects/prj_a/"+kind || strings.HasPrefix(r.URL.Path, "/v1/secrets/projects/prj_a/"+kind+"/") {
 			items := map[string]map[string]map[string]any{"identities": f.identities, "syncs": f.syncs}[kind]
+			if items == nil {
+				if f.regs == nil {
+					f.regs = map[string]map[string]map[string]any{}
+				}
+				if f.regs[kind] == nil {
+					f.regs[kind] = map[string]map[string]any{}
+				}
+				items = f.regs[kind]
+			}
 			f.rest(w, r, kind, items, write)
 			return
 		}
+	}
+	if lease, ok := strings.CutPrefix(r.URL.Path, "/v1/secrets/projects/prj_a/leases/"); ok && r.Method == http.MethodDelete {
+		f.revoked = append(f.revoked, lease)
+		write(204, nil)
+		return
 	}
 	rest, ok := strings.CutPrefix(r.URL.Path, "/v1/secrets/projects/prj_a/environments/")
 	if !ok {
@@ -154,7 +209,14 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				values[key] = k["value"].(string)
 			}
 		}
-		write(200, map[string]any{"values": values, "problems": []any{}})
+		leases := []string{}
+		if r.URL.Query().Get("dynamic") == "true" {
+			lease := fmt.Sprintf("lse_%d", len(f.issued)+1)
+			f.issued = append(f.issued, lease)
+			leases = append(leases, lease)
+			values["TEMP_PASSWORD"] = "temporary"
+		}
+		write(200, map[string]any{"values": values, "problems": []any{}, "leases": leases})
 		return
 	}
 	key, valueRoute := strings.CutSuffix(parts[2], "/value")
@@ -285,4 +347,165 @@ resource "roll_secrets_sync" "deploys" {
 			return nil
 		},
 	})
+}
+
+// A value from an ephemeral read, written write-only: it reaches roll secrets and never Terraform's
+// state, and the run's dynamic credential is revoked when it closes.
+func TestValuesStayOutOfTheState(t *testing.T) {
+	f := &fakeRolld{envs: map[string]*environment{"production": {Slug: "production", Name: "production"}, "staging": {Slug: "staging", Name: "staging"}}, keys: map[string]map[string]any{"production:/DB_URL": {"value": "postgres://db/shop", "version": float64(1), "comment": ""}}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	config := fmt.Sprintf(`
+provider "roll" {
+  api_url = %q
+  token   = "rlt_terraform"
+  project = "prj_a"
+}
+ephemeral "roll_secrets_values" "production" {
+  environment = "production"
+  dynamic     = true
+}
+resource "roll_secret" "copy" {
+  environment      = "staging"
+  key              = "DB_URL"
+  value_wo         = ephemeral.roll_secrets_values.production.values["DB_URL"]
+  value_wo_version = 1
+}
+`, srv.URL)
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){"roll": providerserver.NewProtocol6WithError(New("test")())},
+		TerraformVersionChecks:   []tfversion.TerraformVersionCheck{tfversion.SkipBelow(tfversion.Version1_11_0)},
+		Steps: []resource.TestStep{{
+			Config: config,
+			Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckNoResourceAttr("roll_secret.copy", "value"),
+				resource.TestCheckNoResourceAttr("roll_secret.copy", "value_wo"),
+				func(s *terraform.State) error {
+					f.mu.Lock()
+					defer f.mu.Unlock()
+					if got := f.keys["staging:/DB_URL"]["value"]; got != "postgres://db/shop" {
+						return fmt.Errorf("roll secrets got %v", got)
+					}
+					if state := fmt.Sprintf("%#v", s.RootModule().Resources); strings.Contains(state, "postgres://") {
+						return fmt.Errorf("the value is in the state")
+					}
+					if len(f.issued) == 0 || len(f.revoked) != len(f.issued) {
+						return fmt.Errorf("leases issued %v, revoked %v", f.issued, f.revoked)
+					}
+					return nil
+				},
+			),
+		}},
+	})
+}
+
+// What a project registers itself, as code: a CA, an SSH CA, an encryption key and a database
+// outside roll, whose admin URL is write-only (sent once, never in the state).
+func TestRegistrationsAsCode(t *testing.T) {
+	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	config := func(vault string) string {
+		return fmt.Sprintf(`
+provider "roll" {
+  api_url = %q
+  token   = "rlt_terraform"
+  project = "prj_a"
+}
+resource "roll_secrets_ca" "internal" {
+  name    = "internal"
+  domains = ["Svc.Internal."]
+}
+resource "roll_secrets_ssh_ca" "fleet" {
+  name         = "fleet"
+  principals   = ["deploy"]
+  host_domains = ["svc.internal"]
+}
+resource "roll_secrets_transit_key" "cards" {
+  name                = "cards"
+  deletion_protection = false
+}
+%s
+resource "roll_secrets_outside_database" "rds" {
+  name                 = "rds"
+  admin_url_wo         = "postgres://admin:s3cret@db.example.com:5432/app"
+  admin_url_wo_version = 1
+  roles                = ["app_blue", "app_green"]
+  ca                   = "-----BEGIN CERTIFICATE-----\n"
+}
+`, srv.URL, vault)
+	}
+	protected := `resource "roll_secrets_transit_key" "vault" {
+  name = "vault"
+}`
+	unprotected := `resource "roll_secrets_transit_key" "vault" {
+  name                = "vault"
+  deletion_protection = false
+}`
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){"roll": providerserver.NewProtocol6WithError(New("test")())},
+		TerraformVersionChecks:   []tfversion.TerraformVersionCheck{tfversion.SkipBelow(tfversion.Version1_11_0)},
+		Steps: []resource.TestStep{{
+			Config: config(protected),
+			Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckResourceAttr("roll_secrets_ca.internal", "certificate", "-----BEGIN CERTIFICATE-----"),
+				resource.TestCheckResourceAttr("roll_secrets_ca.internal", "max_days", "90"),
+				resource.TestCheckResourceAttr("roll_secrets_ssh_ca.fleet", "public_key", "ssh-ed25519 AAAA roll-secrets:fleet"),
+				resource.TestCheckResourceAttr("roll_secrets_transit_key.cards", "latest_version", "1"),
+				resource.TestCheckResourceAttr("roll_secrets_outside_database.rds", "host", "db.example.com"),
+				resource.TestCheckNoResourceAttr("roll_secrets_outside_database.rds", "admin_url_wo"),
+				func(s *terraform.State) error {
+					f.mu.Lock()
+					defer f.mu.Unlock()
+					if len(f.adminURLs) != 1 || f.adminURLs[0] != "postgres://admin:s3cret@db.example.com:5432/app" {
+						return fmt.Errorf("registered with %v", f.adminURLs)
+					}
+					if strings.Contains(fmt.Sprintf("%#v", s.RootModule().Resources), "s3cret") {
+						return fmt.Errorf("the admin URL is in the state")
+					}
+					return nil
+				},
+			),
+		}, {
+			// Values roll keeps normalised, as configured: nothing to change.
+			Config:   config(protected),
+			PlanOnly: true,
+		}, {
+			// A protected key isn't destroyed (a rename, or taking it out of the configuration)…
+			Config:      config(""),
+			ExpectError: regexp.MustCompile("deletion_protection"),
+		}, {
+			// …until protection is turned off, in place.
+			Config: config(unprotected),
+		}},
+		CheckDestroy: func(*terraform.State) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			for kind, items := range f.regs {
+				if len(items) != 0 {
+					return fmt.Errorf("%s left behind: %v", kind, items)
+				}
+			}
+			return nil
+		},
+	})
+}
+
+// TestServeFakeRolld serves the fake on ROLL_FAKE_ROLLD_ADDR until the process is stopped, for
+// sdk/pulumi's end-to-end run (its e2e.sh); GET /fake/state answers what it holds. Skipped otherwise.
+func TestServeFakeRolld(t *testing.T) {
+	addr := os.Getenv("ROLL_FAKE_ROLLD_ADDR")
+	if addr == "" {
+		t.Skip("ROLL_FAKE_ROLLD_ADDR isn't set")
+	}
+	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, identities: map[string]map[string]any{}, syncs: map[string]map[string]any{}, tokens: map[string]map[string]any{}}
+	t.Fatal(http.ListenAndServe(addr, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/fake/state" {
+			f.ServeHTTP(w, r)
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"environments": f.envs, "keys": f.keys, "tokens": f.tokens})
+	})))
 }

@@ -46,6 +46,127 @@ type operator struct {
 
 	mu      sync.Mutex
 	clients map[string]*secrets.Client // by login (namespace/service account, identity)
+
+	// Push: each RollSecret's digest is long-polled between passes, and a change wakes the loop.
+	every   time.Duration
+	wake    chan struct{}
+	seen    map[string]watchTarget // what the last pass reconciled, by namespace/name
+	watches map[string]*watchState
+}
+
+// What a RollSecret's watch long-polls: its environment and folder, as its login reads them,
+// from the digest its Secret holds.
+type watchTarget struct {
+	c         *secrets.Client
+	env, path string
+	digest    string
+}
+
+type watchState struct {
+	target watchTarget
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// observe records what a reconcile left a RollSecret at, for its watch.
+func (o *operator) observe(rs *rollSecret, t watchTarget) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.seen != nil {
+		o.seen[rs.Metadata.Namespace+"/"+rs.Metadata.Name] = t
+	}
+}
+
+// rearm keeps one watch per RollSecret the last pass reconciled: a new one where its client,
+// folder or digest changed or the old one ended, none for RollSecrets that are gone.
+func (o *operator) rearm(ctx context.Context) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.watches == nil {
+		o.watches = map[string]*watchState{}
+	}
+	if o.wake == nil {
+		o.wake = make(chan struct{}, 1)
+	}
+	for key, w := range o.watches {
+		t, ok := o.seen[key]
+		ended := false
+		select {
+		case <-w.done:
+			ended = true
+		default:
+		}
+		if !ok || ended || t != w.target {
+			w.cancel()
+			delete(o.watches, key)
+		}
+	}
+	for key, t := range o.seen {
+		if _, ok := o.watches[key]; ok {
+			continue
+		}
+		wctx, cancel := context.WithCancel(ctx)
+		w := &watchState{target: t, cancel: cancel, done: make(chan struct{})}
+		o.watches[key] = w
+		go o.watchOne(wctx, w)
+	}
+}
+
+// watchOne long-polls one RollSecret's digest until it moves (then wakes the loop) or the watch
+// is cancelled. An error, or an answer that came back at once unchanged (roll holds at most 32
+// polls per login), waits a full interval: never a busy loop.
+func (o *operator) watchOne(ctx context.Context, w *watchState) {
+	defer close(w.done)
+	every := o.every
+	if every <= 0 {
+		every = 30 * time.Second
+	}
+	for ctx.Err() == nil {
+		asked := time.Now()
+		d, err := w.target.c.DigestSince(ctx, w.target.env, w.target.path, w.target.digest, 25*time.Second)
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil && d != w.target.digest {
+			select {
+			case o.wake <- struct{}{}:
+			default:
+			}
+			return
+		}
+		if err != nil || time.Since(asked) < time.Second {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(every):
+			}
+		}
+	}
+}
+
+// run reconciles every RollSecret, then again after the interval or as soon as a watch saw a
+// change, until ctx ends.
+func (o *operator) run(ctx context.Context) {
+	o.mu.Lock()
+	if o.wake == nil {
+		o.wake = make(chan struct{}, 1)
+	}
+	o.mu.Unlock()
+	every := o.every
+	if every <= 0 {
+		every = 30 * time.Second
+	}
+	for {
+		if err := o.pass(ctx); err != nil {
+			log.Printf("listing RollSecrets: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		case <-o.wake:
+		}
+	}
 }
 
 // login is how a RollSecret logs in: as a service account of its namespace, or as the operator.
@@ -171,7 +292,11 @@ func (o *operator) reconcile(ctx context.Context, rs *rollSecret) rollStatus {
 	if existing != nil && !ownedBy(existing, rs) {
 		return fail(fmt.Errorf("Secret %s/%s exists and isn't this RollSecret's: it isn't touched", ns, name))
 	}
+	o.observe(rs, watchTarget{c: c, env: rs.Spec.Environment, path: rs.Spec.Path, digest: digest})
 	if existing != nil && digest == rs.Status.Digest && rs.Status.Error == "" {
+		if rs.Status.PendingRestarts != "" {
+			st.PendingRestarts, st.RestartError = o.restart(ctx, ns, rs, pending(rs.Spec.RolloutRestart, rs.Status.PendingRestarts))
+		}
 		return st
 	}
 
@@ -209,7 +334,94 @@ func (o *operator) reconcile(ctx context.Context, rs *rollSecret) rollStatus {
 	if err != nil {
 		return fail(err)
 	}
-	return rollStatus{Digest: digest, SyncedAt: o.now().UTC().Format(time.RFC3339), Keys: len(data), ObservedGeneration: rs.Metadata.Generation}
+	// A changed Secret restarts what reads it: only when its data changed (not a pass that clears an
+	// earlier error, or a key rewritten with the same value), and never a new one (nothing read it).
+	// Targets a change didn't restart yet are tried again on each pass, until they are.
+	done := rollStatus{Digest: digest, SyncedAt: o.now().UTC().Format(time.RFC3339), Keys: len(data), ObservedGeneration: rs.Metadata.Generation}
+	targets := pending(rs.Spec.RolloutRestart, rs.Status.PendingRestarts)
+	if existing != nil && !sameData(existing.Data, data) {
+		targets = rs.Spec.RolloutRestart
+	}
+	if len(targets) > 0 {
+		done.PendingRestarts, done.RestartError = o.restart(ctx, ns, rs, targets)
+	}
+	return done
+}
+
+// pending is the targets of `all` named in a status's PendingRestarts.
+func pending(all []restartTarget, names string) []restartTarget {
+	var out []restartTarget
+	for _, t := range all {
+		for _, n := range strings.Split(names, ",") {
+			if n == t.Kind+"/"+t.Name {
+				out = append(out, t)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// sameData is whether a Secret's data is as it was.
+func sameData(a, b map[string][]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if w, ok := b[k]; !ok || string(v) != string(w) {
+			return false
+		}
+	}
+	return true
+}
+
+// restartKinds are the workloads a RollSecret may restart, by their API resource.
+var restartKinds = map[string]string{"Deployment": "deployments", "StatefulSet": "statefulsets", "DaemonSet": "daemonsets"}
+
+// restartOptIn is the annotation a workload opts in with: the RollSecrets (names, comma-separated)
+// whose changes may restart it. Creating a RollSecret alone restarts nothing.
+const restartOptIn = "roll.sh/restart-on"
+
+// restart rolls each target's pods, as `kubectl rollout restart` does: a new annotation on the
+// pod template. Only in the RollSecret's own namespace, and only a workload that names the
+// RollSecret in its roll.sh/restart-on annotation. Every target is tried: the ones not restarted
+// ("Kind/name,…") and why.
+func (o *operator) restart(ctx context.Context, ns string, rs *rollSecret, targets []restartTarget) (string, string) {
+	at := o.now().UTC().Format(time.RFC3339)
+	var left, why []string
+	for _, t := range targets {
+		if err := o.restartOne(ctx, ns, rs.Metadata.Name, t, at); err != nil {
+			left = append(left, t.Kind+"/"+t.Name)
+			why = append(why, err.Error())
+		}
+	}
+	return strings.Join(left, ","), strings.Join(why, "; ")
+}
+
+func (o *operator) restartOne(ctx context.Context, ns, rollSecret string, t restartTarget, at string) error {
+	resource, ok := restartKinds[t.Kind]
+	if !ok || t.Name == "" {
+		return fmt.Errorf("spec.rolloutRestart: %s/%s isn't a Deployment, StatefulSet or DaemonSet", t.Kind, t.Name)
+	}
+	path := "/apis/apps/v1/namespaces/" + url.PathEscape(ns) + "/" + resource + "/" + url.PathEscape(t.Name)
+	var w struct {
+		Metadata meta `json:"metadata"`
+	}
+	if err := o.kube.call(ctx, http.MethodGet, path, "", nil, &w); err != nil {
+		return fmt.Errorf("restarting %s %s (the Secret is updated): %w", t.Kind, t.Name, err)
+	}
+	optedIn := false
+	for _, n := range strings.Split(w.Metadata.Annotations[restartOptIn], ",") {
+		optedIn = optedIn || strings.TrimSpace(n) == rollSecret
+	}
+	if !optedIn {
+		return fmt.Errorf("%s %s isn't restarted: its %s annotation doesn't name RollSecret %s", t.Kind, t.Name, restartOptIn, rollSecret)
+	}
+	patch := map[string]any{"spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"annotations": map[string]string{"roll.sh/restartedAt": at}}}}}
+	if err := o.kube.call(ctx, http.MethodPatch, path, "application/merge-patch+json", patch, nil); err != nil {
+		return fmt.Errorf("restarting %s %s (the Secret is updated): %w", t.Kind, t.Name, err)
+	}
+	return nil
 }
 
 // pass reconciles every RollSecret in the cluster once.
@@ -220,11 +432,18 @@ func (o *operator) pass(ctx context.Context) error {
 	if err := o.kube.call(ctx, http.MethodGet, "/apis/"+group+"/"+version+"/rollsecrets", "", nil, &list); err != nil {
 		return err
 	}
+	o.mu.Lock()
+	o.seen = map[string]watchTarget{}
+	o.mu.Unlock()
+	defer o.rearm(ctx)
 	for i := range list.Items {
 		rs := &list.Items[i]
 		st := o.reconcile(ctx, rs)
 		if st == rs.Status {
 			continue
+		}
+		if st.RestartError != "" {
+			log.Printf("rollsecret %s/%s: %s", rs.Metadata.Namespace, rs.Metadata.Name, st.RestartError)
 		}
 		if st.Error != "" {
 			log.Printf("rollsecret %s/%s: %s", rs.Metadata.Namespace, rs.Metadata.Name, st.Error)
@@ -263,6 +482,9 @@ func main() {
 		now:        time.Now,
 		clients:    map[string]*secrets.Client{},
 		namespaces: namespaces,
+		every:      every,
+		wake:       make(chan struct{}, 1),
+		watches:    map[string]*watchState{},
 		oidc: func() (string, error) {
 			b, err := os.ReadFile(env("ROLL_OIDC_TOKEN_FILE"))
 			return strings.TrimSpace(string(b)), err
@@ -273,15 +495,6 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
-	log.Printf("roll secrets operator: every %s", every)
-	for {
-		if err := o.pass(ctx); err != nil {
-			log.Printf("listing RollSecrets: %v", err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(every):
-		}
-	}
+	log.Printf("roll secrets operator: every %s, and within seconds of a change (each RollSecret's digest is long-polled)", every)
+	o.run(ctx)
 }

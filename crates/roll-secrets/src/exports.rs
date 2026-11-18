@@ -47,7 +47,7 @@ pub(crate) fn exported(c: &Conn<'_>, from_env_id: &str, path: &str, to_project: 
 impl Secrets {
     /// The folders other projects share with `project`, ready to import (`Import`s).
     pub fn shared_with(&self, project: &str, caller: &Caller) -> Result<Vec<crate::Import>> {
-        caller.need(Action::Read, &Scope::project(project))?;
+        caller.need(Action::Read, &Scope::whole(project))?;
         self.project(project)?;
         self.db.read(|c| {
             Ok(c.query(

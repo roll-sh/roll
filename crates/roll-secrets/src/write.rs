@@ -294,6 +294,8 @@ fn credential_id(state: &Option<Json>) -> Option<String> {
 pub(crate) fn apply(c: &Conn<'_>, dek: &Dek, env: &EnvRow, items: &[Item], kind: &str, message: &str, caller: &Caller, now: i64) -> Result<(Change, Vec<ItemDiff>)> {
     let project = &env.project_id;
     c.execute("UPDATE projects SET seq = seq + 1 WHERE project_id = ?", [project])?;
+    // The project's syncs check their digests next, within seconds, ahead of their turn.
+    c.execute("UPDATE syncs SET checked_at = NULL WHERE project_id = ? AND checked_at IS NOT NULL", [project])?;
     let seq: i64 = c.query_row("SELECT seq FROM projects WHERE project_id = ?", [project], |r| r.get(0))?;
     let mut diffs = vec![];
     let mut dropped_credentials: BTreeMap<String, (Link, Json)> = BTreeMap::new();
@@ -580,7 +582,7 @@ impl Secrets {
                     Some((_, state)) => (open_parts(&dek, project, state)?, state.clone()),
                     None => {
                         if let Ok(p) = self.links.get(&link.kind)
-                            && p.exclusive()
+                            && p.exclusive_for(&link.r#ref)
                             && let Some(other) = self.holder(project, env_slug, &link, items)?
                         {
                             result = Err(Error::Conflict("in_use", format!("{} {} already issues {other}'s credential: one environment per resource of this kind", link.kind, p.name(&link.r#ref).unwrap_or_else(|| link.r#ref.clone()))));
@@ -628,8 +630,8 @@ impl Secrets {
     }
 
     /// What this project may link, sink to or sync to, as (kind, ref): its canvas's resources and
-    /// its own registrations (rotators, databases outside roll, AWS roles and IAM users, cloud
-    /// accounts, CAs and SSH CAs), checked on every write, read, issue, rotation and delivery (a
+    /// its own registrations (rotators, SaaS rotators, databases outside roll, AWS roles and IAM users, cloud
+    /// accounts, Kubernetes clusters, CAs, SSH CAs and GitHub Apps), checked on every write, read, issue, rotation and delivery (a
     /// resource can move to another project).
     ///
     /// A person's project (docs/accounts.md) has only what the workspace trusts it for
@@ -639,12 +641,15 @@ impl Secrets {
         let p = self.workspace.get(roll_workspace::Scope::All, project).map_err(|e| Error::Internal(e.to_string()))?;
         let mut out: BTreeSet<(String, String)> = p.resources.iter().filter(|r| self.workspace.trusts(&p, r.kind, &r.r#ref)).map(|r| (r.kind.as_str().to_string(), r.r#ref.clone())).collect();
         out.extend(self.rotator_refs(project)?.into_iter().map(|(id, _)| (crate::rotators::KIND.to_string(), id)));
+        out.extend(self.saas_refs(project)?.into_iter().map(|(id, _)| (crate::saas::KIND.to_string(), id)));
         out.extend(self.ca_refs(project)?.into_iter().map(|(id, _)| (crate::pki::KIND.to_string(), id)));
         out.extend(self.ssh_ca_refs(project)?.into_iter().map(|(id, _)| (crate::ssh::KIND.to_string(), id)));
         out.extend(self.cloud_refs(project)?.into_iter().map(|(kind, id, _)| (kind, id)));
         out.extend(self.aws_role_refs(project)?.into_iter().map(|(id, _)| (crate::aws::KIND.to_string(), id)));
         out.extend(self.aws_user_refs(project)?.into_iter().map(|(id, _)| (crate::iam::KIND.to_string(), id)));
         out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, _)| (crate::outside::KIND.to_string(), id)));
+        out.extend(self.kubernetes_refs(project)?.into_iter().map(|(id, _)| (crate::kubernetes::KIND.to_string(), id)));
+        out.extend(self.github_app_refs(project)?.into_iter().map(|(id, _)| (crate::github_app::KIND.to_string(), id)));
         Ok(out)
     }
 
@@ -669,7 +674,7 @@ impl Secrets {
     pub(crate) fn not_linkable(&self, project: &str, kind: &str, r#ref: &str) -> String {
         let personal = self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty() && p.resources.iter().any(|r| r.kind.as_str() == kind && r.r#ref == r#ref));
         if personal {
-            format!("{kind} {ref} is on this project's canvas, but roll can't tell it's yours: links, sinks and syncs reach roll's products only from the operator's projects and an admin's for now (the project's own registrations work anywhere: rotators, databases outside roll, AWS roles and IAM users, cloud accounts, CAs and SSH CAs)", ref = r#ref)
+            format!("{kind} {ref} is on this project's canvas, but roll can't tell it's yours: links, sinks and syncs reach roll's products only from the operator's projects and an admin's for now (the project's own registrations work anywhere: rotators, SaaS rotators, databases outside roll, AWS roles and IAM users, cloud accounts, Kubernetes clusters, CAs, SSH CAs and GitHub Apps)", ref = r#ref)
         } else {
             format!("{kind} {ref} isn't in this project", ref = r#ref)
         }

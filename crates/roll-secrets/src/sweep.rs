@@ -161,7 +161,16 @@ impl Secrets {
         let l = self.lease(project, id)?;
         let handle: Option<String> = self.db.read(|c| c.query_row("SELECT handle FROM leases WHERE id = ?", [id], |r| r.get(0)).optional())?;
         let (env, kind, issued_at, expires_at, revoked_at) = (l.environment.clone(), l.kind.clone(), l.issued_at, l.expires_at, l.revoked_at);
-        caller.need(Action::Reveal, &Scope::at(project, &env, &l.path))?;
+        // As ending one: whoever may delete there, or the caller it was issued to while it may
+        // still reveal there (keeping another's credential alive is as much theirs to decide).
+        let at = Scope::at(project, &env, &l.path);
+        if !caller.allows(Action::Delete, &at) {
+            caller.need(Action::Reveal, &at)?;
+            let by: Option<String> = self.db.read(|c| c.query_row("SELECT issued_by FROM leases WHERE id = ?", [id], |r| r.get(0)))?;
+            if by.as_deref() != Some(caller.principal.as_str()) {
+                return Err(Error::Forbidden(format!("{id} wasn't issued to you: renewing another's lease needs delete on {env}")));
+            }
+        }
         if kind != "dynamic" {
             return Err(Error::BadRequest(format!("{id} is a retired credential's: only dynamic leases renew")));
         }
@@ -185,16 +194,30 @@ impl Secrets {
         self.lease(project, id)
     }
 
-    /// Revoke a lease now.
+    /// Revoke a lease now: whoever may delete there, or the caller it was issued to while it may
+    /// still reveal there (Terraform's ephemeral reads close their own leases with a read token).
+    /// A reader can't end another's: that would drop a running service's credential.
     pub fn revoke_lease(&self, project: &str, id: &str, caller: &Caller) -> Result<()> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let l = self.lease(project, id)?;
         let env = l.environment;
-        caller.need(Action::Delete, &Scope::at(project, &env, &l.path))?;
+        let at = Scope::at(project, &env, &l.path);
+        if !caller.allows(Action::Delete, &at) {
+            caller.need(Action::Reveal, &at)?;
+            let by: Option<String> = self.db.read(|c| c.query_row("SELECT issued_by FROM leases WHERE id = ?", [id], |r| r.get(0)))?;
+            if by.as_deref() != Some(caller.principal.as_str()) {
+                return Err(Error::Forbidden(format!("{id} wasn't issued to you: ending another's lease needs delete on {env}")));
+            }
+        }
+        // A credential the product can't end early (a bound Kubernetes token) keeps working.
+        let note = match &l.link {
+            Some(link) if self.links.get(&link.kind).is_ok_and(|p| !p.revocable()) => format!(" (a {} credential can't be ended early: it works until it expires)", link.kind),
+            _ => String::new(),
+        };
         match self.revoke_one(id)? {
             true => {
-                self.audit_now(project, caller, "lease.revoke", Some(&env), None, &[], &format!("revoked {id}"));
+                self.audit_now(project, caller, "lease.revoke", Some(&env), None, &[], &format!("revoked {id}{note}"));
                 Ok(())
             }
             false => Err(Error::Conflict("conflict", format!("{id} is already revoked"))),
@@ -218,9 +241,11 @@ impl Secrets {
             // Give it back to the sweeper, which tries again.
             // Kept for health (`revoke_failing`) while the sweeper retries.
             let why: String = e.to_string().chars().take(300).collect();
+            crate::metrics::Counters::add(&self.counters.revoke_failures, 1);
             self.db.write(|c| c.execute("UPDATE leases SET revoked_at = NULL, expires_at = ?, revoke_error = ? WHERE id = ?", params![now + 60_000, why, id]))?;
             return Err(Error::Link(format!("revoking {id}: {e}")));
         }
+        crate::metrics::Counters::add(&self.counters.leases_revoked, 1);
         Ok(true)
     }
 
@@ -297,6 +322,7 @@ impl Secrets {
     /// A scheduled rotation's failure, kept on the key for health (`rotation_failing`) until one
     /// succeeds; `None` clears it.
     fn note_rotation(&self, project: &str, slug: &str, path: &str, key: &str, failure: Option<&str>) {
+        crate::metrics::Counters::add(if failure.is_some() { &self.counters.rotation_failures } else { &self.counters.rotations }, 1);
         let now = self.db.now_ms().unwrap_or_default();
         let failure = failure.map(|f| f.chars().take(300).collect::<String>());
         let at = failure.as_ref().map(|_| now);
@@ -335,12 +361,7 @@ impl Secrets {
                     return Err(Error::BadRequest(format!("{} {} has no credential to rotate", link.kind, link.r#ref)));
                 }
                 // Every folder that links it live reads a new value now: their digests move.
-                self.db.write(|c| {
-                    c.execute(
-                        "INSERT INTO source_generations (kind, ref, generation) VALUES (?, ?, 1) ON CONFLICT (kind, ref) DO UPDATE SET generation = source_generations.generation + 1",
-                        [link.kind.as_str(), link.r#ref.as_str()],
-                    )
-                })?;
+                self.source_changed(&link.kind, &link.r#ref)?;
                 self.audit_now(project, caller, "secrets.rotate", Some(slug), Some(&path), &[key.to_string()], &format!("rotated {} {}'s credential", link.kind, link.r#ref));
                 Ok(Applied { change: None, items: vec![], warnings: vec![], request: None })
             }
@@ -410,6 +431,9 @@ impl Secrets {
     /// retention and old audit rows.
     pub fn sweep_local(&self) -> Result<Swept> {
         let mut out = Swept::default();
+        if let Err(e) = self.forget_read_counts() {
+            tracing::warn!("forgetting old read counts failed: {e}");
+        }
         let now = self.db.now_ms()?;
         // Expired leases: dynamic credentials and retired managed ones.
         let due = self.db.read(|c| c.query("SELECT id FROM leases WHERE revoked_at IS NULL AND expires_at <= ? LIMIT 200", [now], |r| r.get::<_, String>(0)))?;
@@ -468,8 +492,8 @@ impl Secrets {
         }
         self.expire_shares()?;
         self.reseal_wrapped();
+        self.sweep_identity_logins()?;
         self.sweep_retention()?;
-        self.sweep_identity_tokens()?;
         self.sweep_reminders()?;
         self.sweep_alerts()?;
         let cutoff = now - crate::audit::RETENTION_DAYS * 86_400_000;
@@ -487,6 +511,8 @@ impl Secrets {
         out.synced += synced;
         out.failed += failed;
         let (_, failed) = self.sweep_sinks()?;
+        out.failed += failed;
+        let (_, failed) = self.sweep_backups()?;
         out.failed += failed;
         Ok(out)
     }

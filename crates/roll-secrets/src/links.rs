@@ -133,6 +133,11 @@ pub trait LinkProvider: Send + Sync {
         let _ = (r#ref, handle);
         Ok(())
     }
+    /// Whether revoking ends the credential at the product. `false`: it works until its own
+    /// expiry (a bound Kubernetes token), and revoking only ends the lease, as its audit row says.
+    fn revocable(&self) -> bool {
+        true
+    }
     /// Keep a dynamic credential working until `until` (unix ms): a lease was renewed. Only a
     /// product that enforces an expiry of its own needs this (a Postgres role's `VALID UNTIL`);
     /// for the rest, roll's lease is the expiry.
@@ -150,6 +155,11 @@ pub trait LinkProvider: Send + Sync {
     /// as which of two roles is in use, can't be shared between environments).
     fn exclusive(&self) -> bool {
         false
+    }
+    /// [`LinkProvider::exclusive`] for one resource (a vendor that keeps one secret per app).
+    fn exclusive_for(&self, r#ref: &str) -> bool {
+        let _ = r#ref;
+        self.exclusive()
     }
     /// Refuse a link this kind can't serve as asked (its options, its mode, its resource's
     /// policy), when it's written rather than at its first issue.
@@ -207,7 +217,7 @@ impl Links {
             return Err(Error::BadRequest(format!("{} {} is {}, not {}", l.kind, l.field, f.modes.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(" or "), l.mode.as_str())));
         }
         for k in l.options.keys() {
-            if !["ttl_minutes", "grace_minutes", "rotate_days", "branch", "permission", "names", "principals"].contains(&k.as_str()) {
+            if !["ttl_minutes", "grace_minutes", "rotate_days", "branch", "permission", "names", "principals", "repositories", "permissions", "namespace", "service_account", "audiences"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown link option {k}")));
             }
         }
@@ -227,7 +237,7 @@ pub struct Target {
 impl crate::Secrets {
     /// The project's resources a provider can link, with their fields.
     pub fn link_targets(&self, project: &str, caller: &crate::Caller) -> Result<Vec<Target>> {
-        caller.need(crate::Action::Read, &crate::Scope::project(project))?;
+        caller.need(crate::Action::Read, &crate::Scope::whole(project))?;
         self.project(project)?;
         let members = self.members(project)?;
         let p = self.workspace.get(roll_workspace::Scope::All, project).map_err(|e| Error::Internal(e.to_string()))?;
@@ -249,8 +259,14 @@ impl crate::Secrets {
         if let Some(provider) = self.links.0.get(crate::rotators::KIND) {
             out.extend(self.rotator_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::rotators::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
         }
+        if let Some(provider) = self.links.0.get(crate::saas::KIND) {
+            out.extend(self.saas_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::saas::KIND.into(), fields: provider.fields_for(&id), r#ref: id, name }));
+        }
         if let Some(provider) = self.links.0.get(crate::outside::KIND) {
             out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::outside::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+        }
+        if let Some(provider) = self.links.0.get(crate::kubernetes::KIND) {
+            out.extend(self.kubernetes_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::kubernetes::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
         }
         for (kind, id, name) in self.cloud_refs(project)? {
             if let Some(provider) = self.links.0.get(kind.as_str()) {
@@ -259,6 +275,9 @@ impl crate::Secrets {
         }
         if let Some(provider) = self.links.0.get(crate::pki::KIND) {
             out.extend(self.ca_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::pki::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+        }
+        if let Some(provider) = self.links.0.get(crate::github_app::KIND) {
+            out.extend(self.github_app_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::github_app::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
         }
         if let Some(provider) = self.links.0.get(crate::ssh::KIND) {
             out.extend(self.ssh_ca_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::ssh::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));

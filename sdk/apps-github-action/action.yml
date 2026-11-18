@@ -1,0 +1,68 @@
+name: roll apps deploy
+description: Deploy a roll apps service from a workflow once its tests pass, wait for it, and say where it runs.
+branding:
+  icon: upload-cloud
+  color: blue
+inputs:
+  api-url:
+    description: rolld's API, e.g. https://api.roll.example.
+    required: true
+  token:
+    description: A roll token that may deploy the service (keep it in the repository's secrets; GitHub gives none to a fork's pull request). Or use client-id.
+    required: false
+  client-id:
+    description: Sign in with the job's own OIDC token as this trusted machine client (mcl_…, made with `roll token client create … --github owner/repo`), instead of a stored token. The job needs `permissions: id-token: write`.
+    required: false
+  audience:
+    description: With client-id, the OIDC token's audience (default api-url, the client's default).
+    required: false
+  service:
+    description: The service (svc_…).
+    required: true
+  environment:
+    description: The environment to deploy (default production).
+    required: false
+    default: production
+  revision:
+    description: The commit a repo or Git URL service builds (default the workflow's commit; on a pull request, its head, not GitHub's merge commit).
+    required: false
+  image:
+    description: For an image service, the tag or digest of its repository to deploy.
+    required: false
+  path:
+    description: For an upload service, the folder whose committed files are sent (default the checkout's root).
+    required: false
+    default: .
+  message:
+    description: The deployment's message (default the commit's subject).
+    required: false
+  wait:
+    description: Wait until the deployment is live or has failed (true), or only queue it (false).
+    required: false
+    default: "true"
+  timeout-minutes:
+    description: How long to wait.
+    required: false
+    default: "30"
+  show-logs:
+    description: Print the build's last lines here when it fails. Off by default, because a public repository's job log is public.
+    required: false
+    default: "false"
+  comment:
+    description: On a pull request, write where it's deployed in one comment, kept up to date (needs `permissions: pull-requests: write`).
+    required: false
+    default: "false"
+  github-token:
+    description: The token comments are written with.
+    required: false
+    default: ${{ github.token }}
+outputs:
+  deployment-id:
+    description: The deployment (dep_…).
+  status:
+    description: Where it ended (active, failed, …; queued with wait false).
+  url:
+    description: The environment's URL.
+runs:
+  using: node20
+  main: index.js

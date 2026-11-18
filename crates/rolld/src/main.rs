@@ -511,6 +511,9 @@ async fn run() -> anyhow::Result<()> {
             };
             let p = previews::start(&args, &home, c, workspace.clone(), cluster.clone(), on_products, apps.as_ref().map(|a| a.apps.clone()))?;
             router = router.merge(roll_previews::api::router(p.engine.clone()));
+            if let Some(internal) = p.internal {
+                router = router.merge(internal);
+            }
             Some(p.runtime)
         }
         None => None,
@@ -523,6 +526,7 @@ async fn run() -> anyhow::Result<()> {
     // roll apps emails a project's owner what needs them, through their account.
     if let Some(a) = &apps {
         a.apps.set_mailbox(std::sync::Arc::new(apps::AccountsMail(accounts.clone())));
+        a.apps.set_visitors(std::sync::Arc::new(apps::AccountsVisitors(accounts.clone())));
     }
     router = router.merge(roll_accounts::router(accounts.clone()));
     // The products this node runs, as rules name them: MCP lists their tools, the token builder
@@ -567,19 +571,23 @@ async fn run() -> anyhow::Result<()> {
     // above this line, or its links 404.
     // People's accounts: what a person made acts while they can sign in, and a person's canvas
     // stands only for what's theirs (roll_workspace::Workspace::trusts, asked by every consumer).
-    let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()) };
+    let people = secrets::People { accounts, code: code.as_ref().map(|c| c.code.clone()), search: search.as_ref().map(|s| s.control.clone()) };
     workspace.set_owners(std::sync::Arc::new(people.clone()));
-    // Grants from roll-access are looked up when a sync made by one pushes.
-    let grants: std::sync::Arc<dyn roll_auth::Grants> = access.clone();
-    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), Some(grants), people)?;
+    // Its tokens are roll-access's: grants for syncs a token made, workload tokens for identities.
+    let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people)?;
+    // Its counters and gauges, a line a minute beside the cluster's (JSON logs only).
+    let _secrets_metrics = logs::SecretsMetrics::start(cluster.node_id().to_string(), secrets.clone());
     code_secrets.set(secrets.clone(), workspace.clone());
     apps_secrets.set(secrets.clone(), workspace.clone());
     let _ = secrets_envs.0.set(secrets.clone());
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }
-    router = router.merge(roll_secrets::router(secrets));
+    router = router.merge(roll_secrets::router(secrets.clone()).layer(axum::middleware::map_request(secrets::guard_header)));
     products_api.set(router.clone());
+    // A product's own credential changes (a password reset, a restore) move live links' digests
+    // at once. Layered after the copy above: roll secrets' own rotations say so themselves.
+    router = router.layer(axum::middleware::from_fn_with_state(secrets, secrets::source_changes));
     // apps' deploy hooks found leaked (`rlk_`) stop working, like tokens.
     if let Some(a) = &apps {
         let apps = a.apps.clone();
@@ -587,6 +595,8 @@ async fn run() -> anyhow::Result<()> {
     }
     // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
     access::sinks(&access);
+    // Trusted machine clients' issuers' keys: the guarded client roll secrets' identities use.
+    let _ = access.oidc_fetch.set(secrets::oidc_fetch(&args, !auth.enforcing()));
     // Approvals can be posted to a Slack channel through roll code's chat ops.
     if let Some(c) = &code {
         access::chat(&access, &c.code);
@@ -613,6 +623,7 @@ async fn run() -> anyhow::Result<()> {
         .info_route(cluster.node_id().to_string())
         .merge(on.off_routes())
         .merge(roll_access::oauth::public_router(access.clone()))
+        .merge(roll_mcp::card::routes(&access::api_url(&args), &args.web_url))
         .merge(auth.gate("api", router));
     let mut router = auth.cors(router).layer(axum::middleware::from_fn(logs::access));
     if let Some(c) = &code {

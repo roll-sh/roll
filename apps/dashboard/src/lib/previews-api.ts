@@ -94,6 +94,10 @@ export interface Preview {
   release?: { head: string; ms: number; before_ms: number | null } | null;
   /** Kept past its TTL until then (epoch ms). */
   kept_until?: number | null;
+  /** What its code may reach: a fork's preview is `roll` by default though the project's reach anything (`egress_forks`). */
+  reaches?: "open" | "roll";
+  /** The pull request a Git URL service's preview is of (roll apps' push hook). A fork's runs only at `approved_head`. */
+  pull?: { number: number; url: string; fork: boolean; approved_head: string | null; approved_by: string | null };
   /** When it goes (its TTL, or a keep, running out), once that's close (a day ahead). */
   goes_at?: number | null;
   /** How much the page changed since the screenshot at an earlier head (`since`). */
@@ -339,6 +343,10 @@ export interface PreviewSettings {
   mail?: "catch" | "deliver";
   /** What its services' code may reach: `open` (default) anything; `roll` only roll's own products (a network with no route out). */
   egress?: "open" | "roll";
+  /** With `egress: "roll"` (or `egress_forks: "roll"`, for forks): hosts outside roll its code may still reach (`api.stripe.com`, `*.sentry.io`), through a proxy that refuses anything else. */
+  egress_hosts?: string[];
+  /** What a fork's preview (an untrusted head a writer approved) may reach when `egress` is `open`: `roll` (default) or `open`. */
+  egress_forks?: "open" | "roll";
   /** Branch the data as of a point in time where the product keeps history: `-24h`, `-30m`, `-7d`, or an RFC 3339 time (30 days back at most). */
   data_at?: string | null;
   /** A feedback button on its pages for people who came in through roll (link access). */
@@ -439,6 +447,8 @@ export const previewsApi = {
   keep: (id: string, hours: number) => call<Preview>("POST", `${one(id)}/keep`, { hours }),
   /** Accept how a change's pages look at its latest screenshot (the `roll/visual` status). */
   /** `head`: the screenshot's that was looked at (`visual_review.head`): refused (409) once a newer one came in. `path`: that page only (`""` the first), else every page. */
+  /** Let one head of a fork's pull request on a Git URL service run (409 once it moved on). */
+  approve: (id: string, head: string) => call<Preview>("POST", `${one(id)}/approve`, { head }),
   acceptVisual: (id: string, head?: string, path?: string) =>
     call<Preview>("POST", `${one(id)}/visual/accept`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}) }),
   /** Its share links (never their tokens). */
@@ -467,6 +477,8 @@ export const previewsApi = {
   wake: (id: string) => call<Preview>("POST", `${one(id)}/wake`),
   /** Re-branches every resource, or the ones named (`"<kind>:<parent>"`). */
   reset: (id: string, resources?: string[]) => call<Preview>("POST", `${one(id)}/reset`, resources?.length ? { resources } : {}),
+  /** Its latest requests through roll, newest first (roll's runtime; a roll apps instance's are roll apps'). */
+  requests: (id: string) => call<{ requests: RequestLine[] }>("GET", `${one(id)}/requests`),
   logs: (id: string, opts: { service?: string; lines?: number } = {}) =>
     call<{ service: string; lines: string[] }>("GET", `${one(id)}/logs${query(opts)}`),
   /** Newest first. */
@@ -501,6 +513,9 @@ export function parseSse(rest: string, text: string): { events: { event: string;
   });
   return { events, rest: left };
 }
+
+/** A request to a preview's service through roll: when (ms), the method, the path (never the query), the status, ms until the answer's headers. */
+export type RequestLine = { at: number; service: string; method: string; path: string; status: number; ms: number };
 
 /** A service's last `lines`, then its output as it comes (`…/logs?follow=1`, read with the
  * operator's headers, which EventSource can't send). Resolves when the stream ends or `signal`

@@ -188,6 +188,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     `roll_net::literal_private_host`, because IP literals skip the resolver. That covers webhooks,
     review apps, owners' own provider `base_url` (`ROLL_CODE_PROVIDER_ALLOW_PRIVATE` to allow),
     gateway upstreams and MCP clients' metadata documents. Bound what you read from it.
+  - OIDC tokens from workloads (CI jobs, clusters) are checked by `crates/roll-oidc`, shared by roll
+    secrets' workload identities and roll-access's trusted machine clients. Its `Fetch` is rolld's
+    guarded client; never write a second verifier, and never make the shared-issuer rule optional.
   - Owner-management routes check `Code::manages`/`check_manage`, not `owns`/`check_write`:
     agent tokens (`agent:<name>`) work code but never manage the owner, and review only as their
     own agent.
@@ -339,13 +342,18 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     (`/v1/secrets`); `crates/rolld/src/secrets.rs` mounts it and implements the link providers;
     `roll secrets …` and `roll run` are `crates/roll-cli/src/secrets.rs`. Runtime clients:
     `packages/secrets` (TypeScript), `sdk/go/secrets` (Go, standard library only),
-    `sdk/python/roll_secrets` (Python, `cryptography` only for sealed resolves) and
-    `sdk/java/secrets` (Java 17, the JDK only); keep their
+    `sdk/python/roll_secrets` (Python, `cryptography` only for sealed resolves),
+    `sdk/java/secrets` (Java 17, the JDK only),
+    `sdk/dotnet/secrets` (.NET 8, the base class library only; X25519 its own) and
+    `sdk/ruby/roll_secrets` (Ruby, standard library only); keep their
     surfaces the same, and the sealed box test vector from the TypeScript one opening in the others.
     The Terraform provider is `sdk/terraform-provider-roll` (`TF_ACC=1 go test ./...` drives it
     against a fake rolld).
     The GitHub Action is `sdk/github-action` (no dependencies; every value masked before anything
     is printed).
+    The AWS Lambda extension (`sdk/lambda-extension`) builds on the Go client: values on
+    127.0.0.1 only, for the function's own `AWS_SESSION_TOKEN`, logged in through STS's
+    `GetWebIdentityToken`; never a value in a log or an error.
     The Kubernetes operator (`sdk/kubernetes-operator`) builds on the Go client and talks to the
     Kubernetes API over plain HTTP; it only ever writes Secrets its RollSecret owns.
     The Secrets Store CSI Driver provider (`sdk/csi-provider`) builds on the Go client too and
@@ -359,6 +367,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     Anything that touches a second environment (a reference, an import, a base, a promote's
     source) checks the caller through `Caller::allows`; checks, sandboxes and previews resolve
     untrusted (`Secrets::untrusted`, `"untrusted": true`): never a protected environment.
+  - Tokens are roll-access's: a project's token is a grant with one secrets rule made through
+    `POST /v1/access/tokens`, and identities' logins get `workload` grants (`Workloads`). Never
+    add a token store to secrets; it asks the caller's `Grant` (`GrantGrants`).
   - Signed-in people manage their own projects' secrets (`OwnProjects`; others' projects 404). A
     canvas proves nothing about who owns what's on it: anything acting on a resource through a
     project asks `roll_workspace::Workspace::trusts` (secrets' `members`, `counts_for_repo`, roll

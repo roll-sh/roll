@@ -20,9 +20,25 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
 mod clouds;
+mod github;
 
 mod outside;
 mod syncs;
+
+/// `X-Roll-Guard` (a credential guard's scan, audited apart as `secrets.guard`) is roll MCP's
+/// alone: kept only on a request its guard tool makes in process (`McpCall` with tool `guard`),
+/// removed from anyone else's, so no caller can file deliberate scans under the guard's name.
+pub async fn guard_header(req: Request<Body>) -> Request<Body> {
+    keep_guard_header(req)
+}
+
+fn keep_guard_header(mut req: Request<Body>) -> Request<Body> {
+    let from_guard = req.extensions().get::<roll_access::evaluate::McpCall>().is_some_and(|m| &*m.tool == "guard");
+    if !from_guard {
+        req.headers_mut().remove("x-roll-guard");
+    }
+    req
+}
 
 /// The router of every product's routes (no gate), set once rolld has built it.
 #[derive(Clone, Default)]
@@ -48,6 +64,21 @@ impl Api {
         })
     }
 
+    /// POST `body` as is (`content_type`) to a product's route as the operator: its status and JSON
+    /// answer (roll search's bulk takes NDJSON).
+    fn post_raw(&self, path: &str, content_type: &str, body: Vec<u8>) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
+        let router = self.0.get().ok_or_else(|| Error::Link("the product APIs aren't up yet".into()))?.clone();
+        let mut req = Request::builder().method(Method::POST).uri(path).header("content-type", content_type);
+        req.extensions_mut().map(|e| e.insert(roll_auth::Operator));
+        let req = req.body(Body::from(body)).map_err(|e| Error::Internal(e.to_string()))?;
+        tokio::runtime::Handle::current().block_on(async move {
+            let resp = router.oneshot(req).await.map_err(|e| Error::Link(e.to_string()))?;
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.map_err(|e| Error::Link(e.to_string()))?.to_bytes();
+            Ok((status, if bytes.is_empty() { Json::Null } else { serde_json::from_slice(&bytes).unwrap_or(Json::Null) }))
+        })
+    }
+
     /// Call a product's route as the operator; a status other than 2xx is an error naming it.
     fn call(&self, method: Method, path: &str, body: Option<Json>) -> roll_secrets::Result<Json> {
         let (status, v) = self.call_status(method.clone(), path, body)?;
@@ -57,6 +88,24 @@ impl Api {
             return Err(Error::Link(format!("{method} {}: {} {why}", path.split('?').next().unwrap_or(path), status.as_u16())));
         }
         Ok(v)
+    }
+
+    /// GET a product's route as the operator, reading at most `limit` bytes of its answer (JSON,
+    /// 2xx only): for objects whose size the caller knows, never the whole of whatever is there.
+    pub(crate) fn get_bounded(&self, path: &str, limit: usize) -> roll_secrets::Result<Json> {
+        let router = self.0.get().ok_or_else(|| Error::Link("the product APIs aren't up yet".into()))?.clone();
+        let mut req = Request::builder().method(Method::GET).uri(path);
+        req.extensions_mut().map(|e| e.insert(roll_auth::Operator));
+        let req = req.body(Body::empty()).map_err(|e| Error::Internal(e.to_string()))?;
+        let route = path.split('?').next().unwrap_or(path).to_string();
+        tokio::runtime::Handle::current().block_on(async move {
+            let resp = router.oneshot(req).await.map_err(|e| Error::Link(e.to_string()))?;
+            if !resp.status().is_success() {
+                return Err(Error::Link(format!("GET {route}: {}", resp.status().as_u16())));
+            }
+            let bytes = http_body_util::Limited::new(resp.into_body(), limit).collect().await.map_err(|_| Error::Link(format!("GET {route}: an answer over {limit} bytes")))?.to_bytes();
+            serde_json::from_slice(&bytes).map_err(|_| Error::Link(format!("GET {route}: not JSON")))
+        })
     }
 
     /// Delete a product's resource; one that's already gone (404) is done.
@@ -227,6 +276,41 @@ impl roll_secrets::aws::Sts for RollSts {
         })
     }
 
+    /// AssumeRoleWithWebIdentity isn't signed: AWS trusts roll's issuer's token, not a credential
+    /// of roll's (none is needed on the server).
+    fn assume_web_identity(&self, role_arn: &str, token: &str, session_name: &str, seconds: i32) -> Result<roll_secrets::aws::Session, String> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let conf = self.conf.get_or_init(|| aws_config::load_defaults(aws_config::BehaviorVersion::latest())).await;
+                // A server with no AWS settings at all still calls STS: the role's partition's
+                // global endpoint when no region is set.
+                let region = conf.region().cloned().unwrap_or_else(|| {
+                    aws_config::Region::from_static(match role_arn.split(':').nth(1) {
+                        Some("aws-cn") => "cn-north-1",
+                        Some("aws-us-gov") => "us-gov-west-1",
+                        _ => "us-east-1",
+                    })
+                });
+                let out = aws_sdk_sts::Client::from_conf(aws_sdk_sts::config::Builder::from(conf).region(region).build())
+                    .assume_role_with_web_identity()
+                    .role_arn(role_arn)
+                    .web_identity_token(token)
+                    .role_session_name(session_name)
+                    .duration_seconds(seconds)
+                    .send()
+                    .await
+                    .map_err(|e| sts_failure(&e))?;
+                let c = out.credentials.ok_or("STS answered without credentials")?;
+                Ok(roll_secrets::aws::Session {
+                    expires_at: c.expiration.to_millis().map_err(|_| "STS answered an expiry roll can't read")?,
+                    access_key_id: Value::new(c.access_key_id),
+                    secret_access_key: Value::new(c.secret_access_key),
+                    session_token: Value::new(c.session_token),
+                })
+            })
+        })
+    }
+
     fn iam_keys(&self, role_arn: &str, external_id: &str, user: &str) -> Result<Vec<String>, String> {
         let iam = self.iam(role_arn, external_id)?;
         Self::wait(async move {
@@ -273,6 +357,21 @@ impl RollSts {
 }
 
 /// AWS's error code, never the request (it may hold a key).
+/// Why an STS call failed: AWS's error code, else what kept it from answering (never the request).
+fn sts_failure<E: aws_sdk_sts::error::ProvideErrorMetadata, R>(e: &aws_sdk_sts::error::SdkError<E, R>) -> String {
+    use aws_sdk_sts::error::{ProvideErrorMetadata, SdkError};
+    if let Some(code) = e.code() {
+        return code.to_string();
+    }
+    match e {
+        SdkError::ConstructionFailure(_) => "the request couldn't be made (is a region set?)",
+        SdkError::TimeoutError(_) => "STS timed out",
+        SdkError::DispatchFailure(_) => "STS couldn't be reached",
+        _ => "no answer",
+    }
+    .to_string()
+}
+
 fn aws_code<E: aws_sdk_iam::error::ProvideErrorMetadata>(e: &E) -> String {
     e.code().unwrap_or("no answer").to_string()
 }
@@ -288,7 +387,13 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     o.open(path)?.write_all(text.as_bytes())
 }
 
-pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, grants: Option<Arc<dyn roll_auth::Grants>>, people: People) -> anyhow::Result<Arc<Secrets>> {
+/// How roll-access's trusted machine clients fetch their issuers' keys: the guarded client roll
+/// secrets' identities use, private addresses only where webhooks may go to them.
+pub fn oidc_fetch(args: &crate::Args, open: bool) -> Arc<dyn roll_oidc::Fetch + Send + Sync> {
+    Arc::new(syncs::OidcFetch::new(args.code_webhook_allow_private.unwrap_or(open)))
+}
+
+pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Workspace>, open: bool, api: Api, access: Arc<roll_access::Access>, people: People) -> anyhow::Result<Arc<Secrets>> {
     let system = args.code.cluster.system_database.as_deref().filter(|u| !u.is_empty());
     let target = match system {
         Some(url) => code_sql::Target::Postgres { url: url.to_string(), schema: "secrets".into() },
@@ -302,10 +407,19 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     let web_url = std::env::var("ROLL_WEB_URL").ok().filter(|u| !u.trim().is_empty());
     // Syncs' webhooks go to private addresses only where roll code's may (local development).
     let allow_private = args.code_webhook_allow_private.unwrap_or(open);
-    let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))), grants, people: Some(Arc::new(people)), kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private })), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
+    let opts = roll_secrets::Options { keyring, key_source, links: links(api.clone()), syncs: syncs::kinds(api.clone(), allow_private), open, trust_forwarded_for: args.code_trust_forwarded_for, web_url, deliver: Some(Arc::new(syncs::AuditDeliver::new(allow_private, api))),
+        // Grants are looked up when a sync made by one pushes; identities' logins mint workload tokens.
+        grants: Some(access.clone() as Arc<dyn roll_auth::Grants>),
+        workloads: Some(Arc::new(Workloads(access))),
+        people: Some(Arc::new(people)),
+        kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private })), github: Some(Arc::new(github::RollGitHub::new(allow_private))), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
     };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
+    // How many reads of values a token or a person makes a minute on this node (0: no limit).
+    if let Ok(n) = std::env::var("ROLL_SECRETS_READS_PER_MINUTE") {
+        secrets.set_reads_per_minute(n.trim().parse().map_err(|_| anyhow::anyhow!("ROLL_SECRETS_READS_PER_MINUTE is a number of reads a minute (0: no limit), not {n:?}"))?);
+    }
     // Where clients reach rolld: a CA's certificates name its CRL there.
     secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
     // A deleted project's secrets go with it.
@@ -323,6 +437,22 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     // rows), and deliveries outside it (notices, syncs, sinks), so a slow platform holds up neither.
     sweeper(secrets.clone(), "local", Secrets::sweep_local);
     sweeper(secrets.clone(), "outbound", Secrets::sweep_outbound);
+    // Syncs a change marked due, within seconds rather than at the next 30 s sweep.
+    let s = secrets.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let s = s.clone();
+            match tokio::task::spawn_blocking(move || s.sweep_due_syncs()).await {
+                Ok(Ok((_, failed))) if failed > 0 => tracing::warn!(failed, "roll secrets: some syncs failed"),
+                Ok(Ok(_)) | Ok(Err(Error::Unavailable(_))) => {}
+                Ok(Err(e)) => tracing::warn!("roll secrets: syncing failed: {e}"),
+                Err(e) => tracing::warn!("roll secrets: syncing panicked: {e}"),
+            }
+        }
+    });
     Ok(secrets)
 }
 
@@ -357,6 +487,9 @@ pub fn link_provider(api: &Api, kind: &str) -> Option<Arc<dyn LinkProvider>> {
         "bucket" => Some(Arc::new(Bucket(api.clone()))),
         "stream" => Some(Arc::new(Stream(api.clone()))),
         "nosql" => Some(Arc::new(Nosql(api.clone()))),
+        // A data-only key of the cluster's own (`ELASTICSEARCH_API_KEY`, or an OpenSearch-flavor
+        // cluster's internal user), never its password.
+        "search" => Some(Arc::new(Search(api.clone(), Default::default()))),
         _ => None,
     }
 }
@@ -783,7 +916,7 @@ impl LinkProvider for Search {
     }
     fn issue(&self, r#ref: &str, _: &str, _: &Link, label: &str, ttl: Option<u64>) -> roll_secrets::Result<Issued> {
         // Data access only (indices, templates, pipelines, lifecycle): a leaked app key can't make
-        // more keys or users. Builds of roll search before `access` ignore it.
+        // more keys or users.
         let mut body = json!({ "name": label.chars().take(64).collect::<String>(), "access": "data" });
         // A dynamic key expires by itself a little after its lease, should a revoke fail.
         if let Some(m) = ttl {
@@ -791,11 +924,12 @@ impl LinkProvider for Search {
         }
         let k = self.0.call(Method::POST, &format!("/v1/search/clusters/{}/keys", enc(r#ref)), Some(body))?;
         let id = text(&k, "/id")?;
-        // A build that says what it made must have made a data key; one that says nothing is
-        // taken as it is (docs/secrets.md, "Links": search).
-        if let Some(access) = k["access"].as_str().filter(|a| *a != "data") {
+        // roll search says what it made (#29): anything but a data key, or a key that doesn't
+        // say, is deleted and refused (docs/secrets.md, "Links": search).
+        if k["access"].as_str() != Some("data") {
             let _ = self.0.delete_gone(&format!("/v1/search/clusters/{}/keys/{}", enc(r#ref), enc(id.expose())));
-            return Err(Error::Link(format!("roll search made an {access} key, not a data one: refused (and deleted)")));
+            let made = k["access"].as_str().map_or("a key without its access".to_string(), |a| format!("an {a} key"));
+            return Err(Error::Link(format!("roll search made {made}, not a data one: refused (and deleted)")));
         }
         Ok(Issued { parts: search_parts(&k)?, handle: json!({ "id": id.expose() }) })
     }
@@ -859,6 +993,7 @@ impl roll_secrets::health::CodeRefs for CodeRefs {
 pub struct People {
     pub accounts: Arc<roll_accounts::Accounts>,
     pub code: Option<Arc<code_control::Code>>,
+    pub search: Option<Arc<search_control::Control>>,
 }
 
 impl roll_secrets::People for People {
@@ -878,11 +1013,47 @@ impl roll_secrets::People for People {
 }
 
 /// What of a person's canvas is theirs: everything for an admin; a repo under their roll code
-/// owner; nothing else until each product says who owns its resources. A failed lookup is a no.
+/// owner; a search cluster they own; nothing else until each product says who owns its resources.
+/// A failed lookup is a no.
 impl roll_workspace::Owners for People {
     fn trusts(&self, user: &str, kind: roll_workspace::Kind, r#ref: &str) -> bool {
         let Ok(Some(p)) = roll_secrets::People::person(self, user) else { return false };
-        p.admin || (kind == roll_workspace::Kind::Repo && roll_secrets::access::OwnProjects::owns_repo(p.code_owner.as_deref(), r#ref))
+        p.admin
+            || match kind {
+                roll_workspace::Kind::Repo => roll_secrets::access::OwnProjects::owns_repo(p.code_owner.as_deref(), r#ref),
+                roll_workspace::Kind::Search => self.search.as_ref().is_some_and(|s| matches!(s.store.owner_of(r#ref), Ok(Some(Some(o))) if o == user)),
+                _ => false,
+            }
+    }
+}
+
+/// After a product's own route changes a resource's credential (a password reset, a restore),
+/// tell roll secrets, so every folder linking it live moves its digest at once (watches, syncs,
+/// apps' redeploys and conditional reads see it). Without this they'd still see it within
+/// seconds: a digest reads live values' fingerprints. Only the route's pattern is looked at.
+pub async fn source_changes(axum::extract::State(s): axum::extract::State<Arc<Secrets>>, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let changed = (req.method() == Method::POST).then(|| changed_source(req.uri().path())).flatten();
+    let resp = next.run(req).await;
+    if let Some((kind, r#ref)) = changed
+        && resp.status().is_success()
+    {
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = s.source_changed(kind, &r#ref) {
+                tracing::warn!(%kind, "telling roll secrets a credential changed failed: {e}");
+            }
+        });
+    }
+    resp
+}
+
+/// The link kind and resource a credential-changing product route names.
+fn changed_source(path: &str) -> Option<(&'static str, String)> {
+    let p: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match p.as_slice() {
+        ["v1", "redis", "databases", id, "password" | "restore"] => Some(("redis", id.to_string())),
+        ["v1", "nosql", "databases", id, "password" | "reset" | "restore"] => Some(("nosql", id.to_string())),
+        ["v1", "projects", id, "branches", _, "restore" | "reset"] => Some(("postgres", id.to_string())),
+        _ => None,
     }
 }
 
@@ -944,7 +1115,9 @@ impl apps_control::integrations::SecretSource for ForApps {
             // Sensitive keys (and keys holding one through a reference) are flagged: apps seals
             // them and never shows them, not even to whoever may reveal the environment.
             let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
-            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: sensitive.contains(&name), value: value.expose().to_string(), name }).collect())
+            // Link fields that aren't credentials (a host, a port): apps' logs may show these.
+            let plain: std::collections::HashSet<String> = v.plain.into_iter().collect();
+            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect())
         })
         .await?
     }
@@ -963,6 +1136,18 @@ impl apps_control::integrations::SecretSource for ForApps {
             Err(e) => Err(e.into()),
         })
         .await?
+    }
+
+    async fn wait_digest(&self, project: &str, env: &str, since: &str, wait: std::time::Duration) -> anyhow::Result<Option<String>> {
+        let Some((secrets, _)) = self.0.get().cloned() else { return Ok(None) };
+        // Held polls are counted per principal: one per environment, so a service's watch never
+        // crowds out another's (the node's cap still holds).
+        let caller = roll_secrets::Caller::consumer(&format!("roll:apps:{project}/{env}"));
+        match roll_secrets::api::wait_digest(secrets, project.into(), env.into(), "/".into(), Some(since.into()), wait.as_secs(), caller).await {
+            Ok(d) => Ok(Some(d)),
+            Err(roll_secrets::Error::NotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// A new apps environment's own in roll secrets (`qa`), made as roll apps: a standard
@@ -991,6 +1176,40 @@ impl apps_control::integrations::SecretSource for ForApps {
             Ok(caller) => caller.allows(roll_secrets::Action::Reveal, &roll_secrets::Scope::at(project, env, "/")),
             Err(_) => false,
         }
+    }
+}
+
+/// Workload identities' logins get roll-access workload tokens (`Access::mint_workload`): the
+/// identity's scope, its addresses, for its minutes, owned by whoever made it.
+pub struct Workloads(pub Arc<roll_access::Access>);
+
+impl roll_secrets::Workloads for Workloads {
+    fn mint(&self, name: &str, rule: roll_auth::scope::Rule, ip_allow: Option<Vec<String>>, minutes: u32, owner: Option<&str>) -> roll_secrets::Result<roll_secrets::Minted> {
+        let within = roll_auth::scope::Scope(vec![rule]);
+        let new = roll_access::store::NewGrant { name: name.chars().take(64).collect(), rules: within.clone(), expires_at: None, ip_allow: ip_allow.unwrap_or_default(), rate_per_minute: None, ask_otherwise: false, ..Default::default() };
+        let (access, owner) = (self.0.clone(), owner.map(str::to_string));
+        // Logins run on the store's blocking threads (`blocking` in roll-secrets' api.rs), inside
+        // the runtime: never call this from an async task, where `block_on` panics.
+        let made = tokio::runtime::Handle::current().block_on(async move { access.mint_workload(new, &within, minutes, owner.as_deref()).await });
+        match made {
+            Ok((g, secret)) => Ok(roll_secrets::Minted { id: g.id, secret, expires_at: g.expires_at.unwrap_or_default() }),
+            Err(roll_access::Error::Forbidden(m)) => Err(Error::Forbidden(m)),
+            Err(roll_access::Error::BadRequest(m)) => Err(Error::BadRequest(m)),
+            Err(roll_access::Error::Conflict(m) | roll_access::Error::TooMany(m)) => Err(Error::TooMany(m)),
+            Err(e) => Err(Error::Internal(format!("minting a workload token: {e}"))),
+        }
+    }
+
+    /// Only a live workload grant, with why and an audit row (`false`: it had already ended).
+    fn revoke(&self, id: &str) -> roll_secrets::Result<()> {
+        self.0.revoke_workload(id, "its workload identity was deleted").map(|_| ()).map_err(|e| Error::Internal(format!("revoking a workload token: {e}")))
+    }
+
+    /// Each token as roll-access answers it now: gone once revoked or expired, or (a person's own)
+    /// once its person can't sign in.
+    fn grants(&self) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
+        let list = self.0.store.list().map_err(|e| Error::Internal(format!("listing roll-access's tokens: {e}")))?;
+        Ok(list.into_iter().filter(|g| g.revoked_at.is_none()).filter_map(|g| roll_auth::Grants::grant(&*self.0, &g.id)).collect())
     }
 }
 
@@ -1097,6 +1316,19 @@ impl code_control::SecretEnv for ForCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_roll_mcps_guard_keeps_the_guard_header() {
+        let req = || super::Request::builder().uri("/v1/secrets/projects/p/leaks").header("x-roll-guard", "1").body(super::Body::empty()).unwrap();
+        assert!(super::keep_guard_header(req()).headers().get("x-roll-guard").is_none(), "a caller's own header is dropped");
+        let call = |tool: &str| roll_access::evaluate::McpCall { tool: tool.into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false };
+        let mut other = req();
+        other.extensions_mut().insert(call("secrets_scan"));
+        assert!(super::keep_guard_header(other).headers().get("x-roll-guard").is_none(), "another tool's isn't the guard");
+        let mut guard = req();
+        guard.extensions_mut().insert(call("guard"));
+        assert!(super::keep_guard_header(guard).headers().get("x-roll-guard").is_some(), "the guard's stays");
+    }
+
     use axum::http::HeaderMap;
     use serde_json::{Value as Json, json};
     use std::sync::{Arc, Mutex};
@@ -1136,7 +1368,9 @@ mod tests {
             kms: None,
             sts: None,
             outside: None,
+            github: None,
             clouds: None,
+            workloads: None,
         };
         let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
         let set = axum::http::Request::put(format!("/v1/secrets/projects/{project}/environments/production/secrets/DB_URL"))

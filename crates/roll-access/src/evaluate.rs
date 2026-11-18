@@ -164,6 +164,7 @@ pub(crate) fn target(access: &Access, row: &Row, params: &[(String, String)], qu
             }
             r.index = row.index.and_then(param);
             r.filters_itself = row.filters_itself;
+            r.filters_index = row.filters_index;
             if let Some(name) = row.path_query {
                 let path = query.and_then(|qs| url::form_urlencoded::parse(qs.as_bytes()).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()));
                 r.path = Some(path.filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into()));
@@ -391,7 +392,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     );
     if as_user && !reachable {
         ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
-        return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents and projects".into(), json!({}));
+        return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, projects and their search clusters".into(), json!({}));
     }
     // A nested service (storage) sees its path without the prefix: the original has it.
     let mut original = req.extensions().get::<axum::extract::OriginalUri>().map_or_else(|| req.uri().clone(), |o| o.0.clone());
@@ -419,7 +420,7 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         let carried = req.extensions().get::<roll_auth::RouteRules>().map(|r| r.access(row.route));
         if !matches!(carried, Some(roll_auth::Access::Public(_) | roll_auth::Access::Product(_) | roll_auth::Access::User(_))) {
             ctx.audit(None, None, None, "deny", None, StatusCode::FORBIDDEN);
-            return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents and projects".into(), json!({}));
+            return deny(StatusCode::FORBIDDEN, "operator_only", "a user's token reaches what their account does: roll code, agents, projects and their search clusters".into(), json!({}));
         }
     }
     // Matched by its real path (a catch-all, a nest, a signed hop): the log names the real route.
@@ -541,16 +542,34 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     let resource = lent.as_ref().map(|(_, id)| id.clone()).or_else(|| describe(&target));
     let about = lent.as_ref().map_or(row.product, |(p, _)| p);
     ctx.about = lent.as_ref().map(|(p, _)| *p);
-    let mut approval_used: Option<String> = None;
+    let mut approved: Option<roll_auth::Approved> = None;
     match outcome {
         Outcome::Deny => {
             ctx.audit(Some(row), Some(action), resource.clone(), "deny", None, StatusCode::FORBIDDEN);
             let what = resource.as_deref().map_or_else(|| about.to_string(), |r| format!("{about} {r}"));
+            // Where a person can allow it: the token's page with this rule proposed (they decide;
+            // nothing widens by itself). Not for a workload's token, which is fixed.
+            let widen = (ctx.grant.kind != "workload").then(|| {
+                let (id, index) = match (&lent, &target) {
+                    (Some((_, id)), _) => (Some(id.clone()), None),
+                    (None, Target::One(r)) => (r.id.clone(), r.index.clone()),
+                    _ => (None, None),
+                };
+                let mut q = url::form_urlencoded::Serializer::new(String::new());
+                q.append_pair("add", &format!("{about}:{}", action.as_str()));
+                if let Some(id) = &id {
+                    q.append_pair("id", id);
+                }
+                if let Some(ix) = &index {
+                    q.append_pair("index", ix);
+                }
+                format!("{}/dashboard/access/tokens/{}?{}", access.web_url(), ctx.grant.id, q.finish())
+            });
             return deny(
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 format!("this token can't {action} {what}"),
-                json!({ "needs": { "product": about, "action": action, "resource": resource } }),
+                json!({ "needs": { "product": about, "action": action, "resource": resource }, "widen": widen }),
             );
         }
         Outcome::Ask if decided_before => {}
@@ -589,11 +608,11 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
             };
             let asked = Asked { headers: &parts.headers, path: original.path(), body: &bytes, request_hash, args: ctx.args.clone(), environment, scope_path, scope_index, product: about };
             match ask(&ctx, row, action, resource.clone(), asked).await {
-                Ok(id) => approval_used = Some(id),
+                Ok(a) => approved = Some(roll_auth::Approved { id: a.id.into(), by: a.decided_by.into_iter().map(Into::into).collect(), until: None }),
                 Err(resp) => return *resp,
             }
         }
-        Outcome::Allow => {}
+        Outcome::Allow => approved = remembered(&access, &ctx.grant, &scope, &target, action).await,
     }
     // Allowed: on as the operator's, narrowed, with the grant for products and the audit. A grant
     // reviews and comments only as itself (roll code takes these headers from the operator).
@@ -614,6 +633,9 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     }
     // Forwarded to an owner, it carries this decision (signed) so a person isn't asked again.
     parts.extensions.insert(roll_cluster::Decided(ctx.grant.id.clone()));
+    if let Some(a) = approved.clone() {
+        parts.extensions.insert(a);
+    }
     parts.extensions.insert(roll_auth::Grant {
         id: ctx.grant.id.as_str().into(),
         name: ctx.grant.name.as_str().into(),
@@ -658,7 +680,10 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
         resp.headers_mut().insert("roll-token-expiration", v);
     }
     if !decided_before {
-        let decision = if approval_used.is_some() { "ask" } else { "allow" };
+        // A request this approval let run is "ask"; one a remembered rule allowed is "allow", with
+        // the approval named all the same.
+        let decision = if approved.as_ref().is_some_and(|a| a.until.is_none()) { "ask" } else { "allow" };
+        let approval_used = approved.as_ref().map(|a| a.id.to_string());
         ctx.about = None;
         ctx.audit(Some(row), Some(own.0), own.1, decision, approval_used.as_deref(), resp.status());
         for (product, a, r) in seconds {
@@ -858,7 +883,7 @@ struct Asked<'a> {
 }
 
 /// Wait for a person: an approval sent with the request (`X-Roll-Approval`), or a new one.
-async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req: Asked<'_>) -> Result<String, Box<Response>> {
+async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req: Asked<'_>) -> Result<crate::store::Approval, Box<Response>> {
     // A completion never asks a person, nor waits on (or uses up) an approval an agent's call opened.
     if ctx.mcp.as_ref().is_some_and(|m| m.quiet) {
         return Err(Box::new(deny(StatusCode::FORBIDDEN, "would_ask", "this would ask a person, and a completion never does".into(), json!({}))));
@@ -920,7 +945,7 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
         "approved" => {
             let (a, id, g, h) = (access.clone(), decided.id.clone(), ctx.grant.id.clone(), decided.request_hash.clone());
             if blocking(move || a.store.consume(&id, &g, &h)).await.map_err(|e| Box::new(e.into_response()))? {
-                Ok(decided.id)
+                Ok(decided)
             } else {
                 Err(Box::new(deny(StatusCode::FORBIDDEN, "approval_used", format!("{} was already used", decided.id), json!({ "approval": decided.id }))))
             }
@@ -942,6 +967,25 @@ async fn ask(ctx: &Ctx, row: &Row, action: Action, resource: Option<String>, req
         "used" => Err(Box::new(deny(StatusCode::FORBIDDEN, "approval_used", format!("{} was already used: send the request again to ask again", decided.id), json!({ "approval": decided.id })))),
         other => Err(Box::new(deny(StatusCode::FORBIDDEN, "approval_expired", format!("the approval is {other}: send the request again to ask again"), json!({ "approval": decided.id })))),
     }
+}
+
+/// The approval whose remembered rule let an allowed request run: none when the grant's own rules
+/// allow it anyway, or no rule an approval allowed for a while covers it. The rule lasting longest
+/// is named.
+async fn remembered(access: &Arc<Access>, grant: &Grant, scope: &Scope, target: &Target, action: Action) -> Option<roll_auth::Approved> {
+    let now = code_sql::now_ms();
+    if grant.temporary.is_empty() || scope.0.len() == grant.rules.0.len() || grant.rules.outcome(target, action) == Outcome::Allow {
+        return None;
+    }
+    let t = grant
+        .temporary
+        .iter()
+        .filter(|t| t.until > now && t.approval.is_some() && Scope(vec![t.rule.clone()]).outcome(target, action) == Outcome::Allow)
+        .max_by_key(|t| t.until)?;
+    let (id, until) = (t.approval.clone()?, t.until);
+    let (a, id2) = (access.clone(), id.clone());
+    let by = blocking(move || a.store.approval(&id2)).await.ok().and_then(|a| a.decided_by);
+    Some(roll_auth::Approved { id: id.into(), by: by.into_iter().map(Into::into).collect(), until: Some(until) })
 }
 
 /// An approval once it's decided, or as it is after `max`.

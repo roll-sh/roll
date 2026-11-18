@@ -25,12 +25,17 @@
 //! - Search mode: `?tools=search` (or `X-MCP-Tools: search`) lists a search tool and two run tools
 //!   instead of every tool ([`search`]).
 
+pub mod ask;
+pub mod card;
 pub mod lockdown;
 pub mod modern;
 pub mod prompts;
 pub mod resources;
 pub mod search;
+pub mod skills;
+pub mod tasks;
 pub mod tools;
+pub mod ui;
 
 use axum::body::Body;
 use axum::extract::State;
@@ -59,6 +64,11 @@ const URL_ELICITATION_REQUIRED: i64 = -32042;
 
 /// Protocol versions spoken, newest first.
 pub const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// Every version roll speaks, newest first, as `server/discover` and the server card list them.
+pub(crate) fn supported_versions() -> Vec<&'static str> {
+    std::iter::once(modern::MODERN).chain(PROTOCOL_VERSIONS).collect()
+}
 const SSE_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(15);
 /// How often a call that asked for progress (`_meta.progressToken`) hears it's still running (it
 /// may be waiting on a person's approval), so a client doesn't give up on it.
@@ -151,11 +161,14 @@ async fn seen_by(State(m): State<Mcp>, axum::extract::Path(id): axum::extract::P
         as_user,
         ip: None,
         url_elicitation: false,
+        form_elicitation: false,
         modern: false,
         toolsets: None,
         readonly: false,
         search: false,
         lockdown: false,
+        tasks: false,
+        ui: false,
         client: None,
         names: Default::default(),
     };
@@ -186,7 +199,7 @@ async fn toolset_costs(State(m): State<Mcp>, ext: Extensions) -> Response {
     if !caller {
         return unauthorized(&m.config);
     }
-    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, client: None, as_user: false, names: Default::default() };
+    let ctx = Ctx { m, headers: HeaderMap::new(), principal: Principal::Operator, ip: None, url_elicitation: false, form_elicitation: false, modern: false, toolsets: None, readonly: false, search: false, lockdown: false, tasks: false, ui: false, client: None, as_user: false, names: Default::default() };
     let mut by: std::collections::BTreeMap<String, (usize, usize, usize)> = Default::default();
     for t in ctx.tools() {
         let e = by.entry(t["_meta"]["roll/product"].as_str().unwrap_or("code").to_string()).or_default();
@@ -362,6 +375,15 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     let declared = messages.iter().find(|m| m["method"] == "initialize").map(|m| m["params"]["capabilities"]["elicitation"].get("url").is_some());
     // A modern request says on itself what the client offers and who it is.
     let (modern_url, modern_name) = if modern { modern::client(&messages[0]) } else { (false, None) };
+    // The tasks extension, declared on a 2026-07-28 request itself.
+    let tasks = modern && tasks::declared(&messages[0]);
+    // MCP Apps: on a modern request itself, in `initialize`, or carried by the session id since.
+    let ui_declared = messages.iter().find(|m| m["method"] == "initialize").map(|m| ui::declared(&m["params"]["capabilities"]));
+    let ui = if modern {
+        ui::declared(&messages[0]["params"]["_meta"][modern::CAPABILITIES])
+    } else {
+        ui_declared.unwrap_or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).is_some_and(|v| session_rest(v).is_some_and(|r| r.starts_with(ui::SESSION_FLAG))))
+    };
     let url_elicitation = if modern { modern_url } else { declared.unwrap_or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with(SESSION_URL))) };
     // Who's calling, as it named itself in `initialize` (carried in the session id after), for
     // the audit log: a hint, never a proof.
@@ -375,7 +397,8 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
         .or_else(|| headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).and_then(session_client))
         .or_else(|| headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).and_then(roll_access::evaluate::client_name))
         .map(Arc::from);
-    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, modern, toolsets, readonly, search, lockdown, client, names: Default::default() });
+    let form_elicitation = modern && modern::form_elicitation(&messages[0]);
+    let ctx = Arc::new(Ctx { m, headers, principal, ip, as_user, url_elicitation, form_elicitation, modern, toolsets, readonly, search, lockdown, tasks, ui, client, names: Default::default() });
     // A call that asked for progress, from a client that takes a stream: answered as one, with
     // progress until the answer (MCP's `notifications/progress`).
     let progress = accepts_sse(&ctx.headers).then(|| messages.iter().find(|m| m["method"] == "tools/call").and_then(|m| m["params"]["_meta"].get("progressToken").cloned())).flatten();
@@ -399,17 +422,24 @@ async fn handle(State(m): State<Mcp>, uri: axum::http::Uri, ext: Extensions, hea
     if let Some(url) = declared {
         use base64::Engine;
         let name = named.map(|n| format!("{}.", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(n))).unwrap_or_default();
-        if let Ok(v) = HeaderValue::from_str(&format!("{}{name}{}", if url { SESSION_URL } else { SESSION_PLAIN }, roll_access::new_id("s"))) {
+        let flag = if ui_declared == Some(true) { ui::SESSION_FLAG } else { "" };
+        if let Ok(v) = HeaderValue::from_str(&format!("{}{flag}{name}{}", if url { SESSION_URL } else { SESSION_PLAIN }, roll_access::new_id("s"))) {
             resp.headers_mut().insert("mcp-session-id", v);
         }
     }
     resp
 }
 
-/// The client name a session id carries (`roll-url-1.<base64>.<random>`), cleaned again.
+/// What follows a session id's prefix: its flags (`~ui.`), the client's name, a random part.
+fn session_rest(id: &str) -> Option<&str> {
+    id.strip_prefix(SESSION_URL).or_else(|| id.strip_prefix(SESSION_PLAIN))
+}
+
+/// The client name a session id carries (`roll-url-1.[~ui.]<base64>.<random>`), cleaned again.
 fn session_client(id: &str) -> Option<String> {
     use base64::Engine;
-    let rest = id.strip_prefix(SESSION_URL).or_else(|| id.strip_prefix(SESSION_PLAIN))?;
+    let rest = session_rest(id)?;
+    let rest = rest.strip_prefix(ui::SESSION_FLAG).unwrap_or(rest);
     let (encoded, _) = rest.split_once('.')?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded).ok()?;
     roll_access::evaluate::client_name(&String::from_utf8_lossy(&bytes))
@@ -466,6 +496,8 @@ struct Ctx {
     as_user: bool,
     /// The client opens URLs for elicitation: an approval comes back as one to open, then retry.
     url_elicitation: bool,
+    /// A 2026-07-28 client that fills in forms: a call missing an id asks for it (`ask`).
+    form_elicitation: bool,
     /// A modern request (2026-07-28): served on its own, its answers marked as that revision's.
     modern: bool,
     /// The products whose tools are listed (`None`: every product's).
@@ -476,6 +508,10 @@ struct Ctx {
     search: bool,
     /// Text written by people who can't push to the repo is withheld from results (`?lockdown=1`).
     lockdown: bool,
+    /// The request declares 2026-07-28's tasks extension: a long call may answer with a task.
+    tasks: bool,
+    /// The host renders MCP Apps (`ui`): tools that show rows point at roll's table view.
+    ui: bool,
     /// The client's name and version, as it said in `initialize`.
     client: Option<Arc<str>>,
     /// The names of the tools it's offered, worked out once per request (prompts, completions and
@@ -567,9 +603,16 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         let resp = match method {
             "initialize" => rpc_result(id, initialize(ctx, &params)),
-            "server/discover" => rpc_result(id, modern::discover(&PROTOCOL_VERSIONS, capabilities(), instructions(ctx))),
+            "server/discover" => rpc_result(id, modern::discover(&PROTOCOL_VERSIONS, capabilities(tasks_available(ctx)), instructions(ctx))),
             "ping" => rpc_result(id, json!({})),
-            "tools/list" => rpc_result(id, json!({ "tools": if ctx.search { search::listed(&ctx.tools()) } else { ctx.tools() } })),
+            "tools/list" => {
+                let mut tools = if ctx.search { search::listed(&ctx.tools()) } else { ctx.tools() };
+                // A host that renders MCP Apps shows the tools that answer rows in roll's table.
+                if ctx.ui && !ctx.search {
+                    ui::attach(&mut tools);
+                }
+                rpc_result(id, json!({ "tools": tools }))
+            }
             "tools/call" => {
                 let mut name = params.get("name").and_then(Value::as_str).unwrap_or("").to_string();
                 let mut args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
@@ -590,21 +633,40 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                     rpc_error(id, -32602, "arguments must be an object")
                 } else if ctx.readonly && !tool_names(ctx).contains(&name) {
                     rpc_result(id, json!({ "content": [{ "type": "text", "text": format!("{name} isn't read-only, and this connection is (?readonly=1): connect without it to change things") }], "isError": true }))
+                } else if let Some(r) = ask_for_missing(ctx, &name, &mut args, &params).await {
+                    rpc_result(id, r)
                 } else {
-                    match call(ctx, &name, args).await {
-                        Some(r) if ctx.url_elicitation && r["structuredContent"]["status"] == "approval_pending" && r["structuredContent"]["url"].as_str().is_some_and(|u| !u.is_empty()) => {
+                    // A client that takes tasks gets one for a call that runs long (or waits for
+                    // a person); everyone else waits for the answer.
+                    let answered = if tasks::on(ctx) { tasks::call_or_task(ctx, &name, args).await } else { Ok(call(ctx, &name, args).await) };
+                    match answered {
+                        Err(task) => rpc_result(id, task),
+                        Ok(Some(r)) if ctx.url_elicitation && r["structuredContent"]["status"] == "approval_pending" && r["structuredContent"]["url"].as_str().is_some_and(|u| !u.is_empty()) => {
                             // 2026-07-28 asks for it in the result (Multi Round-Trip Requests);
                             // earlier revisions as URL elicitation's error.
                             if ctx.modern { rpc_result(id, modern::approval_input_required(&r)) } else { approval_elicitation(id, &r) }
                         }
-                        Some(r) => rpc_result(id, r),
-                        None => rpc_error(id, -32602, format!("unknown tool {name:?}")),
+                        Ok(Some(r)) => rpc_result(id, r),
+                        Ok(None) => rpc_error(id, -32602, format!("unknown tool {name:?}")),
                     }
                 }
             }
-            "resources/list" => rpc_result(id, json!({ "resources": resources::list() })),
+            "tasks/get" | "tasks/update" | "tasks/cancel" => match tasks::method(ctx, method, &params).await {
+                Ok(v) => rpc_result(id, v),
+                Err((code, message)) => rpc_error(id, code, message),
+            },
+            "resources/list" => {
+                let mut all = resources::list().as_array().cloned().unwrap_or_default();
+                // The MCP Apps view, for a host that renders it; then the skills' files.
+                if ctx.ui {
+                    all.push(ui::resource());
+                }
+                all.extend(skills::resources(&tool_names(ctx)));
+                rpc_result(id, json!({ "resources": all }))
+            }
             "resources/read" => match params.get("uri").and_then(Value::as_str) {
                 Some(resources::GUIDE) => rpc_result(id, resources::guide()),
+                Some(ui::TABLE) => rpc_result(id, ui::read()),
                 Some(resources::ME) => match read_me(ctx).await {
                     Ok(v) => rpc_result(id, v),
                     Err((message, data)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32603, "message": message, "data": data } }),
@@ -621,7 +683,17 @@ async fn process(ctx: &Arc<Ctx>, messages: Vec<Value>) -> Vec<Value> {
                         }
                     }
                 }
+                Some(uri) if uri.starts_with("skill://") => match skills::read(uri, &tool_names(ctx)) {
+                    Some(v) => rpc_result(id, v),
+                    // The Skills extension's answer for a file roll doesn't serve.
+                    None => rpc_error(id, -32602, format!("No skill file is served at {uri}")),
+                },
                 other => rpc_error(id, -32002, format!("resource not found: {}", other.unwrap_or(""))),
+            },
+            "skills/list" => rpc_result(id, skills::list(&tool_names(ctx))),
+            "skills/get" => match skills::get(params.get("uri").and_then(Value::as_str).unwrap_or(""), &tool_names(ctx)) {
+                Ok(v) => rpc_result(id, v),
+                Err(e) => rpc_error(id, -32602, e),
             },
             "resources/templates/list" => rpc_result(id, json!({ "resourceTemplates": resources::templates(&tool_names(ctx)) })),
             "prompts/list" => rpc_result(id, prompts::list(&tool_names(ctx))),
@@ -673,6 +745,37 @@ async fn complete(ctx: &Arc<Ctx>, params: &Value) -> Result<Value, String> {
     Ok(json!({ "completion": { "values": values, "hasMore": more } }))
 }
 
+/// A call missing an id it needs, from a client that fills in forms: the person's choice from the
+/// retry's `inputResponses` goes into `args`; while one is still missing, the form asking for it
+/// (its choices what the connection may read), or why the call stops. `None`: run the call.
+async fn ask_for_missing(ctx: &Arc<Ctx>, name: &str, args: &mut Value, params: &Value) -> Option<Value> {
+    if !ctx.form_elicitation {
+        return None;
+    }
+    let refused = |why: String| json!({ "content": [{ "type": "text", "text": why }], "isError": true });
+    if let Some(responses) = params.get("inputResponses")
+        && let Err(why) = ask::fill(args, responses)
+    {
+        return Some(refused(why));
+    }
+    // Only a tool this connection is offered; the gate still decides the call.
+    let tool = tools::all().iter().find(|t| t.name == name).filter(|_| tool_names(ctx).iter().any(|n| n == name))?;
+    let (param, src) = ask::missing(tool, args)?;
+    if !tool_names(ctx).iter().any(|t| t == src.tool) {
+        return None;
+    }
+    // The choices, read through the gate with the caller's token (never asking a person).
+    let answer = call_as(ctx, src.tool, (src.args)(args), true).await?;
+    if answer["isError"] == true {
+        return None;
+    }
+    let (values, more) = prompts::values(&answer["structuredContent"], src.fields, "");
+    if values.is_empty() {
+        return None;
+    }
+    Some(ask::input_required(tool.title, param, &values, more))
+}
+
 /// The names of the tools this connection is offered (what prompts may use).
 fn tool_names(ctx: &Ctx) -> Vec<String> {
     ctx.names.get_or_init(|| ctx.tools().iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()).clone()
@@ -696,15 +799,34 @@ fn initialize(ctx: &Ctx, params: &Value) -> Value {
     let version = if PROTOCOL_VERSIONS.contains(&asked) { asked } else { PROTOCOL_VERSIONS[0] };
     json!({
         "protocolVersion": version,
-        "capabilities": capabilities(),
+        "capabilities": capabilities(false),
         "serverInfo": { "name": "roll", "title": "roll", "version": env!("CARGO_PKG_VERSION"), "icons": [server_icon()] },
         "instructions": instructions(ctx),
     })
 }
 
 /// What roll offers, the same in `initialize` and `server/discover`.
-fn capabilities() -> Value {
-    json!({ "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false }, "prompts": { "listChanged": false }, "completions": {} })
+fn capabilities(tasks: bool) -> Value {
+    let mut c = json!({
+        "tools": { "listChanged": false },
+        "resources": { "listChanged": false, "subscribe": false },
+        "prompts": { "listChanged": false },
+        "completions": {},
+        // Skills over MCP: `skills/list`, `skills/get`, and their files as resources (no directories).
+        "extensions": { skills::EXT: {} },
+    });
+    // MCP Apps: HTML views for the hosts that render them.
+    c["extensions"][ui::EXT] = json!({});
+    // 2026-07-28's tasks extension, where results can be sealed (tasks::on).
+    if tasks {
+        c["extensions"][tasks::EXT] = json!({});
+    }
+    c
+}
+
+/// Whether this server makes tasks at all (a client still has to declare the extension).
+fn tasks_available(ctx: &Ctx) -> bool {
+    ctx.m.config.access.as_ref().is_some_and(|a| a.sinks.get().is_some())
 }
 
 /// How to use roll, for the model: who the connection is and how approvals work.
@@ -731,7 +853,7 @@ Read the resource roll://access/me for what this connection may do, in words, an
 
 /// roll's Horizon mark for clients that show a server's icon (2025-11-25): the dashboard's favicon,
 /// the brand export's output, inline so it needs no public URL. Sent once, in `initialize`.
-fn server_icon() -> Value {
+pub(crate) fn server_icon() -> Value {
     use base64::Engine;
     static ICON: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         // The crate's own copy of the dashboard's favicon (`@roll/brand`'s export): roll-mcp builds
@@ -967,7 +1089,11 @@ async fn outcome(tool: &str, resp: Response) -> Value {
         }
         let text = match status {
             StatusCode::UNAUTHORIZED => format!("{msg}: the token isn't valid any more (reconnect)"),
-            StatusCode::FORBIDDEN => format!("not allowed: {msg}"),
+            // Where the person can allow it, when roll says (the token's page, the rule proposed).
+            StatusCode::FORBIDDEN => match body.get("widen").and_then(Value::as_str) {
+                Some(w) => format!("not allowed: {msg}. If the user wants this token to be able to, they can allow it here: {w}"),
+                None => format!("not allowed: {msg}"),
+            },
             StatusCode::NOT_FOUND => format!("not found: {msg}"),
             _ => msg,
         };

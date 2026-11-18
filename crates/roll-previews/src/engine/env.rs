@@ -17,6 +17,8 @@ impl EnvSource for Engine {
                 Some(_) => anyhow::bail!("the change moved on: the preview is updating"),
                 None => anyhow::bail!("the change was deleted"),
             }
+        } else if !self.git_head_may_run(&r)? {
+            anyhow::bail!("this pull request's head isn't approved to run (POST …/approve)");
         }
         let s = self.store.settings(&r.project_id)?;
         let services = self.store.services(preview)?;
@@ -67,15 +69,13 @@ impl EnvSource for Engine {
         // A protected base (production) reaches a preview only when the project allows it and
         // the change is trusted; a fork's code never gets it.
         let untrusted = !(s.secrets.allow_production && r.trusted);
-        let (secrets, leases) = self.resolve_secrets(&r, untrusted, service).await?;
+        let (secrets, leases, plain) = self.resolve_secrets(&r, untrusted, true, service).await?;
         self.keep_leases(&r, service, &leases).await?;
-        for (k, v) in secrets {
-            set(&mut env, &k, v);
-        }
-        for (k, v) in project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(preview)?) {
-            set(&mut env, &k, v);
-        }
-        for (k, v) in self.resource_env(preview).await? {
+        let own: Vec<(String, String)> = project_env(&s, r.branch.as_deref()).into_iter().chain(self.store.vars(preview)?).collect();
+        let branches = self.resource_env(preview).await?;
+        // Its logs hide what this start is given (its dynamic credentials included).
+        self.add_masks(preview, masks::secret_values(&secrets, &plain, &own, &branches));
+        for (k, v) in secrets.into_iter().chain(own).chain(branches) {
             set(&mut env, &k, v);
         }
         if s.mail == crate::settings::MailRule::Catch {
@@ -109,7 +109,8 @@ impl EnvSource for Engine {
             bypass_sha256: None,
             // The runtime's proxy adds the button per request (`runtime::Tagger`).
             feedback: false,
-            egress: s.egress,
+            egress: s.egress_for(r.trusted),
+            egress_hosts: s.egress_hosts.clone(),
         };
         Ok((t, env))
     }
