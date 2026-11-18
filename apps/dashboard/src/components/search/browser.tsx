@@ -167,7 +167,9 @@ function Keys({ cluster }: { cluster: SearchCluster }) {
   };
 
   const snippetTarget = made?.application ?? made?.indices?.[0] ?? (target.split(",")[0]?.trim() || (kind === "application" ? "my-app" : "products"));
-  const code = quickstart(snippet, cluster.url, snippetTarget, made?.api_key);
+  // The key is never written out on screen: the copy carries it while it's shown once.
+  const code = quickstart(snippet, cluster.url, snippetTarget);
+  const copyText = quickstart(snippet, cluster.url, snippetTarget, made?.api_key);
 
   if (opensearch) {
     return (
@@ -351,7 +353,10 @@ function Keys({ cluster }: { cluster: SearchCluster }) {
           <h3 className="flex items-center gap-2 text-[13px] font-medium">
             <Globe className="size-3.5 text-muted" strokeWidth={1.5} /> Quickstart
           </h3>
-          <CopyButton id="browser-snippet" text={code} copied={copied} onCopy={copy} />
+          <span className="flex items-center gap-2">
+            {made && <span className="text-[12px] text-subtle">copies with the new key</span>}
+            <CopyButton id="browser-snippet" text={copyText} copied={copied} onCopy={copy} />
+          </span>
         </div>
         <div className="flex gap-1 overflow-x-auto px-4 py-2">
           {SNIPPETS.map((s) => (
