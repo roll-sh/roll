@@ -1047,6 +1047,21 @@ async fn a_token_reaches_only_its_environments_folders_and_actions() {
     }
     let (_, who) = api.req(Method::GET, "/v1/secrets/whoami", None, Some(&token)).await;
     assert_eq!(who["project"].as_str(), Some(api.project.as_str()));
+    // A token in a loop is told to slow down before it decrypts and audits without end; the
+    // operator sets how far (600 a minute unless told).
+    api.secrets.set_reads_per_minute(5);
+    let mut refused = None;
+    for _ in 0..6 {
+        let (s, v) = api.req(Method::GET, "/environments/production/values?path=/api", None, Some(&token)).await;
+        if s == StatusCode::TOO_MANY_REQUESTS {
+            refused = Some(v["code"].clone());
+            break;
+        }
+    }
+    assert_eq!(refused, Some(json!("rate_limited")));
+    api.secrets.set_reads_per_minute(600);
+    let (s, _) = api.req(Method::GET, "/environments/production/values?path=/api", None, Some(&token)).await;
+    assert_eq!(s, StatusCode::OK);
     // A project-wide read answers per environment; one about the project as a whole (other
     // environments' key names, shares, required keys) needs a rule over all of it.
     assert_eq!(api.req(Method::GET, "/environments", None, Some(&token)).await.0, StatusCode::OK);

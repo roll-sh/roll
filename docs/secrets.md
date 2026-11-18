@@ -2498,6 +2498,16 @@ code owner (`ada/…`).
   could hand a stranger's previews their variables (say, a `DATABASE_URL` pointing at their own
   server), or watch a stranger's landings for their values.
 
+### Read quotas
+
+A token or a person reads values at most 600 times a minute, counted across every node in the
+database they share (the operator sets it:
+`ROLL_SECRETS_READS_PER_MINUTE`, 0 for no limit), as Vault's rate-limit quotas: past that,
+`…/values`, `…/resolve` and a key's reveal answer 429 (`rate_limited`) for the rest of the minute,
+before anything is decrypted, issued or audited. roll's own runtimes (apps, previews, checks,
+syncs, workload identities' logins) and the operator aren't held to it. A service that reads in a
+loop should cache (the clients' `cacheTtl`) or follow the digest (`watch`).
+
 ### Reach
 
 `GET …/environments/{env}/reach?path=&key=` (`roll secrets reach [KEY]`, a key's menu "Who can
@@ -3296,7 +3306,9 @@ rotating a database's admin password and editing registrations in place (#75), s
    rotations, KMS refusals, live leases and failing work (Vault telemetry, CloudWatch).
 3. **Scheduled sealed backups** (building: into one of the project's roll buckets, read back and
    pruned to `keep`; S3 next), as Vault's snapshots and Akeyless' DR.
-4. **Read quotas per token** on values, resolve and reveal (Vault's rate-limit quotas).
+4. **Read quotas per token** on values, resolve and reveal (Vault's rate-limit quotas; built:
+   `feature/roll-secrets-read-quotas`, 600 a minute per token or person, the operator's
+   `ROLL_SECRETS_READS_PER_MINUTE`).
 5. **Rotation windows and schedules** (`Sun 02:00–04:00`, `rate(30 days)`, cron) and **password
    policies per key** (length, classes, a target's rules) for every generated value (AWS Secrets
    Manager, Vault password policies).
@@ -3312,12 +3324,15 @@ rotating a database's admin password and editing registrations in place (#75), s
    the cache, transit); its Spring `PropertySource` adapter is next.
 10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
    CAs**.
-11. *The user's call:* land the stack (#62, then #63–#73; roll search before #62).
-12. *Waits on roll MCP's #25 on `main`:* #64 (#30 onto #62: roll-access's tokens replace `rlst_`;
+11. *Landing (approved):* #20 and #62 are on main; the follow-ups go one at a time when the merge
+   lock is free (the order is in "Landing").
+12. *Unblocked (#25 is on `main`):* #64 rebuilt on main (#30 onto #62: roll-access's tokens replace `rlst_`;
    roll MCP's `feature/mcp-on-landing` is #25 with it, its gate passing), then a workload identity
    a person creates asks roll-access's policy (held until an admin approves), and the Access tab
    shows tokens waiting for approval and rotations that keep the old secret (`keep_old_for_s`).
-13. *Waits on other threads:* transit keys scoped by name (#24/#25 with #47), a live check of
+13. *Waits on other threads:* transit keys scoped by name (roll MCP's #80 puts `.index("name")` on
+   every per-key row; then `GET …/transit` lists only the keys the grant allows, marked
+   `filters_itself`, with roll-auth's `filters_itself` letting an index-limited rule through), a live check of
    OpenSearch links (#29 with #51), roll redis and nosql keeping a rotated password a while,
    splitting the CLI's `secrets.rs` once the stack has landed.
 14. *Waits on linking chat users to roll accounts:* approving change requests from Slack.

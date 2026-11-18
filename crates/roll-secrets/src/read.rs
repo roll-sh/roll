@@ -397,6 +397,57 @@ impl Secrets {
     }
 }
 
+/// Value reads a principal may make in a minute across every node unless the operator says otherwise
+/// (`ROLL_SECRETS_READS_PER_MINUTE`), as Vault's rate-limit quotas: a token or a person in a loop is
+/// told to slow down (429) before it decrypts, audits and issues without end. roll's own runtimes
+/// (apps, previews, checks, syncs, workload identities' logins) and the operator aren't held to it.
+pub(crate) const READS_PER_MINUTE: u32 = 600;
+
+impl Secrets {
+    /// How many reads of values a principal may make in a minute on this node; 0: no limit.
+    pub fn set_reads_per_minute(&self, n: u32) {
+        self.reads_per_minute.store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Count one read of values for `caller`; past the limit in this minute, refused.
+    pub(crate) fn read_quota(&self, caller: &Caller) -> Result<()> {
+        let max = self.reads_per_minute.load(std::sync::atomic::Ordering::Relaxed);
+        if max == 0 || caller.runtime || caller.principal == "operator" {
+            return Ok(());
+        }
+        // Counted in the database every node shares, so a fleet allows the limit, not N times it.
+        let minute = self.db.now_ms()? / 60_000;
+        let n: i64 = self.db.write(|c| {
+            c.query_row(
+                "INSERT INTO read_counts (principal, minute, n) VALUES (?, ?, 1) ON CONFLICT (principal, minute) DO UPDATE SET n = read_counts.n + 1 RETURNING n",
+                params![caller.principal, minute],
+                |r| r.get(0),
+            )
+        })?;
+        if n > max as i64 {
+            return Err(Error::TooMany(format!("more than {max} reads of values a minute: slow down, or cache them (watches follow the digest)")));
+        }
+        Ok(())
+    }
+
+    /// Minutes of read counts that have passed (the sweeper).
+    pub(crate) fn forget_read_counts(&self) -> Result<()> {
+        let minute = self.db.now_ms()? / 60_000;
+        self.db.write(|c| c.execute("DELETE FROM read_counts WHERE minute < ?", [minute - 1]))?;
+        Ok(())
+    }
+}
+
+/// Reads of values per principal and minute, for the read quota.
+pub(crate) const READS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS read_counts (
+    principal TEXT NOT NULL,
+    minute INTEGER NOT NULL,
+    n INTEGER NOT NULL,
+    PRIMARY KEY (principal, minute)
+) WITHOUT ROWID;
+";
+
 impl Secrets {
     /// The effective entries of a folder; `shared` leaves out the caller's personal values.
     /// Imports and the base show through only where the caller may `action` them.
@@ -462,6 +513,7 @@ impl Secrets {
     pub fn reveal(&self, project: &str, slug: &str, path: &str, key: &str, resolve: bool, caller: &Caller) -> Result<(Value, Vec<Problem>)> {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        self.read_quota(caller)?;
         let narrowed = self.caller_for(project, slug, caller)?;
         let caller = &narrowed;
         let dek = self.project(project)?;
@@ -494,6 +546,7 @@ impl Secrets {
     pub fn values_for(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, dynamic: bool, caller: &Caller) -> Result<Values> {
         let path = names::path(path)?;
         caller.need(Action::Reveal, &Scope::at(project, slug, &path))?;
+        self.read_quota(caller)?;
         let narrowed = self.caller_for(project, slug, caller)?;
         let caller = &narrowed;
         let dek = self.project(project)?;
