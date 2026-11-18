@@ -312,6 +312,10 @@ export type OutsideDatabase = { id: string; name: string; host: string; roles: s
 /** A GitHub App's installation; `repositories` and `permissions` are the most its tokens may reach. */
 export type GitHubApp = { id: string; name: string; app_id: number; installation_id: number; api_base: string; repositories: string[]; permissions: Record<string, string>; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
+/** A Kubernetes cluster whose service accounts get short-lived tokens per lease (dynamic `kubernetes` links); the admin token and the CA stay sealed. */
+export type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
+/** `token`: a service account token that may create tokens; `ca_pem`: the cluster's CA, when it isn't publicly trusted. */
+export type NewKubernetesCluster = { name: string; api_url: string; ca_pem?: string; token: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 
 /** A `roll-seal-v1` box (base64url fields): X25519 to the recipient, HKDF-SHA256, AES-256-GCM. */

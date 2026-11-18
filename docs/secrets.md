@@ -236,6 +236,9 @@ Three ways, as the best products offer:
   be restarted waits in `status.pendingRestarts` and is tried again on every pass.
 - **Push (the `kubernetes` sync)**: roll writes a Secret with credentials for the cluster it holds,
   sealed. For clusters roll can reach and the operator can't run in.
+
+Access *to* a cluster is the other way round: roll issues short-lived service account tokens per
+lease (["Kubernetes service-account tokens"](#kubernetes-service-account-tokens)).
 ## Customer-managed keys
 A project's data key can be wrapped once more by a KMS key in the customer's own AWS account, as
 Infisical's external KMS does (`PUT …/kms {key: "arn:aws:kms:…"}`, `roll secrets kms set ARN`;
@@ -1115,6 +1118,42 @@ cloud trusts roll's token for one project the way it trusts GitHub Actions' toke
   early or extended: a lease that ends leaves it valid until it expires, an hour at most; resolve again for a
   new one. An account a key links to can't be deleted. `roll secrets clouds ls` prints the issuer and
   subject to trust; `roll secrets clouds add-gcp` / `add-azure` register one.
+### Kubernetes service-account tokens
+A short-lived token of a Kubernetes service account for each lease, as Vault's Kubernetes secrets
+engine gives, so a pod, a CI job or a person gets cluster access for minutes rather than a token
+that never expires.
+- **Register a cluster** (`POST …/kubernetes {name, api_url, ca_pem?, token}`, `admin`; `roll
+  secrets kubernetes-clusters add NAME API_URL [--ca FILE]` with the token on stdin, or the
+  dashboard's Syncs page). `token` is a service account token roll manages the cluster with: it
+  needs `create` on `serviceaccounts/token` in the namespaces links name, and nothing more (a
+  ClusterRole with that one rule, bound per namespace). `api_url` is the API server's `https://`
+  URL. It's a URL the tenant chose, so every call goes through rolld's guarded client: public
+  addresses only, no redirects, a 15 s timeout, a bounded answer. `ca_pem` is the cluster's CA
+  (PEM), when its API server's certificate isn't publicly trusted (most self-managed clusters,
+  EKS, GKE): then that cluster's calls trust only it, and nothing else's calls trust it. The token
+  and the CA are sealed with the project's data key; the answer (`KubernetesCluster`) shows the
+  URL and whether there's a CA, never either. Registering calls `GET /api` with the token first:
+  the address, the TLS trust and the token must all work. A cluster a key links to, or with a
+  lease still live, can't be deleted (409).
+- **Link a key** to the cluster in `dynamic` mode (the only mode), naming an existing service
+  account in the options: `{kind: "kubernetes", ref: "kube_…", field: "token", mode: "dynamic",
+  options: {namespace, service_account, audiences?, ttl_minutes?}}`. Each resolve that asks for
+  dynamic credentials calls the TokenRequest API (`POST
+  /api/v1/namespaces/{namespace}/serviceaccounts/{service_account}/token`, `expirationSeconds` the
+  lease's TTL, `audiences` when set, else the API server's own) and records a lease. The fields are
+  `token` (the credential), and `api_url` and `ca` (plain, from the registration), so a pod or a
+  CI job can build a kubeconfig; keys of one environment linked to the same cluster with the same
+  options share one token. Code nobody vetted (checks, sandboxes, previews) never gets one, as with
+  every dynamic link.
+- **A token lives until its expiry.** A bound service-account token can't be revoked on its own:
+  ending a lease (`DELETE …/leases/{id}`, or its expiry) records the revocation, and the audit row
+  says the token still works until it expires. So keep `ttl_minutes` short: 15 minutes at least
+  (roll's floor; Kubernetes' own is 10), a day at most, and leases don't renew (resolve again). roll
+  never hands out a token the API server made to outlive its lease. To cut access at once, delete
+  the service account or its RoleBinding in the cluster. Errors name the cluster's host and the
+  status (with roll's hint for 401, 403 and 404), never a token or the API server's message.
+- Not built yet: Vault's generated roles (`role_rules`: a temporary service account, Role and
+  RoleBinding per lease, deleted when it ends).
 ### Certificates
 A project's own certificate authority, as Vault's PKI engine and Infisical's PKI give: short-lived
 TLS certificates for services (mTLS between them), with no CA to run.
@@ -1332,6 +1371,7 @@ roll secrets leases  [--renew ID | --revoke ID]
 roll secrets databases ls | add NAME [--role A --role B] [--group G] [--ca FILE] (admin URL on stdin) | rm ID
 roll secrets aws-users ls | add NAME USER --role ROLE | rm ID
 roll secrets clouds  ls | add-gcp NAME --audience A --service-account SA | add-azure NAME --tenant T --client-id C [--scope S] | rm ID
+roll secrets kubernetes-clusters ls | add NAME API_URL [--ca FILE] (admin token on stdin) | rm ID
 roll secrets cas     ls | add NAME --domain D… [--allow-ip] [--max-days N] | cert ID | sign ID [CSR|-] [--days N] [--chain]
                      | certs ID | revoke ID SERIAL | rm ID
 roll secrets ssh-cas ls | add NAME [--principal P…] [--max-hours N] [--host-domain D…] [--max-host-days N] | key ID
@@ -2591,6 +2631,9 @@ isn't in the workspace is 404.
 | `GET /cloud-accounts` | | `CloudAccount[]` (`read` on the project) |
 | `POST /cloud-accounts` | `{name, cloud: "gcp", audience, service_account}` or `{name, cloud: "azure", tenant, client_id, scope?}` | 201 `CloudAccount` (`admin`; 400 when a made-up project's token is taken, or this project's isn't) |
 | `DELETE /cloud-accounts/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `GET /kubernetes` | | `KubernetesCluster[]` (`read` on the project; never the token or the CA) |
+| `POST /kubernetes` | `{name, api_url, ca_pem?, token}` | 201 `KubernetesCluster` (`admin`; calls `GET /api` with the token first: 400 with the host and status) |
+| `DELETE /kubernetes/{id}` | | 204; 409 while a key links to it or a lease is live (`admin`) |
 | `GET /github-apps` | | `GitHubApp[]` (`read` on the project; never the key) |
 | `POST /github-apps` | `{name, app_id, installation_id, private_key, repositories, permissions, api_base?}` | 201 `GitHubApp` (`admin`; gets and revokes a token first: 400 with GitHub's reason) |
 | `DELETE /github-apps/{id}` | | 204; 409 while a key links to it or a lease holds a token (`admin`) |
@@ -2691,6 +2734,7 @@ type Finding = { issue: "expired" | "rotation_failing" | "revoke_failing" | "mis
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Finding = { issue: "expired" | "missing" | "exposed" | "public" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
+type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
 type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to" | "hidden"; from: number | null; to: number | null }[] };

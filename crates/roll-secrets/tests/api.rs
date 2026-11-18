@@ -123,6 +123,26 @@ impl roll_secrets::Deliver for Sent {
         self.0.lock().unwrap().push(json!({ "format": format, "token": token.map(|t| t.expose().to_string()), "events": body["events"] }));
         Ok(())
     }
+    /// A Kubernetes API server at `KUBE` taking only the admin token: discovery, and TokenRequest
+    /// for `ci/deployer` (each request kept, with the CA it trusted, as `{"kube": …}`).
+    fn request_trusting(&self, ca: Option<&str>, method: &str, url: &str, headers: &[(&str, &Secret)], body: Option<(&str, &Secret)>, _: usize) -> roll_secrets::Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        let admin = headers.iter().any(|(h, v)| *h == "authorization" && v.expose() == "Bearer fake-admin-token");
+        let (status, answer) = match (method, url.strip_prefix(KUBE)) {
+            _ if !admin => (401, json!({ "kind": "Status", "reason": "Unauthorized" })),
+            ("GET", Some("/api")) => (200, json!({ "kind": "APIVersions", "versions": ["v1"] })),
+            ("POST", Some("/api/v1/namespaces/ci/serviceaccounts/deployer/token")) => {
+                let sent: Value = serde_json::from_str(body.unwrap().1.expose()).unwrap();
+                let mut kept = self.0.lock().unwrap();
+                kept.push(json!({ "kube": { "ca": ca, "request": sent } }));
+                let n = kept.iter().filter(|b| b.get("kube").is_some()).count();
+                let t = time::OffsetDateTime::now_utc() + time::Duration::seconds(sent["spec"]["expirationSeconds"].as_i64().unwrap());
+                let expires = format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", t.year(), t.month() as u8, t.day(), t.hour(), t.minute(), t.second());
+                (201, json!({ "kind": "TokenRequest", "spec": sent["spec"], "status": { "token": format!("fake-sa-token-{n}"), "expirationTimestamp": expires } }))
+            }
+            _ => (404, json!({ "kind": "Status", "reason": "NotFound" })),
+        };
+        Ok((status, answer.to_string().into_bytes().into()))
+    }
     fn get(&self, url: &str, _: usize) -> roll_secrets::Result<Vec<u8>> {
         let doc = match url.strip_prefix(ISSUER) {
             Some("/.well-known/openid-configuration") => json!({ "issuer": ISSUER, "jwks_uri": format!("{ISSUER}/keys") }),
@@ -147,6 +167,8 @@ impl roll_secrets::Deliver for Sent {
 
 const ISSUER: &str = "https://token.actions.githubusercontent.com";
 const ISSUER_URL: &str = "https://roll.example/v1/secrets/oidc";
+const KUBE: &str = "https://kube.example";
+const KUBE_CA: &str = "-----BEGIN CERTIFICATE-----\nfake-cluster-ca\n-----END CERTIFICATE-----";
 
 /// GCP and Azure: they trust roll's token only for the pinned subject, and keep what they saw.
 #[derive(Default)]
@@ -1836,6 +1858,48 @@ async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
     assert_eq!((renamed["name"].as_str(), renamed["host"].as_str()), (Some("billing-eu"), Some("db.example:5432")));
     let lease = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;
     assert!(password(lease["values"]["TMP_USER"].as_str().unwrap()).is_some(), "its links carry on through the new URL");
+}
+
+#[tokio::test]
+async fn a_kubernetes_cluster_issues_short_lived_service_account_tokens() {
+    let api = Api::new().await;
+    let (s, _) = api.call(Method::POST, "/kubernetes", Some(json!({ "name": "prod", "api_url": KUBE, "token": "not-the-admin-token" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "the API server must take the admin token");
+    let k = api.ok(Method::POST, "/kubernetes", Some(json!({ "name": "prod", "api_url": format!("{KUBE}/"), "ca_pem": KUBE_CA, "token": "fake-admin-token" }))).await;
+    assert_eq!((k["api_url"].as_str(), k["has_ca"].as_bool()), (Some(KUBE), Some(true)), "{k}");
+
+    // Dynamic only, naming the service account; a token that can't be revoked has a short lease.
+    let link = |field: &str, ttl: u64| json!({ "kind": "kubernetes", "ref": k["id"], "field": field, "mode": "dynamic", "options": { "namespace": "ci", "service_account": "deployer", "audiences": ["vault"], "ttl_minutes": ttl } });
+    let (s, _) = api.call(Method::PUT, "/environments/staging/secrets/KUBE_TOKEN", Some(json!({ "link": link("token", 7 * 24 * 60) }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a week-long token is refused");
+    let ops: Vec<Value> = [("KUBE_TOKEN", "token"), ("KUBE_API_URL", "api_url"), ("KUBE_CA", "ca")].iter().map(|(key, field)| json!({ "op": "set", "key": key, "link": link(field, 20) })).collect();
+    api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": ops }))).await;
+
+    // A resolve issues one token for the three keys, for the lease's TTL and the audiences, through the cluster's CA.
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:deploy" }))).await;
+    assert_eq!((r["values"]["KUBE_TOKEN"].as_str(), r["values"]["KUBE_API_URL"].as_str(), r["values"]["KUBE_CA"].as_str()), (Some("fake-sa-token-1"), Some(KUBE), Some(KUBE_CA)), "{r}");
+    let asked: Vec<Value> = api.sent.0.lock().unwrap().iter().filter_map(|b| b.get("kube").cloned()).collect();
+    assert_eq!(asked, [json!({ "ca": KUBE_CA, "request": { "apiVersion": "authentication.k8s.io/v1", "kind": "TokenRequest", "spec": { "expirationSeconds": 1200, "audiences": ["vault"] } } })]);
+    let lease_id = r["leases"][0].as_str().unwrap().to_string();
+    let leases = api.ok(Method::GET, "/leases", None).await;
+    let lease = leases.as_array().unwrap().iter().find(|l| l["id"] == lease_id.as_str()).unwrap().clone();
+    assert_eq!(lease["expires_at"].as_i64().unwrap() - lease["issued_at"].as_i64().unwrap(), 20 * 60_000, "{lease}");
+
+    // Code nobody vetted gets none, and no request reaches the cluster.
+    let check = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "check:fork#1", "untrusted": true }))).await;
+    assert!(check["values"].get("KUBE_TOKEN").is_none() && check["leases"] == json!([]), "{check}");
+    assert_eq!(api.sent.0.lock().unwrap().iter().filter(|b| b.get("kube").is_some()).count(), 1);
+
+    // Ending the lease can't end the token: the audit row says so.
+    api.ok(Method::DELETE, &format!("/leases/{lease_id}"), None).await;
+    let listed = api.ok(Method::GET, "/kubernetes", None).await;
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    assert!(audit.to_string().contains("works until it expires"), "{audit}");
+    for shown in [&k, &listed, &audit] {
+        assert!(!shown.to_string().contains("fake-admin-token") && !shown.to_string().contains("fake-cluster-ca"), "never the admin token or the CA: {shown}");
+    }
+    let (s, _) = api.call(Method::DELETE, &format!("/kubernetes/{}", k["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");
 }
 
 #[tokio::test]
