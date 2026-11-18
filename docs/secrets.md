@@ -3656,11 +3656,13 @@ cache waited out. Ranked now:
    Next: let whoever may `reveal` the key set the reference, then
    search's snapshot repositories, the reviewer's provider keys and the gateway's upstreams, each
    with its thread.
-4b. **roll's issuer for the other products** (asked by roll apps, 2026-11-18): an in-process
+4b. **roll's issuer for the other products** (#357, on #281; asked by roll apps): an in-process
    `Secrets::issue(subject, aud, ttl)` for apps' per-instance workload tokens (`roll-apps:<project>:<service>:<env>`,
    Vercel's OIDC federation), scheduled key rotation (publish ahead, retire after the last token
    expires), and secrets' own workload logins trusting roll's issuer for apps' subjects; one issuer,
-   never a second one.
+   never a second one. Built: 90-day rotation (published 2 days ahead, old key kept 2 h after the
+   switch, retired keys kept sealed so old audit digests still verify), one audit row per subject,
+   audience and hour, `ForApps::issue` behind the same trust check as `resolve`.
 5. **A sealed start for the deployment key** (building: `feature/roll-secrets-sealed-start`, on #276):
    rolld starts with products down until N of M holders post shares. The thirty-second security
    review (2026-11-18 evening): one high, two medium, four low, all being fixed. High: #304's freeze
