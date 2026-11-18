@@ -40,6 +40,8 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/oauth/{provider}/callback", get(oauth_callback))
         .route("/v1/accounts/signin/totp", post(signin_totp))
         .route("/v1/accounts/signin/recovery", post(signin_recovery))
+        .route("/v1/accounts/signin/passkey/options", post(signin_passkey_options))
+        .route("/v1/accounts/signin/passkey", post(signin_passkey))
         .route("/v1/accounts/me", get(me).patch(update_me))
         .route("/v1/accounts/me/sessions", get(my_sessions))
         .route("/v1/accounts/me/activity", get(my_activity))
@@ -48,6 +50,9 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/me/totp", post(totp_enrol).delete(totp_disable))
         .route("/v1/accounts/me/totp/confirm", post(totp_confirm))
         .route("/v1/accounts/me/recovery-codes", post(recovery_codes))
+        .route("/v1/accounts/me/passkeys", get(my_passkeys).post(add_passkey))
+        .route("/v1/accounts/me/passkeys/options", post(passkey_options))
+        .route("/v1/accounts/me/passkeys/{id}", axum::routing::patch(rename_passkey).delete(remove_passkey))
         .route("/v1/accounts/invites", get(list_invites).post(create_invite))
         .route("/v1/accounts/invites/peek", post(peek_invite))
         .route("/v1/accounts/invites/{id}", delete(revoke_invite))
@@ -160,9 +165,16 @@ fn with_cookies(mut resp: Response, cookies: impl IntoIterator<Item = HeaderValu
 fn session_body(a: &Accounts, issued_token: &str, user: &str, session: &str, second_factor: bool) -> Result<Value> {
     let csrf = roll_auth::csrf_token(issued_token);
     if second_factor {
-        return Ok(json!({ "status": "mfa_required", "methods": ["totp", "recovery"], "csrf": csrf }));
+        return Ok(json!({ "status": "mfa_required", "methods": second_methods(a, user), "csrf": csrf }));
     }
     Ok(json!({ "status": "signed_in", "user": a.user(user)?, "session": a.session_info(session)?, "csrf": csrf }))
+}
+
+/// How a person owing a second factor can give it: TOTP, a recovery code, and a passkey if they
+/// have one.
+fn second_methods(a: &Accounts, user: &str) -> Value {
+    let passkey = a.webauthn_site().is_ok() && a.passkeys(user).is_ok_and(|p| !p.is_empty());
+    if passkey { json!(["totp", "recovery", "passkey"]) } else { json!(["totp", "recovery"]) }
 }
 
 /// A new session's answer, with its cookie.
@@ -176,7 +188,8 @@ fn signed_in_response(a: &Accounts, user: &str, issued: Issued) -> Result<Respon
 
 async fn info(State(a): S) -> Json<Value> {
     let sso = blocking(&a, |a| a.sso_connections()).await.is_ok_and(|c| !c.is_empty());
-    Json(json!({ "providers": { "email": a.mail_on(), "github": a.config.github.is_some(), "google": a.config.google.is_some(), "sso": sso } }))
+    let passkey = a.webauthn_site().is_ok();
+    Json(json!({ "providers": { "email": a.mail_on(), "github": a.config.github.is_some(), "google": a.config.google.is_some(), "sso": sso, "passkey": passkey } }))
 }
 
 async fn session(State(a): S, me: Me, owed: Owed, headers: HeaderMap) -> Result<Response> {
@@ -186,7 +199,11 @@ async fn session(State(a): S, me: Me, owed: Owed, headers: HeaderMap) -> Result<
             let t = t.clone();
             blocking(&a, move |a| session_body(a, &t, &u.user, &u.session, false)).await?
         }
-        (None, Some(_), Some(t)) => json!({ "status": "mfa_required", "methods": ["totp", "recovery"], "csrf": roll_auth::csrf_token(t) }),
+        (None, Some(Extension(o)), Some(t)) => {
+            let (t, user) = (t.clone(), o.user.clone());
+            let methods = blocking(&a, move |a| Ok(second_methods(a, &user))).await?;
+            json!({ "status": "mfa_required", "methods": methods, "csrf": roll_auth::csrf_token(&t) })
+        }
         _ => {
             let resp = Json(json!({ "status": "anonymous" })).into_response();
             // A cookie that no longer stands for a session goes. With an `Authorization` header the
@@ -494,6 +511,98 @@ async fn signin_totp(State(a): S, owed: Owed, ip: Ip, headers: HeaderMap, b: Byt
 
 async fn signin_recovery(State(a): S, owed: Owed, ip: Ip, headers: HeaderMap, b: Bytes) -> Result<Response> {
     second_step(a, owed, ip, headers, b, true).await
+}
+
+// ── passkeys (docs/accounts.md, "Passkeys") ──
+
+/// A passkey sign-in's challenge: for the person owing a second factor, their passkeys; for
+/// anyone else, any passkey the browser holds for roll (throttled by address: no account yet).
+async fn signin_passkey_options(State(a): S, owed: Owed, ip: Ip) -> Result<Json<Value>> {
+    let owed = owed.map(|Extension(o)| o.user);
+    let from = ip.map(|Extension(roll_auth::ClientIp(i))| i.to_string()).unwrap_or_default();
+    Ok(Json(
+        blocking(&a, move |a| {
+            if owed.is_none() && !a.attempt(&format!("passkey:{from}"), 60, 10 * 60 * 1000)? {
+                return Err(Error::Unavailable("too many passkey sign-ins from this address: try again in a few minutes".into(), "too_many_requests"));
+            }
+            a.passkey_signin_options(owed.as_deref())
+        })
+        .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct PasskeyAnswer {
+    /// The challenge's id, from the options.
+    id: String,
+    /// The browser's `PublicKeyCredential`, as JSON (`id`, `response`).
+    credential: Value,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// A passkey sign-in: the second factor of a sign-in owing one, or, on its own, a whole sign-in
+/// (the authenticator verified the person).
+async fn signin_passkey(State(a): S, owed: Owed, ip: Ip, headers: HeaderMap, b: Bytes) -> Result<Response> {
+    let PasskeyAnswer { id, credential, .. } = body(&b)?;
+    let ua = user_agent(&headers);
+    let who = Who::of(ip, &headers);
+    let owed = owed.map(|Extension(o)| o);
+    blocking(&a, move |a| {
+        let checked = a.passkey_check(&id, &credential, owed.as_ref().map(|o| o.user.as_str()));
+        let user = checked.as_ref().ok().cloned().or_else(|| owed.as_ref().map(|o| o.user.clone()));
+        let done = checked.and_then(|user| match &owed {
+            // The challenge was this owing person's, and the passkey theirs (both checked).
+            Some(o) => a.complete(o, &ua),
+            None => a.issue_passkey(&user, &ua),
+        });
+        match (done, user) {
+            (Ok(issued), Some(user)) => {
+                a.record_sign_in(Some(&user), "passkey", None, false, &who);
+                signed_in_response(a, &user, issued)
+            }
+            (Err(e), user) => {
+                // A passkey names its account: a refusal is that person's (by nobody known, unless
+                // they were already signed in up to their second factor).
+                match (&owed, user) {
+                    (Some(o), _) => a.record_sign_in(Some(&o.user), "passkey", Some(&e), false, &who),
+                    (None, u) => a.record_code_refused(u.as_deref(), "passkey", &e, &who),
+                }
+                Err(e)
+            }
+            (Ok(_), None) => Err(Error::Internal("a passkey sign-in without a person".into())),
+        }
+    })
+    .await
+}
+
+async fn my_passkeys(State(a): S, me: Me) -> Result<Json<Value>> {
+    let u = signed_in(me)?;
+    Ok(Json(json!({ "passkeys": blocking(&a, move |a| a.passkeys(&u.user)).await? })))
+}
+
+async fn passkey_options(State(a): S, me: Me) -> Result<Json<Value>> {
+    let u = signed_in(me)?;
+    Ok(Json(blocking(&a, move |a| a.passkey_register_options(&u.user)).await?))
+}
+
+async fn add_passkey(State(a): S, me: Me, b: Bytes) -> Result<(StatusCode, Json<Value>)> {
+    let u = signed_in(me)?;
+    let PasskeyAnswer { id, credential, name } = body(&b)?;
+    let made = blocking(&a, move |a| a.passkey_add(&u.user, &id, name.as_deref().unwrap_or("Passkey"), &credential)).await?;
+    Ok((StatusCode::CREATED, Json(json!(made))))
+}
+
+async fn rename_passkey(State(a): S, me: Me, Path(id): Path<String>, b: Bytes) -> Result<Json<Value>> {
+    let u = signed_in(me)?;
+    let Name { name } = body(&b)?;
+    Ok(Json(json!(blocking(&a, move |a| a.passkey_rename(&u.user, &id, &name)).await?)))
+}
+
+async fn remove_passkey(State(a): S, me: Me, Path(id): Path<String>) -> Result<StatusCode> {
+    let u = signed_in(me)?;
+    blocking(&a, move |a| a.passkey_remove(&u.user, &id)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
