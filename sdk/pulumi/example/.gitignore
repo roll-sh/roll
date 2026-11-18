@@ -1,0 +1,5 @@
+bin/
+sdks/
+node_modules/
+package-lock.json
+Pulumi.*.yaml

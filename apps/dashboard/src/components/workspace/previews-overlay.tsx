@@ -66,7 +66,7 @@ export function PreviewsOverlay({ projectId, placed }: { projectId: string; plac
               <Link
                 key={c.preview.id}
                 href={`${tab}?preview=${encodeURIComponent(c.preview.id)}`}
-                title={`${c.preview.title} · ${STATE_LABEL[c.preview.state]}\n${c.ref ?? "branching…"} · ${formatBytes(c.bytes)}`}
+                title={`${c.preview.title} · ${STATE_LABEL[c.preview.state]}\n${c.ref ?? "branching…"} · ${formatBytes(c.bytes)}${c.preview.reported_by ? `\nquiet: ${c.preview.reported_by} reports its pull request` : ""}`}
                 className="pointer-events-auto relative flex h-[18px] max-w-[88px] min-w-0 items-center gap-1 self-start rounded-full border border-line-2 bg-sheet px-1.5 font-mono text-[10.5px] leading-none text-muted shadow-card inset-shadow-highlight transition-colors hover:border-line-3 hover:text-fg"
               >
                 <StateDot state={c.state} />

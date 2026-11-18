@@ -37,6 +37,12 @@ impl Secrets {
     /// `candidates` are values of this project's it may reveal. Only those: anything else would
     /// make the scan an oracle for guessing values it can't read.
     pub fn scan(&self, project: &str, candidates: &[String], caller: &Caller) -> Result<Vec<Found>> {
+        self.scan_as(project, candidates, caller, false)
+    }
+
+    /// [`Secrets::scan`], from a credential guard (roll MCP's, checking what a tool call would write:
+    /// `X-Roll-Guard: 1`): the same match, audited as `secrets.guard` so those rows can be told apart.
+    pub fn scan_as(&self, project: &str, candidates: &[String], caller: &Caller, guard: bool) -> Result<Vec<Found>> {
         caller.need(Action::Read, &Scope::project(project))?;
         if candidates.len() > SCAN_MAX {
             return Err(Error::BadRequest(format!("at most {SCAN_MAX} candidates a scan")));
@@ -51,7 +57,7 @@ impl Secrets {
             .map(|(index, leak)| Found { index, leak })
             .collect();
         let keys: Vec<String> = found.iter().map(|f| f.leak.key.clone()).collect::<BTreeSet<_>>().into_iter().collect();
-        self.audit_now(project, caller, "secrets.scan", None, None, &keys, &format!("scanned {} candidates: {} matched", candidates.len(), found.len()));
+        self.audit_now(project, caller, if guard { "secrets.guard" } else { "secrets.scan" }, None, None, &keys, &format!("scanned {} candidates: {} matched", candidates.len(), found.len()));
         Ok(found)
     }
 
