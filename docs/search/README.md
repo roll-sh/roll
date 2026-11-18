@@ -161,18 +161,19 @@ and `tests/cluster.rs` `a_forward_carries_the_clients_address_to_the_owner` cove
 **Terraform** (Elastic Cloud's `ec_deployment` and `elasticstack` providers, AWS's
 `aws_opensearch_domain`). roll's provider (`sdk/terraform-provider-roll`, its README has the
 details) has `roll_search_cluster` (name, flavor, `always_on` or `idle_timeout_s`, limits,
-`ip_allowlist`; computed endpoint, status, version and the password from create; a new name or
-flavor makes a new cluster; import by id or name; destroy deletes it, restorable for
+`ip_allowlist`; computed endpoint, status, version and the password from create; a new name
+makes a new cluster, a new flavor switches it in place keeping its data (links made before are
+reissued, and keys don't carry over: an API key isn't an OpenSearch user); import by id or name; destroy deletes it, restorable for
 `deleted_retention_s`, 7 days by default), `roll_search_api_key` (`access`, or Elasticsearch
 `role_descriptors` through the cluster's `_security/api_key`, and an `expiration`; its secret is
-sensitive, replaced on any change, revoked on destroy; also an ephemeral resource, revoked when
+sensitive, replaced on any change and after a flavor switch, revoked on destroy; also an ephemeral resource, revoked when
 the run ends), `roll_search_snapshot_repository` (`s3`, `gcs` or `azure` through
 `PUT _snapshot/<name>`, credentials in a sensitive map roll seals apart and never returns) and
 the data source `roll_search_cluster` (by id or name). Reading keys and repositories never
 wakes a sleeping cluster. There's no `deletion_protection` (roll has no setting to enforce it;
 `prevent_destroy` covers the plan). `TestSearchAsCode`, `TestSearchClusterCap` and
 `TestSearchKeyEphemeral` (`internal/provider/search_test.go`) drive Terraform against a fake
-`/v1/search`: create, change in place, a new flavor, import, destroy, the cap's 409, and keys'
+`/v1/search`: create, change in place, a flavor switch in place (the id kept), import, destroy, the cap's 409, and keys'
 secrets kept out of the plan and the state. Left: remote-cluster links (#347) and allowed
 origins (browser search), once they're on main.
 

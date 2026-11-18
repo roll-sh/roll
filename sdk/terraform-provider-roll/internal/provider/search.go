@@ -134,14 +134,13 @@ func (r *searchClusterResource) Metadata(_ context.Context, req resource.Metadat
 func (r *searchClusterResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	keep := []planmodifier.String{stringplanmodifier.UseStateForUnknown()}
 	keepInt := []planmodifier.Int64{int64planmodifier.UseStateForUnknown()}
-	replace := []planmodifier.String{stringplanmodifier.UseStateForUnknown(), stringplanmodifier.RequiresReplace()}
 	resp.Schema = schema.Schema{
 		Description: "A roll search cluster: Elasticsearch or OpenSearch, scaled to zero when idle unless always on. Destroying it deletes it; it can be restored for the node's retention window (7 days by default) with `roll search clusters restore`.",
 		Attributes: map[string]schema.Attribute{
 			"id":   schema.StringAttribute{Computed: true, PlanModifiers: keep, Description: "srch_…"},
 			"name": schema.StringAttribute{Required: true, PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}, Description: "1-63 of a-z, 0-9 and -, starting with a letter: the cluster's user and its host label. A new name is a new cluster."},
-			"flavor": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replace, Validators: []validator.String{stringvalidator.OneOf("elasticsearch", "opensearch")},
-				Description: "elasticsearch or opensearch (the node's default when left out). A new flavor makes a new, empty cluster."},
+			"flavor": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: keep, Validators: []validator.String{stringvalidator.OneOf("elasticsearch", "opensearch")},
+				Description: "elasticsearch or opensearch (the node's default when left out). A new flavor switches the cluster in place, keeping its data: it reloads as soon as no request runs. Keys don't carry over (an API key isn't an OpenSearch user): give roll_search_api_key `replace_triggered_by` on it."},
 			"always_on": schema.BoolAttribute{Optional: true, Computed: true, Description: "Never unload (idle_timeout_s 0). A person may have 2 by default."},
 			"idle_timeout_s": schema.Int64Attribute{Optional: true, Computed: true,
 				Description: "Seconds without requests before it scales to zero; 0 is always on. The node's default when left out."},
@@ -187,6 +186,11 @@ func (r *searchClusterResource) ModifyPlan(ctx context.Context, req resource.Mod
 	if !req.State.Raw.IsNull() {
 		state = &searchClusterModel{}
 		resp.Diagnostics.Append(req.State.Get(ctx, state)...)
+	}
+	// A flavor switch answers as the other product's version.
+	if state != nil && !plan.Flavor.Equal(state.Flavor) {
+		plan.Version = types.StringUnknown()
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("version"), plan.Version)...)
 	}
 	ao, idle := cfg.AlwaysOn, cfg.IdleTimeoutS
 	if ao.IsUnknown() || idle.IsUnknown() {

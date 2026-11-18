@@ -41,6 +41,8 @@ type keyMade struct {
 	Password string `json:"password"`
 	URL      string `json:"url"`
 	Expires  *int64 `json:"expires_at"`
+	// The cluster's flavor when it was made: a flavor switch doesn't carry keys across.
+	Flavor string `json:"-"`
 }
 
 var expirationRe = regexp.MustCompile(`^([1-9][0-9]*)(d|h|m|s)$`)
@@ -101,6 +103,7 @@ func (c *client) makeKey(ctx context.Context, k *keySpec) (*keyMade, error) {
 		if err := c.call(ctx, http.MethodPost, searchCluster(cl.ID)+"/keys", body, &made); err != nil {
 			return nil, err
 		}
+		made.Flavor = cl.Flavor
 		return &made, nil
 	}
 	if cl.Flavor == "opensearch" {
@@ -125,7 +128,7 @@ func (c *client) makeKey(ctx context.Context, k *keySpec) (*keyMade, error) {
 	if json.Unmarshal(raw, &v) != nil || v.ID == "" || v.Key == "" {
 		return nil, fmt.Errorf("the cluster answered without a key (%d)", status)
 	}
-	made := &keyMade{ID: v.ID, Encoded: base64.StdEncoding.EncodeToString([]byte(v.ID + "@" + cl.Name + ":" + v.Key)), URL: cl.URL}
+	made := &keyMade{ID: v.ID, Encoded: base64.StdEncoding.EncodeToString([]byte(v.ID + "@" + cl.Name + ":" + v.Key)), URL: cl.URL, Flavor: cl.Flavor}
 	if v.Expiration != nil {
 		s := *v.Expiration / 1000
 		made.Expires = &s
@@ -162,6 +165,7 @@ type searchKeyModel struct {
 	Password        types.String `tfsdk:"password"`
 	URL             types.String `tfsdk:"url"`
 	ExpiresAt       types.String `tfsdk:"expires_at"`
+	Flavor          types.String `tfsdk:"flavor"`
 }
 
 func (m *searchKeyModel) spec() *keySpec {
@@ -169,7 +173,7 @@ func (m *searchKeyModel) spec() *keySpec {
 }
 
 func (m *searchKeyModel) fill(made *keyMade) {
-	m.ID, m.URL, m.ExpiresAt = types.StringValue(made.ID), types.StringValue(made.URL), expiresAt(made)
+	m.ID, m.URL, m.ExpiresAt, m.Flavor = types.StringValue(made.ID), types.StringValue(made.URL), expiresAt(made), types.StringValue(made.Flavor)
 	m.Encoded, m.Username, m.Password = optional(made.Encoded), optional(made.Username), optional(made.Password)
 }
 
@@ -217,6 +221,7 @@ func (r *searchKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			"password":         out(true, "password"),
 			"url":              out(false, "url"),
 			"expires_at":       schema.StringAttribute{Computed: true, PlanModifiers: keep, Description: "When it stops working (RFC 3339), if it does."},
+			"flavor":           schema.StringAttribute{Computed: true, PlanModifiers: keep, Description: "The cluster's flavor when the key was made. After a flavor switch the key is gone (it doesn't carry over) and is made again."},
 		},
 	}
 }
@@ -248,8 +253,9 @@ func (r *searchKeyResource) Create(ctx context.Context, req resource.CreateReque
 	resp.Diagnostics.Append(resp.State.Set(ctx, m)...)
 }
 
-// Read never wakes a sleeping cluster for a key: it is gone with its cluster or past its
-// expiry, and on a loaded Elasticsearch cluster it is looked up (revoked elsewhere: gone).
+// Read never wakes a sleeping cluster for a key: it is gone with its cluster, past its expiry
+// or after a flavor switch, and on a loaded Elasticsearch cluster it is looked up (revoked
+// elsewhere: gone).
 func (r *searchKeyResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var m searchKeyModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &m)...)
@@ -262,6 +268,10 @@ func (r *searchKeyResource) Read(ctx context.Context, req resource.ReadRequest, 
 		return
 	} else if err != nil {
 		resp.Diagnostics.AddError("reading the key's cluster", err.Error())
+		return
+	}
+	if given(m.Flavor) && m.Flavor.ValueString() != cl.Flavor {
+		resp.State.RemoveResource(ctx)
 		return
 	}
 	if given(m.ExpiresAt) {

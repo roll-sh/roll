@@ -220,6 +220,11 @@ func (f *fakeSearch) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(409, msg)
 			return
 		}
+		// A new flavor keeps the cluster and its data; keys don't carry over (an API key isn't an
+		// OpenSearch user).
+		if next.flavor != c.flavor {
+			next.keys = map[string]bool{}
+		}
 		*c = next
 		c.loaded = c.loaded || c.idle == 0
 		write(200, c.view(false))
@@ -337,8 +342,9 @@ func held(f *fakeSearch, name string, check func(*fakeCluster) error) resource.T
 	}
 }
 
-// A search cluster as code: made with a key and a snapshot repository, changed in place, made
-// again on a new flavor, imported, destroyed. The keys' secrets stay out of the plan.
+// A search cluster as code: made with a key and a snapshot repository, changed in place,
+// switched to another flavor in place (its key made again), imported, destroyed. The keys'
+// secrets stay out of the plan.
 func TestSearchAsCode(t *testing.T) {
 	f := newFakeSearch()
 	srv := httptest.NewServer(f)
@@ -373,6 +379,7 @@ resource "roll_search_cluster" "logs" {
 resource "roll_search_api_key" "shipper" {
   cluster = roll_search_cluster.logs.id
   name    = "shipper"
+  lifecycle { replace_triggered_by = [roll_search_cluster.logs.flavor] }
 }
 data "roll_search_cluster" "shop" {
   name       = "shop"
@@ -472,23 +479,26 @@ data "roll_search_cluster" "shop" {
 				),
 			},
 			{
-				// A new flavor is a new cluster, and its key is made again on it.
+				// A new flavor switches the cluster in place, keeping its data; its key doesn't carry
+				// over, so it's made again on it.
 				Config: config(`max_in_flight = 32`, "opensearch"),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
-					plancheck.ExpectResourceAction("roll_search_cluster.logs", plancheck.ResourceActionDestroyBeforeCreate),
+					plancheck.ExpectResourceAction("roll_search_cluster.logs", plancheck.ResourceActionUpdate),
 					plancheck.ExpectResourceAction("roll_search_api_key.shipper", plancheck.ResourceActionDestroyBeforeCreate),
 					plancheck.ExpectResourceAction("roll_search_cluster.shop", plancheck.ResourceActionNoop),
 				}},
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("roll_search_cluster.logs", "version", "3.9.0"),
+					resource.TestCheckResourceAttr("roll_search_api_key.shipper", "flavor", "opensearch"),
 					resource.TestCheckResourceAttr("roll_search_api_key.shipper", "username", "roll-key-key1@logs"),
 					resource.TestCheckResourceAttr("roll_search_api_key.shipper", "password", "secret-roll-key-key1"),
 					resource.TestCheckNoResourceAttr("roll_search_api_key.shipper", "encoded"),
-					func(*terraform.State) error {
+					func(s *terraform.State) error {
 						f.mu.Lock()
 						defer f.mu.Unlock()
-						if len(f.deleted) != 1 || f.deleted[0] != logsID {
-							return fmt.Errorf("deleted %v, not the old logs %s", f.deleted, logsID)
+						id := s.RootModule().Resources["roll_search_cluster.logs"].Primary.ID
+						if c := f.byIDOrName("logs"); id != logsID || c == nil || c.id != logsID || c.flavor != "opensearch" || len(f.deleted) != 0 {
+							return fmt.Errorf("logs is %s (was %s), deleted %v", id, logsID, f.deleted)
 						}
 						return nil
 					},

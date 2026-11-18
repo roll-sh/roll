@@ -145,7 +145,7 @@ resource "roll_machine_client" "web_ci" {
 # repository. The operator's token, an admin's, or a person's own (their clusters, within their caps).
 resource "roll_search_cluster" "shop" {
   name      = "shop"
-  flavor    = "elasticsearch"    # or opensearch; a new flavor is a new, empty cluster
+  flavor    = "elasticsearch"    # or opensearch; switched in place, data kept
   always_on = false              # or idle_timeout_s = 900; 0 is always on
   ip_allowlist = [
     { cidr = "203.0.113.0/24", description = "office" },
@@ -159,6 +159,9 @@ resource "roll_search_api_key" "web" {
   role_descriptors = jsonencode({ reader = { indices = [{ names = ["products"], privileges = ["read"] }] } })
   expiration       = "90d"
   # or access = "data" | "admin" instead of role_descriptors (OpenSearch: .username and .password)
+
+  # Keys don't carry over a flavor switch: make it again in the same apply.
+  lifecycle { replace_triggered_by = [roll_search_cluster.shop.flavor] }
 }
 
 resource "roll_search_snapshot_repository" "backups" {
@@ -201,9 +204,15 @@ provider "elasticstack" {
   the pinned keys), and a `public_jwk` isn't read back at all, so when either is in the file the
   first apply after an import registers it again (a rotate).
 
-- A search cluster's `name` and `flavor` replace it: roll can switch a cluster's dialect in place,
-  but Terraform treats Elasticsearch and OpenSearch as different products, as Elastic Cloud and
-  AWS do, and makes a new, empty cluster. Everything else changes in place (`PATCH`).
+- A search cluster's `name` replaces it; everything else changes in place (`PATCH`), `flavor`
+  too: roll switches the cluster between Elasticsearch and OpenSearch keeping its id and its data
+  (it reloads as soon as no request runs), where a replacement would delete it and make a new,
+  empty one. What a switch doesn't keep: links made before it are reissued by roll (roll secrets'
+  and roll apps' search links), and keys don't carry over, since an Elasticsearch API key isn't
+  an OpenSearch user. A `roll_search_api_key` remembers the flavor it was made on and is gone
+  from the state once the cluster's differs, so the next apply makes it again; give it
+  `lifecycle { replace_triggered_by = [roll_search_cluster.<name>.flavor] }` to make it again in
+  the same apply as the switch.
   `always_on` and `idle_timeout_s` are one setting: either decides the other, and turning
   `always_on` off without a timeout goes back to the node's default. Settings left out keep what
   roll has, except `ip_allowlist`, which Terraform owns: left out, it's empty (anyone). Entries
