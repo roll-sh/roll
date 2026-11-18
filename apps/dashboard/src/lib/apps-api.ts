@@ -177,7 +177,7 @@ export interface ProjectImport {
       branch: string | null;
       run: Partial<Run>;
       /** A database's kind, or `service`: another app of the file, by its name. */
-      links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "service"; name: string }[];
+      links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "search" | "service"; name: string }[];
       /** What it's set to as it is. */
       variables: Record<string, string>;
       /** Made once, when the service is (`{ generate = "secret" }`): 32 random bytes in hex. */
@@ -188,7 +188,7 @@ export interface ProjectImport {
       environments?: Record<string, { branch: string | null; run: Partial<Record<EnvRunField, number>>; variables: Record<string, string> }>;
     }
   >;
-  databases: Record<string, { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" }>;
+  databases: Record<string, { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "search" }>;
 }
 
 export interface NewService {
@@ -450,6 +450,8 @@ export interface EnvironmentPut {
   traces?: boolean;
   /** Its pages measure their Web Vitals (a tag roll adds). */
   vitals?: boolean;
+  /** Its deploys post commit statuses and GitHub Deployments (false: someone else reports them). */
+  report?: boolean;
   /** What its code may reach from the next deploy: roll and `hosts` only, or anything. null: open. */
   egress?: Egress | null;
   /** Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until false. */
@@ -547,6 +549,9 @@ export interface Environment extends EnvironmentSummary {
   traces?: boolean;
   /** Its pages measure their Web Vitals for roll. */
   vitals?: boolean;
+  /** Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
+   *  someone else reports them (roll previews' `pv-` environments). */
+  report?: boolean;
   /** People signed in to roll who can open its project get in. */
   signed_in?: boolean;
   /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
@@ -849,6 +854,18 @@ export interface Metrics {
   egress_bytes: number[];
   /** Requests a minute that found every instance busy at `max_instances` (saturation). */
   over_capacity: number[];
+  /** Each instance's own last hour by minute (those it has now), whatever the range. */
+  by_instance?: InstanceSeries[];
+}
+
+/** One instance's last hour (Railway's per replica): cores in use on average each minute, and
+ *  the minute's peak memory. */
+export interface InstanceSeries {
+  instance: string;
+  deployment: string;
+  minutes: number[];
+  cpu: number[];
+  memory_bytes: number[];
 }
 
 export interface Usage {
