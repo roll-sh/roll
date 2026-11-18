@@ -151,6 +151,7 @@ type meta struct {
 	ResourceVersion string            `json:"resourceVersion,omitempty"`
 	Generation      int64             `json:"generation,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
+	Annotations     map[string]string `json:"annotations,omitempty"`
 	OwnerReferences []ownerRef        `json:"ownerReferences,omitempty"`
 }
 
@@ -179,8 +180,17 @@ type rollSecret struct {
 		// requests for it), so the identity's subject pins the namespace. Without one, the
 		// operator's own login, only in the namespaces it's given (ROLL_OPERATOR_NAMESPACES).
 		ServiceAccountName string `json:"serviceAccountName"`
+		// Workloads in the RollSecret's namespace restarted when the Secret changes (not when it's
+		// first made), as `kubectl rollout restart` does.
+		RolloutRestart []restartTarget `json:"rolloutRestart"`
 	} `json:"spec"`
 	Status rollStatus `json:"status"`
+}
+
+// restartTarget is a Deployment, StatefulSet or DaemonSet to restart.
+type restartTarget struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
 }
 
 type rollStatus struct {
@@ -189,6 +199,12 @@ type rollStatus struct {
 	Keys               int    `json:"keys"`
 	Error              string `json:"error,omitempty"`
 	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
+	// PendingRestarts are the rolloutRestart targets a change hasn't restarted yet
+	// ("Deployment/web,StatefulSet/db"): retried on every pass until they are.
+	PendingRestarts string `json:"pendingRestarts,omitempty"`
+	// RestartError is why they weren't (kept apart from Error, so an unchanged Secret still
+	// costs one digest per pass while a restart waits).
+	RestartError string `json:"restartError,omitempty"`
 }
 
 type secretObj struct {

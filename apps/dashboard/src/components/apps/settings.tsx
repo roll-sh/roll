@@ -71,6 +71,7 @@ interface Form {
   affinity: boolean;
   tcp: boolean;
   rollbackOnCrash: boolean;
+  rebuildOnBase: boolean;
   scaleStream: string;
   scaleGroup: string;
   scalePer: string;
@@ -136,6 +137,7 @@ export function formOf(s: Service): Form {
     affinity: !!s.run.affinity,
     tcp: !!s.run.tcp,
     rollbackOnCrash: !!s.run.rollback_on_crash,
+    rebuildOnBase: !!s.run.rebuild_on_base,
     scaleStream: s.run.scale?.stream ?? "",
     scaleGroup: s.run.scale?.group ?? "",
     scalePer: str(s.run.scale?.per_instance),
@@ -216,6 +218,7 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.affinity !== before.affinity) run.affinity = f.affinity ? true : null;
   if (f.tcp !== before.tcp) run.tcp = f.tcp ? true : null;
   if (f.rollbackOnCrash !== before.rollbackOnCrash) run.rollback_on_crash = f.rollbackOnCrash ? true : null;
+  if (f.rebuildOnBase !== before.rebuildOnBase) run.rebuild_on_base = f.rebuildOnBase ? true : null;
   if (f.restart !== before.restart || f.restartTries !== before.restartTries) {
     run.restart = f.restart === "always" ? null : f.restart;
     run.restart_tries = f.restart === "on_failure" ? num(f.restartTries) : null;
@@ -576,6 +579,14 @@ export function SettingsTab({
                 <option value="back">Rolls back to the one before</option>
               </select>
             </Field>
+            {service.source.kind !== "image" && (
+              <Field label="When a base image is updated" hint="its registry moves the tag it builds on (a security fix)">
+                <select value={form.rebuildOnBase ? "build" : "say"} onChange={(e) => set("rebuildOnBase", e.target.value === "build")} className={`${input} w-full`}>
+                  <option value="say">Says so</option>
+                  <option value="build">Builds the same revision again</option>
+                </select>
+              </Field>
+            )}
             <Field label="Alert: its log says" hint="text in its output (any case); empty: off">
               {t("alertLog", "panic")}
             </Field>
@@ -716,12 +727,12 @@ export function SettingsTab({
                   if (await runner.run("delete", () => appsApi.remove(service.id).then(() => true))) onDeleted();
                 }}
               >
-                Deletes every environment, instance, deployment and image of <span className="font-mono text-fg">{service.name}</span>. Its URLs stop answering.
-                {service.run.volume ? " Its volume goes too, after a last backup kept for a week." : ""}
+                Stops every environment of <span className="font-mono text-fg">{service.name}</span>: its URLs stop answering. For 48 hours it can be restored as it was from {projectName}'s settings; then its deployments, images
+                {service.run.volume ? " and volume (after a last backup kept for a week)" : ""} are deleted for good.
               </Confirm>
             ) : (
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <p className="text-[13px] text-muted">Delete the service, its environments, deployments and images.</p>
+                <p className="text-[13px] text-muted">Delete the service, its environments, deployments and images (restorable for 48 hours).</p>
                 <button className={danger} onClick={() => setDeleting(true)}>
                   <Trash2 className="size-3.5" /> Delete
                 </button>

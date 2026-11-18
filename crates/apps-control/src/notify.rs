@@ -18,8 +18,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What a target can ask for; a new one gets the two that need someone.
-pub const EVENTS: [&str; 21] = [
+pub const EVENTS: [&str; 22] = [
     "deploy.failed",
+    "deploy.base_updated",
     "rollout.waiting",
     "deploy.ready",
     "error.new",
@@ -372,6 +373,7 @@ impl Apps {
                 format!("{what}: a rollout waits for you at {}%", e.data["share"]),
                 format!("The deployment{rev} passed its step at {}% of requests and holds there until someone advances it, puts it all live or rolls it back (the service page, or `roll apps rollout`). It still rolls back by itself if it starts failing.", e.data["share"]),
             ),
+            "deploy.base_updated" => (format!("{what}: its base image {} was updated", e.data["image"].as_str().unwrap_or("")), "A deploy now would build on the new one and get its fixes (Deploy without the cache, or `run.rebuild_on_base` to do it by itself).".to_string()),
             "deploy.ready" => (format!("{what}: built and waiting to go live"), format!("The deployment{rev} is healthy beside the live one, on its own URL ({}), and waits for a person to put it live.", e.data["url"].as_str().unwrap_or("its deployment URL"))),
             "spend.alert" | "spend.limit" => {
                 let (project, usd, limit) = (e.data["project_name"].as_str().unwrap_or("a project"), e.data["usd"].as_f64().unwrap_or(0.0), e.data["limit_usd"].as_f64().unwrap_or(0.0));

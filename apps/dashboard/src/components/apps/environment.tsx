@@ -2,6 +2,7 @@ import { Lock, Rocket, Trash2, Unlock } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { appsApi, formatFirewall, formatHeaders, parseAllowList, parseFirewall, parseHeaders, PRODUCTION, shortSha, type Backup, type Environment, type EnvRunField, type Service, formatRoutes, parseRoutes } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
+import { CompareSection } from "./env-compare";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
 import { clock, CPU, MEMORY, mb, since, StateBadge, SureButton, type Runner } from "./shared";
 
@@ -386,6 +387,8 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </div>
         )}
 
+        <CompareSection service={service} env={env} runner={runner} />
+
         <p className="px-5 pb-2 pt-5 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Who gets in</p>
 
         <div className="space-y-3 px-5 py-4">
@@ -466,7 +469,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
                 <p className="mt-1 text-[12px] text-muted">
                   {env.firewall?.length
                     ? `${env.firewall.length} ${env.firewall.length === 1 ? "rule" : "rules"}, in order: the first that matches a request decides.`
-                    : "No rules. One a line: deny /admin/*, deny method=DELETE, allow /admin/health, deny ua=BadBot, limit 10 /login method=POST (10 a minute a client)."}
+                    : "No rules. One a line: deny /admin/*, deny method=DELETE, allow /admin/health, deny ua=BadBot, limit 10 /login method=POST (10 a minute a client), challenge /* (a browser check)."}
                 </p>
               </div>
               <button className={btn} disabled={busy || fw === fwText} onClick={() => runner.run("firewall", () => appsApi.putEnvironment(service.id, env.name, { firewall: parseFirewall(fw) }))}>
