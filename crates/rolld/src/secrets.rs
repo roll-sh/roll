@@ -25,6 +25,21 @@ mod github;
 mod outside;
 mod syncs;
 
+/// `X-Roll-Guard` (a credential guard's scan, audited apart as `secrets.guard`) is roll MCP's
+/// alone: kept only on a request its guard tool makes in process (`McpCall` with tool `guard`),
+/// removed from anyone else's, so no caller can file deliberate scans under the guard's name.
+pub async fn guard_header(req: Request<Body>) -> Request<Body> {
+    keep_guard_header(req)
+}
+
+fn keep_guard_header(mut req: Request<Body>) -> Request<Body> {
+    let from_guard = req.extensions().get::<roll_access::evaluate::McpCall>().is_some_and(|m| &*m.tool == "guard");
+    if !from_guard {
+        req.headers_mut().remove("x-roll-guard");
+    }
+    req
+}
+
 /// The router of every product's routes (no gate), set once rolld has built it.
 #[derive(Clone, Default)]
 pub struct Api(Arc<OnceLock<axum::Router>>);
@@ -1279,6 +1294,19 @@ impl code_control::SecretEnv for ForCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_roll_mcps_guard_keeps_the_guard_header() {
+        let req = || super::Request::builder().uri("/v1/secrets/projects/p/leaks").header("x-roll-guard", "1").body(super::Body::empty()).unwrap();
+        assert!(super::keep_guard_header(req()).headers().get("x-roll-guard").is_none(), "a caller's own header is dropped");
+        let call = |tool: &str| roll_access::evaluate::McpCall { tool: tool.into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false };
+        let mut other = req();
+        other.extensions_mut().insert(call("secrets_scan"));
+        assert!(super::keep_guard_header(other).headers().get("x-roll-guard").is_none(), "another tool's isn't the guard");
+        let mut guard = req();
+        guard.extensions_mut().insert(call("guard"));
+        assert!(super::keep_guard_header(guard).headers().get("x-roll-guard").is_some(), "the guard's stays");
+    }
+
     use axum::http::HeaderMap;
     use serde_json::{Value as Json, json};
     use std::sync::{Arc, Mutex};

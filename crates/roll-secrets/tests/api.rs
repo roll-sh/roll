@@ -1606,6 +1606,11 @@ async fn a_scan_finds_values_only_its_caller_may_reveal() {
     let (_, v) = api.req(Method::POST, "/leaks", Some(mine.clone()), Some(reveal.as_str())).await;
     assert_eq!(v, json!([]));
     assert_eq!(api.ok(Method::POST, "/leaks", Some(mine)).await[0]["key"], "DB_PASSWORD", "its owner finds it");
+    // A credential guard's scan (roll MCP, `X-Roll-Guard: 1`) is audited apart from a person's.
+    let req = Request::builder().method(Method::POST).uri(format!("/v1/secrets/projects/{}/leaks", api.project)).header("content-type", "application/json").header("authorization", format!("Bearer {reveal}")).header("x-roll-guard", "1").body(Body::from(json!({ "candidates": ["sk_live_51Hx9Q2abc"] }).to_string())).unwrap();
+    assert_eq!(api.router.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+    let rows = api.ok(Method::GET, "/audit?action=secrets.guard", None).await;
+    assert_eq!((rows.as_array().unwrap().len(), rows[0]["keys"].clone()), (1, json!(["STRIPE_KEY"])));
 }
 
 #[tokio::test]

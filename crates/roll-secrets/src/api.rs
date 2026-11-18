@@ -1076,9 +1076,11 @@ struct Scan {
     candidates: Vec<String>,
 }
 
-async fn scan_leaks(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+async fn scan_leaks(State(s): S, Who(c): Who, Path(project): Path<String>, headers: HeaderMap, b: Bytes) -> crate::Result<Response> {
     let Scan { candidates } = body(&b)?;
-    Ok(ok(blocking(s, move |s| s.scan(&project, &candidates, &c)).await?))
+    // A credential guard's check of what a tool call would write (roll MCP): audited apart.
+    let guard = headers.get("x-roll-guard").is_some_and(|v| v.as_bytes() == b"1");
+    Ok(ok(blocking(s, move |s| s.scan_as(&project, &candidates, &c, guard)).await?))
 }
 
 async fn all_health(State(s): S, Who(c): Who) -> crate::Result<Response> {
