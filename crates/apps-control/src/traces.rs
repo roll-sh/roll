@@ -23,7 +23,7 @@ pub(crate) fn key(service: &str, env: &str) -> String {
     format!("trace:{service}/{env}")
 }
 
-fn metric_key(service: &str, env: &str) -> String {
+pub(crate) fn metric_key(service: &str, env: &str) -> String {
     format!("metric:{service}/{env}")
 }
 
@@ -49,6 +49,13 @@ impl Signal {
 impl Apps {
     /// Spans an environment's instances sent (OTLP/HTTP): kept, how many. Anything that isn't the
     /// environment's live token is the same 404.
+    /// Whether `token` is the environment's live trace token: asked before an export's body is
+    /// read, so nobody without one makes the owner hold 8 MiB.
+    pub(crate) async fn otlp_token_ok(self: &Arc<Self>, service: &str, env: &str, token: &str) -> bool {
+        let (sid, e) = (service.to_string(), env.to_string());
+        self.db(move |s| s.trace_token(&sid, &e)).await.ok().flatten().is_some_and(|k| crate::public::same(&k, token))
+    }
+
     pub async fn ingest_traces(self: &Arc<Self>, service: &str, env: &str, token: &str, json: bool, gzip: bool, body: &[u8]) -> Result<usize> {
         self.ingest_otlp(service, env, token, Signal::Traces, json, gzip, body).await
     }

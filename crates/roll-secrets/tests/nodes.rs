@@ -13,7 +13,7 @@ fn node(dir: &std::path::Path, ws: Arc<roll_workspace::Workspace>) -> Arc<Secret
 
 fn node_with(dir: &std::path::Path, ws: Arc<roll_workspace::Workspace>, links: Links) -> Arc<Secrets> {
     let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.join("secrets.db")), "secrets").unwrap();
-    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, clouds: None, workloads: None };
+    let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, github: None, clouds: None, workloads: None };
     Arc::new(Secrets::new(db, ws, opts).unwrap())
 }
 
@@ -126,7 +126,7 @@ fn a_digest_one_node_keeps_moves_at_once_with_what_another_node_changes() {
     b.source_changed("bucket", "assets").unwrap();
     moved("a rotation", &mut last);
     // The same caller, now unable to read staging, doesn't get the digest it had.
-    let narrowed = Caller { principal: "operator".into(), grants: Arc::new(AllBut("staging")), ip: None, runtime: false };
+    let narrowed = Caller { principal: "operator".into(), grants: Arc::new(AllBut("staging")), ip: None, runtime: false, approval: None };
     assert_ne!(digest(&narrowed), last, "what the caller may read is part of it");
     assert_eq!(digest(&op), last);
 }

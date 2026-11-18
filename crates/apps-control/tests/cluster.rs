@@ -214,7 +214,10 @@ async fn a_sites_rewrite_reaches_a_service_another_node_owns() {
             api = Some(id);
             break;
         }
-        assert_eq!(call(&via.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
+        // For good (a first delete keeps its name for a restore).
+        for _ in 0..2 {
+            assert_eq!(call(&via.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
+        }
     }
     let api = api.expect("an api owned by the other node");
     let (api_owner, _) = f.owner_and_other(&api);
