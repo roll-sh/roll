@@ -62,6 +62,7 @@ fn apply_one(c: &AppConfig, build: &Build, run: &Run) -> Result<(Build, Run)> {
         b.builder = match v {
             apps_build::Builder::Auto => Builder::Auto,
             apps_build::Builder::Dockerfile => Builder::Dockerfile,
+            apps_build::Builder::Functions => Builder::Functions,
         };
     }
     for (from, to) in [(&c.dockerfile, &mut b.dockerfile), (&c.install, &mut b.install), (&c.build, &mut b.build), (&c.start, &mut b.start), (&c.pre_deploy, &mut r.pre_deploy), (&c.health_path, &mut r.health_path)] {
@@ -130,6 +131,7 @@ mod tests {
             affinity: true,
             tcp: true,
             rollback_on_crash: true,
+            rebuild_on_base: true,
             schedules: vec![crate::model::Scheduled { name: "a".into(), schedule: "@daily".into(), command: "x".into(), path: None, timezone: None, timeout_s: None }],
         };
         let keys: std::collections::BTreeSet<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().filter(|k| *k != "volume").cloned().collect();
