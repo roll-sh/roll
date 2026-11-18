@@ -1961,37 +1961,65 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **In review, for previews' next lock turn** (logged after search's and mcp's): #232 (a Git URL
-   preview reported on GitHub through roll's GitHub App), #246 on it (one voice per pull request:
-   a Git URL service on two projects' canvases is reported by the project that has had it longest,
-   with one comment across a handover; the other preview is `quiet` on its row, chip and sheet),
-   #233 (a page's words masked whole before they're cut), #245 (what a preview's services use)
-   and #259 (a preview made by hand is only of a repo the project stands for, and never another
-   project's: both on main, found by an independent review) and #266 (`skip_authors`: no preview
-   for a dependency bot's pull request unless asked, Netlify's and Vercel's ignored builds) and
-   #272 (deploy hooks: a secret URL a headless CMS calls to rebuild a branch's previews), #280
-   (a preview's services deploy at once: a cached push live again in 4.2 s against 5.8 s), #234
-   (Roll only on roll apps' builds: a closed build has no secrets and only a proxy to public
-   hosts; `closed: true` on each deploy) and #251 on it (`report: false` on every `pv-`
-   environment, so a pull request hears only previews' `roll/preview`). #234 and #251 passed
-   `scripts/preview-apps.sh` on main with apps' socket-path fix (#271).
-2. **Sign-in access** (Vercel Authentication, Netlify's team access): `access: "team"`, so only
-   people signed in to roll who can open the project open its previews, not whoever has the
-   link. On roll apps, the `pv-` environment gets apps' `access: {signed_in: true}`
-   ("Signing in to an environment"). On roll's runtime, previews' gate does the same: a page
-   load with no session goes to sign in on the dashboard, which asks for a one-use ticket as the
-   person; the preview's host trades it for a host-only cookie, checked again every 5 minutes.
-   Share links and the CI bypass keep working beside it.
-3. **A project's own preview domain, apps' half** (previews' half is #275; apps' is #278, with a `PreviewRouter` hook previews wires in rolld once it's on main, plus a live check): roll apps' project
-   preview domain (`POST/GET/DELETE /v1/apps/projects/{project}/preview-domain`, a verified
-   wildcard) and `preview_host` routing in `host_target`, third in apps' queue. Then a live
-   check in `scripts/preview-apps.sh`. TLS waits on wildcard certificates over DNS-01 on the edge.
-4. **Bots on Git URL services:** roll apps' `GitPull` carries no author, so `skip_authors` doesn't
-   reach a Git URL service's pull requests (with the apps thread).
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+Every feature in review has its `roll preview` command too: `metrics`, `hooks` (#344), `errors`
+(on #326), `visitors` (on #335), `masks [--apply]` (on #324), `up`/`down` (#314).
+
+1. **Sign-in access, in review** (#285): `access: "team"` (Vercel Authentication, Netlify's team
+   access), so only people signed in to roll who can open the project open its previews, not
+   whoever has the link. On roll apps the `pv-` environment gets apps' `access: {signed_in:
+   true}`; on roll's runtime previews' gate does the same ticket handshake. Being fixed after an
+   independent review: signing out of roll must end a preview session, the ticket URL keeps the
+   service's own scheme and port, a racing access change, the link token stripped under `team`.
+   Review findings fixed (914b738b5); main merged in (c256d4eaf). The feedback button under
+   `team` is #300 on it: a visitor let in through roll (link or a live team session) gets it, and
+   a note is posted from roll's dashboard as the signed-in person; a team preview's services on
+   roll apps get no button yet (apps adds it only for link visitors).
+2. **Who opened a team preview, in review** (#335, on #285): a sign-in to a `team` preview (the ticket traded for a
+   session) is said in its activity, once per person per session ("ana opened it"), so a team sees
+   who looked at production's data; the sheet lists who opened it lately.
+3. **`roll preview up`, in review** (#314): a preview of the working tree (Netlify's `netlify deploy`, Vercel's
+   `vercel deploy`): from a checkout of a project's repo, uncommitted changes included, a commit
+   made without touching the user's index or HEAD is pushed to a branch of their own
+   (`preview/<user>/<name>`) and previewed, the URL printed once it's ready; again moves it,
+   `roll preview down` deletes the branch and the preview.
+4. **Mask suggestions, in review** (#324, review findings fixed: never a suggestion that fails masking, checked on real Postgres; Tonic's and Neon's anonymisation). The dialog reads columns only when asked, so opening it never resets a running parent's idle timer: previews read production's data, and
+   today the rules dialog only says "mask what holds people's data" when a resource has no masks
+   at all. Name the columns and fields that look like personal data (email, phone, name, address,
+   birth date, IP, national ids, tokens) in each branched Postgres, NoSQL and search parent and
+   aren't masked, each with a one-click rule (`email`, `redact`, `hash`, `null`), on the rules
+   dialog and the sheet.
+5. **A preview's errors on its sheet, in review** (#326, review findings fixed: masked whole before any cut, bounded log reads, a count route that reads no secrets; Vercel's runtime logs, Sentry's grouping): the sheet shows
+   raw logs only. Group a preview's errors by fingerprint: roll apps' `…/environments/pv-…/errors`
+   for its instances, the same grouping over roll's runtime's logs (stack traces joined, ids and
+   numbers taken out), masked as logs are; the count on the row and the pull request comment's
+   "What went wrong".
+6. **A project's own preview domain, the wiring, in review** (draft #341, on #305; previews' half #275 is on main): after apps'
+   #278, rolld hands apps' `PreviewRouter` previews' `runtime::serve_host`, and
+   `scripts/preview-apps.sh` checks a verified domain over plain HTTP, a roll apps service and a
+   runtime one by label. TLS waits on wildcard certificates over DNS-01 on the edge.
+7. **Bots on Git URL services** (draft #305, on apps' #282; and draft #343 on apps' #317: a bot's branch push makes no preview at all, by its pusher): previews' own `GitPull` carries the
+   opener and `skip_authors` reaches a Git URL service's pull requests. Undraft once #282 is on
+   main.
+8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
-7. **Watch: a cold start on a Docker name conflict.**
+9. **Watch: pg-control's recovery to a time seconds old** (unowned).
+10. **Watch: a cold start on a Docker name conflict.**
+
+Landed in previews' lock turn of 2026-11-18 (main 440e13ebf; one combined tree, each step
+tagged and gated once with both live checks, then landed one at a time, each identical to its
+step):
+- a Git URL preview's `roll/preview` and pull request comment through roll's GitHub App (#232);
+- one voice per pull request: a Git URL service on two projects' canvases is reported by the
+  project that has had it longest, one comment across a handover, the other `quiet` (#246);
+- a page's words masked whole before they're cut (#233);
+- what a preview's services use, CPU and memory (#245);
+- a preview made by hand only of a repo the project stands for, never another project's (#259);
+- `skip_authors` for dependency bots' pull requests (#266);
+- deploy hooks (`rlb_`), a secret URL a headless CMS calls to rebuild a branch's previews (#272);
+- a preview's services deploy at once: a cached push live again in 4.2 s against 5.8 s (#280);
+- Roll only on roll apps' builds, `closed: true` on each deploy (#234), and `report: false` on
+  every `pv-` environment (#251);
+- previews' half of a project's own preview domain (#275).
 
 Landed in previews' lock turn of 2026-11-17 (main 42a3bbe1b, one combined gate with both live
 checks):
