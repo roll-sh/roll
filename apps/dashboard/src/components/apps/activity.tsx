@@ -35,6 +35,10 @@ export function describe(e: AppEvent): string {
       return `set the registry login${d.server ? ` for ${String(d.server)}` : ""}`;
     case "audit.registry.removed":
       return "removed the registry login";
+    case "audit.deleted":
+      return "deleted the service";
+    case "audit.restored":
+      return "restored the service";
     // What roll did or saw (its timeline).
     case "deploy.active":
       return `put a deployment live${where}`;

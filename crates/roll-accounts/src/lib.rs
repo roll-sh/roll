@@ -422,6 +422,10 @@ impl Accounts {
         if !db.has_column("scim_users", "user_name")? {
             db.add_column("scim_users", "user_name", "TEXT")?;
         }
+        // A SCIM token found leaked: where, and it no longer opens anything.
+        if !db.has_column("scim_tokens", "leaked")? {
+            db.add_column("scim_tokens", "leaked", "TEXT")?;
+        }
         // Whether a passkey is synced to the person's other devices (its authenticator says so).
         if !db.has_column("passkeys", "synced")? {
             db.add_column("passkeys", "synced", "INTEGER")?;
@@ -989,6 +993,18 @@ impl roll_auth::Sessions for Resolver {
 
     fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
         self.0.person(user).map_err(|e| e.to_string())
+    }
+
+    fn sso_trust<'a>(&'a self, id: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SsoTrust>, String>> {
+        let (accounts, id) = (self.0.clone(), id.to_string());
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let all = accounts.sso_connections().map_err(|e| e.to_string())?;
+                Ok(all.into_iter().find(|c| c.id == id).map(|c| roll_auth::SsoTrust { name: c.name, issuer: c.issuer, verified: c.verified }))
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        })
     }
 
     fn person_by_email<'a>(&'a self, email: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SignedIn>, String>> {

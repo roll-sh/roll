@@ -136,6 +136,15 @@ export interface EnvironmentSummary {
   attention?: ("crash_loop" | "capped" | "paused" | "held" | "maintenance" | "deploy_failed")[];
 }
 
+/** A deleted service, kept stopped for a restore until `purge_at` (ms), then deleted for good. */
+export interface DeletedService {
+  id: string;
+  project: string;
+  name: string;
+  deleted_at: number;
+  purge_at: number;
+}
+
 export interface Service {
   id: string;
   project: string;
@@ -168,7 +177,7 @@ export interface ProjectImport {
       branch: string | null;
       run: Partial<Run>;
       /** A database's kind, or `service`: another app of the file, by its name. */
-      links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "service"; name: string }[];
+      links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "search" | "service"; name: string }[];
       /** What it's set to as it is. */
       variables: Record<string, string>;
       /** Made once, when the service is (`{ generate = "secret" }`): 32 random bytes in hex. */
@@ -179,7 +188,7 @@ export interface ProjectImport {
       environments?: Record<string, { branch: string | null; run: Partial<Record<EnvRunField, number>>; variables: Record<string, string> }>;
     }
   >;
-  databases: Record<string, { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" }>;
+  databases: Record<string, { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "search" }>;
 }
 
 export interface NewService {
@@ -407,6 +416,21 @@ export function parseAllowList(text: string): IpRule[] {
     });
 }
 
+/** How an environment differs from another (`GET …/diff?from=`): never a value. */
+export interface EnvironmentDiff {
+  from: string;
+  to: string;
+  variables: {
+    /** `from`'s own variables this one lacks (a sealed one can't be copied). */
+    missing: { name: string; sealed: boolean }[];
+    extra: string[];
+    /** Set in both with other values; null: the caller can't reveal both, so isn't told. */
+    differ: string[] | null;
+  };
+  /** Each setting that differs, and the `PUT …/environments/{to}` body that makes it `from`'s. */
+  settings: { field: string; from: unknown; to: unknown; put: EnvironmentPut }[];
+}
+
 export interface EnvironmentPut {
   branch?: string | null;
   /** Its name on the roll domain (`<hostname>.<domain>`): the old one stops answering. */
@@ -426,6 +450,8 @@ export interface EnvironmentPut {
   traces?: boolean;
   /** Its pages measure their Web Vitals (a tag roll adds). */
   vitals?: boolean;
+  /** Its deploys post commit statuses and GitHub Deployments (false: someone else reports them). */
+  report?: boolean;
   /** What its code may reach from the next deploy: roll and `hosts` only, or anything. null: open. */
   egress?: Egress | null;
   /** Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until false. */
@@ -523,6 +549,9 @@ export interface Environment extends EnvironmentSummary {
   traces?: boolean;
   /** Its pages measure their Web Vitals for roll. */
   vitals?: boolean;
+  /** Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
+   *  someone else reports them (roll previews' `pv-` environments). */
+  report?: boolean;
   /** People signed in to roll who can open its project get in. */
   signed_in?: boolean;
   /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
@@ -825,6 +854,18 @@ export interface Metrics {
   egress_bytes: number[];
   /** Requests a minute that found every instance busy at `max_instances` (saturation). */
   over_capacity: number[];
+  /** Each instance's own last hour by minute (those it has now), whatever the range. */
+  by_instance?: InstanceSeries[];
+}
+
+/** One instance's last hour (Railway's per replica): cores in use on average each minute, and
+ *  the minute's peak memory. */
+export interface InstanceSeries {
+  instance: string;
+  deployment: string;
+  minutes: number[];
+  cpu: number[];
+  memory_bytes: number[];
 }
 
 export interface Usage {
@@ -1006,7 +1047,10 @@ export const appsApi = {
   create: (body: NewService) => call<Service>("POST", "/v1/apps/services", body),
   service: (id: string) => call<Service>("GET", svc(id)),
   update: (id: string, patch: ServicePatch) => call<Service>("PATCH", svc(id), patch),
+  /** Deletes it until it's restored (48 hours); a deleted service's delete deletes it for good. */
   remove: (id: string) => call<null>("DELETE", svc(id)),
+  deletedServices: (project?: string) => call<DeletedService[]>("GET", `/v1/apps/services${qs({ project, deleted: "true" })}`),
+  restoreService: (id: string) => call<Service>("POST", `${svc(id)}/restore`),
 
   links: (id: string) => call<Link[]>("GET", `${svc(id)}/links`),
   /** `all`: every kind of event (its timeline), not only what people changed. */
@@ -1081,8 +1125,12 @@ export const appsApi = {
   /** The values in the clear (the `reveal` action). */
   reveal: (id: string, e: string) => call<Record<string, string>>("GET", `${env(id, e)}/variables/values`),
   /** `seal`: names set here or already set, sealed for good (a new value keeps them sealed). */
-  setVariables: (id: string, e: string, change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null> }) =>
-    call<Variables>("PATCH", `${env(id, e)}/variables`, change),
+  setVariables: (
+    id: string,
+    e: string,
+    change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null>; copy_from?: string; copy?: string[] },
+  ) => call<Variables>("PATCH", `${env(id, e)}/variables`, change),
+  diff: (id: string, e: string, from: string) => call<EnvironmentDiff>("GET", `${env(id, e)}/diff${qs({ from })}`),
 
   logs: (id: string, e: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${env(id, e)}/logs${qs({ tail: q.tail, since: q.since })}`),
   /** Lines that contain `q` (any case), back through the stored logs (7 days), newest last. */

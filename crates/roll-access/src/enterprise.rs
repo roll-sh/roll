@@ -65,9 +65,16 @@ pub struct Idp {
     #[serde(default)]
     pub matching: Matching,
     /// The email domains it vouches for (`acme.com`): a person matched by email must have one.
-    /// Required with email matching: a provider names people of its own company, never anyone's.
+    /// Required with email matching unless `sso` names them: a provider names people of its own
+    /// company, never anyone's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub domains: Vec<String>,
+    /// The SSO connection of roll accounts that is this same provider (`sso_…`): its issuer, and
+    /// the domains a DNS record proved for it, as they are at each sign-in (then `domains` is
+    /// empty). One provider, set up once, for people and their agents; removing the connection or
+    /// a domain's proof stops it here too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sso: Option<String>,
     /// Whether it may sign in roll's admins (who act as the operator, past roll's own second
     /// factor). Off by default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -166,8 +173,11 @@ impl Access {
             if i.tenant.as_deref().is_some_and(|t| t.trim().is_empty() || t.len() > 200 || t.contains(char::is_control)) {
                 return Err(Error::BadRequest(format!("{}'s tenant is its tenant id (1 to 200 characters)", i.issuer)));
             }
-            if i.matching == Matching::Email && i.domains.is_empty() {
-                return Err(Error::BadRequest(format!("{} matches people by email: name the email domains it vouches for (domains)", i.issuer)));
+            if i.sso.is_some() && !i.domains.is_empty() {
+                return Err(Error::BadRequest(format!("{} takes its domains from its SSO connection: leave domains out", i.issuer)));
+            }
+            if i.matching == Matching::Email && i.domains.is_empty() && i.sso.is_none() {
+                return Err(Error::BadRequest(format!("{} matches people by email: name the email domains it vouches for (domains), or its SSO connection (sso)", i.issuer)));
             }
         }
         let mut seen = std::collections::HashSet::new();
@@ -429,10 +439,6 @@ pub async fn token(a: Arc<Access>, headers: &axum::http::HeaderMap, f: &HashMap<
                     return Err(Error::OAuth("access_denied", "the identity provider doesn't say it verified the person's email (email_verified)".into()));
                 }
                 let email = jwt.str("email").filter(|m| m.is_ascii() && m.len() <= 320).map(str::to_ascii_lowercase).ok_or_else(|| refused("the assertion names no email"))?;
-                let domain = email.rsplit_once('@').map(|(_, d)| d).unwrap_or_default();
-                if !idp.domains.iter().any(|d| d == domain) {
-                    return Err(Error::OAuth("access_denied", "that email's domain isn't one roll trusts this identity provider for".into()));
-                }
                 Who::Email(email)
             }
             Matching::AudSub => Who::Id(jwt.str("aud_sub").filter(|s| s.starts_with("usr_")).ok_or_else(|| refused("the assertion names no roll account (aud_sub)"))?.to_string()),
@@ -444,6 +450,21 @@ pub async fn token(a: Arc<Access>, headers: &axum::http::HeaderMap, f: &HashMap<
     let (app, idp, who, sub, (read_only, mcp_only)) = checked;
     // The person, as their account is now (never cached).
     let people = a.people.get().ok_or_else(|| Error::OAuth("access_denied", "roll has no accounts here".into()))?.clone();
+    if let Who::Email(email) = &who {
+        // The domains it vouches for: the operator's list, or those its SSO connection proved, as
+        // they are now (a connection removed, or a domain's proof gone, trusts nothing).
+        let domains = match &idp.sso {
+            None => idp.domains.clone(),
+            Some(id) => match people.sso_trust(id).await.map_err(Error::Internal)? {
+                Some(t) if t.issuer.trim_end_matches('/') == idp.issuer.trim_end_matches('/') => t.verified,
+                _ => return Err(Error::OAuth("access_denied", "this identity provider's SSO connection is gone or names another issuer".into())),
+            },
+        };
+        let domain = email.rsplit_once('@').map(|(_, d)| d).unwrap_or_default();
+        if !domains.iter().any(|d| d == domain) {
+            return Err(Error::OAuth("access_denied", "that email's domain isn't one roll trusts this identity provider for".into()));
+        }
+    }
     let person = match &who {
         Who::Email(m) => people.person_by_email(m).await,
         Who::Id(id) => people.person(id).await,
@@ -572,6 +593,16 @@ pub(crate) struct Idps {
 
 pub(crate) async fn put_idps(axum::extract::State(a): S, ext: axum::http::Extensions, axum::Json(b): axum::Json<Idps>) -> crate::Result<axum::Json<Value>> {
     crate::api::operator_only(&a, &ext, "choose which identity providers roll trusts")?;
+    // A provider tied to an SSO connection is that connection's: same issuer.
+    for i in b.idps.iter().filter(|i| i.sso.is_some()) {
+        let id = i.sso.as_deref().unwrap_or_default();
+        let people = a.people.get().ok_or_else(|| Error::BadRequest("roll has no accounts here, so no SSO connections".into()))?;
+        match people.sso_trust(id).await.map_err(Error::Internal)? {
+            Some(t) if t.issuer.trim_end_matches('/') == i.issuer.trim_end_matches('/') => {}
+            Some(t) => return Err(Error::BadRequest(format!("SSO connection {id} ({}) is for {}, not {}", t.name, t.issuer, i.issuer))),
+            None => return Err(Error::BadRequest(format!("no SSO connection {id}"))),
+        }
+    }
     let idps = tokio::task::spawn_blocking(move || a.set_idps(b.idps)).await.map_err(|e| Error::Internal(e.to_string()))??;
     Ok(axum::Json(json!({ "idps": idps })))
 }
