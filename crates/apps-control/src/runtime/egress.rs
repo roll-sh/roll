@@ -56,13 +56,17 @@ pub fn relay_name(network: &str, digest: &str) -> String {
 /// The ports a listed host is reached on.
 const WEB_PORTS: [u16; 2] = [443, 80];
 
+/// The host list of a closed build's proxy: any host (on 443 and 80), connected to its public
+/// addresses only. Never an environment's own (`egress.hosts` never takes `*`).
+pub const ANY_PUBLIC: &str = "*";
+
 /// Whether `host:port` is one `hosts` lets through: a listed name (`api.stripe.com`) or a
 /// subdomain of a `*.` one (`*.sentry.io`: `o1.ingest.sentry.io`, never `sentry.io` itself),
 /// on one of `ports`.
 pub fn allowed(hosts: &[String], ports: &[u16], host: &str, port: u16) -> bool {
     let h = host.trim_end_matches('.').to_ascii_lowercase();
     ports.contains(&port)
-        && hosts.iter().any(|p| match p.strip_prefix("*.") {
+        && hosts.iter().any(|p| p == ANY_PUBLIC || match p.strip_prefix("*.") {
             Some(base) => h.len() > base.len() + 1 && h.ends_with(base) && h.as_bytes()[h.len() - base.len() - 1] == b'.',
             None => h == *p,
         })
@@ -355,6 +359,9 @@ mod tests {
         assert_eq!(digest("net", &hosts), digest("net", &["*.sentry.io".to_string(), "api.stripe.com".to_string()]));
         assert_ne!(digest("net", &hosts), digest("another", &hosts), "one network's proxy is its own");
         assert_eq!(proxy_url("net", &hosts), format!("http://roll-egress-{}:3128", digest("net", &hosts)));
+        // A closed build's list: any host, still only on web ports.
+        let any = vec![ANY_PUBLIC.to_string()];
+        assert!(super::allowed(&any, &WEB_PORTS, "registry.npmjs.org", 443) && !super::allowed(&any, &WEB_PORTS, "registry.npmjs.org", 22));
     }
 
     /// What the proxy answers a caller's `req` with, and what it kept as refused: `hosts` on
@@ -410,6 +417,12 @@ mod tests {
         let (out, refused) = through(&["localhost"], port, false, connect("localhost", port)).await;
         assert!(out.starts_with("HTTP/1.1 403") && out.contains("private address"), "{out}");
         assert_eq!(refused, [Refused { host: "localhost".into(), private: true }]);
+        // Any public host (a closed build's list) is still never a private or metadata address,
+        // by name or as an address.
+        for h in ["localhost", "169.254.169.254", "10.0.0.1"] {
+            let (out, _) = through(&[ANY_PUBLIC], port, false, connect(h, port)).await;
+            assert!(out.starts_with("HTTP/1.1 403"), "{h}: {out}");
+        }
         // An https:// URL without CONNECT isn't a request a proxy forwards.
         let (out, _) = through(&["localhost"], port, true, "GET https://localhost/ HTTP/1.1\r\n\r\n".into()).await;
         assert!(out.starts_with("HTTP/1.1 400"), "{out}");

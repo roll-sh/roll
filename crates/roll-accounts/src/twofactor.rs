@@ -40,21 +40,26 @@ pub(crate) fn verify_code(code: &str, hash: &str) -> bool {
 
 /// AES-256-GCM under a key derived from `ROLL_SECRET_KEY`, the user's id as associated data (a
 /// seed copied to another user doesn't open). Stored as `v1:` + base64(nonce ‖ ciphertext).
-struct Sealer(Aes256Gcm);
+pub(crate) struct Sealer(Aes256Gcm);
 
 impl Sealer {
     fn new(secret: &str) -> Sealer {
-        let key = Sha256::digest(format!("roll-accounts-totp:{}", secret.trim()).as_bytes());
+        Sealer::for_purpose("roll-accounts-totp", secret)
+    }
+
+    /// A key of its own per purpose (TOTP seeds, SSO client secrets): one never opens the other's.
+    fn for_purpose(purpose: &str, secret: &str) -> Sealer {
+        let key = Sha256::digest(format!("{purpose}:{}", secret.trim()).as_bytes());
         Sealer(Aes256Gcm::new_from_slice(&key).expect("32-byte key"))
     }
 
-    fn seal(&self, user: &str, plain: &str) -> String {
+    pub(crate) fn seal(&self, user: &str, plain: &str) -> String {
         let nonce = random::<12>();
         let ct = self.0.encrypt(Nonce::from_slice(&nonce), Payload { msg: plain.as_bytes(), aad: user.as_bytes() }).expect("encrypt");
         format!("v1:{}", base64::engine::general_purpose::STANDARD.encode([&nonce[..], &ct].concat()))
     }
 
-    fn open(&self, user: &str, sealed: &str) -> Option<zeroize::Zeroizing<String>> {
+    pub(crate) fn open(&self, user: &str, sealed: &str) -> Option<zeroize::Zeroizing<String>> {
         let raw = base64::engine::general_purpose::STANDARD.decode(sealed.strip_prefix("v1:")?).ok()?;
         if raw.len() < 12 + 16 {
             return None;
@@ -90,6 +95,14 @@ impl Accounts {
         match &self.config.secret_key {
             Some(k) if k.expose().len() >= 32 => Ok(Sealer::new(k.expose())),
             _ => Err(Error::Unavailable("authenticator apps need ROLL_SECRET_KEY (at least 32 characters) on the server".into(), "secret_key")),
+        }
+    }
+
+    /// What SSO client secrets are sealed with (the connection's id as associated data).
+    pub(crate) fn sso_sealer(&self) -> Result<Sealer> {
+        match &self.config.secret_key {
+            Some(k) if k.expose().len() >= 32 => Ok(Sealer::for_purpose("roll-accounts-sso", k.expose())),
+            _ => Err(Error::Unavailable("SSO needs ROLL_SECRET_KEY (at least 32 characters) on the server: it seals the client secret".into(), "secret_key")),
         }
     }
 

@@ -96,6 +96,8 @@ pub struct SearchRequest {
     pub rank_only: bool,
     /// The document and field level security of the principal the search reads for.
     pub security: Option<crate::xpack::security::dls::ReadSecurity>,
+    /// What its slow log entries say about it (its body, `X-Opaque-Id`).
+    pub slowlog: crate::slowlog::Origin,
 }
 
 /// One shard to search.
@@ -356,6 +358,7 @@ pub fn parse_request(ctx: &Ctx, body: Option<&Value>, raw: Option<&[u8]>) -> EsR
         rank_only: false,
         security: crate::xpack::security::dls::ReadSecurity::of(ctx),
         now_ms: ctx.now_ms,
+        slowlog: crate::slowlog::Origin::of(&ctx.request.body, raw, ctx.request.header("x-opaque-id")),
     })
 }
 
@@ -1077,7 +1080,13 @@ pub fn query_phase(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t:
     });
     let _ambient = search_index::search::set_ambient_control(ctl);
     SHARD_TIMED_OUT.with(|c| c.set(false));
+    // Timed only when a slow log threshold could log it: one relaxed load otherwise.
+    let slow_from = t.shard.slow.on(crate::slowlog::Phase::Query).then(std::time::Instant::now);
     let r = query_phase_inner(cluster, st, req, t, ti, shards, n, after, aggs, knn, window);
+    if let (Some(from), Ok(sr)) = (slow_from, &r) {
+        let total = (sr.total, !matches!(sr.relation, TotalRelation::EqualTo));
+        slow_search(crate::slowlog::Phase::Query, req, t, shards, from.elapsed().as_nanos() as u64, Some(total));
+    }
     let timed_out = SHARD_TIMED_OUT.with(|c| c.replace(false));
     match r {
         Ok(mut sr) if timed_out => {
@@ -1121,6 +1130,34 @@ pub fn query_phase(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t:
         }
         r => r,
     }
+}
+
+/// Logs a shard's query or fetch phase that took `nanos` when it passed one of its index's slow
+/// log thresholds ([`crate::slowlog`]).
+fn slow_search(phase: crate::slowlog::Phase, req: &SearchRequest, t: &Target, shards: usize, nanos: u64, total: Option<(u64, bool)>) {
+    let Some(level) = t.shard.slow.level(phase, nanos) else { return };
+    let source = req.slowlog.source.as_deref().map_or_else(String::new, |b| {
+        // A character is at most 4 bytes: decode no more than the entry keeps.
+        let head = &b[..b.len().min(crate::slowlog::SEARCH_SOURCE_CHARS * 4)];
+        crate::slowlog::cut(&String::from_utf8_lossy(head), crate::slowlog::SEARCH_SOURCE_CHARS).to_string()
+    });
+    t.shard.slowlog.push(crate::slowlog::Entry {
+        at_ms: crate::slowlog::now_ms(),
+        phase,
+        level,
+        took_nanos: nanos,
+        index: t.idx.name.clone(),
+        uuid: t.idx.uuid.clone(),
+        shard: t.shard.id,
+        source,
+        opaque_id: req.slowlog.opaque_id.clone(),
+        total_hits: total.map(|(n, at_least)| crate::slowlog::total_hits(n, at_least)),
+        total_shards: Some(shards),
+        search_type: Some(if req.dfs { "DFS_QUERY_THEN_FETCH" } else { "QUERY_THEN_FETCH" }),
+        stats: req.source.stats.clone(),
+        id: None,
+        routing: None,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2856,6 +2893,11 @@ fn execute_targets(cluster: &Cluster, req: &SearchRequest, targets: &[Target]) -
         let fetched = results.iter().enumerate().any(|(ri, r)| r.target == i && fetch_times[ri].hits > 0);
         let notes = field_usage::Notes::search(&t.table(), src, fetched);
         t.shard.counters.field_usage.lock().record(&notes.used);
+        if fetched && t.shard.slow.on(crate::slowlog::Phase::Fetch) {
+            let nanos = results.iter().enumerate().filter(|(_, r)| r.target == i).map(|(ri, _)| fetch_times[ri].nanos).sum();
+            let total = results.iter().find(|r| r.target == i).map(|r| (r.total, !matches!(r.relation, TotalRelation::EqualTo)));
+            slow_search(crate::slowlog::Phase::Fetch, req, t, targets.len(), nanos, total);
+        }
     }
     for t in targets {
         t.shard.counters.fetch_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3529,6 +3571,7 @@ fn lookup_fields_of_hit(cluster: &Cluster, src: &SearchSource, table: &Arc<crate
                 "fields" => fetch.clone(),
             };
             let req = SearchRequest {
+                slowlog: Default::default(),
                 indices: vec![target_index.clone()],
                 opts: IndicesOptions::STRICT_EXPAND_OPEN,
                 source: SearchSource::parse(&body, None)?,
