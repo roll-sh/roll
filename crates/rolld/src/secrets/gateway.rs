@@ -965,15 +965,20 @@ mod tests {
         let _ = &r.secrets;
     }
 
-    /// A ClickHouse HTTPS interface on loopback with a certificate for `localhost` (its CA PEM
-    /// returned): answers `1` to every statement, keeping the user and the statement it got.
-    async fn clickhouse_server(seen: Arc<Mutex<Vec<String>>>) -> (u16, String) {
+    /// TLS for a fake server on loopback: a certificate for `localhost`, and its CA PEM.
+    fn localhost_tls() -> (tokio_rustls::TlsAcceptor, String) {
         use tokio_rustls::rustls;
         let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let ca = ck.cert.pem();
         let key = rustls::pki_types::PrivateKeyDer::try_from(ck.signing_key.serialize_der()).unwrap();
         let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider())).with_safe_default_protocol_versions().unwrap().with_no_client_auth().with_single_cert(vec![ck.cert.der().clone()], key).unwrap();
-        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        (tokio_rustls::TlsAcceptor::from(Arc::new(config)), ca)
+    }
+
+    /// A ClickHouse HTTPS interface on loopback with a certificate for `localhost` (its CA PEM
+    /// returned): answers `1` to every statement, keeping the user and the statement it got.
+    async fn clickhouse_server(seen: Arc<Mutex<Vec<String>>>) -> (u16, String) {
+        let (acceptor, ca) = localhost_tls();
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = l.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -1117,5 +1122,134 @@ mod tests {
         tokio::task::spawn_blocking(move || hub.call(&gw, Call::DbDropLogin { url, ca: None, name: n })).await.unwrap().unwrap();
         assert!(c.query_opt("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&name]).await.unwrap().is_none());
         assert!(lines.lock().unwrap().iter().any(|l| l.contains("open 127.0.0.1:18432")), "{:?}", lines.lock().unwrap());
+    }
+
+    /// Elasticsearch's security API on loopback over TLS for `localhost` (its CA PEM returned): the
+    /// admin authenticates, `app_blue` and the role `reader` exist, writes succeed. Keeps each
+    /// request as `METHOD path user body`.
+    async fn elasticsearch_server(seen: Arc<Mutex<Vec<String>>>) -> (u16, String) {
+        let (acceptor, ca) = localhost_tls();
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = l.accept().await {
+                let (acceptor, seen) = (acceptor.clone(), seen.clone());
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(tcp).await else { return };
+                    let serve = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                        let seen = seen.clone();
+                        async move {
+                            use base64::Engine as _;
+                            use http_body_util::BodyExt;
+                            let user = req.headers().get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Basic ")).and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok()).map(|b| String::from_utf8_lossy(&b).split(':').next().unwrap_or_default().to_string()).unwrap_or_default();
+                            let (method, path) = (req.method().clone(), req.uri().path().to_string());
+                            let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+                            seen.lock().unwrap().push(format!("{method} {path} {user} {}", String::from_utf8_lossy(&body)));
+                            let found = method != hyper::Method::GET || ["/_security/_authenticate", "/_security/user/app_blue", "/_security/role/reader"].contains(&path.as_str());
+                            let (status, answer) = if found { (200, r#"{"username":"admin"}"#) } else { (404, r#"{"found":false}"#) };
+                            let mut resp = hyper::Response::new(http_body_util::Full::new(bytes::Bytes::from_static(answer.as_bytes())));
+                            *resp.status_mut() = hyper::StatusCode::from_u16(status).unwrap();
+                            Ok::<_, std::convert::Infallible>(resp)
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new().serve_connection(hyper_util::rt::TokioIo::new(tls), serve).await;
+                });
+            }
+        });
+        (port, ca)
+    }
+
+    /// A Cassandra node's native protocol (v4) on loopback over TLS for `localhost` (its CA PEM
+    /// returned): PasswordAuthenticator's SASL PLAIN, then every statement succeeds. Keeps the
+    /// user that logged in and each statement.
+    async fn cassandra_server(seen: Arc<Mutex<Vec<String>>>) -> (u16, String) {
+        use futures_util::{SinkExt, StreamExt};
+        use nosql_proto::{Ctx, Dialect, Inbound, Request, RequestFrame, Response, ResponseFrame, ResultBody, ServerCodec, Version};
+        let (acceptor, ca) = localhost_tls();
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = l.accept().await {
+                let (acceptor, seen) = (acceptor.clone(), seen.clone());
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(tcp).await else { return };
+                    let mut io = tokio_util::codec::Framed::new(tls, ServerCodec::new(Dialect::Cassandra));
+                    let ctx = Ctx::new(Version::V4);
+                    while let Some(Ok(Inbound::Frame(frame))) = io.next().await {
+                        let Ok(req) = RequestFrame::decode(ctx, &frame) else { return };
+                        let answer = match req.request {
+                            Request::Startup(_) => {
+                                io.codec_mut().established(Version::V4, None);
+                                Response::Authenticate("org.apache.cassandra.auth.PasswordAuthenticator".into())
+                            }
+                            Request::AuthResponse(token) => {
+                                let token = token.unwrap_or_default();
+                                let user = token.split(|b| *b == 0).nth(1).map(|u| String::from_utf8_lossy(u).into_owned()).unwrap_or_default();
+                                seen.lock().unwrap().push(format!("login {user}"));
+                                Response::AuthSuccess(None)
+                            }
+                            Request::Query(q) => {
+                                seen.lock().unwrap().push(q.query);
+                                Response::Result(ResultBody::Void)
+                            }
+                            _ => return,
+                        };
+                        if io.send(ResponseFrame::new(req.stream, answer).to_frame(ctx)).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (port, ca)
+    }
+
+    /// Elasticsearch over HTTPS and Cassandra over CQL with TLS, each reached through the gateway
+    /// by the call another node would forward to the gateway's holder, TLS checked here with the
+    /// database's CA. A server the gateway's allow-list doesn't name is never dialed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn elasticsearch_and_cassandra_are_reached_through_the_gateway_and_only_on_its_allow_list() {
+        let r = Rolld::start().await;
+        let (gw, token) = r.gateway("vpc").await;
+        let (es_seen, cql_seen, other_seen) = (Arc::new(Mutex::new(vec![])), Arc::new(Mutex::new(vec![])), Arc::new(Mutex::new(vec![])));
+        let (es, es_ca) = elasticsearch_server(es_seen.clone()).await;
+        let (cql, cql_ca) = cassandra_server(cql_seen.clone()).await;
+        let (other, other_ca) = elasticsearch_server(other_seen.clone()).await;
+        let (_agent, lines) = r.up(&gw, &token, &[format!("localhost:{es}"), format!("localhost:{cql}")]);
+        r.linked(&gw).await;
+        let call = async |c: Call| {
+            let (hub, g) = (r.hub.clone(), gw.clone());
+            tokio::task::spawn_blocking(move || hub.call(&g, c)).await.unwrap()
+        };
+        let pw = "Fake0password0for0test";
+
+        // Elasticsearch: registering checks the admin, the user and the role; a rotation is the
+        // user's _password call.
+        let url = format!("elasticsearch://admin:fakeadminpw@localhost:{es}");
+        call(Call::DbCheck { url: url.clone(), ca: Some(es_ca.clone()), roles: vec!["app_blue".into()], group: Some("reader".into()) }).await.unwrap();
+        let missing = call(Call::DbCheck { url: url.clone(), ca: Some(es_ca.clone()), roles: vec!["nobody".into()], group: None }).await.unwrap_err();
+        assert!(missing.contains("there's no user nobody") && !missing.contains("fakeadminpw"), "{missing}");
+        call(Call::DbSetPassword { url: url.clone(), ca: Some(es_ca.clone()), role: "app_blue".into(), password: pw.into() }).await.unwrap();
+        let got = es_seen.lock().unwrap().join("\n");
+        assert!(got.contains("GET /_security/_authenticate admin") && got.contains(&format!("POST /_security/user/app_blue/_password admin {{\"password\":\"{pw}\"}}")), "{got}");
+        let untrusted = call(Call::DbCheck { url, ca: None, roles: vec![], group: None }).await.unwrap_err();
+        assert!(untrusted.contains("certificate"), "TLS runs from roll, not the gateway: {untrusted}");
+
+        // Cassandra: a rotation and a dynamic login, each statement carrying bcrypt's hash, never
+        // the password.
+        let url = format!("cassandra://admin:fakeadminpw@localhost:{cql}/");
+        call(Call::DbSetPassword { url: url.clone(), ca: Some(cql_ca.clone()), role: "app_blue".into(), password: pw.into() }).await.unwrap();
+        call(Call::DbCreateLogin { url: url.clone(), ca: Some(cql_ca.clone()), name: "roll_fakefake".into(), password: pw.into(), group: "reader".into(), until: 0 }).await.unwrap();
+        let got = cql_seen.lock().unwrap().join("\n");
+        assert!(got.contains("login admin") && got.contains("ALTER ROLE \"app_blue\" WITH HASHED PASSWORD = '$2a$10$"), "{got}");
+        assert!(got.contains("CREATE ROLE \"roll_fakefake\" WITH LOGIN = true AND HASHED PASSWORD = '$2a$10$") && got.contains("GRANT \"reader\" TO \"roll_fakefake\""), "{got}");
+        assert!(!got.contains(pw), "{got}");
+        let log = lines.lock().unwrap().join("\n");
+        assert!(log.contains(&format!("open localhost:{es}")) && log.contains(&format!("open localhost:{cql}")), "{log}");
+
+        // A server the allow-list doesn't name: the gateway refuses, and it's never dialed.
+        let refused = call(Call::DbCheck { url: format!("elasticsearch://admin:fakeadminpw@localhost:{other}"), ca: Some(other_ca), roles: vec![], group: None }).await.unwrap_err();
+        assert!(refused.contains("allow-list") && !refused.contains("fakeadminpw"), "{refused}");
+        assert!(other_seen.lock().unwrap().is_empty());
     }
 }

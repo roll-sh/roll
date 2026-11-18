@@ -15,6 +15,7 @@ anyhow.workspace = true
 base64.workspace = true
 hmac.workspace = true
 pbkdf2.workspace = true
+bcrypt.workspace = true
 sha2.workspace = true
 axum.workspace = true
 bytes.workspace = true
@@ -53,6 +54,8 @@ mq-storage.workspace = true
 mq-stream.workspace = true
 nosql-alternator.workspace = true
 nosql-control.workspace = true
+# roll secrets' Cassandra/ScyllaDB outside roll: frames and messages, no client.
+nosql-proto.workspace = true
 nosql-server.workspace = true
 nosql-storage.workspace = true
 object_store.workspace = true

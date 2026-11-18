@@ -1,4 +1,4 @@
-//! Postgres, MySQL, Redis and MongoDB servers roll doesn't run (docs/secrets.md, "Databases outside roll"): roll
+//! Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis, MongoDB, Elasticsearch, OpenSearch, Cassandra and ScyllaDB servers roll doesn't run (docs/secrets.md, "Databases outside roll"): roll
 //! rotates a login's password itself, without a webhook of the customer's, as Infisical's secret
 //! rotation.
 //!
@@ -53,7 +53,8 @@ pub struct Target<'a> {
     pub gateway: Option<&'a str>,
 }
 
-/// A Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis or MongoDB server outside roll, by
+/// A Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis, MongoDB, Elasticsearch/OpenSearch or
+/// Cassandra/ScyllaDB server outside roll, by
 /// the URL's scheme (rolld: TLS to a public address it resolved itself, or to any address through
 /// the target's gateway). Calls block; errors never carry a password.
 pub trait OutsideDb: Send + Sync {
@@ -113,7 +114,8 @@ pub struct OutsideDatabaseChange {
 pub struct NewOutsideDatabase {
     pub name: String,
     /// `postgres://admin:…@host:5432/db`, `mysql://admin:…@host:3306/db`,
-    /// `sqlserver://admin:…@host:1433/db`, `clickhouse://admin:…@host:8443/db`, `rabbitmq://admin:…@host:15671/vhost` or `rediss://admin:…@host:6379`: a user that may alter the roles and create logins in the group
+    /// `sqlserver://admin:…@host:1433/db`, `clickhouse://admin:…@host:8443/db`, `rabbitmq://admin:…@host:15671/vhost`, `rediss://admin:…@host:6379`,
+    /// `elasticsearch://admin:…@host:9200`, `opensearch://admin:…@host:9200` or `cassandra://admin:…@host:9142/keyspace`: a user that may alter the roles and create logins in the group
     /// (Redis: a template user whose rules dynamic logins copy).
     pub url: String,
     /// Two login roles that take turns (managed links), or none.
@@ -186,8 +188,8 @@ fn with_password(url: &str, password: &str) -> Result<String> {
 /// A URL a registration may use: one of the engines', with a host.
 fn check_url(url: &str) -> Result<String> {
     let host = authority_host(url)?;
-    if !["postgres://", "postgresql://", "mysql://", "sqlserver://", "clickhouse://", "rabbitmq://", "redis://", "rediss://", "mongodb://", "mongodb+srv://"].iter().any(|p| url.starts_with(p)) || host.is_empty() || url.len() > 2048 {
-        return Err(Error::BadRequest("the URL is postgres://user:password@host:5432/db, mysql://…@host:3306/db, sqlserver://…@host:1433/db, clickhouse://…@host:8443/db, rabbitmq://…@host:15671/vhost, rediss://…@host:6379 or mongodb+srv://…@cluster".into()));
+    if !["postgres://", "postgresql://", "mysql://", "sqlserver://", "clickhouse://", "rabbitmq://", "redis://", "rediss://", "mongodb://", "mongodb+srv://", "elasticsearch://", "opensearch://", "cassandra://"].iter().any(|p| url.starts_with(p)) || host.is_empty() || url.len() > 2048 {
+        return Err(Error::BadRequest("the URL is postgres://user:password@host:5432/db, mysql://…@host:3306/db, sqlserver://…@host:1433/db, clickhouse://…@host:8443/db, rabbitmq://…@host:15671/vhost, rediss://…@host:6379, mongodb+srv://…@cluster, elasticsearch://…@host:9200, opensearch://…@host:9200 or cassandra://…@host:9142/keyspace".into()));
     }
     Ok(host)
 }

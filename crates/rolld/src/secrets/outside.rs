@@ -1,18 +1,22 @@
-//! Databases outside roll (roll-secrets' outside.rs), Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis or MongoDB by the URL's scheme: the
+//! Databases outside roll (roll-secrets' outside.rs), Postgres, MySQL, SQL Server, ClickHouse, RabbitMQ, Redis, MongoDB,
+//! Elasticsearch/OpenSearch or Cassandra/ScyllaDB by the URL's scheme: the
 //! address is the tenant's, so the host is resolved here, private addresses are refused (unless
 //! rolld allows them for local development), and the connection goes to the address that was
 //! checked; through a gateway (docs/secrets.md, "Gateways") the gateway dials it instead, and TLS
 //! still runs from here to the server. TLS is required off private addresses. Postgres gets a new password as a SCRAM
 //! verifier, so neither the wire nor the server's statement log ever sees it (MySQL: mysql.rs;
-//! SQL Server: mssql.rs; ClickHouse: clickhouse.rs; RabbitMQ: rabbitmq.rs; Redis: redis.rs; MongoDB: mongo.rs).
+//! SQL Server: mssql.rs; ClickHouse: clickhouse.rs; RabbitMQ: rabbitmq.rs; Redis: redis.rs; MongoDB: mongo.rs;
+//! Elasticsearch and OpenSearch: search.rs; Cassandra and ScyllaDB: cql.rs).
 
 mod clickhouse;
+mod cql;
 mod https;
 mod mongo;
 mod mssql;
 mod mysql;
 mod rabbitmq;
 mod redis;
+mod search;
 
 use roll_secrets::outside::Target;
 use std::net::{IpAddr, SocketAddr};
@@ -164,6 +168,12 @@ impl roll_secrets::outside::OutsideDb for Engine {
         if let Some(u) = self.rabbitmq(url)? {
             return self.rq(u, ca, async move |c| rabbitmq::check(c, &roles, group.as_deref()).await);
         }
+        if let Some(u) = self.search(url)? {
+            return self.es(u, ca, async move |c| search::check(c, &roles, group.as_deref()).await);
+        }
+        if let Some(u) = self.cql(url)? {
+            return self.cq(u, ca, async move |c| cql::check(c, &roles, group.as_deref()).await);
+        }
         self.run(url, ca, move |c| {
             Box::pin(async move {
                 let rows = c.query("SELECT rolname FROM pg_roles WHERE rolname = ANY($1) AND rolcanlogin", &[&roles]).await.map_err(db_error)?;
@@ -201,6 +211,12 @@ impl roll_secrets::outside::OutsideDb for Engine {
         if let Some(u) = self.rabbitmq(url)? {
             return self.rq(u, ca, async move |c| rabbitmq::set_password(c, role, password).await);
         }
+        if let Some(u) = self.search(url)? {
+            return self.es(u, ca, async move |c| search::set_password(c, role, password).await);
+        }
+        if let Some(u) = self.cql(url)? {
+            return self.cq(u, ca, async move |c| cql::set_password(c, role, password).await);
+        }
         // Checked by roll-secrets (lowercase letters, digits, _), quoted anyway.
         let sql = format!("ALTER ROLE {} PASSWORD '{}'", ident(role), postgres_protocol::password::scram_sha_256(password.as_bytes()));
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
@@ -226,14 +242,22 @@ impl roll_secrets::outside::OutsideDb for Engine {
         if let Some(u) = self.rabbitmq(url)? {
             return self.rq(u, ca, async move |c| rabbitmq::create_login(c, name, password, group).await);
         }
+        if let Some(u) = self.search(url)? {
+            return self.es(u, ca, async move |c| search::create_login(c, name, password, group).await);
+        }
+        if let Some(u) = self.cql(url)? {
+            return self.cq(u, ca, async move |c| cql::create_login(c, name, password, group).await);
+        }
         let sql = format!("CREATE ROLE {} LOGIN PASSWORD '{}' VALID UNTIL '{}' IN ROLE {}", ident(name), postgres_protocol::password::scram_sha_256(password.as_bytes()), stamp(until)?, ident(group));
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
     }
 
     fn extend_login(&self, at: &Target<'_>, name: &str, until: i64) -> Result<(), String> {
         let (url, ca) = (at.url, at.ca);
-        // MySQL, SQL Server, ClickHouse, RabbitMQ, Redis and MongoDB have no expiry for a login: it lasts until roll ends the lease.
-        if self.mysql(url)?.is_some() || self.mssql(url)?.is_some() || self.clickhouse(url)?.is_some() || self.rabbitmq(url)?.is_some() || self.redis(url)?.is_some() || self.mongo(url)?.is_some() {
+        // MySQL, SQL Server, ClickHouse, RabbitMQ, Redis, MongoDB, Elasticsearch, OpenSearch, Cassandra and ScyllaDB have
+        // no expiry for a login: it lasts until roll ends the lease.
+        let none = self.mysql(url)?.is_some() || self.mssql(url)?.is_some() || self.clickhouse(url)?.is_some() || self.rabbitmq(url)?.is_some();
+        if none || self.redis(url)?.is_some() || self.mongo(url)?.is_some() || self.search(url)?.is_some() || self.cql(url)?.is_some() {
             return Ok(());
         }
         let sql = format!("ALTER ROLE {} VALID UNTIL '{}'", ident(name), stamp(until)?);
@@ -259,6 +283,12 @@ impl roll_secrets::outside::OutsideDb for Engine {
         }
         if let Some(u) = self.rabbitmq(url)? {
             return self.rq(u, ca, async move |c| rabbitmq::drop_login(c, name).await);
+        }
+        if let Some(u) = self.search(url)? {
+            return self.es(u, ca, async move |c| search::drop_login(c, name).await);
+        }
+        if let Some(u) = self.cql(url)? {
+            return self.cq(u, ca, async move |c| cql::drop_login(c, name).await);
         }
         let name = name.to_string();
         self.run(url, ca, move |c| {
@@ -384,6 +414,24 @@ impl Engine {
         tokio::runtime::Handle::current().block_on(rabbitmq::run(u, ca.map(str::to_string), self.via.clone(), work))
     }
 
+    /// An `elasticsearch://` or `opensearch://` URL's settings; `None` for the others.
+    fn search(&self, url: &str) -> Result<Option<search::Url>, String> {
+        if url.starts_with("elasticsearch://") || url.starts_with("opensearch://") { search::parse(url).map(Some) } else { Ok(None) }
+    }
+
+    fn es<T>(&self, u: search::Url, ca: Option<&str>, work: impl AsyncFnOnce(&search::Conn) -> Result<T, String>) -> Result<T, String> {
+        tokio::runtime::Handle::current().block_on(search::run(u, ca.map(str::to_string), self.via.clone(), work))
+    }
+
+    /// A `cassandra://` URL's settings; `None` for the others.
+    fn cql(&self, url: &str) -> Result<Option<cql::Url>, String> {
+        if url.starts_with("cassandra://") { cql::parse(url).map(Some) } else { Ok(None) }
+    }
+
+    fn cq<T>(&self, u: cql::Url, ca: Option<&str>, work: impl AsyncFnOnce(&mut cql::Conn) -> Result<T, String>) -> Result<T, String> {
+        tokio::runtime::Handle::current().block_on(cql::run(u, ca.map(str::to_string), self.via.clone(), work))
+    }
+
     fn run(&self, url: &str, ca: Option<&str>, work: impl FnOnce(tokio_postgres::Client) -> Done + Send + 'static) -> Result<(), String> {
         let (config, host, tls) = self.config(url, ca)?;
         let via = self.via.clone();
@@ -496,6 +544,16 @@ fn connect_error(host: &str, e: tokio_postgres::Error) -> String {
 mod tests {
     use super::*;
 
+    /// An engine reaching the servers the real-server tests start (on loopback) from here.
+    pub(super) fn direct() -> Engine {
+        Engine { allow_private: true, via: Via::Direct { allow_private: true } }
+    }
+
+    /// Where a server is, with no gateway.
+    pub(super) fn at<'a>(url: &'a str, ca: Option<&'a str>) -> Target<'a> {
+        Target { url, ca, gateway: None }
+    }
+
     #[tokio::test]
     async fn a_tenants_url_reaches_only_a_public_database_over_tls() {
         let g = Engine { allow_private: false, via: Via::Direct { allow_private: false } };
@@ -528,6 +586,13 @@ mod tests {
         // RabbitMQ: the management HTTPS API, a vhost, no settings.
         assert!(g.rabbitmq("rabbitmq://a:b@mq.example.com:15671/%2F?x=1").err().unwrap().contains("settings"));
         assert!(g.rabbitmq("rabbitmq://a:b@mq.example.com/").unwrap().is_some());
+        // Elasticsearch and OpenSearch: the HTTPS port, no path or settings.
+        assert!(g.search("elasticsearch://a:b@es.example.com:9200/?scheme=http").err().unwrap().contains("scheme"));
+        assert!(g.search("opensearch://a:b@os.example.com/index").is_err());
+        assert!(g.search("elasticsearch://a:b@es.example.com").unwrap().is_some());
+        // Cassandra and ScyllaDB: CQL over TLS, an optional keyspace, no settings.
+        assert!(g.cql("cassandra://a:b@db.example.com:9142/app?ssl=false").err().unwrap().contains("ssl"));
+        assert!(g.cql("cassandra://a:b@db.example.com/app").unwrap().is_some());
         assert!(resolve("127.0.0.1", 5432, false).await.unwrap_err().contains("private"));
         assert!(resolve("10.1.2.3", 5432, false).await.unwrap_err().contains("private"));
     }
