@@ -1695,16 +1695,23 @@ Ranked by what a person notices first. Done so far:
    hosts; `closed: true` on each deploy) and #251 on it (`report: false` on every `pv-`
    environment, so a pull request hears only previews' `roll/preview`). #234 and #251 passed
    `scripts/preview-apps.sh` on main with apps' socket-path fix (#271).
-2. **A project's own preview domain, apps' half** (previews' half is #275; apps' is #278, with a `PreviewRouter` hook previews wires in rolld once it's on main, plus a live check): roll apps' project
+2. **Sign-in access** (Vercel Authentication, Netlify's team access): `access: "team"`, so only
+   people signed in to roll who can open the project open its previews, not whoever has the
+   link. On roll apps, the `pv-` environment gets apps' `access: {signed_in: true}`
+   ("Signing in to an environment"). On roll's runtime, previews' gate does the same: a page
+   load with no session goes to sign in on the dashboard, which asks for a one-use ticket as the
+   person; the preview's host trades it for a host-only cookie, checked again every 5 minutes.
+   Share links and the CI bypass keep working beside it.
+3. **A project's own preview domain, apps' half** (previews' half is #275; apps' is #278, with a `PreviewRouter` hook previews wires in rolld once it's on main, plus a live check): roll apps' project
    preview domain (`POST/GET/DELETE /v1/apps/projects/{project}/preview-domain`, a verified
    wildcard) and `preview_host` routing in `host_target`, third in apps' queue. Then a live
    check in `scripts/preview-apps.sh`. TLS waits on wildcard certificates over DNS-01 on the edge.
-3. **Bots on Git URL services:** roll apps' `GitPull` carries no author, so `skip_authors` doesn't
+4. **Bots on Git URL services:** roll apps' `GitPull` carries no author, so `skip_authors` doesn't
    reach a Git URL service's pull requests (with the apps thread).
-4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-5. **Watch: pg-control's recovery to a time seconds old** (unowned).
-6. **Watch: a cold start on a Docker name conflict.**
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+7. **Watch: a cold start on a Docker name conflict.**
 
 Landed in previews' lock turn of 2026-11-17 (main 42a3bbe1b, one combined gate with both live
 checks):
