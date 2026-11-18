@@ -626,7 +626,7 @@ impl Store {
                 db.add_column("previews", col, "INTEGER")?;
             }
         }
-        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head", "teardown_error", "schema_risks"] {
+        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head", "teardown_error", "schema_risks", "reported_by"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "TEXT")?;
             }
@@ -1123,6 +1123,17 @@ impl Store {
     /// warning; `None`: not close).
     pub fn goes_at(&self, id: &str) -> Result<Option<i64>> {
         Ok(self.db.read(|c| c.query_row("SELECT goes_at FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    /// The name of the project that reports this preview's change (or pull request) when it's
+    /// another project's ([`crate::engine::Engine::speaker`]); `None`: this one reports it.
+    pub fn reported_by(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT reported_by FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    /// Sets [`Store::reported_by`]: whether it changed.
+    pub fn set_reported_by(&self, id: &str, by: Option<&str>) -> Result<bool> {
+        Ok(self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE previews SET reported_by = ? WHERE id = ? AND reported_by IS NOT ?", params![by, id, by])?))? > 0)
     }
 
     pub fn set_goes_at(&self, id: &str, at: Option<i64>) -> Result<()> {
@@ -2232,6 +2243,7 @@ impl Store {
             g
         });
         let goes_at = self.goes_at(&r.id)?;
+        let reported_by = self.reported_by(&r.id)?;
         // The screenshot row in one read, without its images.
         let f = self.shot_facts(&r.id)?;
         let screenshot_at = f.at;
@@ -2316,6 +2328,7 @@ impl Store {
             kept_until,
             pull,
             goes_at,
+            reported_by,
             earlier,
             screenshot_at,
             visual_change,

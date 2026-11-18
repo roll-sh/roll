@@ -1365,3 +1365,35 @@ async fn data_at_branches_from_history_where_there_is_some() {
     assert!(said.iter().any(|m| m.contains("keeps no history: branched as of now")), "{said:?}");
 }
 
+
+/// A repo on two projects' canvases gets a preview in each, but only the project that has had it
+/// longest reports to the change; the other's preview names it, and speaks once it's gone.
+#[tokio::test]
+async fn only_the_project_that_has_had_a_repo_longest_reports_its_change() {
+    use roll_workspace::{Kind as Res, Scope};
+    struct Ada;
+    impl roll_workspace::Owners for Ada {
+        fn trusts(&self, user: &str, _kind: Res, r: &str) -> bool {
+            user == "usr_ada" && r == "acme/web"
+        }
+    }
+    let e = env(json!({ "enabled": true }));
+    e.ws.set_owners(Arc::new(Ada));
+    let theirs = e.ws.create("usr_ada", "ada-shop", "", None).unwrap();
+    e.ws.place(Scope::All, &theirs.id, Res::Repo, "acme/web", 0.0, 0.0).unwrap();
+    e.engine.store.put_settings(&theirs.id, &roll_previews::Settings::default().patched(&json!({ "enabled": true })).unwrap()).unwrap();
+    e.code.open(change("chg_1", 7));
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+
+    let quiet = e.engine.store.rows(Some(&theirs.id)).unwrap().into_iter().find(|r| r.change_id.as_deref() == Some("chg_1")).expect("a preview in each project");
+    assert!(e.code.reports.lock().iter().all(|p| p.project == e.project), "only the project that had the repo first reports");
+    assert_eq!(e.engine.store.preview(&quiet.id).unwrap().reported_by.as_deref(), Some("shop"), "the other one says who does");
+
+    // It leaves the first project's canvas: the other's preview speaks at once.
+    e.ws.remove(Scope::All, &e.project, Res::Repo, "acme/web").unwrap();
+    e.engine.pass().await.unwrap();
+    e.engine.pass().await.unwrap();
+    let last = e.code.last_report("chg_1");
+    assert_eq!((last.id.as_str(), last.reported_by.as_deref()), (quiet.id.as_str(), None));
+}

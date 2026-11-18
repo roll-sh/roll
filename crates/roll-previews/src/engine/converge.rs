@@ -1128,6 +1128,11 @@ impl Engine {
 
     pub(super) async fn report(&self, row: Row) {
         let Ok(s) = self.store.settings(&row.project_id) else { return };
+        // Only the project that speaks for its repo or service tells the change: another's
+        // preview of it stays on its own sheet.
+        if !matches!(self.refresh_voice(&row), Ok((_, true))) {
+            return;
+        }
         if let Ok(mut p) = self.store.view(row) {
             // The open notes, newest first (a few), for the pull request's comment.
             if p.change.is_some() {
@@ -1151,6 +1156,10 @@ impl Engine {
     /// tried at the next report.
     pub(super) async fn report_on_git(&self, p: &Preview, s: &crate::Settings, deleted: Option<Option<&str>>) {
         let (Some(gr), Some(service)) = (self.git_report.get(), p.repo.strip_prefix("git:")) else { return };
+        // Another project speaks for the service: its own preview posts (and says it went).
+        if p.reported_by.is_some() {
+            return;
+        }
         // One report at a time per preview (what's posted, and the comment's id, read and kept
         // in turn).
         let turn = self.git_reporting.lock().entry(p.id.clone()).or_default().clone();
@@ -1202,6 +1211,35 @@ impl Engine {
         }
     }
 
+}
+
+impl Engine {
+    /// Which project speaks for `kind r#ref` (a repo, or a Git URL service) on its changes and
+    /// pull requests, as `(id, name)`: of the projects with previews on that stand for it
+    /// (`Workspace::trusts`), the one that has had it on its canvas longest, then by id. roll apps
+    /// puts a service on the canvas of the project it's made in, so a service's is its own.
+    pub fn speaker(&self, kind: roll_workspace::Kind, r#ref: &str) -> Option<(String, String)> {
+        self.workspace
+            .projects_of(kind.as_str(), r#ref)
+            .ok()?
+            .iter()
+            .filter_map(|id| self.workspace.get(roll_workspace::Scope::All, id).ok())
+            .filter(|p| self.workspace.trusts(p, kind, r#ref) && self.store.settings(&p.id).is_ok_and(|s| s.enabled))
+            .filter_map(|p| p.resources.iter().find(|x| x.kind == kind && x.r#ref == r#ref).map(|x| (x.added_at, p.id.clone(), p.name.clone())))
+            .min()
+            .map(|(_, id, name)| (id, name))
+    }
+
+    /// Keeps `row`'s [`crate::Preview::reported_by`] up to date: `(changed, it speaks)`. With no
+    /// speaker at all (its project's previews just turned off) it speaks for itself.
+    pub(super) fn refresh_voice(&self, row: &Row) -> Result<(bool, bool)> {
+        let (kind, of) = match row.repo.strip_prefix("git:") {
+            Some(svc) => (roll_workspace::Kind::Service, svc),
+            None => (roll_workspace::Kind::Repo, row.repo.as_str()),
+        };
+        let by = self.speaker(kind, of).filter(|(id, _)| *id != row.project_id).map(|(_, name)| name);
+        Ok((self.store.set_reported_by(&row.id, by.as_deref())?, by.is_none()))
+    }
 }
 
 /// `owner/name` of a pull request's page (`https://<host>/<owner>/<name>/pull/<n>`).

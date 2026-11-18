@@ -121,6 +121,11 @@ impl Engine {
                 self.mark_deleted(&r.id, if r.repo.starts_with("git:") { "its service is no longer in the project" } else { "its repo is no longer in the project" })?;
                 continue;
             }
+            // Another project took over speaking for it, or handed it back: the change hears from
+            // this one again at once.
+            if let (true, true) = self.refresh_voice(&r)? {
+                self.report(r.clone()).await;
+            }
             // A baseline lasts while there are changes to compare with it.
             let held = r.is_baseline() && has_changes;
             let ttl_ms = s.ttl_hours as i64 * 3_600_000;
