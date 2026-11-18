@@ -143,7 +143,7 @@ impl roll_previews::ports::Apps for RollApps {
         let made = match self.api.call(Method::PUT, &path, Some(body.clone())).await {
             // A roll apps older than #249 (a node not yet upgraded, on a fleet) refuses the field:
             // the environment is made all the same, and its deploys report as well as previews.
-            Err(e) if e.downcast_ref::<super::Refused>().is_some_and(|r| r.status == reqwest::StatusCode::BAD_REQUEST && r.error == "unknown field report") => {
+            Err(e) if e.downcast_ref::<super::Refused>().is_some_and(|r| r.status.as_u16() == 400 && r.error == "unknown field report") => {
                 body.as_object_mut().map(|o| o.remove("report"));
                 self.api.call(Method::PUT, &path, Some(body)).await?
             }
