@@ -34,6 +34,11 @@ cleanup() {
     for v in $(docker volume ls -q | grep "^roll-apps-vol-$s-" || true); do docker volume rm -f "$v" >/dev/null || true; done
   done
   if [ -n "$PRJ" ]; then
+    # A closed environment's egress proxy, and the project's closed builder (buildx, named as its
+    # network) with its proxy: left running when rolld stops before the environment's delete.
+    for c in $(docker ps -aq --filter "name=roll-apps-egress-closed-${PRJ#prj_}" --filter "name=roll-apps-build-${PRJ#prj_}"); do docker rm -f "$c" >/dev/null; done
+    docker buildx rm -f "roll-apps-build-${PRJ#prj_}" >/dev/null 2>&1 || true
+    docker network rm "roll-apps-build-${PRJ#prj_}" >/dev/null 2>&1 || true
     for n in $(docker network ls --format '{{.Name}}' | grep "^roll-apps-net-${PRJ#prj_}-" || true); do docker network rm "$n" >/dev/null || true; done
   fi
 }
