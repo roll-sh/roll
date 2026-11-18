@@ -52,7 +52,9 @@
 //!   ([`crate::metrics`]: requests, responses by class, 429 rejections and latency per kind of
 //!   request, by the minute) and its slow log entries (`search_es::slowlog`), handed to whoever
 //!   meters, and carried over the same way when an instance unloads. Latency is the time from
-//!   taking the cluster's permits (queueing included) to the answer being durable.
+//!   taking the cluster's permits (queueing included) to the answer being durable. Search
+//!   analytics (`search_es::analytics`: the buckets of the indices that turned them on, and the
+//!   indices whose analytics went) travel with them.
 //! - **Live spec changes** ([`Node::update_spec`]): limits and credentials apply to the loaded
 //!   instance at once, and to one still waking (the wake re-reads the catalog before it
 //!   publishes, and updates made after that wait in `pending_specs` for the publishing opener).
@@ -268,7 +270,7 @@ pub struct Usage {
     pub requests: u64,
 }
 
-/// A cluster's request metrics and slow log entries not handed on yet
+/// A cluster's request metrics, slow log entries and search analytics not handed on yet
 /// ([`Node::take_observations`]).
 #[derive(Debug, Default)]
 pub struct Observed {
@@ -276,23 +278,26 @@ pub struct Observed {
     pub minutes: Vec<(u64, crate::metrics::Stats)>,
     /// Oldest first.
     pub slow: Vec<search_es::slowlog::Entry>,
+    /// Search analytics: buckets, and the indices whose analytics went (their kept rows go).
+    pub analytics: search_es::analytics::Taken,
 }
 
 impl Observed {
     pub fn is_empty(&self) -> bool {
-        self.minutes.is_empty() && self.slow.is_empty()
+        self.minutes.is_empty() && self.slow.is_empty() && self.analytics.is_empty()
     }
 
     /// Adds `o` (newer) to this.
     fn extend(&mut self, o: Observed) {
         self.minutes.extend(o.minutes);
         self.slow.extend(o.slow);
+        self.analytics.extend(o.analytics);
         let over = self.slow.len().saturating_sub(search_es::slowlog::MAX_ENTRIES);
         self.slow.drain(..over);
     }
 
     fn take_from(l: &Loaded) -> Observed {
-        Observed { minutes: l.metrics.take().into_iter().map(|(m, s)| (m, *s)).collect(), slow: l.cluster.engine.slowlog.take() }
+        Observed { minutes: l.metrics.take().into_iter().map(|(m, s)| (m, *s)).collect(), slow: l.cluster.engine.slowlog.take(), analytics: l.cluster.analytics.take() }
     }
 }
 
@@ -1455,9 +1460,15 @@ impl Node {
         if let Some(o) = self.unobserved.lock().get(name) {
             out.minutes.extend(o.minutes.iter().cloned());
             out.slow.extend(o.slow.iter().cloned());
+            out.analytics.cleared = o.analytics.cleared.clone();
+            out.analytics.enabled = o.analytics.enabled.clone();
+            out.analytics.hours = o.analytics.hours.clone();
         }
         if let Some(l) = self.get_loaded(name) {
-            out.extend(Observed { minutes: l.metrics.peek(), slow: l.cluster.engine.slowlog.peek() });
+            let analytics = search_es::analytics::Taken { hours: l.cluster.analytics.peek(), ..Default::default() };
+            out.extend(Observed { minutes: l.metrics.peek(), slow: l.cluster.engine.slowlog.peek(), analytics });
+            // Loaded here: which indices have analytics on now decides what reads may show.
+            out.analytics.enabled = Some(l.cluster.analytics.enabled_names());
         }
         out
     }

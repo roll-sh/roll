@@ -2470,3 +2470,93 @@ async fn the_sweep_purges_after_the_window_and_branches_keep_their_data() {
     }
     e.control.shutdown().await.unwrap();
 }
+
+/// Search analytics: off until an index turns them on; then searches (with and without results)
+/// and `search_click` events come back as top queries, no-result queries and click-through,
+/// before and after the metering pass; turning them off deletes what's kept; another person's
+/// cluster answers 404.
+#[tokio::test]
+async fn search_analytics() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let (user, pw) = creds(&c);
+    let es = |m: Method, p: &str, b: Option<Value>| {
+        let (user, pw, p, e) = (user.clone(), pw.clone(), p.to_string(), &e);
+        async move {
+            let (s, v) = e.es(&user, &pw, m, &p, b).await;
+            assert!(s < 300, "{p}: {s} {v}");
+            v
+        }
+    };
+    es(Method::PUT, "/products", Some(json!({"mappings": {"properties": {"title": {"type": "text"}}}}))).await;
+    for (id, t) in [("1", "red shoes"), ("2", "blue shoes"), ("3", "red hat")] {
+        es(Method::PUT, &format!("/products/_doc/{id}?refresh=true"), Some(json!({ "title": t }))).await;
+    }
+    let search = |q: &str| es(Method::POST, "/products/_search", Some(json!({"query": {"match": {"title": q}}})));
+    let analytics = async |range: &str| e.get(&format!("/v1/search/clusters/shop/analytics?index=products&range={range}")).await;
+
+    // Off by default: nothing is recorded.
+    search("shoes").await;
+    e.control.sample().await.unwrap();
+    let a = analytics("24h").await;
+    assert_eq!((a["totals"]["searches"].as_u64(), a["top"].as_array().unwrap().len()), (Some(0), 0), "{a}");
+
+    es(Method::PUT, "/products/_settings", Some(json!({"index.roll.analytics.enabled": true}))).await;
+    for _ in 0..3 {
+        search("Shoes").await;
+    }
+    search("red").await;
+    search("sandals").await;
+    search("sandals").await;
+    // A header names a search's text, whatever its body; `_msearch` items count one by one.
+    let r = e.http.post(format!("{}/products/_search", e.es)).basic_auth(&user, Some(&pw)).header("x-roll-search-query", "Hat").json(&json!({"query": {"term": {"title": "hat"}}})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let msearch = "{\"index\":\"products\"}\n{\"query\":{\"match\":{\"title\":\"red\"}}}\n";
+    let r = e.http.post(format!("{}/_msearch", e.es)).basic_auth(&user, Some(&pw)).header("content-type", "application/x-ndjson").body(msearch).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    // Clicks: Elasticsearch's own behavioral analytics events.
+    es(Method::PUT, "/_application/analytics/web", None).await;
+    let click = |query: &str, id: &str| {
+        json!({
+            "session": {"id": "s1"}, "user": {"id": "u1"},
+            "document": {"index": "products", "id": id},
+            "search": {"query": query, "results": {"items": [{"document": {"index": "products", "id": "1"}}, {"document": {"index": "products", "id": "2"}}]}},
+        })
+    };
+    es(Method::POST, "/_application/analytics/web/event/search_click", Some(click("shoes", "2"))).await;
+    es(Method::POST, "/_application/analytics/web/event/search_click", Some(click("shoes", "1"))).await;
+
+    let check = |a: &Value| {
+        assert_eq!(a["totals"]["searches"].as_u64(), Some(8), "{a}");
+        assert_eq!(a["totals"]["no_hits"].as_u64(), Some(2), "{a}");
+        assert_eq!(a["totals"]["clicks"].as_u64(), Some(2), "{a}");
+        let top = a["top"].as_array().unwrap();
+        assert_eq!(top.iter().map(|q| (q["query"].as_str().unwrap(), q["searches"].as_u64().unwrap())).collect::<Vec<_>>(), [("shoes", 3), ("red", 2), ("sandals", 2), ("hat", 1)], "{a}");
+        assert_eq!((top[0]["clicks"].as_u64(), top[0]["ctr"].as_f64(), top[0]["avg_position"].as_f64()), (Some(2), Some(0.6667), Some(1.5)), "{a}");
+        assert_eq!(a["no_results"].as_array().unwrap().iter().map(|q| q["query"].as_str().unwrap()).collect::<Vec<_>>(), ["sandals"], "{a}");
+        // Clicked never: red and hat (with results) are low click-through; sandals found nothing.
+        assert_eq!(a["low_ctr"].as_array().unwrap().iter().map(|q| q["query"].as_str().unwrap()).collect::<Vec<_>>(), ["red"], "{a}");
+        assert_eq!(a["indices"], json!(["products"]), "{a}");
+    };
+    check(&analytics("24h").await);
+    e.control.sample().await.unwrap();
+    check(&analytics("24h").await);
+    check(&analytics("30d").await);
+    // Nothing kept anywhere holds a credential or a document.
+    let all = analytics("7d").await.to_string();
+    assert!(!all.contains(&pw) && !all.contains("blue shoes"), "{all}");
+
+    // Another person's cluster: no such cluster.
+    let (s, _) = e.call_as("mallory", Method::GET, "/v1/search/clusters/shop/analytics", None).await;
+    assert_eq!(s, 404);
+
+    // Turning it off deletes what's kept, at once for reads and from the catalog on the next pass.
+    es(Method::PUT, "/products/_settings", Some(json!({"index.roll.analytics.enabled": null}))).await;
+    assert_eq!(analytics("24h").await["totals"]["searches"].as_u64(), Some(0));
+    e.control.sample().await.unwrap();
+    let id = c["id"].as_str().unwrap();
+    assert!(e.control.store.analytics_indices(id).await.unwrap().is_empty());
+    search("shoes").await;
+    assert_eq!(analytics("24h").await["totals"]["searches"].as_u64(), Some(0));
+}
