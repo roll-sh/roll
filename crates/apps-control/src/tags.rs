@@ -62,6 +62,65 @@ impl Apps {
         started
     }
 
+    /// Base images (docs/apps/README.md, "Base image updates"; Railway's automatic security
+    /// patches): each hour, on the owner, the bases each built environment's live deployment
+    /// recorded are asked of their registries (a manifest `HEAD` each, once a pass however many
+    /// use one). One that moved is said once per new digest (`deploy.base_updated`, the
+    /// environment's `base_updated`), and with `run.rebuild_on_base` the same revision is built
+    /// again without the cache. The deploys it started.
+    pub async fn watch_bases(self: &Arc<Self>) -> Vec<String> {
+        let mut started = Vec::new();
+        let mut seen: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+        let Ok(services) = self.db(|s| s.services(None)).await else { return started };
+        for svc in services.into_iter().filter(|s| self.owns(&s.id) && !matches!(s.source, Source::Image { .. })) {
+            let sid = svc.id.clone();
+            let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
+            for env in envs.into_iter().filter(|e| !e.paused && !e.ephemeral) {
+                let Some(active) = env.active.clone() else { continue };
+                let a = active.clone();
+                let Ok(dep) = self.db(move |s| s.deployment(&a)).await else { continue };
+                let bases: Vec<(String, String)> = dep.plan.as_ref().and_then(|p| p["bases"].as_array().cloned()).unwrap_or_default().iter().filter_map(|b| Some((b["image"].as_str()?.to_string(), b["digest"].as_str()?.to_string()))).collect();
+                let mut moved = Vec::new();
+                for (image, was) in bases {
+                    if !seen.contains_key(&image) {
+                        let now = match tokio::time::timeout(std::time::Duration::from_secs(10), self.deps.runtime.remote_digest(&image, None)).await {
+                            Ok(Ok(p)) => p.rsplit_once('@').map(|(_, d)| d.to_string()),
+                            _ => None,
+                        };
+                        seen.insert(image.clone(), now);
+                    }
+                    let Some(now) = seen[&image].clone().filter(|n| *n != was) else { continue };
+                    moved.push(image.clone());
+                    // Said once per new digest (kept per environment, gone with it).
+                    let (k, nv) = (format!("base_seen:{}/{}:{image}", svc.id, env.name), now.clone());
+                    if self.db(move |s| s.get_state(&k)).await.ok().flatten().as_deref() == Some(nv.as_str()) {
+                        continue;
+                    }
+                    let (k, nv, sid, en, did) = (format!("base_seen:{}/{}:{image}", svc.id, env.name), now.clone(), svc.id.clone(), env.name.clone(), active.clone());
+                    let data = json!({ "image": image, "was": was, "now": now });
+                    let _ = self
+                        .db(move |s| {
+                            s.set_state(&k, &nv)?;
+                            s.add_event("deploy.base_updated", &sid, &en, Some(&did), &data)
+                        })
+                        .await;
+                    let run = svc.for_env(&env).map(|s| s.run).unwrap_or_else(|_| svc.run.clone());
+                    if run.rebuild_on_base && dep.revision.is_some() {
+                        let body = json!({ "revision": dep.revision, "no_cache": true, "message": format!("its base image {image} was updated") });
+                        let key = format!("base:{active}:{now}");
+                        match self.deploy(&svc.id, &env.name, body, By { trigger: Trigger::Settings, actor: Some("base image watch".into()) }, None, Some(&key)).await {
+                            Ok(d) => started.push(d.id),
+                            Err(e) => self.logs.sink(format!("env:{}/{}", svc.id, env.name), crate::logs::Stream::System).line(format!("building again for its updated base image {image}: {e}")),
+                        }
+                    }
+                }
+                let (k, v) = (format!("base_moved:{}/{}", svc.id, env.name), json!({ "deployment": active, "images": moved }).to_string());
+                let _ = self.db(move |s| s.set_state(&k, &v)).await;
+            }
+        }
+        started
+    }
+
     /// Check every watched tag of the services this node owns; the deployments it started.
     pub async fn watch_tags(self: &Arc<Self>) -> Vec<String> {
         let mut started = Vec::new();
