@@ -32,13 +32,14 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/plan` | `PlanRequest` | `Plan`; with `roots: true` (a repo or a Git URL, no `root`): `{ roots: { root, provider, framework? }[] }`, the folders up to three levels down that build on their own (a start command, a framework or a Dockerfile: no library package, docs or dependencies), at most 20 | read |
 | `POST /v1/apps/projects/{project}/export` | `{ databases? }` (`{"postgres:<ref>": "db"}`: the names of the databases its services link, as the caller lists them; one not named is named after its ref) | `{ roll_toml, notes }`: its services (source, branch, the run settings that differ from a new service's), the postgres and redis databases they link, variables by name only in its header; read back with the parser `roll up --all` uses before it's answered; 409 for a project with no service | read |
 | `POST /v1/apps/import` | `{ roll_toml }`, `{ compose }`, another platform's file (`{ render }` a Blueprint's render.yaml, `{ fly }` fly.toml, `{ railway }` railway.json or railway.toml, `{ heroku, procfile? }` app.json and its Procfile; read as roll.toml with `notes` on what isn't carried over) (each at most 1 MiB; one at a time), `{ repo, revision? }` (that roll code repo's root roll.toml, at its default branch's head unless a revision is named: a "deploy to roll" link), or `{ git, branch? }` (a public Git repository's root roll.toml by URL, at most 64 KiB, at its branch's head; https, no credentials, a public address). From a repo or a Git URL, an app that names only a `root` becomes that repository's source at that folder (a Git URL's following the branch it was read from), not an upload | `ProjectImport` (read, nothing made: checked as `roll up --all` checks it; 400 says what's wrong) | read |
-| `GET /v1/apps/services?project=` | | `Service[]` | read |
+| `GET /v1/apps/services?project=&deleted=` | | `Service[]`; `deleted=true`: `{id, project, name, deleted_at, purge_at}[]` (unix ms, newest first), the deleted services kept for a restore until `purge_at`, 48 hours after the delete | read |
 | `POST /v1/apps/services` | `NewService` | 201 `Service` | deploy* (a repo or image source deploys production at once; write for an upload source) |
 | `GET /v1/apps/projects/{project}/services` | | `Service[]` | read |
 | `POST /v1/apps/projects/{project}/services` | `NewService` (`project` may be left out) | 201 `Service` | deploy* (as above) |
 | `GET /v1/apps/services/{id}` | | `Service` | read |
 | `PATCH /v1/apps/services/{id}` | `ServicePatch` | `Service` | write |
-| `DELETE /v1/apps/services/{id}` | | 204 | delete |
+| `DELETE /v1/apps/services/{id}` | | 204: the service stops (pending deploys cancelled, instances removed) and is hidden, kept 48 hours for a restore with its environments, volumes, images, backups, domains, links and name; every other route of it is a 404. A deleted service's `DELETE` deletes it for good now (frees its name); the prune sweep does after 48 hours | delete |
+| `POST /v1/apps/services/{id}/restore` | | `Service`: a deleted service back as it was, its live deployments loaded again and its card placed on the canvas; 409 when it isn't deleted | deploy |
 | `GET /v1/apps/services/{id}/activity?all=` | | `Event[]` (`audit.*`, newest first, 200): who changed what, never a value; `all=1`: every kind (deploys, failures, crash loops, alerts, domains, spend), the service's timeline | read |
 | `GET /v1/apps/services/{id}/links` | | `Link[]` | read |
 | `PUT /v1/apps/services/{id}/links/{kind}/{ref}` | `{prefix?}` | `Link` (a kind that makes a credential per link makes it here, once; setting the link again keeps it) | write |
@@ -75,7 +76,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/commits` | | `DeployCommits`: what a repo deployment brings over the live one (for the live one: the one live before it), along its first parents, newest first, at most 50 | read |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback` | `{ keep_variables? }` (default false: the variables come back as they were when it was live) | 202 `Deployment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/rollback` | `{ keep_variables? }` | 202 `Deployment`: back to the deployment live before what runs, walking back through rollbacks (after B → A the next goes before A, never forward to B); 409 when there's none | deploy* |
-| `POST /v1/apps/services/{id}/environments/{env}/redeploy` | `{ message? }`; `Idempotency-Key` header optional (a retry with it answers the first call's redeploy; a key a deploy of another kind used is a 409) | 202 `Deployment` (trigger `settings`) | deploy* |
+| `POST /v1/apps/services/{id}/environments/{env}/redeploy` | `{ message?, closed? }` (`closed` as `NewDeploy`'s); `Idempotency-Key` header optional (a retry with it answers the first call's redeploy; a key a deploy of another kind used is a 409) | 202 `Deployment` (trigger `settings`) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/promote` | `{ from, message?, expect? }` (`expect`: a deployment id; 409 when `from`'s live deployment isn't it, checked against the read the promotion is made from) | 202 `Deployment` (trigger `promote`: `from`'s live image, no build, with `env`'s variables; `rollback_of` names the promoted deployment) | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/hook` | | 201 `{ path }`: a new deploy hook, its path shown once (prefix the API's base URL; the token is `rlk_…` with a checksum, so secret scanning finds a leaked one); the old one stops working | admin (a standing credential that deploys) |
 | `DELETE /v1/apps/services/{id}/environments/{env}/hook` | | 204 | admin |
@@ -93,7 +94,8 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/variables` | | `Variables` (values masked) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/pending` | | `{ variables: { added, removed, changed } \| null, run: string[], secrets: boolean \| null }` (secrets: the project's secrets changed since, by roll secrets' digest; null without one): what the next deploy changes (names, never values; variables against the snapshot kept at the live deployment's switch, null without one; run: fields the service sets that the live deployment doesn't run with). Links and project secrets move `needs_deploy` too, unnamed | read |
 | `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}`, never a sealed variable (nor a reference that reads one); 403 naming them when some come from roll secrets and roll secrets wouldn't show them to the caller (`SecretSource::may_reveal`) | reveal |
-| `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[], seal?: string[], files?: {[name]: path \| null}}` (set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed. `files`: kept as a file at an absolute path in its instances, not in their environment, from the next deploy (0444; at most 20; not under `/proc`, `/sys` or `/dev`, no `..`; two can't share a path; null puts it back; unsetting a variable drops its file; 400 otherwise; on Fargate the deploy fails for now) | `Variables` | deploy* |
+| `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[], seal?: string[], files?: {[name]: path \| null}, copy_from?: string, copy?: string[]}` (`copy_from` with `copy`: those names' values from another environment's own variables, set here as `set` sets them; 400 for a sealed one or one it lacks; reveal on `copy_from` too. set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed. `files`: kept as a file at an absolute path in its instances, not in their environment, from the next deploy (0444; at most 20; not under `/proc`, `/sys` or `/dev`, no `..`; two can't share a path; null puts it back; unsetting a variable drops its file; 400 otherwise; on Fargate the deploy fails for now) | `Variables` | deploy* |
+| `GET /v1/apps/services/{id}/environments/{env}/diff?from=` | | `{from, to, variables: {missing: {name, sealed}[], extra: string[], differ: string[] \| null}, settings: {field, from, to, put}[]}`: how `env` differs from `from` (Railway's environment sync), never a value. `variables`: its own variables' names, `differ` null for a token without reveal on both; `settings`: `run.*`, `wait_for_ci`, `follow_tag`, `redeploy_on_secrets`, `traces`, `vitals`, `report`, `egress`, `allow_ips`, `rate_limit`, `firewall`, `headers`, `routes`, `pages.*` (whether each has its own), each with the `PUT …/environments/{env}` body that makes it `from`'s. A token needs read on `from` too (403) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&before=&instance=&deployment=&stream=&level=&where=&q=&http=&status=&min_ms=&by=` | | `LogLine[]` or SSE; `before` (unix ms) reads back to a time (not followed), `instance`/`deployment`/`stream` narrow it (followed too), `level` keeps lines at that level or worse (a line that says none isn't; 400 for another word), `where` keeps lines whose JSON or logfmt fields say all its terms (`level:error user_id:42`, `key:*`, `-key:value`, `a.b:x`, quoted values; at most 10; 400 for one that isn't `key:value`), `X-Roll-Search-Truncated: 1` when a read back stopped short; `http=1`: the proxy's access log (`stream: "http"`, text `AccessLine`), `status` (`500`, `5xx`, `400-499`), `min_ms` and `by` (one reason, or `any`: every answer roll gave itself) filtering it | read |
 | `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=&format=` | | `Metrics`; `format=prometheus`: the last finished minute as Prometheus text (`roll_apps_requests_per_minute`, `…_errors_per_minute`, `…_latency_ms{quantile}`, `…_cpu_seconds_per_minute`, `…_memory_bytes`, `…_instances`, `…_cold_starts_per_minute`, `…_cold_start_ms`, labelled `service`, `service_id`, `environment`) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/routes?minutes=` | | `RouteStats` (with `deployments` and `instances`: the same requests by the deployment and the instance that answered, the busiest 50 of each) (the last 5–60 minutes, default 60): the access log grouped by method and route, id-like segments `:id` and no query; the busiest, the most 5xx and the slowest (5 requests or more), each at most 50 | read |
@@ -374,6 +376,7 @@ type EnvironmentPut = {
    *  environment, then 429). No cookie, no id; the edge's country is kept. Off: those paths are
    *  the app's. */
   vitals?: boolean;
+  report?: boolean; // false: its deploys post no commit status and no GitHub Deployment (someone else reports them: roll previews, for its `pv-` environments)
   follow_tag?: boolean;
   /** A preview environment (ephemeral) only, set by roll previews: a visitor who came in through
    *  its access link gets roll previews' feedback button on its pages (`/__roll/feedback.js`
@@ -441,6 +444,7 @@ type Environment = EnvironmentSummary & {
   redeploy_on_secrets: boolean; // the project's secrets changing redeploys it (same image, new values)
   traces: boolean; // its instances send OpenTelemetry traces to roll
   vitals: boolean; // its pages measure their Web Vitals for roll (`…/vitals`)
+  report: boolean; // its deploys are reported to the Git host (default true)
   egress: { mode: "roll" | "open"; hosts: string[] }; // what its code may reach (roll: roll and the hosts)
   egress_refused?: { host: string; private?: true }[]; // hosts its egress proxy refused lately, oldest first, at most 20: not listed, or (private) listed but resolving only to private addresses
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
@@ -479,7 +483,7 @@ type DeployCommits = {
   complete: boolean;         // `since` was reached (false: more than 50, or not in its history: a rollback, another branch)
 };
 
-type NewDeploy = { revision?: string; image?: string; message?: string; no_traffic?: boolean; no_cache?: boolean /* build from scratch (400 with an image): no cached layer, base images pulled again, the service's cache mounts empty from then on; an upload says it with `X-Roll-No-Cache: 1` */ };
+type NewDeploy = { revision?: string; image?: string; message?: string; no_traffic?: boolean; no_cache?: boolean /* build from scratch (400 with an image): no cached layer, base images pulled again, the service's cache mounts empty from then on; an upload says it with `X-Roll-No-Cache: 1` */; closed?: boolean /* true: 409 unless the environment is built closed (egress `roll` on a node that closes it: its own network, no secret value); a node that predates the field answers 400, so the request fails closed (roll previews sends it for a fork's head) */ };
 
 type Deployment = {
   id: string;
@@ -588,6 +592,10 @@ type Metrics = {
   cold_start_ms: number[];   // average of the minute's cold starts (0 when none)
   egress_bytes: number[];    // bytes answered (what egress is billed by); format=prometheus: roll_apps_egress_bytes_per_minute
   over_capacity: number[];   // requests that found every instance busy at max_instances (saturation); roll_apps_over_capacity_per_minute
+  by_instance: {             // each instance it has now, its own last hour whatever `minutes` asks (on its owner, in memory)
+    instance: string; deployment: string;
+    minutes: number[]; cpu: number[] /* cores, average over the minute */; memory_bytes: number[] /* the minute's peak */;
+  }[];
 };
 
 type Usage = {

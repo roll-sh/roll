@@ -197,6 +197,7 @@ fn parse_slices(s: &str) -> EsResult<u32> {
 /// A search request with by-scroll defaults (`scroll` 5m, `size` 1000).
 fn scroll_search(ctx: &Ctx, source: SearchSource) -> EsResult<SearchRequest> {
     Ok(SearchRequest {
+        slowlog: Default::default(),
         indices: Vec::new(),
         opts: ctx.indices_options(IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED)?,
         source,
