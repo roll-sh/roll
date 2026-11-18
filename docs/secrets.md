@@ -3617,7 +3617,9 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
 on the #132 stack, #165/#166's engines through the gateway, their `rotate-admin`, and Cassandra's
 cache waited out. Ranked now:
 1. **The thirty-first security review** (2026-11-18 afternoon, today's PRs read cold): one high, three
-   medium, six low, all being fixed. High: #281's verify (and the public JWKS) trusted any key a
+   medium, six low, all being fixed (#277 4a23eabc2: answers stored literally, a per-request attempt
+   count in its row, replays refused; #303 e4be05f1c: block fails closed; #304 3b1757d45; #290, #262, #274
+   pushed). High: #281's verify (and the public JWKS) trusted any key a
    database writer added; now only keys whose sealed half opens under the deployment key. Medium:
    #281's head forgeable after a tail cut (a keyed MAC and hourly digests with a staleness check);
    #277's answer `${production.X}` became a reference (stored literally); #303's block mode failed open
