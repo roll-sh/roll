@@ -1,6 +1,7 @@
 import { Database, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { OutsideDatabase } from "@/lib/secrets-api";
+import { GatewayPicker } from "./gateways";
 import { useSecrets } from "./secrets-page";
 import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field, ghost, primary, Section, textareaField, useLoad } from "./ui";
 
@@ -22,6 +23,7 @@ export function OutsideDatabases() {
   const [roles, setRoles] = useState<[string, string]>(["", ""]);
   const [group, setGroup] = useState("");
   const [ca, setCa] = useState("");
+  const [gateway, setGateway] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -37,13 +39,14 @@ export function OutsideDatabases() {
     setBusy(true);
     setError(null);
     try {
-      await api.addOutsideDatabase({ name, url: url.trim(), roles: noPair ? [] : roles, group: group || undefined, ca: ca.trim() || undefined });
+      await api.addOutsideDatabase({ name, url: url.trim(), roles: noPair ? [] : roles, group: group || undefined, ca: ca.trim() || undefined, gateway: gateway || undefined });
       setAdding(false);
       setName("");
       setUrl("");
       setRoles(["", ""]);
       setGroup("");
       setCa("");
+      setGateway("");
       list.reload();
     } catch (e) {
       setError(errorText(e));
@@ -126,6 +129,9 @@ export function OutsideDatabases() {
               <input value={group} onChange={(e) => setGroup(e.target.value)} placeholder="app_rw" spellCheck={false} className={`${field} font-mono text-[12px]`} />
             </label>
           </div>
+          <div className="sm:col-start-2 max-w-sm">
+            <GatewayPicker value={gateway} onChange={setGateway} />
+          </div>
           <details className="sm:col-start-2">
             <summary className="cursor-pointer text-[11px] text-subtle select-none">Server CA certificate (Amazon RDS and other private CAs)</summary>
             <textarea value={ca} onChange={(e) => setCa(e.target.value)} rows={4} placeholder="-----BEGIN CERTIFICATE-----" spellCheck={false} className={`${textareaField} mt-1 resize-y font-mono text-[11px]`} />
@@ -152,6 +158,7 @@ export function OutsideDatabases() {
                 <span className="font-mono text-[11.5px] text-subtle">{d.host}</span>
                 {d.roles.length > 0 && <span className="font-mono text-[11px] text-muted">{d.roles.join(" ⇄ ")}</span>}
                 {d.group && <span className="font-mono text-[11px] text-muted">dynamic in {d.group}</span>}
+                {d.gateway && <span className="font-mono text-[11px] text-muted">through {d.gateway}</span>}
                 <span className="ml-auto text-[11px] text-subtle">
                   added {ago(d.created_at)} · <ActorMark who={d.created_by} />
                 </span>

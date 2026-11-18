@@ -2,6 +2,7 @@ import { Check, Copy, Fingerprint, Plus } from "lucide-react";
 import { useState } from "react";
 import { ROLL_API } from "@/lib/roll-api";
 import { ACTIONS, type Action, type Identity, type NewIdentity } from "@/lib/secrets-api";
+import { GatewayPicker } from "./gateways";
 import { useSecrets } from "./secrets-page";
 import { ago, button, card, Chip, dangerButton, ErrorNote, errorText, field, ghost, label, primary, Section, textareaField, useLoad } from "./ui";
 
@@ -55,9 +56,13 @@ export function Identities() {
       {made && (
         <div className="fade-in mb-3 rounded-xl border border-accent/40 bg-panel p-3 shadow-card inset-shadow-highlight" role="status">
           <p className="text-[12.5px]">
-            <b className="font-medium">{made.name}</b> <span className="text-muted">is ready.{made.issuer === GITHUB ? " In the workflow:" : made.issuer.startsWith(AZURE) ? " In the pipeline:" : ` Set ROLL_IDENTITY=${made.id} and ROLL_OIDC_TOKEN (or ROLL_OIDC_TOKEN_FILE) in the workload.`}</span>
+            <b className="font-medium">{made.name}</b>{" "}
+            <span className="text-muted">
+              is ready.
+              {made.gateway ? ` Inside the network: roll secrets gateways up --gateway ${made.gateway} --identity ${made.id} --oidc-token-file FILE --allow HOST:PORT` : made.issuer === GITHUB ? " In the workflow:" : made.issuer.startsWith(AZURE) ? " In the pipeline:" : ` Set ROLL_IDENTITY=${made.id} and ROLL_OIDC_TOKEN (or ROLL_OIDC_TOKEN_FILE) in the workload.`}
+            </span>
           </p>
-          {(made.issuer === GITHUB || made.issuer.startsWith(AZURE)) && (
+          {(made.issuer === GITHUB || made.issuer.startsWith(AZURE)) && !made.gateway && (
             <div className="mt-2 flex items-start gap-2">
               <pre className="min-w-0 flex-1 overflow-x-auto rounded-md border border-line-2 bg-panel-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed select-all">{workflow(made, made.environments?.[0] ?? "production")}</pre>
               <button
@@ -110,16 +115,20 @@ export function Identities() {
                     {identitySummary(i)}
                   </span>
                 </span>
-                <span className="flex flex-wrap gap-1 text-[10.5px]">
-                  {i.actions.map((a) => (
-                    <span key={a} className="rounded border border-line-2 px-1 text-muted">
-                      {a}
-                    </span>
-                  ))}
-                </span>
+                {i.gateway ? (
+                  <span className="font-mono text-[11px] text-muted">logs in gateway {i.gateway}</span>
+                ) : (
+                  <span className="flex flex-wrap gap-1 text-[10.5px]">
+                    {i.actions.map((a) => (
+                      <span key={a} className="rounded border border-line-2 px-1 text-muted">
+                        {a}
+                      </span>
+                    ))}
+                  </span>
+                )}
                 <span className="text-[11px] text-subtle">
-                  {i.environments ? i.environments.join(", ") : "all environments"}
-                  {i.paths ? ` · ${i.paths.join(", ")}` : ""} · {i.ttl_minutes} min
+                  {i.gateway ? "" : `${i.environments ? i.environments.join(", ") : "all environments"}${i.paths ? ` · ${i.paths.join(", ")}` : ""} · `}
+                  {i.ttl_minutes} min
                   {i.allowed_ips ? ` · from ${i.allowed_ips.join(", ")}` : ""}
                   {i.pinned_keys ? ` · ${i.pinned_keys} pinned ${i.pinned_keys === 1 ? "key" : "keys"}` : ""}
                 </span>
@@ -184,6 +193,9 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
   const [ttl, setTtl] = useState("15");
   const [ips, setIps] = useState("");
   const [jwks, setJwks] = useState("");
+  // A gateway it logs in instead of reading secrets: its logins get that gateway's own rule, so
+  // environments and actions don't apply (the server refuses them).
+  const [gateway, setGateway] = useState("");
   const [busy, setBusy] = useState(false);
   const ipList = ips.split(/[\s,]+/).filter(Boolean);
   const minutes = Number(ttl);
@@ -197,7 +209,7 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
   // Pinned keys: the issuer is only compared with iss (a cluster's own needn't be reachable).
   const keysOk = jwks.trim() === "" || jwksHasKeys(jwks);
   const otherOk = provider !== "other" || ((jwks.trim() ? issuer.trim() !== "" : issuer.trim().startsWith("https://")) && keysOk && subject.trim() !== "" && subject.trim() !== "*");
-  const ok = name.trim() !== "" && repoOk && otherOk && audience.trim() !== "" && picked.size > 0 && actions.size > 0 && Number.isInteger(minutes) && minutes >= 5 && minutes <= 60;
+  const ok = name.trim() !== "" && repoOk && otherOk && audience.trim() !== "" && (gateway !== "" || (picked.size > 0 && actions.size > 0)) && Number.isInteger(minutes) && minutes >= 5 && minutes <= 60;
   const toggle = <T,>(set: Set<T>, v: T) => {
     const n = new Set(set);
     if (n.has(v)) n.delete(v);
@@ -218,7 +230,8 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
         e.preventDefault();
         if (!ok) return;
         setBusy(true);
-        await onCreate({ name: name.trim(), audience: audience.trim(), ...shape(), environments: [...picked], actions: ACTIONS.filter((a) => actions.has(a)), ttl_minutes: minutes, ...(ipList.length && { allowed_ips: ipList }) });
+        const scope: Pick<NewIdentity, "environments" | "actions" | "gateway"> = gateway ? { actions: [], gateway } : { environments: [...picked], actions: ACTIONS.filter((a) => actions.has(a)) };
+        await onCreate({ name: name.trim(), audience: audience.trim(), ...shape(), ...scope, ttl_minutes: minutes, ...(ipList.length && { allowed_ips: ipList }) });
         setBusy(false);
       }}
       onKeyDown={(e) => e.key === "Escape" && onCancel()}
@@ -297,27 +310,34 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
           </label>
         )}
       </div>
-      <div>
-        <span className={label}>Environments</span>
-        <div className="flex flex-wrap gap-1">
-          {envs.map((e) => (
-            <Chip key={e} on={picked.has(e)} onClick={() => setPicked((p) => toggle(p, e))}>
-              <span className="font-mono">{e}</span>
-            </Chip>
-          ))}
-        </div>
+      <div className="max-w-sm">
+        <GatewayPicker value={gateway} onChange={setGateway} title="A login gets" none="secrets (the environments and actions below)" />
       </div>
-      <div className="flex flex-wrap items-end gap-3">
+      {!gateway && (
         <div>
-          <span className={label}>Actions</span>
+          <span className={label}>Environments</span>
           <div className="flex flex-wrap gap-1">
-            {ACTIONS.map((a) => (
-              <Chip key={a} on={actions.has(a)} onClick={() => setActions((s) => toggle(s, a))}>
-                {a}
+            {envs.map((e) => (
+              <Chip key={e} on={picked.has(e)} onClick={() => setPicked((p) => toggle(p, e))}>
+                <span className="font-mono">{e}</span>
               </Chip>
             ))}
           </div>
         </div>
+      )}
+      <div className="flex flex-wrap items-end gap-3">
+        {!gateway && (
+          <div>
+            <span className={label}>Actions</span>
+            <div className="flex flex-wrap gap-1">
+              {ACTIONS.map((a) => (
+                <Chip key={a} on={actions.has(a)} onClick={() => setActions((s) => toggle(s, a))}>
+                  {a}
+                </Chip>
+              ))}
+            </div>
+          </div>
+        )}
         <label className="w-28">
           <span className={label}>Minutes (5–60)</span>
           <input value={ttl} onChange={(e) => setTtl(e.target.value)} inputMode="numeric" className={`${field} font-mono`} />

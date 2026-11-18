@@ -19,6 +19,7 @@ pub mod outside;
 pub mod directories;
 pub mod snowflake;
 pub mod atlas;
+pub mod gateways;
 mod turns;
 pub mod github_app;
 pub mod aws;
@@ -342,6 +343,9 @@ pub struct Options {
     /// Sets passwords and makes users on LDAP and Active Directory servers outside roll
     /// (directories.rs); `None`: not on this server.
     pub directory: Option<std::sync::Arc<dyn directories::Directory>>,
+    /// Gateways' links (rolld), re-checked at once when a gateway is deleted or a credential that
+    /// may open one is revoked here; `None`: no links on this server.
+    pub gateways: Option<std::sync::Arc<dyn gateways::Links>>,
     /// Calls GitHub for the installation tokens of Apps projects register (github_app.rs); `None`:
     /// not on this server.
     pub github: Option<std::sync::Arc<dyn github_app::GitHubApps>>,
@@ -361,6 +365,7 @@ pub struct Secrets {
     unwrap: kms::Unwrapper,
     sts: Option<Arc<dyn aws::Sts>>,
     workloads: Option<Arc<dyn access::Workloads>>,
+    gateway_links: Option<Arc<dyn gateways::Links>>,
     open: bool,
     trust_forwarded_for: bool,
     web_url: Option<String>,
@@ -516,6 +521,11 @@ impl Secrets {
             links.register(Arc::new(outside::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), outside: outside.clone() }));
         }
         db.ensure_schema(directories::SCHEMA)?;
+        // Gateways into private networks (gateways.rs), and what goes through one.
+        db.ensure_schema(gateways::SCHEMA)?;
+        db.add_column("outside_dbs", "gateway", "TEXT")?;
+        db.add_column("directories", "gateway", "TEXT")?;
+        db.add_column("identities", "gateway", "TEXT")?;
         if let (Some(directory), Ok(keys)) = (&opts.directory, &opts.keyring) {
             links.register(Arc::new(directories::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), directory: directory.clone() }));
         }
@@ -534,7 +544,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default(), counters: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default(), counters: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
