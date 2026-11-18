@@ -1,9 +1,11 @@
-import { Building2, Check, Copy, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
+import { Building2, Check, Copy, Fingerprint, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { accountsApi, activityText, refreshSession, useSession, type Activity, type Invite, type Provider, type Session, type User } from "@/lib/accounts-api";
+import { accountsApi, activityText, refreshSession, useSession, type Activity, type Invite, type Passkey, type Provider, type Session, type User } from "@/lib/accounts-api";
+import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } from "@/lib/webauthn";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { SsoSection } from "./account-sso";
 import { AppShell } from "./app-shell";
+import { ReauthDialog } from "./reauth-dialog";
 
 const card = "rounded-xl border border-line-2 bg-sheet inset-shadow-highlight";
 const btn = "flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-raised px-2.5 text-[12px] font-medium inset-shadow-highlight transition-colors hover:border-line-3 disabled:opacity-50";
@@ -40,11 +42,13 @@ export function AccountPage() {
           <Profile user={user} onChange={setUser} />
           <Methods user={user} />
           <TwoFactor user={user} onChange={reload} />
+          <Passkeys />
           <Sessions />
           <RecentActivity me={user.id} />
           {user.admin && <Invites />}
           {user.admin && <Users me={user.id} />}
           {user.admin && <SsoSection />}
+          <ReauthDialog />
         </div>
       )}
     </AppShell>
@@ -277,6 +281,96 @@ function TwoFactor({ user, onChange }: { user: User; onChange: () => void }) {
           </div>
         )}
         {error && <p className="text-[12px] text-danger">{error}</p>}
+      </div>
+    </Section>
+  );
+}
+
+/** Your passkeys (WebAuthn): sign in with one on its own, or use one as the second factor. */
+function Passkeys() {
+  const [on, setOn] = useState<boolean | null>(null);
+  const [list, setList] = useState<Passkey[] | null>(null);
+  const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => accountsApi.passkeys().then(setList, (e) => setError(errorText(e))), []);
+  useEffect(() => {
+    accountsApi.info().then(
+      (i) => {
+        const yes = Boolean(i.providers.passkey) && passkeysSupported();
+        setOn(yes);
+        if (yes) void load();
+      },
+      () => setOn(false),
+    );
+  }, [load]);
+  if (on === false) return null;
+  const add = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const o = await accountsApi.passkeyOptions();
+      const made = (await navigator.credentials.create({ publicKey: creationOptions(o.publicKey) })) as PublicKeyCredential | null;
+      if (!made) throw new Error("No passkey was made.");
+      await accountsApi.addPasskey(o.id, browser(navigator.userAgent), credentialJSON(made));
+      await load();
+    } catch (e) {
+      setError(passkeyProblem(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Section title="Passkeys" lead="Sign in with your fingerprint, face or device PIN instead of a code. A passkey can't be phished: it only works on roll.">
+      <div className={card}>
+        {!list ? (
+          <div className="grid h-14 place-items-center">
+            <LoaderCircle className="size-4 animate-spin text-subtle motion-reduce:animate-none" />
+          </div>
+        ) : (
+          list.map((p) => (
+            <div key={p.id} className="flex items-center gap-3 border-t border-line px-4 py-2.5 first:border-t-0">
+              <Fingerprint className="size-4 text-muted" />
+              <span className="min-w-0 flex-1 leading-tight">
+                {renaming?.id === p.id ? (
+                  <form
+                    className="flex gap-2"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      accountsApi.renamePasskey(p.id, renaming.name).then(() => (setRenaming(null), load()), (err) => setError(errorText(err)));
+                    }}
+                  >
+                    <input autoFocus value={renaming.name} maxLength={64} onChange={(e) => setRenaming({ id: p.id, name: e.target.value })} className={`${field} w-56`} />
+                    <button type="submit" className={btn}>
+                      Save
+                    </button>
+                  </form>
+                ) : (
+                  <span className="block truncate text-[12.5px]">{p.name}</span>
+                )}
+                <span className="block text-[11px] text-subtle">
+                  {p.synced ? "Synced across your devices" : "On one device"} · added {when(p.created_at)}
+                  {p.last_used_at ? ` · last used ${when(p.last_used_at)}` : " · not used yet"}
+                </span>
+              </span>
+              {renaming?.id !== p.id && (
+                <button onClick={() => setRenaming({ id: p.id, name: p.name })} className="text-[12px] text-muted hover:text-fg">
+                  Rename
+                </button>
+              )}
+              <button onClick={() => accountsApi.removePasskey(p.id).then(load, (e) => setError(errorText(e)))} className={`${btn} text-danger`}>
+                Remove
+              </button>
+            </div>
+          ))
+        )}
+        <div className="flex items-center gap-3 border-t border-line px-4 py-3 first:border-t-0">
+          <button disabled={busy || on === null} onClick={add} className={primary}>
+            Add a passkey
+          </button>
+          <span className="text-[11.5px] text-subtle">{list?.length ? "With one, you can skip the authenticator app's code too." : "Your browser or phone keeps it, synced if you use iCloud Keychain or Google Password Manager."}</span>
+        </div>
+        {error && <p className="px-4 pb-3 text-[12px] text-danger">{error}</p>}
       </div>
     </Section>
   );

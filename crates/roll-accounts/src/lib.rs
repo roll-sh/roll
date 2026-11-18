@@ -13,6 +13,9 @@ pub mod api;
 pub mod audit;
 mod mail;
 mod oauth;
+pub mod passkeys;
+mod places;
+mod sudo;
 mod scim;
 pub mod sso;
 mod twofactor;
@@ -116,6 +119,20 @@ CREATE TABLE IF NOT EXISTS passkeys (
     created_at INTEGER NOT NULL,
     last_used_at INTEGER
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS sign_in_places (
+    user_id TEXT NOT NULL,
+    place TEXT NOT NULL,
+    first_at INTEGER NOT NULL,
+    last_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, place)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS passkey_challenges (
+    id TEXT PRIMARY KEY,
+    user_id TEXT,
+    purpose TEXT NOT NULL,
+    challenge TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS throttle (
     key TEXT PRIMARY KEY,
     n INTEGER NOT NULL,
@@ -191,11 +208,11 @@ pub enum Error {
 }
 
 impl Error {
-    fn bad_code() -> Error {
+    pub(crate) fn bad_code() -> Error {
         Error::BadRequest("the code is wrong or expired".into(), Some("bad_code"))
     }
 
-    fn signed_out() -> Error {
+    pub(crate) fn signed_out() -> Error {
         Error::Unauthorized("sign in first".into())
     }
 
@@ -385,6 +402,8 @@ pub struct Accounts {
     /// Where account events go (rolld: roll-access's audit log); none until it's set.
     audit: std::sync::RwLock<Option<Arc<dyn audit::Audit>>>,
     owners: Option<Arc<dyn Owners>>,
+    /// Sudo mode's window (`sudo::SUDO_MS`; shorter in tests).
+    sudo_ms: std::sync::atomic::AtomicI64,
 }
 
 impl Accounts {
@@ -414,13 +433,25 @@ impl Accounts {
         if !db.has_column("scim_users", "user_name")? {
             db.add_column("scim_users", "user_name", "TEXT")?;
         }
+        // A SCIM token found leaked: where, and it no longer opens anything.
+        if !db.has_column("scim_tokens", "leaked")? {
+            db.add_column("scim_tokens", "leaked", "TEXT")?;
+        }
+        // Whether a passkey is synced to the person's other devices (its authenticator says so).
+        if !db.has_column("passkeys", "synced")? {
+            db.add_column("passkeys", "synced", "INTEGER")?;
+        }
+        // When a session last proved who it is (sudo mode): its sign-in until then.
+        if !db.has_column("sessions", "verified_at")? {
+            db.add_column("sessions", "verified_at", "INTEGER")?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;
         }
         let doh = std::env::var("ROLL_ACCOUNTS_DOH").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "https://cloudflare-dns.com/dns-query".into());
         let txt: Arc<dyn sso::TxtLookup> = Arc::new(sso::Doh { client: sso_http.clone(), url: doh });
-        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners })
+        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners, sudo_ms: std::sync::atomic::AtomicI64::new(sudo::SUDO_MS) })
     }
 
     /// Where SSO domains' TXT records are read (tests answer from a table).
@@ -496,15 +527,22 @@ impl Accounts {
     /// in).
     pub fn issue(&self, user: &str, user_agent: &str) -> Result<Issued> {
         self.sso_not_enforced(user)?;
-        self.issue_session(user, user_agent, None)
+        self.issue_session(user, user_agent, None, false)
     }
 
     /// A session for a person their company's SSO provider just signed in.
     pub(crate) fn issue_sso(&self, user: &str, user_agent: &str) -> Result<Issued> {
-        self.issue_session(user, user_agent, Some("sso"))
+        self.issue_session(user, user_agent, Some("sso"), false)
     }
 
-    fn issue_session(&self, user: &str, user_agent: &str, method: Option<&str>) -> Result<Issued> {
+    /// A session for a person a passkey signed in on its own: the authenticator verified them
+    /// (a PIN or biometric) and holds the key, so it's both factors, as GitHub counts it.
+    pub(crate) fn issue_passkey(&self, user: &str, user_agent: &str) -> Result<Issued> {
+        self.sso_not_enforced(user)?;
+        self.issue_session(user, user_agent, Some("passkey"), true)
+    }
+
+    fn issue_session(&self, user: &str, user_agent: &str, method: Option<&str>, both_factors: bool) -> Result<Issued> {
         self.provision_owner(user);
         let now = self.db.now_ms()?;
         let token = new_token("rls");
@@ -516,7 +554,7 @@ impl Accounts {
                 Some(true) => return Err(Error::Forbidden("this account is disabled".into(), "disabled")),
                 Some(false) => {}
             }
-            let mfa = c.query_row("SELECT 1 FROM totp WHERE user_id = ? AND enabled = 1", [user], |_| Ok(())).optional()?.is_some();
+            let mfa = !both_factors && c.query_row("SELECT 1 FROM totp WHERE user_id = ? AND enabled = 1", [user], |_| Ok(())).optional()?.is_some();
             let (level, ttl) = if mfa { ("mfa", SECOND_FACTOR_TTL_MS) } else { ("full", SESSION_TTL_MS) };
             // The user's sessions that ended go with each new one: no sweeper needed.
             c.execute("DELETE FROM sessions WHERE user_id = ? AND (expires_at <= ? OR (level = 'full' AND seen_at <= ?))", params![user, now, now - SESSION_IDLE_MS])?;
@@ -910,6 +948,12 @@ impl Accounts {
         Ok(Some(mail))
     }
 
+    /// Whose account an email code was sent to (`None`: a sign-up's, or no such code): a wrong
+    /// code for it goes in that person's security log.
+    pub(crate) fn code_owner(&self, challenge: &str) -> Option<String> {
+        self.db.read(|c| c.query_row("SELECT user_id FROM email_codes WHERE id = ?", [challenge], |r| r.get::<_, Option<String>>(0)).optional()).ok().flatten().flatten()
+    }
+
     /// Check a challenge's code: the user it signs in (made from the invite on first sign-in).
     /// The person an email code signs in, and whether their account was made now (an invite).
     pub fn email_verify(&self, challenge: &str, code: &str) -> Result<(String, bool)> {
@@ -964,6 +1008,18 @@ impl roll_auth::Sessions for Resolver {
 
     fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
         self.0.person(user).map_err(|e| e.to_string())
+    }
+
+    fn sso_trust<'a>(&'a self, id: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SsoTrust>, String>> {
+        let (accounts, id) = (self.0.clone(), id.to_string());
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let all = accounts.sso_connections().map_err(|e| e.to_string())?;
+                Ok(all.into_iter().find(|c| c.id == id).map(|c| roll_auth::SsoTrust { name: c.name, issuer: c.issuer, verified: c.verified }))
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        })
     }
 
     fn person_by_email<'a>(&'a self, email: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SignedIn>, String>> {

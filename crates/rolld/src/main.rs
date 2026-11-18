@@ -564,6 +564,11 @@ async fn run() -> anyhow::Result<()> {
     )?;
     // People's accounts in the audit log (sign-ins, invites, SSO and SCIM changes).
     accounts.set_audit(std::sync::Arc::new(accounts::AccessAudit(access.clone())));
+    // SSO connections' SCIM tokens found leaked (`rlp_`) stop working, like tokens.
+    {
+        let accounts = accounts.clone();
+        access.on_leaked("rlp_", move |secret, why| accounts.revoke_leaked_scim(secret, why));
+    }
     router = router.merge(roll_access::api::router(access.clone()));
     // Users' own tokens act as them, as they are now (docs/permissions.md, "Users' own tokens").
     let _ = access.people.set(sessions);

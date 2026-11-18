@@ -333,17 +333,6 @@ fn hook_row(r: &code_sql::Row<'_>) -> code_sql::Result<Hook> {
     Ok(Hook { id: r.get(0)?, project: r.get(1)?, name: r.get(2)?, branches: serde_json::from_str(&globs).unwrap_or_default(), created_at: r.get(4)?, fired_at: r.get(5)? })
 }
 
-/// A roll secret: `prefix`, 34 random characters of lowercase base32 and 6 of CRC-32 checksum
-/// (`roll_auth::credentials`), so secret scanning finds a leaked one.
-fn roll_access_secret(prefix: &str) -> String {
-    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-    let mut b = [0u8; 34];
-    getrandom::fill(&mut b).expect("system randomness");
-    let body: String = format!("{prefix}{}", b.iter().map(|x| ALPHABET[(x & 31) as usize] as char).collect::<String>());
-    let sum = roll_auth::credentials::checksum(&body);
-    format!("{body}{sum}")
-}
-
 /// The SHA-256 (hex) a bypass secret is kept as.
 pub fn bypass_hash(secret: &str) -> String {
     use sha2::Digest;
@@ -1968,7 +1957,7 @@ impl Store {
     /// A new hook for `project`'s previews of `branches` (globs): its secret, returned once and
     /// kept only as its SHA-256 (`rlb_…`, a roll secret leak scanning finds).
     pub fn create_hook(&self, project: &str, name: &str, branches: &[String]) -> Result<(Hook, String)> {
-        let secret = roll_access_secret("rlb_");
+        let secret = roll_auth::credentials::new_secret("rlb_");
         let (id, hash, now) = (format!("hk_{}", crate::new_id()), bypass_hash(&secret), self.now_ms()?);
         let globs = serde_json::to_string(branches).map_err(|e| Error::Internal(e.to_string()))?;
         self.db.write(|c| {

@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { activityText, type Activity } from "./accounts-api";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { accountsApi, activityText, onReauthRequired, type Activity } from "./accounts-api";
 
 describe("activityText", () => {
   const e = (a: Partial<Activity>): Activity => ({ at: 0, action: "sign_in", actor: "usr_me", ok: true, status: 200, ...a });
@@ -11,5 +11,37 @@ describe("activityText", () => {
     expect(activityText(e({ action: "PATCH /v1/accounts/users/{id}", actor: "usr_admin", detail: { set: { admin: true } } }), "usr_me")).toBe("An admin made you an admin");
     expect(activityText(e({ action: "scim.update", actor: "scim:sso_1", detail: { active: false } }), "usr_me")).toBe("Your company's provider deactivated your account");
     expect(activityText(e({ action: "DELETE /v1/accounts/me/totp" }), "usr_me")).toBe("Your authenticator app was turned off");
+  });
+});
+
+describe("sudo mode", () => {
+  afterEach(() => {
+    onReauthRequired(null);
+    vi.unstubAllGlobals();
+  });
+  const answers = (...bodies: [number, unknown][]) => {
+    const f = vi.fn();
+    for (const [status, body] of bodies) f.mockResolvedValueOnce(new Response(JSON.stringify(body), { status }));
+    vi.stubGlobal("fetch", f);
+    return f;
+  };
+  it("asks the person to confirm, then runs the change once more", async () => {
+    const f = answers([403, { error: "confirm it's you first", code: "reauth_required" }], [200, { id: "pk_1", name: "Phone" }]);
+    const confirm = vi.fn(async () => {});
+    onReauthRequired(confirm);
+    await expect(accountsApi.renamePasskey("pk_1", "Phone")).resolves.toMatchObject({ name: "Phone" });
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(f).toHaveBeenCalledTimes(2);
+  });
+  it("changes nothing when the person doesn't confirm, or nobody can ask", async () => {
+    const f = answers([403, { error: "confirm it's you first", code: "reauth_required" }]);
+    onReauthRequired(async () => {
+      throw new Error("Not confirmed: nothing changed.");
+    });
+    await expect(accountsApi.removePasskey("pk_1")).rejects.toThrow("Not confirmed");
+    expect(f).toHaveBeenCalledOnce();
+    onReauthRequired(null);
+    answers([403, { error: "confirm it's you first", code: "reauth_required" }]);
+    await expect(accountsApi.removePasskey("pk_1")).rejects.toMatchObject({ code: "reauth_required" });
   });
 });
