@@ -838,24 +838,23 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Built 2026-11-18, for the next turn (after secrets #79 and search's turn):** a person's own
-   data export (#283, this PR), hardware keys only (#286), one provider for people and agents
-   (#287), an SSO connection's session length (#289) with back-channel logout on it (#292),
-   allowed networks (#294) with a second factor for everyone (#298), who has one (#299) and an
-   idle timeout (#302) on it; moving an account to another address (#306) with deleting your own
-   account on it (#309); downloads that send the session (signed-in people got 401s on the audit
-   export, apps' logs and previews' QR codes, screenshots, mail and logs) and the sign-in report
-   link (#307); the audit log naming people by handle, the CSV too (#313); tools for search's
-   metrics, slow log and IP allowlist and previews' metrics (#310). #306, #307 and #309 were
-   checked together in a real Chromium (`users-live/review306-shot.sh`). Conflicts: appended
-   tests (keep both), #287×#289 in `account-sso.tsx`, #306/#309×#302's stack in `account.tsx`,
-   `api.rs` and docs/accounts.md, #307×#313 in the audit page; build land commits up front as the
-   last turn did.
-2. **Next, ranked (now):** the email change's and deletion's SCIM and SSO refusals in the SSO and
-   SCIM flow tests; what a removed person owned (their roll code owner's repositories) handed to
-   someone else when an admin disables or a person deletes the account (GitHub's transfer on
-   removal; roll code's routes, so asked of no thread until a code thread runs); tools for
-   search's audit and analytics once #247 and #291 are on main.
+1. **Next, ranked (now):** an admin reads a person's security log and sessions from People (Okta's
+   per-user System Log: `GET /v1/accounts/users/{id}/activity`, the same events a person sees of
+   themselves, plus ending one session); passkey autofill on the sign-in page (#322, open, checked
+   in Chromium); tools for search's audit and analytics once search #247 and #291 are on main
+   (search tells this thread); what a removed person owned (their roll code owner's
+   repositories) handed to someone else on removal (GitHub's transfer; roll code has no
+   transfer yet, so it waits for a code thread).
+2. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
+   hardware keys only (#286), one provider for people and agents (#287), an SSO connection's
+   session length (#289) and back-channel logout (#292), allowed networks (#294), a second factor
+   for everyone (#298) and who has one (#299), an idle timeout (#302), phishing-resistant sign-in
+   (#316), moving an account to another address (#306), deleting your own account (#309),
+   downloads that send the session plus the sign-in report link (#307), tools for search's
+   metrics, slow log and IP allowlist, previews' metrics and secrets' TOTP, SaaS rotators and
+   Kubernetes clusters (#310), and the audit log naming people by handle (#313). Gated as one tree,
+   then landed one per round (`turn3-land.sh`: the queue drops stacked PRs that share anchors once
+   a squash breaks their ancestry).
 3. **Landed 2026-11-18 (main 1a60b43be):** passkeys (#256), sudo mode (#257, #260), new-sign-in mail
    (#258), second-factor resets (#263), refused codes in the security log (#254); for roll secrets,
    `revoke_many` and the public detectors (#267) and decoy tokens (#270).
