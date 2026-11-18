@@ -42,6 +42,7 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/signin/recovery", post(signin_recovery))
         .route("/v1/accounts/me", get(me).patch(update_me))
         .route("/v1/accounts/me/sessions", get(my_sessions))
+        .route("/v1/accounts/me/activity", get(my_activity))
         .route("/v1/accounts/me/sessions/{id}", delete(revoke_my_session))
         .route("/v1/accounts/me/identities/{provider}", delete(unlink))
         .route("/v1/accounts/me/totp", post(totp_enrol).delete(totp_disable))
@@ -522,6 +523,20 @@ async fn update_me(State(a): S, me: Me, b: Bytes) -> Result<Response> {
     let u = signed_in(me)?;
     let Name { name } = body(&b)?;
     Ok(Json(blocking(&a, move |a| a.rename(&u.user, &name)).await?).into_response())
+}
+
+#[derive(Deserialize)]
+struct ActivityQuery {
+    before: Option<i64>,
+    limit: Option<usize>,
+}
+
+/// A person's own security log: their sign-ins (and refusals) and every change to their account,
+/// newest first (`before`: older pages).
+async fn my_activity(State(a): S, me: Me, Query(q): Query<ActivityQuery>) -> Result<Response> {
+    let u = signed_in(me)?;
+    let events = blocking(&a, move |a| Ok(a.activity(&u.user, q.before, q.limit.unwrap_or(50)))).await?;
+    Ok(Json(json!({ "events": events })).into_response())
 }
 
 async fn my_sessions(State(a): S, me: Me) -> Result<Response> {
