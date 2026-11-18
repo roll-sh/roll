@@ -1547,28 +1547,39 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn waiting_commits_at_once_and_unwaited_records_within_the_window() {
         let objects = crate::test_objects("wal-unit-demand");
-        let dir = crate::test_dir().join(format!("wal-unit-{}", crate::random_u64()));
-        // A window much longer than one fsync, even on a loaded disk.
-        let cfg = WalConfig { flush_delay: Duration::from_secs(3), ship_interval: Duration::from_secs(3600), ..WalConfig::default() };
-        let wal = Wal::open("n1", objects, dir.clone(), cfg).await.unwrap();
+        let open = |flush_delay: Duration| {
+            let (objects, dir) = (objects.clone(), crate::test_dir().join(format!("wal-unit-{}", crate::random_u64())));
+            async move {
+                let cfg = WalConfig { flush_delay, ship_interval: Duration::from_secs(3600), ..WalConfig::default() };
+                (Wal::open("n1", objects, dir.clone(), cfg).await.unwrap(), dir)
+            }
+        };
+        // An hour's window: the wait ending at all shows the waiter didn't wait for it.
+        let (wal, dir) = open(Duration::from_secs(3600)).await;
         let w = wal.shard("c1", &ShardId::new("idx", 0)).unwrap();
-        let t = Instant::now();
         let mut lsn = 0;
         for i in 0..1000 {
             lsn = w.append_parts(i, &[b"op ", b"payload"]).unwrap();
         }
-        wal.durable(lsn).await.unwrap();
-        assert!(t.elapsed() < Duration::from_millis(2000), "a waiter doesn't wait for the window: {:?}", t.elapsed());
+        tokio::time::timeout(Duration::from_secs(60), wal.durable(lsn))
+            .await
+            .unwrap_or_else(|_| panic!("a waiter waits for the window: {:?}", wal.stats()))
+            .unwrap();
         assert_eq!(wal.stats().commits, 1, "{:?}", wal.stats());
+        drop(w);
+        wal.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
         // Nobody waits: committed within the window anyway.
-        let lsn = w.append(1000, b"async").unwrap();
+        let (wal, dir) = open(Duration::from_secs(3)).await;
+        let w = wal.shard("c1", &ShardId::new("idx", 0)).unwrap();
+        let lsn = w.append(0, b"async").unwrap();
         let t = Instant::now();
         while wal.durable_lsn() < lsn {
-            assert!(t.elapsed() < Duration::from_secs(15), "unwaited records commit within the window");
+            assert!(t.elapsed() < Duration::from_secs(15), "unwaited records commit within the window: {:?}", wal.stats());
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert!(t.elapsed() >= Duration::from_millis(2500), "{:?}", t.elapsed());
-        assert_eq!(wal.stats().commits, 2);
+        assert_eq!(wal.stats().commits, 1);
         drop(w);
         wal.close().await.unwrap();
         let _ = std::fs::remove_dir_all(dir);
