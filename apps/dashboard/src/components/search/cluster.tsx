@@ -7,6 +7,7 @@ import { formatBytes, formatUsd } from "@/lib/roll-api";
 import {
   formatCount,
   formatDuration,
+  formatWindow,
   NAME_HINT,
   NAME_RE,
   searchApi,
@@ -229,6 +230,7 @@ export function SearchClusterPage({ id }: { id: string }) {
             busy={busy}
             run={run}
             onRotated={setRevealed}
+            retentionS={info.deleted_retention_s}
             onDeleted={() => navigate({ href: "/dashboard/search" })}
           />
         )}
@@ -904,12 +906,15 @@ function SettingsTab({
   busy,
   run,
   onRotated,
+  retentionS,
   onDeleted,
 }: {
   cluster: SearchCluster;
   busy: string | null;
   run: Run;
   onRotated: (c: SearchCluster) => void;
+  /** How long it can be restored after the delete (0: not at all). */
+  retentionS: number;
   onDeleted: () => void;
 }) {
   const saved = settingsOf(cluster);
@@ -990,8 +995,11 @@ function SettingsTab({
         <Panel title="Delete cluster">
           <div className="space-y-3 px-5 py-4">
             <p className="text-[13px] text-muted">
-              Removes the cluster, its indices and its history. Branches keep working: segments they share stay until
-              nothing uses them.
+              Removes the cluster: it stops answering at once and its name is free.{" "}
+              {retentionS > 0
+                ? `Its indices are kept for ${formatWindow(retentionS)} (billed as storage), so it can be restored from the Search page; then they go for good.`
+                : "Its indices and history go with it."}{" "}
+              Branches keep working: segments they share stay until nothing uses them.
             </p>
             {deleting ? (
               <Confirm
@@ -1004,7 +1012,7 @@ function SettingsTab({
                   if (r) onDeleted();
                 }}
               >
-                This can&apos;t be undone.
+                {retentionS > 0 ? `It can be restored for ${formatWindow(retentionS)}.` : "This can't be undone."}
               </Confirm>
             ) : (
               <button onClick={() => setDeleting(true)} className={`${btn} hover:border-danger/50 hover:text-danger`}>

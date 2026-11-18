@@ -90,7 +90,7 @@ fn credential(a: &Access, public_jwk: Option<&Value>, oidc: Option<OidcIn>) -> R
 }
 
 /// A public JWK of a kind roll verifies: Ed25519 (OKP), P-256 (EC) or RSA, with no private part.
-fn check_jwk(jwk: &Value) -> Result<String, Error> {
+pub(crate) fn check_jwk(jwk: &Value) -> Result<String, Error> {
     let bad = |why: &str| Error::BadRequest(format!("public_jwk: {why}"));
     if ["d", "p", "q", "dp", "dq", "qi", "k"].iter().any(|k| jwk.get(*k).is_some()) {
         return Err(bad("that's a private key: send only its public part"));

@@ -129,12 +129,14 @@ impl AuditLogs {
         self.remembered.lock().get(cluster).cloned()
     }
 
-    /// Drops a deleted cluster's log: entries still waiting are discarded, and a write in
-    /// progress finishes before this returns (so nothing lands after its storage is deleted).
+    /// Drops a deleted cluster's log: entries still waiting are written first (a deleted cluster
+    /// kept for restoring takes them along), and a write in progress finishes before this
+    /// returns, so nothing lands after its storage is deleted or moved.
     pub async fn forget(&self, cluster: &str) {
         self.remembered.lock().remove(cluster);
         let log = self.logs.lock().remove(cluster);
         if let Some(log) = log {
+            self.flush(cluster, &log).await;
             let _io = log.io.lock().await;
             *log.pending.lock() = Pending::default();
         }

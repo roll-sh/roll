@@ -81,6 +81,7 @@ throttle(key TEXT PRIMARY KEY, n INTEGER NOT NULL, since INTEGER NOT NULL)
 | email code (6 digits) | argon2id (19 MiB, 2 passes), salted | 10 minutes, single use, 5 tries |
 | recovery code (16 base32, `xxxx-xxxx-xxxx-xxxx`) | sha256 | until used or replaced |
 | TOTP seed (20 bytes) | AES-256-GCM under `ROLL_SECRET_KEY`, the user id as associated data | until disabled |
+| SSO client secret | AES-256-GCM under a key of its own from `ROLL_SECRET_KEY`, the connection's id as associated data | until changed or removed |
 | OAuth state, browser nonce | sha256 | 10 minutes, single use |
 | PKCE verifier, OIDC nonce | as is (useless without the state and the browser) | 10 minutes |
 
@@ -251,6 +252,86 @@ needs the person signed in (`intent: "link"`).
 
 `return_to` must be a path starting with `/` (not `//`); anything else becomes `/dashboard`.
 
+### SSO (a company's OpenID Connect provider)
+
+Okta, Entra ID, Google Workspace, JumpCloud or any OpenID Connect provider signs people in, chosen
+by their email's domain, as Linear's, Vercel's and GitHub's enterprise sign-in do.
+
+- **A connection** (admin): `POST /v1/accounts/sso {name?, issuer, client_id, client_secret,
+  domains, enforce?, provision?}`. The issuer's discovery document must answer and name the same
+  issuer before it's saved; roll keeps the issuer as the document states it (with or without a
+  trailing `/`: what its ID tokens carry). The answer has the `redirect_uri` to register at the
+  provider (`<api>/v1/accounts/sso/{id}/callback`). The client secret is sealed (`ROLL_SECRET_KEY`
+  is required) and never returned. A domain has one connection; public mail domains (gmail.com,
+  outlook.com…) are refused.
+- **Domains are proven** before they do anything: a TXT record at `_roll-sso.<domain>` with the
+  connection's value (`dns` in the answer), then `POST /v1/accounts/sso/{id}/verify`. Only
+  verified domains route sign-ins, link accounts, provision people or enforce. Records are read
+  over DNS-over-HTTPS (Cloudflare's, or `ROLL_ACCOUNTS_DOH`). Dropping a domain from a connection
+  unverifies it and removes its people's links there.
+- **Signing in**: the dashboard asks for an email; `POST /v1/accounts/sso/start {email, invite?,
+  return_to?}` answers the provider's authorize URL (code flow, PKCE, a nonce, `login_hint`) and
+  the browser cookie, as GitHub's and Google's do (at most 10 starts per address in ten minutes,
+  600 per connection a minute). roll trades the code (`client_secret_post`, or Basic where the
+  provider only takes that), then checks the ID token with roll-oidc against the keys the
+  discovery document names: signature, issuer exactly, audience (its client id; `azp` when there
+  are several), times, and the nonce. Discovery and keys are reused for ten minutes (a provider
+  that didn't answer, for one); a token signed by a key roll hasn't seen reads the keys again,
+  once. Only an email the provider says it verified, in plain ASCII, in a verified domain of the
+  connection, counts. Entra ID doesn't send `email_verified`: its optional claim `xms_edov` (the
+  domain's owner verified the address) counts instead. Google's issuer also vouches for consumer
+  accounts, so its token must carry `hd` (the Workspace domain), one of the verified domains.
+- **Who it is**: a person linked before, while their account's email is still in the
+  connection's verified domains; else the account with that email, linked now, unless it's an
+  admin's (`link_required`: admins link from their own session, `POST /v1/accounts/sso/start
+  {intent: "link"}`, and the provider must sign in the account's own address) or it's linked
+  there to another subject already (`linked_elsewhere`: an address reassigned at the provider;
+  the person or an admin removes the old link, `DELETE /v1/accounts/me/identities/sso:<id>`).
+  With no account, an invite, or `provision: true` makes one (never an admin). TOTP still applies
+  to people who turned it on.
+- **Enforced** (`enforce: true`): people of its verified domains sign in only through the
+  provider. Turning it on (or verifying a domain while it's on) ends their sessions that didn't
+  come from SSO. An email code is refused at once (`403 sso_required`, decided by the domain
+  alone, so it says nothing about whether the address has an account); GitHub, Google, or an
+  email code that reaches a session is refused there, and so is a second factor owed by a
+  sign-in that began another way. The operator's token is never refused, so an outage at the
+  provider never locks roll out.
+- The provider is fetched only through a client that refuses private addresses (and IP
+  literals), uses no proxy, follows no redirects and bounds every answer
+  (`ROLL_ACCOUNTS_SSO_ALLOW_PRIVATE=1` allows private addresses, and plain http, for local
+  development and tests only). Failures are logged with their detail; the browser is told only
+  that the provider didn't answer.
+- Removing a connection deletes its people's links; their accounts stay and sign in other ways.
+
+### SCIM (the provider manages its people)
+
+A connection's provider (Okta, Entra ID, JumpCloud) creates, updates and deactivates its people
+over SCIM 2.0 (RFC 7643 and 7644), so someone who leaves loses roll at once.
+
+- An admin makes the connection a token: `POST /v1/accounts/sso/{id}/scim` answers `{token,
+  base_url}` once (`rlp_…`, kept as a hash; a new one replaces it, `DELETE` turns SCIM off). The
+  provider uses `base_url` (`<api>/v1/accounts/scim/v2`) and sends the token as `Authorization:
+  Bearer`. It's looked up on every request.
+- It reaches only people whose email is in the connection's verified domains, and never an
+  admin (admins are managed in roll): anyone else is a 404 to it. It never changes an email.
+- A person's roll address is their primary email (`emails`), else a `userName` that is an email.
+  The provider's `userName` (Entra's userPrincipalName, say) is kept beside it: map the work email
+  to `emails[type eq "work"].value` in Entra. Filters: `userName eq` (the provider's userName or
+  the address), `externalId eq`, `emails.value eq`; `startIndex` and `count` (up to 200) page,
+  in the database.
+- `GET /Users`, `GET /Users/{id}`, `POST /Users` (a new person in its domains, never an admin,
+  made in one write; 409 `uniqueness` when the email has an account, which the provider then finds
+  by filter; `Location` on the 201), `PUT` and `PATCH /Users/{id}` (name, `externalId`,
+  `userName`, `active`: `"False"` and `false` both count, anything else is a 400; `remove` of what
+  roll keeps nothing of is fine), `DELETE /Users/{id}` (deactivates). `ServiceProviderConfig`,
+  `ResourceTypes` and `Schemas` describe this: users only, no groups, no bulk; any other path is a
+  SCIM 404 (turn group provisioning off in the provider).
+- Deactivating is roll's own disable, done every time it's asked (a retry finishes cutting off
+  what a failure left): the person's sessions end, and their roll code owner (its tokens and
+  machine links) is cut off. Their own roll tokens and connections pause with the account, and
+  come back if it's reactivated. SCIM reactivates only an account it deactivated: one an admin
+  disabled stays so (403 `admin_disabled`).
+
 ### Second factor
 
 When the user has TOTP on, every sign-in (email code or OAuth) ends at level `mfa`.
@@ -274,7 +355,7 @@ token or an admin's session.
 ```ts
 type User = { id: string; email: string; handle: string; name: string; admin: boolean;
               disabled: boolean; created_at: number; totp: boolean;
-              identities: { provider: "github" | "google"; login: string; email: string }[] };
+              identities: { provider: "github" | "google" | `sso:${string}`; login: string; email: string }[] };
 type Session = { id: string; created_at: number; seen_at: number; expires_at: number;
                  user_agent: string; current: boolean };
 type Invite = { id: string; email: string; admin: boolean; handle: string | null;
@@ -288,13 +369,15 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 
 | Route | Body | Answer |
 | --- | --- | --- |
-| `GET /v1/accounts` | | `{providers: {email: bool, github: bool, google: bool}}`: which sign-ins are configured |
+| `GET /v1/accounts` | | `{providers: {email: bool, github: bool, google: bool, sso: bool}}`: which sign-ins are configured |
 | `GET /v1/accounts/session` | | `{status: "anonymous"}`, `MfaRequired` or `SignedIn` (always 200) |
 | `POST /v1/accounts/invites/peek` | `{token}` | `{email, expires_at}`; 404 for a used, revoked, expired or unknown invite |
-| `POST /v1/accounts/email/start` | `{email, invite?}` | 202 `{challenge}`; 400 bad email; 503 `{code: "email_off"}` when mail isn't configured |
+| `POST /v1/accounts/email/start` | `{email, invite?}` | 202 `{challenge}`; 400 bad email; 403 `{code: "sso_required"}` for a domain whose SSO connection enforces it; 503 `{code: "email_off"}` when mail isn't configured |
 | `POST /v1/accounts/email/verify` | `{challenge, code}` | 200 `SignedIn` or `MfaRequired`, with `Set-Cookie`; 400 `{code: "bad_code"}` (wrong, used, expired or too many tries: one answer); 400 `{code: "invite_invalid"}`; 403 `{code: "disabled"}` |
 | `POST /v1/accounts/oauth/{provider}/start` | `{intent?: "signin" \| "link", invite?, return_to?}` | `{url}` and `Set-Cookie` (the browser cookie); 400 `{code: "invite_invalid"}`; 404 provider not configured; `link` needs a session (401) |
 | `GET /v1/accounts/oauth/{provider}/callback` | query `code`, `state` (or `error`) | 303 to the dashboard, see above |
+| `POST /v1/accounts/sso/start` | `{email, invite?, return_to?}`, or `{intent: "link"}` with a session (csrf) | `{url}` and `Set-Cookie` (the browser cookie); 400 `{code: "no_sso"}` when no connection answers for the email's (verified) domain, `throttled`, `provider` |
+| `GET /v1/accounts/sso/{id}/callback` | query `code`, `state` (or `error`) | 303 to the dashboard; `?error=` `unverified_email`, `domain`, `not_invited`, `link_required`, `linked_elsewhere`, `link_email`, `state` or `provider` |
 | `POST /v1/accounts/signout` | | 204, clears the cookie and deletes the session (any level; csrf) |
 
 ### Second factor (a session at level `mfa`, csrf)
@@ -311,6 +394,7 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | `GET /v1/accounts/me` | | `User` |
 | `PATCH /v1/accounts/me` | `{name}` | `User` (1–100 characters) |
 | `GET /v1/accounts/me/sessions` | | `Session[]`, newest first |
+| `GET /v1/accounts/me/activity` | query `before?` (Unix ms), `limit?` (1–200, 50) | `{events: [{at, action, actor, ok, status, ip, user_agent, detail}]}`: your security log, newest first |
 | `DELETE /v1/accounts/me/sessions/{id}` | | 204; 404 if it isn't yours |
 | `DELETE /v1/accounts/me/identities/{provider}` | | 204; 404 if not linked |
 | `POST /v1/accounts/me/totp` | | `{secret, otpauth_url, qr_png}` (`qr_png` a `data:image/png;base64,…` URL): a new seed, not on until confirmed; 409 if on; 503 `{code: "secret_key"}` without `ROLL_SECRET_KEY` |
@@ -331,8 +415,39 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 | `GET /v1/accounts/users` | | `User[]`, oldest first |
 | `PATCH /v1/accounts/users/{id}` | `{admin?, disabled?}` | `User`; disabling deletes the user's sessions and cuts off their roll code owner (its tokens are revoked and its machines' links closed; turning the account back on gives none of them back) |
 | `DELETE /v1/accounts/users/{id}/sessions` | | 204: signs the user out everywhere |
+| `GET /v1/accounts/sso` | | `SsoConnection[]` (`{id, name, issuer, client_id, domains, verified, enforce, provision, created_at, redirect_uri, dns: {name, value}, scim}`; never the secret) |
+| `POST /v1/accounts/sso` | `{name?, issuer, client_id, client_secret, domains, enforce?, provision?}` | 201 `SsoConnection`; 400 when the issuer's discovery doesn't answer, `public_domain`; 409 a domain has a connection already; 503 `{code: "secret_key"}` without `ROLL_SECRET_KEY` |
+| `POST /v1/accounts/sso/{id}/verify` | | `SsoConnection`: its claimed domains whose `_roll-sso.<domain>` TXT record has its value are verified |
+| `PATCH /v1/accounts/sso/{id}` | `{name?, client_id?, client_secret?, domains?, enforce?, provision?}` | `SsoConnection` |
+| `DELETE /v1/accounts/sso/{id}` | | 204: its people's links go; their accounts stay; its SCIM token stops |
+| `POST /v1/accounts/sso/{id}/scim` | | 201 `{token, base_url}`: its SCIM token, shown once (replacing the old one) |
+| `DELETE /v1/accounts/sso/{id}/scim` | | 204: SCIM off (the token stops at once) |
 
 A non-admin session on these is 403 `{code: "admin_only"}`; no credentials at all is 401.
+
+## Audit
+
+People's accounts are in roll's audit log (`/dashboard/access/audit`, `GET /v1/access/audit?product=accounts`,
+and the SIEM sinks), as Okta's System Log and GitHub's audit log keep them:
+
+- every write to an accounts route, once answered: its method and route (`PATCH
+  /v1/accounts/users/{id}`), the id it names, who made it (a person's id, `operator`,
+  `anonymous`), its status, the client's address (read as the gate reads it: trusted proxies) and
+  user agent: invites, users disabled or made admin, sessions ended, SSO connections and SCIM
+  tokens, TOTP, links;
+- every sign-in that ended, well or not (`sign_in`): the person (or `anonymous`), the method
+  (`email`, `github`, `google`, `sso:<connection>`, `totp`, `recovery_code`) and why it was refused
+  (`bad_code`, `sso_required`, `disabled`, `not_invited`…);
+- SCIM's changes (`scim.create`, `scim.update` with `active`), as `scim:<connection>`.
+
+Never a body: no code, token, secret or password is in an event. Starting a sign-in isn't
+recorded (its end is).
+
+Each person reads their own (`GET /v1/accounts/me/activity`, "Recent activity" on the account
+page, as GitHub's security log): their sign-ins, refused ones too, with the method, address and
+device, and every change to their account, whoever made it (them, an admin, SCIM). An event is
+theirs when it's about them: its resource is their id (a person's own routes, `/v1/accounts/me…`,
+are about them).
 
 ## Mail
 
@@ -353,7 +468,9 @@ A non-admin session on these is 403 `{code: "admin_only"}`; no credentials at al
 | `ROLL_ACCOUNTS_MAIL_FROM`, `ROLL_ACCOUNTS_OUTBOX` | see "Mail" |
 | `ROLL_ACCOUNTS_GITHUB_CLIENT_ID`, `ROLL_ACCOUNTS_GITHUB_CLIENT_SECRET` | a GitHub OAuth app; callback `<api>/v1/accounts/oauth/github/callback` |
 | `ROLL_ACCOUNTS_GOOGLE_CLIENT_ID`, `ROLL_ACCOUNTS_GOOGLE_CLIENT_SECRET` | a Google OAuth client (web); callback `<api>/v1/accounts/oauth/google/callback` |
-| `ROLL_SECRET_KEY` | seals TOTP seeds; TOTP is off without it |
+| `ROLL_SECRET_KEY` | seals TOTP seeds and SSO client secrets; TOTP and SSO are off without it |
+| `ROLL_ACCOUNTS_SSO_ALLOW_PRIVATE` | `1`: SSO providers on private addresses and plain http (local development and tests only) |
+| `ROLL_ACCOUNTS_DOH` | the DNS-over-HTTPS endpoint (`application/dns-json`) SSO domains' TXT records are read from (default Cloudflare's) |
 | `ROLL_CODE_PUBLIC_URL`, `ROLL_WEB_URL` | the API's and the dashboard's public URLs (the edge sets `https://api.<domain>` and `https://<domain>`) |
 | `ROLL_DASHBOARD_ORIGIN` | the origins CORS and the CSRF check accept |
 
