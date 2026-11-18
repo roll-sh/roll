@@ -137,6 +137,11 @@ pub(crate) struct LeakFacts {
     /// The credentials it adds that roll secrets doesn't hold, in order (placeholders left out;
     /// the allow-list is applied when they're shown, as it can change without the change moving).
     unstored: Vec<Unstored>,
+    /// Its diff couldn't be read: nothing is known, so under `block` that's a blocker.
+    unread: bool,
+    /// Something failed (the diff, or roll secrets' lookup, when every credential counts as
+    /// unstored): the next prepare tries again.
+    retry: bool,
 }
 pub(crate) type Leaks = Arc<LeakFacts>;
 
@@ -168,29 +173,35 @@ const MAX_ENV_READS: usize = 200;
 
 impl Code {
     /// Make sure [`leak_blockers`](Self::leak_blockers) knows whether `c`'s head adds a
-    /// secret's value. Nothing without roll secrets; an error is logged and tried again next time.
-    /// Without roll secrets only the credentials are looked for (none counts as stored).
+    /// secret's value. Without roll secrets only the credentials are looked for (none counts as
+    /// stored). An error is logged and tried again next time, and fails closed for credentials:
+    /// a diff that can't be read is marked unread, and when roll secrets can't say which values
+    /// it holds, every credential counts as unstored.
     pub(crate) async fn prepare_leaks(&self, r: &RepoRow, c: &Change) {
         let secrets = self.secret_env.get().cloned();
         if matches!(c.state, ChangeState::Landed | ChangeState::Closed) {
             return;
         }
         let Ok(Some(head)) = self.store.resolve(&r.id, &c.head) else { return };
-        let Ok(mb) = self.merge_base(r, &head) else { return };
         let key = (r.id.clone(), head);
-        if self.leak_facts.get(&key).is_some_and(|(at, _)| at == mb) {
+        let unread = |e: &dyn std::fmt::Display, mb: Option<ChangesetId>| {
+            tracing::warn!(change = %c.id, error = %e, "checking a change for leaked secrets");
+            self.leak_facts.put(key.clone(), (mb, Arc::new(LeakFacts { unread: true, retry: true, ..Default::default() })));
+        };
+        let mb = match self.merge_base(r, &head) {
+            Ok(mb) => mb,
+            Err(e) => return unread(&e, None),
+        };
+        if self.leak_facts.get(&key).is_some_and(|(at, f)| at == mb && !f.retry) {
             return;
         }
         let (mut candidates, reads, added) = match self.added_candidates(r, mb.as_ref(), &head).await {
             Ok(found) => found,
-            Err(e) => {
-                tracing::warn!(change = %c.id, error = %e, "checking a change for leaked secrets");
-                return;
-            }
+            Err(e) => return unread(&e, mb),
         };
         let Some(secrets) = secrets else {
             let unstored = added.into_iter().map(|a| a.unstored).collect();
-            self.leak_facts.put(key, (mb, Arc::new(LeakFacts { leaks: Vec::new(), unstored })));
+            self.leak_facts.put(key, (mb, Arc::new(LeakFacts { unstored, ..Default::default() })));
             return;
         };
         // The variables it starts reading that an environment lacks: a notice, never a blocker.
@@ -217,9 +228,15 @@ impl Code {
                 leaks.sort();
                 leaks.dedup();
                 let unstored = added.into_iter().zip(at).filter(|(_, i)| !stored.contains(i)).map(|(a, _)| a.unstored).collect();
-                self.leak_facts.put(key, (mb, Arc::new(LeakFacts { leaks, unstored })));
+                self.leak_facts.put(key, (mb, Arc::new(LeakFacts { leaks, unstored, ..Default::default() })));
             }
-            Err(e) => tracing::warn!(change = %c.id, error = %e, "checking a change for leaked secrets"),
+            // Finding credentials needs nothing from roll secrets: they all count as unstored
+            // until the lookup answers (a `secret_leak` is found then).
+            Err(e) => {
+                tracing::warn!(change = %c.id, error = %e, "checking a change for leaked secrets");
+                let unstored = added.into_iter().map(|a| a.unstored).collect();
+                self.leak_facts.put(key, (mb, Arc::new(LeakFacts { unstored, retry: true, ..Default::default() })));
+            }
         }
     }
 
@@ -245,13 +262,18 @@ impl Code {
     /// default branch's `.roll/secrets-allow` doesn't allow (from what
     /// [`prepare_leaks`](Self::prepare_leaks) last found): a notice, or a blocker under
     /// `[secrets] unstored_credentials = "block"`. The first [`UNSTORED_SHOWN`], then one that
-    /// counts the rest. Kind, path and line, never the value.
+    /// counts the rest. Kind, path and line, never the value. Under `block`, a head whose diff
+    /// couldn't be read is a blocker too (an admin may land over it).
     pub(crate) fn unstored_findings(&self, r: &RepoRow, c: &Change, settings: &crate::settings::Settings) -> Vec<Blocker> {
         if matches!(c.state, ChangeState::Landed | ChangeState::Closed) {
             return Vec::new();
         }
         let Ok(Some(head)) = self.store.resolve(&r.id, &c.head) else { return Vec::new() };
         let Some((_, facts)) = self.leak_facts.get(&(r.id.clone(), head)) else { return Vec::new() };
+        if facts.unread {
+            let block = settings.secrets.unstored_credentials == crate::settings::Unstored::Block;
+            return if block { vec![Blocker::new("secret_unstored", "couldn't check this change for credentials: try again, or an admin can land it over this")] } else { Vec::new() };
+        }
         let allow = &settings.secrets_allow;
         let found: Vec<&Unstored> = facts.unstored.iter().filter(|u| !allow.fingerprints.contains(&u.fingerprint) && !code_review::glob::any(&allow.paths, &u.path)).collect();
         let mut out: Vec<Blocker> = found
