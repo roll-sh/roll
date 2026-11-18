@@ -55,7 +55,7 @@ class Followed:
     field: str
 
 
-@dataclass
+@dataclass(repr=False)
 class Values:
     """An environment's values. ``dynamic`` keys hold a credential that ends with its lease
     (``leases``; ``renew`` keeps it); ``linked`` keys come from a link to a resource; ``followed``
@@ -67,6 +67,10 @@ class Values:
     dynamic: List[str] = field(default_factory=list)
     linked: List[str] = field(default_factory=list)
     followed: List[Followed] = field(default_factory=list)
+
+    def __repr__(self) -> str:
+        # Never a value: a logged or printed Values names its keys only.
+        return f"Values(keys={sorted(self.values)!r}, problems={len(self.problems)}, leases={len(self.leases)})"
 
     @staticmethod
     def _of(d: Dict[str, Any], values: Optional[Dict[str, str]] = None) -> "Values":
@@ -86,6 +90,10 @@ def _q(path: str) -> str:
 
 class Client:
     """Reads one project's secrets."""
+
+    def __repr__(self) -> str:
+        # Never the token.
+        return f"Client(api={self.api!r}, project={self.project!r})"
 
     def __init__(self, api: str, token: str, project: Optional[str] = None, timeout: float = 30.0, cache_ttl: float = 0.0, clock: Callable[[], float] = time.monotonic):
         """``cache_ttl`` (seconds) keeps ``values`` answers that long and answers from memory

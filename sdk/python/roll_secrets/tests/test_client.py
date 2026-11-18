@@ -20,6 +20,16 @@ CONTEXT = "roll-secrets:prj_a:production:app:web"
 BOX = {"v": 1, "epk": "aAGjVaESpknkSH_uG48K1a_unnp97Gh4uRwOYWrjHkk", "nonce": "yct4_uAUdnUKxskR", "ct": "-UbR7dzvRmoXgBHnbyoW00qyGY07tIB_0vx6VrXQhPPRNns7PU3irIJq5M5Xjto"}
 
 
+class Printing(unittest.TestCase):
+    def test_printing_never_shows_a_value_or_the_token(self):
+        v = roll_secrets.Values(values={"DB_PASSWORD": "fake-pw-not-real"})
+        c = roll_secrets.Client("https://api.roll.example", "rlt_fake_token_not_real", project="prj_1")
+        for s in (repr(v), str(v), repr(c), str(c), f"{v!r} {c!r}"):
+            self.assertNotIn("fake-pw-not-real", s)
+            self.assertNotIn("rlt_fake_token_not_real", s)
+        self.assertIn("DB_PASSWORD", repr(v))
+
+
 class SealedBoxes(unittest.TestCase):
     def test_a_box_sealed_by_roll_opens_only_for_its_context(self):
         self.assertEqual(roll_secrets.open_sealed(BOX, KEY, CONTEXT), b'{"DB_URL":"postgres://db/shop"}')

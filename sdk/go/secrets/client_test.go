@@ -331,3 +331,17 @@ func TestSetAndDeleteWriteOneKeyAndDropTheCache(t *testing.T) {
 		t.Fatalf("%#v", err)
 	}
 }
+
+// A Values or a Client printed or logged shows no value and no token.
+func TestPrintingNeverShowsAValueOrTheToken(t *testing.T) {
+	v := Values{Values: map[string]string{"DB_PASSWORD": "fake-pw-not-real"}}
+	c := &Client{API: "https://api.roll.example", Token: "rlt_fake_token_not_real", Project: "prj_1"}
+	for _, s := range []string{fmt.Sprintf("%v", v), fmt.Sprintf("%+v", v), fmt.Sprintf("%#v", v), fmt.Sprintf("%v", c), fmt.Sprintf("%+v", c), fmt.Sprintf("%#v", c)} {
+		if strings.Contains(s, "fake-pw-not-real") || strings.Contains(s, "rlt_fake_token_not_real") {
+			t.Fatalf("printed a secret: %s", s)
+		}
+	}
+	if !strings.Contains(fmt.Sprint(v), "DB_PASSWORD") {
+		t.Fatalf("keys should still show: %s", fmt.Sprint(v))
+	}
+}
