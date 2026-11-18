@@ -39,7 +39,7 @@ fn unknown() -> Error {
 }
 
 /// `Authorization: Basic base64(id:secret)` (RFC 6749 §2.3.1: each part form-urlencoded).
-fn basic(headers: &HeaderMap) -> Option<(String, String)> {
+pub(crate) fn basic(headers: &HeaderMap) -> Option<(String, String)> {
     use base64::Engine;
     let v = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?.strip_prefix("Basic ")?;
     let raw = String::from_utf8(base64::engine::general_purpose::STANDARD.decode(v.trim()).ok()?).ok()?;
@@ -48,7 +48,7 @@ fn basic(headers: &HeaderMap) -> Option<(String, String)> {
     Some((dec(id)?, dec(secret)?))
 }
 
-fn same(a: &str, b: &str) -> bool {
+pub(crate) fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
@@ -127,7 +127,7 @@ fn unverified_sub(jwt: &str) -> Option<String> {
 }
 
 /// Check an assertion against the client's key: answers its `jti` and expiry.
-fn verify(jwt: &str, jwk: &str, client_id: &str, api: &str) -> Result<(String, i64), Error> {
+pub(crate) fn verify(jwt: &str, jwk: &str, client_id: &str, api: &str) -> Result<(String, i64), Error> {
     use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
     let bad = |why: &str| Error::OAuth("invalid_client", format!("the client assertion {why}"));
     // Until the signature checks out, every refusal is the same `invalid_client` an unknown client
@@ -155,7 +155,7 @@ fn verify(jwt: &str, jwk: &str, client_id: &str, api: &str) -> Result<(String, i
 
 /// A machine client's sign-in, in the audit log (source `access`, `sign_in`) on its grant: who,
 /// with which kind of credential (and a CI token's issuer and subject), from where. Never a secret.
-fn audit_sign_in(a: &Access, grant: &crate::store::Grant, client_id: &str, args: serde_json::Value, ip: Option<std::net::IpAddr>) {
+pub(crate) fn audit_sign_in(a: &Access, grant: &crate::store::Grant, client_id: &str, args: serde_json::Value, ip: Option<std::net::IpAddr>) {
     let e = crate::store::AuditEvent {
         id: crate::new_id("aud"),
         at: code_sql::now_ms(),

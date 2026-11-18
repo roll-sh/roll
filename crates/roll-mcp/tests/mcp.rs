@@ -40,6 +40,11 @@ fn products() -> Router {
     Router::new()
         .route("/v1/projects", get(|| async { axum::Json(json!([{ "id": "pa" }])) }))
         .route("/v1/projects/{id}", delete(|| async { axum::http::StatusCode::NO_CONTENT }))
+        // roll secrets' scan: one stored value, found where a candidate is it.
+        .route("/v1/secrets/projects/{project}/leaks", axum::routing::post(|axum::Json(b): axum::Json<Value>| async move {
+            let i = b["candidates"].as_array().and_then(|c| c.iter().position(|w| w == "Tr0ub4dor-Horse-77"));
+            axum::Json(json!(i.map(|i| vec![json!({ "index": i, "key": "DB_PASSWORD", "environment": "production", "path": "/" })]).unwrap_or_default()))
+        }))
         .route("/v1/previews/{id}/screenshot", get(|| async { ([(axum::http::header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 0, 1, 2]) }))
         // A run still going the first two times it's waited on (each wait answers at its limit).
         .route("/v1/tasks/runs/{id}/wait", get(|| async {
@@ -212,6 +217,9 @@ async fn tools_follow_the_tokens_rules() {
     assert_eq!((ok["isError"].as_bool(), &ok["structuredContent"]["items"][0]["id"]), (Some(false), &json!("pa")));
     let refused = d.tool(&reader, "postgres_delete_project", json!({ "project": "pa" })).await;
     assert_eq!(refused["isError"], true);
+    // It says where the person can allow it; this token was made never to ask, so nothing more.
+    let said = refused["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(said.contains("allow it here") && !said.contains("access_request_access"), "{said}");
     let bad = d.tool(&reader, "postgres_list_projects", json!({ "nope": 1 })).await;
     assert_eq!(bad["isError"], true);
 
@@ -222,6 +230,22 @@ async fn tools_follow_the_tokens_rules() {
     let schema = |list: &Value, tool: &str| list["tools"].as_array().unwrap().iter().find(|t| t["name"] == tool).map(|t| t["inputSchema"]["properties"].clone()).unwrap();
     assert!(schema(&d.rpc(&asker, "tools/list", json!({})).await, "postgres_delete_project").get("approval").is_some());
     assert!(schema(&d.rpc(&reader, "tools/list", json!({})).await, "postgres_query").get("approval").is_none());
+    // A token made to ask people is also told it can ask for what it was refused, for a while.
+    let refused = d.tool(&asker, "postgres_list_projects", json!({})).await;
+    let said = refused["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(said.contains("access_request_access") && said.contains(r#""action":"read""#), "{said}");
+    // It asks for that read for a while; once approved, waiting on it answers on a stream that
+    // says the tools changed first, and the list then has the tool.
+    let asked = d.tool(&asker, "access_request_access", json!({ "product": "postgres", "action": "read", "for": "15m", "reason": "list the databases" })).await;
+    let apr = asked["structuredContent"]["id"].as_str().unwrap_or_else(|| panic!("{asked}")).to_string();
+    assert!(!names(&d.rpc(&asker, "tools/list", json!({})).await).contains(&"postgres_list_projects".to_string()));
+    assert_eq!(d.http(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::OK);
+    let call = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "access_wait_approval", "arguments": { "approval_id": apr, "wait": 0 } } });
+    let req = Request::builder().method(Method::POST).uri("/v1/mcp").header("content-type", "application/json").header("accept", "application/json, text/event-stream").header("authorization", format!("Bearer {asker}")).body(Body::from(call.to_string())).unwrap();
+    let raw = String::from_utf8(d.router.clone().oneshot(req).await.unwrap().into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    let (changed, answer) = (raw.find("notifications/tools/list_changed"), raw.find(r#""id":7"#));
+    assert!(changed.is_some() && answer.is_some() && changed < answer, "{raw}");
+    assert!(names(&d.rpc(&asker, "tools/list", json!({})).await).contains(&"postgres_list_projects".to_string()));
     let pending = d.tool(&asker, "postgres_delete_project", json!({ "project": "pa" })).await;
     assert_eq!((pending["isError"].as_bool(), pending["structuredContent"]["status"].as_str()), (Some(false), Some("approval_pending")), "{pending}");
     let id = pending["structuredContent"]["approval"].as_str().unwrap();
@@ -725,4 +749,86 @@ async fn a_persons_token_page_shows_only_their_reach() {
     let tools: Vec<&str> = seen["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(tools.contains(&"workspace_list_projects"), "{tools:?}");
     assert!(!tools.iter().any(|t| t.starts_with("postgres_")), "a person's token never reaches Postgres: {tools:?}");
+}
+
+/// 2026-07-28's `subscriptions/listen` (SEP-2575): the stream starts with the acknowledgement of
+/// what roll will send, then says when the connection's tools change (an access request approved),
+/// tagged with the subscription's id.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subscription_hears_the_tools_change() {
+    let d = Daemon::new();
+    let asker = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "delete": "ask" } }])).await;
+    let meta = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "t", "version": "1" }, "io.modelcontextprotocol/clientCapabilities": {} });
+    let listen = json!({ "jsonrpc": "2.0", "id": "listen:1", "method": "subscriptions/listen", "params": { "_meta": meta, "notifications": { "toolsListChanged": true, "resourcesListChanged": true } } });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/mcp")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2026-07-28")
+        .header("mcp-method", "subscriptions/listen")
+        .header("authorization", format!("Bearer {asker}"))
+        .body(Body::from(listen.to_string()))
+        .unwrap();
+    // Asking only for what roll doesn't send is refused rather than held open.
+    let nothing = json!({ "jsonrpc": "2.0", "id": "listen:0", "method": "subscriptions/listen", "params": { "_meta": meta, "notifications": { "resourcesListChanged": true } } });
+    let (_, _, refused) = d.http_with(&asker, Method::POST, "/v1/mcp", Some(nothing), &[("mcp-protocol-version", "2026-07-28"), ("mcp-method", "subscriptions/listen")]).await;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    let mut body = d.router.clone().oneshot(req).await.unwrap().into_body();
+    let mut buf = String::new();
+    // The next JSON-RPC message on the stream (keep-alive comments skipped), within 15 s.
+    let mut next = async move || -> Value {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if let Some(i) = buf.find("\n\n") {
+                let event: String = buf.drain(..i + 2).collect();
+                if let Some(data) = event.lines().find_map(|l| l.strip_prefix("data: ").or_else(|| l.strip_prefix("data:"))) {
+                    return serde_json::from_str(data).unwrap();
+                }
+                continue;
+            }
+            let frame = tokio::time::timeout_at(deadline, body.frame()).await.expect("a message within 15 s").unwrap_or_else(|| panic!("the stream ended: {buf}")).unwrap();
+            if let Ok(data) = frame.into_data() {
+                buf.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+    };
+    let ack = next().await;
+    assert_eq!((ack["method"].as_str(), &ack["params"]["notifications"]), (Some("notifications/subscriptions/acknowledged"), &json!({ "toolsListChanged": true })), "only what roll sends");
+    assert_eq!(ack["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"], "listen:1", "a client matches the ack by it");
+    let asked = d.tool(&asker, "access_request_access", json!({ "product": "postgres", "action": "read", "for": "15m", "reason": "list the databases" })).await;
+    let apr = asked["structuredContent"]["id"].as_str().unwrap_or_else(|| panic!("{asked}")).to_string();
+    assert_eq!(d.http(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), None).await.0, StatusCode::OK);
+    let changed = next().await;
+    assert_eq!((changed["method"].as_str(), &changed["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]), (Some("notifications/tools/list_changed"), &json!("listen:1")), "{changed}");
+}
+
+/// A credential headed where people and agents read it is refused before it's sent (guard.rs):
+/// a well-known format in a project's description, a roll token anywhere but roll secrets. The
+/// refusal names where and what kind, never the value, and the audit log keeps it.
+#[tokio::test(flavor = "multi_thread")]
+async fn credentials_are_kept_out_of_what_agents_write() {
+    let d = Daemon::new();
+    let agent = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "write": "allow" } }, { "product": "postgres", "resources": "*", "actions": { "delete": "allow" } }])).await;
+    let gh = format!("ghp_{}", "a1B2".repeat(9));
+    let refused = d.tool(&agent, "workspace_create_project", json!({ "name": "deploys", "description": format!("push with {gh}") })).await;
+    assert_eq!((refused["isError"].as_bool(), refused["structuredContent"]["at"].as_str(), refused["structuredContent"]["kind"].as_str()), (Some(true), Some("arguments.description"), Some("a GitHub token")), "{refused}");
+    assert!(!refused.to_string().contains(&gh), "never the value");
+    let (_, _, projects) = d.http(OPERATOR, Method::GET, "/v1/workspace/projects", None).await;
+    assert_eq!(projects.as_array().map(Vec::len), Some(0), "nothing was sent");
+    // roll's own token, checksummed, anywhere but roll secrets.
+    let leaked = d.tool(&agent, "postgres_delete_project", json!({ "project": agent })).await;
+    assert_eq!(leaked["structuredContent"]["kind"], "a roll token", "{leaked}");
+    // A project without one is made as ever.
+    assert_eq!(d.tool(&agent, "workspace_create_project", json!({ "name": "deploys" })).await["isError"], false);
+    let audit = d.audit_until(|a| a.as_array().is_some_and(|l| l.iter().any(|e| e["resource"].as_str().is_some_and(|r| r.contains("a GitHub token in arguments.description"))))).await;
+    assert!(!audit.to_string().contains(&gh), "{audit}");
+
+    // The value of a roll secret it may reveal (so it could have read it), asked of roll secrets'
+    // own scan as the token; a token that can't reveal one isn't scanned.
+    let revealer = d.token(json!([{ "product": "workspace", "resources": "*", "actions": { "write": "allow" } }, { "product": "secrets", "resources": [{ "project": "prj_s" }], "actions": { "read": "allow", "reveal": "allow" } }])).await;
+    let leak = d.tool(&revealer, "workspace_create_project", json!({ "name": "db", "description": "password: Tr0ub4dor-Horse-77" })).await;
+    assert_eq!((leak["structuredContent"]["kind"].as_str(), leak["structuredContent"]["at"].as_str()), (Some("the value of roll secret DB_PASSWORD (production)"), Some("arguments.description")), "{leak}");
+    assert!(!leak.to_string().contains("Tr0ub4dor"), "never the value");
+    assert_eq!(d.tool(&agent, "workspace_create_project", json!({ "name": "db", "description": "password: Tr0ub4dor-Horse-77" })).await["isError"], false, "it can't have read one");
 }

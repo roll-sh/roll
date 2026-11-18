@@ -446,6 +446,9 @@ pub struct EnvRow {
     pub egress: crate::model::Egress,
     /// Its pages measure their Web Vitals for roll (a tag the proxy adds).
     pub vitals: bool,
+    /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
+    /// someone else reports them (roll previews for its `pv-` environments).
+    pub report: bool,
 }
 
 /// A link: its kind, resource, variables' prefix, and the credentials it made for itself.
@@ -548,7 +551,17 @@ pub struct Store {
 }
 
 const SERVICE_COLS: &str = "id, project, name, source, build, run, created_at";
-const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes";
+/// An environment's (or any row with a `service` column's) service isn't deleted.
+const NOT_DELETED: &str = "service NOT IN (SELECT id FROM services WHERE deleted_at IS NOT NULL)";
+
+/// The conflict a taken name is: a live service's, or a deleted one's until it goes for good.
+fn name_taken(name: &str, deleted: Option<i64>) -> String {
+    match deleted {
+        None => format!("a service named {name} exists in this project"),
+        Some(_) => format!("a deleted service named {name} holds the name: restore it, or delete it again to delete it for good"),
+    }
+}
+const ENV_COLS: &str = "service, name, branch, ephemeral, active, slug, port, created_at, wait_for_ci, run, hook_hash, follow_tag, tag_seen, feedback, maintenance, allow_ips, rate_limit, tcp_port, firewall, pages, redeploy_on_secrets, secrets_seen, headers, paused, held_by, egress, vitals, routes, report";
 /// A deployment [`Store::prune_deployments`] pruned, with its image when nothing else names it.
 pub struct Pruned {
     pub id: String,
@@ -626,6 +639,7 @@ fn env_row(r: &code_sql::Row<'_>) -> code_sql::Result<EnvRow> {
         },
         vitals: r.get::<_, i64>(26)? != 0,
         routes: r.get::<_, Option<String>>(27)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default(),
+        report: r.get::<_, i64>(28)? != 0,
     })
 }
 
@@ -727,6 +741,10 @@ impl Store {
         db.add_column("deployments", "pruned_at", "INTEGER")?;
         db.add_column("deployments", "retired_at", "INTEGER")?;
         db.add_column("deployments", "error_detail", "TEXT")?;
+        db.add_column("deployments", "build_key", "TEXT")?;
+        // A deleted service is kept this long (`DELETED_KEPT_MS`), stopped, until it's restored
+        // or the prune sweep deletes it for good.
+        db.add_column("services", "deleted_at", "INTEGER")?;
         db.add_column("runs", "instance", "TEXT")?;
         db.add_column("domains", "warned_at", "INTEGER")?;
         // Targets made before filters follow every environment, previews too, as they did.
@@ -757,6 +775,10 @@ impl Store {
         db.add_column("environments", "held_by", "TEXT")?;
         db.add_column("environments", "egress", "TEXT")?;
         db.add_column("environments", "vitals", "INTEGER NOT NULL DEFAULT 0")?;
+        db.add_column("environments", "report", "INTEGER NOT NULL DEFAULT 1")?;
+        // The roll login (`ses_…`) a ticket and a visit session came from: its end ends them.
+        db.add_column("visit_tickets", "login", "TEXT")?;
+        db.add_column("visit_sessions", "login", "TEXT")?;
         db.add_column("environments", "routes", "TEXT")?;
         // Drains made before their filters sent every environment's runtime output: still so.
         db.add_column("log_drains", "sources", "TEXT")?;
@@ -778,23 +800,51 @@ impl Store {
 
     pub fn services(&self, project: Option<&str>) -> Result<Vec<ServiceRow>> {
         Ok(match project {
-            Some(p) => self.db.query(&format!("SELECT {SERVICE_COLS} FROM services WHERE project = ? ORDER BY created_at, id"), [p], service_row)?,
-            None => self.db.query(&format!("SELECT {SERVICE_COLS} FROM services ORDER BY created_at, id"), (), service_row)?,
+            Some(p) => self.db.query(&format!("SELECT {SERVICE_COLS} FROM services WHERE project = ? AND deleted_at IS NULL ORDER BY created_at, id"), [p], service_row)?,
+            None => self.db.query(&format!("SELECT {SERVICE_COLS} FROM services WHERE deleted_at IS NULL ORDER BY created_at, id"), (), service_row)?,
         })
     }
 
+    /// A service that isn't deleted (a deleted one is no service until it's restored).
     pub fn service(&self, id: &str) -> Result<ServiceRow> {
         self.db
-            .query_row(&format!("SELECT {SERVICE_COLS} FROM services WHERE id = ?"), [id], service_row)
+            .query_row(&format!("SELECT {SERVICE_COLS} FROM services WHERE id = ? AND deleted_at IS NULL"), [id], service_row)
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("no service {id}")))
     }
 
+    /// A service, deleted or not, and when it was deleted.
+    pub fn service_any(&self, id: &str) -> Result<(ServiceRow, Option<i64>)> {
+        self.db
+            .query_row(&format!("SELECT {SERVICE_COLS}, deleted_at FROM services WHERE id = ?"), [id], |r| Ok((service_row(r)?, r.get(7)?)))
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("no service {id}")))
+    }
+
+    /// The deleted services (of `project`, or all), newest first, with when each was deleted.
+    pub fn deleted_services(&self, project: Option<&str>) -> Result<Vec<(ServiceRow, i64)>> {
+        let row = |r: &code_sql::Row<'_>| Ok((service_row(r)?, r.get(7)?));
+        Ok(match project {
+            Some(p) => self.db.query(&format!("SELECT {SERVICE_COLS}, deleted_at FROM services WHERE project = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC"), [p], row)?,
+            None => self.db.query(&format!("SELECT {SERVICE_COLS}, deleted_at FROM services WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC"), (), row)?,
+        })
+    }
+
+    /// Delete a service until it's restored (`at`), or restore it (`None`). Answers whether it
+    /// changed: deleting a deleted service, or restoring a live one, doesn't.
+    pub fn set_deleted(&self, id: &str, at: Option<i64>) -> Result<bool> {
+        let n = match at {
+            Some(at) => self.db.execute("UPDATE services SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", params![at, id])?,
+            None => self.db.execute("UPDATE services SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL", [id])?,
+        };
+        Ok(n > 0)
+    }
+
     pub fn create_service(&self, s: &ServiceRow) -> Result<()> {
         self.db.write(|c| {
-            let taken = c.query_row("SELECT 1 FROM services WHERE project = ? AND name = ?", [&s.project, &s.name], |_| Ok(())).optional()?;
-            if taken.is_some() {
-                return Err(Error::Conflict(format!("a service named {} exists in this project", s.name)));
+            let taken: Option<Option<i64>> = c.query_row("SELECT deleted_at FROM services WHERE project = ? AND name = ?", [&s.project, &s.name], |r| r.get(0)).optional()?;
+            if let Some(deleted) = taken {
+                return Err(Error::Conflict(name_taken(&s.name, deleted)));
             }
             c.execute(
                 &format!("INSERT INTO services ({SERVICE_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?)"),
@@ -807,10 +857,10 @@ impl Store {
     pub fn update_service(&self, s: &ServiceRow) -> Result<()> {
         self.db.write(|c| {
             let taken = c
-                .query_row("SELECT id FROM services WHERE project = ? AND name = ?", [&s.project, &s.name], |r| r.get::<_, String>(0))
+                .query_row("SELECT id, deleted_at FROM services WHERE project = ? AND name = ?", [&s.project, &s.name], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)))
                 .optional()?;
-            if taken.is_some_and(|other| other != s.id) {
-                return Err(Error::Conflict(format!("a service named {} exists in this project", s.name)));
+            if let Some((_, deleted)) = taken.filter(|(other, _)| *other != s.id) {
+                return Err(Error::Conflict(name_taken(&s.name, deleted)));
             }
             let n = c.execute(
                 "UPDATE services SET name = ?, source = ?, build = ?, run = ? WHERE id = ?",
@@ -838,6 +888,7 @@ impl Store {
                 [id],
             )?;
             c.execute("DELETE FROM deploy_steps WHERE deployment IN (SELECT id FROM deployments WHERE service = ?)", [id])?;
+            c.execute("DELETE FROM state WHERE key LIKE ?", [format!("%:{id}/%")])?;
             for t in ["environments", "deployments", "deploy_keys", "fences", "env_access", "registry_auth", "git_auth", "git_github", "github_events", "trace_ingest", "visit_tickets", "visit_sessions", "variable_files", "error_groups", "variables", "links", "domains", "runs", "jobs", "metrics", "usage"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ?"), [id])?;
             }
@@ -895,12 +946,13 @@ impl Store {
             .ok_or_else(|| Error::NotFound(format!("service {service} has no environment {env}")))
     }
 
+    /// The environment a generated hostname names (a deleted service's name nothing).
     pub fn environment_by_slug(&self, slug: &str) -> Result<Option<EnvRow>> {
-        Ok(self.db.query_row(&format!("SELECT {ENV_COLS} FROM environments WHERE slug = ?"), [slug], env_row).optional()?)
+        Ok(self.db.query_row(&format!("SELECT {ENV_COLS} FROM environments WHERE slug = ? AND {NOT_DELETED}"), [slug], env_row).optional()?)
     }
 
     pub fn environment_by_port(&self, port: u16) -> Result<Option<EnvRow>> {
-        Ok(self.db.query_row(&format!("SELECT {ENV_COLS} FROM environments WHERE port = ?"), [port as i64], env_row).optional()?)
+        Ok(self.db.query_row(&format!("SELECT {ENV_COLS} FROM environments WHERE port = ? AND {NOT_DELETED}"), [port as i64], env_row).optional()?)
     }
 
     /// Make the environment if it's missing (with a slug from `slugs`, the first one free, and
@@ -936,7 +988,7 @@ impl Store {
                     None => None,
                 };
                 c.execute(
-                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL)"),
+                    &format!("INSERT INTO environments ({ENV_COLS}) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, '{{}}', NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL, 0, NULL, 1)"),
                     params![service, env, branch.flatten(), ephemeral.unwrap_or(false) as i64, slug, port, now],
                 )?;
             }
@@ -955,6 +1007,10 @@ impl Store {
             }
             for t in ["variables", "variable_files", "error_groups", "domains", "runs", "jobs", "metrics", "deploy_keys", "env_access", "trace_ingest", "visit_tickets", "visit_sessions"] {
                 c.execute(&format!("DELETE FROM {t} WHERE service = ? AND env = ?"), [service, env])?;
+            }
+            // Its schedules', challenge's and base images' state goes with it.
+            for k in [format!("%:{service}/{env}"), format!("%:{service}/{env}/%"), format!("%:{service}/{env}:%")] {
+                c.execute("DELETE FROM state WHERE key LIKE ?", [k])?;
             }
             c.execute(
                 "UPDATE deployments SET status = 'removed', finished_at = COALESCE(finished_at, ?) WHERE service = ? AND env = ?",
@@ -1517,6 +1573,24 @@ impl Store {
         })
     }
 
+    /// What a deployment's build was made from ([`crate::deploy`]'s `build_key`).
+    pub fn set_build_key(&self, id: &str, key: &str) -> Result<()> {
+        self.db.execute("UPDATE deployments SET build_key = ? WHERE id = ?", [key, id])?;
+        Ok(())
+    }
+
+    /// The newest kept image this project built from `key`, and the deployment that built it.
+    pub fn built_image(&self, project: &str, key: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT d.id, d.image FROM deployments d JOIN services s ON s.id = d.service WHERE s.project = ? AND d.build_key = ? AND d.image IS NOT NULL AND d.pruned_at IS NULL ORDER BY d.created_at DESC LIMIT 1",
+                [project, key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
     pub fn set_built(&self, id: &str, image: &str, plan: Option<&serde_json::Value>, run: Option<&Run>) -> Result<()> {
         self.db.write(|c| {
             c.execute("UPDATE deployments SET image = ?, plan = COALESCE(?, plan) WHERE id = ?", params![image, plan.map(to_json), id])?;
@@ -1661,11 +1735,17 @@ impl Store {
         Ok(self.db.query_row(&format!("SELECT {DOMAIN_COLS} FROM domains WHERE hostname = ?"), [host], domain_row).optional()?)
     }
 
+    /// [`Store::domain_owner`], unless its service is deleted (its domains answer nothing then,
+    /// but stay its own for a restore).
+    pub fn serving_domain(&self, host: &str) -> Result<Option<(String, String, Domain)>> {
+        Ok(self.db.query_row(&format!("SELECT {DOMAIN_COLS} FROM domains WHERE hostname = ? AND {NOT_DELETED}"), [host], domain_row).optional()?)
+    }
+
     /// Custom domains to check: DNS not verified yet, or verified with a certificate still
     /// pending (a failed one waits for Verify).
     pub fn domains_to_check(&self) -> Result<Vec<(String, String, Domain)>> {
         Ok(self.db.query(
-            &format!("SELECT {DOMAIN_COLS} FROM domains WHERE kind = 'custom' AND (status IN ('pending', 'issuing') OR tls = 'pending') ORDER BY created_at"),
+            &format!("SELECT {DOMAIN_COLS} FROM domains WHERE kind = 'custom' AND (status IN ('pending', 'issuing') OR tls = 'pending') AND {NOT_DELETED} ORDER BY created_at"),
             (),
             domain_row,
         )?)
@@ -1894,6 +1974,11 @@ impl Store {
 
     /// An error seen: whether it's the first time the environment has had it.
     pub fn remember_error(&self, service: &str, env: &str, fingerprint: &str, name: &str, at: i64) -> Result<bool> {
+        // At most 1,000 kept an environment: past that, nothing more is new.
+        let n: i64 = self.db.query_row("SELECT COUNT(*) FROM error_groups WHERE service = ? AND env = ?", params![service, env], |r| r.get(0))?;
+        if n >= 1000 {
+            return Ok(false);
+        }
         Ok(self.db.execute("INSERT INTO error_groups (service, env, fingerprint, name, first_seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT (service, env, fingerprint) DO NOTHING", params![service, env, fingerprint, name, at])? > 0)
     }
 
@@ -2025,32 +2110,37 @@ impl Store {
 
     // ── signed-in visitors ──
 
-    pub fn put_visit_ticket(&self, hash: &str, service: &str, env: &str, user: &str, expires_at: i64) -> Result<()> {
-        self.db.execute("INSERT INTO visit_tickets (hash, service, env, user_id, expires_at) VALUES (?, ?, ?, ?, ?)", params![hash, service, env, user, expires_at])?;
+    /// A ticket for `user`, asked for by their roll login `login` (`ses_…`).
+    pub fn put_visit_ticket(&self, hash: &str, service: &str, env: &str, user: &str, login: &str, expires_at: i64) -> Result<()> {
+        self.db.execute("INSERT INTO visit_tickets (hash, service, env, user_id, login, expires_at) VALUES (?, ?, ?, ?, ?, ?)", params![hash, service, env, user, login, expires_at])?;
         Ok(())
     }
 
-    /// A ticket used: its person, if it was this environment's and still good. It goes either way.
-    pub fn take_visit_ticket(&self, hash: &str, service: &str, env: &str, now: i64) -> Result<Option<String>> {
+    /// A ticket used: its person and their roll login, if it was this environment's and still
+    /// good. It goes either way.
+    pub fn take_visit_ticket(&self, hash: &str, service: &str, env: &str, now: i64) -> Result<Option<(String, String)>> {
         let h = hash.to_string();
         let (s, e) = (service.to_string(), env.to_string());
         self.db.write(move |c| {
-            let row: Option<(String, String, String, i64)> = c.query_row("SELECT service, env, user_id, expires_at FROM visit_tickets WHERE hash = ?", [&h], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+            let row: Option<(String, String, String, Option<String>, i64)> =
+                c.query_row("SELECT service, env, user_id, login, expires_at FROM visit_tickets WHERE hash = ?", [&h], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()?;
             c.execute("DELETE FROM visit_tickets WHERE hash = ? OR expires_at < ?", params![h, now])?;
-            Ok(row.filter(|(rs, re, _, exp)| *rs == s && *re == e && *exp >= now).map(|(_, _, u, _)| u))
+            // One made before logins were kept has none: it opens nothing.
+            Ok(row.filter(|(rs, re, _, l, exp)| *rs == s && *re == e && *exp >= now && l.is_some()).map(|(_, _, u, l, _)| (u, l.unwrap_or_default())))
         })
     }
 
-    pub fn put_visit_session(&self, hash: &str, service: &str, env: &str, user: &str, expires_at: i64) -> Result<()> {
-        self.db.execute("INSERT INTO visit_sessions (hash, service, env, user_id, expires_at) VALUES (?, ?, ?, ?, ?)", params![hash, service, env, user, expires_at])?;
+    pub fn put_visit_session(&self, hash: &str, service: &str, env: &str, user: &str, login: &str, expires_at: i64) -> Result<()> {
+        self.db.execute("INSERT INTO visit_sessions (hash, service, env, user_id, login, expires_at) VALUES (?, ?, ?, ?, ?, ?)", params![hash, service, env, user, login, expires_at])?;
         Ok(())
     }
 
-    /// A visitor's session there: its person and when it ends.
-    pub fn visit_session(&self, hash: &str, service: &str, env: &str) -> Result<Option<(String, i64)>> {
+    /// A visitor's session there: its person, when it ends, and the roll login it came from
+    /// (none for one opened before logins were kept: such a session is ended).
+    pub fn visit_session(&self, hash: &str, service: &str, env: &str) -> Result<Option<(String, i64, Option<String>)>> {
         Ok(self
             .db
-            .query_row("SELECT user_id, expires_at FROM visit_sessions WHERE hash = ? AND service = ? AND env = ?", params![hash, service, env], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row("SELECT user_id, expires_at, login FROM visit_sessions WHERE hash = ? AND service = ? AND env = ?", params![hash, service, env], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .optional()?)
     }
 
@@ -2374,6 +2464,11 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_report(&self, service: &str, env: &str, on: bool) -> Result<()> {
+        self.db.execute("UPDATE environments SET report = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
+        Ok(())
+    }
+
     pub fn set_vitals(&self, service: &str, env: &str, on: bool) -> Result<()> {
         self.db.execute("UPDATE environments SET vitals = ? WHERE service = ? AND name = ?", params![on as i64, service, env])?;
         Ok(())
@@ -2391,7 +2486,7 @@ impl Store {
 
     /// The environment whose deploy hook's token hashes to `hash`.
     pub fn environment_by_hook(&self, hash: &str) -> Result<Option<EnvRow>> {
-        Ok(self.db.query_row(&format!("SELECT {ENV_COLS} FROM environments WHERE hook_hash = ?"), [hash], env_row).optional()?)
+        Ok(self.db.query_row(&format!("SELECT {ENV_COLS} FROM environments WHERE hook_hash = ? AND {NOT_DELETED}"), [hash], env_row).optional()?)
     }
 
     pub fn set_hook(&self, service: &str, env: &str, hash: Option<&str>) -> Result<()> {
@@ -2619,6 +2714,17 @@ impl Store {
     /// Set `key` only when it isn't set: whether this call set it (one wins, on any node).
     pub fn claim_state(&self, key: &str, value: &str) -> Result<bool> {
         Ok(self.db.write(|c| c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", [key, value]))? == 1)
+    }
+
+    /// `key`'s value, set to `value` first if it has none (two nodes asking at once read the same).
+    pub fn state_or(&self, key: &str, value: &str) -> Result<String> {
+        self.db.write(|c| {
+            if let Some(v) = c.query_row("SELECT value FROM state WHERE key = ?", [key], |r| r.get::<_, String>(0)).optional()? {
+                return Ok(v);
+            }
+            c.execute("INSERT INTO state (key, value) VALUES (?, ?)", [key, value])?;
+            Ok(value.to_string())
+        })
     }
 
     pub fn set_state(&self, key: &str, value: &str) -> Result<()> {
