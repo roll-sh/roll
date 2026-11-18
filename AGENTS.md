@@ -350,6 +350,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     against a fake rolld).
     The GitHub Action is `sdk/github-action` (no dependencies; every value masked before anything
     is printed).
+    The AWS Lambda extension (`sdk/lambda-extension`) builds on the Go client: values on
+    127.0.0.1 only, for the function's own `AWS_SESSION_TOKEN`, logged in through STS's
+    `GetWebIdentityToken`; never a value in a log or an error.
     The Kubernetes operator (`sdk/kubernetes-operator`) builds on the Go client and talks to the
     Kubernetes API over plain HTTP; it only ever writes Secrets its RollSecret owns.
     The Secrets Store CSI Driver provider (`sdk/csi-provider`) builds on the Go client too and
