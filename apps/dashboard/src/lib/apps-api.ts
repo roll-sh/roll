@@ -1152,7 +1152,7 @@ export const appsApi = {
     e: string,
     q: { q?: string; where?: string; since?: number; before?: number; instance?: string; deployment?: string; stream?: string; level?: LogLevel; http?: boolean; by?: string; status?: string; min_ms?: number; tail?: number },
   ): Promise<{ lines: LogLine[]; truncated: boolean }> => {
-    const res = await fetch(`${ROLL_API}${env(id, e)}/logs${qs({ ...q, http: q.http || undefined, tail: q.tail ?? 500 })}`, { headers: apiHeaders(), cache: "no-store" });
+    const res = await fetch(`${ROLL_API}${env(id, e)}/logs${qs({ ...q, http: q.http || undefined, tail: q.tail ?? 500 })}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
     onApiStatus(res.status);
     const data = await res.json().catch(() => null);
     if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
