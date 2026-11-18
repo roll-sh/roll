@@ -110,6 +110,16 @@ pub enum Token {
     /// credentials). The operator's, or, signed in, a person's own acting as them.
     #[command(subcommand)]
     Client(MachineCmd),
+    /// Enterprise sign-in (SEP-990, ID-JAG): the identity providers roll trusts to vouch for
+    /// their people, and the apps they may sign people in to. Nothing to show them.
+    ///
+    /// Examples:
+    ///   roll token enterprise trust https://acme.okta.com --name Okta --domain acme.com
+    ///   roll token enterprise app create Claude --product code,workspace --allow read,write
+    Enterprise {
+        #[command(subcommand)]
+        what: Option<EnterpriseCmd>,
+    },
     /// roll's rules for every token: `--max-days 90`, `--require-expiry`, `--no-limit`,
     /// `--max-idle-days 60` (`0` for no idle limit), `--approval-rule secrets:reveal@production=2`
     /// (what needs several approvers); nothing to show them.
@@ -220,6 +230,75 @@ pub enum MachineCmd {
     ///   roll token client rotate mcl_… --public-key ci-2026.pub.pem
     ///   roll token client rotate mcl_… --github acme/web --ref refs/heads/main   (CI's own identity)
     Rotate(Box<ClientRotate>),
+}
+
+#[derive(Subcommand)]
+pub enum EnterpriseCmd {
+    /// Trust an identity provider (its issuer, an https URL); again to change how it's set up.
+    Trust {
+        issuer: String,
+        /// What people call it ("Okta").
+        #[arg(long)]
+        name: Option<String>,
+        /// Its keys pinned (a JWKS file), for a provider roll can't reach.
+        #[arg(long)]
+        jwks: Option<std::path::PathBuf>,
+        /// How a person is found: by their verified email (default), or by `aud_sub` naming
+        /// their roll account.
+        #[arg(long = "match", value_parser = ["email", "aud_sub"], default_value = "email")]
+        matching: String,
+        /// An email domain it vouches for (acme.com); repeat for more. Email matching needs one.
+        #[arg(long = "domain")]
+        domains: Vec<String>,
+        /// Let it sign in roll's admins too (they act as the operator).
+        #[arg(long)]
+        admins: bool,
+        /// A multi-tenant issuer's one tenant roll trusts (its assertions' `tenant` claim).
+        #[arg(long)]
+        tenant: Option<String>,
+    },
+    /// Stop trusting an identity provider: no new sign-ins from it.
+    Untrust { issuer: String },
+    /// The apps an identity provider may sign people in to.
+    #[command(subcommand)]
+    App(EnterpriseAppCmd),
+}
+
+#[derive(Subcommand)]
+pub enum EnterpriseAppCmd {
+    /// Register an app (its client id is what the provider puts in an assertion): with
+    /// --public-key it signs its client assertions; without, roll makes a secret, shown once.
+    Create {
+        name: String,
+        #[command(flatten)]
+        rules: RuleArgs,
+        /// Its public key: a PEM file (Ed25519 or P-256) or a JWK.
+        #[arg(long)]
+        public_key: Option<std::path::PathBuf>,
+    },
+    /// Change an app's name or rules: its people's connections take the new rules at once.
+    Update {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[command(flatten)]
+        rules: RuleArgs,
+    },
+    /// A new credential for an app, keeping its client id and its people's connections: with
+    /// --public-key a key, without a new secret (shown once). The old secret stops now with the
+    /// tokens it got, unless --keep-old keeps it working while the app moves over. A leaked app
+    /// signs in again from here.
+    Rotate {
+        id: String,
+        /// Its new public key: a PEM file (Ed25519 or P-256) or a JWK.
+        #[arg(long)]
+        public_key: Option<std::path::PathBuf>,
+        /// The old secret keeps working this long (1h, 2d; at most 7d).
+        #[arg(long)]
+        keep_old: Option<String>,
+    },
+    /// Remove an app: every person's connection to it is revoked.
+    Remove { id: String },
 }
 
 /// CI's own identity as a machine client's credential (`create` and `rotate`): GitHub Actions,
@@ -702,6 +781,117 @@ fn span(s: &str, flag: &str) -> anyhow::Result<Option<i64>> {
 }
 
 /// The rules a `create` asks for: the preset's (its "project" filled in), then a rule of its own.
+async fn enterprise(api: &Api, json_out: bool, cmd: Option<EnterpriseCmd>) -> anyhow::Result<()> {
+    let current = api.get("/v1/access/enterprise").await?;
+    let idps = |v: &Value| v["idps"].as_array().cloned().unwrap_or_default();
+    let other = |list: Vec<Value>, issuer: &str| -> Vec<Value> { list.into_iter().filter(|i| i["issuer"].as_str().map(|s| s.trim_end_matches('/')) != Some(issuer.trim_end_matches('/'))).collect() };
+    let out = match cmd {
+        None => current,
+        Some(EnterpriseCmd::Trust { issuer, name, jwks, matching, domains, admins, tenant }) => {
+            // Again for the same issuer and tenant changes it; another tenant is another entry.
+            let mut list: Vec<Value> = idps(&current)
+                .into_iter()
+                .filter(|i| i["issuer"].as_str().map(|s| s.trim_end_matches('/')) != Some(issuer.trim_end_matches('/')) || i["tenant"].as_str() != tenant.as_deref())
+                .collect();
+            let mut idp = json!({ "issuer": issuer, "matching": matching, "domains": domains, "admins": admins });
+            if let Some(t) = tenant {
+                idp["tenant"] = json!(t);
+            }
+            if let Some(n) = name {
+                idp["name"] = json!(n);
+            }
+            if let Some(path) = jwks {
+                idp["jwks"] = json!(std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?);
+            }
+            list.push(idp);
+            api.call(reqwest::Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": list }))).await?;
+            api.get("/v1/access/enterprise").await?
+        }
+        Some(EnterpriseCmd::Untrust { issuer }) => {
+            let list = other(idps(&current), &issuer);
+            if list.len() == idps(&current).len() {
+                anyhow::bail!("roll doesn't trust {issuer}");
+            }
+            api.call(reqwest::Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": list }))).await?;
+            api.get("/v1/access/enterprise").await?
+        }
+        Some(EnterpriseCmd::App(EnterpriseAppCmd::Create { name, rules: r, public_key })) => {
+            let jwk = match &public_key {
+                Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
+                None => None,
+            };
+            let made = api.post("/v1/access/enterprise/apps", json!({ "name": name, "rules": rules(api, &r).await?, "public_jwk": jwk })).await?;
+            if !json_out {
+                println!("client_id: {}", s(&made["client_id"]));
+                if let Some(secret) = made["client_secret"].as_str() {
+                    println!("client_secret (shown once; it's the app's, never the identity provider's): {secret}");
+                }
+                println!("Give the identity provider this client id for the app: it puts it in each person's assertion.");
+                return Ok(());
+            }
+            made
+        }
+        Some(EnterpriseCmd::App(EnterpriseAppCmd::Update { id, name, rules: r })) => {
+            if name.is_none() && !r.given() {
+                bail!("nothing to change: --name, or the app's new rules (--preset, --product, --allow…)");
+            }
+            let mut body = json!({});
+            if let Some(n) = name {
+                body["name"] = json!(n);
+            }
+            if r.given() {
+                body["rules"] = rules(api, &r).await?;
+            }
+            let app = api.call(reqwest::Method::PATCH, &format!("/v1/access/enterprise/apps/{}", urlencoding::encode(&id)), Some(body)).await?;
+            if !json_out {
+                println!("{} changed: its people's connections have its rules now", s(&app["name"]));
+                return Ok(());
+            }
+            app
+        }
+        Some(EnterpriseCmd::App(EnterpriseAppCmd::Rotate { id, public_key, keep_old })) => {
+            let jwk = match &public_key {
+                Some(path) => Some(public_jwk(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)?),
+                None => None,
+            };
+            let keep = keep_old.as_deref().map(|k| span(k, "--keep-old")).transpose()?.flatten().map(|ms| ms / 1000);
+            let app = api.post(&format!("/v1/access/enterprise/apps/{}/rotate", urlencoding::encode(&id)), json!({ "public_jwk": jwk, "keep_old_for_s": keep })).await?;
+            if !json_out {
+                // The secret alone on stdout (for a script to hand to the provider); words on stderr.
+                let old = if app["old_until"].is_i64() { "The old secret keeps working a while (old_until in --json)." } else { "The old secret and the tokens it got stopped." };
+                match app["client_secret"].as_str() {
+                    Some(secret) => {
+                        println!("{secret}");
+                        eprintln!("{old} Copy the new secret now: it isn't shown again.");
+                    }
+                    None => eprintln!("{} signs with its new key now. {old}", s(&app["name"])),
+                }
+                return Ok(());
+            }
+            app
+        }
+        Some(EnterpriseCmd::App(EnterpriseAppCmd::Remove { id })) => api.call(reqwest::Method::DELETE, &format!("/v1/access/enterprise/apps/{}", urlencoding::encode(&id)), None).await?,
+    };
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else if out.get("revoked").is_some() {
+        println!("removed; {} people's connections revoked", out["revoked"]);
+    } else {
+        for i in idps(&out) {
+            let domains: Vec<&str> = i["domains"].as_array().into_iter().flatten().filter_map(|d| d.as_str()).collect();
+            println!("trusts {} ({}; people by {}{}{})", s(&i["issuer"]), i["name"].as_str().unwrap_or("-"), s(&i["matching"]), if domains.is_empty() { String::new() } else { format!(" at {}", domains.join(", ")) }, if i["admins"] == true { "; admins too" } else { "" });
+        }
+        for app in out["apps"].as_array().into_iter().flatten() {
+            let leaked = app["leaked"].as_str().map(|w| format!("  its secret leaked ({w}): rotate it")).unwrap_or_default();
+            println!("app {}  {}  {}{leaked}", s(&app["client_id"]), s(&app["name"]), if app["signs_with_key"] == true { "signs with a key" } else { "a secret" });
+        }
+        if idps(&out).is_empty() && out["apps"].as_array().is_none_or(|a| a.is_empty()) {
+            println!("no identity provider is trusted, and no app registered");
+        }
+    }
+    Ok(())
+}
+
 async fn rules(api: &Api, c: &RuleArgs) -> anyhow::Result<Value> {
     let mut rules = Vec::new();
     let selectors = || {
@@ -1117,6 +1307,7 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
             }
         }
         Token::Client(cmd) => machine(api, json_out, cmd).await?,
+        Token::Enterprise { what } => enterprise(api, json_out, what).await?,
         Token::Presets => {
             let c = api.get("/v1/access/catalog").await?;
             if json_out {

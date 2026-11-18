@@ -66,6 +66,11 @@ impl roll_auth::Sessions for People {
     fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
         Ok(self.0.lock().unwrap().get(user).cloned())
     }
+    /// Everyone's address is `<handle>@acme.test`.
+    fn person_by_email<'a>(&'a self, email: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SignedIn>, String>> {
+        let p = self.0.lock().unwrap().values().find(|p| format!("{}@acme.test", p.handle) == email.to_lowercase()).cloned();
+        Box::pin(async move { Ok(p) })
+    }
     fn admins(&self) -> roll_auth::BoxFuture<'_, Result<Vec<String>, String>> {
         Box::pin(async { Ok(vec!["usr_root".to_string()]) })
     }
@@ -229,6 +234,13 @@ impl Daemon {
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into())))
+    }
+
+    /// A request roll's MCP server makes for a tool call (its `McpCall` extension), with `token`.
+    async fn via_mcp(&self, token: &str, method: Method, path: &str) -> StatusCode {
+        let mut req = Request::builder().method(method).uri(path).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
+        req.extensions_mut().insert(roll_access::evaluate::McpCall { tool: "test_tool".into(), args: Arc::new(json!({})), ip: None, elicits: false, client: None, quiet: false });
+        self.router.clone().oneshot(req).await.unwrap().status()
     }
 
     async fn form(&self, path: &str, form: &[(&str, &str)]) -> (StatusCode, Value) {
@@ -761,20 +773,28 @@ async fn oauth_connects_an_mcp_client() {
     assert_eq!(exchange(verifier, code).await.1["error"], "invalid_grant", "a code works once");
     let access = tokens["access_token"].as_str().unwrap().to_string();
     assert!(access.starts_with("rlo_"));
-    assert_eq!(d.call(&access, Method::GET, "/v1/projects", None).await.0, StatusCode::OK);
-    assert_eq!(d.call(&access, Method::DELETE, "/v1/projects/pa", None).await.0, StatusCode::FORBIDDEN);
+    // It asked for the MCP server (RFC 8707), so it works through that server only: the API
+    // directly refuses it (lockdown, the credential guard and a read-only URL can't be stepped
+    // around), and a token request for another resource is refused.
+    assert_eq!(d.via_mcp(&access, Method::GET, "/v1/projects").await, StatusCode::OK);
+    assert_eq!(d.via_mcp(&access, Method::DELETE, "/v1/projects/pa").await, StatusCode::FORBIDDEN);
+    let (s, direct) = d.call(&access, Method::GET, "/v1/projects", None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{direct}");
+    assert!(direct.to_string().contains("MCP server"), "{direct}");
+    let elsewhere = d.form("/v1/access/oauth/token", &[("grant_type", "authorization_code"), ("code", "x"), ("redirect_uri", redirect), ("client_id", client_id), ("code_verifier", verifier), ("resource", "https://elsewhere.example/mcp")]).await;
+    assert_eq!(elsewhere.1["error"], "invalid_target");
 
     let refresh = tokens["refresh_token"].as_str().unwrap();
     assert_eq!(d.call(refresh, Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED, "a refresh token opens nothing");
     let (s, next) = d.form("/v1/access/oauth/token", &[("grant_type", "refresh_token"), ("refresh_token", refresh), ("client_id", client_id)]).await;
     assert_eq!(s, StatusCode::OK, "{next}");
-    assert_eq!(d.call(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects", None).await.0, StatusCode::OK);
+    assert_eq!(d.via_mcp(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects").await, StatusCode::OK);
+    assert_eq!(d.call(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects", None).await.0, StatusCode::UNAUTHORIZED, "a refresh keeps the audience");
     // A spent refresh token used again: someone else has a copy (OAuth 2.1), so the whole
     // connection is revoked, the fresh tokens with it, and it says why.
     let reuse = d.form("/v1/access/oauth/token", &[("grant_type", "refresh_token"), ("refresh_token", refresh), ("client_id", client_id)]).await;
     assert_eq!(reuse.1["error"], "invalid_grant", "refresh tokens rotate");
-    let (s, _) = d.call(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects", None).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert_eq!(d.via_mcp(next["access_token"].as_str().unwrap(), Method::GET, "/v1/projects").await, StatusCode::UNAUTHORIZED);
     let grant = next["grant_id"].as_str().unwrap();
     let (_, g) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{grant}"), None).await;
     assert!(g["revoked_why"].as_str().is_some_and(|w| w.contains("used again")), "{g}");
@@ -2226,4 +2246,157 @@ async fn registration_from_one_network_is_limited() {
     }
     let (s, e) = register().await;
     assert_eq!((s, e["error"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("too_many_requests")), "{e}");
+}
+
+/// A company's identity provider signs a person in to an app (SEP-990, the ID-JAG grant): the app
+/// authenticates, the provider's assertion names the person, and the token acts as them within
+/// the app's rules. Replays, another client's assertion, another audience and an unknown person
+/// are refused; removing the app ends its people's tokens.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
+    use base64::Engine;
+    use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    d.people.add("usr_bob", "bob");
+    d.people.add("usr_root", "root");
+    d.people.set_admin("usr_root", true);
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+    let point = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng).unwrap().public_key().as_ref().to_vec();
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    let jwks = json!({ "keys": [{ "kty": "EC", "crv": "P-256", "kid": "okta1", "x": b64(&point[1..33]), "y": b64(&point[33..]) }] }).to_string();
+    let okta = "https://acme.okta.example";
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": [{ "issuer": "http://acme.okta.example", "jwks": jwks }] }))).await.0, StatusCode::BAD_REQUEST, "an https issuer");
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": [{ "issuer": okta, "jwks": jwks }] }))).await.0, StatusCode::BAD_REQUEST, "email matching names its domains");
+    let trust = |admins: bool| {
+        let (d, jwks) = (&d, jwks.clone());
+        async move { d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": [{ "issuer": okta, "jwks": jwks, "name": "Okta", "domains": ["acme.test"], "admins": admins }] }))).await.0 }
+    };
+    assert_eq!(trust(false).await, StatusCode::OK);
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "write": "allow" } }]);
+    let (s, app) = d.call(OPERATOR, Method::POST, "/v1/access/enterprise/apps", Some(json!({ "name": "Claude", "rules": rules }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{app}");
+    let (client_id, secret) = (app["client_id"].as_str().unwrap().to_string(), app["client_secret"].as_str().unwrap().to_string());
+    let (_, listed) = d.call(OPERATOR, Method::GET, "/v1/access/enterprise", None).await;
+    assert!(listed["apps"][0].get("client_secret").is_none() && listed["apps"][0].get("secret_hash").is_none(), "never its secret: {listed}");
+
+    let api = d.access.config.api_url.trim_end_matches('/').to_string();
+    assert_eq!((listed["audience"].as_str(), listed["token_endpoint"].as_str()), (Some(api.as_str()), Some(format!("{api}/v1/access/oauth/token").as_str())), "what the provider is set up with");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let idjag = |claims: Value| {
+        let mut h = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        h.kid = Some("okta1".into());
+        h.typ = Some("oauth-id-jag+jwt".into());
+        jsonwebtoken::encode(&h, &claims, &jsonwebtoken::EncodingKey::from_ec_der(pkcs8.as_ref())).unwrap()
+    };
+    let claims = |jti: &str, email: &str, aud: &str, client: &str| json!({ "iss": okta, "sub": "00u1alice", "aud": aud, "client_id": client, "jti": jti, "exp": now + 300, "iat": now, "email": email, "email_verified": true, "resource": api });
+    let sign_in = |assertion: String, secret: String| {
+        let (d, id) = (&d, client_id.clone());
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("assertion", &assertion), ("client_id", &id), ("client_secret", &secret)]).await }
+    };
+    let (s, got) = sign_in(idjag(claims("j1", "alice@acme.test", &api, &client_id)), secret.clone()).await;
+    assert_eq!((s, got.get("refresh_token")), (StatusCode::OK, None), "{got}");
+    let token = got["access_token"].as_str().unwrap().to_string();
+    let (_, me) = d.call(&token, Method::GET, "/v1/access", None).await;
+    assert_eq!((me["grant"]["user"].as_str(), me["grant"]["created_by"].as_str()), (Some("usr_alice"), Some(format!("enterprise:{okta}").as_str())), "it acts as alice: {me}");
+    assert_eq!(d.call(&token, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "from-claude" }))).await.0, StatusCode::CREATED);
+    // An assertion for roll's MCP server alone: its token works through that server, never on the
+    // API directly (draft -06: the token is held to the assertion's resources).
+    let mut for_mcp = claims("j40", "alice@acme.test", &api, &client_id);
+    for_mcp["resource"] = json!(format!("{api}/v1/mcp"));
+    let (_, mcp_only) = sign_in(idjag(for_mcp), secret.clone()).await;
+    let mcp_token = mcp_only["access_token"].as_str().unwrap_or_else(|| panic!("{mcp_only}")).to_string();
+    assert_eq!(d.via_mcp(&mcp_token, Method::GET, "/v1/workspace/projects").await, StatusCode::OK);
+    assert_eq!(d.call(&mcp_token, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED, "the MCP server's only");
+    // Refusals: a replay, the wrong secret, no client authentication, another client's assertion,
+    // another audience, someone with no account.
+    assert_eq!(sign_in(idjag(claims("j1", "alice@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "invalid_grant");
+    assert_eq!(sign_in(idjag(claims("j2", "alice@acme.test", &api, &client_id)), "rlc_wrong".into()).await.1["error"], "invalid_client");
+    let bare = d.form("/v1/access/oauth/token", &[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("assertion", &idjag(claims("j3", "alice@acme.test", &api, &client_id)))]).await;
+    assert_eq!(bare.1["error"], "invalid_client", "{bare:?}");
+    assert_eq!(sign_in(idjag(claims("j4", "alice@acme.test", &api, "ent_other")), secret.clone()).await.1["error"], "invalid_grant");
+    assert_eq!(sign_in(idjag(claims("j5", "alice@acme.test", "https://elsewhere.example", &client_id)), secret.clone()).await.1["error"], "invalid_grant");
+    assert_eq!(sign_in(idjag(claims("j6", "mallory@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied");
+    // An email the provider didn't say it verified, or outside its domains: no.
+    let mut unverified = claims("j8", "alice@acme.test", &api, &client_id);
+    unverified.as_object_mut().unwrap().remove("email_verified");
+    assert_eq!(sign_in(idjag(unverified), secret.clone()).await.1["error"], "access_denied");
+    assert_eq!(sign_in(idjag(claims("j9", "alice@elsewhere.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied");
+    // An admin acts as the operator: only from a provider the operator lets sign admins in.
+    assert_eq!(sign_in(idjag(claims("j10", "root@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied");
+    trust(true).await;
+    assert_eq!(sign_in(idjag(claims("j11", "root@acme.test", &api, &client_id)), secret.clone()).await.0, StatusCode::OK);
+    trust(false).await;
+    // Exactly one audience (draft-ietf-oauth-identity-assertion-authz-grant-06 §4.4.1): an array
+    // of one is roll's, a second audience is refused.
+    let mut two = claims("j30", "alice@acme.test", &api, &client_id);
+    two["aud"] = json!([api, "https://elsewhere.example"]);
+    assert_eq!(sign_in(idjag(two), secret.clone()).await.1["error"], "invalid_grant", "two audiences");
+    let mut one = claims("j31", "alice@acme.test", &api, &client_id);
+    one["aud"] = json!([api]);
+    assert_eq!(sign_in(idjag(one), secret.clone()).await.0, StatusCode::OK, "an array of one");
+    // A multi-tenant issuer: trusted with one tenant, never its others; an assertion naming a
+    // tenant from a provider trusted without one is refused.
+    let tenant_of = |jti: &str, tenant: &str| {
+        let mut c = claims(jti, "alice@acme.test", &api, &client_id);
+        c["tenant"] = json!(tenant);
+        c
+    };
+    assert_eq!(sign_in(idjag(tenant_of("j32", "t-acme")), secret.clone()).await.1["error"], "invalid_grant", "a tenant roll wasn't told about");
+    let put = d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": [{ "issuer": okta, "jwks": jwks, "domains": ["acme.test"], "tenant": "t-acme" }] }))).await;
+    assert_eq!(put.0, StatusCode::OK, "{put:?}");
+    assert_eq!(sign_in(idjag(tenant_of("j33", "t-acme")), secret.clone()).await.0, StatusCode::OK, "the trusted tenant");
+    assert_eq!(sign_in(idjag(tenant_of("j34", "t-evil")), secret.clone()).await.1["error"], "invalid_grant", "another tenant at the same issuer");
+    assert_eq!(sign_in(idjag(claims("j35", "alice@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "invalid_grant", "no tenant, from a tenant-pinned provider");
+    trust(false).await;
+    let (_, meta) = d.call(OPERATOR, Method::GET, "/.well-known/oauth-authorization-server", None).await;
+    assert_eq!(meta["authorization_grant_profiles_supported"], json!(["urn:ietf:params:oauth:grant-profile:id-jag"]), "{meta}");
+    // The assertion's read-only scope: the token reads, never writes.
+    let mut reads = claims("j12", "bob@acme.test", &api, &client_id);
+    reads["scope"] = json!("read-only");
+    let (_, ro) = sign_in(idjag(reads), secret.clone()).await;
+    let ro_token = ro["access_token"].as_str().unwrap_or_else(|| panic!("{ro}")).to_string();
+    assert_eq!(d.call(&ro_token, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "nope" }))).await.0, StatusCode::FORBIDDEN, "read-only");
+    // Revoked in roll: the provider can't hand it back.
+    let bobs = d.call(&ro_token, Method::GET, "/v1/access", None).await.1["grant"]["id"].as_str().unwrap().to_string();
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/tokens/{bobs}"), None).await.0, StatusCode::OK);
+    assert_eq!(sign_in(idjag(claims("j13", "bob@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied");
+    // Again later: the same connection, a new token.
+    let (_, again) = sign_in(idjag(claims("j7", "ALICE@acme.test", &api, &client_id)), secret.clone()).await;
+    let token2 = again["access_token"].as_str().unwrap_or_else(|| panic!("{again}")).to_string();
+    let (_, me2) = d.call(&token2, Method::GET, "/v1/access", None).await;
+    assert_eq!(me2["grant"]["id"], me["grant"]["id"], "one connection per person and app");
+    // Narrowing the app narrows every live token at once (its people's connections take its rules).
+    let reads_only = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
+    let (s, changed) = d.call(OPERATOR, Method::PATCH, &format!("/v1/access/enterprise/apps/{client_id}"), Some(json!({ "rules": reads_only }))).await;
+    assert_eq!(s, StatusCode::OK, "{changed}");
+    assert_eq!(d.call(&token2, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "after-narrowing" }))).await.0, StatusCode::FORBIDDEN, "narrowed at once");
+    assert_eq!(d.call(&token2, Method::GET, "/v1/access", None).await.0, StatusCode::OK, "the connection stays");
+    // A rotation keeping the old secret a while: both sign in; the new one is answered once.
+    let (s, rotated) = d.call(OPERATOR, Method::POST, &format!("/v1/access/enterprise/apps/{client_id}/rotate"), Some(json!({ "keep_old_for_s": 3600 }))).await;
+    let secret2 = rotated["client_secret"].as_str().unwrap_or_else(|| panic!("{s} {rotated}")).to_string();
+    assert!(rotated["old_until"].as_i64().is_some(), "{rotated}");
+    assert_eq!(sign_in(idjag(claims("j20", "alice@acme.test", &api, &client_id)), secret.clone()).await.0, StatusCode::OK, "the old secret, kept");
+    let (_, fresh) = sign_in(idjag(claims("j21", "alice@acme.test", &api, &client_id)), secret2.clone()).await;
+    let token3 = fresh["access_token"].as_str().unwrap_or_else(|| panic!("{fresh}")).to_string();
+    // Leaked (found by a scan, or GitHub's): the secret, the kept one and every token go at once.
+    assert!(d.access.revoke_leaked(std::slice::from_ref(&secret2), "a public gist").unwrap().is_empty(), "no grant is revoked: the connections stay");
+    assert_eq!(d.call(&token3, Method::GET, "/v1/access", None).await.0, StatusCode::UNAUTHORIZED, "its tokens ended");
+    for (jti, s) in [("j22", &secret2), ("j23", &secret)] {
+        assert_eq!(sign_in(idjag(claims(jti, "alice@acme.test", &api, &client_id)), s.clone()).await.1["error"], "invalid_client", "after the leak");
+    }
+    let (_, listed) = d.call(OPERATOR, Method::GET, "/v1/access/enterprise", None).await;
+    assert_eq!(listed["apps"][0]["leaked"], "found in a public gist", "{listed}");
+    // The operator rotates it: a new secret, and the same people back on their connections.
+    let (_, again) = d.call(OPERATOR, Method::POST, &format!("/v1/access/enterprise/apps/{client_id}/rotate"), Some(json!({ "keep_old_for_s": 3600 }))).await;
+    assert!(again["old_until"].is_null() && again["leaked"].is_null(), "a leaked secret is never kept: {again}");
+    let secret3 = again["client_secret"].as_str().unwrap().to_string();
+    let (_, back) = sign_in(idjag(claims("j24", "alice@acme.test", &api, &client_id)), secret3).await;
+    let token4 = back["access_token"].as_str().unwrap_or_else(|| panic!("{back}")).to_string();
+    assert_eq!(d.call(&token4, Method::GET, "/v1/access", None).await.1["grant"]["id"], me["grant"]["id"], "the same connection");
+    let token2 = token4;
+    // Removing the app ends its people's tokens (alice's and root's; bob's was revoked already).
+    assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/enterprise/apps/{client_id}"), None).await.1["revoked"], 2);
+    assert_eq!(d.call(&token2, Method::GET, "/v1/access", None).await.0, StatusCode::UNAUTHORIZED);
 }
