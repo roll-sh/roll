@@ -20,6 +20,7 @@ pub mod cluster;
 pub mod control;
 pub mod meter;
 pub mod pricing;
+pub mod secret_refs;
 pub mod store;
 mod wake;
 

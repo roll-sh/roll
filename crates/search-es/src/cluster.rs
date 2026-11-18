@@ -112,6 +112,9 @@ pub struct ClusterConfig {
     /// Where the cluster's security audit entries go ([`crate::xpack::security::audit`]);
     /// `None`: it records none.
     pub audit: Option<crate::xpack::security::audit::AuditLog>,
+    /// Resolves credentials given as references (`roll://ENV/KEY`, [`crate::secret_refs`]);
+    /// `None`: references are refused.
+    pub secret_refs: Option<crate::secret_refs::Resolver>,
 }
 
 impl ClusterConfig {
@@ -127,6 +130,7 @@ impl ClusterConfig {
             sealer: None,
             default_repository: None,
             audit: None,
+            secret_refs: None,
         }
     }
 

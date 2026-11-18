@@ -137,6 +137,9 @@ pub struct NodeConfig {
     pub default_repository: Option<String>,
     /// How long and how much each cluster's audit log keeps ([`crate::audit`]).
     pub audit: crate::audit::AuditConfig,
+    /// Resolves the credential references clusters' snapshot repositories name
+    /// (`search_es::secret_refs`); `None`: they're refused.
+    pub secret_refs: Option<search_es::secret_refs::Resolver>,
 }
 
 impl Default for NodeConfig {
@@ -159,6 +162,7 @@ impl Default for NodeConfig {
             sealer: None,
             default_repository: None,
             audit: crate::audit::AuditConfig::default(),
+            secret_refs: None,
         }
     }
 }
@@ -1097,6 +1101,7 @@ impl Node {
         cfg.test_features = self.cfg.test_features;
         cfg.host_metrics = self.cfg.host_metrics;
         cfg.sealer = self.cfg.sealer.clone();
+        cfg.secret_refs = self.cfg.secret_refs.clone();
         // Snapshot contents are durable only with object storage behind the cluster.
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
         cfg.audit = Some(search_es::xpack::security::audit::AuditLog(self.audit.clone()));

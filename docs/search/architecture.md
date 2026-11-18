@@ -460,6 +460,23 @@ allowlist (a preview's branch included); change it like any setting.
   redirects, no proxy, bounded reads (`--search-repository-allow-private` for local MinIO,
   fake-gcs-server and Azurite; `scripts/search-repo-emulators.sh` runs the `gcs` and `azure`
   tests against those two in Docker).
+- **Credentials by reference** (`api/snapshots/refs.rs`). Any of those settings may hold a roll
+  secrets reference (`roll://ENV/KEY`) instead. It isn't a secret: it stays in the settings as
+  written (the cluster state, `GET _snapshot` and branches show it), and the value is never
+  stored. search-es only knows the seam (`search_es::secret_refs::SecretRefs`, on the
+  cluster's config); search-control's resolver names the cluster from the catalog
+  (`secret_refs.rs`) and rolld's `ForSearch` asks `Secrets::resolve_for` for workspace resource
+  `search` with that id. A branch asks as the cluster its line started from, marked untrusted
+  (`ResourceRef::untrusted`): no protected environment, no sensitive key. A cluster restored
+  after a delete keeps its id and owner, so it stays trusted. The value is resolved when the
+  repository's client is built; each repository operation (snapshot, restore, verify, cleanup)
+  first asks for the references' digests (`digest_for`) and reuses the values it holds in
+  memory while they're the same, so a rotation reaches the next operation. `PUT _snapshot`
+  checks every reference first: one that can't resolve (no roll secrets on the node, as on dev
+  nodes and the YAML clusters; no project standing for the cluster; no such key) is a 400
+  `settings_exception` naming the setting, the reference and why. A reference refused later
+  (the secret deleted, access lost) fails that operation with the reason; it never falls back
+  to anonymous requests or to values held from before, and no error carries a value.
 
 ## On the fleet (roll cloud)
 

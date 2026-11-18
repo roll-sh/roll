@@ -515,6 +515,8 @@ pub struct Control {
     refreshed: Mutex<HashMap<String, i64>>,
     /// The roll-cluster fleet this node serves clusters in ([`Control::join`]).
     leases: OnceLock<Arc<crate::cluster::ClusterLeases>>,
+    /// Resolves snapshot repositories' credential references ([`Control::set_secrets`]).
+    secret_refs: Arc<crate::secret_refs::CatalogRefs>,
 }
 
 impl Control {
@@ -555,6 +557,7 @@ impl Control {
         let meter = Meter::new(store.clone());
         let wakes = Arc::new(Wakes::default());
         let hooks = Arc::new(ControlHooks { meter: MeterHooks(meter.clone()), wakes: wakes.clone(), control: OnceLock::new() });
+        let secret_refs = Arc::new(crate::secret_refs::CatalogRefs { store: store.clone(), secrets: OnceLock::new() });
         let node = Node::with_hooks(
             Arc::new(SqlCatalog { store: store.clone(), wakes: wakes.clone() }),
             Arc::new(GuardedStores { inner: ObjectStores::new(data.clone()), store: store.clone(), wakes: wakes.clone() }),
@@ -568,6 +571,7 @@ impl Control {
                 sealer: cfg.sealer.clone(),
                 default_repository: cfg.default_repository.clone(),
                 audit: cfg.audit.clone(),
+                secret_refs: Some(search_es::secret_refs::Resolver(secret_refs.clone())),
                 ..NodeConfig::default()
             },
             hooks.clone(),
@@ -585,6 +589,7 @@ impl Control {
             me: OnceLock::new(),
             refreshed: Mutex::new(HashMap::new()),
             leases: OnceLock::new(),
+            secret_refs,
         });
         // Nothing can load before the node is handed out, so the hook always finds the control.
         let _ = hooks.control.set(Arc::downgrade(&control));
@@ -680,6 +685,13 @@ impl Control {
     }
 
     /// The fleet's leases, when this node is in one ([`Control::join`]).
+    /// Lets snapshot repositories name roll secrets references (`roll://ENV/KEY`) as
+    /// credentials, resolved by `secrets` ([`crate::secret_refs`]). Once; until then (and
+    /// without it) references are refused.
+    pub fn set_secrets(&self, secrets: Arc<dyn crate::secret_refs::ResourceSecrets>) {
+        let _ = self.secret_refs.secrets.set(secrets);
+    }
+
     pub fn cluster_leases(&self) -> Option<&Arc<crate::cluster::ClusterLeases>> {
         self.leases.get()
     }

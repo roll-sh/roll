@@ -1208,6 +1208,31 @@ impl s3_server::TargetCredentials for ForStorage {
     }
 }
 
+/// roll secrets for roll search's snapshot repositories (`search_control::secret_refs`): a
+/// repository's `roll://` credentials resolve for its cluster, the canvas resource asking
+/// (`search:search:<id>` in the audit log); a branch asks as the cluster it came from, untrusted.
+pub struct ForSearch(pub Arc<Secrets>);
+
+impl ForSearch {
+    async fn run<T: Send + 'static>(&self, holder: &search_control::secret_refs::Holder, reference: &str, f: fn(&Secrets, &roll_secrets::ResourceRef, &str) -> Result<T, roll_secrets::Refusal>) -> Result<T, String> {
+        let resource = roll_secrets::ResourceRef::new(roll_workspace::Kind::Search, holder.id.clone());
+        let resource = if holder.copy { resource.untrusted() } else { resource };
+        let (secrets, reference) = (self.0.clone(), reference.to_string());
+        tokio::task::spawn_blocking(move || f(&secrets, &resource, &reference).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
+    }
+}
+
+#[async_trait::async_trait]
+impl search_control::secret_refs::ResourceSecrets for ForSearch {
+    async fn resolve(&self, holder: &search_control::secret_refs::Holder, reference: &str) -> Result<search_control::secret_refs::Revealed, String> {
+        self.run(holder, reference, |s, r, x| s.resolve_for(r, x).map(|v| search_control::secret_refs::Revealed::new(v.value.expose()))).await
+    }
+
+    async fn digest(&self, holder: &search_control::secret_refs::Holder, reference: &str) -> Result<String, String> {
+        self.run(holder, reference, |s, r, x| s.digest_for(r, x)).await
+    }
+}
+
 /// Workload identities' logins get roll-access workload tokens (`Access::mint_workload`): the
 /// identity's scope, its addresses, for its minutes, owned by whoever made it.
 pub struct Workloads(pub Arc<roll_access::Access>);

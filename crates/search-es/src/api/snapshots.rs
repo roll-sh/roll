@@ -49,6 +49,7 @@ use std::sync::Arc;
 
 mod analyze;
 mod cloud;
+mod refs;
 mod s3;
 mod transfer;
 pub use analyze::analyze_repository;
@@ -72,6 +73,8 @@ pub struct SnapshotData {
     io: parking_lot::Mutex<std::collections::HashMap<String, Arc<transfer::RepoIo>>>,
     /// The cluster's `indices.recovery.max_bytes_per_sec`, which restores also pay.
     recovery: transfer::RateLimiter,
+    /// Repositories' resolved credential references, kept while their digests stay the same.
+    refs: refs::KeptRefs,
 }
 
 impl SnapshotData {
@@ -710,6 +713,7 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let mut settings = settings;
     validate_repository(ctx, &name, &ty, &settings)?;
+    refs::check(ctx.cluster, &ty, &settings).await?;
     let secrets = cloud::take_secrets(ctx.cluster, &ty, &mut settings);
     let repo = Repository { ty, settings, secrets };
     // A bucket is checked once registered (a write, a read and a delete); a repository that

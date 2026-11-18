@@ -132,6 +132,13 @@ them (`api::Caller`):
 - A person's workspace project stands only for their own clusters (`Workspace::trusts`: rolld's
   `Owners` reads the owner), so previews, roll secrets' links and roll apps' links take only
   those.
+- A snapshot repository's credentials may be roll secrets references (`roll://ENV/KEY`,
+  architecture.md "Snapshots"), resolved for the cluster as its project's runtime reads them: only
+  a cluster on a project's canvas that stands for it resolves one, and a branch resolves as an
+  untrusted copy of the cluster it came from (no protected environment, no sensitive key). Whoever
+  holds a cluster's admin credentials can register a repository, so they can send any key the
+  cluster's project runtime reads to an endpoint they choose, as code deployed to a roll apps
+  service can: hand those credentials out accordingly.
 - Nothing in the API is node-wide besides `GET /v1/search`'s figures: node settings and the
   default repository are rolld's flags (`--search-*`), not routes. A cluster's data plane is
   unchanged: the REST port with the cluster's own credentials, which give what any tenant gets.

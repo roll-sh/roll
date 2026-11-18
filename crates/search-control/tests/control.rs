@@ -2047,6 +2047,112 @@ async fn an_s3_repository_moves_indices_between_clusters() {
     assert!(bucket.keys("prod/roll/indices/stray/").is_empty());
 }
 
+/// roll secrets as a fake (rolld's is `Secrets::resolve_for`): keys by reference with a version,
+/// the clusters a project's canvas holds, and protected references (refused to an untrusted copy).
+#[derive(Default)]
+struct FakeSecrets {
+    keys: std::sync::Mutex<std::collections::BTreeMap<String, (String, u32)>>,
+    canvas: std::sync::Mutex<Vec<String>>,
+    protected: Vec<String>,
+    resolves: std::sync::Mutex<Vec<search_control::secret_refs::Holder>>,
+}
+
+impl FakeSecrets {
+    fn check(&self, h: &search_control::secret_refs::Holder, reference: &str) -> Result<(String, u32), String> {
+        if !self.canvas.lock().unwrap().contains(&h.id) {
+            return Err(format!("no project: search:search:{} isn't on any project's canvas", h.id));
+        }
+        if h.copy && self.protected.iter().any(|p| p == reference) {
+            return Err("protected: production is protected".into());
+        }
+        self.keys.lock().unwrap().get(reference).cloned().ok_or_else(|| format!("no such key: {reference}"))
+    }
+
+    fn set(&self, reference: &str, value: &str) {
+        let mut keys = self.keys.lock().unwrap();
+        let version = keys.get(reference).map_or(1, |(_, v)| v + 1);
+        keys.insert(reference.into(), (value.into(), version));
+    }
+}
+
+#[async_trait::async_trait]
+impl search_control::secret_refs::ResourceSecrets for FakeSecrets {
+    async fn resolve(&self, h: &search_control::secret_refs::Holder, reference: &str) -> Result<search_control::secret_refs::Revealed, String> {
+        let (value, _) = self.check(h, reference)?;
+        self.resolves.lock().unwrap().push(h.clone());
+        Ok(search_control::secret_refs::Revealed::new(value))
+    }
+
+    async fn digest(&self, h: &search_control::secret_refs::Holder, reference: &str) -> Result<String, String> {
+        self.check(h, reference).map(|(_, v)| format!("v{v}"))
+    }
+}
+
+/// An `s3` repository's keys as roll secrets references: kept as written, resolved for the
+/// cluster when its client is built and again only once a rotation moves the digest; refused
+/// (400) to a cluster no project holds, to a branch reaching a protected environment, and, once
+/// the secret is deleted, failing the snapshot with the reason (never anonymously).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_s3_repository_takes_its_keys_from_roll_secrets() {
+    let (endpoint, bucket) = MockBucket::start().await;
+    let e = env_with(|c| c.node_settings.push((search_control::S3_ALLOW_PRIVATE.into(), "true".into()))).await;
+    let vault = e.post("/v1/search/clusters", json!({"name": "vault"})).await;
+    let (u, p) = creds(&vault);
+    let (lu, lp) = creds(&e.post("/v1/search/clusters", json!({"name": "loose"})).await);
+    let (access, secret) = ("roll://production/AWS_ACCESS_KEY_ID", "roll://production/AWS_SECRET_ACCESS_KEY");
+    let fake = Arc::new(FakeSecrets { protected: vec![access.into(), secret.into()], ..Default::default() });
+    fake.canvas.lock().unwrap().push(vault["id"].as_str().unwrap().into());
+    fake.set(access, "AKIDONE");
+    fake.set(secret, "fake-secret-one");
+    let repo = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "refs", "endpoint": endpoint, "path_style_access": true, "access_key": access, "secret_key": secret}});
+
+    // Before roll secrets is installed, and for a cluster no project holds: a clear 400.
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_snapshot/backup", Some(repo.clone())).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (400, Some("settings_exception")), "{v}");
+    e.control.set_secrets(fake.clone());
+    let (s, v) = e.es(&lu, &lp, reqwest::Method::PUT, "/_snapshot/backup", Some(repo.clone())).await;
+    assert_eq!((s, v["error"]["type"].as_str()), (400, Some("settings_exception")), "{v}");
+    assert!(v["error"]["reason"].as_str().unwrap().contains("isn't on any project's canvas"), "{v}");
+
+    // Registered and verified with the resolved keys; the reference shows as written.
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_snapshot/backup", Some(repo)).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&u, &p, reqwest::Method::GET, "/_snapshot/backup", None).await;
+    assert_eq!(v["backup"]["settings"]["secret_key"], secret, "{v}");
+    let (_, state) = e.es(&u, &p, reqwest::Method::GET, "/_cluster/state/metadata", None).await;
+    assert!(!state.to_string().contains("fake-secret-one"), "a value in the cluster state");
+    e.es(&u, &p, reqwest::Method::PUT, "/docs/_doc/1?refresh=true", Some(json!({"n": 1}))).await;
+    let snapshot = |name: &str| format!("/_snapshot/backup/{name}?wait_for_completion=true");
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, &snapshot("one"), Some(json!({"indices": "docs"}))).await;
+    assert_eq!((s, v["snapshot"]["state"].as_str()), (200, Some("SUCCESS")), "{v}");
+    assert_eq!(bucket.signed_by.lock().unwrap().iter().cloned().collect::<Vec<_>>(), ["AKIDONE"]);
+    let resolved = fake.resolves.lock().unwrap().len();
+    assert_eq!(resolved, 2, "resolved once, then kept while the digests stay");
+
+    // A rotation moves the digest: the next snapshot signs with the new key.
+    fake.set(access, "AKIDTWO");
+    bucket.signed_by.lock().unwrap().clear();
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, &snapshot("two"), Some(json!({"indices": "docs"}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(bucket.signed_by.lock().unwrap().iter().cloned().collect::<Vec<_>>(), ["AKIDTWO"]);
+
+    // A branch asks as the cluster it came from, untrusted: production is refused, visibly.
+    let branch = e.post(&format!("/v1/search/clusters/{}/branches", vault["id"].as_str().unwrap()), json!({"name": "vault-dev"})).await;
+    let (bu, bp) = creds(&branch);
+    let (s, v) = e.es(&bu, &bp, reqwest::Method::PUT, &snapshot("from-branch"), Some(json!({"indices": "docs"}))).await;
+    assert_eq!(s, 500, "{v}");
+    assert!(v.to_string().contains("protected") && !v.to_string().contains("fake-secret"), "{v}");
+    assert!(fake.resolves.lock().unwrap().iter().all(|h| !h.copy), "nothing resolved for the branch");
+
+    // The secret deleted: the snapshot fails with why, and nothing reaches the bucket unsigned.
+    fake.keys.lock().unwrap().remove(secret);
+    let before = bucket.keys("").len();
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, &snapshot("three"), Some(json!({"indices": "docs"}))).await;
+    assert_eq!(s, 500, "{v}");
+    assert!(v["error"]["reason"].as_str().unwrap().contains("no such key"), "{v}");
+    assert_eq!(bucket.keys("").len(), before);
+}
+
 #[path = "control/cloud_repositories.rs"]
 mod cloud_repositories;
 

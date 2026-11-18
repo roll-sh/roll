@@ -2212,8 +2212,11 @@ Agent's templates do).
 
 - **Which products.** roll storage's replication targets to buckets outside roll: the access key
   id and the secret (`POST /v1/storage/replication-targets` with
-  `"secret_access_key": "roll://production/AWS_SECRET_ACCESS_KEY"`). Search snapshot
-  repositories, roll code's reviewer provider keys and the agents' gateway upstreams still keep
+  `"secret_access_key": "roll://production/AWS_SECRET_ACCESS_KEY"`), and roll search's `s3`,
+  `gcs` and `azure` snapshot repositories: their credential settings (`PUT _snapshot/backup`
+  with `"secret_key": "roll://production/AWS_SECRET_ACCESS_KEY"`; docs/search/architecture.md,
+  "Snapshots"), resolved for the search cluster (a branch as an untrusted copy of the cluster it
+  came from). roll code's reviewer provider keys and the agents' gateway upstreams still keep
   sealed copies.
 - **Who reads it.** The product asks rolld in process (`Secrets::resolve_for(resource,
   reference)`), naming the workspace resource that needs the value: a replication target
@@ -2248,7 +2251,10 @@ Agent's templates do).
   why in its log), and nothing is dropped.
 - **Who may write one.** Storage takes references in a replication target only from the operator
   (its token, an admin's session): a scoped token that manages targets could otherwise point a
-  reference at any key the bucket's project holds and send it to an endpoint it chose.
+  reference at any key the bucket's project holds and send it to an endpoint it chose. Search
+  takes them from whoever may register a repository on the cluster (its admin credentials), who
+  can likewise reach any key the cluster's project runtime reads, as a roll apps service's code
+  can.
 
 ### Templates
 

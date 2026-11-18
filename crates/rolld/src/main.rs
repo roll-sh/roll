@@ -591,6 +591,10 @@ async fn run() -> anyhow::Result<()> {
     code_secrets.set(secrets.clone(), workspace.clone());
     apps_secrets.set(secrets.clone(), workspace.clone());
     storage_secrets.set(secrets.clone());
+    // roll search's snapshot repositories resolve their roll:// credentials for their cluster.
+    if let Some(s) = &search {
+        s.control.set_secrets(std::sync::Arc::new(secrets::ForSearch(secrets.clone())));
+    }
     let _ = secrets_envs.0.set(secrets.clone());
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
