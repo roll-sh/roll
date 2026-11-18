@@ -668,6 +668,7 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | `POST /v1/accounts/me/email/confirm` | `{challenge, code}` | `User` at the new address; 400 `{code: "bad_code"}`; 409 the address has an account now |
 | `GET /v1/accounts/me/sessions` | | `Session[]`, newest first: `{id, created_at, seen_at, expires_at, user_agent, current, method, passkey}`; `method` is how it signed in (`email`, `github`, `google`, `sso`, `passkey`; `null` for sessions older than this), `passkey` whether a passkey was used in it (with `sso`, a phishing-resistant session) |
 | `GET /v1/accounts/me/activity` | query `before?` (Unix ms), `limit?` (1–200, 50) | `{events: [{at, action, actor, ok, status, ip, user_agent, detail}]}`: your security log, newest first |
+| `DELETE /v1/accounts/me/sessions` | | `{ended}`: every session of yours but this one ends ("Sign out of all other sessions") |
 | `DELETE /v1/accounts/me/sessions/{id}` | | 204; 404 if it isn't yours |
 | `DELETE /v1/accounts/me/identities/{provider}` | | 204; 404 if not linked |
 | `POST /v1/accounts/me/totp` | | `{secret, otpauth_url, qr_png}` (`qr_png` a `data:image/png;base64,…` URL): a new seed, not on until confirmed; 409 if on; 503 `{code: "secret_key"}` without `ROLL_SECRET_KEY` |

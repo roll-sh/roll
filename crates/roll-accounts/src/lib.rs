@@ -716,6 +716,11 @@ impl Accounts {
         row.ok_or_else(Error::signed_out)
     }
 
+    /// End all of `user`'s sessions but `keep`: how many ended.
+    pub fn end_other_sessions(&self, user: &str, keep: &str) -> Result<usize> {
+        Ok(self.db.write(|c| c.execute("DELETE FROM sessions WHERE user_id = ? AND id <> ?", [user, keep]))?)
+    }
+
     pub fn revoke_session(&self, user: &str, id: &str) -> Result<()> {
         match self.db.write(|c| c.execute("DELETE FROM sessions WHERE id = ? AND user_id = ?", [id, user]))? {
             0 => Err(Error::NotFound(format!("no session {id}"))),

@@ -285,6 +285,8 @@ export const accountsApi = {
   deleteMe: (confirm: string) => call<null>("DELETE", "/me", { confirm }),
   sessions: () => call<Session[]>("GET", "/me/sessions"),
   revokeSession: (id: string) => call<null>("DELETE", `/me/sessions/${encodeURIComponent(id)}`),
+  /** End every session but this browser's. */
+  endOtherSessions: () => call<{ ended: number }>("DELETE", "/me/sessions"),
   unlink: (provider: Provider | `sso:${string}`) => call<null>("DELETE", `/me/identities/${encodeURIComponent(provider)}`),
   totpBegin: () => call<{ secret: string; otpauth_url: string; qr_png: string }>("POST", "/me/totp"),
   totpConfirm: (code: string) => call<{ recovery_codes: string[] }>("POST", "/me/totp/confirm", { code }),
