@@ -171,9 +171,9 @@ function Streams() {
   const [made, setMade] = useState<{ host: string; secret: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
-  // An HTTPS endpoint, or a roll bucket of this project's canvas (an archive).
+  // An HTTPS endpoint, or a roll bucket, search index or stream topic of this project's canvas.
   // A SIEM's own format is an HTTPS endpoint with its token.
-  const urlOk = format === "roll" ? /^https:\/\/[^\s/]+/.test(url.trim()) || /^bucket:[a-z0-9][a-z0-9.-]{1,62}$/.test(url.trim()) : /^https:\/\/[^\s/]+/.test(url.trim()) && token.trim() !== "";
+  const urlOk = format === "roll" ? /^https:\/\/[^\s/]+/.test(url.trim()) || /^bucket:[a-z0-9][a-z0-9.-]{1,62}$/.test(url.trim()) || /^search:[^\s/]+\/[a-z0-9][a-z0-9._-]{0,254}$/.test(url.trim()) || /^stream:[^\s/]+\/[A-Za-z0-9._-]{1,249}$/.test(url.trim()) : /^https:\/\/[^\s/]+/.test(url.trim()) && token.trim() !== "";
 
   const add = async () => {
     setBusy(true);
@@ -257,12 +257,12 @@ function Streams() {
             </select>
           </label>
           <label className="min-w-64 flex-1">
-            <span className="mb-1 block text-[11px] font-medium text-subtle">{format === "roll" ? <>HTTPS endpoint, or bucket:&lt;name&gt; for a roll bucket on this canvas</> : "HTTPS endpoint"}</span>
+            <span className="mb-1 block text-[11px] font-medium text-subtle">{format === "roll" ? <>HTTPS endpoint, or on this canvas: bucket:&lt;name&gt;, search:&lt;cluster&gt;/&lt;index&gt; or stream:&lt;stream&gt;/&lt;topic&gt;</> : "HTTPS endpoint"}</span>
             <input
               autoFocus
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder={{ roll: "https://siem.example.com/roll  or  bucket:audit-archive", splunk: "https://splunk.example.com:8088/services/collector/event", datadog: "https://http-intake.logs.datadoghq.com/api/v2/logs", bearer: "https://collector.example.com/roll" }[format]}
+              placeholder={{ roll: "https://siem.example.com/roll  or  search:cl_…/roll-audit", splunk: "https://splunk.example.com:8088/services/collector/event", datadog: "https://http-intake.logs.datadoghq.com/api/v2/logs", bearer: "https://collector.example.com/roll" }[format]}
               spellCheck={false}
               className={`${field} font-mono text-[12px]`}
             />
