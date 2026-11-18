@@ -1695,8 +1695,15 @@ Ranked by what a person notices first. Done so far:
    coalesced to one rebuild a minute, named in each preview's activity.
 3. **A project's own preview domain** (Vercel's preview deployment suffix): previews at
    `<service>-<slug>.preview.acme.dev`, so cookies scoped to the team's domain and OAuth redirect
-   allowlists work. Needs a wildcard DNS record pointed at roll and a wildcard certificate (DNS-01),
-   or roll apps' custom domains.
+   allowlists work. Agreed with the apps thread on 2026-11-18: it goes through roll apps' domain
+   records, one verified wildcard `Domain` per project for its previews (the same CNAME and
+   `_roll-challenge` TXT; routing already falls back to a covering wildcard). A service on roll
+   apps: previews sends its label on the `pv-` PUT and apps' `host_target` maps `<label>.<base>`
+   to that environment. A service on roll's runtime: apps answers "not mine", and rolld's preview
+   router matches `<label>.<base>` against the project's verified domain. Plain HTTP first (a
+   local node, or the user's own TLS proxy); TLS needs wildcard certificates over DNS-01, with
+   `_acme-challenge` delegated to a zone roll answers, which waits on the edge (apps' "Wildcard
+   certificates", the roll cloud thread). Waits on apps' record kind.
 4. **Bots on Git URL services:** roll apps' `GitPull` carries no author, so `skip_authors` doesn't
    reach a Git URL service's pull requests (with the apps thread).
 5. **Roll only on roll apps' builds** (draft #234; apps' #222, #238 and #240 are on main, but main's `scripts/preview-apps.sh` fails at Roll only since: a request never reaches a closed `pv-` instance through its sandbox, so its health check fails; apps reproduced it and is fixing it): a closed
