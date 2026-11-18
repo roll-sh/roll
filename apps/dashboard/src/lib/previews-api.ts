@@ -3,6 +3,7 @@
  * of a workspace project per change, with a branch of every data resource. Change both together.
  */
 
+import { withSession } from "./code-token";
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 
 export const PREVIEW_STATES = ["queued", "awaiting_approval", "creating", "ready", "sleeping", "updating", "failed", "deleting"] as const;
@@ -100,6 +101,8 @@ export interface Preview {
   pull?: { number: number; url: string; fork: boolean; approved_head: string | null; approved_by: string | null };
   /** When it goes (its TTL, or a keep, running out), once that's close (a day ahead). */
   goes_at?: number | null;
+  /** The project that reports a Git URL service's pull request, when another one does (the service is on both canvases; the one that has had it longest speaks). */
+  reported_by?: string | null;
   /** How much the page changed since the screenshot at an earlier head (`since`). */
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
   /** How much its page differs from the project's preview of the default branch. */
@@ -320,6 +323,8 @@ export interface PreviewSettings {
   paths: string[];
   /** …that none of these match. */
   ignore_paths: string[];
+  /** Globs on a change's author (a pull request's GitHub login, `*[bot]`): skipped unless asked. */
+  skip_authors?: string[];
   /** `"<kind>:<ref>"` → mode; resources not listed get `data`. A patch replaces the whole map. */
   resources: Record<string, ResourceRule>;
   data: "branch" | "schema";
@@ -392,6 +397,15 @@ export interface PreviewBypass {
   secret?: string;
 }
 
+/** A deploy hook (a headless CMS's publish webhook): calling its URL builds the project's previews of `branches` again at their heads. */
+export interface PreviewHook {
+  id: string;
+  name: string;
+  branches: string[];
+  created_at: number;
+  fired_at: number | null;
+}
+
 export type PreviewSource = { branch: string; change?: never } | { change: string; branch?: never };
 
 const one = (id: string) => `/v1/previews/${encodeURIComponent(id)}`;
@@ -409,7 +423,7 @@ function query(params: Record<string, string | number | undefined>) {
 /** The preview's screenshot as an object URL; `previous`: the one at the head before; `phone`: at a phone's width; `base`: the default branch's preview's; `page`: another of the project's pages. */
 /** A service's link with the preview's access as a QR code (an object URL; revoke it when done): a phone opens it by scanning. */
 export async function qrUrl(id: string, service?: string): Promise<string> {
-  const res = await fetch(`${ROLL_API}${one(id)}/qr.png${service ? `?service=${encodeURIComponent(service)}` : ""}`, { headers: apiHeaders(), cache: "no-store" });
+  const res = await fetch(`${ROLL_API}${one(id)}/qr.png${service ? `?service=${encodeURIComponent(service)}` : ""}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
   onApiStatus(res.status);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
   return URL.createObjectURL(await res.blob());
@@ -418,7 +432,7 @@ export async function qrUrl(id: string, service?: string): Promise<string> {
 /** A picture of a note's element, as a screenshot run cropped it (an object URL; revoke it when
  * done), or `null` while it has none. */
 export async function noteCropUrl(id: string, note: string): Promise<string | null> {
-  const res = await fetch(`${ROLL_API}${one(id)}/notes/${encodeURIComponent(note)}/crop`, { headers: apiHeaders(), cache: "no-store" });
+  const res = await fetch(`${ROLL_API}${one(id)}/notes/${encodeURIComponent(note)}/crop`, withSession({ headers: apiHeaders(), cache: "no-store" }));
   onApiStatus(res.status);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
@@ -427,7 +441,7 @@ export async function noteCropUrl(id: string, note: string): Promise<string | nu
 
 export async function screenshotUrl(id: string, previous = false, phone = false, base = false, page?: string, diff?: "base" | "previous"): Promise<string> {
   const q = [previous ? "previous=1" : "", phone ? "view=phone" : "", base ? "base=1" : "", page ? `page=${encodeURIComponent(page)}` : "", diff ? `diff=${diff}` : ""].filter(Boolean).join("&");
-  const res = await fetch(`${ROLL_API}${one(id)}/screenshot${q ? `?${q}` : ""}`, { headers: apiHeaders(), cache: "no-store" });
+  const res = await fetch(`${ROLL_API}${one(id)}/screenshot${q ? `?${q}` : ""}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
   onApiStatus(res.status);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
   return URL.createObjectURL(await res.blob());
@@ -464,7 +478,7 @@ export const previewsApi = {
   mail: (id: string) => call<{ mail: CaughtMail[] }>("GET", `${one(id)}/mail`),
   /** One caught message as it was sent, as text. */
   mailText: async (id: string, mail: string) => {
-    const res = await fetch(`${ROLL_API}${one(id)}/mail/${encodeURIComponent(mail)}`, { headers: apiHeaders(), cache: "no-store" });
+    const res = await fetch(`${ROLL_API}${one(id)}/mail/${encodeURIComponent(mail)}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
     onApiStatus(res.status);
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
     return res.text();
@@ -479,6 +493,8 @@ export const previewsApi = {
   reset: (id: string, resources?: string[]) => call<Preview>("POST", `${one(id)}/reset`, resources?.length ? { resources } : {}),
   /** Its latest requests through roll, newest first (roll's runtime; a roll apps instance's are roll apps'). */
   requests: (id: string) => call<{ requests: RequestLine[] }>("GET", `${one(id)}/requests`),
+  /** What its running services use right now (cores of CPU, resident memory, the memory each runs with). */
+  metrics: (id: string) => call<{ services: ServiceMetrics[] }>("GET", `${one(id)}/metrics`),
   logs: (id: string, opts: { service?: string; lines?: number } = {}) =>
     call<{ service: string; lines: string[] }>("GET", `${one(id)}/logs${query(opts)}`),
   /** Newest first. */
@@ -490,6 +506,10 @@ export const previewsApi = {
   /** A new secret (the old one stops working), shown only in this answer. */
   rotateBypass: (projectId: string) => call<PreviewBypass>("POST", `${project(projectId)}/bypass`),
   deleteBypass: (projectId: string) => call<void>("DELETE", `${project(projectId)}/bypass`),
+  hooks: (projectId: string) => call<{ hooks: PreviewHook[] }>("GET", `${project(projectId)}/hooks`),
+  /** A new hook; `path` (its secret URL) is only in this answer. */
+  createHook: (projectId: string, name: string, branches: string[]) => call<{ hook: PreviewHook; path: string }>("POST", `${project(projectId)}/hooks`, { name, branches }),
+  deleteHook: (projectId: string, id: string) => call<void>("DELETE", `${project(projectId)}/hooks/${encodeURIComponent(id)}`),
 };
 
 /** Server-sent events in `text` (after `rest`, what was left of the last chunk): the complete
@@ -514,6 +534,9 @@ export function parseSse(rest: string, text: string): { events: { event: string;
   return { events, rest: left };
 }
 
+/** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */
+export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };
+
 /** A request to a preview's service through roll: when (ms), the method, the path (never the query), the status, ms until the answer's headers. */
 export type RequestLine = { at: number; service: string; method: string; path: string; status: number; ms: number };
 
@@ -521,7 +544,7 @@ export type RequestLine = { at: number; service: string; method: string; path: s
  * operator's headers, which EventSource can't send). Resolves when the stream ends or `signal`
  * aborts it. */
 export async function followLogs(id: string, service: string, lines: number, onLine: (l: string) => void, signal: AbortSignal): Promise<void> {
-  const res = await fetch(`${ROLL_API}${one(id)}/logs${query({ service, lines, follow: 1 })}`, { headers: apiHeaders(), cache: "no-store", signal });
+  const res = await fetch(`${ROLL_API}${one(id)}/logs${query({ service, lines, follow: 1 })}`, withSession({ headers: apiHeaders(), cache: "no-store", signal }));
   onApiStatus(res.status);
   if (!res.ok || !res.body) {
     const data = await res.json().catch(() => null);

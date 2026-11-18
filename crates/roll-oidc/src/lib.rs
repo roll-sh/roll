@@ -83,9 +83,28 @@ pub fn pinned(subject: &str, prefix: &str, owner_name: bool) -> bool {
     shaped && !tenant.contains('*')
 }
 
+/// Azure Pipelines' issuer: one per organization (`https://vstoken.dev.azure.com/<organization id>`),
+/// signing for every project, pipeline and service connection in it.
+const AZURE_DEVOPS: &str = "https://vstoken.dev.azure.com/";
+/// Microsoft Entra's v2.0 issuer: one per tenant (`https://login.microsoftonline.com/<tenant>/v2.0`),
+/// signing for every app and identity in it, Azure DevOps' newer service connections among them.
+const ENTRA: (&str, &str) = ("https://login.microsoftonline.com/", "/v2.0");
+
 /// Why an identity for `issuer` with `subject` would let other tenants in, if it would: a shared
 /// issuer's subject must name one tenant literally. Not optional: every identity is checked.
+///
+/// Azure's issuers are per organization or tenant, but everyone in it shares them: any project's
+/// pipeline, any app. So the subject names one pipeline or service connection (`p://` or `sc://`
+/// with an organization, a project and a name), or one Entra subject exactly.
 pub fn open_to_others(issuer: &str, subject: &str) -> Option<&'static str> {
+    if let Some(org) = issuer.strip_prefix(AZURE_DEVOPS) {
+        let named = |prefix: &str| subject.strip_prefix(prefix).is_some_and(|r| r.splitn(3, '/').filter(|p| !p.is_empty()).count() == 3);
+        let one = !org.is_empty() && !subject.contains('*') && (named("p://") || named("sc://"));
+        return (!one).then_some("p://<organization>/<project>/<pipeline> or sc://<organization>/<project>/<service connection>, exactly (Azure Pipelines' sub)");
+    }
+    if issuer.strip_prefix(ENTRA.0).and_then(|r| r.strip_suffix(ENTRA.1)).is_some_and(|t| !t.is_empty() && !t.contains('/')) && subject.contains('*') {
+        return Some("the token's sub exactly (Microsoft Entra's: an Azure DevOps service connection's /eid1/…/sc/<organization id>/<connection id>)");
+    }
     SHARED.iter().find(|(i, ..)| *i == issuer).filter(|(_, prefix, owner_name, _)| !pinned(subject, prefix, *owner_name)).map(|(.., shape)| *shape)
 }
 
@@ -179,6 +198,8 @@ fn invalid(m: impl Into<String>) -> Error {
 pub struct Jwt<'a> {
     alg: Alg,
     kid: Option<String>,
+    /// The header's `typ` (`oauth-id-jag+jwt` for an identity assertion grant), as given.
+    pub typ: Option<String>,
     pub claims: Map<String, Json>,
     signed: &'a str,
     signature: Vec<u8>,
@@ -205,13 +226,14 @@ impl<'a> Jwt<'a> {
             return Err(invalid("the identity token has critical header parameters"));
         }
         let kid = header.get("kid").and_then(Json::as_str).map(str::to_string);
+        let typ = header.get("typ").and_then(Json::as_str).map(str::to_string);
         let claims = match b64(p).and_then(|b| serde_json::from_slice::<Json>(&b).ok()) {
             Some(Json::Object(m)) => m,
             _ => return Err(invalid("the identity token's claims aren't valid")),
         };
         let signature = b64(s).ok_or_else(|| invalid("the identity token's signature isn't valid"))?;
         let signed = &token[..h.len() + 1 + p.len()];
-        Ok(Self { alg, kid, claims, signed, signature })
+        Ok(Self { alg, kid, typ, claims, signed, signature })
     }
 
     pub fn str(&self, name: &str) -> Option<&str> {
@@ -429,6 +451,12 @@ mod tests {
         assert!(open_to_others(gh, "repo:acme/web:ref:refs/heads/main").is_none() && open_to_others(gh, "repo:acme/web:*").is_none());
         assert!(open_to_others(gh, "repo:*").is_some() && open_to_others(gh, "repo:acme/*:ref:x").is_some() && open_to_others(gh, "*").is_some());
         assert!(open_to_others("https://accounts.google.com", "1234*").is_some() && open_to_others("https://issuer.example.com", "*").is_none());
+        // Azure: one issuer per organization or tenant, so one pipeline or service connection.
+        let ado = "https://vstoken.dev.azure.com/00000000-0000-0000-0000-00000000a0b1";
+        assert!(open_to_others(ado, "p://acme/shop/deploy").is_none() && open_to_others(ado, "sc://acme/shop/roll-prod").is_none());
+        assert!(open_to_others(ado, "p://acme/shop/*").is_some() && open_to_others(ado, "p://acme/shop").is_some() && open_to_others(ado, "repo:acme/web:*").is_some());
+        let entra = "https://login.microsoftonline.com/00000000-0000-0000-0000-00000000c0d2/v2.0";
+        assert!(open_to_others(entra, "/eid1/c/pub/t/dGVzdA/a/dGVzdA/sc/org-1/sc-1").is_none() && open_to_others(entra, "/eid1/*").is_some());
     }
 
     #[test]

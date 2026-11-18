@@ -216,6 +216,71 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
   (the right repository and branch sign in, within the rules; another repository, branch, audience,
   key or an expired token is `invalid_grant`; a shared issuer's wildcard tenant is refused); `roll-cli/tests/token.rs::a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules`.
 
+### Enterprise identity providers
+
+A company's identity provider can decide which of its people may use an app with roll, as MCP's
+enterprise-managed authorization (SEP-990) and the IETF's Identity Assertion JWT Authorization
+Grant ("ID-JAG", Okta's Cross App Access) describe: the app trades the provider's assertion for a
+roll token acting as that person, with no consent screen and no roll sign-in.
+
+- **Trusting a provider** (the operator): `PUT /v1/access/enterprise/idps {idps: [{issuer, jwks?,
+  matching?, domains?, admins?, name?, tenant?, sso?}]}` (`roll token enterprise trust <issuer> …`). `issuer` is an
+  `https` URL; its keys are fetched from its metadata through the guarded client, or pinned
+  (`jwks`). `matching` says how a person is found: `email` (the default: the assertion's `email`,
+  with `email_verified: true`, in one of the provider's `domains`, which email matching requires,
+  ASCII only, is their roll account's) or `aud_sub` (the assertion names the roll account,
+  `usr_…`). A provider names people of its own company, never anyone's: some let people set their
+  own email, so an unverified one or another domain is `access_denied`. roll's admins act as the
+  operator, past roll's own second factor: a provider signs them in only with `admins: true`.
+  The same provider as people's single sign-on is set up once: `sso` names its SSO connection
+  (docs/accounts.md, "SSO"; `--sso`, or the form's "same provider" choice), whose issuer it must
+  be, and then it vouches for the domains that connection's DNS records proved, read at each
+  sign-in instead of `domains` (a domain whose proof is gone, or a removed connection, trusts
+  nobody).
+  A multi-tenant issuer (one issuer URL many companies share) names the person's tenant in each
+  assertion: roll trusts the issuer with one `tenant` (`--tenant`), and refuses that issuer's other
+  tenants, and any assertion naming a tenant from a provider trusted without one (anyone can be a
+  tenant there, and set up an address in your domain). An assertion has exactly one audience
+  (roll's issuer, a string or an array of one), and the token is held to its `resource`: roll's
+  MCP server alone makes a token for that server only (refused on the API directly); roll's API,
+  both, or none makes an API token. roll's metadata advertises the ID-JAG grant profile
+  (`authorization_grant_profiles_supported`, `id_jag_signing_alg_values_supported`: RS256, ES256),
+  never which providers it trusts.
+- **Registering an app** (the operator): `POST /v1/access/enterprise/apps {name, rules,
+  public_jwk?}` answers its `client_id` (`ent_…`, what the provider puts in an assertion) and, with
+  no key, a `client_secret` shown once. `rules` is the most the app may do for a person.
+  `GET /v1/access/enterprise` lists both (never a secret) with roll's `audience` (what a provider
+  puts in `aud`) and `token_endpoint`; `DELETE …/apps/{id}` removes an app and revokes every
+  person's connection to it. `PATCH …/apps/{id} {name?, rules?}` changes an app; its people's
+  connections take new rules in the same write, so narrowing it narrows every live token at once.
+  `POST …/apps/{id}/rotate {public_jwk?, keep_old_for_s?}` gives it a new key, or a new secret
+  answered once, keeping its client id and its people's connections; the old secret works up to a
+  week longer while the provider moves over, or stops now with every token its people hold.
+- **A leaked app secret** (an `rlc_` with its checksum, found by roll code's push scan or reported
+  by GitHub's secret scanning) is revoked like any other: roll drops the secret, the one kept from
+  before a rotation, and every token the app's people hold, in one write, and audits it. The
+  connections stay; the app signs in again once the operator rotates it (`leaked` in the listing
+  says where it was found; a leaked secret is never kept through that rotation).
+- The access overview's "Enterprise sign-in" panel does all of this, and `roll token enterprise`
+  (`trust`, `untrust`, `app create|update|rotate|remove`).
+- **Signing in:** `POST /v1/access/oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`,
+  `assertion=<ID-JAG>` (header `typ: oauth-id-jag+jwt`) and the app's own authentication
+  (`client_secret_basic`, `client_secret_post` or `private_key_jwt`); an assertion alone is
+  `invalid_client`. roll checks it was signed by a trusted issuer, `aud` is roll (its API URL),
+  `client_id` is the app that authenticated, it hasn't expired, its `jti` is new, and its
+  `resource` (if any) is roll's API or MCP server; anything else is `invalid_grant`. A person with
+  no live roll account is `access_denied`.
+- **What it gets:** the person's own connection to the app (an OAuth grant, made the first time:
+  the app's rules, acting as the person, so never past what their account reaches; waiting for an
+  admin when roll's people policy says so, `access_denied` until then) and an hour's access token
+  on it. A connection revoked or denied in roll stays so (the provider can't hand it back); one that
+  lapsed (expired, or idle past roll's policy) is replaced. No refresh token: the app asks the provider again. `scope: read-only` in the assertion
+  narrows the token to reads. Each sign-in is a `sign_in` row in the audit log with the provider
+  and the person's subject there.
+- Revoking the person's connection ends its tokens and keeps them out of that app; removing the
+  app ends all of them (in the same write that removes it); un-trusting the provider stops new
+  ones. A used assertion's `jti` is kept past the verifier's clock leeway, so it never works twice.
+
 ### When a token is refused
 
 A refused request's answer says what it needed (`needs: {product, action, resource}`) and where a
@@ -490,10 +555,16 @@ remembers only a request that named one. The builder writes it `prj_1/payments,p
 a project's keys to tick, as it lists a cluster's indices.
 
 It covers the routes of one key (`/v1/secrets/projects/{project}/transit/{name}/…`: encrypt,
-decrypt, sign, verify, HMAC, the public key), at their own actions, so a service that signs with
-one key needs write on that key only, not on the project. Listing, creating, rotating and deleting
-keys stay the project's (`roll_auth::scope::sub_resources` lists the products that have such
-names; secrets' rows name `{name}` with `.index("name")`).
+decrypt, sign, verify, HMAC, the public key; rotating, its minimum version and deleting it at
+admin), at their own actions, so a service that signs with one key needs write on that key only,
+not on the project. Roll secrets checks the key again itself (`Caller::need_key`). The list
+(`GET …/transit`) shows such a rule only the keys it names: the row filters by index
+(`filters_index`), roll-auth lets a rule limited to some indices match such a list and no other
+request that names none (secrets' health and leaks filter only by environment and folder, so a
+key-limited token gets a 403 there), and roll secrets asks the grant about each key
+(`Grants::reaches_key`); with none reachable it's a 403. Creating a key stays the project's
+(`roll_auth::scope::sub_resources` lists the products that have such names; secrets' rows name
+`{name}` with `.index("name")`).
 
 ### Presets
 
@@ -602,7 +673,8 @@ type Approval = {
   approved one by one.
 - The person decides on the dashboard (a notification in the header, and the list under
   `/dashboard/access/approvals`), with `roll mcp approvals` / `roll mcp approve <id>`, or through the
-  API. Only the operator decides. A grant never approves its own request, not even with `admin` on
+  API. Only the operator (or an admin) decides, and a person decides their own tokens' requests
+  unless the policy asks for someone else ("Two-person approvals"). A grant never approves its own request, not even with `admin` on
   `access`.
 - An approval not decided in 10 minutes expires.
 - MCP tools hold the call open the same way, with keep-alive events, and return the pending
@@ -640,6 +712,71 @@ page's "Once ▾", `roll mcp approve --remember 1h`):
   (`DELETE /v1/access/tokens/{id}/temporary/{approval}`), and with it
   the approval when its request hasn't used it (the rule may have run that request instead).
 
+### Two-person approvals
+
+What matters most can need more than one approver, and named ones, as Teleport's access requests,
+Vault's control groups, Infisical's approval policies and GitHub's required reviewers do. The
+policy's `approval_rules` (`PUT /v1/access/policy`, `roll token policy --approval-rule
+secrets:reveal@production=2`, the overview's "Require several approvers…"):
+
+```json
+{ "approval_rules": [
+  { "product": "secrets", "actions": ["reveal"], "environments": ["production"], "approvals": 2 },
+  { "product": "postgres", "actions": ["delete"], "approvals": 1, "approvers": ["usr_ana", "usr_ben"] }
+] }
+```
+
+- Each rule covering a request is a gate it must pass: `approvals` (1–10) from its `approvers`.
+  Left-out `actions` or `environments` mean all; a request about no one environment is covered
+  (the stricter reading). The names match roll secrets' protected environments, whose change
+  requests count approvals the same way.
+- Who counts: with `approvers` left out, signed-in people (`usr_…`: admins, and a person for their
+  own tokens' requests, except as below). With no accounts, a rule must name its approvers
+  (`operator`): the policy refuses one that doesn't. The operator's token (`operator`) and chat approvers
+  (`slack:U…`) count only where a rule names them: anyone may hold the token, and a chat id isn't
+  tied to an account, so one human could otherwise count twice, or approve their own token's
+  request from chat. A chat approver the operator linked to their account ("Approvals in chat")
+  is that person, and counts as them.
+- A person named in `approvers` sees and decides the approvals naming them, admin or not.
+- An approver counts once; the person whose token asked never counts (as a change request's author
+  can't approve it). A token made with the operator's token has no person: the operator approving
+  its requests is the usual one-operator setup, so name people where that matters.
+- Approving adds to `approved_by`. The approval stays `pending` until every gate has its approvals
+  (`gates: [{approvals, approvers?, approved}]` on a pending approval, from the policy as it is
+  then); the request waits on as before, and runs once. Anyone who may decide can deny it.
+- Such a request is approved once: never remembered, since a rule for a while would let the next
+  ones through with fewer people. A rule remembered for a while before a gate covered it asks
+  again, and an approval approved before a gate came (one the same request would run with) asks
+  again too. Gates are about what asks: a token's own rules that allow outright don't ask.
+- The approvals page and chat cards say who has approved and how many more are needed, and the
+  product hears everyone who approved (`Approved.by`).
+
+### Access requests
+
+A token can ask up front for one more rule for a while, saying why, as Teleport's access requests
+and Entra's Privileged Identity Management do: an agent that knows it will need to drop a scratch
+database asks once, rather than being refused or asking at every call.
+
+- `POST /v1/access/requests {product, action, resource?, environment?, path?, index?, for, reason}`
+  with the token itself (`access_request_access` over MCP; `roll token request --product … --allow …
+  --for 1h --reason … --wait` with `ROLL_TOKEN`, which waits for the decision); `for` is `15m`, `1h`, `8h` or `1d`, and
+  `reason` (up to 500 characters) is what the person reads. It answers `202` with the pending
+  approval (method `GRANT`, `args: {for, reason}`); the same request again is the one waiting.
+  Only a token asks, never the operator or a person (they change rules directly), and only one made
+  to involve people (with "ask for anything else" or a rule that asks), as only a token that asks
+  may make one that does; a workload's token, which is fixed, never does. A refusal says what the
+  token could ask for (`request`, beside `widen`) only when it may. Nothing on `access` (tokens and approvals) is ever asked for:
+  a token that could manage tokens could widen itself past any approval.
+- The person reads its whole reach: "every postgres resource in every environment" when it names
+  none.
+- It's decided like any approval: on the approvals page, from chat or the CLI, under the policy's
+  approval rules ("Two-person approvals"). Approved (in the same write, however it's decided), it's the rule it asked for (one action, on that
+  resource or the product's every one, only where it named), until `for` from the approval, in the
+  token's `temporary` rules, named by the approval (taken back like any). It can't be remembered
+  for longer. What two people approved under a gate is marked so (`gated`): that gate doesn't
+  make it ask again. A read-only token's rules for a while that a gate covers just don't apply.
+- Nothing runs when it's approved: the agent waits with `access_wait_approval`, then goes on.
+
 ### What a product is told about an approval
 
 A request that runs because of an approval carries `roll_auth::Approved {id, by, until}` beside its
@@ -665,7 +802,10 @@ Approvals can also go to a Slack or Discord channel, through roll code's chat op
   approvals go to and from one of the approvers: not whoever else can see the channel (a Slack
   Connect guest, an install open to anyone), and not the install's member list, which the roll
   code owner manages rather than the operator. Anyone else is told so. `decided_by` is the
-  person (`slack:U123`, `discord:123…`).
+  person (`slack:U123`, `discord:123…`), or the roll account the operator linked them to
+  (`"people": {"U123": "usr_…"}`, `--approver U123=usr_…`, `U123=usr_…` on the approvals page):
+  a linked approver decides as that person, so they count toward the policy's approval rules
+  ("Two-person approvals") and never for their own token's request.
 - Once a day, the live tokens that expire within a week are posted there too (`expiry_digest`,
   from the hourly maintenance loop; one node posts it, the day claimed in the store).
 - Posting is best effort: an approval lives in roll (the dashboard, the API, `roll mcp approvals`);
@@ -761,6 +901,10 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
 With accounts (docs/accounts.md), a signed-in person who isn't an admin makes tokens and connects
 MCP clients for themselves, as GitHub's fine-grained tokens act for the person who made them:
 
+- Sudo mode (docs/accounts.md): a token made from a session (a person's, or an admin's) needs a
+  sign-in or a confirmation in the last two hours, else 403 `{code: "reauth_required"}`; the
+  dashboard asks "Confirm it's you" and makes it then. The operator's token and a token's own
+  tokens have no session to prove.
 - `POST /v1/access/tokens` with their session makes a grant with `user: "usr_…"`, and so does the
   consent screen. A token theirs makes is theirs too.
 - **An admin approves what reaches far** (GitHub's organization approval of fine-grained tokens).
@@ -909,12 +1053,36 @@ and Google mail a sign-in from somewhere new): a leaked token is used from somew
   OAuth client put in a name (Slack's `<!channel>`, Discord's `[label](url)`) is dropped, and Slack
   text is escaped.
 
+## Revoking at once
+
+An incident's cut-off revokes many tokens in one write: `POST /v1/access/tokens/revoke {ids, why}`
+(the operator's; at most 500 ids) revokes every listed token or none (an unknown id refuses the
+lot), puts `why` on each (`revoked_why`), and writes an audit row per token naming who and why.
+roll secrets' reach chooses the ids (the tokens and identities that can read a folder) and calls
+`Access::revoke_many` in process; roll-access never matches scopes a second way for it.
+
+## Decoy tokens
+
+A decoy (a honeytoken, as Thinkst's canary tokens are) is a token made to be found: `POST
+/v1/access/tokens {…, decoy: true}` (the builder's "A decoy"). Plant it where only an intruder would
+look (an old repo, a wiki page, a backup's config):
+
+- It never allows anything, whatever its rules say, and never waits for an admin's approval.
+- Any use answers exactly as a revoked or made-up token does (401 `invalid_token`), so whoever
+  holds it learns nothing, and the gate checks it before anything else (the idle-token rule would
+  otherwise retire a token nobody uses).
+- Each use is written on the token (`last_used_at`, `last_used_ip`), to the audit log
+  (`source: "decoy"`, the route and the client), and mailed to its owner and every admin (once an
+  hour per decoy and person). A decoy can't be turned into a working token.
+- It's checksummed like any `rlt_`, so scanners report a leaked decoy too (roll revokes it, which
+  ends the trap: plant another).
+
 ## Leaked tokens
 
 Other products' secrets made the same way are found and revoked the same way: apps' deploy hooks
-(`rlk_`, the secret in a hook's URL) are in `SECRET_PREFIXES`, and a product registers how to
-revoke its own with `Access::on_leaked` (rolld wires apps' when apps is in). The audit log has each
-revocation.
+(`rlk_`, the secret in a hook's URL), previews' deploy hooks (`rlb_`) and SSO connections' SCIM tokens (`rlp_`, docs/accounts.md)
+are in `SECRET_PREFIXES`, and a product registers how to revoke its own with `Access::on_leaked`
+(rolld wires apps' when apps is in, previews' when they are, and accounts' always). The audit log has each revocation.
 
 
 A token pasted into a file is a token anyone who reads that file holds. roll revokes one as soon as
@@ -984,10 +1152,12 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
 | `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}`; `?product=` (and `&resource=`) only those with a rule on that product by name (naming that `{id}` or `{project}`), as a product's page lists its own tokens; `?kind=workload` the workload tokens instead |
-| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?}` → 201 `{grant, token}`; `token` is shown this once |
+| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?, decoy?}` → 201 `{grant, token}`; `token` is shown this once; `decoy`: a honeytoken ("Decoy tokens"); 403 `reauth_required` from a session without a recent proof |
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
+| `POST /v1/access/tokens/revoke` | operator | `{ids, why}`: every listed token revoked at once, all or none (404 for an unknown id), `why` on each → `{revoked: Grant[]}` |
+| `POST /v1/access/requests` | the token itself | `{product, action, resource?, environment?, path?, index?, for, reason}`: ask for one more rule for a while ("Access requests"); `202` the pending approval |
 | `DELETE /v1/access/tokens/{id}/temporary/{approval}` | operator | take back what an approval allowed it for a while, and the approval if its request hasn't used it |
 | `POST /v1/access/tokens/{id}/tighten` | operator | `{from, days?}`: apply the proposal, made again now, if its rules are still `from` (else 409) → the grant |
 | `GET /v1/access/checkup` | access read | the live tokens that need attention: `[{grant, findings: [{kind, why, fix}]}]` ("Checkup") |
@@ -999,13 +1169,19 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
 | `POST /v1/access/approvals/{id}/approve` | operator | `{remember?: "1h" \| "8h" \| "1d" \| "always"}`: also allow the same action on the same resource ("Remembered approvals") |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
-| `GET /v1/access/audit` | access read | `?grant=&product=&action=&decision=&source=&resource=&before=&limit=`; `resource` is who touched it: that resource or anything under it (`cl_1` finds `cl_1/logs-a`); `&format=jsonl` answers one event per line and `&format=csv` a row each (UTC times, every cell quoted; a formula character is defused with `'` at a cell's start and after a `;`, tab or `|` inside it, which some spreadsheets split on), as a download (the audit page and `roll mcp audit --format csv` or `jsonl`) |
+| `GET /v1/access/audit` | access read | `?grant=&product=&action=&decision=&source=&resource=&before=&limit=`; `resource` is who touched it: that resource or anything under it (`cl_1` finds `cl_1/logs-a`); `&format=jsonl` answers one event per line and `&format=csv` a row each (UTC times, every cell quoted; a formula character is defused with `'` at a cell's start and after a `;`, tab or `|` inside it, which some spreadsheets split on), as a download (the audit page and `roll mcp audit --format csv` or `jsonl`). Rows that name people (`usr_` ids: an account event's actor, a change's `by`, a resource) carry `actor_handle` and `resource_handle`, disabled and deleted people too, looked up for each answer; the CSV has them as its last two columns |
 | `POST /v1/access/leaks/github` | public (GitHub's signature) | GitHub secret scanning reports: `[{token, type, url, source}]` → `[{token_hash, token_type, label}]`; live tokens are revoked |
 | `GET /v1/access/audit/sinks` | operator | where the log streams: `Sink[]` (`{id, url, status, error, cursor_at, delivered_at, created_at, created_by}`) |
 | `POST /v1/access/audit/sinks` | operator | `{url, from_start?}` → 201 `{sink, secret}`; the secret is shown this once |
 | `POST /v1/access/audit/sinks/{id}/retry` | operator | a failed sink's batch at the next sweep → 204 |
 | `DELETE /v1/access/audit/sinks/{id}` | operator | stop streaming → 204 |
-| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days}`: roll's rules for every grant |
+| `GET /v1/access/enterprise` | operator | `{idps, apps}`: the trusted identity providers and apps (never a secret) |
+| `PUT /v1/access/enterprise/idps` | operator | `{idps: [{issuer, jwks?, matching?, name?}]}` |
+| `POST /v1/access/enterprise/apps` | operator | `{name, rules, public_jwk?}`: 201 `{client_id, client_secret?}` (the secret once) |
+| `PATCH /v1/access/enterprise/apps/{id}` | operator | `{name?, rules?}`: the app as changed; its people's connections take new rules in the same write |
+| `POST /v1/access/enterprise/apps/{id}/rotate` | operator | `{public_jwk?, keep_old_for_s?}`: a new key, or a new `client_secret` answered once; the old secret works that long (at most a week) or stops now with every token its people hold |
+| `DELETE /v1/access/enterprise/apps/{id}` | operator | remove an app, revoking its people's connections: `{revoked}` |
+| `GET /v1/access/policy` | operator | `{max_days, require_expiry, max_idle_days, approve_people, approval_rules}`: roll's rules for every grant, and what needs several approvers ("Two-person approvals") |
 | `PUT /v1/access/policy` | operator | change them; a grant made, rotated, or whose rules, lifetime or addresses change, must fit (consent too) |
 | `GET /v1/access/notify` | operator | where approvals are posted: `{chat: {install, channel, approvers} \| null}` |
 | `PUT /v1/access/notify` | operator | `{chat: {install, channel, approvers} \| null}` |

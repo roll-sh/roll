@@ -35,7 +35,7 @@ const HOUR_MS: i64 = 3_600_000;
 const BATCH: i64 = 1000;
 
 /// The audit actions that read values.
-const READS: &str = "'secrets.reveal', 'secrets.export', 'secrets.resolve'";
+const READS: &str = "'secrets.reveal', 'secrets.export', 'secrets.resolve', 'secrets.totp'";
 
 impl Secrets {
     /// Look at the audit rows since the last sweep and queue an alert for each odd read.

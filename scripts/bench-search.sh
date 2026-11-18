@@ -90,12 +90,16 @@ wait_http() { # url seconds
 running() { [[ -n $(docker_ ps -q -f "name=^$1\$") ]]; }
 
 # The disk watermarks are off: the host's disk is shared, and a reference that blocks index
-# creation (OpenSearch's create-index block past the high watermark) measures nothing.
+# creation (OpenSearch's create-index block past the high watermark) measures nothing. So is
+# Elasticsearch's merge disk check (9.1+, `indices.merge.disk.*`, apart from the allocation
+# watermarks): it holds every merge, force-merges included, while less than 5% of the disk (at
+# most 100 GB) is free, and the reference then searches unmerged segments.
 start_es() {
   if ! running "$ES_NAME"; then
     docker_ run --rm -d --name "$ES_NAME" --cpuset-cpus "$CPUS" -m "$MEM" \
       -e discovery.type=single-node -e xpack.security.enabled=false \
       -e cluster.routing.allocation.disk.threshold_enabled=false \
+      -e indices.merge.disk.check_interval=0 \
       -e xpack.license.self_generated.type=trial -e "ES_JAVA_OPTS=-Xms2g -Xmx2g" \
       -p "127.0.0.1:$ES_PORT:9200" "docker.elastic.co/elasticsearch/elasticsearch:$ES_VERSION" >/dev/null
   fi

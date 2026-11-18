@@ -10,8 +10,21 @@
 //!   (`roll_auth::check`) resolves session cookies with.
 
 pub mod api;
+pub mod audit;
+mod deletion;
+mod email_change;
 mod mail;
 mod oauth;
+pub mod passkeys;
+mod export;
+pub mod attestation;
+pub mod networks;
+mod places;
+pub mod policy;
+pub mod recovery;
+mod sudo;
+mod scim;
+pub mod sso;
 mod twofactor;
 
 use code_sql::{Db, OptionalExtension, Target, params};
@@ -113,10 +126,85 @@ CREATE TABLE IF NOT EXISTS passkeys (
     created_at INTEGER NOT NULL,
     last_used_at INTEGER
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS reset_requests (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    ip TEXT,
+    user_agent TEXT,
+    created_at INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    decided_by TEXT,
+    decided_at INTEGER
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS sign_in_places (
+    user_id TEXT NOT NULL,
+    place TEXT NOT NULL,
+    first_at INTEGER NOT NULL,
+    last_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, place)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS passkey_policy (
+    id INTEGER PRIMARY KEY,
+    policy TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS account_policy (
+    id INTEGER PRIMARY KEY,
+    policy TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS network_policy (
+    id INTEGER PRIMARY KEY,
+    policy TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS passkey_challenges (
+    id TEXT PRIMARY KEY,
+    user_id TEXT,
+    purpose TEXT NOT NULL,
+    challenge TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS throttle (
     key TEXT PRIMARY KEY,
     n INTEGER NOT NULL,
     since INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS logout_tokens (
+    jti_hash TEXT PRIMARY KEY,
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS sso_connections (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    issuer TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    client_secret TEXT NOT NULL,
+    domains TEXT NOT NULL,
+    verified TEXT NOT NULL,
+    enforce INTEGER NOT NULL,
+    provision INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    challenge TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS email_changes (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS scim_tokens (
+    connection_id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS scim_users (
+    connection_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    external_id TEXT,
+    user_name TEXT,
+    PRIMARY KEY (connection_id, user_id)
 ) WITHOUT ROWID;
 ";
 
@@ -163,11 +251,11 @@ pub enum Error {
 }
 
 impl Error {
-    fn bad_code() -> Error {
+    pub(crate) fn bad_code() -> Error {
         Error::BadRequest("the code is wrong or expired".into(), Some("bad_code"))
     }
 
-    fn signed_out() -> Error {
+    pub(crate) fn signed_out() -> Error {
         Error::Unauthorized("sign in first".into())
     }
 
@@ -227,6 +315,9 @@ pub struct Config {
     /// The gate checks nothing (a daemon on loopback without `ROLL_ADMIN_TOKEN`): anyone may use
     /// the admin routes, as every other route.
     pub open: bool,
+    /// `ROLL_ACCOUNTS_SSO_ALLOW_PRIVATE`: SSO providers on private addresses and plain http
+    /// (local development and tests only; never on by itself).
+    pub sso_allow_private: bool,
 }
 
 impl Config {
@@ -247,6 +338,7 @@ impl Config {
             google: app("ROLL_ACCOUNTS_GOOGLE_CLIENT_ID", "ROLL_ACCOUNTS_GOOGLE_CLIENT_SECRET").map(|a| ProviderConfig::new(Provider::Google, a)),
             secret_key: var("ROLL_SECRET_KEY").map(|k| Secret::new(&k)),
             open,
+            sso_allow_private: var("ROLL_ACCOUNTS_SSO_ALLOW_PRIVATE").is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
         }
     }
 
@@ -288,6 +380,8 @@ pub struct User {
     pub disabled: bool,
     pub created_at: i64,
     pub totp: bool,
+    /// How many passkeys they have (with `totp`: whether they have a second factor).
+    pub passkeys: u32,
     pub identities: Vec<Identity>,
 }
 
@@ -344,7 +438,17 @@ pub struct Accounts {
     config: Config,
     mailer: Mailer,
     http: reqwest::Client,
+    /// SSO providers' URLs are the operator's choice: never a private address, never a redirect.
+    sso_http: reqwest::Client,
+    /// SSO providers' endpoints and keys (or that they didn't answer), by issuer, with when.
+    sso_discovery: std::sync::Mutex<std::collections::HashMap<String, (sso::Discovered, std::time::Instant)>>,
+    /// TXT records, for proving SSO domains (DNS over HTTPS; a table in tests).
+    txt: std::sync::RwLock<Arc<dyn sso::TxtLookup>>,
+    /// Where account events go (rolld: roll-access's audit log); none until it's set.
+    audit: std::sync::RwLock<Option<Arc<dyn audit::Audit>>>,
     owners: Option<Arc<dyn Owners>>,
+    /// Sudo mode's window (`sudo::SUDO_MS`; shorter in tests).
+    sudo_ms: std::sync::atomic::AtomicI64,
 }
 
 impl Accounts {
@@ -361,7 +465,72 @@ impl Accounts {
         db.ensure_schema(SCHEMA)?;
         let mailer = Mailer::new(&config.mail).await?;
         let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(10)).user_agent("roll").build()?;
-        Ok(Accounts { db, config, mailer, http, owners })
+        // No proxy: a proxy would resolve names itself, past the private-address guard.
+        let mut sso = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(10)).user_agent("roll").no_proxy();
+        if !config.sso_allow_private {
+            sso = sso.dns_resolver(Arc::new(roll_net::PublicOnly));
+        }
+        let sso_http = sso.build()?;
+        // Who disabled an account (`admin`, `scim:<connection>`): SCIM lifts only its own.
+        if !db.has_column("users", "disabled_by")? {
+            db.add_column("users", "disabled_by", "TEXT")?;
+        }
+        if !db.has_column("scim_users", "user_name")? {
+            db.add_column("scim_users", "user_name", "TEXT")?;
+        }
+        // A SCIM token found leaked: where, and it no longer opens anything.
+        if !db.has_column("scim_tokens", "leaked")? {
+            db.add_column("scim_tokens", "leaked", "TEXT")?;
+        }
+        // A passkey's model, when a verified attestation proved it (hardware keys only).
+        if !db.has_column("passkeys", "aaguid")? {
+            db.add_column("passkeys", "aaguid", "TEXT")?;
+            db.add_column("passkeys", "model", "TEXT")?;
+        }
+        // Whether a passkey is synced to the person's other devices (its authenticator says so).
+        if !db.has_column("passkeys", "synced")? {
+            db.add_column("passkeys", "synced", "INTEGER")?;
+        }
+        // When a session last proved who it is (sudo mode): its sign-in until then.
+        if !db.has_column("sessions", "verified_at")? {
+            db.add_column("sessions", "verified_at", "INTEGER")?;
+        }
+        // An SSO connection's session length, and the cap a session of it carries.
+        if !db.has_column("sso_connections", "session_hours")? {
+            db.add_column("sso_connections", "session_hours", "INTEGER")?;
+        }
+        if !db.has_column("sessions", "cap_ms")? {
+            db.add_column("sessions", "cap_ms", "INTEGER")?;
+        }
+        // Which SSO connection signed a session in, and the provider's session (back-channel logout).
+        if !db.has_column("sessions", "sso_sid")? {
+            db.add_column("sessions", "sso_connection", "TEXT")?;
+            db.add_column("sessions", "sso_sid", "TEXT")?;
+        }
+        // When a session last used a passkey: phishing-resistant sign-in counts it.
+        if !db.has_column("sessions", "passkey_at")? {
+            db.add_column("sessions", "passkey_at", "INTEGER")?;
+        }
+        // A person deleted their own account: the row is a tombstone from then on.
+        if !db.has_column("users", "deleted_at")? {
+            db.add_column("users", "deleted_at", "INTEGER")?;
+        }
+        // How each session began (`sso`, or not): enforcing SSO ends the others.
+        if !db.has_column("sessions", "method")? {
+            db.add_column("sessions", "method", "TEXT")?;
+        }
+        let doh = std::env::var("ROLL_ACCOUNTS_DOH").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "https://cloudflare-dns.com/dns-query".into());
+        let txt: Arc<dyn sso::TxtLookup> = Arc::new(sso::Doh { client: sso_http.clone(), url: doh });
+        Ok(Accounts { db, config, mailer, http, sso_http, sso_discovery: Default::default(), txt: std::sync::RwLock::new(txt), audit: Default::default(), owners, sudo_ms: std::sync::atomic::AtomicI64::new(sudo::SUDO_MS) })
+    }
+
+    /// Where SSO domains' TXT records are read (tests answer from a table).
+    pub fn set_txt_lookup(&self, lookup: Arc<dyn sso::TxtLookup>) {
+        *self.txt.write().unwrap_or_else(|e| e.into_inner()) = lookup;
+    }
+
+    pub(crate) fn txt_lookup(&self) -> Arc<dyn sso::TxtLookup> {
+        self.txt.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn config(&self) -> &Config {
@@ -400,7 +569,9 @@ impl Accounts {
         })?;
         let Some(((id, user, level), (seen_at, expires_at), (handle, admin, disabled, code_owner))) = row else { return Ok(None) };
         let full = level == "full";
-        if disabled || expires_at <= now || (full && seen_at + SESSION_IDLE_MS <= now) {
+        // A company's idle timeout (its account policy), else roll's week.
+        let idle = self.account_policy()?.idle_ms();
+        if disabled || expires_at <= now || (full && seen_at + idle <= now) {
             return Ok(None);
         }
         if !full {
@@ -423,8 +594,40 @@ impl Accounts {
         Ok(row.filter(|(_, _, disabled, _)| !disabled).map(|(handle, admin, _, code_owner)| roll_auth::SignedIn { user: user.to_string(), handle, admin, code_owner, session: String::new() }))
     }
 
-    /// A new session for `user`: full, or owing a second factor when they have one on.
+    /// A new session for `user`: full, or owing a second factor when they have one on. Refused
+    /// for a person whose domain's SSO connection enforces it ([`Accounts::issue_sso`] signs them
+    /// in).
     pub fn issue(&self, user: &str, user_agent: &str) -> Result<Issued> {
+        self.sso_not_enforced(user)?;
+        self.issue_session(user, user_agent, None, false)
+    }
+
+    /// A session for a person their company's SSO provider (connection `connection`) just signed
+    /// in: no longer than the connection's session length.
+    pub(crate) fn issue_sso(&self, user: &str, user_agent: &str, connection: &str, sid: Option<&str>) -> Result<Issued> {
+        let cap = self.db.read(|c| c.query_row("SELECT session_hours FROM sso_connections WHERE id = ?", [connection], |r| r.get::<_, Option<i64>>(0)).optional())?.flatten().filter(|h| *h > 0);
+        let issued = self.issue_capped(user, user_agent, Some("sso"), false, cap.map(|h| h * 3_600_000))?;
+        // Which connection, and the provider's own session: its back-channel logout ends this one.
+        self.db.write(|c| c.execute("UPDATE sessions SET sso_connection = ?, sso_sid = ? WHERE id = ?", params![connection, sid, issued.id]))?;
+        Ok(issued)
+    }
+
+    /// A session for a person a passkey signed in on its own: the authenticator verified them
+    /// (a PIN or biometric) and holds the key, so it's both factors, as GitHub counts it.
+    pub(crate) fn issue_passkey(&self, user: &str, user_agent: &str) -> Result<Issued> {
+        self.sso_not_enforced(user)?;
+        let issued = self.issue_session(user, user_agent, Some("passkey"), true)?;
+        self.mark_passkey(&issued.id)?;
+        Ok(issued)
+    }
+
+    fn issue_session(&self, user: &str, user_agent: &str, method: Option<&str>, both_factors: bool) -> Result<Issued> {
+        self.issue_capped(user, user_agent, method, both_factors, None)
+    }
+
+    /// [`Self::issue_session`], its whole session lasting at most `cap_ms` (an SSO connection's
+    /// session length), kept on the session so finishing a second factor keeps it.
+    fn issue_capped(&self, user: &str, user_agent: &str, method: Option<&str>, both_factors: bool, cap_ms: Option<i64>) -> Result<Issued> {
         self.provision_owner(user);
         let now = self.db.now_ms()?;
         let token = new_token("rls");
@@ -436,13 +639,13 @@ impl Accounts {
                 Some(true) => return Err(Error::Forbidden("this account is disabled".into(), "disabled")),
                 Some(false) => {}
             }
-            let mfa = c.query_row("SELECT 1 FROM totp WHERE user_id = ? AND enabled = 1", [user], |_| Ok(())).optional()?.is_some();
-            let (level, ttl) = if mfa { ("mfa", SECOND_FACTOR_TTL_MS) } else { ("full", SESSION_TTL_MS) };
+            let mfa = !both_factors && c.query_row("SELECT 1 FROM totp WHERE user_id = ? AND enabled = 1", [user], |_| Ok(())).optional()?.is_some();
+            let (level, ttl) = if mfa { ("mfa", SECOND_FACTOR_TTL_MS) } else { ("full", cap_ms.map_or(SESSION_TTL_MS, |c| c.min(SESSION_TTL_MS))) };
             // The user's sessions that ended go with each new one: no sweeper needed.
             c.execute("DELETE FROM sessions WHERE user_id = ? AND (expires_at <= ? OR (level = 'full' AND seen_at <= ?))", params![user, now, now - SESSION_IDLE_MS])?;
             c.execute(
-                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                params![sha256_hex(&token), id, user, level, now, now, now + ttl, user_agent],
+                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method, cap_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![sha256_hex(&token), id, user, level, now, now, now + ttl, user_agent, method, cap_ms],
             )?;
             Ok(mfa)
         })?;
@@ -451,6 +654,20 @@ impl Accounts {
 
     /// The second factor passed: the owing session is replaced by a new, full one.
     pub(crate) fn complete(&self, owed: &roll_auth::SecondFactorOwed, user_agent: &str) -> Result<Issued> {
+        // A sign-in that began some other way while SSO was enforced (or before it was) doesn't
+        // finish: the provider signs those people in.
+        let row = self.db.read(|c| {
+            c.query_row("SELECT method, cap_ms, sso_connection, sso_sid FROM sessions WHERE id = ?", [owed.session.as_str()], |r| {
+                Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?))
+            })
+            .optional()
+        })?;
+        let (method, cap_ms, sso_connection, sso_sid) = row.unwrap_or((None, None, None, None));
+        // An SSO connection's session length holds past the second factor too.
+        let ttl = cap_ms.map_or(SESSION_TTL_MS, |c| c.min(SESSION_TTL_MS));
+        if method.as_deref() != Some("sso") {
+            self.sso_not_enforced(&owed.user)?;
+        }
         let now = self.db.now_ms()?;
         let token = new_token("rls");
         let id = new_id("ses");
@@ -460,8 +677,8 @@ impl Accounts {
                 return Err(Error::signed_out());
             }
             c.execute(
-                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent) VALUES (?, ?, ?, 'full', ?, ?, ?, ?)",
-                params![sha256_hex(&token), id, owed.user, now, now, now + SESSION_TTL_MS, user_agent],
+                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method, cap_ms, sso_connection, sso_sid) VALUES (?, ?, ?, 'full', ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![sha256_hex(&token), id, owed.user, now, now, now + ttl, user_agent, method, cap_ms, sso_connection, sso_sid],
             )?;
             Ok(())
         })?;
@@ -515,8 +732,18 @@ impl Accounts {
         Ok(self.db.read(|c| c.query_row("SELECT code_owner_id FROM users WHERE id = ?", [user], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
     }
 
+    /// The handles of the people `ids` name (at most 500), whatever their state.
+    pub fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>> {
+        let ids = &ids[..ids.len().min(500)];
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; ids.len()].join(", ");
+        Ok(self.db.read(|c| c.query(&format!("SELECT id, handle FROM users WHERE id IN ({marks})"), ids, |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?)
+    }
+
     pub fn users(&self) -> Result<Vec<User>> {
-        let ids = self.db.read(|c| c.query("SELECT id FROM users ORDER BY created_at, id", (), |r| r.get::<_, String>(0)))?;
+        let ids = self.db.read(|c| c.query("SELECT id FROM users WHERE deleted_at IS NULL ORDER BY created_at, id", (), |r| r.get::<_, String>(0)))?;
         ids.iter().map(|id| self.user(id)).collect()
     }
 
@@ -531,15 +758,22 @@ impl Accounts {
 
     /// An admin's change to a user. Disabling one signs them out everywhere, in the same write.
     pub fn update_user(&self, id: &str, admin: Option<bool>, disabled: Option<bool>) -> Result<User> {
+        self.update_user_by(id, admin, disabled, "admin")
+    }
+
+    /// As [`Accounts::update_user`], saying who disables (`admin`, or `scim:<connection>`): SCIM
+    /// lifts only a disable of its own, never an admin's.
+    pub(crate) fn update_user_by(&self, id: &str, admin: Option<bool>, disabled: Option<bool>, by: &str) -> Result<User> {
         self.db.write(|c| {
-            if c.query_row("SELECT 1 FROM users WHERE id = ?", [id], |_| Ok(())).optional()?.is_none() {
+            // A deleted account is gone for good: no admin turns it back on.
+            if c.query_row("SELECT 1 FROM users WHERE id = ? AND deleted_at IS NULL", [id], |_| Ok(())).optional()?.is_none() {
                 return Err(Error::NotFound(format!("no user {id}")));
             }
             if let Some(a) = admin {
                 c.execute("UPDATE users SET admin = ? WHERE id = ?", params![a, id])?;
             }
             if let Some(d) = disabled {
-                c.execute("UPDATE users SET disabled = ? WHERE id = ?", params![d, id])?;
+                c.execute("UPDATE users SET disabled = ?, disabled_by = ? WHERE id = ?", params![d, d.then_some(by), id])?;
                 if d {
                     c.execute("DELETE FROM sessions WHERE user_id = ?", [id])?;
                 }
@@ -602,7 +836,7 @@ impl Accounts {
 
     /// The first free handle from `hint` (else the email's local part): an owner name, unique
     /// among users and roll code's owners.
-    fn pick_handle(&self, hint: Option<&str>, email: &str) -> Result<String> {
+    pub(crate) fn pick_handle(&self, hint: Option<&str>, email: &str) -> Result<String> {
         let base = hint.map(slug).filter(|s| !s.is_empty()).unwrap_or_else(|| slug(email.split('@').next().unwrap_or_default()));
         let base = if base.is_empty() { "user".to_string() } else { base };
         for n in 1..=50 {
@@ -656,6 +890,30 @@ impl Accounts {
             Ok(())
         })?;
         tracing::info!(user = %id, "accounts: user created from an invite");
+        Ok(id)
+    }
+
+    /// A new account for a person an SSO connection vouched for (its sign-in with `provision`, or
+    /// its SCIM): never an admin, invited by `by`, linked to `identity` when there is one.
+    pub(crate) fn provision_user(&self, email: &str, name: Option<&str>, identity: Option<(&str, &str)>, by: &str) -> Result<String> {
+        let handle = self.pick_handle(None, email)?;
+        let id = new_id("usr");
+        let now = self.db.now_ms()?;
+        let name: String = name.map(str::trim).filter(|n| !n.is_empty()).unwrap_or(&handle).chars().take(100).collect();
+        self.db.write(|c| {
+            if c.query_row("SELECT 1 FROM users WHERE email = ? OR handle = ?", [email, handle.as_str()], |_| Ok(())).optional()?.is_some() {
+                return Err(Error::Conflict("an account has this email or handle; try again".into()));
+            }
+            c.execute(
+                "INSERT INTO users (id, email, handle, name, admin, disabled, code_owner_id, invited_by, created_at) VALUES (?, ?, ?, ?, 0, 0, NULL, ?, ?)",
+                params![id, email, handle, name, by, now],
+            )?;
+            if let Some((provider, subject)) = identity {
+                c.execute("INSERT INTO identities (provider, subject, user_id, email, login, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![provider, subject, id, email, email, now])?;
+            }
+            Ok(())
+        })?;
+        tracing::info!(user = %id, by = %by, "accounts: user provisioned by SSO");
         Ok(id)
     }
 
@@ -794,8 +1052,15 @@ impl Accounts {
         Ok(Some(mail))
     }
 
+    /// Whose account an email code was sent to (`None`: a sign-up's, or no such code): a wrong
+    /// code for it goes in that person's security log.
+    pub(crate) fn code_owner(&self, challenge: &str) -> Option<String> {
+        self.db.read(|c| c.query_row("SELECT user_id FROM email_codes WHERE id = ?", [challenge], |r| r.get::<_, Option<String>>(0)).optional()).ok().flatten().flatten()
+    }
+
     /// Check a challenge's code: the user it signs in (made from the invite on first sign-in).
-    pub fn email_verify(&self, challenge: &str, code: &str) -> Result<String> {
+    /// The person an email code signs in, and whether their account was made now (an invite).
+    pub fn email_verify(&self, challenge: &str, code: &str) -> Result<(String, bool)> {
         let now = self.db.now_ms()?;
         // A try is used up before the code is checked, in one write: guesses sent in parallel
         // can't share one.
@@ -819,8 +1084,8 @@ impl Accounts {
         }
         self.forget(&key)?;
         match (user, invite) {
-            (Some(u), _) => Ok(u),
-            (None, Some(inv)) => self.create_user(NewUser { invite_id: &inv, email: &email, hint: None, name: None, identity: None }),
+            (Some(u), _) => Ok((u, false)),
+            (None, Some(inv)) => self.create_user(NewUser { invite_id: &inv, email: &email, hint: None, name: None, identity: None }).map(|u| (u, true)),
             (None, None) => Err(Error::bad_code()),
         }
     }
@@ -847,6 +1112,58 @@ impl roll_auth::Sessions for Resolver {
 
     fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
         self.0.person(user).map_err(|e| e.to_string())
+    }
+
+    fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>, String> {
+        self.0.handles(ids).map_err(|e| e.to_string())
+    }
+
+    fn sso_trust<'a>(&'a self, id: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SsoTrust>, String>> {
+        let (accounts, id) = (self.0.clone(), id.to_string());
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let all = accounts.sso_connections().map_err(|e| e.to_string())?;
+                Ok(all.into_iter().find(|c| c.id == id).map(|c| roll_auth::SsoTrust { name: c.name, issuer: c.issuer, verified: c.verified }))
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        })
+    }
+
+    fn fresh<'a>(&'a self, user: &'a str, session: &'a str) -> roll_auth::BoxFuture<'a, Result<bool, String>> {
+        let (accounts, user, session) = (self.0.clone(), user.to_string(), session.to_string());
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || accounts.fresh_for(&user, &session).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
+        })
+    }
+
+    fn missing<'a>(&'a self, user: &'a str, session: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::Missing>, String>> {
+        let (accounts, user, session) = (self.0.clone(), user.to_string(), session.to_string());
+        Box::pin(async move { tokio::task::spawn_blocking(move || accounts.missing(&user, &session).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())? })
+    }
+
+    fn network_ok<'a>(&'a self, _user: &'a str, ip: Option<std::net::IpAddr>) -> roll_auth::BoxFuture<'a, Result<bool, String>> {
+        let accounts = self.0.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || accounts.network_policy().map(|p| p.allows(ip)).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
+        })
+    }
+
+    fn person_by_email<'a>(&'a self, email: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SignedIn>, String>> {
+        // As addresses are kept (ASCII, lower-cased): a look-alike letter never folds into one.
+        let (accounts, email) = (self.0.clone(), normalize_email(email).ok().filter(|e| e.is_ascii()));
+        Box::pin(async move {
+            let Some(email) = email else { return Ok(None) };
+            tokio::task::spawn_blocking(move || {
+                let id: Option<String> = accounts.db.read(|c| c.query_row("SELECT id FROM users WHERE email = ?", [email.as_str()], |r| r.get(0)).optional()).map_err(|e| e.to_string())?;
+                match id {
+                    Some(id) => accounts.person(&id).map_err(|e| e.to_string()),
+                    None => Ok(None),
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        })
     }
 
     fn tell<'a>(&'a self, user: &'a str, subject: &'a str, text: &'a str) -> roll_auth::BoxFuture<'a, Result<(), String>> {
@@ -888,12 +1205,14 @@ fn load_user(c: &code_sql::Conn<'_>, id: &str) -> code_sql::Result<Option<User>>
                 disabled: r.get(5)?,
                 created_at: r.get(6)?,
                 totp: false,
+                passkeys: 0,
                 identities: Vec::new(),
             })
         })
         .optional()?;
     let Some(mut user) = user else { return Ok(None) };
     user.totp = c.query_row("SELECT 1 FROM totp WHERE user_id = ? AND enabled = 1", [id], |_| Ok(())).optional()?.is_some();
+    user.passkeys = c.query_row("SELECT COUNT(*) FROM passkeys WHERE user_id = ?", [id], |r| r.get::<_, i64>(0))?.clamp(0, u32::MAX as i64) as u32;
     user.identities = c.query("SELECT provider, login, email FROM identities WHERE user_id = ? ORDER BY provider", [id], |r| {
         Ok(Identity { provider: r.get(0)?, login: r.get(1)?, email: r.get(2)? })
     })?;

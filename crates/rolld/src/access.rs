@@ -112,6 +112,9 @@ pub fn open(args: &crate::Args, home: &std::path::Path, auth: &crate::auth::Auth
     let resolvers = resolvers(products, workspace);
     let access = tokio::task::block_in_place(|| Access::open(&target, pg, config, resolvers))?;
     auth.set_authorizer(Arc::new(roll_access::evaluate::Evaluator(access.clone())));
+    // People's sessions from allowed networks only: the same client address the evaluator reads.
+    let a = access.clone();
+    auth.set_client_ip(Arc::new(move |req| roll_access::evaluate::client_ip(req, &a.config)));
     // Old audit rows, decided approvals, spent codes and expired secrets go once an hour.
     let a = access.clone();
     tokio::spawn(async move {
@@ -272,13 +275,22 @@ fn card(web: &str, a: &roll_access::store::Approval) -> code_control::chatops::a
         detail.push_str(&format!("\n{cut}"));
     }
     detail.push_str(&format!("\n{}/dashboard/access/approvals?id={}", web.trim_end_matches('/'), a.id));
+    let mention = |by: &str| by.strip_prefix("slack:").map_or(by.to_string(), |u| format!("<@{u}>"));
+    // roll's policy asks several people: who has, and how many more.
+    if a.state == "pending" && !a.gates.is_empty() {
+        let more: usize = a.gates.iter().map(|g| usize::from(g.approvals).saturating_sub(g.approved)).sum();
+        let by: Vec<String> = a.approved_by.iter().map(|b| mention(b)).collect();
+        let so_far = if by.is_empty() { String::new() } else { format!("Approved by {}; ", by.join(", ")) };
+        detail = format!("{so_far}{more} more approval{} needed\n{detail}", if more == 1 { "" } else { "s" });
+    }
+    let approvers = if a.approved_by.is_empty() { a.decided_by.clone().unwrap_or_else(|| "someone".into()) } else { a.approved_by.join(", ") };
     let decided = match a.state.as_str() {
         "pending" => None,
-        "approved" | "used" => Some((a.decided_by.clone().unwrap_or_else(|| "someone".into()), "approved".into())),
+        "approved" | "used" => Some((approvers, "approved".into())),
         "denied" => Some((a.decided_by.clone().unwrap_or_else(|| "someone".into()), "denied".into())),
         other => Some(("roll".into(), other.to_string())),
     };
-    let decided = decided.map(|(by, what)| (by.strip_prefix("slack:").map_or(by.clone(), |u| format!("<@{u}>")), what));
+    let decided = decided.map(|(by, what)| (by.split(", ").map(mention).collect::<Vec<_>>().join(", "), what));
     code_control::chatops::access::AccessCard {
         approval: a.id.clone(),
         title: format!("{} wants to {} {what}", a.grant_name, a.action),

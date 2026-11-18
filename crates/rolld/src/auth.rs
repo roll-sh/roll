@@ -37,6 +37,8 @@ pub const RULES: &[Rule] = &[
     // …except where approvals are posted and where the audit log streams: the operator's.
     Rule { route: "/v1/access/notify", access: Access::Operator },
     Rule { route: "/v1/access/audit/sinks", access: Access::Operator },
+    // Which identity providers roll trusts, and the apps they may sign people in to.
+    Rule { route: "/v1/access/enterprise", access: Access::Operator },
     // Health: load balancers and the dashboard's status; nothing a tenant owns.
     Rule { route: "/v1/health", access: Access::Public("health: Postgres control plane version and status") },
     Rule { route: "/v1/code/health", access: Access::Public("health: load balancers") },
@@ -46,6 +48,7 @@ pub const RULES: &[Rule] = &[
     // Version, node and which products are on: the dashboard's sidebar reads it before sign-in.
     // It (and the 404s of products that are off) is merged in front of the gate in main.rs.
     Rule { route: "/v1/info", access: Access::Public("version, node and products on, for the dashboard before sign-in") },
+    Rule { route: "/v1/previews/hooks", access: Access::Public("previews' deploy hooks: the secret in the URL (`rlb_`, a hash kept); anything but a live hook is a 404") },
     Rule { route: "/v1/previews/{id}/screenshot.png", access: Access::Public("a public preview's screenshot behind a signed, expiring link (GitHub fetches the pull request comment's image anonymously)") },
     // roll code has owners and tokens of its own (docs/code/http-api.md "Auth"): public repos and
     // pages read anonymously, git per its own rules, GitHub/Slack/Discord/Linear webhooks verify
@@ -194,6 +197,11 @@ impl Auth {
     }
 
     /// Scoped tokens' evaluator (`access.rs`): set before serving.
+    /// How the gate reads a client's address (roll-access's, with its trusted proxies).
+    pub fn set_client_ip(&self, f: roll_auth::ClientIpFn) {
+        self.gate.set_client_ip(f);
+    }
+
     pub fn set_authorizer(&self, a: std::sync::Arc<dyn roll_auth::Authorizer>) {
         self.gate.set_authorizer(a);
     }

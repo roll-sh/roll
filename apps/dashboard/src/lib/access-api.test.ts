@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { installLink, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
+import { installLink, accessRequest, approversText, parseApprovers, deciderName, describeApprovalRule, gateProgress, rememberable, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset, idpFromForm, tieForAgents, untieForAgents } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -177,6 +177,34 @@ describe("a refusal's proposal", () => {
   });
 });
 
+describe("two-person approvals", () => {
+  it("says what a pending approval still needs, and who approved it", () => {
+    expect(gateProgress({ gates: [] })).toBeNull();
+    expect(gateProgress({ gates: [{ approvals: 2, approved: 1 }], approved_by: ["usr_bob"] })).toBe("approved by usr_bob · 1 more approval needed");
+    expect(gateProgress({ gates: [{ approvals: 2, approved: 0, approvers: ["usr_a", "usr_b"] }] })).toBe("2 more approvals needed (from usr_a, usr_b)");
+  });
+  it("reads an access request's time and reason, and never offers to remember it", () => {
+    const asked = { method: "GRANT", resource: "pa", args: { for: "1h", reason: "drop scratch" } };
+    expect(accessRequest(asked)).toEqual({ for: "1h", reason: "drop scratch" });
+    expect(accessRequest({ method: "DELETE" })).toBeNull();
+    expect(rememberable(asked)).toBe(false);
+  });
+  it("reads chat approvers with the accounts some are linked to", () => {
+    expect(parseApprovers("U1=usr_ana, @U2 U1")).toEqual({ approvers: ["U1", "U2"], people: { U1: "usr_ana" } });
+    expect(approversText({ approvers: ["U1", "U2"], people: { U1: "usr_ana" } })).toBe("U1=usr_ana, U2");
+  });
+  it("names whoever is looking as an approval records them", () => {
+    expect(deciderName({ kind: "operator", locked: true })).toBe("operator");
+    expect(deciderName({ kind: "operator", user: { id: "usr_bob", handle: "bob" }, locked: true })).toBe("usr_bob");
+    expect(deciderName(null)).toBeNull();
+  });
+  it("names a rule as the policy panel lists it, and a gated approval isn't remembered", () => {
+    expect(describeApprovalRule({ product: "secrets", actions: ["reveal"], environments: ["production"], approvals: 2 })).toBe("Secrets · reveal · production: 2 approvals");
+    expect(rememberable({ resource: "prj_a", gates: [{ approvals: 2, approved: 1 }] })).toBe(false);
+    expect(rememberable({ resource: "prj_a" })).toBe(true);
+  });
+});
+
 describe("one-click installs", () => {
   it("links Cursor and VS Code to the server's URL alone, and nothing else", () => {
     const url = "https://api.roll.example/v1/mcp?tools=search";
@@ -187,5 +215,32 @@ describe("one-click installs", () => {
     const vscode = installLink("vscode", url)!;
     expect(JSON.parse(decodeURIComponent(vscode.href.slice("vscode:mcp/install?".length)))).toEqual({ name: "roll", type: "http", url });
     expect(installLink("claude-code", url)).toBeNull();
+  });
+});
+
+describe("idpFromForm", () => {
+  const form = { issuer: "https://acme.okta.com", name: " Okta ", matching: "email" as const, domains: "", jwks: "", admins: false };
+  it("needs an https issuer and, matching by email, the domains it vouches for", () => {
+    expect(idpFromForm({ ...form, issuer: "http://acme.okta.com" })).toEqual({ problem: "The issuer is an https URL" });
+    expect(idpFromForm(form)).toEqual({ problem: "Name the email domains it vouches for" });
+    expect(idpFromForm({ ...form, domains: "acme.com, nope" })).toEqual({ problem: "nope isn't a domain" });
+    expect(idpFromForm({ ...form, domains: "acme.com", jwks: "{}" })).toMatchObject({ problem: expect.stringContaining("JWKS") });
+    expect(idpFromForm({ ...form, domains: "@Acme.com acme.com, acme.co.uk", admins: true })).toEqual({
+      idp: { issuer: "https://acme.okta.com", matching: "email", domains: ["acme.com", "acme.co.uk"], admins: true, name: "Okta" },
+    });
+    expect(idpFromForm({ ...form, matching: "aud_sub" })).toEqual({ idp: { issuer: "https://acme.okta.com", matching: "aud_sub", name: "Okta" } });
+    // Tied to an SSO connection: its proven domains, never typed ones.
+    expect(idpFromForm({ ...form, domains: "evil.com", sso: "sso_1" })).toEqual({ idp: { issuer: "https://acme.okta.com", matching: "email", name: "Okta", sso: "sso_1" } });
+  });
+});
+
+describe("an SSO connection for agents too", () => {
+  const c = { id: "sso_okta", name: "Okta", issuer: "https://acme.okta.com" };
+  it("adds it once, in place of a hand-made one for the same issuer, and takes it away", () => {
+    const typed = [{ issuer: "https://acme.okta.com/", domains: ["acme.com"] }, { issuer: "https://other.example", domains: ["x.com"] }];
+    const tied = tieForAgents(typed, c);
+    expect(tied).toEqual([{ issuer: "https://other.example", domains: ["x.com"] }, { issuer: "https://acme.okta.com", name: "Okta", matching: "email", sso: "sso_okta" }]);
+    expect(tieForAgents(tied, c)).toBe(tied);
+    expect(untieForAgents(tied, "sso_okta")).toEqual([{ issuer: "https://other.example", domains: ["x.com"] }]);
   });
 });
