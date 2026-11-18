@@ -265,7 +265,9 @@ behind the `Apps` trait:
   - Each gets an ephemeral environment `pv-<preview id>`: `PUT …/environments/pv-…`
     `{branch: null, ephemeral: true, report: false}`. `report: false` (apps' #249) keeps roll
     apps from posting its own commit status and GitHub Deployment for the environment's deploys.
-    The pull request then hears one voice: previews' `roll/preview` and comment.
+    The pull request then hears one voice: previews' `roll/preview` and comment. A roll apps
+    older than that, such as a node not yet upgraded on a fleet, refuses the field. Then the
+    environment is made without it, and both report.
   - The branches' URLs and the project's overrides are set as its variables.
   - Every variable of a link to a branched resource comes from the branch, under roll apps'
     names (a stream's `KAFKA_BROKERS`/`KAFKA_USERNAME`/`KAFKA_PASSWORD`, a bucket's
