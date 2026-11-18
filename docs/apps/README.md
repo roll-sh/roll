@@ -625,7 +625,18 @@ whole. The environment's log
   rollout's step passed; `deploy.ready`: a deployment built beside the live one, under a hold or
   `no_traffic`), and when asked every new live deployment, go to its targets:
   a webhook (JSON, signed with HMAC-SHA256 over `<timestamp>.<body>`), a Slack incoming webhook,
-  a Discord webhook, or email to the project's owner. Email is on by default (Render's,
+  a Discord webhook, email to the project's owner, or an on-call service (Heroku's and Cloud
+  Monitoring's PagerDuty and Opsgenie): `pagerduty` with its integration's `routing_key` (Events
+  API v2) or `opsgenie` with an API integration's `api_key`, each sealed as a target's secret and
+  never returned, `region` `us` or `eu`, sent only to the service's own API (no URL of the
+  tenant's). A failure opens an incident keyed `roll:<service>/<environment>/<event>` (a repeat
+  updates it), its severity by what failed (a crash loop or the spend limit critical, a failed
+  deploy, error rate or job an error, the rest warnings); `alert.resolved` closes its alert's, and
+  a deploy that goes live closes a failed deploy's (an on-call target that pages on `deploy.failed`
+  hears `deploy.active` for it). An on-call target's deliveries go one at a time in the events'
+  order, a retry included, so a close never overtakes its open; others go side by side.
+  `roll apps notifications --add - --kind pagerduty` reads the key from stdin.
+  `on_call_targets_open_and_close_incidents`. Email is on by default (Render's,
   Vercel's): a project's first service adds an `email` target with the default events, once
   per project (`state` remembers it, so a removed one stays removed; `roll apps notifications
   --email` adds it back). It goes only to the owner's own account address, looked up at each
@@ -2986,11 +2997,14 @@ the day's sidecars, analytics and builds found six more, fixed: a digest-pinned 
 skipped the registry check; runs and consoles ran their sidecars unmetered; sidecars' load read as
 the app's for autoscaling; invented event properties grew a read without bound; sbt's script name
 dropped `_`, missed `"""…"""` and had no tree of its own without a plugin; a dev start.sh turned a
-static site into a container. Firewall rules on more than the path were built next.
+static site into a container. Firewall rules on more than the path were built next, then PagerDuty and Opsgenie targets
+("Notifications").
 
-1. **PagerDuty and Opsgenie targets** (Heroku's, Cloud Monitoring's): notification kinds with a
-   sealed routing key on the existing delivery queue; alerts, `crash_loop` and `cron.failed`
-   trigger with a dedup key, `alert.resolved` resolves.
+1. **Variables that belong in roll secrets** (roll secrets' review): a secret-looking variable
+   pasted into the panel offers "Move to roll secrets" (into the project environment apps
+   already injects), and a variable may be `roll://ENV/KEY`, resolved through roll secrets'
+   `Secrets::resolve_for(ResourceRef::new(Kind::Service, id), …)` (#329, audited as the service,
+   rotation seen through `digest_for`), so values reach its health, leak guard and audit chain.
 2. **External proxy rewrites and conditional rules** (Vercel's rewrites to another origin,
    Netlify's 200 proxies and conditions): `https://…/:splat 200` through `roll_net::PublicOnly`,
    no redirects, bounded and metered; `Country=`, `Language=`, `Cookie=` and vercel.json's

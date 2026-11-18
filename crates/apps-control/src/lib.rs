@@ -155,6 +155,9 @@ pub struct AppsConfig {
     /// registries whose names resolve to one (local development and tests only:
     /// `ROLL_APPS_ALLOW_PRIVATE`).
     pub allow_private: bool,
+    /// PagerDuty's Events API v2 and Opsgenie's Alert API, per region (`us`, `eu`): fixed, never
+    /// a tenant's URL ([`notify`]'s on-call targets). Tests point them at their own servers.
+    pub oncall_apis: OncallApis,
     /// Between two passes over spend limits (`spend`).
     pub spend_every: Duration,
     /// A failed cron run's first retry waits this long, each next one twice as long (10 min at most).
@@ -187,6 +190,7 @@ impl AppsConfig {
             visitor_recheck: Duration::from_secs(300),
             otlp_base: None,
             allow_private: false,
+            oncall_apis: OncallApis::default(),
             spend_every: Duration::from_secs(30),
             cron_retry_after: Duration::from_secs(30),
             keep_deployments: 10,
@@ -318,6 +322,26 @@ pub struct Apps {
     /// HTTP/2 without TLS (prior knowledge), for h2c apps ([`model::Run::h2c`]).
     pub(crate) client_h2: hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
     stop: CancellationToken,
+}
+
+/// Where on-call targets are sent ([`AppsConfig::oncall_apis`]).
+#[derive(Clone, Debug)]
+pub struct OncallApis {
+    pub pagerduty_us: String,
+    pub pagerduty_eu: String,
+    pub opsgenie_us: String,
+    pub opsgenie_eu: String,
+}
+
+impl Default for OncallApis {
+    fn default() -> Self {
+        OncallApis {
+            pagerduty_us: "https://events.pagerduty.com/v2/enqueue".into(),
+            pagerduty_eu: "https://events.eu.pagerduty.com/v2/enqueue".into(),
+            opsgenie_us: "https://api.opsgenie.com/v2/alerts".into(),
+            opsgenie_eu: "https://api.eu.opsgenie.com/v2/alerts".into(),
+        }
+    }
 }
 
 pub(crate) fn env_key(service: &str, env: &str) -> String {
