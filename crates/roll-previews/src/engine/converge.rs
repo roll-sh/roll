@@ -509,6 +509,7 @@ impl Engine {
             }
         }
         // Every deploy at once (on roll apps each waits for its rollout), their outcomes in order.
+        let mut failed: Option<String> = None;
         let outcomes = futures::future::join_all(to_deploy.iter().map(|(t, ..)| self.apps.deploy(t))).await;
         for ((t, fingerprint, rev, own), outcome) in to_deploy.into_iter().zip(outcomes) {
             let spec = &t.spec;
@@ -536,7 +537,8 @@ impl Engine {
                         self.deploying_since.lock().remove(&(r.id.clone(), spec.name.clone()));
                         let msg = format!("{e:#}, for over {} minutes", DEPLOY_WAIT_MS / 60_000);
                         self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
-                        anyhow::bail!("deploying {}: {msg}", spec.name);
+                        failed.get_or_insert(format!("deploying {}: {msg}", spec.name));
+                        continue;
                     }
                     self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
                     // The backend has what this deploy sent (its variables): a change made
@@ -547,9 +549,14 @@ impl Engine {
                 Err(e) => {
                     let msg = format!("{e:#}");
                     self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
-                    anyhow::bail!("deploying {}: {msg}", spec.name);
+                    failed.get_or_insert(format!("deploying {}: {msg}", spec.name));
                 }
             }
+        }
+        // Every outcome is kept first: a failed deploy doesn't lose the others' (which would be
+        // deployed again for nothing).
+        if let Some(e) = failed {
+            anyhow::bail!(e);
         }
         if still_deploying {
             let again = self.store.now_ms()? + DEPLOY_POLL_MS;

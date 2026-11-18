@@ -194,7 +194,13 @@ state. A pass of the reconciler:
        "Schema changes").
    5. The secrets environment `pv-<preview id>` is ensured (base, overrides, resource URLs).
    6. Every service whose revision is not the one it should run is redeployed (the change's head
-      for its repo; for the others their branch of the same name, else their default head).
+      for its repo; for the others their branch of the same name, else their default head), all
+      of them at once. Every outcome is kept before the first failure fails the converge, so a
+      service that deployed isn't deployed again. Measured on 2026-11-18 with two roll apps
+      services, six interleaved pairs in both orders under 32–79 load: a push with cached builds
+      is live again in 4.2 s against 5.8 s one after another (medians; at once won 5 of 6, the
+      sixth a tie). A first push with cold builds is no faster (CPU-bound: two builds share the
+      cores), within the noise in both orders.
    7. The preview becomes `ready` (or `sleeping`), and the change and the PR hear about it.
    Every write that asks for a converge (a push, a delete, a reset, a refresh) bumps the row's
    `generation`. A converge settles a row only if its generation hasn't moved since it started,
