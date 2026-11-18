@@ -130,7 +130,7 @@ fn connection_of(a: &Accounts, headers: &HeaderMap) -> crate::Result<crate::sso:
     if !scheme.eq_ignore_ascii_case("bearer") || !token.starts_with("rlp_") {
         return Err(unauthorized());
     }
-    let id = a.db.read(|c| c.query_row("SELECT connection_id FROM scim_tokens WHERE token_hash = ?", [sha256_hex(token)], |r| r.get::<_, String>(0)).optional())?.ok_or_else(unauthorized)?;
+    let id = a.db.read(|c| c.query_row("SELECT connection_id FROM scim_tokens WHERE token_hash = ? AND leaked IS NULL", [sha256_hex(token)], |r| r.get::<_, String>(0)).optional())?.ok_or_else(unauthorized)?;
     a.sso_connections()?.into_iter().find(|c| c.id == id).ok_or_else(unauthorized)
 }
 
@@ -166,7 +166,8 @@ fn clean(s: &str) -> String {
 impl Accounts {
     /// A SCIM token for a connection (replacing its old one), answered this once.
     pub fn scim_token(&self, id: &str) -> crate::Result<String> {
-        let token = crate::new_token("rlp");
+        // Checksummed, as roll's other secrets: scanners find a leaked one ([`Self::revoke_leaked_scim`]).
+        let token = roll_auth::credentials::new_secret("rlp_");
         let now = self.db.now_ms()?;
         let h = sha256_hex(&token);
         self.db.write(|c| {
@@ -178,6 +179,27 @@ impl Accounts {
             Ok(())
         })?;
         Ok(token)
+    }
+
+    /// A SCIM token found where it shouldn't be (roll-access's leak scanning, `Access::on_leaked`):
+    /// it stops at once, and the connection says where it was found until an admin makes a new
+    /// one. Says whose token it was, or `None` when no live token is it.
+    pub fn revoke_leaked_scim(&self, token: &str, why: &str) -> Option<String> {
+        let h = sha256_hex(token);
+        let why: String = why.chars().filter(|c| !c.is_control()).take(300).collect();
+        let id = self
+            .db
+            .write(|c| {
+                let id = c.query_row("SELECT connection_id FROM scim_tokens WHERE token_hash = ? AND leaked IS NULL", [h.as_str()], |r| r.get::<_, String>(0)).optional()?;
+                if id.is_some() {
+                    c.execute("UPDATE scim_tokens SET leaked = ? WHERE token_hash = ?", params![why, h])?;
+                }
+                Ok::<_, Error>(id)
+            })
+            .ok()??;
+        tracing::warn!(connection = %id, "accounts: a leaked SCIM token was revoked");
+        let name = self.sso_connections().ok()?.into_iter().find(|c| c.id == id).map(|c| c.name).unwrap_or_else(|| id.clone());
+        Some(format!("SSO connection {name}'s SCIM token"))
     }
 
     /// Turn a connection's SCIM off: its token stops at once.

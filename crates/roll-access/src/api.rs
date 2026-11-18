@@ -551,6 +551,15 @@ impl Access {
     }
 
     async fn create_for(self: &Arc<Self>, ext: &Extensions, mut new: NewGrant) -> crate::Result<(crate::store::Grant, String)> {
+        // Sudo mode (docs/accounts.md): a token made from a person's session (theirs, or an
+        // admin's acting as the operator) needs a recent proof, so a stolen cookie can't mint a
+        // long-lived token. One a token makes is within that token; the operator's has no session.
+        if let (Some(u), None) = (ext.get::<roll_auth::SignedIn>(), ext.get::<roll_auth::Grant>())
+            && let Some(people) = self.people.get()
+            && !people.fresh(&u.user, &u.session).await.map_err(Error::Internal)?
+        {
+            return Err(Error::ReauthRequired("confirm it's you first (on your account page, or GET /v1/accounts/me/reauth): making a token needs a sign-in in the last two hours".into()));
+        }
         // A user's token is theirs, and so is one their token makes: it acts as them.
         let who = who(self, ext)?;
         // A person's own token past what the policy has an admin approve waits for one (one their

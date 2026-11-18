@@ -224,7 +224,7 @@ Grant ("ID-JAG", Okta's Cross App Access) describe: the app trades the provider'
 roll token acting as that person, with no consent screen and no roll sign-in.
 
 - **Trusting a provider** (the operator): `PUT /v1/access/enterprise/idps {idps: [{issuer, jwks?,
-  matching?, domains?, admins?, name?, tenant?}]}` (`roll token enterprise trust <issuer> …`). `issuer` is an
+  matching?, domains?, admins?, name?, tenant?, sso?}]}` (`roll token enterprise trust <issuer> …`). `issuer` is an
   `https` URL; its keys are fetched from its metadata through the guarded client, or pinned
   (`jwks`). `matching` says how a person is found: `email` (the default: the assertion's `email`,
   with `email_verified: true`, in one of the provider's `domains`, which email matching requires,
@@ -232,6 +232,11 @@ roll token acting as that person, with no consent screen and no roll sign-in.
   `usr_…`). A provider names people of its own company, never anyone's: some let people set their
   own email, so an unverified one or another domain is `access_denied`. roll's admins act as the
   operator, past roll's own second factor: a provider signs them in only with `admins: true`.
+  The same provider as people's single sign-on is set up once: `sso` names its SSO connection
+  (docs/accounts.md, "SSO"; `--sso`, or the form's "same provider" choice), whose issuer it must
+  be, and then it vouches for the domains that connection's DNS records proved, read at each
+  sign-in instead of `domains` (a domain whose proof is gone, or a removed connection, trusts
+  nobody).
   A multi-tenant issuer (one issuer URL many companies share) names the person's tenant in each
   assertion: roll trusts the issuer with one `tenant` (`--tenant`), and refuses that issuer's other
   tenants, and any assertion naming a tenant from a provider trusted without one (anyone can be a
@@ -890,6 +895,10 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
 With accounts (docs/accounts.md), a signed-in person who isn't an admin makes tokens and connects
 MCP clients for themselves, as GitHub's fine-grained tokens act for the person who made them:
 
+- Sudo mode (docs/accounts.md): a token made from a session (a person's, or an admin's) needs a
+  sign-in or a confirmation in the last two hours, else 403 `{code: "reauth_required"}`; the
+  dashboard asks "Confirm it's you" and makes it then. The operator's token and a token's own
+  tokens have no session to prove.
 - `POST /v1/access/tokens` with their session makes a grant with `user: "usr_…"`, and so does the
   consent screen. A token theirs makes is theirs too.
 - **An admin approves what reaches far** (GitHub's organization approval of fine-grained tokens).
@@ -1049,9 +1058,9 @@ roll secrets' reach chooses the ids (the tokens and identities that can read a f
 ## Leaked tokens
 
 Other products' secrets made the same way are found and revoked the same way: apps' deploy hooks
-(`rlk_`, the secret in a hook's URL) are in `SECRET_PREFIXES`, and a product registers how to
-revoke its own with `Access::on_leaked` (rolld wires apps' when apps is in). The audit log has each
-revocation.
+(`rlk_`, the secret in a hook's URL) and SSO connections' SCIM tokens (`rlp_`, docs/accounts.md)
+are in `SECRET_PREFIXES`, and a product registers how to revoke its own with `Access::on_leaked`
+(rolld wires apps' when apps is in, and accounts' always). The audit log has each revocation.
 
 
 A token pasted into a file is a token anyone who reads that file holds. roll revokes one as soon as
@@ -1121,7 +1130,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
 | `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}`; `?product=` (and `&resource=`) only those with a rule on that product by name (naming that `{id}` or `{project}`), as a product's page lists its own tokens; `?kind=workload` the workload tokens instead |
-| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?}` → 201 `{grant, token}`; `token` is shown this once |
+| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?}` → 201 `{grant, token}`; `token` is shown this once; 403 `reauth_required` from a session without a recent proof |
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
