@@ -829,34 +829,31 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **The merge queue, in turn:** #114 is on main (93fc949b5, 2026-11-17). Open, in one turn after
-   secrets #69 and apps (the logged order; waiter unit `roll-mcp-lock208`), with #225 (SSO), #226
-   (sibling tools), #231 (SCIM) and #236 (accounts audit):
-   #208 (two-person approvals, access requests, the credential guard, `subscriptions/listen`), #209
-   (`roll_machine_client` in the Terraform provider; Go only) and #210 (enterprise sign-in, MCP-only
-   OAuth tokens). #208 and #210 overlap in three files: #208 lands first, then main goes into #210.
-   - **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
-     and `killed_connections_never_lose_or_repeat_acknowledged_writes` (16 threads on one row
-     exhaust the 40 conflict re-runs), and code-control's Linear e2e (30 s for the elicitation).
-     A test-side deadline, not more retries in production, is the likely fix. (#114's own gate
-     caught a race of mine: a test read an audit row written off the request; fixed in the test.)
-2. **People's accounts, enterprise-grade (stacked on #225):** SSO (#225), SCIM provisioning (#231)
-   and an audit trail of accounts in roll's audit log (#236) are built and reviewed by an agent
-   (highs fixed in each). Next on it, ranked:
-   - **A person's own security log** (now; GitHub's): `GET /v1/accounts/me/activity`, their
-     sign-ins (method, address, device, refused or not) and every change to their account (by
-     them, an admin or SCIM), on the account page, from #236's audit rows.
-   - Checksummed `rlp_` SCIM tokens revoked on a leak (roll-access's leak path), once #208 brings
-     `roll_auth::credentials` to main.
-   - Provider groups to roles over SCIM; one place for identity providers shared with enterprise
-     sign-in (#210's `idps`); SAML for providers without OIDC.
-3. **Tools for sibling routes as they reach main** (each a row in tools.rs and the table above):
-   - #226: apps' stack (`apps_purge_cache`, `apps_vitals`, `apps_rollout`, `apps_set_environment`'s
-     new fields), previews #215's `previews_requests`, and search #172's `search_restore_cluster`
-     with `deleted` on `search_list_clusters`.
-   - Waiting: `secrets_totp` (secrets #194), apps #230 (`apps_restore_service`, deploy, its own
-     row as agreed; `deleted` on `apps_list_services`; delete keeps a service 48 h), apps
-     #219/#221/#222 (`rebuild_on_base`, firewall `challenge`, `build_closed`).
+1. **People's accounts, enterprise-grade:** on main since 2026-11-18: SSO (#225), SCIM
+   provisioning (#231), an audit trail of accounts in roll's audit log (#236) and a person's own
+   security log (#239). Next on it, ranked:
+   - **Checksummed `rlp_` SCIM tokens, revoked on a leak** (now; this PR): found by leak scanning
+     like roll's other secrets, stopped at once, the connection says where it was found.
+   - One place for identity providers: SSO connections (people) and enterprise sign-in's `idps`
+     (#210, ID-JAG for agents) both name an issuer and its keys; one list, each provider used for
+     either or both, so an admin configures Okta once.
+   - SAML for providers without OIDC: its signature checks are s3-server's (`s3-proto`'s xmldsig,
+     storage's STS); reuse means a shared crate, so the storage thread agrees first.
+   - Provider groups to roles over SCIM: **blocked.** roll has no org or team membership for people
+     yet (docs/accounts.md phase 2, "Orgs"), and its one role, admin, is never SCIM's to grant.
+     Groups map to org membership once orgs exist.
+2. **Tools for sibling routes as they reach main** (each a row in tools.rs and the table above).
+   Waiting on open PRs: `secrets_totp` (secrets #194), apps #230 (`apps_restore_service`, deploy,
+   its own row as agreed; `deleted` on `apps_list_services`; delete keeps a service 48 h), apps
+   #219/#221/#222 (`rebuild_on_base`, firewall `challenge`, `build_closed`), apps #235 (`GET …/diff`,
+   and `PATCH …/variables` `copy_from` on its own row with `copies_from`). Apps tells this thread
+   as #230 and #235 land (their turn began 2026-11-18 03:00).
+3. **Gate flakes under load, for their owners:** code-sql's `writes_are_serializable_and_retried`
+   and `killed_connections_never_lose_or_repeat_acknowledged_writes` (16 threads on one row exhaust
+   the 40 conflict re-runs), and code-control's Linear e2e (30 s for the elicitation). A test-side
+   deadline, not more retries in production, is the likely fix. (The 2026-11-18 turn's combined
+   gate passed without them: #208, #209, #210, #225, #226, #231, #236 and #239 landed as one gated
+   tree, main 53b939213.)
 4. **Enterprise sign-in (#210), what's left:** a live check with a real provider's ID-JAG (Okta's
    Cross App Access sandbox needs an account: the review pack's decision 5). The draft names the
    tenant `tenant`; a provider whose assertions say it another way (Entra's own tokens use `tid`)
