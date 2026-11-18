@@ -160,14 +160,18 @@ pub enum Secrets {
         /// A .env or JSON file (`-`: stdin); or `--from` another manager.
         #[arg(required_unless_present = "from")]
         file: Option<String>,
-        /// Read it from another manager's API, with your own token from its usual variable:
-        /// doppler (`DOPPLER_TOKEN`), vault (`VAULT_ADDR`, `VAULT_TOKEN`), infisical (`INFISICAL_TOKEN`),
-        /// aws (Secrets Manager through your `aws` CLI: its profiles and SSO).
+        /// Read it from another manager, signed in as you are there. From its API with your token
+        /// in its usual variable: doppler (`DOPPLER_TOKEN`), vault (`VAULT_ADDR`, `VAULT_TOKEN`),
+        /// infisical (`INFISICAL_TOKEN`). Through its own CLI: aws (Secrets Manager),
+        /// aws-parameter-store, 1password (`op`), bitwarden (`bws`), gcp (`gcloud`), azure (`az`),
+        /// akeyless.
         #[arg(long, conflicts_with = "file", requires = "source")]
         from: Option<String>,
         /// What to read there: doppler `project/config`, vault `mount/path` (KV v2), infisical
-        /// `workspace-id/environment[/path]`, aws a name prefix (`prod/app/`). With `--map`, the
-        /// part before the mapped name.
+        /// `workspace-id/environment[/path]`, aws a name prefix (`prod/app/`),
+        /// aws-parameter-store and akeyless a path (`/prod/app`), 1password `VAULT` or
+        /// `VAULT/ITEM`, bitwarden a project id, gcp `PROJECT[/PREFIX]`, azure a vault's name.
+        /// With `--map`, the part before the mapped name.
         #[arg(long)]
         source: Option<String>,
         /// Several environments at once: `dev=development,prd=production` reads `<source>/dev`
@@ -183,6 +187,14 @@ pub enum Secrets {
         overwrite: bool,
         #[arg(long)]
         request: bool,
+        /// Print the folders and keys it would import (never a value), and import nothing.
+        #[arg(long, requires = "from")]
+        dry_run: bool,
+        /// Tag what the source keeps secret `sensitive` (for good: no person or token reads it
+        /// back): Parameter Store's SecureStrings, 1Password's concealed fields, every value of
+        /// the other managers.
+        #[arg(long, requires = "from")]
+        sensitive: bool,
     },
     /// Fill `${KEY}` in a config file (`-`: stdin) from the environment; a key that isn't set fails.
     /// `\${KEY}` stays as written. Prints it, or writes `--out` (0600).
@@ -1317,48 +1329,31 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             write(&c, &env, ops, None, request, json_out).await?;
         }
         Secrets::Edit { request } => edit(&c, &env, request, json_out).await?,
-        Secrets::Import { file, from, source, map, recursive, overwrite, request } => {
-            if recursive {
-                anyhow::ensure!(from.as_deref() == Some("vault") && map.is_empty(), "--recursive reads a Vault KV v2 tree: --from vault --source mount/path");
-                let tree = vault_tree(source.as_deref().unwrap_or_default()).await?;
-                anyhow::ensure!(!tree.is_empty(), "nothing to import under {}", source.as_deref().unwrap_or_default());
-                for (folder, values) in &tree {
-                    let path = format!("{}/{}", c.at.path.trim_end_matches('/'), folder).replace("//", "/");
-                    let path = if path.len() > 1 { path.trim_end_matches('/').to_string() } else { path };
-                    let body = import_body(&serde_json::to_string(values)?, &path, overwrite, request)?;
-                    let v = c.call(Method::POST, &format!("{env}/import"), Some(body)).await.map_err(approval_hint).with_context(|| format!("importing into {path}"))?;
-                    let skipped = v["skipped"].as_array().map_or(0, Vec::len);
-                    match v.get("request").filter(|r| r.is_object()) {
-                        Some(r) => println!("{path}: change request {} ({} values)", s(&r["id"]), values.len()),
-                        None => println!("{path}: {} value{}{}", values.len(), if values.len() == 1 { "" } else { "s" }, if skipped > 0 { format!(", {skipped} existing skipped (use --overwrite)") } else { String::new() }),
-                    }
+        Secrets::Import { file, from, source, map, recursive, overwrite, request, dry_run, sensitive } => {
+            if let Some(from) = from {
+                anyhow::ensure!(!recursive || (from == "vault" && map.is_empty()), "--recursive reads a Vault KV v2 tree: --from vault --source mount/path");
+                let source = source.unwrap_or_default();
+                let o = ImportOpts { overwrite, request, sensitive, dry_run, message: format!("imported from {from} {}", source.chars().take(200).collect::<String>()) };
+                if map.is_empty() {
+                    let folders = read_source(&from, &source, recursive).await?;
+                    return import_folders(&c, &env, &folders, &o, None, json_out).await;
                 }
-                return Ok(());
-            }
-            if let (Some(from), false) = (&from, map.is_empty()) {
-                let base = source.as_deref().unwrap_or_default().trim_end_matches('/');
+                let base = source.trim_end_matches('/');
                 for pair in &map {
                     let (src, dst) = pair.split_once('=').with_context(|| format!("{pair}: --map is source=environment"))?;
-                    let values = import_from(from, &format!("{base}/{src}")).await.with_context(|| format!("reading {base}/{src}"))?;
-                    let body = import_body(&serde_json::to_string(&values)?, &c.at.path, overwrite, request)?;
-                    let v = c.call(Method::POST, &format!("{}/import", c.env(dst)), Some(body)).await.map_err(approval_hint).with_context(|| format!("importing into {dst}"))?;
-                    let skipped = v["skipped"].as_array().map_or(0, Vec::len);
-                    match v.get("request").filter(|r| r.is_object()) {
-                        Some(r) => println!("{src} → {dst}: change request {} ({} values)", s(&r["id"]), values.len()),
-                        None => println!("{src} → {dst}: {} value{}{}", values.len(), if values.len() == 1 { "" } else { "s" }, if skipped > 0 { format!(", {skipped} existing skipped (use --overwrite)") } else { String::new() }),
-                    }
+                    let folders = read_source(&from, &format!("{base}/{src}"), false).await.with_context(|| format!("reading {base}/{src}"))?;
+                    import_folders(&c, &c.env(dst), &folders, &o, Some(&format!("{src} → {dst}")), json_out).await?;
                 }
                 return Ok(());
             }
-            let text = match (file.as_deref(), from) {
-                (_, Some(from)) => serde_json::to_string(&import_from(&from, source.as_deref().unwrap_or_default()).await?)?,
-                (Some("-"), None) => {
+            let text = match file.as_deref() {
+                Some("-") => {
                     let mut t = String::new();
                     std::io::stdin().read_to_string(&mut t)?;
                     t
                 }
-                (Some(f), None) => std::fs::read_to_string(f).with_context(|| format!("reading {f}"))?,
-                (None, None) => bail!("a file, or --from another manager"),
+                Some(f) => std::fs::read_to_string(f).with_context(|| format!("reading {f}"))?,
+                None => bail!("a file, or --from another manager"),
             };
             let v = c
                 .call(Method::POST, &format!("{env}/import"), Some(import_body(&text, &c.at.path, overwrite, request)?))
@@ -2664,10 +2659,88 @@ async fn envs(c: &Client<'_>, e: Envs, json_out: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An import's body: a JSON file (an object of `KEY: value` or an array of `{key, value}`, as
-/// other managers export) when it parses as one, else a `.env` file.
-/// An environment's values from another manager's API, as `{KEY: value}`: read here, with the
-/// user's own token, and never through roll's server.
+/// How `import --from` writes what it read.
+struct ImportOpts {
+    overwrite: bool,
+    request: bool,
+    sensitive: bool,
+    dry_run: bool,
+    message: String,
+}
+
+/// What another manager gives, by folder under the import's path: read here, signed in as the
+/// user is there, and never through roll's server.
+async fn read_source(from: &str, source: &str, recursive: bool) -> anyhow::Result<crate::managers::Folders> {
+    let entries = |m: serde_json::Map<String, Value>| m.into_iter().map(|(key, v)| crate::managers::Entry { key, value: s(&v).to_string(), secret: true }).collect::<Vec<_>>();
+    if recursive {
+        return Ok(vault_tree(source).await?.into_iter().map(|(folder, m)| (folder, entries(m))).collect());
+    }
+    if let Some(folders) = crate::managers::read(from, source).await? {
+        return Ok(folders);
+    }
+    Ok(vec![(String::new(), entries(import_from(from, source).await?))])
+}
+
+/// `folder` under the import's path `at`.
+fn under(at: &str, folder: &str) -> String {
+    let path = format!("{}/{}", at.trim_end_matches('/'), folder).replace("//", "/");
+    if path.len() > 1 { path.trim_end_matches('/').to_string() } else { path }
+}
+
+/// What another manager gave, imported into `env` (its API base): one change (or change request)
+/// per folder, or with `dry_run` its folders and keys printed, never a value. `label` names a
+/// `--map` pair.
+async fn import_folders(c: &Client<'_>, env: &str, folders: &crate::managers::Folders, o: &ImportOpts, label: Option<&str>, json_out: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(!folders.is_empty(), "nothing to import");
+    let single = folders.len() == 1 && folders[0].0.is_empty();
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    for (folder, entries) in folders {
+        let path = under(&c.at.path, folder);
+        let at = match (label, single) {
+            (Some(l), true) => l.to_string(),
+            (Some(l), false) => format!("{l} {path}"),
+            (None, _) => path.clone(),
+        };
+        if o.dry_run {
+            println!("{at}: {} key{}", entries.len(), plural(entries.len()));
+            for e in entries {
+                println!("  {}{}", e.key, if o.sensitive && e.secret { "  (sensitive)" } else { "" });
+            }
+            continue;
+        }
+        let items: Vec<Value> = entries.iter().map(|e| json!({ "key": e.key, "value": e.value, "sensitive": o.sensitive && e.secret })).collect();
+        let body = json!({ "json": items, "path": path, "overwrite": o.overwrite, "request": o.request, "message": o.message });
+        let v = c.call(Method::POST, &format!("{env}/import"), Some(body)).await.map_err(approval_hint).with_context(|| format!("importing into {path}"))?;
+        if single && label.is_none() {
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            if let Some(r) = v.get("request").filter(|r| r.is_object()) {
+                println!("Opened change request {} on {}", s(&r["id"]), c.at.env);
+            } else {
+                summary(&v);
+            }
+            if let Some(sk) = v["skipped"].as_array().filter(|a| !a.is_empty()) {
+                println!("Skipped {} existing (use --overwrite): {}", sk.len(), sk.iter().map(s).collect::<Vec<_>>().join(", "));
+            }
+            continue;
+        }
+        let skipped = v["skipped"].as_array().map_or(0, Vec::len);
+        match v.get("request").filter(|r| r.is_object()) {
+            Some(r) => println!("{at}: change request {} ({} values)", s(&r["id"]), entries.len()),
+            None => println!("{at}: {} value{}{}", entries.len(), plural(entries.len()), if skipped > 0 { format!(", {skipped} existing skipped (use --overwrite)") } else { String::new() }),
+        }
+    }
+    if o.dry_run {
+        let keys: usize = folders.iter().map(|f| f.1.len()).sum();
+        println!("Dry run: nothing imported ({keys} key{} in {} change{}).", plural(keys), folders.len(), plural(folders.len()));
+    }
+    Ok(())
+}
+
+/// An environment's values from another manager's API (or Secrets Manager through the `aws`
+/// CLI), as `{KEY: value}`.
 async fn import_from(from: &str, source: &str) -> anyhow::Result<serde_json::Map<String, Value>> {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     let need = |k: &str| env(k).with_context(|| format!("set {k}"));
@@ -2746,12 +2819,14 @@ async fn import_from(from: &str, source: &str) -> anyhow::Result<serde_json::Map
                 }
             }
         }
-        other => bail!("{other}: --from is doppler, vault, infisical or aws"),
+        other => bail!("{other}: --from is doppler, vault, infisical, aws, {}", crate::managers::SOURCES.join(", ")),
     }
     anyhow::ensure!(!out.is_empty(), "{from} {source} has no values to import");
     Ok(out)
 }
 
+/// An import's body: a JSON file (an object of `KEY: value` or an array of `{key, value}`, as
+/// other managers export) when it parses as one, else a `.env` file.
 fn import_body(text: &str, path: &str, overwrite: bool, request: bool) -> anyhow::Result<Value> {
     let trimmed = text.trim_start();
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
@@ -4056,16 +4131,9 @@ async fn transit_stdin(c: &Client<'_>, name: &str, route: &str, field: &str) -> 
     Ok(s(&v[field]).to_string())
 }
 
-/// Run the user's `aws` CLI with `args` and read its JSON (errors name the command, never output).
+/// The user's `aws` CLI's JSON (errors name the command, never its output).
 async fn aws(args: &[&str]) -> anyhow::Result<Value> {
-    let out = tokio::process::Command::new(std::env::var("ROLL_AWS_CLI").unwrap_or_else(|_| "aws".into()))
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .context("running the aws CLI (install it, or set ROLL_AWS_CLI)")?;
-    anyhow::ensure!(out.status.success(), "aws {}: {}", args[..2].join(" "), String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or_default().chars().take(200).collect::<String>());
-    serde_json::from_slice(&out.stdout).context("the aws CLI's answer isn't JSON")
+    crate::managers::aws(args).await
 }
 
 /// A Secrets Manager secret as keys: a JSON object's fields as they are; anything else one key
@@ -4075,11 +4143,7 @@ fn aws_entries(name: &str, prefix: &str, text: &str) -> Vec<(String, String)> {
         return fields.into_iter().filter(|(_, v)| !v.is_null()).map(|(k, v)| (k, v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))).collect();
     }
     let last = name.strip_prefix(prefix).unwrap_or(name).rsplit('/').next().unwrap_or(name);
-    let mut key: String = last.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' }).collect();
-    if key.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        key.insert(0, '_');
-    }
-    vec![(key, text.to_string())]
+    vec![(crate::managers::upper_key(last), text.to_string())]
 }
 
 /// Vault answered with this status (matched by the status, never by an error's text).

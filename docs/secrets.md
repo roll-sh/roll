@@ -1658,6 +1658,47 @@ roll secrets import --from aws --source prod/shop/ -e production      # your aws
 - Checked against Vault 1.20 (a three-level tree into three folders) and Secrets Manager on
   LocalStack (a JSON secret, a plain one, and one outside the prefix left alone).
 
+Through the manager's own CLI, signed in as you already are there (its profiles, SSO or service
+account token), never through roll's server:
+
+```
+roll secrets import --from 1password --source Prod -e production             # op: every item of the vault
+roll secrets import --from 1password --source "Prod/Main DB" -e production   # one item's fields
+roll secrets import --from bitwarden --source <project id> -e production     # bws (BWS_ACCESS_TOKEN)
+roll secrets import --from aws-parameter-store --source /prod/shop -e production --sensitive
+roll secrets import --from gcp --source my-project/prod- -e production       # gcloud
+roll secrets import --from azure --source shop-prod-kv -e production         # az
+roll secrets import --from akeyless --source /prod/shop -e production
+```
+
+| `--from` | Reads | Keys |
+| --- | --- | --- |
+| `1password` | `op item list --vault V`, then `op item get ID --reveal` per item | `VAULT`: `ITEM_FIELD` (`Main DB` + `password` → `MAIN_DB_PASSWORD`; a named section adds itself, `MAIN_DB_REPLICA_PORT`). `VAULT/ITEM`: `FIELD`. Words are uppercased, runs of anything else one `_`. Every field with a value comes in, since `op run` and `op inject` reference any field (`op://Prod/Main DB/username`), except notes and one-time passwords; concealed fields are the secret ones. |
+| `bitwarden` | `bws secret list PROJECT_ID` | Bitwarden's own keys, as they are; one that isn't a roll key stops it, naming the secret. Two secrets with one key (Bitwarden allows it) stop it. |
+| `aws-parameter-store` | `aws ssm get-parameters-by-path --path P --recursive --with-decryption` | The path under `--source` is the folder under `--path` and the last segment the key (`/prod/shop/db/password` → `/db`, `PASSWORD`), one change per folder, as Vault's `--recursive`. A folder segment that can't be a roll folder stops it. SecureStrings are the secret ones. |
+| `gcp` | `gcloud secrets list --project P`, then `gcloud secrets versions access latest` per secret | Each secret whose id starts with the prefix, named after the rest of its id (`prod-db-url` under `prod-` → `DB_URL`). One with no version is left out, named; so is a binary one. |
+| `azure` | `az keyvault secret list --vault-name V`, then `az keyvault secret show` per secret | `db-url` → `DB_URL`: the azure-key-vault sync's `_` → `-` in reverse (Key Vault's names are case-insensitive, so two can't give one key). Disabled secrets and the ones backing certificates are left out, named. |
+| `akeyless` | `akeyless list-items --path P --type static-secret`, then `akeyless get-secret-value` per item | As Parameter Store: folders from the path, the last segment the key (`/prod/shop/api-key` → `API_KEY`). |
+
+- Unless a row says otherwise, a name becomes a key uppercased, any other character `_`, a leading
+  digit after a `_`, as `--from aws` does.
+- Every one keeps the guarantees above: at most 500 secrets (more stops it: import a narrower
+  `--source`); each CLI's answer read up to 16 MiB and killed after 60 s; a secret the CLI can't
+  read stops it, naming it and the CLI's error (only the manager's "not found" is nothing there);
+  two secrets that give one key stop it, naming both. Everything is read before anything is
+  written, so a stopped import writes nothing.
+- Names go on the CLI's command line, never values: values come back on its output only, and no
+  error or line `roll` prints holds one.
+- `--dry-run` (any `--from`) prints the folders and keys it would import, never a value, and
+  imports nothing. Then the import is one change per folder, refused or opened as a change request
+  where the folder is protected, as any other import.
+- `--sensitive` (any `--from`) tags what the source keeps secret `sensitive`: Parameter Store's
+  SecureStrings and 1Password's concealed fields, and every value of the other managers. It's
+  opt-in because sensitive is for good: no person or token reads the key back, `roll run` leaves it
+  out, and the tag never comes off ("Sensitive keys").
+- Checked against each vendor's documented output only (fakes in
+  `crates/roll-cli/tests/secrets.rs` print those shapes), not against real accounts.
+
 `--map dev=development,stg=staging,prd=production` does a whole project: each `<source>/<name>` (a
 Doppler config, a Vault path, an Infisical environment) into its roll environment, one change
 each, reported per environment. The dashboard's import dialog shows these commands, since a browser
@@ -2514,7 +2555,7 @@ isn't in the workspace is 404.
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
 | `POST /environments/{env}/changes` | `Batch` | 201 `Applied` |
 | `POST /environments/{env}/diff` | `{dotenv} \| {json}, path?` | `{added, changed, same, missing, references, linked}`: a local copy against the folder by fingerprint, names only (`reveal`, audited) |
-| `POST /environments/{env}/import` | `{dotenv \| json, path?, overwrite?, replace?, message?, request?, if_seq?}` | 201 `Applied & {skipped}` or `{request, skipped}` |
+| `POST /environments/{env}/import` | `{dotenv \| json, path?, overwrite?, replace?, message?, request?, if_seq?}` (`json`'s array items may say `sensitive: true`: the key gets the tag) | 201 `Applied & {skipped}` or `{request, skipped}` |
 | `GET /environments/{env}/changes/{seq}?state=` | | `ChangeDetail` |
 | `POST /environments/{env}/rollback` | `{to?: seq, at?: ms, message?, bypass?}` | 201 `Applied` |
 | `GET /compare?from=&to=&path=` | | `Compare` |

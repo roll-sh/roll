@@ -20,6 +20,7 @@ mod seal;
 mod mask;
 mod secret_refs;
 mod fallback;
+mod managers;
 mod secrets;
 mod apps;
 mod login;

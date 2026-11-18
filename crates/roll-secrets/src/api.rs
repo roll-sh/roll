@@ -729,6 +729,17 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
         let existing: std::collections::HashSet<String> = mine.iter().map(|x| x.key.clone()).collect();
         let own: Vec<&crate::Secret> = mine.iter().filter(|x| x.kind == crate::SecretType::Shared).collect();
         let in_file: std::collections::HashSet<String> = entries.iter().map(|e| e.key.clone()).collect();
+        // A sensitive entry adds the tag to what the key has (the tag is never taken off).
+        let tags_of: std::collections::HashMap<&str, &Vec<String>> = own.iter().map(|x| (x.key.as_str(), &x.tags)).collect();
+        let tagged = |e: &dotenv::Entry| {
+            e.sensitive.then(|| {
+                let mut t = tags_of.get(e.key.as_str()).map(|t| t.to_vec()).unwrap_or_default();
+                if !t.iter().any(|x| x == crate::names::SENSITIVE) {
+                    t.push(crate::names::SENSITIVE.to_string());
+                }
+                t
+            })
+        };
         let removed: Vec<Op> = if i.replace {
             own.iter().filter(|x| x.link.is_none() && !in_file.contains(&x.key)).map(|x| Op::Delete { key: x.key.clone(), kind: None, path: None, if_version: None }).collect()
         } else {
@@ -746,10 +757,10 @@ async fn import_dotenv(State(s): S, Who(c): Who, Path((project, env)): Path<(Str
                 keep
             })
             .map(|e| Op::Set {
+                tags: tagged(&e),
                 key: e.key,
                 value: Some(e.value.expose().to_string()),
                 comment: (!e.comment.is_empty()).then_some(e.comment),
-                tags: None,
                 kind: None,
                 link: None,
                 path: None,
