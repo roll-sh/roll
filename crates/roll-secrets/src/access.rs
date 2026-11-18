@@ -255,7 +255,14 @@ pub trait Workloads: Send + Sync {
     fn grants(&self) -> crate::Result<Vec<roll_auth::Grant>> {
         Ok(vec![])
     }
+    /// Revoke these grants at once, with why and who (an incident's cut-off: rolld calls
+    /// `Access::revoke_many`). All or none: an id roll-access doesn't know refuses the lot. At most
+    /// [`REVOKE_MAX`] ids. Blocking.
+    fn revoke_many(&self, ids: &[String], why: &str, by: &str) -> crate::Result<()>;
 }
+
+/// The most grants one [`Workloads::revoke_many`] takes (roll-access's `MAX_REVOKE`).
+pub const REVOKE_MAX: usize = 500;
 
 /// A workload token: its grant's id, the secret (shown once) and when it ends (Unix ms).
 pub struct Minted {

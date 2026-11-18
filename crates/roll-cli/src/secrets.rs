@@ -259,7 +259,26 @@ pub enum Secrets {
     },
     /// Who and what can read this folder's values (or one key's): tokens and identities that reach
     /// it, untrusted code, syncs, shares and imports, and who read it in 30 days. A project admin's.
-    Reach { key: Option<String> },
+    /// `--cut-off` cuts all of it at once (an incident): tokens and identities' logins revoked,
+    /// identities disabled, leases ended, shares expired, syncs paused.
+    Reach {
+        key: Option<String>,
+        /// Cut off everything listed (asks first unless --yes).
+        #[arg(long, requires = "why")]
+        cut_off: bool,
+        /// Why (the incident): on every revoked token and in the audit log.
+        #[arg(long)]
+        why: Option<String>,
+        /// With --cut-off: also freeze the folder (reads answer 423 to all but its admins).
+        #[arg(long, requires = "cut_off")]
+        freeze: bool,
+        /// Don't ask before cutting off.
+        #[arg(long)]
+        yes: bool,
+        /// Lift the folder's freeze.
+        #[arg(long, conflicts_with = "cut_off")]
+        unfreeze: bool,
+    },
     /// Print the resolved values: dotenv, json, shell, yaml, docker (`--env-file`) or kubernetes (a Secret manifest).
     Export {
         #[arg(long, default_value = "dotenv")]
@@ -1586,12 +1605,68 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             );
             eprintln!("Made token {} for {}:{}; it's only in the output above. Apply it with: | kubectl apply -f -", s(&token["grant"]["id"]), c.at.env, c.at.path);
         }
-        Secrets::Reach { key } => {
-            let mut url = format!("{}/reach?{}", c.env(&c.at.env), c.q());
-            if let Some(k) = &key {
-                url.push_str(&format!("&key={}", enc(k)));
+        Secrets::Reach { key, cut_off, why, freeze, yes, unfreeze } => {
+            if unfreeze {
+                c.call(Method::DELETE, &format!("{}/reach/cut-off?{}", c.env(&c.at.env), c.q()), None).await?;
+                println!("Unfroze {}:{}", c.at.env, c.at.path);
+                return Ok(());
             }
+            let key_q = key.as_deref().map(|k| format!("&key={}", enc(k))).unwrap_or_default();
+            let url = format!("{}/reach?{}{key_q}", c.env(&c.at.env), c.q());
             let v = c.call(Method::GET, &url, None).await?;
+            if cut_off {
+                let what = format!("{}{}:{}", key.as_deref().map(|k| format!("{k} in ")).unwrap_or_default(), c.at.env, c.at.path);
+                let lines = cut_off_plan(&v, freeze);
+                if !yes {
+                    use std::io::{BufRead, IsTerminal, Write};
+                    if !std::io::stdin().is_terminal() {
+                        bail!("this cuts off everything that can read {what}: pass --yes to go ahead");
+                    }
+                    eprintln!("This cuts off everything that can read {what}:");
+                    for l in &lines {
+                        eprintln!("  {l}");
+                    }
+                    eprint!("Type cut off to go ahead: ");
+                    std::io::stderr().flush()?;
+                    let mut typed = String::new();
+                    std::io::stdin().lock().read_line(&mut typed)?;
+                    if typed.trim() != "cut off" {
+                        bail!("nothing was cut");
+                    }
+                }
+                let body = json!({ "why": why.unwrap_or_default(), "freeze": freeze });
+                let r = c.call(Method::POST, &format!("{}/reach/cut-off?{}{key_q}", c.env(&c.at.env), c.q()), Some(body)).await?;
+                if json_out {
+                    return print(&r);
+                }
+                let names = |k: &str| r[k].as_array().map(|a| a.iter().map(|x| s(&x["name"])).collect::<Vec<_>>()).unwrap_or_default();
+                for (title, k) in [("revoked token", "tokens"), ("disabled identity", "identities"), ("ended lease", "leases"), ("expired share", "shares"), ("paused sync", "syncs")] {
+                    for n in names(k) {
+                        println!("{title:<18} {n}");
+                    }
+                }
+                if r["logins"].as_u64().unwrap_or(0) > 0 {
+                    println!("{:<18} {}", "revoked logins", r["logins"]);
+                }
+                for p in r["projects"].as_array().into_iter().flatten() {
+                    println!("{:<18} {}", "unshared from", s(p));
+                }
+                if r["frozen"] == true {
+                    println!("{:<18} {}:{}", "frozen", c.at.env, c.at.path);
+                }
+                if r["batches"].as_u64().unwrap_or(0) > 1 {
+                    eprintln!("Tokens were revoked in {} calls of at most 500.", r["batches"]);
+                }
+                let failed = r["failed"].as_array().cloned().unwrap_or_default();
+                for f in &failed {
+                    eprintln!("failed: {} {}: {}", s(&f["what"]), f["ids"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_default(), s(&f["why"]));
+                }
+                if !failed.is_empty() {
+                    bail!("{} part(s) of the cut-off failed: run it again to cut what's left", failed.len());
+                }
+                eprintln!("Now rotate what it held (roll secrets rotate KEY, or set a new value).");
+                return Ok(());
+            }
             if json_out {
                 return print(&v);
             }
@@ -2406,7 +2481,11 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             };
             let (ciphertext, secret) = share_seal(&value);
             let note = if note.is_empty() { key.clone().unwrap_or_default() } else { note };
-            let body = json!({ "ciphertext": ciphertext, "note": note, "views": views, "ttl_minutes": minutes(&ttl)? });
+            let mut body = json!({ "ciphertext": ciphertext, "note": note, "views": views, "ttl_minutes": minutes(&ttl)? });
+            // A stored key's share says where it came from: a cut-off of the key expires it.
+            if let Some(k) = &key {
+                body["from"] = json!({ "environment": c.at.env, "path": c.at.path, "key": k });
+            }
             let v = c.call(Method::POST, &format!("{}/shares", c.base()), Some(body)).await?;
             let id = s(&v["id"]);
             // The server's link (it knows the dashboard), else ROLL_WEB_URL here, else `<id>#<key>`
@@ -2528,6 +2607,30 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         }
     }
     Ok(())
+}
+
+/// What a cut-off would cut, from reach's answer: one line per kind, with counts and names.
+fn cut_off_plan(v: &Value, freeze: bool) -> Vec<String> {
+    let list = |k: &str, name: &dyn Fn(&Value) -> String| v[k].as_array().map(|a| a.iter().map(name).collect::<Vec<_>>()).unwrap_or_default();
+    let mut out = vec![];
+    let mut line = |title: &str, names: Vec<String>| {
+        if !names.is_empty() {
+            out.push(format!("{} {title}: {}", names.len(), names.join(", ")));
+        }
+    };
+    line("token(s) revoked", list("tokens", &|h| s(&h["name"])));
+    line("identity(ies) disabled, their logins revoked", list("identities", &|h| s(&h["name"])));
+    line("lease(s) ended", list("leases", &|l| format!("{} for {}", s(&l["key"]), s(&l["consumer"]))));
+    line("share(s) expired", list("shares", &|x| s(&x["id"])));
+    line("project(s) no longer sharing it", list("projects", &s));
+    line("sync(s) paused", v["syncs"].as_array().map(|a| a.iter().filter(|x| x["paused_at"].is_null()).map(|x| s(&x["kind"])).collect()).unwrap_or_default());
+    if freeze {
+        out.push("the folder frozen: reads answer 423 to all but its admins".into());
+    }
+    if out.is_empty() {
+        out.push("nothing reaches it now".into());
+    }
+    out
 }
 
 fn s(v: &Value) -> String {

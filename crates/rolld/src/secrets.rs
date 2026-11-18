@@ -1155,6 +1155,18 @@ impl roll_secrets::Workloads for Workloads {
         self.0.revoke_workload(id, "its workload identity was deleted").map(|_| ()).map_err(|e| Error::Internal(format!("revoking a workload token: {e}")))
     }
 
+    /// An incident's cut-off: `Access::revoke_many`, one write, all or none, an audit row per grant
+    /// with why and who. Called from roll secrets' blocking threads, as `mint` is.
+    fn revoke_many(&self, ids: &[String], why: &str, by: &str) -> roll_secrets::Result<()> {
+        let (access, ids, why, by) = (self.0.clone(), ids.to_vec(), why.to_string(), by.to_string());
+        match tokio::runtime::Handle::current().block_on(async move { access.revoke_many(ids, &why, &by).await }) {
+            Ok(_) => Ok(()),
+            Err(roll_access::Error::NotFound(m)) => Err(Error::NotFound(m)),
+            Err(roll_access::Error::BadRequest(m)) => Err(Error::BadRequest(m)),
+            Err(e) => Err(Error::Internal(format!("revoking tokens: {e}"))),
+        }
+    }
+
     /// Each token as roll-access answers it now: gone once revoked or expired, or (a person's own)
     /// once its person can't sign in.
     fn grants(&self) -> roll_secrets::Result<Vec<roll_auth::Grant>> {
@@ -1345,6 +1357,58 @@ mod tests {
         assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
         assert_ne!(apps.digest(&project, "production").await.unwrap(), Some(before));
         assert_eq!(apps.digest(&project, "pr-9").await.unwrap(), None);
+    }
+
+    /// An incident's cut-off revokes through roll-access's own bulk revoke: every token that
+    /// reaches the folder, 500 a call (one write each, all or none), each with why; none other.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cut_off_revokes_tokens_through_roll_access_500_at_a_time() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        let project = ws.create("", "shop", "", None).unwrap().id;
+        let access = roll_access::Access::open(&code_sql::Target::Sqlite(dir.path().join("access.db")), Default::default(), Default::default(), Default::default()).unwrap();
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+        let opts = roll_secrets::Options {
+            keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()),
+            key_source: roll_secrets::KeySource::Env,
+            links: Default::default(),
+            syncs: Default::default(),
+            open: true,
+            trust_forwarded_for: false,
+            web_url: None,
+            deliver: None,
+            grants: Some(access.clone() as Arc<dyn roll_auth::Grants>),
+            people: None,
+            kms: None,
+            sts: None,
+            outside: None,
+            github: None,
+            clouds: None,
+            workloads: Some(Arc::new(super::Workloads(access.clone()))),
+        };
+        let secrets = Arc::new(roll_secrets::Secrets::new(db, ws, opts).unwrap());
+        let token = |env: &str, n: usize| {
+            let rule = roll_secrets::access::rule(&project, Some(vec![env.into()]), None, &[roll_secrets::Action::Read, roll_secrets::Action::Reveal]);
+            let new = roll_access::store::NewGrant { name: format!("fake-{env}-{n}"), rules: roll_auth::scope::Scope(vec![rule]), ..Default::default() };
+            access.store.create(&new, roll_auth::GrantKind::Token, "operator", None, None).unwrap().0.id
+        };
+        let reaching: Vec<String> = (0..501).map(|n| token("production", n)).collect();
+        let other = token("staging", 0);
+        let cut = axum::http::Request::post(format!("/v1/secrets/projects/{project}/environments/production/reach/cut-off?path=/"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(json!({ "why": "incident 9: a fake leak" }).to_string()))
+            .unwrap();
+        let resp = roll_secrets::router(secrets).oneshot(cut).await.unwrap();
+        assert!(resp.status().is_success(), "{}", resp.status());
+        let r: Json = serde_json::from_slice(&http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes()).unwrap();
+        assert_eq!((r["tokens"].as_array().unwrap().len(), r["batches"].as_u64(), r["failed"].clone()), (501, Some(2), json!([])));
+        for id in [&reaching[0], &reaching[500]] {
+            let g = access.store.get(id).unwrap();
+            assert!(g.revoked_at.is_some() && g.revoked_why.as_deref().is_some_and(|w| w.contains("incident 9")), "{g:?}");
+        }
+        assert!(access.store.get(&other).unwrap().revoked_at.is_none(), "a token that doesn't reach it stays");
     }
 
     /// A customer's key wraps a project's data key: Encrypt and Decrypt name the key and carry the

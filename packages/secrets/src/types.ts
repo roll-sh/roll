@@ -136,9 +136,53 @@ export type KeyInsight = { key: string; version: number; updated_at: number; upd
   weak?: string;
 };
 /** A token or identity that reaches a folder, with what it may do there. */
-export type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };
+/** `disabled_at`: an identity a cut-off disabled (it doesn't log in). */
+export type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string; disabled_at?: number };
+/** A frozen folder: reads of its values answer 423 `frozen` to all but its admins. */
+export type Freeze = { why: string; at: number; by: string };
 /** `GET …/reach` (a project admin's): every way a folder's (or one key's) values can leave roll. Names only. */
-export type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string };
+export type Reach = {
+  environment: string;
+  path: string;
+  key: string | null;
+  protected: boolean;
+  untrusted: boolean;
+  tokens: Holder[];
+  identities: Holder[];
+  syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null; paused_at: number | null }[];
+  /** Live dynamic credentials issued for its keys. */
+  leases: { id: string; key: string; consumer: string; issued_at: number; expires_at: number }[];
+  /** Open one-time shares made from its keys, as their makers said (`from`). */
+  shares: { id: string; note: string; key: string; created_by: string; expires_at: number }[];
+  /** Open shares of the project that don't say where their value came from. */
+  unattributed_shares: number;
+  projects: string[];
+  imported_by: string[];
+  truncated: boolean;
+  readers: { actor: string; last_at: number; reads: number }[];
+  uncounted: string;
+  frozen: Freeze | null;
+};
+/** `POST …/reach/cut-off`: what to cut (each on unless false; `freeze` off unless true), and why. */
+export type CutOffRequest = { why: string; tokens?: boolean; identities?: boolean; leases?: boolean; shares?: boolean; syncs?: boolean; freeze?: boolean };
+export type Cut = { id: string; name: string };
+/** What a cut-off did: what was cut, and what couldn't be with why (the rest went on). `batches`: calls to roll-access, 500 grants each at most. */
+export type CutOff = {
+  environment: string;
+  path: string;
+  key: string | null;
+  why: string;
+  tokens: Cut[];
+  identities: Cut[];
+  logins: number;
+  batches: number;
+  leases: Cut[];
+  shares: Cut[];
+  projects: string[];
+  syncs: Cut[];
+  frozen: boolean;
+  failed: { what: "tokens" | "identities" | "logins" | "leases" | "shares" | "syncs" | "freeze" | "audit"; ids: string[]; why: string }[];
+};
 export type Insights = { path: string; max_age_days: number | null; reads_since: number; keys: KeyInsight[] };
 
 export type ChangeRequest = {
@@ -190,9 +234,11 @@ export type Token = {
   keys?: string | null;
 };
 /** A one-time share (never its ciphertext): `open` until its last open, expiry or revocation. */
-export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
+export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean; from?: ShareFrom };
+/** The key a share's value came from (a cut-off of it expires the share). */
+export type ShareFrom = { environment: string; path?: string; key: string };
 /** `ciphertext`: base64url(nonce ‖ AES-256-GCM ciphertext) with `roll-share-v1` as associated data; `views` 1–10, `ttl_minutes` 5–10080. */
-export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number };
+export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number; from?: ShareFrom };
 export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email";
 /** A key every standard environment must define in a folder; typed keys also say what its value must be. */
 /** `owner`: who supplies it (a person or team), named in health and the daily notice. */
@@ -220,6 +266,9 @@ export type Identity = {
   allowed_ips: string[] | null;
   /** How many keys it pins, when it carries its issuer's keys (a cluster roll can't reach). */
   pinned_keys?: number;
+  /** When a cut-off disabled it, and why: it doesn't log in until an admin enables it. */
+  disabled_at: number | null;
+  disabled_why: string | null;
 };
 /** `jwks`: the issuer's keys (a JWKS document as text); then the issuer is never fetched. */
 export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string };
@@ -259,6 +308,9 @@ export type Sync = {
   signed: boolean;
   created_at: number;
   created_by: string;
+  /** When a cut-off paused it, and why: it pushes nothing until an admin resumes it. */
+  paused_at: number | null;
+  paused_why: string | null;
 };
 /** What a sync would push before it exists (`POST …/syncs/preview`): names only. */
 export type SyncPreview = { names: string[]; credentials: string[]; missing_credentials: string[]; unknown_keys: string[] };

@@ -372,7 +372,7 @@ export function EnvView({ env }: { env: Environment }) {
       </div>
 
       <HistoryDrawer env={env} drawer={drawer} onClose={() => setDrawer(null)} onDrawer={setDrawer} onChanged={refresh} />
-      <ReachDialog open={reaching !== null} onClose={() => setReaching(null)} env={env} path={path} keyName={reaching ?? ""} />
+      <ReachDialog open={reaching !== null} onClose={() => setReaching(null)} env={env} path={path} keyName={reaching ?? ""} link={secrets.find((x) => x.key === reaching)?.link} />
       <EsoDialog open={pulling} onClose={() => setPulling(false)} env={env} path={path} />
       <ImportDialog open={importing} onClose={() => setImporting(false)} env={env} path={path} current={secrets} onImported={(text, w) => (setNote({ text, warnings: w }), refresh(), open.reload())} />
       <ShareDialog source={sharing} onClose={() => setSharing(null)} onShared={() => {}} />

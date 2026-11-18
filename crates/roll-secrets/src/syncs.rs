@@ -162,6 +162,10 @@ pub struct SecretSync {
     pub signed: bool,
     pub created_at: i64,
     pub created_by: String,
+    /// When an incident's cut-off paused it (`…/reach/cut-off`), and why: it pushes nothing until
+    /// an admin resumes it (`PATCH …/syncs/{id}`).
+    pub paused_at: Option<i64>,
+    pub paused_why: Option<String>,
     /// Only in the answer that made it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signing_secret: Option<String>,
@@ -194,6 +198,13 @@ pub struct NewSync {
     pub prefix: Option<String>,
 }
 
+/// `PATCH …/syncs/{id}`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncChange {
+    pub paused: bool,
+}
+
 /// A kind the server offers (`GET …/syncs`).
 #[derive(Debug, Serialize)]
 pub struct SyncKind {
@@ -212,7 +223,7 @@ struct Row {
     sealed: Option<Vec<u8>>,
 }
 
-const COLUMNS: &str = "s.id, e.slug, s.path, s.kind, s.target, s.keys, s.prefix, s.secret, s.status, s.error, s.last_digest, s.state, s.last_synced_at, s.created_at, s.created_by, s.project_id";
+const COLUMNS: &str = "s.id, e.slug, s.path, s.kind, s.target, s.keys, s.prefix, s.secret, s.status, s.error, s.last_digest, s.state, s.last_synced_at, s.created_at, s.created_by, s.project_id, s.paused_at, s.paused_why";
 
 fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
     let state: BTreeMap<String, String> = from_json(&r.get::<_, String>(11)?);
@@ -234,6 +245,8 @@ fn row(r: &code_sql::Row<'_>) -> code_sql::Result<Row> {
             signed: sealed.is_some(),
             created_at: r.get(13)?,
             created_by: r.get(14)?,
+            paused_at: r.get(16)?,
+            paused_why: r.get(17)?,
             signing_secret: None,
         },
         project: r.get(15)?,
@@ -392,6 +405,8 @@ impl Secrets {
             signed: secret.is_some(),
             created_at: now,
             created_by: caller.principal.clone(),
+            paused_at: None,
+            paused_why: None,
             signing_secret: secret.map(|s| s.expose().to_string()),
         }))
     }
@@ -415,12 +430,39 @@ impl Secrets {
         })
     }
 
+    /// Pause or resume a sync (`PATCH …/syncs/{id}`). Resuming marks it due: what changed while it
+    /// was paused goes out on the next pass.
+    pub fn update_sync(&self, project: &str, id: &str, change: SyncChange, caller: &Caller) -> Result<SecretSync> {
+        caller.need(Action::Read, &Scope::project(project))?;
+        self.project(project)?;
+        let r = self.sync_row(project, id)?;
+        caller.need(Action::Admin, &Scope::at(project, &r.info.environment, &r.info.path))?;
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            let what = match change.paused {
+                true => {
+                    c.execute("UPDATE syncs SET paused_at = ?, paused_why = NULL WHERE id = ? AND paused_at IS NULL", params![now, id])?;
+                    "paused"
+                }
+                false => {
+                    c.execute("UPDATE syncs SET paused_at = NULL, paused_why = NULL, checked_at = NULL, retry_at = 0 WHERE id = ?", [id])?;
+                    "resumed"
+                }
+            };
+            audit::record(c, project, caller, "sync.update", Some(&r.info.environment), Some(&r.info.path), &[], &format!("{what} {} sync {id}", r.info.kind), now)
+        })?;
+        Ok(masked(self.sync_row(project, id)?.info))
+    }
+
     /// Push every key now, whatever the digest says. 409 `running` while another push holds it.
     pub fn run_sync(&self, project: &str, id: &str, caller: &Caller) -> Result<SecretSync> {
         caller.need(Action::Read, &Scope::project(project))?;
         self.project(project)?;
         let r = self.sync_row(project, id)?;
         caller.need(Action::Admin, &Scope::at(project, &r.info.environment, &r.info.path))?;
+        if r.info.paused_at.is_some() {
+            return Err(Error::Conflict("paused", format!("sync {id} is paused: resume it first")));
+        }
         let hold = self.claim_sync(id, r.info.last_digest.as_deref())?.ok_or_else(|| Error::Conflict("running", format!("sync {id} is being pushed right now")))?;
         self.push_sync(r, hold, None, true);
         Ok(self.sync_row(project, id)?.info)
@@ -433,7 +475,7 @@ impl Secrets {
         let now = self.db.now_ms()?;
         let hold = now + HOLD_MS;
         let seen = read_digest.unwrap_or("");
-        let n = self.db.write(|c| c.execute("UPDATE syncs SET running_until = ? WHERE id = ? AND running_until <= ? AND COALESCE(last_digest, '') = ?", params![hold, id, now, seen]))?;
+        let n = self.db.write(|c| c.execute("UPDATE syncs SET running_until = ? WHERE id = ? AND paused_at IS NULL AND running_until <= ? AND COALESCE(last_digest, '') = ?", params![hold, id, now, seen]))?;
         Ok((n == 1).then_some(hold))
     }
 
@@ -462,7 +504,7 @@ impl Secrets {
     /// syncs there are. One indexed read when nothing changed.
     pub fn sweep_due_syncs(&self) -> Result<(usize, usize)> {
         let now = self.db.now_ms()?;
-        let due = self.db.read(|c| c.query_row("SELECT 1 FROM syncs WHERE checked_at IS NULL AND retry_at <= ? AND running_until <= ? LIMIT 1", params![now, now], |_| Ok(())).optional())?;
+        let due = self.db.read(|c| c.query_row("SELECT 1 FROM syncs WHERE checked_at IS NULL AND paused_at IS NULL AND retry_at <= ? AND running_until <= ? LIMIT 1", params![now, now], |_| Ok(())).optional())?;
         if due.is_none() {
             return Ok((0, 0));
         }
@@ -498,9 +540,9 @@ impl Secrets {
             let batch: Vec<(Row, Option<i64>)> = self.db.write(|c| {
                 // Least recently checked first: every sync gets its turn, however many there are.
                 let rows = c.query(
-                    &format!("SELECT {COLUMNS}, s.checked_at FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.running_until <= ? AND s.retry_at <= ? AND COALESCE(s.checked_at, 0) < ?{marked} ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT {CLAIM}"),
+                    &format!("SELECT {COLUMNS}, s.checked_at FROM syncs s JOIN environments e ON e.id = s.env_id WHERE s.paused_at IS NULL AND s.running_until <= ? AND s.retry_at <= ? AND COALESCE(s.checked_at, 0) < ?{marked} ORDER BY COALESCE(s.checked_at, 0), s.id LIMIT {CLAIM}"),
                     params![now, now, now],
-                    |r| Ok((row(r)?, r.get::<_, Option<i64>>(16)?)),
+                    |r| Ok((row(r)?, r.get::<_, Option<i64>>(18)?)),
                 )?;
                 for (r, _) in &rows {
                     c.execute("UPDATE syncs SET checked_at = ? WHERE id = ?", params![now, r.info.id])?;

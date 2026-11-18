@@ -59,6 +59,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{E}/digest"), get(digest))
         .route(&format!("{E}/insights"), get(insights))
         .route(&format!("{E}/reach"), get(reach))
+        .route(&format!("{E}/reach/cut-off"), post(cut_off).delete(unfreeze))
         .route(&format!("{E}/resolve"), post(resolve))
         .route(&format!("{E}/changes"), get(changes).post(batch))
         .route(&format!("{E}/changes/{{seq}}"), get(change))
@@ -77,7 +78,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/leases/{{id}}"), axum::routing::delete(revoke_lease))
         .route(&format!("{P}/leases/{{id}}/renew"), post(renew_lease))
         .route(&format!("{P}/identities"), get(identities).post(create_identity))
-        .route(&format!("{P}/identities/{{id}}"), axum::routing::delete(delete_identity))
+        .route(&format!("{P}/identities/{{id}}"), axum::routing::delete(delete_identity).patch(update_identity))
         .route(&format!("{P}/identities/{{id}}/jwks"), axum::routing::put(set_identity_keys))
         .route("/v1/secrets/login", post(login))
         .route("/v1/secrets/oidc/.well-known/openid-configuration", get(oidc_discovery))
@@ -133,7 +134,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
         .route(&format!("{P}/syncs"), get(list_syncs).post(create_sync))
         .route(&format!("{P}/syncs/preview"), post(preview_sync))
-        .route(&format!("{P}/syncs/{{id}}"), axum::routing::delete(delete_sync))
+        .route(&format!("{P}/syncs/{{id}}"), axum::routing::delete(delete_sync).patch(update_sync))
         .route(&format!("{P}/syncs/{{id}}/run"), post(run_sync))
         // Public: a share's link (docs/secrets.md, "Sharing a value once").
         .route("/v1/secrets/shares/{id}", get(peek_share))
@@ -152,6 +153,7 @@ impl IntoResponse for Error {
             Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")),
             Error::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, Some("no_key")),
             Error::KeyDenied(_) => (StatusCode::LOCKED, Some("kms_denied")),
+            Error::Frozen(_) => (StatusCode::LOCKED, Some("frozen")),
             Error::Link(_) => (StatusCode::BAD_GATEWAY, Some("link")),
             Error::Db(_) | Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
         };
@@ -588,6 +590,16 @@ async fn reach(State(s): S, Who(c): Who, Path((project, env)): Path<(String, Str
     Ok(ok(blocking(s, move |s| s.reach(&project, &env, &path_of(&q), q.get("key").map(String::as_str), &c)).await?))
 }
 
+async fn cut_off(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q, b: Bytes) -> crate::Result<Response> {
+    let req: crate::cutoff::CutOffRequest = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.cut_off(&project, &env, &path_of(&q), q.get("key").map(String::as_str), req, &c)).await?))
+}
+
+async fn unfreeze(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.unfreeze(&project, &env, &path_of(&q), &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn insights(State(s): S, Who(c): Who, Path((project, env)): Path<(String, String)>, Query(q): Q) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.insights(&project, &env, &path_of(&q), &c)).await?))
 }
@@ -850,6 +862,11 @@ async fn identities(State(s): S, Who(c): Who, Path(project): Path<String>) -> cr
 async fn create_identity(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let n: crate::NewIdentity = body(&b)?;
     Ok(created(blocking(s, move |s| s.create_identity(&project, n, &c)).await?))
+}
+
+async fn update_identity(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let ch: crate::identities::IdentityChange = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.update_identity(&project, &id, ch, &c)).await?))
 }
 
 async fn delete_identity(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
@@ -1354,6 +1371,11 @@ async fn create_sync(State(s): S, Who(c): Who, Path(project): Path<String>, b: B
 async fn delete_sync(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_sync(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn update_sync(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let ch: crate::syncs::SyncChange = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.update_sync(&project, &id, ch, &c)).await?))
 }
 
 async fn run_sync(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<Response> {

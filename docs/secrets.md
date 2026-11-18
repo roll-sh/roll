@@ -1807,6 +1807,11 @@ open it.
 - Creating, opening (with the opener's address) and revoking are in the project's audit log.
   `GET …/shares` lists a project's shares (never their ciphertext); `DELETE …/shares/{id}` revokes
   one. A project has at most 200 open at once.
+- **Where it came from.** A share of a stored key (the CLI's `share KEY`, a key's "Share once" in
+  the dashboard) says so: `from: {environment, path, key}`, checked against the caller's `reveal`
+  there. The server can't see that the ciphertext holds that value; it records the claim so an
+  incident's cut-off of that key or folder expires the share ([Reach](#reach)). A share without
+  `from` (a value typed or piped in) is counted by reach as `unattributed_shares`.
 
 ## Syncs
 
@@ -2240,7 +2245,68 @@ credentials as the tokens list does. Names and metadata only, never a value:
   a `${…}` or `roll://` reference in another key are recorded where they happened and aren't
   counted: the answer says so (`uncounted`).
 
-roll-access's grants (`rlt_`, OAuth) aren't listed yet: they're rolld's (#30).
+It also lists what the folder has handed out that's still out: dynamic credentials issued for
+its keys and not yet revoked (`leases`), open one-time shares made from them (`shares`, as their
+makers said with `from`), and how many of the project's open shares don't say where their value
+came from (`unattributed_shares`). `frozen` says whether it's frozen, and by whom and why.
+
+#### Cutting it off
+
+`POST …/environments/{env}/reach/cut-off?path=&key=` with `{why, tokens?, identities?, leases?,
+shares?, syncs?, freeze?}` (`roll secrets reach [KEY] --cut-off --why "…" [--freeze]`, the reach
+dialog's "Cut off…") cuts everything reach lists, in one call. It's a project admin's, as reach is.
+Each part is on unless it's `false`, except `freeze`, which is off unless it's `true`. It reads
+reach as the caller sees it (the list the confirmation showed), then:
+
+- **Tokens**: roll-access's grants that reach it are revoked through roll-access's own bulk revoke
+  (`Access::revoke_many`, called in process through `Workloads::revoke_many`): one write per call,
+  all or none, at most 500 ids a call, each grant with `revoked_why` (`cut off from
+  production:/ STRIPE_KEY: <why>`) and its own audit row in roll-access's log. More than 500 go in
+  several calls; `batches` says how many.
+- **Identities** that reach it are disabled (`disabled_at`, `disabled_why`): a login answers 403
+  until an admin enables it again (`PATCH …/identities/{id}` with `{disabled: false}`). Their live
+  logins' grants go through the same bulk revoke (`logins` counts them). A login that races the
+  cut-off can't keep its token: it's recorded only while the identity is still enabled.
+- **Leases**: dynamic credentials issued for its keys (or the key) end, each revoked at its
+  product outside the transaction, as `DELETE …/leases/{id}` does; one the product refuses goes
+  back to the sweeper and is named under `failed`. A retired managed credential waiting out its
+  grace isn't tied to a folder and ends on its own; rotate the key to replace the current one.
+- **Shares**: open one-time shares made from its keys expire, and the projects the folder is
+  shared with stop reading it: its exports are removed (`projects`), so their importing folders
+  lose its values at once. An export is the whole folder's, so a cut-off of one key removes the
+  folder's exports too; share it again once the key is rotated. Shares that don't say where they
+  came from are left alone (revoke them by hand if they might hold it).
+- **Syncs** that push it (its own, and this project's importing folders') are paused
+  (`paused_at`, `paused_why`): nothing is pushed, and running one answers 409 `paused`, until an
+  admin resumes it (`PATCH …/syncs/{id}` with `{paused: false}`). What changed meanwhile goes out
+  on the next pass.
+- **Freeze** (off by default): reads of the folder's values answer 423 `frozen`, the shape of
+  `kms_denied`, to everyone but its admins, also through a folder that imports it, an environment
+  based on it, a reference, or the history. Admins still read and write, so they can rotate.
+  Names and metadata stay readable. `DELETE …/reach/cut-off?path=` lifts it. A freeze is the
+  folder's, not the folders under it, as reach is.
+
+What's roll secrets' own (identities, shares, exports, syncs, the freeze) changes in one
+transaction; revocations happen outside it. One audit row (`reach.cut_off`) names what was cut and
+why, beside the rows the revocations write themselves. The answer lists what was cut (`tokens`,
+`identities`, `logins`, `leases`, `shares`, `projects`, `syncs`, `frozen`) and what couldn't be,
+each with why (`failed`), without stopping the rest. It's idempotent: a second call cuts what's
+left (a bulk revoke that failed, a lease its product refused).
+
+#### During an incident
+
+A value leaked (a log, a laptop, a fork), or a credential that reads it did:
+
+1. **Look.** `roll secrets reach KEY` (or the key's "Who can read it…"): who could read it, where
+   it goes by itself, who did in the last 30 days.
+2. **Cut off.** `roll secrets reach KEY --cut-off --why "INC-123: STRIPE_KEY in a CI log"`. Add
+   `--freeze` when nobody but the admins should read the folder until it's rotated (services that
+   read it start failing with 423, loudly).
+3. **Rotate.** A managed key: `roll secrets rotate KEY` (or the dashboard's Rotations). A plain
+   value: issue a new one at its vendor and set it. Admins can do both while it's frozen.
+4. **Restore.** `roll secrets reach --unfreeze`, resume the syncs (`PATCH …/syncs/{id}`), enable
+   the identities that should log in again, share the folder again, and make new tokens for what
+   needs them. The audit log has every step.
 
 Measured (release, 2026-11-14, `examples/bench.rs`, load average about 52): at its cap, 300 folders
 importing production (it follows 256), each read once, reach takes 5–7 ms on SQLite and 120–150 ms
@@ -2508,7 +2574,9 @@ isn't in the workspace is 404.
 | `POST /environments/{env}/secrets/{key}/purge?path=` | `{before_version?}` | `{purged}` (`admin`) |
 | `GET /environments/{env}/values?path=&format=&resolve=&dynamic=&strict=&digest=&name=&namespace=&seq=&at=` | | `Values` (`dynamic=false`: a dynamic key is left out, named in `dynamic`, instead of a fresh credential; `strict=1`: any problem is a 409 `unresolved` naming the keys, so a reader keeps what it had; `digest=1`: the folder's `…/digest`, taken just before the read, as `digest`; with `seq`: as stored after that change, `seq` in the answer), or text with `format`: `dotenv`, `shell`, `json`, `yaml`, `docker` (`--env-file`; a value with a line break is a 400 naming the key) or `kubernetes` (a Secret named `name`, default the environment, in `namespace`); with `digest=1` or `If-None-Match` an `ETag` (the digest), and `If-None-Match` with the digest still current is a 304 that decrypts and issues nothing, and writes one `secrets.revalidate` row a day per caller and folder (so health and insights still see the folder read) (never for a folder holding a dynamic credential unless `dynamic=false`: a lease ends without moving the digest) |
 | `GET /environments/{env}/insights?path=` | | `Insights` (read) |
-| `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, projects it's shared with, folders that import it, readers in 30 days |
+| `GET /environments/{env}/reach?path=&key=` | | `Reach` (a project admin's): tokens and identities that reach it, syncs, live leases and attributed shares, projects it's shared with, folders that import it, readers in 30 days, `frozen` |
+| `POST /environments/{env}/reach/cut-off?path=&key=` | `{why, tokens?, identities?, leases?, shares?, syncs?, freeze?}` | `CutOff`: what was cut and what failed, with why (a project admin's; idempotent) |
+| `DELETE /environments/{env}/reach/cut-off?path=` | | 204: the folder's freeze lifted (a project admin's; 404 when it isn't frozen) |
 | `GET /environments/{env}/digest?path=` | | `{digest}` (read: changes when the values would; a live link counts its value's keyed fingerprint as the product answers, read at most every 10 s, and at once when roll rotates it or the product's own password, reset or restore route changes it) |
 | `POST /environments/{env}/resolve` | `{path?, consumer, seal_to?, untrusted?, dynamic?}` | `Values` or `{sealed, context, problems, leases, dynamic, linked, followed}` (`dynamic: false`: a consumer that can't renew leases, such as a preview's service, gets no dynamic credential; those keys are left out, named in `dynamic`; a key linked to a resource the ephemeral environment branched is left out and named in `followed`, in the clear beside a sealed box: names only) |
 | `GET /environments/{env}/changes?before=&limit=` | | `Change[]` newest first |
@@ -2533,18 +2601,20 @@ isn't in the workspace is 404.
 | `GET /identities` | | `Identity[]` (admin) |
 | `POST /identities` | `NewIdentity` | 201 `Identity` |
 | `DELETE /identities/{id}` | | 204 (its tokens revoked) |
+| `PATCH /identities/{id}` | `{disabled}` | `Identity` (admin; a person's): `false` enables one a cut-off disabled, `true` disables it and revokes its live logins |
 | `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept |
 | `POST /v1/secrets/login` | `{identity, token}` | `{token, expires_at, project, identity}` (public) |
 | `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format` |
 | `GET /required` | | `Required[]` |
 | `PUT /required` | `Required[]` | `Required[]` (replaces the list; `admin`) |
 | `GET /shares` | | `Share[]` newest first |
-| `POST /shares` | `{ciphertext, note?, views?, ttl_minutes?}` | 201 `Share` |
+| `POST /shares` | `{ciphertext, note?, views?, ttl_minutes?, from?: {environment, path?, key}}` | 201 `Share` (`from`: the key the value came from, `reveal` there) |
 | `DELETE /shares/{id}` | | 204 |
 | `GET /syncs` | | `{syncs: Sync[], kinds: SyncKind[]}` |
 | `POST /syncs` | `NewSync` | 201 `Sync & {signing_secret?}` (shown once; `admin`) |
 | `POST /syncs/preview` | `NewSync` | `{names, credentials, missing_credentials, unknown_keys}`: what it would push, before it exists (`admin`; names only, the platform isn't called) |
 | `DELETE /syncs/{id}` | | 204 (`admin`) |
+| `PATCH /syncs/{id}` | `{paused}` | `Sync` (`admin`): `false` resumes one a cut-off paused, and it's due at once |
 | `POST /syncs/{id}/run` | | `Sync` after pushing every key (`admin`; 409 `running` while another push holds it) |
 | `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |
 | `POST /v1/secrets/shares/{id}/open` (public) | | `{ciphertext}` (one open used) |

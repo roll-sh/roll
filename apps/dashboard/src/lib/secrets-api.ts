@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, AwsUser, CloudAccount, NewCloudAccount, SignedCertificate, CaCertificate, Ca, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, AwsUser, CloudAccount, NewCloudAccount, SignedCertificate, CaCertificate, Ca, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, CutOff, CutOffRequest } from "@roll/secrets/types";
 import type { Grant } from "./access-api";
 import { withSession } from "./code-token";
 import { grantFor, tokenOf } from "./secrets-tokens";
@@ -167,6 +167,10 @@ export function secretsApi(project: string) {
     /** When each key of a folder was last read and changed, and which are stale. */
     insights: (env: string, path = "/") => req<Insights>("GET", `${E(env)}/insights${qs({ path })}`),
     reach: (env: string, path = "/", key?: string) => req<Reach>("GET", `${E(env)}/reach${qs({ path, key })}`),
+    /** An incident's cut-off of everything reach lists (a project admin's); the answer says what was cut and what failed. */
+    cutOff: (env: string, path: string, key: string | undefined, body: CutOffRequest) => req<CutOff>("POST", `${E(env)}/reach/cut-off${qs({ path, key })}`, body),
+    /** Lift a folder's freeze. */
+    unfreeze: (env: string, path = "/") => req<null>("DELETE", `${E(env)}/reach/cut-off${qs({ path })}`),
     request: (env: string, id: string) => req<ChangeRequest>("GET", `${E(env)}/requests/${enc(id)}`),
     /** A request's values now and proposed, for an approver who may reveal them (audited). */
     requestValues: (env: string, id: string) => req<RequestValue[]>("GET", `${E(env)}/requests/${enc(id)}/values`),
@@ -193,6 +197,8 @@ export function secretsApi(project: string) {
     setIdentityKeys: (id: string, jwks: string) => req<Identity>("PUT", `${P}/identities/${enc(id)}/jwks`, { jwks }),
     createIdentity: (i: NewIdentity) => req<Identity>("POST", `${P}/identities`, i),
     deleteIdentity: (id: string) => req<null>("DELETE", `${P}/identities/${enc(id)}`),
+    /** `disabled: false` enables an identity a cut-off disabled. */
+    setIdentityDisabled: (id: string, disabled: boolean) => req<Identity>("PATCH", `${P}/identities/${enc(id)}`, { disabled }),
 
     shares: () => req<Share[]>("GET", `${P}/shares`),
     createShare: (s: NewShare) => req<Share>("POST", `${P}/shares`, s),
@@ -203,6 +209,8 @@ export function secretsApi(project: string) {
     createSync: (s: NewSync) => req<Sync & { signing_secret?: string }>("POST", `${P}/syncs`, s),
     previewSync: (s: NewSync) => req<SyncPreview>("POST", `${P}/syncs/preview`, s),
     deleteSync: (id: string) => req<null>("DELETE", `${P}/syncs/${enc(id)}`),
+    /** `paused: false` resumes a sync a cut-off paused. */
+    setSyncPaused: (id: string, paused: boolean) => req<Sync>("PATCH", `${P}/syncs/${enc(id)}`, { paused }),
     /** Pushes every key now; 409 `running` while another push holds it. */
     runSync: (id: string) => req<Sync>("POST", `${P}/syncs/${enc(id)}/run`),
 

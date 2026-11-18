@@ -64,7 +64,9 @@ function Form({ source, onClose, onShared }: { source: ShareSource; onClose: () 
         plain = r.value;
       }
       const sealed = sealShare(plain);
-      const share = await api.createShare({ ciphertext: sealed.ciphertext, note: note.trim() || undefined, views: Number(views), ttl_minutes: Number(expiry) });
+      // A stored key's share says where it came from: a cut-off of the key expires it.
+      const from = source.kind === "secret" ? { environment: source.env, path: source.path, key: source.key } : undefined;
+      const share = await api.createShare({ ciphertext: sealed.ciphertext, note: note.trim() || undefined, views: Number(views), ttl_minutes: Number(expiry), from });
       setValue("");
       setMade({ link: shareLink(location.origin, share.id, sealed.key), share });
       onShared(share);
