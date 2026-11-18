@@ -300,6 +300,11 @@ function Row({ preview: p, open, onOpen }: { preview: Preview; open: boolean; on
             </span>
           )}
           <NewAgainstMain preview={p} />
+          {p.reported_by && (
+            <span className="shrink-0 rounded border border-line-2 px-1 text-[10.5px] text-muted" title={`${p.reported_by} reports this pull request (its roll/preview status and comment); this preview says nothing there`}>
+              quiet
+            </span>
+          )}
           {p.baseline && (
             <span className="shrink-0 rounded border border-line-2 px-1 text-[10.5px] text-muted" title="roll keeps it to compare the project's changes with">
               baseline
