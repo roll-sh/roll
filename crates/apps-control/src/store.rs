@@ -727,6 +727,7 @@ impl Store {
         db.add_column("deployments", "pruned_at", "INTEGER")?;
         db.add_column("deployments", "retired_at", "INTEGER")?;
         db.add_column("deployments", "error_detail", "TEXT")?;
+        db.add_column("deployments", "build_key", "TEXT")?;
         db.add_column("runs", "instance", "TEXT")?;
         db.add_column("domains", "warned_at", "INTEGER")?;
         // Targets made before filters follow every environment, previews too, as they did.
@@ -1520,6 +1521,24 @@ impl Store {
             insert_event(c, now, "deploy.ready", service, env, Some(id), data)?;
             Ok(true)
         })
+    }
+
+    /// What a deployment's build was made from ([`crate::deploy`]'s `build_key`).
+    pub fn set_build_key(&self, id: &str, key: &str) -> Result<()> {
+        self.db.execute("UPDATE deployments SET build_key = ? WHERE id = ?", [key, id])?;
+        Ok(())
+    }
+
+    /// The newest kept image this project built from `key`, and the deployment that built it.
+    pub fn built_image(&self, project: &str, key: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT d.id, d.image FROM deployments d JOIN services s ON s.id = d.service WHERE s.project = ? AND d.build_key = ? AND d.image IS NOT NULL AND d.pruned_at IS NULL ORDER BY d.created_at DESC LIMIT 1",
+                [project, key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
     }
 
     pub fn set_built(&self, id: &str, image: &str, plan: Option<&serde_json::Value>, run: Option<&Run>) -> Result<()> {

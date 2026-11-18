@@ -899,8 +899,9 @@ async fn old_deployments_are_pruned_past_what_an_environment_keeps() {
     let base = format!("/v1/apps/services/{id}/environments/production/deploys");
     let mut deps = vec![svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string()];
     settled(&w, &id, "production", &deps[0]).await;
+    // Each built anew (the same tree's image would be reused otherwise).
     for _ in 0..3 {
-        let (_, d) = call(&w.api, "POST", &base, Some(json!({}))).await;
+        let (_, d) = call(&w.api, "POST", &base, Some(json!({"no_cache": true}))).await;
         let d = settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
         assert_eq!(d["status"], "active", "{d}");
         deps.push(d["id"].as_str().unwrap().to_string());
@@ -2999,6 +3000,33 @@ async fn a_closed_environments_build_gets_no_secret_values() {
     settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     let vars = w.fake.build_vars.lock().last().cloned().unwrap();
     assert!(vars.contains(&"GREETING".to_string()) && !vars.contains(&"API_TOKEN".to_string()) && !vars.contains(&"DATABASE_URL".to_string()), "{vars:?}");
+}
+
+/// A build whose inputs were built before in the project is skipped (Railway's skipped builds):
+/// a second service from the same repository runs the first's image, and a changed build
+/// variable builds again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_same_inputs_are_built_once() {
+    let w = world().await;
+    let builds = || w.fake.counts.builds.load(Ordering::SeqCst);
+    let make = |name: &'static str| {
+        let api = w.api.clone();
+        let project = w.project.clone();
+        async move { call(&api, "POST", "/v1/apps/services", Some(json!({ "project": project, "name": name, "source": {"kind": "repo", "repo": "acme/site"} }))).await.1 }
+    };
+    let web = make("web").await;
+    let d1 = settled(&w, web["id"].as_str().unwrap(), "production", web["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let after_first = builds();
+    let worker = make("worker").await;
+    let wid = worker["id"].as_str().unwrap().to_string();
+    let d2 = settled(&w, &wid, "production", worker["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    assert_eq!((builds(), d2["image"].clone()), (after_first, d1["image"].clone()), "the same source and settings: no build, the same image");
+    let (_, log) = call(&w.api, "GET", &format!("/v1/apps/services/{wid}/environments/production/deploys/{}/logs", d2["id"].as_str().unwrap()), None).await;
+    assert!(log.to_string().contains("no build"), "it says so: {log}");
+    call(&w.api, "PATCH", &format!("/v1/apps/services/{wid}/environments/production/variables"), Some(json!({"set": {"NEXT_PUBLIC_API": "https://api.example.com"}}))).await;
+    let (_, d) = call(&w.api, "POST", &format!("/v1/apps/services/{wid}/environments/production/deploys"), Some(json!({}))).await;
+    settled(&w, &wid, "production", d["id"].as_str().unwrap()).await;
+    assert_eq!(builds(), after_first + 1, "a build variable changed: built again");
 }
 
 /// A crowd at a sleeping service wakes one instance; those waiting on a start slower than the
