@@ -65,6 +65,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/metrics", get(metrics))
         .route("/v1/search/clusters/{id}/slowlog", get(slowlog))
         .route("/v1/search/clusters/{id}/audit", get(audit))
+        .route("/v1/search/clusters/{id}/analytics", get(analytics))
         .route("/v1/search/clusters/{id}/keys", post(create_key))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
@@ -639,6 +640,20 @@ async fn audit(State(c): State<AppState>, Path(id): Path<String>, Query(q): Quer
     let events = q.event.as_deref().unwrap_or_default().split(',').map(str::trim).filter(|e| !e.is_empty()).map(str::to_string).collect();
     let query = search_server::audit::AuditQuery { from_ms: q.from, to_ms: q.to, events, size: q.size.unwrap_or(100) };
     Ok(Json(c.audit(&id, &query).await?))
+}
+
+#[derive(Deserialize)]
+struct AnalyticsQuery {
+    index: Option<String>,
+    range: Option<String>,
+}
+
+/// Search analytics (`?index=&range=24h|7d|30d`): top queries, queries with no results and
+/// click-through. Runs on the cluster's owner (`per_cluster`), which adds what it recorded since
+/// the last pass.
+async fn analytics(State(c): State<AppState>, Path(id): Path<String>, Query(q): Query<AnalyticsQuery>) -> ApiResult<Value> {
+    let index = q.index.as_deref().filter(|i| !i.is_empty());
+    Ok(Json(c.analytics(&id, index, q.range.as_deref().unwrap_or("24h")).await?))
 }
 
 #[cfg(test)]
