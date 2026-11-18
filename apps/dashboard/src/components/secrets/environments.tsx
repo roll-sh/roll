@@ -1,6 +1,6 @@
 import { ArrowDown, ArrowUp, Bell, GripVertical, KeyRound, Lock, Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { ENV_SLUG, KEY_TYPES, LABEL_PART, SECRET_KEY, secretsHealth, type Environment, type KeyType, type Required } from "@/lib/secrets-api";
+import { ENV_SLUG, KEY_TYPES, LABEL_PART, SECRET_KEY, secretsHealth, type Environment, type KeyType, type PasswordClass, type Required } from "@/lib/secrets-api";
 import { Select } from "../agents/ui/select";
 import { Dialog } from "../agents/ui/dialog";
 import { Switch } from "../agents/ui/switch";
@@ -250,10 +250,21 @@ function Notify({ env, onError }: { env: Environment; onError: (e: string) => vo
 /** How long old values stay readable: the sweeper destroys older versions' values after that (never a current one). */
 const TYPE_LABEL: Record<KeyType, string> = { url: "URL", int: "integer", port: "port", bool: "boolean", json: "JSON", email: "email" };
 
+/** A password policy's classes, as the form offers them (other sets and symbols: the API and `roll secrets required add`). */
+const CLASS_SETS: { value: string; label: string; classes: PasswordClass[] }[] = [
+  { value: "letters-digits", label: "letters, digits", classes: ["lower", "upper", "digit"] },
+  { value: "all", label: "letters, digits, symbols", classes: ["lower", "upper", "digit", "symbol"] },
+  { value: "lower-digits", label: "lowercase, digits", classes: ["lower", "digit"] },
+  { value: "digits", label: "digits", classes: ["digit"] },
+];
+const CLASS_SHORT: Record<PasswordClass, string> = { lower: "a-z", upper: "A-Z", digit: "0-9", symbol: "symbols" };
+
 /** Keys every standard environment must set, each with what its value must be (typed keys). */
 function RequiredKeys({ onError }: { onError: (e: string) => void }) {
   const { api, reloadEnvs, required, reloadRequired } = useSecrets();
   const [adding, setAdding] = useState<Required>({ key: "", path: "/", comment: "" });
+  const [pwLength, setPwLength] = useState("");
+  const [pwClasses, setPwClasses] = useState(CLASS_SETS[0].value);
   const [busy, setBusy] = useState(false);
   const save = async (next: Required[]) => {
     setBusy(true);
@@ -270,7 +281,9 @@ function RequiredKeys({ onError }: { onError: (e: string) => void }) {
     }
   };
   const rows = required;
-  const keyOk = SECRET_KEY.test(adding.key) && adding.path.startsWith("/");
+  const length = pwLength.trim() ? Number(pwLength) : null;
+  const lengthOk = length === null || (Number.isInteger(length) && length >= 8 && length <= 256);
+  const keyOk = SECRET_KEY.test(adding.key) && adding.path.startsWith("/") && lengthOk;
   return (
     <Section title="Required keys" aside={<span className="text-[11.5px] text-subtle max-sm:hidden">Every standard environment must set these; typed ones must fit.</span>}>
       {rows.length > 0 && (
@@ -282,6 +295,11 @@ function RequiredKeys({ onError }: { onError: (e: string) => void }) {
               {r.type && <span className="rounded border border-line-2 px-1 text-[10.5px] text-muted">{TYPE_LABEL[r.type]}</span>}
               {r.pattern && <code className="truncate rounded border border-line-2 px-1 font-mono text-[10.5px] text-muted" title="The whole value must match">/{r.pattern}/</code>}
               {r.comment && <span className="truncate text-[11.5px] text-subtle">{r.comment}</span>}
+              {r.password && (
+                <span className="rounded border border-line-2 px-1 font-mono text-[10.5px] text-muted" title="A password policy: at least this long, one of each class, nothing else; Generate makes values that fit">
+                  {r.password.length}+ {(r.password.classes?.length ? r.password.classes : (["lower", "upper", "digit"] as PasswordClass[])).map((c) => CLASS_SHORT[c]).join(" ")}
+                </span>
+              )}
               {r.owner && <span className="truncate text-[11.5px] text-muted" title="Who supplies it">{r.owner}</span>}
               <button className={`${ghost} ml-auto`} disabled={busy} onClick={() => save(rows.filter((x) => x !== r))}>
                 Remove
@@ -295,8 +313,18 @@ function RequiredKeys({ onError }: { onError: (e: string) => void }) {
         onSubmit={async (ev) => {
           ev.preventDefault();
           if (!keyOk) return;
-          const next = { ...adding, key: adding.key.trim(), ...(adding.pattern?.trim() ? { pattern: adding.pattern.trim() } : { pattern: undefined }), ...(adding.owner?.trim() ? { owner: adding.owner.trim() } : { owner: undefined }) };
-          if (await save([...rows.filter((x) => !(x.key === next.key && x.path === next.path)), next])) setAdding({ key: "", path: adding.path, comment: "" });
+          const classes = CLASS_SETS.find((s) => s.value === pwClasses)?.classes;
+          const next: Required = {
+            ...adding,
+            key: adding.key.trim(),
+            pattern: adding.pattern?.trim() || undefined,
+            owner: adding.owner?.trim() || undefined,
+            password: length !== null ? { length, classes } : undefined,
+          };
+          if (await save([...rows.filter((x) => !(x.key === next.key && x.path === next.path)), next])) {
+            setAdding({ key: "", path: adding.path, comment: "" });
+            setPwLength("");
+          }
         }}
       >
         <label className="w-48">
@@ -315,6 +343,16 @@ function RequiredKeys({ onError }: { onError: (e: string) => void }) {
           <span className={label}>Pattern (optional)</span>
           <input value={adding.pattern ?? ""} onChange={(e) => setAdding({ ...adding, pattern: e.target.value })} placeholder="[a-z]{2}-[a-z]+-[0-9]" spellCheck={false} className={`${field} h-7 font-mono text-[12px]`} />
         </label>
+        <label className="w-24">
+          <span className={label}>Password ≥</span>
+          <input value={pwLength} onChange={(e) => setPwLength(e.target.value.replace(/\D/g, ""))} inputMode="numeric" placeholder="32" aria-invalid={!lengthOk} className={`${field} h-7 font-mono text-[12px]`} />
+        </label>
+        {pwLength && (
+          <div>
+            <span className={label}>Made of</span>
+            <Select label="Password classes" value={pwClasses} onChange={setPwClasses} options={CLASS_SETS.map(({ value, label }) => ({ value, label }))} className="h-7 w-44" />
+          </div>
+        )}
         <label className="w-36">
           <span className={label}>Owner (optional)</span>
           <input value={adding.owner ?? ""} onChange={(e) => setAdding({ ...adding, owner: e.target.value })} placeholder="@payments" maxLength={64} spellCheck={false} className={`${field} h-7 text-[12px]`} />

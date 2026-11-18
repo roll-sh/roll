@@ -116,10 +116,11 @@ pub enum Secrets {
         /// A value of your own that replaces the shared one for you only.
         #[arg(long)]
         personal: bool,
-        /// Make each KEY a fresh random value of this many characters (letters and digits), made
-        /// here: `roll secrets set SESSION_SECRET --generate 48`.
-        #[arg(long, value_name = "LENGTH")]
-        generate: Option<usize>,
+        /// Make each KEY a fresh random value, made here: what the key's password policy asks if
+        /// it has one (`roll secrets required`), else LENGTH (default 48) letters and digits:
+        /// `roll secrets set SESSION_SECRET --generate`.
+        #[arg(long, value_name = "LENGTH", num_args = 0..=1)]
+        generate: Option<Option<usize>>,
         /// Open a change request instead of writing (protected environments).
         #[arg(long)]
         request: bool,
@@ -335,6 +336,11 @@ pub enum Secrets {
     /// list, add, remove.
     #[command(subcommand)]
     Databases(DatabasesCmd),
+    /// Kubernetes clusters that issue short-lived service account tokens per lease (link kind
+    /// `kubernetes`): list, add (the admin token on stdin), remove. Not `kubernetes`, which pulls
+    /// an environment into a cluster.
+    #[command(subcommand, name = "kubernetes-clusters")]
+    KubernetesClusters(KubernetesClustersCmd),
     /// The project's GitHub Apps, for an installation token per lease (narrowed by the link's
     /// options.repositories and options.permissions): list, add, remove.
     #[command(subcommand, name = "github-apps")]
@@ -423,8 +429,9 @@ pub enum Secrets {
     },
     /// Open a share's link (or `<id>#<key>`) and print its value; it counts as one of its opens.
     Open { link: String },
-    /// Pushes of an environment to outside platforms (GitHub Actions, Vercel, Cloudflare, AWS
-    /// Parameter Store, webhooks): list, add, run now, remove.
+    /// Pushes of an environment to outside platforms (GitHub Actions, Vercel, Cloudflare, Supabase,
+    /// AWS Parameter Store, Azure App Configuration, HashiCorp Vault, webhooks): list, add, run now,
+    /// remove.
     #[command(subcommand)]
     Syncs(Syncs),
     /// Streams of the audit log to a SIEM: list, add, remove.
@@ -477,7 +484,7 @@ pub enum Syncs {
     Ls,
     /// Add a sync of this environment and folder: `add github --target repo=acme/web`.
     Add {
-        /// The kind: github, gitlab, vercel, aws-secrets-manager, … (`syncs ls` lists them).
+        /// The kind: github, gitlab, azure-devops, vercel, aws-secrets-manager, … (`syncs ls` lists them).
         kind: String,
         /// The target's fields as `name=value` (repeat), as `syncs ls` describes them.
         #[arg(long = "target", value_name = "NAME=VALUE")]
@@ -698,6 +705,23 @@ pub enum GithubAppsCmd {
         /// A permission tokens may have at most, `name:level` (`contents:read`; repeat it).
         #[arg(long = "permission", required = true)]
         permissions: Vec<String>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum KubernetesClustersCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register a cluster: its API server's https:// URL, and on stdin a service account token
+    /// that may create tokens (`create` on `serviceaccounts/token`).
+    Add {
+        name: String,
+        api_url: String,
+        /// The cluster's CA certificates (PEM file), when its API server's certificate isn't
+        /// publicly trusted: then only it is trusted, for this cluster's calls.
+        #[arg(long)]
+        ca: Option<std::path::PathBuf>,
     },
     Rm { id: String },
 }
@@ -938,6 +962,17 @@ pub enum RequiredCmd {
         /// Who supplies it (a person or team): health and the daily notice name them.
         #[arg(long)]
         owner: Option<String>,
+        /// A password policy's length (8–256): values must be at least this long, and
+        /// `set KEY --generate` makes this many characters.
+        #[arg(long, value_name = "N")]
+        password_length: Option<u16>,
+        /// The policy's character classes, one of each required and nothing else: lower, upper,
+        /// digit, symbol (default lower,upper,digit).
+        #[arg(long, value_delimiter = ',', requires = "password_length")]
+        classes: Vec<String>,
+        /// Which characters `symbol` means (default !#%&*+-=?^_~).
+        #[arg(long, requires = "password_length")]
+        symbols: Option<String>,
     },
     Rm {
         key: String,
@@ -1288,12 +1323,18 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         }
         Secrets::Set { pairs, comment, tags, personal, generate, request, message, expires } => {
             let expires = expires.as_deref().map(expiry).transpose()?;
+            // Password policies, for --generate (a caller who can't read them gets plain values).
+            let policies = if generate.is_some() { c.call(Method::GET, &format!("{}/required", c.base()), None).await.unwrap_or_default() } else { Value::Null };
             let mut ops = vec![];
             for p in &pairs {
                 let (key, value) = split_pair(p)?;
+                let policy = policies.as_array().into_iter().flatten().find(|r| r["key"] == key && r["path"] == c.at.path.as_str()).map(|r| &r["password"]).filter(|p| p.is_object());
                 let value = match (value, generate) {
                     (Some(_), Some(_)) => bail!("{key}: --generate makes the value; give only the key"),
-                    (None, Some(n)) => random_value(n)?,
+                    (None, Some(n)) => match policy {
+                        Some(p) => policy_value(p, n)?,
+                        None => random_value(n.unwrap_or(48))?,
+                    },
                     (Some(v), None) => v,
                     (None, None) if pairs.len() == 1 => {
                         let mut v = String::new();
@@ -1854,6 +1895,36 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Removed {id}");
             }
         },
+        Secrets::KubernetesClusters(k) => match k {
+            KubernetesClustersCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/kubernetes", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for k in v.as_array().into_iter().flatten() {
+                    let ca = if k["has_ca"].as_bool() == Some(true) { "  its own CA" } else { "" };
+                    println!("{}  {:<16} {}{ca}", s(&k["id"]), s(&k["name"]), s(&k["api_url"]));
+                }
+            }
+            KubernetesClustersCmd::Add { name, api_url, ca } => {
+                // The admin token is a credential: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("Service account token roll manages the cluster with, then Enter and Ctrl-D: ");
+                }
+                let mut token = zeroize::Zeroizing::new(String::new());
+                std::io::stdin().read_to_string(&mut token).context("reading the admin token from stdin")?;
+                let ca = ca.map(|p| std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))).transpose()?;
+                let v = c.call(Method::POST, &format!("{}/kubernetes", c.base()), Some(json!({ "name": name, "api_url": api_url, "ca_pem": ca, "token": token.trim() }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link KUBE_TOKEN to it, dynamic, with options namespace and service_account (KUBE_API_URL and KUBE_CA for a kubeconfig).", s(&v["name"]), s(&v["id"]));
+            }
+            KubernetesClustersCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/kubernetes/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
         Secrets::Kms { cmd } => {
             let v = match cmd {
                 None => c.call(Method::GET, &format!("{}/kms", c.base()), None).await?,
@@ -2344,11 +2415,15 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                         return print(&list);
                     }
                     for x in &rows {
-                        let rule = [x["type"].as_str().map(|t| format!("type {t}")), x["pattern"].as_str().map(|p| format!("/{p}/"))].into_iter().flatten().collect::<Vec<_>>().join(" ");
+                        let password = x["password"]["length"].as_u64().map(|n| {
+                            let classes = x["password"]["classes"].as_array().map(|c| c.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(",")).unwrap_or_else(|| "lower,upper,digit".into());
+                            format!("password {n}+ {classes}")
+                        });
+                        let rule = [x["type"].as_str().map(|t| format!("type {t}")), x["pattern"].as_str().map(|p| format!("/{p}/")), password].into_iter().flatten().collect::<Vec<_>>().join(" ");
                         println!("{:<28} {:<12} {:<28} {}{}", s(&x["key"]), s(&x["path"]), rule, x["comment"].as_str().unwrap_or_default(), x["owner"].as_str().map(|o| format!("  (owner {o})")).unwrap_or_default());
                     }
                 }
-                RequiredCmd::Add { key, path, kind, pattern, comment, owner } => {
+                RequiredCmd::Add { key, path, kind, pattern, comment, owner, password_length, classes, symbols } => {
                     rows.retain(|x| !same(x, &key, &path));
                     let mut row = json!({ "key": key, "path": path, "comment": comment });
                     if let Some(k) = kind {
@@ -2359,6 +2434,16 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     }
                     if let Some(o) = owner {
                         row["owner"] = json!(o);
+                    }
+                    if let Some(length) = password_length {
+                        let mut p = json!({ "length": length });
+                        if !classes.is_empty() {
+                            p["classes"] = json!(classes);
+                        }
+                        if let Some(s) = symbols {
+                            p["symbols"] = json!(s);
+                        }
+                        row["password"] = p;
                     }
                     rows.push(row);
                     put(rows).await?;
@@ -2935,6 +3020,41 @@ async fn sinks(c: &Client<'_>, cmd: Sinks, json_out: bool) -> anyhow::Result<()>
     Ok(())
 }
 
+/// A random value by a key's password policy (`{length, classes?, symbols?}`, as the server
+/// checks it): its length (or `n`, if longer), one of each of its classes and nothing else.
+fn policy_value(p: &Value, n: Option<usize>) -> anyhow::Result<String> {
+    let classes: Vec<&str> = p["classes"].as_array().map(|c| c.iter().filter_map(Value::as_str).collect()).filter(|c: &Vec<&str>| !c.is_empty()).unwrap_or_else(|| vec!["lower", "upper", "digit"]);
+    let symbols = p["symbols"].as_str().unwrap_or("!#%&*+-=?^_~");
+    let sets: Vec<&str> = classes
+        .iter()
+        .map(|c| match *c {
+            "lower" => "abcdefghijklmnopqrstuvwxyz",
+            "upper" => "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "digit" => "0123456789",
+            _ => symbols,
+        })
+        .collect();
+    let alphabet: Vec<u8> = sets.concat().into_bytes();
+    let len = n.unwrap_or(0).max(p["length"].as_u64().unwrap_or(48) as usize);
+    anyhow::ensure!((8..=4096).contains(&len) && !alphabet.is_empty() && alphabet.len() <= 256, "--generate is 8–4096 characters");
+    let limit = 256 - 256 % alphabet.len();
+    loop {
+        let mut out = String::with_capacity(len);
+        let mut buf = [0u8; 64];
+        while out.len() < len {
+            getrandom::fill(&mut buf).expect("system randomness");
+            for b in buf {
+                if (b as usize) < limit && out.len() < len {
+                    out.push(alphabet[b as usize % alphabet.len()] as char);
+                }
+            }
+        }
+        if sets.iter().all(|s| out.chars().any(|ch| s.contains(ch))) {
+            return Ok(out);
+        }
+    }
+}
+
 /// A random value of `n` letters and digits (62 symbols, rejection-sampled: no bias).
 fn random_value(n: usize) -> anyhow::Result<String> {
     anyhow::ensure!((8..=4096).contains(&n), "--generate is 8–4096 characters");
@@ -2966,9 +3086,10 @@ fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
 }
 
 /// A workload identity's login (`ROLL_IDENTITY`): the workload's own OIDC token, from
-/// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes projected token) or GitHub Actions
-/// (`permissions: id-token: write`; audience `ROLL_OIDC_AUDIENCE`, default `roll`), for a
-/// short-lived secrets token and when it ends (ms).
+/// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes projected token), GitHub Actions
+/// (`permissions: id-token: write`; audience `ROLL_OIDC_AUDIENCE`, default the server's URL) or
+/// Azure Pipelines (`SYSTEM_ACCESSTOKEN` mapped in), for a short-lived secrets token and when it
+/// ends (ms).
 pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
     let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
     let oidc = if let Some(t) = env("ROLL_OIDC_TOKEN") {
@@ -2983,8 +3104,21 @@ pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String
         anyhow::ensure!(r.status().is_success(), "GitHub Actions answered {} for its OIDC token (does the job have `permissions: id-token: write`?)", r.status());
         let v: Value = r.json().await?;
         v["value"].as_str().context("GitHub Actions' OIDC answer has no value")?.to_string()
+    } else if let (Some(url), Some(bearer)) = (env("SYSTEM_OIDCREQUESTURI"), env("SYSTEM_ACCESSTOKEN")) {
+        // Azure Pipelines: the pipeline's own token (`p://org/project/pipeline`), or a service
+        // connection's (`sc://…`) with ROLL_AZURE_SERVICE_CONNECTION. Its audience is always
+        // Azure's (`api://AzureADTokenExchange`).
+        let sep = if url.contains('?') { '&' } else { '?' };
+        let mut url = format!("{url}{sep}api-version=7.1");
+        if let Some(sc) = env("ROLL_AZURE_SERVICE_CONNECTION") {
+            url.push_str(&format!("&serviceConnectionId={}", enc(&sc)));
+        }
+        let r = reqwest::Client::new().post(url).bearer_auth(bearer).header("content-type", "application/json").body("").send().await.context("asking Azure Pipelines for its OIDC token")?;
+        anyhow::ensure!(r.status().is_success(), "Azure Pipelines answered {} for its OIDC token (is SYSTEM_ACCESSTOKEN mapped from $(System.AccessToken)?)", r.status());
+        let v: Value = r.json().await.context("Azure Pipelines' OIDC answer isn't JSON")?;
+        v["oidcToken"].as_str().context("Azure Pipelines' OIDC answer has no oidcToken")?.to_string()
     } else {
-        anyhow::bail!("ROLL_IDENTITY is set but there's no OIDC token: set ROLL_OIDC_TOKEN or ROLL_OIDC_TOKEN_FILE, or run in GitHub Actions with `permissions: id-token: write`");
+        anyhow::bail!("ROLL_IDENTITY is set but there's no OIDC token: set ROLL_OIDC_TOKEN or ROLL_OIDC_TOKEN_FILE, run in GitHub Actions with `permissions: id-token: write`, or in Azure Pipelines with SYSTEM_ACCESSTOKEN: $(System.AccessToken)");
     };
     // A request of its own, without a token (never through `Api::call`, which renews logins).
     let mut req = api.http.post(format!("{}/v1/secrets/login", api.base)).json(&json!({ "identity": identity, "token": oidc.trim() }));
@@ -3351,8 +3485,8 @@ async fn render_watch(c: &Client<'_>, env: &str, file: &str, tpl: &str, out: &st
                     }
                 }
             }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(interval.max(1))) => {
-                let now = match digests(c, &follow).await {
+            now = next_digests(c, &follow, &last, std::time::Duration::from_secs(interval.max(1))) => {
+                let now = match now {
                     Ok(d) => d,
                     Err(e) => {
                         eprintln!("roll secrets render: couldn't check {} ({e}); {out} stays as it is", c.at.env);
@@ -3774,6 +3908,39 @@ async fn digests(c: &Client<'_>, follow: &[String]) -> anyhow::Result<Digests> {
 
 type Digests = std::collections::BTreeMap<String, String>;
 
+/// The followed folders' digests, once they may have moved. One folder (the usual case) is
+/// long-polled: the answer comes as soon as it moves (or after 25 s unchanged); a server that
+/// answers at once is asked again after `every`. Several are checked every `every`.
+async fn next_digests(c: &Client<'_>, follow: &[String], last: &Digests, every: std::time::Duration) -> anyhow::Result<Digests> {
+    if let [p] = follow
+        && let Some(d) = last.get(p)
+    {
+        let asked = std::time::Instant::now();
+        let sep = if p.contains('?') { '&' } else { '?' };
+        let url = format!("{p}{sep}since={}&wait=25", enc(d));
+        let poll = c.call(Method::GET, &url, None);
+        // Held at most 25 s: past 40 the server (or what's between) isn't answering.
+        let answer = match tokio::time::timeout(std::time::Duration::from_secs(40), poll).await {
+            Ok(a) => a,
+            Err(_) => Err(anyhow::anyhow!("no answer in 40 s")),
+        };
+        // A failure (rolld restarting, a revoked token) waits `every` like any check, never spins.
+        let now = match answer {
+            Ok(v) => Digests::from([(p.clone(), s(&v["digest"]))]),
+            Err(e) => {
+                tokio::time::sleep(every).await;
+                return Err(e);
+            }
+        };
+        if now == *last && asked.elapsed() < std::time::Duration::from_secs(1) {
+            tokio::time::sleep(every).await;
+        }
+        return Ok(now);
+    }
+    tokio::time::sleep(every).await;
+    digests(c, follow).await
+}
+
 /// Which followed folders moved between two polls, as `env:/path` (another project's as
 /// `prj_…@env:/path`), for a watch's message.
 fn moved(c: &Client<'_>, last: &Digests, now: &Digests) -> String {
@@ -3991,8 +4158,8 @@ async fn watch(c: &Client<'_>, at: &At, r: &Run, mut env: Vec<Var>, mut leases: 
                         }
                     }
                 }
-                _ = tokio::time::sleep(every) => {
-                    let now = match digests(c, &follow).await {
+                now = next_digests(c, &follow, &last, every) => {
+                    let now = match now {
                         Ok(d) => d,
                         Err(e) => {
                             eprintln!("roll run: couldn't check {} ({e}); still running", at.env);

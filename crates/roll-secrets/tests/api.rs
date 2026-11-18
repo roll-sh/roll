@@ -95,6 +95,9 @@ impl SyncTarget for FakeSync {
     fn check(&self, _: &str, _: &Resources, target: &Value) -> roll_secrets::Result<()> {
         target.get("name").map(|_| ()).ok_or_else(|| roll_secrets::Error::BadRequest("target needs a name".into()))
     }
+    fn refuses(&self, name: &str) -> Option<String> {
+        name.starts_with("FAKE_").then(|| format!("{name}: FAKE_ is the platform's"))
+    }
     fn push(&self, _: &Value, p: &Push<'_>) -> roll_secrets::Result<()> {
         let credentials = p.credentials.iter().map(|(k, v)| (format!("credential:{k}"), v.expose().to_string()));
         let values = p.values.iter().map(|(k, v)| (k.clone(), v.expose().to_string())).chain(credentials).collect();
@@ -122,6 +125,26 @@ impl roll_secrets::Deliver for Sent {
         }
         self.0.lock().unwrap().push(json!({ "format": format, "token": token.map(|t| t.expose().to_string()), "events": body["events"] }));
         Ok(())
+    }
+    /// A Kubernetes API server at `KUBE` taking only the admin token: discovery, and TokenRequest
+    /// for `ci/deployer` (each request kept, with the CA it trusted, as `{"kube": …}`).
+    fn request_trusting(&self, ca: Option<&str>, method: &str, url: &str, headers: &[(&str, &Secret)], body: Option<(&str, &Secret)>, _: usize) -> roll_secrets::Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        let admin = headers.iter().any(|(h, v)| *h == "authorization" && v.expose() == "Bearer fake-admin-token");
+        let (status, answer) = match (method, url.strip_prefix(KUBE)) {
+            _ if !admin => (401, json!({ "kind": "Status", "reason": "Unauthorized" })),
+            ("GET", Some("/api")) => (200, json!({ "kind": "APIVersions", "versions": ["v1"] })),
+            ("POST", Some("/api/v1/namespaces/ci/serviceaccounts/deployer/token")) => {
+                let sent: Value = serde_json::from_str(body.unwrap().1.expose()).unwrap();
+                let mut kept = self.0.lock().unwrap();
+                kept.push(json!({ "kube": { "ca": ca, "request": sent } }));
+                let n = kept.iter().filter(|b| b.get("kube").is_some()).count();
+                let t = time::OffsetDateTime::now_utc() + time::Duration::seconds(sent["spec"]["expirationSeconds"].as_i64().unwrap());
+                let expires = format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", t.year(), t.month() as u8, t.day(), t.hour(), t.minute(), t.second());
+                (201, json!({ "kind": "TokenRequest", "spec": sent["spec"], "status": { "token": format!("fake-sa-token-{n}"), "expirationTimestamp": expires } }))
+            }
+            _ => (404, json!({ "kind": "Status", "reason": "NotFound" })),
+        };
+        Ok((status, answer.to_string().into_bytes().into()))
     }
     fn get(&self, url: &str, _: usize) -> roll_secrets::Result<Vec<u8>> {
         let doc = match url.strip_prefix(ISSUER) {
@@ -162,6 +185,8 @@ impl roll_secrets::Deliver for Sent {
 
 const ISSUER: &str = "https://token.actions.githubusercontent.com";
 const ISSUER_URL: &str = "https://roll.example/v1/secrets/oidc";
+const KUBE: &str = "https://kube.example";
+const KUBE_CA: &str = "-----BEGIN CERTIFICATE-----\nfake-cluster-ca\n-----END CERTIFICATE-----";
 
 /// GCP and Azure: they trust roll's token only for the pinned subject, and keep what they saw.
 #[derive(Default)]
@@ -720,8 +745,22 @@ async fn references_imports_and_personal_values_resolve_and_cycles_are_reported(
     // A values answer carries the same digest, taken before its read: a watch compares from it.
     let (_, with) = api.call(Method::GET, "/environments/development/values?digest=1", None).await;
     assert_eq!((with["digest"].clone(), api.values("development", "/").await.get("digest").cloned()), (before.clone(), None), "asked for (a watch)");
+    // A watcher long-polls instead: unchanged, it holds until `wait` runs out; a change answers it
+    // at once (well before its 30 s), with the new digest.
+    let since = before.as_str().unwrap().to_string();
+    let (router, project) = (api.router.clone(), api.project.clone());
+    let waiting = tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let req = Request::get(format!("/v1/secrets/projects/{project}/environments/development/digest?since={since}&wait=30")).body(Body::empty()).unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap()).unwrap();
+        (body["digest"].clone(), started.elapsed())
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     api.set("production", "DB_HOST", "prod2.db").await;
-    assert_ne!(api.ok(Method::GET, "/environments/development/digest", None).await["digest"], before);
+    let (moved, took) = waiting.await.unwrap();
+    assert!(moved != before && took < std::time::Duration::from_secs(10), "{moved} after {took:?}");
+    assert_eq!(api.ok(Method::GET, "/environments/development/digest", None).await["digest"], moved);
     api.set("production", "DB_HOST", "prod.db").await;
     let problems: Vec<&str> = v["problems"].as_array().unwrap().iter().map(|p| p["problem"].as_str().unwrap()).collect();
     assert!(problems.iter().any(|p| p.starts_with("cycle: A → B → A")), "{problems:?}");
@@ -904,6 +943,17 @@ async fn the_grid_flags_differences_and_promote_copies_them() {
     api.set("development", "PORT", "${WRONG}").await;
     let problems = api.values("development", "/").await["problems"].clone();
     assert!(problems.as_array().unwrap().iter().any(|p| p["key"] == "PORT" && p["problem"] == "PORT must be a port (1–65535)"), "{problems}");
+    // A password policy: a value too short, missing a class or using another is refused by key,
+    // never echoed; a policy nobody could meet isn't taken.
+    let (s, _) = api.call(Method::PUT, "/required", Some(json!([{ "key": "DB_PASSWORD", "password": { "length": 4 } }]))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "8 characters at least");
+    api.ok(Method::PUT, "/required", Some(json!([{ "key": "PORT", "type": "port" }, { "key": "DB_PASSWORD", "password": { "length": 12, "classes": ["lower", "digit", "symbol"], "symbols": "-_" } }]))).await;
+    for (value, why) in [("short-1", "DB_PASSWORD must be at least 12 characters"), ("no-digits-here", "DB_PASSWORD needs at least a digit"), ("Upper-case-1x", "DB_PASSWORD may only use a lowercase letter, a digit, a symbol")] {
+        let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/DB_PASSWORD", Some(json!({ "value": value }))).await;
+        assert_eq!((s, e["error"].as_str()), (StatusCode::BAD_REQUEST, Some(why)), "{value}");
+    }
+    api.set("staging", "DB_PASSWORD", "lower-and-digit-9").await;
+    assert_eq!(api.ok(Method::GET, "/required", None).await[0]["password"]["symbols"], "-_");
     // A type added after the values: the grid says which don't fit, to whoever may reveal them.
     api.ok(Method::PUT, "/required", Some(json!([{ "key": "SAME_OR_NOT", "type": "int" }]))).await;
     let grid = api.ok(Method::GET, "/grid", None).await;
@@ -998,7 +1048,9 @@ async fn a_token_reaches_only_its_environments_folders_and_actions() {
     // As `POST /v1/access/tokens` makes it from secrets' page; roll-access keeps it (expiry, client
     // addresses, revocation), secrets checks each second resource against it.
     let token = api.token(json!({ "environments": ["production"], "paths": ["/api"], "actions": ["read", "reveal"] }));
+    let reads = api.secrets.metrics().unwrap().reads;
     let (s, v) = api.req(Method::GET, "/environments/production/values?path=/api", None, Some(&token)).await;
+    assert_eq!(api.secrets.metrics().unwrap().reads, reads + 1, "rolld's metrics count each read");
     assert_eq!((s, v["values"]["STRIPE"].as_str()), (StatusCode::OK, Some("sk_live")));
     for (method, path, body) in [
         (Method::GET, "/environments/production/values?path=/", None),
@@ -1319,6 +1371,9 @@ async fn a_sync_pushes_each_change_once_removes_deleted_keys_and_is_audited() {
     // Before it exists: what it would push (names only), its credential kept out.
     let p = api.ok(Method::POST, "/syncs/preview", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" }, "keys": ["DB_URL", "STRIPE_KEY", "TYPO"] }))).await;
     assert_eq!(p, json!({ "names": ["DB_URL", "STRIPE_KEY"], "credentials": ["PLATFORM_TOKEN"], "missing_credentials": [], "unknown_keys": ["TYPO"] }));
+    // A name the platform keeps for itself (Supabase's SUPABASE_) is refused when it's made.
+    let (s, e) = api.call(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "prefix": "FAKE_", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
+    assert_eq!((s, e["error"].as_str()), (StatusCode::BAD_REQUEST, Some("FAKE_DB_URL: FAKE_ is the platform's")));
     let s = api.ok(Method::POST, "/syncs", Some(json!({ "environment": "staging", "kind": "fake", "target": { "name": "x", "token_key": "PLATFORM_TOKEN" } }))).await;
     let id = s["id"].as_str().unwrap().to_string();
     assert!(s["signing_secret"].as_str().unwrap().starts_with("whsec_"), "shown once: {s}");
@@ -1572,6 +1627,11 @@ async fn a_scan_finds_values_only_its_caller_may_reveal() {
     let (_, v) = api.req(Method::POST, "/leaks", Some(mine.clone()), Some(reveal.as_str())).await;
     assert_eq!(v, json!([]));
     assert_eq!(api.ok(Method::POST, "/leaks", Some(mine)).await[0]["key"], "DB_PASSWORD", "its owner finds it");
+    // A credential guard's scan (roll MCP, `X-Roll-Guard: 1`) is audited apart from a person's.
+    let req = Request::builder().method(Method::POST).uri(format!("/v1/secrets/projects/{}/leaks", api.project)).header("content-type", "application/json").header("authorization", format!("Bearer {reveal}")).header("x-roll-guard", "1").body(Body::from(json!({ "candidates": ["sk_live_51Hx9Q2abc"] }).to_string())).unwrap();
+    assert_eq!(api.router.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+    let rows = api.ok(Method::GET, "/audit?action=secrets.guard", None).await;
+    assert_eq!((rows.as_array().unwrap().len(), rows[0]["keys"].clone()), (1, json!(["STRIPE_KEY"])));
 }
 
 #[tokio::test]
@@ -1824,6 +1884,48 @@ async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
     assert_eq!((renamed["name"].as_str(), renamed["host"].as_str()), (Some("billing-eu"), Some("db.example:5432")));
     let lease = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:report" }))).await;
     assert!(password(lease["values"]["TMP_USER"].as_str().unwrap()).is_some(), "its links carry on through the new URL");
+}
+
+#[tokio::test]
+async fn a_kubernetes_cluster_issues_short_lived_service_account_tokens() {
+    let api = Api::new().await;
+    let (s, _) = api.call(Method::POST, "/kubernetes", Some(json!({ "name": "prod", "api_url": KUBE, "token": "not-the-admin-token" }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "the API server must take the admin token");
+    let k = api.ok(Method::POST, "/kubernetes", Some(json!({ "name": "prod", "api_url": format!("{KUBE}/"), "ca_pem": KUBE_CA, "token": "fake-admin-token" }))).await;
+    assert_eq!((k["api_url"].as_str(), k["has_ca"].as_bool()), (Some(KUBE), Some(true)), "{k}");
+
+    // Dynamic only, naming the service account; a token that can't be revoked has a short lease.
+    let link = |field: &str, ttl: u64| json!({ "kind": "kubernetes", "ref": k["id"], "field": field, "mode": "dynamic", "options": { "namespace": "ci", "service_account": "deployer", "audiences": ["vault"], "ttl_minutes": ttl } });
+    let (s, _) = api.call(Method::PUT, "/environments/staging/secrets/KUBE_TOKEN", Some(json!({ "link": link("token", 7 * 24 * 60) }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a week-long token is refused");
+    let ops: Vec<Value> = [("KUBE_TOKEN", "token"), ("KUBE_API_URL", "api_url"), ("KUBE_CA", "ca")].iter().map(|(key, field)| json!({ "op": "set", "key": key, "link": link(field, 20) })).collect();
+    api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": ops }))).await;
+
+    // A resolve issues one token for the three keys, for the lease's TTL and the audiences, through the cluster's CA.
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:deploy" }))).await;
+    assert_eq!((r["values"]["KUBE_TOKEN"].as_str(), r["values"]["KUBE_API_URL"].as_str(), r["values"]["KUBE_CA"].as_str()), (Some("fake-sa-token-1"), Some(KUBE), Some(KUBE_CA)), "{r}");
+    let asked: Vec<Value> = api.sent.0.lock().unwrap().iter().filter_map(|b| b.get("kube").cloned()).collect();
+    assert_eq!(asked, [json!({ "ca": KUBE_CA, "request": { "apiVersion": "authentication.k8s.io/v1", "kind": "TokenRequest", "spec": { "expirationSeconds": 1200, "audiences": ["vault"] } } })]);
+    let lease_id = r["leases"][0].as_str().unwrap().to_string();
+    let leases = api.ok(Method::GET, "/leases", None).await;
+    let lease = leases.as_array().unwrap().iter().find(|l| l["id"] == lease_id.as_str()).unwrap().clone();
+    assert_eq!(lease["expires_at"].as_i64().unwrap() - lease["issued_at"].as_i64().unwrap(), 20 * 60_000, "{lease}");
+
+    // Code nobody vetted gets none, and no request reaches the cluster.
+    let check = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "check:fork#1", "untrusted": true }))).await;
+    assert!(check["values"].get("KUBE_TOKEN").is_none() && check["leases"] == json!([]), "{check}");
+    assert_eq!(api.sent.0.lock().unwrap().iter().filter(|b| b.get("kube").is_some()).count(), 1);
+
+    // Ending the lease can't end the token: the audit row says so.
+    api.ok(Method::DELETE, &format!("/leases/{lease_id}"), None).await;
+    let listed = api.ok(Method::GET, "/kubernetes", None).await;
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    assert!(audit.to_string().contains("works until it expires"), "{audit}");
+    for shown in [&k, &listed, &audit] {
+        assert!(!shown.to_string().contains("fake-admin-token") && !shown.to_string().contains("fake-cluster-ca"), "never the admin token or the CA: {shown}");
+    }
+    let (s, _) = api.call(Method::DELETE, &format!("/kubernetes/{}", k["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");
 }
 
 #[tokio::test]
@@ -2294,6 +2396,43 @@ async fn reads_unlike_the_reader_are_alerted() {
     assert_eq!(logged.as_array().map(Vec::len), Some(2), "{logged}");
 }
 
+/// A roll-access rule naming one encryption key (`{id: "prj_…", index: "payments"}`) reaches that
+/// key alone: the list shows it, its operations work, another key's are refused.
+#[tokio::test]
+async fn a_rule_naming_one_encryption_key_reaches_it_alone() {
+    use roll_auth::scope::{Action as A, Effect, Resources, Rule, Scope, Selector};
+    let api = Api::new().await;
+    for name in ["payments", "billing"] {
+        api.ok(Method::POST, "/transit", Some(json!({ "name": name }))).await;
+    }
+    let rule = Rule {
+        product: "secrets".into(),
+        resources: Resources::Some(vec![Selector::Id { id: api.project.clone(), index: Some("payments".into()) }]),
+        environments: None,
+        paths: None,
+        actions: BTreeMap::from([(A::Read, Effect::Allow), (A::Write, Effect::Allow)]),
+    };
+    let grant = roll_auth::Grant { user: None, ask_otherwise: false, id: "tok_pay".into(), name: "pay".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(Scope(vec![rule])) };
+    let call = |method: Method, path: &str, body: Option<Value>| {
+        let mut req = Request::builder().method(method).uri(format!("/v1/secrets/projects/{}{path}", api.project)).header("content-type", "application/json").body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).unwrap();
+        req.extensions_mut().insert(roll_auth::Operator);
+        req.extensions_mut().insert(grant.clone());
+        let router = api.router.clone();
+        async move {
+            let resp = router.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+        }
+    };
+    let (s, keys) = call(Method::GET, "/transit", None).await;
+    let names: Vec<&str> = keys.as_array().map(|k| k.iter().filter_map(|k| k["name"].as_str()).collect()).unwrap_or_default();
+    assert_eq!((s, names), (StatusCode::OK, vec!["payments"]), "{keys}");
+    let plain = json!({ "plaintext": "aGk=" });
+    assert_eq!(call(Method::POST, "/transit/payments/encrypt", Some(plain.clone())).await.0, StatusCode::OK);
+    assert_eq!(call(Method::POST, "/transit/billing/encrypt", Some(plain)).await.0, StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn a_roll_access_grant_reaches_only_what_its_rules_name() {
     use roll_auth::scope::{Action as A, Effect, Resources, Rule, Scope, Selector};
@@ -2635,6 +2774,17 @@ async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token()
     // What it gave out under the old key ends with it (a rotation is often for a leaked key).
     let (s, _) = api.req(Method::GET, "/environments/staging/values", None, before["token"].as_str()).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // Azure Pipelines: one issuer per organization, so an identity names one pipeline (or service
+    // connection), and the token's audience is Azure's own.
+    let ado = "https://vstoken.dev.azure.com/00000000-0000-0000-0000-00000000a0b1";
+    let azure = Issuer::new();
+    let pipeline = |subject: &str| json!({ "name": "pipeline", "issuer": ado, "audience": "api://AzureADTokenExchange", "subject": subject, "environments": ["staging"], "actions": ["read", "reveal"], "jwks": azure.jwks().to_string() });
+    assert_eq!(api.call(Method::POST, "/identities", Some(pipeline("p://acme/shop/*"))).await.0, StatusCode::BAD_REQUEST, "every pipeline of the organization");
+    let a = api.ok(Method::POST, "/identities", Some(pipeline("p://acme/shop/deploy"))).await;
+    let run = |sub: &str| json!({ "identity": a["id"], "token": azure.sign(json!({ "iss": ado, "aud": "api://AzureADTokenExchange", "sub": sub, "exp": now + 300, "iat": now })) });
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(run("p://acme/shop/deploy"))).await.0, StatusCode::OK);
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(run("p://acme/shop/deploy-preview"))).await.0, StatusCode::FORBIDDEN);
 
     // Deleting the identity ends what it gave out.
     api.ok(Method::DELETE, &format!("/identities/{id}"), None).await;
