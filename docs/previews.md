@@ -1775,6 +1775,9 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
+Every feature in review has its `roll preview` command too: `metrics`, `hooks` (#344), `errors`
+(on #326), `visitors` (on #335), `masks [--apply]` (on #324), `up`/`down` (#314).
+
 1. **Sign-in access, in review** (#285): `access: "team"` (Vercel Authentication, Netlify's team
    access), so only people signed in to roll who can open the project open its previews, not
    whoever has the link. On roll apps the `pv-` environment gets apps' `access: {signed_in:
