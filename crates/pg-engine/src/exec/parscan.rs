@@ -372,6 +372,10 @@ struct Pre<'a> {
     done: u64,
     /// `worth` said no: `run_rows` reads on without it.
     off: bool,
+    /// The batch aggregates the rows it decides (an aggregating scan without stages); below
+    /// stages it only filters them (and a probe drops misses): the joined rows are the row
+    /// path's to aggregate.
+    agg: bool,
 }
 
 impl<'a> Pre<'a> {
@@ -396,6 +400,7 @@ impl<'a> Pre<'a> {
             _ => None,
         };
         let plan = d.vplan.get_or_init(|| Pre::compile(d, spec, probe.map(|p| p.0)).map(Arc::new)).clone()?;
+        let agg = spec.is_some() && d.stages.is_empty();
         Some(Pre {
             plan,
             probe: probe.map(|p| p.1),
@@ -412,6 +417,7 @@ impl<'a> Pre<'a> {
             seen: 0,
             done: 0,
             off: false,
+            agg,
         })
     }
 
@@ -425,9 +431,12 @@ impl<'a> Pre<'a> {
         {
             return None;
         }
-        if !d.stages.is_empty() && probe.is_none() && (spec.is_some() || d.filter.is_none()) {
+        // (Below stages without a probe the batch only filters: an aggregating scan's joined
+        // rows are aggregated by the row path, `agg`.)
+        if !d.stages.is_empty() && probe.is_none() && d.filter.is_none() {
             return None;
         }
+        let spec = spec.filter(|_| d.stages.is_empty());
         if spec.is_none() && probe.is_none() && d.filter.is_none() {
             return None;
         }
@@ -496,7 +505,7 @@ impl<'a> Pre<'a> {
     /// row path, no probe) and every argument's numbers make a lane. False: nothing done.
     fn aggregate(&mut self, pa: &mut super::partial::Partials<'_>) -> bool {
         use super::vector::Tri;
-        if self.plan.probe.is_some() || self.sel.len() != self.odd.len() || self.tri.contains(&Tri::Out) {
+        if !self.agg || self.plan.probe.is_some() || self.sel.len() != self.odd.len() || self.tri.contains(&Tri::Out) {
             return false;
         }
         self.fill_live();
@@ -1706,11 +1715,13 @@ fn partial_chunk<'d>(
             for (r, i) in run.enumerate() {
                 use super::vector::Tri;
                 read += 1;
-                if pre.fate(r) == DROP {
+                let fate = pre.fate(r);
+                if fate == DROP {
                     taken += 1;
                     continue;
                 }
-                let aggregated = !pre.odd[r]
+                let aggregated = pre.agg
+                    && !pre.odd[r]
                     && pre.tri[r] == Tri::T
                     && pre.plan.probe.is_none()
                     && pa.batch_row(&pre.plan, &pre.cols, &pre.nums, r);
@@ -1718,7 +1729,7 @@ fn partial_chunk<'d>(
                     taken += 1;
                 } else {
                     let (k, v) = scan.batch.get(i);
-                    if let Err(e) = partial_row(d, &mut pa, &mut serial, scratch, lazy, top, k, v) {
+                    if let Err(e) = partial_row(d, &mut pa, &mut serial, scratch, lazy, top, k, v, fate == PASSED) {
                         return (send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok(), pa);
                     }
                 }
@@ -1745,7 +1756,7 @@ fn partial_chunk<'d>(
             Ok(e) => e,
             Err(e) => return (send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok(), pa),
         };
-        if let Err(e) = partial_row(d, &mut pa, &mut serial, scratch, lazy, top, k, v) {
+        if let Err(e) = partial_row(d, &mut pa, &mut serial, scratch, lazy, top, k, v, false) {
             return (send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok(), pa);
         }
         if !serial.is_empty() {
@@ -1840,7 +1851,8 @@ pub static VECTOR_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 pub static RUN_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One stored row of an aggregating scan through the row path: read in place, filtered,
-/// aggregated or queued in `serial` (with the joins' rows it makes), in order.
+/// aggregated or queued in `serial` (with the joins' rows it makes), in order. `passed`: the
+/// batch found the whole filter true for it (`Pre::fate`), not evaluated again.
 #[allow(clippy::too_many_arguments)]
 fn partial_row(
     d: &Decode,
@@ -1851,11 +1863,12 @@ fn partial_row(
     top: u8,
     k: &[u8],
     v: &[u8],
+    passed: bool,
 ) -> Result<()> {
     // (Read in place: a row the filter rejects or the part takes is never made.)
     let row = match &d.ios {
         None => lazy.read(d, k, v).and_then(|lazy| {
-            let pass = filter_pass(d, &lazy);
+            let pass = if passed { Some(true) } else { filter_pass(d, &lazy) };
             match pass {
                 Some(false) => Ok(None),
                 Some(true) if d.stages.is_empty() && pa.row(&lazy) => Ok(None),

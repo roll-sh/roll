@@ -171,6 +171,29 @@ count:int8 | sum:int8 | sum:numeric
 > RESET enable_mergejoin
 -- RESET
 
+> SELECT x.f, count(*), sum(x.q) FROM a258_k x WHERE x.d >= date '1993-01-01' AND x.d < timestamp '1994-01-01' AND EXISTS (SELECT 1 FROM a258_dim d WHERE d.k = x.k AND d.w > 10) GROUP BY x.f ORDER BY x.f
+f:bpchar | count:int8 | sum:numeric
+A | 5699 | 44847.99
+N | 5699 | 44831.58
+R | 5704 | 44844.84
+NULL | 178 | 1371.27
+-- SELECT 4
+
+> SELECT x.s, count(d.name), sum(x.p) FROM a258_k x LEFT JOIN a258_dim d ON d.k = x.k + 1 AND d.w < 5 WHERE x.q > 30 AND x.id < 60000 GROUP BY x.s ORDER BY x.s
+s:bpchar | count:int8 | sum:numeric
+F | 2909 | 191996222.50
+O | 2631 | 192145515.00
+NULL | 64 | 4347711.50
+-- SELECT 3
+
+> SELECT x.f, count(*) FROM a258_k x WHERE x.q < 0 AND NOT EXISTS (SELECT 1 FROM a258_dim d WHERE d.k = x.k AND d.name LIKE 'n1%') GROUP BY x.f ORDER BY x.f
+f:bpchar | count:int8
+A | 1559
+N | 1569
+R | 1553
+NULL | 48
+-- SELECT 4
+
 > DROP TABLE a258_dim
 -- DROP TABLE
 
