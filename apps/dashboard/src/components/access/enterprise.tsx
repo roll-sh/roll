@@ -13,6 +13,7 @@ import {
   type EnterpriseIdp,
   type Rule,
 } from "@/lib/access-api";
+import { accountsApi, type SsoConnection } from "@/lib/accounts-api";
 import { btn, Confirm, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 import { Builder } from "./builder";
 import { relative } from "./shell";
@@ -106,7 +107,7 @@ function Providers({ idps, audience, save }: { idps: EnterpriseIdp[]; audience: 
               <span className="font-medium">{i.name ?? i.issuer.replace(/^https:\/\//, "")}</span>
               <code className="font-mono text-subtle">{i.issuer}</code>
               <span className="text-muted">
-                {(i.matching ?? "email") === "email" ? `people at ${(i.domains ?? []).join(", ")}` : "names roll accounts (usr_…)"}
+                {(i.matching ?? "email") !== "email" ? "names roll accounts (usr_…)" : i.sso ? "people at its SSO connection's verified domains" : `people at ${(i.domains ?? []).join(", ")}`}
               </span>
               {i.admins && <span className="text-accent">signs in admins</span>}
               {i.tenant && <span className="text-subtle">tenant <code className="font-mono">{i.tenant}</code></span>}
@@ -124,8 +125,17 @@ function Providers({ idps, audience, save }: { idps: EnterpriseIdp[]; audience: 
 }
 
 function NewIdp({ onAdd, onCancel }: { onAdd: (idp: EnterpriseIdp) => Promise<boolean>; onCancel: () => void }) {
-  const [f, setF] = useState({ issuer: "", name: "", matching: "email" as "email" | "aud_sub", domains: "", jwks: "", admins: false, tenant: "" });
+  const [f, setF] = useState({ issuer: "", name: "", matching: "email" as "email" | "aud_sub", domains: "", jwks: "", admins: false, tenant: "", sso: "" });
   const [busy, setBusy] = useState(false);
+  // People's SSO connections: the same provider, set up once (its issuer and proven domains).
+  const [connections, setConnections] = useState<SsoConnection[]>([]);
+  useEffect(() => {
+    accountsApi.ssoConnections().then(setConnections, () => setConnections([]));
+  }, []);
+  const tie = (id: string) => {
+    const c = connections.find((x) => x.id === id);
+    setF(c ? { ...f, sso: c.id, issuer: c.issuer, name: f.name || c.name, domains: "" } : { ...f, sso: "" });
+  };
   const parsed = idpFromForm(f);
   const problem = "problem" in parsed ? parsed.problem : null;
   const set = (k: keyof typeof f) => (ev: { target: { value: string } }) => setF({ ...f, [k]: ev.target.value });
@@ -137,10 +147,23 @@ function NewIdp({ onAdd, onCancel }: { onAdd: (idp: EnterpriseIdp) => Promise<bo
   };
   return (
     <div className="rise space-y-4 p-5">
+      {connections.length > 0 && (
+        <label className="block space-y-1.5">
+          <span className="block text-[12px] text-subtle">The same provider as people&apos;s single sign-on (its issuer, and the domains its DNS records proved)</span>
+          <select value={f.sso} onChange={(ev) => tie(ev.target.value)} className={`${input} w-full sm:w-1/2`}>
+            <option value="">No: set it up here</option>
+            {connections.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name} ({c.verified.length ? c.verified.join(", ") : "no domain proven yet"})
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="block space-y-1.5">
           <span className="block text-[12px] text-subtle">Issuer</span>
-          <input autoFocus value={f.issuer} onChange={set("issuer")} placeholder="https://acme.okta.com" spellCheck={false} className={`${input} w-full font-mono text-[12px]`} />
+          <input autoFocus value={f.issuer} onChange={set("issuer")} readOnly={!!f.sso} placeholder="https://acme.okta.com" spellCheck={false} className={`${input} w-full font-mono text-[12px]`} />
         </label>
         <label className="block space-y-1.5">
           <span className="block text-[12px] text-subtle">Name</span>
@@ -153,10 +176,12 @@ function NewIdp({ onAdd, onCancel }: { onAdd: (idp: EnterpriseIdp) => Promise<bo
             <option value="aud_sub">The provider names their roll account</option>
           </select>
         </label>
-        <label className="block space-y-1.5">
-          <span className="block text-[12px] text-subtle">Email domains it vouches for</span>
-          <input value={f.domains} onChange={set("domains")} placeholder="acme.com, acme.co.uk" spellCheck={false} className={`${input} w-full font-mono text-[12px]`} />
-        </label>
+        {!f.sso && (
+          <label className="block space-y-1.5">
+            <span className="block text-[12px] text-subtle">Email domains it vouches for</span>
+            <input value={f.domains} onChange={set("domains")} placeholder="acme.com, acme.co.uk" spellCheck={false} className={`${input} w-full font-mono text-[12px]`} />
+          </label>
+        )}
       </div>
       <label className="block space-y-1.5">
         <span className="block text-[12px] text-subtle">Tenant (only for an issuer many companies share: the one tenant roll trusts there)</span>

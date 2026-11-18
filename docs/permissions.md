@@ -224,7 +224,7 @@ Grant ("ID-JAG", Okta's Cross App Access) describe: the app trades the provider'
 roll token acting as that person, with no consent screen and no roll sign-in.
 
 - **Trusting a provider** (the operator): `PUT /v1/access/enterprise/idps {idps: [{issuer, jwks?,
-  matching?, domains?, admins?, name?, tenant?}]}` (`roll token enterprise trust <issuer> …`). `issuer` is an
+  matching?, domains?, admins?, name?, tenant?, sso?}]}` (`roll token enterprise trust <issuer> …`). `issuer` is an
   `https` URL; its keys are fetched from its metadata through the guarded client, or pinned
   (`jwks`). `matching` says how a person is found: `email` (the default: the assertion's `email`,
   with `email_verified: true`, in one of the provider's `domains`, which email matching requires,
@@ -232,6 +232,11 @@ roll token acting as that person, with no consent screen and no roll sign-in.
   `usr_…`). A provider names people of its own company, never anyone's: some let people set their
   own email, so an unverified one or another domain is `access_denied`. roll's admins act as the
   operator, past roll's own second factor: a provider signs them in only with `admins: true`.
+  The same provider as people's single sign-on is set up once: `sso` names its SSO connection
+  (docs/accounts.md, "SSO"; `--sso`, or the form's "same provider" choice), whose issuer it must
+  be, and then it vouches for the domains that connection's DNS records proved, read at each
+  sign-in instead of `domains` (a domain whose proof is gone, or a removed connection, trusts
+  nobody).
   A multi-tenant issuer (one issuer URL many companies share) names the person's tenant in each
   assertion: roll trusts the issuer with one `tenant` (`--tenant`), and refuses that issuer's other
   tenants, and any assertion naming a tenant from a provider trusted without one (anyone can be a
