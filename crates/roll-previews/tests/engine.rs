@@ -1143,6 +1143,7 @@ async fn a_git_url_services_branch_push_makes_its_preview() {
         branch: branch.into(),
         sha: sha.map(Into::into),
         message: message.into(),
+        pusher: None,
         pull: None,
     };
     let rows = || e.engine.store.rows(Some(&e.project)).unwrap().into_iter().filter(|r| r.repo == "git:svc_shop").collect::<Vec<_>>();
@@ -1194,6 +1195,7 @@ async fn a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head()
         branch: "pull/7".into(),
         sha: sha.map(Into::into),
         message: String::new(),
+        pusher: None,
         pull: Some(roll_previews::ports::GitPull { number: 7, title: "Faster cart".into(), url: "https://github.com/acme/shop/pull/7".into(), fork: true, author: None }),
     };
     let deployed = |id: &str| e.apps.deployed.lock().get(&(id.to_string(), "shop".to_string())).cloned();
@@ -1268,6 +1270,7 @@ async fn a_git_url_preview_reports_its_status_and_pull_request_comment() {
         branch: branch.into(),
         sha: Some(sha.into()),
         message: String::new(),
+        pusher: None,
         pull: Some(roll_previews::ports::GitPull { number, title: "Cart".into(), url: format!("https://github.com/acme/shop/pull/{number}"), fork, author: None }),
     };
     e.engine.git_push(&push("feat/cart", "a1", 3, false)).await.unwrap();
@@ -1317,6 +1320,10 @@ async fn a_git_url_preview_reports_its_status_and_pull_request_comment() {
     let branch_push = || roll_previews::ports::GitPush { pull: None, ..push("deps/lodash", "d1", 9, false) };
     e.engine.git_push(&branch_push()).await.unwrap();
     assert!(of_bump());
+    // (With the pusher known, a bot's branch push makes none at all.)
+    let deps = |b: &str| roll_previews::ports::GitPush { pusher: Some("dependabot[bot]".into()), ..roll_previews::ports::GitPush { pull: None, ..push(b, "e1", 10, false) } };
+    e.engine.git_push(&deps("deps/react")).await.unwrap();
+    assert!(!e.engine.store.rows(Some(&e.project)).unwrap().iter().any(|r| r.branch.as_deref() == Some("deps/react")), "a bot's branch push");
     // …which its pull request takes back, and the branch's next push makes none.
     e.engine.git_push(&bump("Bump lodash")).await.unwrap();
     assert!(!of_bump(), "a bot's pull request is skipped");
@@ -1481,6 +1488,7 @@ async fn the_project_that_has_had_a_service_longest_speaks_for_its_branches() {
         branch: branch.into(),
         sha: Some("a1".into()),
         message: String::new(),
+        pusher: None,
         pull: Some(roll_previews::ports::GitPull { number, title: "Cart".into(), url: format!("https://github.com/acme/shop/pull/{number}"), fork: false, author: None }),
     };
     e.engine.git_push(&push("feat/cart", 3)).await.unwrap();
