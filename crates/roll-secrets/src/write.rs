@@ -700,6 +700,14 @@ impl Secrets {
     /// (`if_version`: the key moved since it was read, so the change is refused as `stale`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit_with(&self, project: &str, env_slug: &str, items: Vec<Item>, expect: &[(usize, i64)], kind: &str, message: &str, if_seq: Option<i64>, force: bool, caller: &Caller) -> Result<Applied> {
+        self.commit_hooked(project, env_slug, items, expect, kind, message, if_seq, force, caller, &|_, _| Ok(()))
+    }
+
+    /// [`Self::commit_with`], running `hook` in the change's own transaction once it's applied (a
+    /// secret request's answer is claimed there: the answer and its change happen together or not
+    /// at all). The hook may run again when the write retries, so it only touches the database.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit_hooked(&self, project: &str, env_slug: &str, items: Vec<Item>, expect: &[(usize, i64)], kind: &str, message: &str, if_seq: Option<i64>, force: bool, caller: &Caller, hook: &dyn Fn(&Conn<'_>, &Change) -> Result<()>) -> Result<Applied> {
         let warnings = self.warnings(project, env_slug, &items, caller);
         // A rollback restores what was there, typed or not.
         if kind != "rollback" {
@@ -727,7 +735,9 @@ impl Secrets {
             {
                 return Err(Error::Conflict("stale", format!("{} changed after #{s}", env.slug)));
             }
-            apply(c, &dek, &env, &prepared.items, kind, message, caller, now)
+            let (change, diffs) = apply(c, &dek, &env, &prepared.items, kind, message, caller, now)?;
+            hook(c, &change)?;
+            Ok((change, diffs))
         });
         match res {
             Ok((change, items)) => Ok(Applied { change: (!items.is_empty()).then_some(change), items, warnings, request: None }),

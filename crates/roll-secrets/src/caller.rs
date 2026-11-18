@@ -178,6 +178,25 @@ impl Secrets {
         }
     }
 
+    /// What `by` (the operator, a person or a roll-access token) may do now, under another name:
+    /// what it made acts as it (a sync, a secret request's answer). `None` once it can't act: a
+    /// person who can't sign in, a token revoked or expired, anything else.
+    pub(crate) fn acting_as(&self, by: &str, principal: String) -> Result<Option<Caller>> {
+        if by == "operator" {
+            return Ok(Some(Caller { principal, grants: Arc::new(crate::access::Everything), ip: None, runtime: false, approval: None }));
+        }
+        // A person's: as they are now, while their account can sign in.
+        if crate::access::is_person(by) {
+            let Some(person) = self.person(by)? else { return Ok(None) };
+            let mut c = self.person_caller(by, person.admin)?;
+            c.principal = principal;
+            return Ok(Some(c));
+        }
+        // A roll-access grant: as it is now (a person's acts as them).
+        let Some(g) = by.strip_prefix("token:").and_then(|t| self.grants.as_ref()?.grant(t)) else { return Ok(None) };
+        Ok(Some(Caller { principal, grants: self.grant_grants(&g)?, ip: None, runtime: false, approval: None }))
+    }
+
     /// Who made `by` in the end: an identity's maker, a token's person (a roll-access grant made by
     /// someone acts as them), up the chain. A token that's gone (revoked, expired, its person
     /// unable to sign in) or an identity that's gone ends it.

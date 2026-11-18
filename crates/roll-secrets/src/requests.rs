@@ -303,6 +303,13 @@ impl Secrets {
     /// it's based on (applying it later needs the environment unchanged since).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn open_request_items(&self, project: &str, slug: &str, path: &str, message: String, items: Vec<Item>, expect: &[(usize, i64)], caller: &Caller) -> Result<Request> {
+        self.open_request_hooked(project, slug, path, message, items, expect, caller, &|_, _| Ok(()))
+    }
+
+    /// [`Self::open_request_items`], running `hook` with the request's id in the transaction that
+    /// opens it (it may run again when the write retries: database only).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_request_hooked(&self, project: &str, slug: &str, path: &str, message: String, items: Vec<Item>, expect: &[(usize, i64)], caller: &Caller, hook: &dyn Fn(&Conn<'_>, &str) -> Result<()>) -> Result<Request> {
         let path = path.to_string();
         let members = if items.iter().any(|i| matches!(i.action, ItemAction::Set { link: Some(Some(_)), .. })) { self.members(project)? } else { Default::default() };
         for i in &items {
@@ -360,6 +367,7 @@ impl Secrets {
                 let link = self.web_url.as_ref().map(|w| format!("{}/dashboard/projects/{project}/secrets?env={slug}", w.trim_end_matches('/')));
                 crate::notices::queue(c, project, &env.id, slug, &id, &caller.principal, &message, &keys, link, now)?;
             }
+            hook(c, &id)?;
             view(c, &env, load(c, &env, &id)?)
         })
     }

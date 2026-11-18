@@ -2804,3 +2804,96 @@ async fn reach_names_who_and_what_can_read_a_folder() {
     let (s, _) = api.req(Method::GET, "/environments/production/reach", None, Some(&deploy)).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
 }
+
+/// An answer as the request's page makes it: each value sealed to the request's public key.
+fn answer(id: &str, public_key: &str, values: &[(&str, &str)]) -> Value {
+    let boxes: serde_json::Map<String, Value> = values
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::to_value(roll_secrets::crypto::seal_to(public_key, &roll_secrets::value_requests::answer_context(id, k), v.as_bytes()).unwrap()).unwrap()))
+        .collect();
+    json!({ "values": boxes })
+}
+
+#[tokio::test]
+async fn a_secret_request_lands_an_outside_value_once_as_a_change() {
+    let api = Api::new().await;
+    // Asking takes `write` on the folder: the answer is written as whoever asked.
+    let reader = api.token(json!({ "name": "reader", "actions": ["read"] }));
+    let (s, _) = api.req(Method::POST, "/environments/staging/value-requests?path=/vendor", Some(json!({ "keys": ["VENDOR_KEY"] })), Some(&reader)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let r = api.ok(Method::POST, "/environments/staging/value-requests?path=/vendor", Some(json!({ "keys": ["VENDOR_KEY", "VENDOR_SECRET"], "note": "the example vendor's sandbox keys" }))).await;
+    let id = r["id"].as_str().unwrap().to_string();
+    assert_eq!((r["open"].as_bool(), r["answers_left"].as_i64(), r["expires_at"].as_i64().unwrap() - r["created_at"].as_i64().unwrap()), (Some(true), Some(1), 7 * 86_400_000));
+
+    // The page shows the note and the key names, and the key to seal to; looking uses nothing up.
+    let (s, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{id}"), None).await;
+    assert_eq!((s, peek["note"].as_str(), peek["keys"].clone()), (StatusCode::OK, Some("the example vendor's sandbox keys"), json!(["VENDOR_KEY", "VENDOR_SECRET"])));
+    assert!(peek.get("environment").is_none() && peek.get("created_by").is_none(), "the page names nothing about the project: {peek}");
+    let public = peek["public_key"].as_str().unwrap().to_string();
+    // A box sealed for another key, or a missing key, is refused and uses nothing up.
+    let mut swapped = answer(&id, &public, &[("VENDOR_KEY", "fake-key-1"), ("VENDOR_SECRET", "fake-secret-1")]);
+    swapped["values"]["VENDOR_KEY"] = swapped["values"]["VENDOR_SECRET"].clone();
+    let (s, e) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{id}/answer"), Some(swapped)).await;
+    assert!(s == StatusCode::BAD_REQUEST && !e.to_string().contains("fake-secret-1"), "{s} {e}");
+    let (s, _) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{id}/answer"), Some(answer(&id, &public, &[("VENDOR_KEY", "fake-key-1")]))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    let (s, body) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{id}/answer"), Some(answer(&id, &public, &[("VENDOR_KEY", "fake-key-1"), ("VENDOR_SECRET", "fake-secret-1")]))).await;
+    assert_eq!((s, body), (StatusCode::NO_CONTENT, Value::String(String::new())), "the answer shows nothing back");
+    let values = api.values("staging", "/vendor").await;
+    assert_eq!((values["values"]["VENDOR_KEY"].as_str(), values["values"]["VENDOR_SECRET"].as_str()), (Some("fake-key-1"), Some("fake-secret-1")));
+    let changes = api.ok(Method::GET, "/environments/staging/changes", None).await;
+    assert_eq!(changes[0]["by"], format!("request:{id}"));
+    assert!(changes[0]["message"].as_str().unwrap().contains("asked by operator"), "{}", changes[0]);
+
+    // Answered once: the link is a 410 now, for the page and for another answer.
+    let (s, e) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{id}/answer"), Some(answer(&id, &public, &[("VENDOR_KEY", "fake-key-2"), ("VENDOR_SECRET", "fake-secret-2")]))).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::GONE, Some("gone")));
+    assert_eq!(api.call(Method::GET, &format!("/v1/secrets/value-requests/{id}"), None).await.0, StatusCode::GONE);
+    assert_eq!(api.values("staging", "/vendor").await["values"]["VENDOR_KEY"], "fake-key-1");
+    let list = api.ok(Method::GET, "/value-requests", None).await;
+    assert_eq!((list[0]["open"].as_bool(), list[0]["outcome"]["change"].as_i64()), (Some(false), changes[0]["seq"].as_i64()));
+    let audit = api.ok(Method::GET, "/audit?action=value_request", None).await;
+    let actions: Vec<&str> = audit.as_array().unwrap().iter().map(|a| a["action"].as_str().unwrap()).collect();
+    assert_eq!(actions, ["value_request.answer", "value_request.create"]);
+    assert!(!audit.to_string().contains("fake-key-1") && !list.to_string().contains("fake-key-1"));
+
+    // An expired request, and a cancelled one, are 410s too.
+    let late = api.ok(Method::POST, "/environments/staging/value-requests", Some(json!({ "keys": ["LATE"], "ttl_minutes": 60 }))).await;
+    let late_id = late["id"].as_str().unwrap();
+    api.db.write(|c| c.execute("UPDATE value_requests SET expires_at = 1 WHERE id = ?", [late_id])).unwrap();
+    assert_eq!(api.call(Method::GET, &format!("/v1/secrets/value-requests/{late_id}"), None).await.0, StatusCode::GONE);
+    let gone = api.ok(Method::POST, "/environments/staging/value-requests", Some(json!({ "keys": ["NEVER"] }))).await;
+    let gone_id = gone["id"].as_str().unwrap();
+    let (_, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{gone_id}"), None).await;
+    let (s, _) = api.req(Method::DELETE, &format!("/value-requests/{gone_id}"), None, Some(&reader)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "only whoever asked, or an admin");
+    let (s, _) = api.call(Method::DELETE, &format!("/value-requests/{gone_id}"), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{gone_id}/answer"), Some(answer(gone_id, peek["public_key"].as_str().unwrap(), &[("NEVER", "fake")]))).await;
+    assert_eq!(s, StatusCode::GONE);
+    assert_eq!(api.call(Method::GET, "/v1/secrets/value-requests/vrq_nosuchrequest", None).await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_secret_request_into_a_folder_that_needs_approval_opens_a_change_request() {
+    let api = Api::new().await;
+    api.ok(Method::PUT, "/environments/production/folder-policies?path=/payments", Some(json!({ "approvals": 1 }))).await;
+    let r = api.ok(Method::POST, "/environments/production/value-requests?path=/payments", Some(json!({ "keys": ["PSP_KEY"] }))).await;
+    let id = r["id"].as_str().unwrap();
+    let (_, peek) = api.call(Method::GET, &format!("/v1/secrets/value-requests/{id}"), None).await;
+    let (s, _) = api.call(Method::POST, &format!("/v1/secrets/value-requests/{id}/answer"), Some(answer(id, peek["public_key"].as_str().unwrap(), &[("PSP_KEY", "fake-psp-key")]))).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(api.values("production", "/payments").await["values"].get("PSP_KEY").is_none(), "nothing lands before it's approved");
+    let list = api.ok(Method::GET, "/value-requests", None).await;
+    let request = list[0]["outcome"]["request"].as_str().unwrap();
+    let cr = api.ok(Method::GET, &format!("/environments/production/requests/{request}"), None).await;
+    // By whoever asked, so they can't approve their own answer in.
+    assert_eq!((cr["state"].as_str(), cr["by"].as_str(), cr["items"][0]["key"].as_str()), (Some("open"), Some("operator"), Some("PSP_KEY")));
+    let (s, _) = api.call(Method::POST, &format!("/environments/production/requests/{request}/review"), Some(json!({ "verdict": "approve" }))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let lead = api.token(json!({ "name": "lead", "actions": ["read", "write", "admin"] }));
+    api.req(Method::POST, &format!("/environments/production/requests/{request}/review"), Some(json!({ "verdict": "approve" })), Some(&lead)).await;
+    api.ok(Method::POST, &format!("/environments/production/requests/{request}/apply"), None).await;
+    assert_eq!(api.values("production", "/payments").await["values"]["PSP_KEY"], "fake-psp-key");
+}

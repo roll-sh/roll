@@ -31,7 +31,7 @@ CREATE INDEX IF NOT EXISTS shares_expiry ON shares (expires_at);
 ";
 
 /// The largest ciphertext (a 64 KiB value, its nonce and tag, in base64url).
-const CIPHERTEXT_MAX: usize = 90 * 1024;
+pub(crate) const CIPHERTEXT_MAX: usize = 90 * 1024;
 /// Shares a project may have open at once.
 const OPEN_MAX: i64 = 200;
 

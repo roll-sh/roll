@@ -83,6 +83,11 @@ pub const RULES: &[Rule] = &[
     // A one-time share's link: the value is encrypted with a key only the link holds, and opens
     // a few times at most (docs/secrets.md, "Sharing a value once").
     Rule { route: "/v1/secrets/shares", access: Access::Public("a one-time share's link: ciphertext only, the key stays in the link") },
+    // A secret request's link: for someone outside roll, who has no roll credential. It shows
+    // only the note and key names, takes values sealed to the request's own key, is answered a
+    // set number of times before it expires, and lands as whoever asked could write
+    // (docs/secrets.md, "Asking for a value").
+    Rule { route: "/v1/secrets/value-requests", access: Access::Public("a secret request's link: someone outside roll sends sealed values in, as whoever asked") },
     Rule { route: "/v1/secrets/ocsp", access: Access::Public("a project CA's OCSP responder, which anyone checking its certificates asks") },
     Rule { route: "/v1/secrets/crl", access: Access::Public("a project CA's certificate revocation list, which anyone checking its certificates fetches") },
     Rule { route: "/v1/secrets/login", access: Access::Public("a workload's OIDC token is the credential (workload identities)") },

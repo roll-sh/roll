@@ -193,6 +193,10 @@ export type Token = {
 export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 /** `ciphertext`: base64url(nonce ‖ AES-256-GCM ciphertext) with `roll-share-v1` as associated data; `views` 1–10, `ttl_minutes` 5–10080. */
 export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number };
+/** A secret request: a link asking someone outside roll for a folder's values (never a key). `outcome`: what the last answer became. */
+export type ValueRequest = { id: string; environment: string; path: string; keys: string[]; note: string; answers_left: number; created_by: string; created_at: number; expires_at: number; answered_at: number | null; cancelled_at: number | null; open: boolean; outcome: { change: number } | { request: string } | null; link?: string };
+/** `keys` 1–20; `ttl_minutes` 5–43200 (default 7 days); `answers` 1–10 (default 1). */
+export type NewValueRequest = { keys: string[]; note?: string; ttl_minutes?: number; answers?: number };
 export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email";
 /** A key every standard environment must define in a folder; typed keys also say what its value must be. */
 /** `owner`: who supplies it (a person or team), named in health and the daily notice. */

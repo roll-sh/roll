@@ -1808,6 +1808,49 @@ open it.
   `GET …/shares` lists a project's shares (never their ciphertext); `DELETE …/shares/{id}` revokes
   one. A project has at most 200 open at once.
 
+### Asking for a value
+
+The other way round, as Infisical's secret requests: a link that asks someone outside roll (a
+vendor, a contractor) to send a value in. `roll secrets request VENDOR_KEY [VENDOR_SECRET…]
+[--note …] [--expires 7d] [--answers 1]` prints the link; in the dashboard, a folder's **Request a
+value…** makes one, and Access → Secret requests lists them with **Cancel**. `roll secrets
+request` alone lists them, `roll secrets request --cancel ID` cancels one.
+
+- **Asking is a `write`** on the folder (`POST …/environments/{env}/value-requests?path=`): the
+  answer is written as whoever asked, as they can write when it arrives (a person who can't sign
+  in any more, or a revoked token, and the link is a 410). 1–20 key names, a note (shown on the
+  page), an expiry from 5 minutes to 30 days (7 days by default), and how many times it may be
+  answered (1 to 10, once by default). A project has at most 200 open at once.
+- **The page** (`<dashboard>/request/<id>`, `link` when rolld has `ROLL_WEB_URL`) shows only the
+  note and the key names: never the project, the environment or who asked. Whoever has the link
+  pastes the values and sends them; the page shows nothing back.
+- **Sealed from their browser.** Each request has its own X25519 key pair, made by roll. The page
+  seals each value to its public key (`roll-seal-v1`, as backups and endpoint keys are, with
+  `roll-secret-request:<id>:<KEY>` as associated data, so a box only opens as that key of that
+  request); the secret key is kept sealed with the project's data key, as every value is, and is
+  dropped when the request closes. roll opens the boxes only inside the write that lands them, so
+  the value is in the clear nowhere between the answerer's browser and its encrypted version: not
+  in a proxy, a request log or the dashboard's server. Unlike a share's, the value is meant for
+  roll, which must be able to read it in the end; a key only the asker's browser held would only
+  add a step (they'd open it and write it themselves).
+- **It lands** as one change on the folder, by `request:<id>` with "asked by …" in its message,
+  or, where the folder needs approval (a protected environment, a folder policy), as a change
+  request by whoever asked: an approver other than them approves it. The answer is claimed in the
+  same transaction, so an answer that doesn't land (a value that doesn't fit its typed key, a box
+  that doesn't open, a missing key) uses nothing up, and a request answered once never lands twice.
+- **Audited** when it's asked for (`value_request.create`), answered (`value_request.answer`, with
+  the answerer's address) and cancelled (`value_request.cancel`); the change or change request is
+  audited as any other. The environment's notify URL hears that it landed (key names and the
+  change, never a value); a change request's own notice goes to its approvers.
+- **The public routes** are `GET /v1/secrets/value-requests/{id}` (`{note, keys, expires_at,
+  public_key}`) and `POST /v1/secrets/value-requests/{id}/answer` (`{values: {KEY: box}}`, 204).
+  An unknown id is a 404; one answered as often as allowed, expired or cancelled is a 410 `gone`.
+  Answers are capped at 5 a minute per request and 10 per client address (429), and a value at
+  64 KiB, as a share's.
+- **MCP**: there's no tool for it. The link is for a person outside roll, and an agent that may
+  write a folder can already set its values; `GET …/value-requests` is readable through the API
+  with `read`.
+
 ## Syncs
 
 A **sync** pushes an environment's resolved values to a platform outside roll, one way, whenever
@@ -2548,6 +2591,11 @@ isn't in the workspace is 404.
 | `POST /syncs/{id}/run` | | `Sync` after pushing every key (`admin`; 409 `running` while another push holds it) |
 | `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |
 | `POST /v1/secrets/shares/{id}/open` (public) | | `{ciphertext}` (one open used) |
+| `POST /environments/{env}/value-requests?path=` | `NewValueRequest` | 201 `ValueRequest` (`write` on the folder) |
+| `GET /value-requests` | | `ValueRequest[]` newest first (never a key) |
+| `DELETE /value-requests/{id}` | | 204 (whoever asked, or an admin of the folder) |
+| `GET /v1/secrets/value-requests/{id}` (public) | | `{note, keys, expires_at, public_key}`; 410 `gone` once answered, expired or cancelled |
+| `POST /v1/secrets/value-requests/{id}/answer` (public) | `{values: Record<string, Sealed>}` | 204; 410 `gone`; 429 past 5 a minute per request or 10 per address |
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
 | `POST /audit/sinks` | `{url, from_start?, format?, token?}` (an HTTPS endpoint, or on the canvas `bucket:<name>`, `search:<cluster>/<index>` or `stream:<id>/<topic>`; `format` `splunk`, `datadog` or `bearer` takes an HTTPS endpoint and its `token`, sealed) | 201 `Sink & {secret}` (shown once; a `Sink` names its `format`, never its token) |
 | `DELETE /audit/sinks/{id}` | | 204 |
@@ -2619,6 +2667,7 @@ isn't in the workspace is 404.
 - 401: no credential, or a token that doesn't exist, is revoked or expired.
 - 403: the caller may not do this (`{"code": "forbidden"}`).
 - 404: no such project, environment, folder, secret, version, change, request, lease or token.
+- 410: a secret request answered as often as it allowed, expired or cancelled (`gone`).
 - 409: a slug that is taken (`conflict`), a write to a protected environment
   (`approval_required`), a request that is `stale`, the last standard environment.
 - 503: no deployment key on a node that shares the system database (`no_key`).
@@ -2680,6 +2729,9 @@ type Rotation = { environment: string; path: string; keys: string[]; kind: strin
 type Finding = { issue: "expired" | "missing" | "exposed" | "public" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
+type NewValueRequest = { keys: string[]; note?: string; ttl_minutes?: number /* 5–43200, default 10080 */; answers?: number /* 1–10, default 1 */ };
+type ValueRequest = { id: string; environment: string; path: string; keys: string[]; note: string; answers_left: number; created_by: string; created_at: number; expires_at: number; answered_at: number | null; cancelled_at: number | null; open: boolean; outcome: { change: number } | { request: string } | null; link?: string };
+type Sealed = { v: 1; epk: string; nonce: string; ct: string }; // roll-seal-v1 to the request's public_key, associated data `roll-secret-request:<id>:<KEY>`
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
 type Compare = { from: string; to: string; path: string; rows: { key: string; status: "same" | "different" | "only_from" | "only_to" | "hidden"; from: number | null; to: number | null }[] };
 type Request = { id: string; environment: string; path: string; message: string; by: string; at: number; state: "open" | "approved" | "rejected" | "applied" | "closed" | "stale"; items: Item[]; reviews: { by: string; verdict: "approve" | "reject"; comment: string; at: number }[]; approvals: number; approvals_needed: number; applied_seq: number | null };
@@ -2733,6 +2785,9 @@ audit(id INTEGER PK, project_id, at, actor, action, env_id, path, keys, summary,
 syncs(id PK, project_id, env_id, path, kind, target, keys, prefix, secret BLOB, status, error,
       last_digest, state, last_synced_at, running_until, retry_at, checked_at, created_at, created_by)
       -- secret: the sealed signing secret; state: {name: stamp} of what was pushed (no values)
+value_requests(id PK, project_id, env_id, path, keys, note, public_key, seal_key BLOB, answers_left,
+      created_by, created_at, expires_at, answered_at, cancelled_at, outcome)
+      -- seal_key: the request's X25519 secret key, sealed with the data key; NULL once it closes
 ```
 
 `owner` is `''` for a shared secret and the principal for a personal one. A deleted secret keeps its

@@ -439,22 +439,8 @@ impl Secrets {
 
     /// Who a sync resolves as: its creator's access, looked up now, named `sync:<id>`.
     fn sync_caller(&self, r: &Row) -> Result<Caller> {
-        let principal = format!("sync:{}", r.info.id);
-        if r.info.created_by == "operator" {
-            return Ok(Caller { principal, grants: Arc::new(Everything), ip: None, runtime: false, approval: None });
-        }
-        let gone = || Error::Forbidden(format!("{} made this sync and can't reach secrets any more: make the sync again", r.info.created_by));
-        // A person's: as they are now, while their account can sign in.
-        if crate::access::is_person(&r.info.created_by) {
-            let person = self.person(&r.info.created_by)?.ok_or_else(gone)?;
-            let mut c = self.person_caller(&r.info.created_by, person.admin)?;
-            c.principal = principal;
-            return Ok(c);
-        }
-        // A roll-access grant: as it is now, or gone once revoked or expired (a person's acts as them).
-        let token = r.info.created_by.strip_prefix("token:").ok_or_else(gone)?;
-        let g = self.grants.as_ref().and_then(|g| g.grant(token)).ok_or_else(gone)?;
-        Ok(Caller { principal, grants: self.grant_grants(&g)?, ip: None, runtime: false, approval: None })
+        self.acting_as(&r.info.created_by, format!("sync:{}", r.info.id))?
+            .ok_or_else(|| Error::Forbidden(format!("{} made this sync and can't reach secrets any more: make the sync again", r.info.created_by)))
     }
 
     /// A pass over the syncs only when a change marked some due (`checked_at` NULL): what rolld
