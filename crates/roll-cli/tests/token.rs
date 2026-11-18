@@ -94,6 +94,26 @@ async fn a_token_from_the_cli_is_held_to_its_rules() {
         { "product": "postgres", "resources": [{ "id": "prj_a" }], "actions": { "delete": "ask" } },
     ]), "{tight}");
 
+    // It asks for more for a while (`roll token request --wait`), a person approves, and it may:
+    // the delete it had to ask about each time runs without asking.
+    let (api2, token2) = (api.clone(), token.clone());
+    let asking = std::thread::spawn(move || roll(&api2, &token2, &["token", "request", "--product", "postgres", "--allow", "delete", "--resource", "prj_a", "--for", "15m", "--reason", "drop the copy", "--wait"]));
+    let mut asked = None;
+    for _ in 0..100 {
+        let pending = json_of(&roll(&api, "", &["--json", "mcp", "approvals"]));
+        if let Some(a) = pending.as_array().and_then(|l| l.iter().find(|a| a["method"] == "GRANT")) {
+            asked = Some(a["id"].as_str().unwrap().to_string());
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(roll(&api, "", &["mcp", "approve", &asked.expect("an access request")]).status.success());
+    let out = asking.join().unwrap();
+    assert!(out.status.success() && String::from_utf8_lossy(&out.stdout).contains("approved"), "{out:?}");
+    let started = std::time::Instant::now();
+    let del = roll(&api, &token, &["db", "delete", "prj_a"]);
+    assert!(del.status.success() && started.elapsed() < std::time::Duration::from_secs(10), "{del:?}");
+
     // Revoked: the next command fails.
     assert!(roll(&api, "", &["token", "revoke", &id]).status.success());
     assert!(!roll(&api, &token, &["db", "list"]).status.success());

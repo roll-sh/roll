@@ -19,6 +19,7 @@ pub mod oauth;
 pub mod rate;
 pub mod sinks;
 pub mod client_credentials;
+pub mod enterprise;
 mod clients_api;
 pub mod redact;
 pub mod store;
@@ -52,6 +53,9 @@ pub enum Error {
     Conflict(String),
     #[error("{0}")]
     TooMany(String),
+    /// Sudo mode: the session must prove who it is again first (403 `reauth_required`).
+    #[error("{0}")]
+    ReauthRequired(String),
     /// An OAuth error (RFC 6749 §5.2): its code and description.
     #[error("{1}")]
     OAuth(&'static str, String),
@@ -70,6 +74,7 @@ impl IntoResponse for Error {
             Error::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             Error::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, "too_many"),
+            Error::ReauthRequired(_) => (StatusCode::FORBIDDEN, "reauth_required"),
             Error::OAuth(code, desc) => {
                 let status = if *code == "invalid_client" { StatusCode::UNAUTHORIZED } else { StatusCode::BAD_REQUEST };
                 return (status, [("cache-control", "no-store")], Json(serde_json::json!({ "error": code, "error_description": desc }))).into_response();
@@ -85,33 +90,7 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", random(16))
 }
 
-/// A secret: `prefix`, 34 random characters of lowercase base32 (170 bits) and 6 of checksum, so a
-/// scanner can tell a real roll token from look-alike text without asking roll ([`checksum_ok`],
-/// as GitHub's tokens carry a CRC32).
-pub fn new_secret(prefix: &str) -> String {
-    let body = format!("{prefix}{}", random(34));
-    let sum = checksum(&body);
-    format!("{body}{sum}")
-}
-
-/// The last 6 characters a secret ends with: CRC-32 of everything before, as base32 (30 bits).
-fn checksum(body: &str) -> String {
-    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-    let c = crc32fast::hash(body.as_bytes()) >> 2;
-    (0..6).rev().map(|i| ALPHABET[((c >> (i * 5)) & 31) as usize] as char).collect()
-}
-
-/// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`), machine
-/// clients' (`rlc_`), and other products' made the same way ([`new_secret`]): apps' deploy hooks
-/// (`rlk_`). (`rlh_` is roll code's automations' inbound webhook secrets: another shape, not ours.)
-pub const SECRET_PREFIXES: [&str; 5] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_"];
-
-/// Whether `s` is shaped like a roll secret ([`SECRET_PREFIXES`]) whose checksum holds: what
-/// scanners look for. Secrets made before checksums don't pass, but still work.
-pub fn checksum_ok(s: &str) -> bool {
-    let Some(rest) = SECRET_PREFIXES.iter().find_map(|p| s.strip_prefix(p)) else { return false };
-    rest.len() == 40 && rest.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)) && checksum(&s[..s.len() - 6]) == s[s.len() - 6..]
-}
+pub use roll_auth::credentials::{SECRET_PREFIXES, checksum_ok, new_secret};
 
 /// Every roll grant secret in `text` whose checksum holds (in a pushed file, a paste, a log).
 pub fn find_secrets(text: &str) -> Vec<String> {
@@ -142,6 +121,7 @@ mod policy_tests {
         let p = super::Policy { max_idle_days: Some(30), ..Default::default() };
         let day = 86_400_000;
         let g = |created: i64, used: Option<i64>| crate::store::Grant {
+            read_only: false,
             id: "tok_a".into(),
             name: "a".into(),
             kind: "token",
@@ -164,6 +144,7 @@ mod policy_tests {
             revoked_why: None,
             temporary: vec![],
             ask_otherwise: false,
+            mcp_only: false,
         };
         let now = 100 * day;
         assert!(p.idle(&g(0, None), now), "made 100 days ago, never used");
@@ -612,7 +593,11 @@ impl Access {
                         tool: None,
                         method: "-".into(),
                         route: "leaked".into(),
-                        product: s.get(..4).and_then(|p| (p == "rlk_").then(|| "apps".to_string())),
+                        product: s.get(..4).and_then(|p| match p {
+                            "rlk_" => Some("apps".to_string()),
+                            "rlp_" => Some("accounts".to_string()),
+                            _ => None,
+                        }),
                         action: Some("admin".into()),
                         resource: Some(format!("{what}, found in {found_at}").chars().take(300).collect()),
                         decision: "revoke".into(),
@@ -624,6 +609,31 @@ impl Access {
                         client: None,
                     });
                 }
+                continue;
+            }
+            // An enterprise app's secret: dropped with its tokens until the operator rotates it.
+            if let Some(app) = self.revoke_leaked_app(s, &format!("found in {found_at}"))? {
+                tracing::warn!(app = %app.client_id, at = %found_at, "a leaked enterprise app secret was revoked");
+                self.store.audit(&store::AuditEvent {
+                    id: new_id("aud"),
+                    at: code_sql::now_ms(),
+                    grant_id: None,
+                    grant_name: None,
+                    source: "leak".into(),
+                    tool: None,
+                    method: "-".into(),
+                    route: "leaked".into(),
+                    product: None,
+                    action: Some("admin".into()),
+                    resource: Some(format!("enterprise app {} ({}), found in {found_at}", app.name, app.client_id).chars().take(300).collect()),
+                    decision: "revoke".into(),
+                    approval: None,
+                    status: 200,
+                    args: None,
+                    ip: None,
+                    duration_ms: 0,
+                    client: None,
+                });
                 continue;
             }
             if let Some(g) = self.store.revoke_leaked(s, &format!("found in {found_at}"))? {
@@ -894,7 +904,7 @@ impl Access {
             );
         }
         let (Some(chat), Some((install, channel))) = (self.chat.get().cloned(), self.chat_target()) else { return };
-        let (me, a) = (self.clone(), a.clone());
+        let (me, a) = (self.clone(), self.gated(a.clone()));
         tokio::spawn(async move {
             match chat.post(install.clone(), channel.clone(), a.clone()).await {
                 Ok(ts) => {
@@ -919,6 +929,54 @@ impl Access {
         });
     }
 
+    /// Whether the policy names `user` as an approver of this pending approval (they see and
+    /// decide it though it isn't their token's).
+    pub fn names_approver(&self, a: &store::Approval, user: &str) -> bool {
+        a.state == "pending" && self.policy_now().gates(a).iter().any(|g| g.approvers.as_ref().is_some_and(|l| l.iter().any(|x| x == user)))
+    }
+
+    /// A pending approval with what the policy asks of it (`gates`), for whoever reads it.
+    pub fn gated(&self, mut a: store::Approval) -> store::Approval {
+        if a.state == "pending" {
+            a.gates = self
+                .policy_now()
+                .gates(&a)
+                .into_iter()
+                .map(|g| store::Gate { approved: a.approved_by.iter().filter(|b| g.may_approve(b)).count(), approvals: g.approvals, approvers: g.approvers })
+                .collect();
+        }
+        a
+    }
+
+    /// Decide an approval as `by`, under the policy's approval rules: when rules cover it, `by`
+    /// must be an approver of one of them and never the person whose token asked, and it's approved
+    /// once every rule has its approvals. Without one, one person decides.
+    pub fn decide(&self, id: &str, approve: bool, by: &str, reason: Option<&str>) -> Result<store::Approval> {
+        let found = self.store.approval(id)?;
+        let gates = self.policy().gates(&found);
+        if approve && !gates.is_empty() {
+            let owner = self.store.get(&found.grant_id)?.user;
+            if owner.as_deref() == Some(by) {
+                return Err(Error::Forbidden("this was asked with your own token: someone else approves it".into()));
+            }
+            if !gates.iter().any(|g| g.may_approve(by)) {
+                let names: Vec<&str> = gates.iter().filter_map(|g| g.approvers.as_ref()).flatten().map(String::as_str).collect();
+                return Err(Error::Forbidden(if names.is_empty() {
+                    "roll's policy asks signed-in people to approve this (an admin, or a person it names): the operator's token and chat approvers not linked to an account don't count".into()
+                } else {
+                    format!("roll's policy names who approves this: {}", names.join(", "))
+                }));
+            }
+        }
+        // An access request becomes its rule in the same write that approves it, decided anywhere.
+        let rule = match crate::api::asked_for(&found) {
+            Some(for_ms) if approve => Some((crate::api::rule_of(&found)?, for_ms)),
+            _ => None,
+        };
+        let grants = rule.as_ref().map(|(r, ms)| (r, *ms, !gates.is_empty()));
+        self.store.decide(id, approve, by, reason, &|who| gates.iter().all(|g| g.met(who)), grants).map(|a| self.gated(a))
+    }
+
     /// A press in chat: decide, when it came from the install approvals go to and from one of the
     /// approvers the operator named. `Err` is what the person who pressed is told.
     pub async fn decide_from_chat(self: &Arc<Self>, approval: String, approve: bool, by: String, install: String) -> std::result::Result<(), String> {
@@ -929,11 +987,14 @@ impl Access {
             }
             // Only the people the operator named: not everyone who can see the channel.
             let user = by.split_once(':').map_or(by.as_str(), |(_, u)| u);
-            let named = me.store.setting("notify").ok().flatten().is_some_and(|n| n["chat"]["approvers"].as_array().is_some_and(|a| a.iter().any(|v| v == user)));
+            let notify = me.store.setting("notify").ok().flatten().unwrap_or_default();
+            let named = notify["chat"]["approvers"].as_array().is_some_and(|a| a.iter().any(|v| v == user));
             if !named {
                 return Err(Error::Forbidden("you aren't one of the people roll's operator lets approve these".into()));
             }
-            let r = me.store.decide(&approval, approve, &by, None);
+            // An approver the operator linked to their roll account decides as that person.
+            let by = notify["chat"]["people"][user].as_str().map_or(by, str::to_string);
+            let r = me.decide(&approval, approve, &by, None);
             // Already decided or expired: bring the card up to date as well.
             if r.is_err()
                 && let Ok(a) = me.store.approval(&approval)
@@ -954,9 +1015,9 @@ impl Access {
     }
 }
 
-/// The operator's rules for every grant (`PUT /v1/access/policy`): how long one may live, and
-/// whether it must expire at all.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// The operator's rules for every grant (`PUT /v1/access/policy`): how long one may live, whether
+/// it must expire at all, and what needs more than one person to approve.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
     /// At most this many days from when it's made or changed (`None`: no limit).
@@ -973,9 +1034,93 @@ pub struct Policy {
     /// admin's approval, as GitHub's organizations approve fine-grained tokens.
     #[serde(default)]
     pub approve_people: Actions,
+    /// What needs more than one approver, and whose ("Two-person approvals"): each rule covering a
+    /// request is a gate it must pass.
+    #[serde(default)]
+    pub approval_rules: Vec<ApprovalRule>,
 }
 
-/// Some actions: a list on the wire (`["reveal", "admin"]`), bits inside (so `Policy` stays `Copy`).
+/// A rule of the policy's `approval_rules`, as roll secrets' protected environments name theirs:
+/// requests it covers need `approvals` approvals from `approvers` (anyone who may decide when
+/// left out), never from the person whose token asked.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalRule {
+    /// A product, or `*` for every one.
+    pub product: String,
+    /// The actions it's about (every action when left out).
+    #[serde(default, skip_serializing_if = "no_actions")]
+    pub actions: Actions,
+    /// The environments it's about (`pv-*` covers `pv-42`; all when left out). A request about no
+    /// one environment is covered: the stricter reading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environments: Option<Vec<String>>,
+    /// How many people must approve: 1 to 10.
+    pub approvals: u8,
+    /// Who may (`operator`, a person's `usr_…`, a chat approver's `slack:U…` or `discord:…`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvers: Option<Vec<String>>,
+}
+
+fn no_actions(a: &Actions) -> bool {
+    a.is_empty()
+}
+
+impl ApprovalRule {
+    /// Whether it's about this approval's request.
+    pub fn covers(&self, a: &store::Approval) -> bool {
+        (self.product == "*" || self.product == a.product)
+            && (self.actions.is_empty() || Action::parse(&a.action).is_some_and(|x| self.actions.has(x)))
+            && match (&self.environments, &a.environment) {
+                (Some(list), Some(env)) => list.iter().any(|p| roll_auth::scope::env_covers(p, env)),
+                _ => true,
+            }
+    }
+
+    /// Whether `by` counts toward it: a name it lists, or, when it lists none, a signed-in person
+    /// (`usr_…`). The operator's token and chat approvers count only where a rule names them: they
+    /// aren't one person each (anyone may hold the token; a chat id isn't tied to an account), so
+    /// one human could otherwise count twice, or approve their own token's request from chat.
+    pub fn may_approve(&self, by: &str) -> bool {
+        match &self.approvers {
+            Some(l) => l.iter().any(|x| x == by),
+            None => by.starts_with("usr_"),
+        }
+    }
+
+    /// Whether it covers what `rule` allows (some of its actions, in some of its environments): a
+    /// rule an approval remembered for a while that a gate now covers asks again.
+    pub fn covers_rule(&self, rule: &roll_auth::scope::Rule) -> bool {
+        (self.product == "*" || rule.product == "*" || self.product == rule.product)
+            && (self.actions.is_empty() || rule.actions.keys().any(|a| self.actions.has(*a)))
+            && match (&self.environments, &rule.environments) {
+                (Some(gate), Some(envs)) => envs.iter().any(|e| gate.iter().any(|p| roll_auth::scope::env_covers(p, e) || roll_auth::scope::env_covers(e, p))),
+                _ => true,
+            }
+    }
+
+    /// Whether these approvers are enough for it.
+    pub fn met(&self, by: &[String]) -> bool {
+        by.iter().filter(|b| self.may_approve(b)).count() >= usize::from(self.approvals)
+    }
+
+    fn problems(&self, at: &str) -> Option<String> {
+        let names = |l: &Option<Vec<String>>| l.as_ref().is_some_and(|l| l.is_empty() || l.len() > 20 || l.iter().any(|s| s.trim().is_empty() || s.len() > 100 || s.contains(char::is_control)));
+        if self.product != "*" && !roll_auth::scope::PRODUCTS.contains(&self.product.as_str()) {
+            Some(format!("{at}: no product {:?}", self.product))
+        } else if !(1..=10).contains(&self.approvals) {
+            Some(format!("{at}: approvals is 1 to 10"))
+        } else if names(&self.environments) || names(&self.approvers) {
+            Some(format!("{at}: environments and approvers are 1 to 20 names (or left out)"))
+        } else if self.approvers.as_ref().is_some_and(|l| l.len() < usize::from(self.approvals)) {
+            Some(format!("{at}: it needs {} approvals but names fewer approvers", self.approvals))
+        } else {
+            None
+        }
+    }
+}
+
+/// Some actions: a list on the wire (`["reveal", "admin"]`), bits inside.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Actions(u8);
 
@@ -1001,6 +1146,27 @@ impl<'de> serde::Deserialize<'de> for Actions {
 }
 
 impl Policy {
+    /// Whether a gate covers a rule remembered for a while (it asks again).
+    pub fn asks_again(&self, rule: &roll_auth::scope::Rule) -> bool {
+        self.approval_rules.iter().any(|gate| gate.covers_rule(rule))
+    }
+
+    /// What's wrong with it, if anything.
+    pub fn problems(&self) -> Option<String> {
+        if self.max_days == Some(0) || self.max_idle_days == Some(0) {
+            return Some("max_days and max_idle_days are at least 1 (or null for no limit)".into());
+        }
+        if self.approval_rules.len() > 50 {
+            return Some("at most 50 approval rules".into());
+        }
+        self.approval_rules.iter().enumerate().find_map(|(i, r)| r.problems(&format!("approval_rules[{i}]")))
+    }
+
+    /// The approval rules covering a request: each is a gate its approvers must pass.
+    pub fn gates(&self, a: &store::Approval) -> Vec<ApprovalRule> {
+        self.approval_rules.iter().filter(|r| r.covers(a)).cloned().collect()
+    }
+
     /// Whether a person's token with these rules waits for an admin.
     pub fn needs_approval(&self, rules: &Scope, ask_otherwise: bool) -> bool {
         !self.approve_people.is_empty() && (ask_otherwise || rules.0.iter().any(|r| r.actions.keys().any(|a| self.approve_people.has(*a))))
@@ -1019,16 +1185,16 @@ const POLICY_FRESH: std::time::Duration = std::time::Duration::from_secs(10);
 impl Access {
     pub fn policy(&self) -> Policy {
         let p: Policy = self.store.setting("policy").ok().flatten().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
-        *self.policy_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), p));
+        *self.policy_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), p.clone()));
         p
     }
 
     /// The policy, read at most every few seconds (for the evaluator, on every request).
     pub fn policy_now(&self) -> Policy {
-        if let Some((at, p)) = *self.policy_cache.lock().unwrap_or_else(|e| e.into_inner())
+        if let Some((at, p)) = &*self.policy_cache.lock().unwrap_or_else(|e| e.into_inner())
             && at.elapsed() < POLICY_FRESH
         {
-            return p;
+            return p.clone();
         }
         self.policy()
     }
@@ -1061,7 +1227,7 @@ impl roll_auth::Grants for Access {
             let people = self.people.get()?;
             people.person_now(user).ok()??;
         }
-        g.usable(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.effective_rules(code_sql::now_ms())), user: g.user.as_deref().map(Into::into), ask_otherwise: g.ask_otherwise })
+        g.usable(code_sql::now_ms()).then(|| roll_auth::Grant { id: g.id.as_str().into(), name: g.name.as_str().into(), kind: g.kind(), scope: Arc::new(g.effective_rules(code_sql::now_ms(), |r| self.policy_now().asks_again(r))), user: g.user.as_deref().map(Into::into), ask_otherwise: g.ask_otherwise })
     }
 }
 
