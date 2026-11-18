@@ -1,4 +1,6 @@
-//! Helpers for the crate's unit tests.
+//! Helpers for roll search's tests: checks of how much work code does, which a loaded host
+//! can't break. A debug build at load 50 can take any wall time, but its work doesn't change,
+//! so these measure the calling thread's CPU time instead of a clock on the wall.
 
 use std::time::Duration;
 
@@ -11,17 +13,15 @@ const MAX_RATIO: f64 = 24.0;
 /// Asserts that `run`'s work grows linearly with its input, not quadratically: `run` on
 /// `input(SCALE * small)` takes less than [`MAX_RATIO`] times the CPU of `run` on `input(small)`.
 ///
-/// Measures this thread's CPU time, fastest of three runs each, rather than wall time against a
-/// fixed bound: a debug build on a loaded host can take any wall time, but its work doesn't change.
-/// Pick `small` so that `run` takes a few milliseconds on it.
-pub(crate) fn assert_linear<I>(what: &str, small: usize, input: impl Fn(usize) -> I, mut run: impl FnMut(I)) {
+/// `input` isn't measured, and each size runs three times, keeping the fastest. Pick `small` so
+/// that `run` takes a few milliseconds on it, and so that `run`'s fixed costs don't hide the
+/// growth.
+pub fn assert_linear<I>(what: &str, small: usize, input: impl Fn(usize) -> I, mut run: impl FnMut(I)) {
     let mut fastest = |size: usize| {
         (0..3)
             .map(|_| {
                 let i = input(size);
-                let started = thread_cpu();
-                run(i);
-                thread_cpu().saturating_sub(started)
+                cpu_time(|| run(i)).1
             })
             .min()
             .unwrap()
@@ -35,7 +35,15 @@ pub(crate) fn assert_linear<I>(what: &str, small: usize, input: impl Fn(usize) -
     );
 }
 
-/// CPU time this thread has used: unlike wall time, it doesn't grow while the thread waits for a CPU.
+/// `f`'s result and the CPU time this thread spent running it. Unlike wall time, it doesn't
+/// grow while the thread waits for a CPU, so a bound on it holds on a loaded host. Only `f`'s
+/// own thread counts: measure work that runs on the calling thread.
+pub fn cpu_time<T>(f: impl FnOnce() -> T) -> (T, Duration) {
+    let started = thread_cpu();
+    let out = f();
+    (out, thread_cpu().saturating_sub(started))
+}
+
 #[cfg(unix)]
 pub(crate) fn thread_cpu() -> Duration {
     let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
@@ -48,4 +56,20 @@ pub(crate) fn thread_cpu() -> Duration {
 pub(crate) fn thread_cpu() -> Duration {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     START.get_or_init(std::time::Instant::now).elapsed()
+}
+
+#[cfg(test)]
+mod tests {
+    /// The check every linear-time test relies on: quadratic work fails it.
+    #[test]
+    #[should_panic(expected = "quadratic loop: 8x the input took")]
+    fn quadratic_work_fails() {
+        super::assert_linear("quadratic loop", 400, |n| n, |n| {
+            for i in 0..n {
+                for j in 0..n {
+                    std::hint::black_box(i ^ j);
+                }
+            }
+        });
+    }
 }

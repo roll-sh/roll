@@ -7931,6 +7931,7 @@ dependencies = [
  "icu_properties",
  "regex",
  "regex-syntax",
+ "search-test-support",
  "serde_json",
  "smallvec",
  "unicode-normalization",
@@ -7947,6 +7948,7 @@ dependencies = [
  "memmap2",
  "rand 0.8.8",
  "regex-syntax",
+ "search-test-support",
  "serde_json",
  "thiserror",
  "zstd 0.14.3",
@@ -8031,6 +8033,7 @@ dependencies = [
  "search-codec",
  "search-index",
  "search-painless",
+ "search-test-support",
  "serde_json",
  "serde_yaml_ng",
  "sha1 0.10.7",
@@ -8052,6 +8055,7 @@ dependencies = [
  "rand 0.8.8",
  "search-analysis",
  "search-codec",
+ "search-test-support",
  "serde_json",
  "smallvec",
  "thiserror",
@@ -8069,6 +8073,7 @@ dependencies = [
  "libm",
  "regex-syntax",
  "ryu",
+ "search-test-support",
  "serde_json",
  "sha1 0.10.7",
  "sha2 0.10.9",
@@ -8122,11 +8127,19 @@ dependencies = [
  "memmap2",
  "parking_lot",
  "pg-storage",
+ "search-test-support",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "zstd 0.14.3",
+]
+
+[[package]]
+name = "search-test-support"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
