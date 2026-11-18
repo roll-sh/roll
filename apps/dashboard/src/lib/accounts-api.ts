@@ -104,6 +104,8 @@ export interface SsoConnection {
   verified: string[];
   /** The TXT record that proves a domain (`name` with the domain in place of `<domain>`). */
   dns: { name: string; value: string };
+  /** Its provider provisions people over SCIM (it has a token). */
+  scim: boolean;
 }
 
 export const accountsApi = {
@@ -145,6 +147,9 @@ export const accountsApi = {
   updateSso: (id: string, c: { name?: string; client_id?: string; client_secret?: string; domains?: string[]; enforce?: boolean; provision?: boolean }) =>
     call<SsoConnection>("PATCH", `/sso/${encodeURIComponent(id)}`, c),
   removeSso: (id: string) => call<null>("DELETE", `/sso/${encodeURIComponent(id)}`),
+  /** A SCIM token for the connection (replacing its old one), shown this once. */
+  scimToken: (id: string) => call<{ token: string; base_url: string }>("POST", `/sso/${encodeURIComponent(id)}/scim`),
+  scimOff: (id: string) => call<null>("DELETE", `/sso/${encodeURIComponent(id)}/scim`),
   /** Check the connection's domains' TXT records now. */
   verifySso: (id: string) => call<SsoConnection>("POST", `/sso/${encodeURIComponent(id)}/verify`),
 };

@@ -12,6 +12,7 @@
 pub mod api;
 mod mail;
 mod oauth;
+mod scim;
 pub mod sso;
 mod twofactor;
 
@@ -131,6 +132,18 @@ CREATE TABLE IF NOT EXISTS sso_connections (
     provision INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     challenge TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS scim_tokens (
+    connection_id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS scim_users (
+    connection_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    external_id TEXT,
+    user_name TEXT,
+    PRIMARY KEY (connection_id, user_id)
 ) WITHOUT ROWID;
 ";
 
@@ -391,6 +404,13 @@ impl Accounts {
             sso = sso.dns_resolver(Arc::new(roll_net::PublicOnly));
         }
         let sso_http = sso.build()?;
+        // Who disabled an account (`admin`, `scim:<connection>`): SCIM lifts only its own.
+        if !db.has_column("users", "disabled_by")? {
+            db.add_column("users", "disabled_by", "TEXT")?;
+        }
+        if !db.has_column("scim_users", "user_name")? {
+            db.add_column("scim_users", "user_name", "TEXT")?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;
@@ -594,6 +614,12 @@ impl Accounts {
 
     /// An admin's change to a user. Disabling one signs them out everywhere, in the same write.
     pub fn update_user(&self, id: &str, admin: Option<bool>, disabled: Option<bool>) -> Result<User> {
+        self.update_user_by(id, admin, disabled, "admin")
+    }
+
+    /// As [`Accounts::update_user`], saying who disables (`admin`, or `scim:<connection>`): SCIM
+    /// lifts only a disable of its own, never an admin's.
+    pub(crate) fn update_user_by(&self, id: &str, admin: Option<bool>, disabled: Option<bool>, by: &str) -> Result<User> {
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM users WHERE id = ?", [id], |_| Ok(())).optional()?.is_none() {
                 return Err(Error::NotFound(format!("no user {id}")));
@@ -602,7 +628,7 @@ impl Accounts {
                 c.execute("UPDATE users SET admin = ? WHERE id = ?", params![a, id])?;
             }
             if let Some(d) = disabled {
-                c.execute("UPDATE users SET disabled = ? WHERE id = ?", params![d, id])?;
+                c.execute("UPDATE users SET disabled = ?, disabled_by = ? WHERE id = ?", params![d, d.then_some(by), id])?;
                 if d {
                     c.execute("DELETE FROM sessions WHERE user_id = ?", [id])?;
                 }
@@ -665,7 +691,7 @@ impl Accounts {
 
     /// The first free handle from `hint` (else the email's local part): an owner name, unique
     /// among users and roll code's owners.
-    fn pick_handle(&self, hint: Option<&str>, email: &str) -> Result<String> {
+    pub(crate) fn pick_handle(&self, hint: Option<&str>, email: &str) -> Result<String> {
         let base = hint.map(slug).filter(|s| !s.is_empty()).unwrap_or_else(|| slug(email.split('@').next().unwrap_or_default()));
         let base = if base.is_empty() { "user".to_string() } else { base };
         for n in 1..=50 {
@@ -722,26 +748,27 @@ impl Accounts {
         Ok(id)
     }
 
-    /// A new account for a person an SSO connection with `provision` vouched for: never an admin,
-    /// invited by that connection.
-    pub(crate) fn provision_user(&self, email: &str, name: Option<&str>, identity: (&str, &str)) -> Result<String> {
+    /// A new account for a person an SSO connection vouched for (its sign-in with `provision`, or
+    /// its SCIM): never an admin, invited by `by`, linked to `identity` when there is one.
+    pub(crate) fn provision_user(&self, email: &str, name: Option<&str>, identity: Option<(&str, &str)>, by: &str) -> Result<String> {
         let handle = self.pick_handle(None, email)?;
         let id = new_id("usr");
         let now = self.db.now_ms()?;
         let name: String = name.map(str::trim).filter(|n| !n.is_empty()).unwrap_or(&handle).chars().take(100).collect();
-        let (provider, subject) = identity;
         self.db.write(|c| {
             if c.query_row("SELECT 1 FROM users WHERE email = ? OR handle = ?", [email, handle.as_str()], |_| Ok(())).optional()?.is_some() {
                 return Err(Error::Conflict("an account has this email or handle; try again".into()));
             }
             c.execute(
                 "INSERT INTO users (id, email, handle, name, admin, disabled, code_owner_id, invited_by, created_at) VALUES (?, ?, ?, ?, 0, 0, NULL, ?, ?)",
-                params![id, email, handle, name, provider, now],
+                params![id, email, handle, name, by, now],
             )?;
-            c.execute("INSERT INTO identities (provider, subject, user_id, email, login, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![provider, subject, id, email, email, now])?;
+            if let Some((provider, subject)) = identity {
+                c.execute("INSERT INTO identities (provider, subject, user_id, email, login, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![provider, subject, id, email, email, now])?;
+            }
             Ok(())
         })?;
-        tracing::info!(user = %id, by = %provider, "accounts: user provisioned by SSO");
+        tracing::info!(user = %id, by = %by, "accounts: user provisioned by SSO");
         Ok(id)
     }
 

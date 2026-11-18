@@ -112,6 +112,7 @@ export function SsoSection() {
                 </div>
               </div>
             )}
+            <Scim connection={c} onChange={load} onError={setError} />
             <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[12px] text-muted">
               <label className="flex items-center gap-1.5">
                 <input type="checkbox" checked={c.enforce} onChange={(e) => void change(c.id, { enforce: e.target.checked })} />
@@ -132,6 +133,55 @@ export function SsoSection() {
         ))}
       </div>
     </section>
+  );
+}
+
+/** SCIM: the provider creates and deactivates its people; its token is shown once. */
+function Scim({ connection: c, onChange, onError }: { connection: SsoConnection; onChange: () => void; onError: (e: string | null) => void }) {
+  const [made, setMade] = useState<{ token: string; base_url: string } | null>(null);
+  const mint = () =>
+    accountsApi.scimToken(c.id).then(
+      (m) => {
+        setMade(m);
+        onChange();
+      },
+      (e) => onError(errorText(e)),
+    );
+  return (
+    <div className="mt-2 text-[12px] text-muted">
+      {made ? (
+        <div className="space-y-1.5 rounded-lg border border-accent/40 bg-accent/[0.05] px-3 py-2">
+          <p>In the provider&apos;s SCIM settings (copy the token now: it isn&apos;t shown again):</p>
+          {[
+            ["Base URL", made.base_url],
+            ["Bearer token", made.token],
+          ].map(([label, value]) => (
+            <div key={label} className="flex items-center gap-2">
+              <span className="w-24 shrink-0 text-subtle">{label}</span>
+              <span className="min-w-0 flex-1 truncate font-mono text-fg">{value}</span>
+              <button onClick={() => navigator.clipboard.writeText(value)} className={btn} aria-label={`Copy the ${label}`}>
+                <Copy className="size-3.5" />
+              </button>
+            </div>
+          ))}
+          <button onClick={() => setMade(null)} className={btn}>
+            Done
+          </button>
+        </div>
+      ) : (
+        <span className="flex flex-wrap items-center gap-2">
+          {c.scim ? "The provider manages its people over SCIM (it deactivates whoever leaves)." : "Let the provider create and deactivate its people (SCIM)."}
+          <button onClick={mint} className={btn}>
+            {c.scim ? "New token" : "Turn on SCIM"}
+          </button>
+          {c.scim && (
+            <button onClick={() => accountsApi.scimOff(c.id).then(onChange, (e) => onError(errorText(e)))} className={btn}>
+              Turn off
+            </button>
+          )}
+        </span>
+      )}
+    </div>
   );
 }
 

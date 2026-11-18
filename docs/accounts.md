@@ -303,6 +303,35 @@ by their email's domain, as Linear's, Vercel's and GitHub's enterprise sign-in d
   that the provider didn't answer.
 - Removing a connection deletes its people's links; their accounts stay and sign in other ways.
 
+### SCIM (the provider manages its people)
+
+A connection's provider (Okta, Entra ID, JumpCloud) creates, updates and deactivates its people
+over SCIM 2.0 (RFC 7643 and 7644), so someone who leaves loses roll at once.
+
+- An admin makes the connection a token: `POST /v1/accounts/sso/{id}/scim` answers `{token,
+  base_url}` once (`rlp_…`, kept as a hash; a new one replaces it, `DELETE` turns SCIM off). The
+  provider uses `base_url` (`<api>/v1/accounts/scim/v2`) and sends the token as `Authorization:
+  Bearer`. It's looked up on every request.
+- It reaches only people whose email is in the connection's verified domains, and never an
+  admin (admins are managed in roll): anyone else is a 404 to it. It never changes an email.
+- A person's roll address is their primary email (`emails`), else a `userName` that is an email.
+  The provider's `userName` (Entra's userPrincipalName, say) is kept beside it: map the work email
+  to `emails[type eq "work"].value` in Entra. Filters: `userName eq` (the provider's userName or
+  the address), `externalId eq`, `emails.value eq`; `startIndex` and `count` (up to 200) page,
+  in the database.
+- `GET /Users`, `GET /Users/{id}`, `POST /Users` (a new person in its domains, never an admin,
+  made in one write; 409 `uniqueness` when the email has an account, which the provider then finds
+  by filter; `Location` on the 201), `PUT` and `PATCH /Users/{id}` (name, `externalId`,
+  `userName`, `active`: `"False"` and `false` both count, anything else is a 400; `remove` of what
+  roll keeps nothing of is fine), `DELETE /Users/{id}` (deactivates). `ServiceProviderConfig`,
+  `ResourceTypes` and `Schemas` describe this: users only, no groups, no bulk; any other path is a
+  SCIM 404 (turn group provisioning off in the provider).
+- Deactivating is roll's own disable, done every time it's asked (a retry finishes cutting off
+  what a failure left): the person's sessions end, and their roll code owner (its tokens and
+  machine links) is cut off. Their own roll tokens and connections pause with the account, and
+  come back if it's reactivated. SCIM reactivates only an account it deactivated: one an admin
+  disabled stays so (403 `admin_disabled`).
+
 ### Second factor
 
 When the user has TOTP on, every sign-in (email code or OAuth) ends at level `mfa`.
@@ -385,11 +414,13 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 | `GET /v1/accounts/users` | | `User[]`, oldest first |
 | `PATCH /v1/accounts/users/{id}` | `{admin?, disabled?}` | `User`; disabling deletes the user's sessions and cuts off their roll code owner (its tokens are revoked and its machines' links closed; turning the account back on gives none of them back) |
 | `DELETE /v1/accounts/users/{id}/sessions` | | 204: signs the user out everywhere |
-| `GET /v1/accounts/sso` | | `SsoConnection[]` (`{id, name, issuer, client_id, domains, verified, enforce, provision, created_at, redirect_uri, dns: {name, value}}`; never the secret) |
+| `GET /v1/accounts/sso` | | `SsoConnection[]` (`{id, name, issuer, client_id, domains, verified, enforce, provision, created_at, redirect_uri, dns: {name, value}, scim}`; never the secret) |
 | `POST /v1/accounts/sso` | `{name?, issuer, client_id, client_secret, domains, enforce?, provision?}` | 201 `SsoConnection`; 400 when the issuer's discovery doesn't answer, `public_domain`; 409 a domain has a connection already; 503 `{code: "secret_key"}` without `ROLL_SECRET_KEY` |
 | `POST /v1/accounts/sso/{id}/verify` | | `SsoConnection`: its claimed domains whose `_roll-sso.<domain>` TXT record has its value are verified |
 | `PATCH /v1/accounts/sso/{id}` | `{name?, client_id?, client_secret?, domains?, enforce?, provision?}` | `SsoConnection` |
-| `DELETE /v1/accounts/sso/{id}` | | 204: its people's links go; their accounts stay |
+| `DELETE /v1/accounts/sso/{id}` | | 204: its people's links go; their accounts stay; its SCIM token stops |
+| `POST /v1/accounts/sso/{id}/scim` | | 201 `{token, base_url}`: its SCIM token, shown once (replacing the old one) |
+| `DELETE /v1/accounts/sso/{id}/scim` | | 204: SCIM off (the token stops at once) |
 
 A non-admin session on these is 403 `{code: "admin_only"}`; no credentials at all is 401.
 

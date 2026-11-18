@@ -73,6 +73,8 @@ pub struct Connection {
     pub redirect_uri: String,
     /// The TXT record that proves a domain: `name` with the domain in place of `<domain>`.
     pub dns: DnsRecord,
+    /// Its provider provisions people over SCIM (it has a token).
+    pub scim: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -192,7 +194,7 @@ fn is_entra(issuer: &str) -> bool {
     url::Url::parse(issuer).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).is_some_and(|h| h == "login.microsoftonline.com" || h == "sts.windows.net")
 }
 
-const COLUMNS: &str = "id, name, issuer, client_id, domains, verified, enforce, provision, created_at, challenge";
+const COLUMNS: &str = "id, name, issuer, client_id, domains, verified, enforce, provision, created_at, challenge, (SELECT COUNT(*) FROM scim_tokens t WHERE t.connection_id = sso_connections.id) AS scim";
 
 impl Accounts {
     fn sso_redirect_uri(&self, id: &str) -> String {
@@ -215,6 +217,7 @@ impl Accounts {
             provision: r.get(7)?,
             created_at: r.get(8)?,
             dns: DnsRecord { name: "_roll-sso.<domain>".into(), value: format!("roll-sso={challenge}") },
+            scim: r.get::<_, i64>(10)? > 0,
         })
     }
 
@@ -321,6 +324,13 @@ impl Accounts {
                 verified.retain(|v| d.contains(v));
                 c.execute("UPDATE sso_connections SET domains = ?, verified = ? WHERE id = ?", params![json!(d).to_string(), json!(verified).to_string(), id])?;
                 drop_links_outside(c, &provider, &verified)?;
+                // And what SCIM kept about people now outside its domains.
+                let kept: Vec<(String, String)> = c.query("SELECT s.user_id, u.email FROM scim_users s JOIN users u ON u.id = s.user_id WHERE s.connection_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                for (user, email) in kept {
+                    if !verified.iter().any(|v| v == domain_of(&email)) {
+                        c.execute("DELETE FROM scim_users WHERE connection_id = ? AND user_id = ?", [id, user.as_str()])?;
+                    }
+                }
             }
             if let Some(n) = &name {
                 c.execute("UPDATE sso_connections SET name = ? WHERE id = ?", params![n, id])?;
@@ -396,6 +406,8 @@ impl Accounts {
             }
             c.execute("DELETE FROM identities WHERE provider = ?", [provider.as_str()])?;
             c.execute("DELETE FROM oauth_states WHERE provider = ?", [provider.as_str()])?;
+            c.execute("DELETE FROM scim_tokens WHERE connection_id = ?", [id])?;
+            c.execute("DELETE FROM scim_users WHERE connection_id = ?", [id])?;
             Ok(())
         })
     }
@@ -651,7 +663,7 @@ impl Accounts {
             Next::Create { provision } => {
                 let user = match &st.invite_id {
                     Some(i) => self.create_user(NewUser { invite_id: i, email, hint: None, name, identity: Some((&provider, subject, email)) })?,
-                    None if provision => self.provision_user(email, name, (&provider, subject))?,
+                    None if provision => self.provision_user(email, name, Some((&provider, subject)), &provider)?,
                     None => return Err(Error::BadRequest("no account has this email, and there was no invite".into(), Some("not_invited"))),
                 };
                 Ok(Finished::SignIn { user, return_to: st.return_to })
