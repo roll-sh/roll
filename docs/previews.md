@@ -91,8 +91,9 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   change or pull request: its `roll/preview` status, its comment, roll code's preview
   environment. That's the project that has had it on its canvas longest (then by id), among those
   with previews on. roll apps puts a service on the canvas of the project it's made in, so a
-  service's is its own. The other preview names that project (`reported_by`, on its sheet) and
-  says nothing. When the speaker takes it off its canvas, or turns previews off, the next one in line
+  service's is its own. The other preview says so on its sheet (`reported_by`: the project's
+  name on the operator's projects, "another project" on a person's, which never learns another
+  owner's project) and says nothing. When the speaker takes it off its canvas, or turns previews off, the next one in line
   reports at once (`Engine::speaker`, checked before every report).
 - **Update**: every new head redeploys the services of the change's repo at that head. Services
   from the project's other repos run at their own branch of the same name when they have one (a

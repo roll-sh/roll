@@ -1237,7 +1237,10 @@ impl Engine {
             Some(svc) => (roll_workspace::Kind::Service, svc),
             None => (roll_workspace::Kind::Repo, row.repo.as_str()),
         };
-        let by = self.speaker(kind, of).filter(|(id, _)| *id != row.project_id).map(|(_, name)| name);
+        // Named only on the operator's projects, which see every project: a person's project
+        // never learns another owner's project's name (they're 404s to them).
+        let operators = self.workspace.get(roll_workspace::Scope::All, &row.project_id).is_ok_and(|p| p.owner.is_empty());
+        let by = self.speaker(kind, of).filter(|(id, _)| *id != row.project_id).map(|(_, name)| if operators { name } else { "another project".into() });
         Ok((self.store.set_reported_by(&row.id, by.as_deref())?, by.is_none()))
     }
 }

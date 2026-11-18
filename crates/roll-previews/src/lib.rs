@@ -237,7 +237,8 @@ pub struct Preview {
     pub goes_at: Option<i64>,
     /// The project that reports its change or pull request (`roll/preview`, the comment), when
     /// it's another one: a repo or service on two projects' canvases gets a preview in each, and
-    /// only the one that has had it longest speaks for it (`Engine::speaker`).
+    /// only the one that has had it longest speaks for it (`Engine::speaker`). Its name on the
+    /// operator's projects; "another project" on a person's.
     pub reported_by: Option<String>,
     /// Earlier pushes of the change's services, still reachable (newest first; the last
     /// [`store::PINNED_KEEP`] per service).

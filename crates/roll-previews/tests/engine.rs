@@ -1388,7 +1388,7 @@ async fn only_the_project_that_has_had_a_repo_longest_reports_its_change() {
 
     let quiet = e.engine.store.rows(Some(&theirs.id)).unwrap().into_iter().find(|r| r.change_id.as_deref() == Some("chg_1")).expect("a preview in each project");
     assert!(e.code.reports.lock().iter().all(|p| p.project == e.project), "only the project that had the repo first reports");
-    assert_eq!(e.engine.store.preview(&quiet.id).unwrap().reported_by.as_deref(), Some("shop"), "the other one says who does");
+    assert_eq!(e.engine.store.preview(&quiet.id).unwrap().reported_by.as_deref(), Some("another project"), "the other one says another does, without naming another owner's project");
 
     // It leaves the first project's canvas: the other's preview speaks at once.
     e.ws.remove(Scope::All, &e.project, Res::Repo, "acme/web").unwrap();
