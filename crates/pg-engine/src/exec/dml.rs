@@ -2912,7 +2912,8 @@ fn foreign_delete_returning(
 }
 
 /// `delete_row`; its index entries deferred to the statement's end when `defer`
-/// (`Txn::defer_entry_delete`, `DeleteNode::defers_entries`).
+/// (`Txn::defer_entry_delete`, `DeleteNode::defers_entries`), and the row counted for the
+/// statistics by the caller then (`DeleteNode::uncounted`).
 fn delete_row_with(
     t: &Table,
     indexes: &[BoundIndex],
@@ -2928,7 +2929,9 @@ fn delete_row_with(
     // heap_delete sets its xmax: writers of its unique keys wait for us now.
     ctx.txn.borrow_mut().row_modified(dkey);
     super::sizing::deleted(t, indexes, dkey, old, ctx)?;
-    super::pgstat::count_delete(ctx, t.oid);
+    if !defer {
+        super::pgstat::count_delete(ctx, t.oid, 1);
+    }
     super::toast::delete_row(dkey.to_vec(), Some(old), &mut ctx.txn.borrow_mut(), defer)?;
     crate::repl::log::delete(t, old, ctx)?;
     delete_index_entries(t, indexes, old, dkey, defer, ctx)
@@ -3527,7 +3530,7 @@ pub fn insert_prepared(
                         ctx,
                     );
                     super::pgstat::count_insert(ctx, t.oid, 1);
-                    super::pgstat::count_delete(ctx, t.oid);
+                    super::pgstat::count_delete(ctx, t.oid, 1);
                     for k in &vals.taken {
                         ctx.txn.borrow_mut().unlock(k, LockMode::Exclusive);
                     }
@@ -5766,6 +5769,10 @@ pub struct DeleteNode {
     capture: bool,
     /// Its rows' index entries are deleted together at its end (`defers_entries`).
     defer_entries: bool,
+    /// Rows deleted by table not yet counted for the statistics (`pgstat::count_delete`): a
+    /// deferring statement, which nothing reads them in before it ends, counts them as each
+    /// call of `next` returns.
+    uncounted: Vec<(u32, i64)>,
 }
 
 impl DeleteNode {
@@ -5806,6 +5813,7 @@ impl DeleteNode {
         let defer_entries = Self::defers_entries(&plan, ctx);
         Ok(DeleteNode {
             defer_entries,
+            uncounted: Vec::new(),
             plan,
             source,
             seen,
@@ -5885,6 +5893,21 @@ impl Node for DeleteNode {
     }
 
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        let r = self.next_rows(ctx);
+        self.count_deleted(ctx);
+        r
+    }
+}
+
+impl DeleteNode {
+    /// The rows deleted and not yet counted (`uncounted`) go into the statistics.
+    fn count_deleted(&mut self, ctx: &ExecCtx) {
+        for (rel, n) in self.uncounted.drain(..) {
+            super::pgstat::count_delete(ctx, rel, n);
+        }
+    }
+
+    fn next_rows(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         let n = self.plan.table.columns.len();
         if self.done {
             return Ok(None);
@@ -5897,6 +5920,8 @@ impl Node for DeleteNode {
                 crate::ext::postgres_fdw::modify::forget_member_rows();
                 if self.defer_entries {
                     ctx.txn.borrow_mut().flush_entry_deletes()?;
+                    // (Before the AFTER triggers, which may read them.)
+                    self.count_deleted(ctx);
                 }
                 if self.plan.inh {
                     trigger::batch(ctx, || self.finish_tree(ctx))?;
@@ -6014,6 +6039,12 @@ impl Node for DeleteNode {
                     back => {
                         let _back = back.and_then(crate::ext::postgres_fdw::modify::with_back);
                         delete_row_with(&t, indexes, &dkey, &old, self.defer_entries, ctx)?;
+                        if self.defer_entries {
+                            match self.uncounted.iter_mut().find(|u| u.0 == t.oid) {
+                                Some(u) => u.1 += 1,
+                                None => self.uncounted.push((t.oid, 1)),
+                            }
+                        }
                     }
                 }
             }

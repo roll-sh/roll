@@ -332,9 +332,9 @@ impl XactStats {
         self.wal_records += 1;
     }
 
-    pub fn count_delete(&mut self, rel: u32, nest: usize) {
-        self.level(rel, nest).deleted += 1;
-        self.wal_records += 1;
+    pub fn count_delete(&mut self, rel: u32, nest: usize, n: i64) {
+        self.level(rel, nest).deleted += n;
+        self.wal_records += n;
     }
 
     /// pgstat_count_truncate.
@@ -880,11 +880,11 @@ pub fn count_update(ctx: &ExecCtx, rel: u32, hot: bool, newpage: bool) {
     }
 }
 
-pub fn count_delete(ctx: &ExecCtx, rel: u32) {
+pub fn count_delete(ctx: &ExecCtx, rel: u32, n: i64) {
     if counting(ctx) {
         ensure(ctx, rel);
         let nest = nest(ctx);
-        ctx.txn.borrow_mut().pgstat.count_delete(rel, nest);
+        ctx.txn.borrow_mut().pgstat.count_delete(rel, nest, n);
     }
 }
 
