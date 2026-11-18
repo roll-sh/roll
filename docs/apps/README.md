@@ -1645,7 +1645,11 @@ text, at most 200 characters), the page (made from the service's own URL, never 
 whether it's a fork's (the head repository's id against the base's), and who opened it (GitHub's
 `pull_request.user.login`; GitLab's `user.username` only when that actor is the opener,
 `author_id`, since GitLab names whoever acted, so none on another person's push to it: untrusted
-text, at most 100 characters, for roll previews' `skip_authors` like `*[bot]`, never for trust). A same-repository one
+text, at most 100 characters, for roll previews' `skip_authors` like `*[bot]`, never for trust).
+Every push handed on, a branch's or a pull request's, also says who pushed or acted (`pusher`:
+GitHub's and Gitea's `sender.login`, GitLab's `user_username` or `user.username`, Bitbucket's
+`actor.nickname`; the same untrusted text), so previews can skip a bot's branch before its pull
+request comes. A same-repository one
 keeps its branch, so it's the branch's preview with the number on it; a fork's is `pull/<N>`, and
 roll previews runs it only once a writer approves that head. Its head is checked against the
 repository first, as a push's is: a same-repository one's against its branch, a fork's against

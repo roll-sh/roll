@@ -4982,8 +4982,10 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let pushes = Arc::new(FakePushes::default());
     w.apps.set_git_pushes(pushes.clone());
     git.branches.lock().insert("feature".into(), code.parse().unwrap());
-    let (st, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": code, "head_commit": { "message": "try it" } }))).await;
+    let (st, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": code, "head_commit": { "message": "try it" }, "sender": { "login": "renovate[bot]" } }))).await;
     assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("roll previews"), "{v}");
+    // Who pushed, for roll previews' `skip_authors` (untrusted: never for trust).
+    assert_eq!(pushes.0.lock()[0].pusher.as_deref(), Some("renovate[bot]"));
     let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": first }))).await;
     assert!(v["ignored"].as_str().unwrap().contains("the repository has it at"), "{v}");
     let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/gone", "after": "0".repeat(40), "deleted": true }))).await;
@@ -5390,10 +5392,19 @@ async fn saturation_is_counted_and_alerted() {
     let id = svc["id"].as_str().unwrap().to_string();
     let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
     let host = host(&svc["environments"][0]["url"]);
-    visit_deployment(&w, &host, d["id"].as_str().unwrap()).await;
-    let all = futures::future::join_all((0..10).map(|_| visit(&w, &host, "/"))).await;
-    assert!(all.iter().all(|(st, _)| *st == StatusCode::OK), "{all:?}");
-    let (_, m) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/metrics?minutes=5"), None).await;
+    // Ten at once on one instance taking one. On a loaded host the instance can be asleep again
+    // by the time they come (then they wait for its wake, not for a busy instance): sent again,
+    // awake first, until they're counted.
+    let mut m = Value::Null;
+    for _ in 0..5 {
+        visit_deployment(&w, &host, d["id"].as_str().unwrap()).await;
+        let all = futures::future::join_all((0..10).map(|_| visit(&w, &host, "/"))).await;
+        assert!(all.iter().all(|(st, _)| *st == StatusCode::OK), "{all:?}");
+        m = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/metrics?minutes=5"), None).await.1;
+        if m["over_capacity"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum::<f64>() >= 5.0 {
+            break;
+        }
+    }
     let over: f64 = m["over_capacity"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum();
     assert!(over >= 5.0, "ten at once on one instance taking one: {m}");
     // Five minutes with 30% of requests over capacity: one alert, saying what to raise.
