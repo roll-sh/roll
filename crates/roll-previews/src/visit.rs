@@ -214,8 +214,9 @@ mod tests {
                     let head = String::from_utf8_lossy(&buf[..n]).to_string();
                     let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
                     let cookies = head.lines().find_map(|l| l.strip_prefix("cookie: ").or_else(|| l.strip_prefix("Cookie: "))).unwrap_or("").to_string();
-                    let body = format!("service saw {path} with cookies [{cookies}]");
-                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+                    // A page (for the button's tag); anything else, what it saw.
+                    let (kind, body) = if path == "/page.html" { ("text/html", "<html><head></head><body>hi</body></html>".to_string()) } else { ("text/plain", format!("service saw {path} with cookies [{cookies}]")) };
+                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
                 });
             }
         });
@@ -299,6 +300,9 @@ mod tests {
         assert_eq!(serde_json::from_str::<serde_json::Value>(&notes).unwrap()[0]["by"], "ada");
         assert_eq!(visit("/__roll/feedback.js", "*/*", None).await.0, 401);
         assert_eq!(visit("/__roll/feedback.json?path=%2Fhello", "*/*", None).await.0, 401);
+        // A session holder's page load carries the button's tag.
+        let (status, _, _, page) = visit("/page.html", "text/html", Some(&session)).await;
+        assert!(status == 200 && page.contains(std::str::from_utf8(crate::runtime::FEEDBACK_TAG).unwrap()), "{status} {page}");
         // A URL with the link's token is the same URL without it.
         let (status, location, ..) = visit(&format!("/hello?roll_access={token}&y=2"), "text/html", Some(&session)).await;
         assert_eq!((status, location.as_str()), (302, "/hello?y=2"));

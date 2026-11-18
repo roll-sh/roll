@@ -917,7 +917,7 @@ struct ThroughRoll;
 pub const FEEDBACK_PATH: &str = "/__roll/feedback.js";
 /// The feedback already left on a page (`?path=`), for the button to list.
 pub const FEEDBACK_NOTES_PATH: &str = "/__roll/feedback.json";
-const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
+pub(crate) const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
 /// Adds the feedback button's tag to a page as it streams: before the first `</body>` (matched
 /// across chunk boundaries, in any case), or at the end of a page without one. Chunks pass on as
 /// they come, so streamed rendering stays streamed and memory stays one chunk.
