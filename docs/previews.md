@@ -905,6 +905,24 @@ What dominates, from most to least:
 - **Bytes the preview writes.** Everything else branches copy-on-write and pays only for those
   (streams included: a stream branch shares its parent's chunks).
 
+### Deploy hooks
+
+A headless CMS (Contentful, Sanity, Strapi) publishes content that a static site reads at
+build time, so its previews show old content until they're built again. Vercel's and Netlify's
+deploy hooks are a secret URL the CMS's publish webhook calls. roll's are the same:
+- **Made per project** (the rules dialog's "Deploy hooks", or `POST …/projects/{project}/hooks`)
+  with a name and branch globs. The URL is shown once and kept as its SHA-256. It's a roll secret
+  (`rlb_`, checksummed), so secret scanning finds a leaked one and roll revokes it.
+- **Calling it** builds every active preview of those branches again at its head, with nothing
+  cached: roll apps builds with `no_cache`; roll's runtime runs a service's build at each start
+  anyway, so it restarts it. Each preview's activity says which hook and from what address.
+- **At most once a minute per hook:** a CMS that saves often makes one rebuild, not one per save.
+- **Anything but a live hook is a 404**, so the URL tells a guesser nothing.
+
+The rebuild is a number on the preview, part of what each service was deployed with, so a
+rebuild that's asked while a deploy is under way still runs once it's done, and converging again
+builds nothing more.
+
 ### Feedback on the preview page
 
 Vercel Comments, Netlify's drawer: people reviewing a preview leave notes on its pages, and they
@@ -1046,6 +1064,10 @@ and admins see every project.
 | `GET /v1/previews/projects/{project}/usage` | | `{previews, sleeping_usd_month, active_usd_hour, month_to_date_usd, bytes, spent_usd_month, max_usd_month}` |
 | `GET /v1/previews/projects/{project}/bypass` | | `{enabled, created_at, header}` (never the secret) |
 | `POST /v1/previews/projects/{project}/bypass` | | 201 `{enabled, created_at, header, secret}`: a new secret, shown only here; the old one stops working |
+| `GET /v1/previews/projects/{project}/hooks` | | `{hooks: [{id, name, branches, created_at, fired_at}]}` (never their secrets) |
+| `POST /v1/previews/projects/{project}/hooks` | `{name, branches?}` (1–64 characters; globs, `["*"]` by default; at most 20 hooks a project) | 201 `{hook, path}`: `path` is `/v1/previews/hooks/rlb_…`, shown only here (kept as its SHA-256) |
+| `DELETE /v1/previews/projects/{project}/hooks/{hook}` | | 204 |
+| `POST /v1/previews/hooks/{secret}` | any (ignored: a CMS's own payload) | 202 `{rebuilt: [preview ids], coalesced}`: every active preview of the hook's project whose branch a glob matches is built again at its head with nothing cached (roll apps' `no_cache`; the runtime builds at each start), each said in its activity with the caller's address. At most once a minute per hook (`coalesced: true`, nothing done). No token: the secret is the credential (rolld's gate lets `/v1/previews/hooks` through); anything but a live hook is a 404. A leaked `rlb_` secret is revoked like a token (`Access::on_leaked`) |
 | `DELETE /v1/previews/projects/{project}/bypass` | | 204 |
 
 - 400: a bad body or setting. 404: no such preview, project or repo. 409: the change already has

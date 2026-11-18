@@ -1472,3 +1472,39 @@ async fn a_preview_made_by_hand_is_only_of_a_repo_the_project_stands_for() {
     let err = e.engine.create(&theirs.id, "acme/api", None, Some("chg_a"), "ada").await.unwrap_err();
     assert!(matches!(err, roll_previews::Error::Conflict(_)) && !err.to_string().contains(&ours.id), "{err}");
 }
+
+/// A deploy hook (Vercel's and Netlify's, for a headless CMS's publish webhook) builds the
+/// project's previews of its branches again at their heads, each service with nothing cached; a
+/// second call within a minute makes no second rebuild; anything but a live hook is a 404; a
+/// leaked one stops working.
+#[tokio::test]
+async fn a_deploy_hook_builds_its_branches_previews_again() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(ChangeInfo { branch: Some("feat/cart".into()), ..change("chg_1", 1) });
+    e.code.open(ChangeInfo { branch: Some("fix/typo".into()), ..change("chg_2", 2) });
+    e.engine.pass().await.unwrap();
+    let cart = e.engine.store.row_by_change("chg_1").unwrap().unwrap();
+    let (hook, path) = e.engine.create_hook(&e.project, "CMS", &["feat/*".into()]).unwrap();
+    let secret = path.strip_prefix("/v1/previews/hooks/").unwrap();
+    assert!(secret.starts_with("rlb_") && roll_auth::credentials::checksum_ok(secret), "a roll secret leak scanning finds: {secret}");
+    assert!(e.engine.store.hooks(&e.project).unwrap().iter().all(|h| h.id == hook.id), "listed, without its secret");
+
+    let (rebuilt, coalesced) = e.engine.run_hook(secret, Some("203.0.113.7")).unwrap();
+    assert_eq!((rebuilt, coalesced), (vec![cart.id.clone()], false), "only its branches' previews");
+    e.engine.pass().await.unwrap();
+    let services = e.engine.store.services(&cart.id).unwrap().len();
+    let fresh: Vec<_> = e.apps.rebuilt.lock().clone();
+    assert_eq!(fresh.len(), services, "every service built again: {fresh:?}");
+    assert!(fresh.iter().all(|(p, _, n)| *p == cart.id && *n == 1));
+    let said = e.engine.store.activity(&cart.id).unwrap().into_iter().map(|a| a.message).collect::<Vec<_>>();
+    assert!(said.iter().any(|m| m.contains("deploy hook \"CMS\" (from 203.0.113.7)")), "{said:?}");
+    // Converging again builds nothing more: one rebuild per call.
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.rebuilt.lock().len(), services);
+    // Called again within the minute: coalesced.
+    assert_eq!(e.engine.run_hook(secret, None).unwrap(), (Vec::new(), true));
+    // A guess, or a leaked hook once revoked: the same 404.
+    assert!(matches!(e.engine.run_hook("rlb_nope", None), Err(roll_previews::Error::NotFound(_))));
+    assert!(e.engine.revoke_leaked_hook(secret).is_some());
+    assert!(matches!(e.engine.run_hook(secret, None), Err(roll_previews::Error::NotFound(_))));
+}

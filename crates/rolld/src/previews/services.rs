@@ -174,12 +174,13 @@ impl roll_previews::ports::Apps for RollApps {
         }
         // What it may reach is part of what's deployed: a changed rule deploys again.
         let key = format!(
-            "{}@{}@{h:016x}{}{}{}",
+            "{}@{}@{h:016x}{}{}{}{}",
             t.environment,
             t.git.as_deref().unwrap_or("image"),
             if t.access_token.is_some() { "p" } else { "" },
             if self.feedback && t.feedback { "f" } else { "" },
-            if closed { format!("e{}", t.egress_hosts.join(",")) } else { String::new() }
+            if closed { format!("e{}", t.egress_hosts.join(",")) } else { String::new() },
+            t.rebuild.map(|n| format!("#r{n}")).unwrap_or_default()
         );
         // The deployment previews last started for exactly this, still under way or live: wait on
         // it (or it's done). The engine asks again while a deploy is in flight, and a redeploy
@@ -196,7 +197,8 @@ impl roll_previews::ports::Apps for RollApps {
         }
         // At the sha already (a reset's new URLs, say): run it again with the variables, no build.
         // Otherwise deploy, keyed so a retry after a crash returns the same deployment.
-        let at_sha = t.git.is_some() && env["active"]["revision"].as_str() == t.git.as_deref();
+        // A deploy hook's rebuild builds again even at the sha.
+        let at_sha = t.rebuild.is_none() && t.git.is_some() && env["active"]["revision"].as_str() == t.git.as_deref();
         let deployment = if at_sha {
             // Keyed too (roll apps takes `Idempotency-Key` on a redeploy): what's deployed and the
             // deployment it replaces, so a retry after a crash gets the same one, and variables
@@ -205,10 +207,15 @@ impl roll_previews::ports::Apps for RollApps {
             let body = json!({ "message": format!("roll preview {}: new variables", t.preview) });
             self.api.call_with(Method::POST, &format!("{path}/redeploy"), Some(body), Some(&idem)).await?
         } else {
-            let body = match &t.git {
+            let mut body = match &t.git {
                 Some(sha) => json!({ "revision": sha, "message": format!("roll preview {}", t.preview) }),
                 None => json!({ "message": format!("roll preview {}", t.preview) }),
             };
+            // Nothing cached: the build's steps run again (a static site's content fetched anew).
+            if t.rebuild.is_some() {
+                body["no_cache"] = json!(true);
+                body["message"] = json!(format!("roll preview {}: built again by a deploy hook", t.preview));
+            }
             let mut idem = key.clone();
             // After a failed or canceled deploy, a retry is a new deploy (a registry timeout
             // doesn't fail the preview until the next push); a crash's retry still finds its own.

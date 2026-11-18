@@ -1,6 +1,7 @@
 import { AlertTriangle, Plus, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { isProduction, previewsApi, unmaskedNote, type PageState, type PreviewBypass, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
+import { isProduction, previewsApi, unmaskedNote, type PageState, type PreviewBypass, type PreviewHook, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
+import { ROLL_API } from "@/lib/roll-api";
 import type { PlacedResource } from "@/lib/workspace-api";
 import { KIND_LABEL, resourceKey } from "@/lib/workspace-resources";
 import { Dialog } from "../agents/ui/dialog";
@@ -410,6 +411,7 @@ function Form({
           <Choice value={s.access} options={["link", "public"]} onChange={(v) => set("access", v)} labels={{ link: "Private link", public: "Anyone with the URL" }} />
         </Field>
         {s.access === "link" && <Bypass projectId={projectId} />}
+        <Hooks projectId={projectId} />
         <Field group label="Mail" note="Previews run on copies of production's people. Caught: their services send mail to roll, where it's listed on the preview and goes no further (mail providers' API keys are removed).">
           <Choice value={s.mail ?? "catch"} options={["catch", "deliver"]} onChange={(v) => set("mail", v)} labels={{ catch: "Caught by roll", deliver: "Delivered" }} />
         </Field>
@@ -624,6 +626,91 @@ function Bypass({ projectId }: { projectId: string }) {
         </span>
       )}
       {state?.secret && <span className="mt-1 block text-[11px] text-subtle">Shown only now; the previous secret stopped working.</span>}
+      {error && <span role="alert" className="mt-1 block text-[11px] text-danger">{error}</span>}
+    </Field>
+  );
+}
+
+/** Deploy hooks (act at once, not on Save): a URL a headless CMS calls on publish, shown once when made. */
+function Hooks({ projectId }: { projectId: string }) {
+  const [hooks, setHooks] = useState<PreviewHook[] | null>(null);
+  const [made, setMade] = useState<{ id: string; url: string } | null>(null);
+  const [name, setName] = useState("");
+  const [globs, setGlobs] = useState("*");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    let live = true;
+    previewsApi.hooks(projectId).then((h) => live && setHooks(h.hooks), (e) => live && setError(errorText(e)));
+    return () => {
+      live = false;
+    };
+  }, [projectId]);
+  const act = async (f: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await f();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const create = () =>
+    act(async () => {
+      const r = await previewsApi.createHook(projectId, name.trim(), words(globs));
+      setHooks((h) => [...(h ?? []), r.hook]);
+      setMade({ id: r.hook.id, url: new URL(r.path, ROLL_API).toString() });
+      setCopied(false);
+      setName("");
+    });
+  const btn = "h-7 rounded-md border border-line-2 px-2.5 text-[12px] text-muted transition-colors hover:text-fg disabled:opacity-50";
+  return (
+    <Field group label="Deploy hooks" note="A headless CMS calls one when content is published: the project's previews of those branches build again at their heads, at most once a minute.">
+      {hooks?.length ? (
+        <ul className="mb-2 divide-y divide-line rounded-md border border-line-2">
+          {hooks.map((h) => (
+            <li key={h.id} className="flex items-center gap-2 px-2.5 py-1.5 text-[12px]">
+              <span className="min-w-0 truncate font-medium">{h.name}</span>
+              <span className="min-w-0 truncate font-mono text-[11px] text-muted">{h.branches.join(", ")}</span>
+              <span className="ml-auto shrink-0 text-[11px] text-subtle">{h.fired_at ? `ran ${new Date(h.fired_at).toLocaleString()}` : "not run yet"}</span>
+              <button
+                type="button"
+                disabled={busy}
+                className={btn}
+                aria-label={`Delete the deploy hook ${h.name}`}
+                onClick={() =>
+                  act(async () => {
+                    await previewsApi.deleteHook(projectId, h.id);
+                    setHooks((all) => (all ?? []).filter((x) => x.id !== h.id));
+                    if (made?.id === h.id) setMade(null);
+                  })
+                }
+              >
+                Delete
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {made && (
+        <span className="mb-2 flex items-center gap-2">
+          <code className={`${field} flex h-8 min-w-0 flex-1 items-center truncate font-mono text-[12px]`}>{made.url}</code>
+          <button type="button" className={btn} onClick={() => navigator.clipboard?.writeText(made.url).then(() => setCopied(true), () => setCopied(false))}>
+            {copied ? "Copied" : "Copy"}
+          </button>
+        </span>
+      )}
+      {made && <span className="mb-2 block text-[11px] text-subtle">Shown only now: POST to it from the CMS's publish webhook. Anyone with it can rebuild these previews.</span>}
+      <span className="flex items-center gap-2">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name (Contentful)" aria-label="Deploy hook name" className={`${field} h-8 min-w-0 flex-1 text-[12px]`} />
+        <input value={globs} onChange={(e) => setGlobs(e.target.value)} aria-label="Deploy hook branches" className={`${field} h-8 w-40 font-mono text-[12px]`} spellCheck={false} />
+        <button type="button" disabled={busy || hooks === null || !name.trim() || !words(globs).length} className={btn} onClick={create}>
+          Make a hook
+        </button>
+      </span>
       {error && <span role="alert" className="mt-1 block text-[11px] text-danger">{error}</span>}
     </Field>
   );

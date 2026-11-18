@@ -5,6 +5,9 @@ use super::*;
 /// How long a preview's metrics are kept before they're read again (ms).
 const METRICS_FOR: i64 = 10_000;
 
+/// The least time between two rebuilds by one deploy hook (ms).
+pub const HOOK_EVERY: i64 = 60_000;
+
 impl Engine {
     // ── what the API asks for ──
 
@@ -328,6 +331,54 @@ impl Engine {
         self.usage_read.lock().remove(id);
         self.kick();
         self.store.view(r)
+    }
+
+    /// A deploy hook for `project`'s previews of `branches` (globs; `["*"]`: every one): its path,
+    /// shown once (`/v1/previews/hooks/rlb_…`).
+    pub fn create_hook(&self, project: &str, name: &str, branches: &[String]) -> Result<(crate::store::Hook, String)> {
+        self.workspace_project(project)?;
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {
+            return Err(Error::BadRequest("a hook's name is 1–64 printable characters".into()));
+        }
+        if branches.is_empty() || branches.len() > crate::settings::MAX_BRANCH_GLOBS || branches.iter().any(|b| b.is_empty() || b.len() > 200) {
+            return Err(Error::BadRequest(format!("branches: 1–{} globs of 1–200 characters", crate::settings::MAX_BRANCH_GLOBS)));
+        }
+        let (hook, secret) = self.store.create_hook(project, name, branches)?;
+        Ok((hook, format!("/v1/previews/hooks/{secret}")))
+    }
+
+    /// `POST /v1/previews/hooks/{secret}` (a headless CMS's publish webhook): every active preview
+    /// of the hook's project whose branch a glob matches is built again at its head, with nothing
+    /// cached. At most once a [`HOOK_EVERY`] (a CMS that saves often makes one rebuild, not one a
+    /// save: `coalesced`). Anything but a live hook is the same 404. `from`: the caller's address,
+    /// for each preview's activity.
+    pub fn run_hook(&self, secret: &str, from: Option<&str>) -> Result<(Vec<String>, bool)> {
+        let Some(hook) = self.store.hook_by_secret(secret)? else { return Err(Error::NotFound("no such hook".into())) };
+        if !self.store.fire_hook(&hook.id, self.store.now_ms()?, HOOK_EVERY)? {
+            return Ok((Vec::new(), true));
+        }
+        let mut rebuilt = Vec::new();
+        for r in self.store.rows(Some(&hook.project))? {
+            if r.desired != Desired::Active || !crate::glob::any(&hook.branches, r.branch.as_deref().unwrap_or("*")) {
+                continue;
+            }
+            self.store.add_rebuild(&r.id)?;
+            let by = from.map(|a| format!(" (from {a})")).unwrap_or_default();
+            self.store.log(&r.id, &format!("built again by the deploy hook {:?}{by}", hook.name))?;
+            rebuilt.push(r.id);
+        }
+        self.kick();
+        Ok((rebuilt, false))
+    }
+
+    /// A hook secret found where it shouldn't be (roll-access's leak scanning): the hook stops
+    /// working at once. Says which it was, or `None` when no live hook has it.
+    pub fn revoke_leaked_hook(&self, secret: &str) -> Option<String> {
+        let hook = self.store.hook_by_secret(secret).ok()??;
+        self.store.delete_hook(&hook.project, &hook.id).ok()?;
+        tracing::warn!(project = %hook.project, hook = %hook.id, "previews: a leaked deploy hook was revoked");
+        Some(format!("previews' deploy hook {:?} of project {}", hook.name, hook.project))
     }
 
     /// A link to the preview for someone outside the team, open for `hours` (1–720), on its own

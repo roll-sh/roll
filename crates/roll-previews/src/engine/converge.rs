@@ -441,6 +441,9 @@ impl Engine {
         let mut still_deploying = false;
         let mut checks: Vec<(String, String, String)> = Vec::new();
         let mut deployed: Vec<String> = Vec::new();
+        // Rebuilds a deploy hook asked for: each one is a deploy of every service, built afresh.
+        let rebuilds = self.store.rebuilds(&r.id)?;
+        let rebuilt = if rebuilds > 0 { format!("#r{rebuilds}") } else { String::new() };
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             if let Some(path) = &spec.health {
@@ -459,8 +462,12 @@ impl Engine {
             let feedback = s.feedback && r.change_id.is_some() && access_token.is_some();
             // Egress too: a service moves onto (or off) the preview's own network by restarting.
             let fingerprint = config_fingerprint(&vars, access_token.is_some() && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps)
-                + &if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() };
-            let config_moved = self.store.service_config(&r.id, &spec.name)?.as_deref() != Some(fingerprint.as_str());
+                + &if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() }
+                + &rebuilt;
+            let was = self.store.service_config(&r.id, &spec.name)?;
+            let config_moved = was.as_deref() != Some(fingerprint.as_str());
+            // Moved only by a rebuild (or with one): the same head built again, nothing cached.
+            let fresh = rebuilds > 0 && was.as_deref().and_then(|w| w.rsplit_once("#r")).is_none_or(|(_, n)| n != rebuilds.to_string());
             // The head it ran stays reachable at a URL of its own (Vercel's per-push URLs): the
             // change's own services on the runtime, a trusted change's.
             if !on_apps
@@ -501,6 +508,7 @@ impl Engine {
                     feedback,
                     egress: s.egress_for(r.trusted),
                     egress_hosts: s.egress_hosts.clone(),
+                    rebuild: fresh.then_some(rebuilds),
                 };
                 self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
                 match self.apps.deploy(&t).await {

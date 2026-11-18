@@ -1074,9 +1074,9 @@ look (an old repo, a wiki page, a backup's config):
 ## Leaked tokens
 
 Other products' secrets made the same way are found and revoked the same way: apps' deploy hooks
-(`rlk_`, the secret in a hook's URL) and SSO connections' SCIM tokens (`rlp_`, docs/accounts.md)
+(`rlk_`, the secret in a hook's URL), previews' deploy hooks (`rlb_`) and SSO connections' SCIM tokens (`rlp_`, docs/accounts.md)
 are in `SECRET_PREFIXES`, and a product registers how to revoke its own with `Access::on_leaked`
-(rolld wires apps' when apps is in, and accounts' always). The audit log has each revocation.
+(rolld wires apps' when apps is in, previews' when they are, and accounts' always). The audit log has each revocation.
 
 
 A token pasted into a file is a token anyone who reads that file holds. roll revokes one as soon as
