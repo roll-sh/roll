@@ -96,12 +96,13 @@ export function onApiStatus(status: number) {
 
 /** A product API's refusal, with its `code` (`reauth_required`, `forbidden`…) when it said one. */
 export class ApiError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-    readonly code?: string,
-  ) {
+  readonly status: number;
+  readonly code?: string;
+  // Plain fields, not parameter properties: Node's type stripping (test:node) can't run those.
+  constructor(message: string, status: number, code?: string) {
     super(message);
+    this.status = status;
+    this.code = code;
   }
 }
 
