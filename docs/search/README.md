@@ -395,21 +395,9 @@ Elasticsearch refuses it); knn CPU on merged segments (#180); the parked-governo
 (#181); runtime fields' and logsdb's last gaps (#187: 248 of 248 and 233 of 234); a branch made by
 create with a `parent` needs `write` on the parent (#188).
 
-1. **Per-person access: what the review left** (the review of #127, #134, #162 and #172 closed
-   its one hole in #188: see Security). A roll secrets link unlinked while its cluster is deleted
-   can't revoke the link's key (the keys route answers 404 then), so a restore would bring the
-   key back: in progress on #172 before it merges (a restore invalidates the keys links made, and
-   links issue new ones), with #162's branch checking the caps before it copies anything. Low: a
-   person's `GET /v1/search/clusters/{id}` shows the node their cluster is loaded on
-   (`status.node`).
-2. **Deleted clusters are recoverable for 7 days** (decided 2026-11-17; built in #172, which merges
-   once a restore invalidates the keys links made: item 1). A deleted cluster
-   leaves the list and stops answering at once, but its storage stays for 7 days (a rolld flag,
-   `--search-deleted-retention-days`; 0 deletes at once, as today), billed as storage; within
-   that time `POST /v1/search/clusters/{id}/restore` brings it back as it was (its name too, unless
-   taken), and the dashboard lists recently deleted clusters with a Restore button. After the
-   window the storage is removed as it is today. Branches of a deleted cluster keep working, as now.
-3. **The Rally losses left by the full rerun** (docs/benchmarks/search.md: Round 8, every Rally
+Landed 2026-11-18: deleted clusters recoverable for 7 days (#172: restore, `?deleted=true`, a purge sweep on one node, held to the caps; an unlink while deleted is recorded and applied at restore); by-query scans run off the reactor, so one tenant's long script can't stop a node's I/O (#211); the `s3` repository's multipart uploads, `chunk_size`, throttling (0.89-0.98 of each setting, never over) and a real `_analyze` (#237); cluster performance metrics and the search and indexing slow logs, with a Performance tab (#241; about 0.5% CPU on a cheap search, nothing for a sleeping cluster); people no longer see which node holds their cluster; IP allowlists per cluster (#243: checked before credentials on the address a trusted front gives, carried signed on a fleet; `/internal/search/rest` takes only signed requests).
+
+1. **The Rally losses left by the full rerun** (Round 10, vectors, #268: Elasticsearch 9.1+ runs no merge while less than ~93.5 GB of disk is free, and this host was 91-98% full, so Round 9's Elasticsearch races were held on vectors, noaa (4 of 6) and nyc_taxis (2 of 3); the harness now sets `indices.merge.disk.check_interval=0`. With merges flowing, the force-merged vector losses are gone and dense_vector `100-1000_multiple_segments` (2.30x) is the one loss with ranges apart. Round 9's noaa and nyc_taxis wins may flatter roll until those tracks are rerun under the fixed harness: rerun next) (docs/benchmarks/search.md: Round 8, every Rally
    track against Elasticsearch 9.5.5 and OpenSearch 3.9 at `83fac5982`; Round 9, the four tracks
    #29 fixed rerun at `c2b47b251`, three alternating rounds each, noaa six). Roll leads most tasks
    1.3-4x (percolator up to 300x) and indexes as many or more docs/s than Elasticsearch on every
@@ -451,25 +439,25 @@ create with a `parent` needs `write` on the parent (#188).
    "0.57 ms" was an error). Still open from before: one-client indexing CPU (51.8 against 34.6
    µs/doc on the ECS log), BP only for time-series and log indices, the request path's
    allocations, one allocator policy.
-4. **IP allowlists per cluster** (Elastic Cloud's traffic filters; AWS OpenSearch's IP and VPC
-   policies): a cluster's endpoint takes any address with valid credentials today. Decided
-   2026-11-17: a per-cluster list of CIDRs (settings, CLI, dashboard; empty: open, as now), checked
-   on the data plane before authentication, on the client address a trusted front gives (PROXY
-   protocol, or a configured header from configured proxy addresses only, never a client's own
-   `X-Forwarded-For`); the control plane (`/v1/search`) stays behind roll's own sign-in. In progress.
-5. **Cluster observability** (Elastic Cloud's Performance tab and Stack Monitoring; OpenSearch
-   Service's CloudWatch metrics): request rate, latency percentiles, errors and rejections per
-   cluster over time in the dashboard, from what the node already counts; and the search and
-   indexing slow logs (`index.search.slowlog.threshold.*`, `index.indexing.slowlog.*`) kept per
-   cluster and readable from the dashboard, as Elastic Cloud's logs are.
-6. **An audit log** (Elastic Cloud's security audit logging; OpenSearch Security's audit log, whose
+2. **Connectors that sync** (in progress; Elastic's connectors, Algolia's and Typesense's data sync):
+   roll serves Elasticsearch's `_connector` API but runs no syncs, so getting a database or a
+   bucket into an index is the user's own job. A runner on the cluster's owner node, scheduled
+   like ILM (an idle cluster pays nothing between syncs), with `_connector/_sync_job` rows as
+   Elasticsearch keeps them; `postgresql` (full and incremental) and `s3` first, reaching a
+   person's own roll Postgres or storage through a link instead of copied credentials.
+3. **Cross-cluster search between a person's own clusters** (Elastic Cloud's remote clusters
+   between deployments; OpenSearch's cross-cluster search): roll's remote clusters reach only the
+   cluster itself today. Same owner only, trusted explicitly, keys scoped to the remote, on the
+   fleet through the owner's signed forward; `_resolve/cluster` and `_remote/info` as
+   Elasticsearch answers them.
+4. **An audit log** (built in #247, which merges after a rebase onto #241 and #243; Elastic Cloud's security audit logging; OpenSearch Security's audit log, whose
    config roll stores but doesn't act on): authentication failures, access denials, API key and
    user changes per cluster, kept for a window and readable by the owner; never a password,
    key or document in it.
-7. **Search analytics** (Algolia's and Elastic App Search's): top queries, queries with no results,
+5. **Search analytics** (in progress; Algolia's and Elastic App Search's): top queries, queries with no results,
    and click-through when the client reports clicks, per index, so the Relevance tab's synonyms and
    rules can be aimed at real searches.
-8. **Snapshots on the fleet.** Landed: every cluster whose data is in object storage (the fleet
+6. **Snapshots on the fleet** (in progress: the `gcs` and `azure` repository types). Landed: every cluster whose data is in object storage (the fleet
    and a single rolld) has a default repository, `found-snapshots` as on Elastic Cloud
    (`--search-default-repository`), so `_snapshot` and snapshot lifecycle policies work without
    setup; it can't be changed or unregistered, costs an idle cluster nothing (registered in
@@ -493,7 +481,7 @@ create with a `parent` needs `write` on the parent (#188).
    the logsdb and time-series default, `_source.enabled: false`) can't come back that way.
    Decided 2026-11-17: not now. A live cluster moves by reindex from remote; build it once tenants
    ask to move by backup alone.
-9. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
+7. **Vector search's footprint** (docs/benchmarks/search.md, "Vector search": 1M × 384 against
    Elasticsearch 9.5.5 and OpenSearch 3.9). Roll leads on indexing (4,735 docs/s against 3,585
    and 2,978 at 8 clients), merged `knn` (1.9 ms CPU against 6.1 and 4.9), `rrf` (3.2 against 13.8
    and 8.3), cold start (36 ms to the first `knn` against a ~25-29 s node start) and memory
@@ -519,7 +507,7 @@ create with a `parent` needs `write` on the parent (#188).
    candidate is rescored); float construction on CPUs without AVX-512 downclocking.
    Decided 2026-11-17: concurrent knn segments stay on (lower latency for 3-25% more CPU on
    unmerged indices); the vector rerun under Rally (in progress) decides what to cut next.
-10. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress). Landed: the
+8. **The dashboard against Elastic Cloud and OpenSearch Dashboards** (in progress). Landed: the
    index browser and console on the per-index routes, an API keys panel in Settings, the mapping
    view as a field table, OpenSearch-flavor clusters' own clients and `OPENSEARCH_*` variables,
    and importing a file into an index from the Indices tab (Kibana's "Upload a file"): NDJSON, a
@@ -542,7 +530,7 @@ create with a `parent` needs `write` on the parent (#188).
    over for the retention, so the write index is never deleted; new backing indices join through
    its `ism_template`). The console keeps each cluster's recent requests in the
    browser (credentials redacted), as Dev Tools keeps its history; named saves are left, low. Signed-in users who aren't admins see and manage their own clusters (#127), within their caps (#162).
-11. **Compatibility gaps** from the extended suites (5,083 of the 5,541 Elasticsearch passes, 5,244 in all, 46 suites at 100%; #187),
+9. **Compatibility gaps** from the extended suites (5,083 of the 5,541 Elasticsearch passes, 5,244 in all, 46 suites at 100%; #187),
    largest first. Landed: ent-search's last 5 (a `rule` retriever over `rrf`/`linear`, inference
    inside a rule query's organic, workflow-restricted API keys), ES|QL's last 5 (`TOP_SNIPPETS`,
    `CATEGORIZE`, approximation's columns, `LIMIT n BY`, `unsigned_long` past `i64::MAX`),
@@ -558,7 +546,7 @@ create with a `parent` needs `write` on the parent (#188).
    cost (its values are stored twice; measure on a logs corpus); downsample's last one (allocation filtering). In the opensearch dialect, pick
    `auto_date_histogram`'s rounding from the bounds as OpenSearch's rewrite does where it differs
    from collecting (roll counts with Elasticsearch's choice in both dialects).
-12. **Language analysis: what's left.** Every analysis plugin Elastic Cloud ships runs now (42 of 42
+10. **Language analysis: what's left.** Every analysis plugin Elastic Cloud ships runs now (42 of 42
    tests). Landed: `analysis-phonetic` (every encoder, Commons Codec's algorithms ported: identical
    codes to Java on 150,000 geonames names), `analysis-stempel` (Polish: Lucene's Egothor stemmer
    and table, identical on 121,000 words) and `analysis-ukrainian` (the Morfologik dictionary
@@ -589,7 +577,7 @@ create with a `parent` needs `write` on the parent (#188).
    `Han-Latin`, `Latin-ASCII`: ICU's transliteration rule data and its rule features beyond plain
    conversions), custom collation `rules` and `rule_files` for the tokenizer (both need ICU's rule
    compilers); then smartcn's speed.
-13. **Elasticsearch's lifecycles: what's left.** The data stream lifecycle (rollover, retention,
+11. **Elasticsearch's lifecycles: what's left** (in progress: ILM's `shrink` and `downsample` steps, the lifecycle's rounds, `searchable_snapshot`, `ilm-history-*`). The data stream lifecycle (rollover, retention,
    failure stores, the error store), ILM and snapshot lifecycle management (scheduled snapshots,
    retention, `.slm-history-7`, ILM's `wait_for_snapshot`) run now (`api/data_stream_lifecycle.rs`,
    `xpack/ilm_run.rs`, `xpack/slm.rs`; compatibility.md, "Known gaps"). They run time-based work
@@ -597,15 +585,19 @@ create with a `parent` needs `write` on the parent (#188).
    and `downsample` (roll has both APIs; the steps that swap the new index in aren't written),
    `searchable_snapshot`, and the `ilm-history-*` data stream.
    The data stream lifecycle's force merges and downsampling rounds aren't run either.
-14. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
+12. **Semantic search in roll's surfaces**: the dashboard's Inference tab lists a cluster's
    endpoints, creates them (OpenAI or any compatible URL, Cohere, Anthropic; the API key sent
    once, sealed, never shown back), tests them with a sample, deletes them, and opens a
    `semantic_text` quickstart in the console. The index browser's mapping view is a field table
    (type, inference endpoint, vector dims, similarity and index type, analyzers, what isn't
    indexed; the JSON a toggle away). Left: a roll secret as an endpoint's key (after #20), MCP
    tools (they follow the routes; the MCP thread).
-15. **Semantic search** (the largest gap against Elasticsearch 9 and Elastic Cloud after machine
-   learning). Landed (compatibility.md, "Inference" and "`semantic_text`"): the `_inference` API
+13. **Semantic search** (the largest gap against Elasticsearch 9 and Elastic Cloud after machine
+   learning). In progress: the rest of Elasticsearch 9's inference services (Azure OpenAI, Amazon
+   Bedrock, Google Vertex AI and AI Studio, Hugging Face, Mistral, Voyage AI, Jina AI, DeepSeek,
+   watsonx, Alibaba Cloud, SageMaker and `custom`), each matched byte for byte against Elasticsearch's
+   upstream requests; roll had `openai`, `cohere` and `anthropic` only, so anyone on Azure, AWS or
+   Google couldn't use their own models. Landed (compatibility.md, "Inference" and "`semantic_text`"): the `_inference` API
    (`openai` with `url`, `cohere`, `anthropic`; keys sealed, `roll_net::PublicOnly`; `rate_limit`
    enforced; the preconfigured endpoints as a cluster without ML nodes; the test plugin's services
    on YAML test clusters) and `semantic_text` fields (embedded at index time in batches, chunked,
@@ -615,7 +607,7 @@ create with a `parent` needs `write` on the parent (#188).
    multi-field, `index_options` validation, the `embedding` task type and `semantic` field type,
    `random_reranker`, rerankers inside compound retrievers (landed 2026-11-14; the rest is low
    priority).
-16. **Integration with the other threads**: on main since #29: previews branch search clusters
+14. **Integration with the other threads**: on main since #29: previews branch search clusters
    (`scripts/preview-cost.sh`: the branch reads the parent's document, its writes stay in it, the
    service gets its `ELASTICSEARCH_URL`, landing deletes it; previews mask search fields), and
    roll secrets' search link asks for `access: "data"` keys and refuses anything else (#97). On
@@ -632,11 +624,11 @@ create with a `parent` needs `write` on the parent (#188).
    an OpenSearch user): links made before one are reissued. The fleet test with every product on
    passed (2026-11-13: search 8,077 writes acknowledged and verified, no errors, longest stall
    1.2 s in the rolling restart).
-17. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
+15. **Fleet takeover after a SIGKILL**: the fleet test's longest search stall (11.1 s at a
    SIGKILL) is the shared lease TTL (`ClusterConfig::lease_ttl`, 10 s: redis 10.4, nosql 10.6 in
    the same run) plus ~1 s to load the cluster from S3 and replay its WAL. Search's part is the
    load; the TTL is roll cloud's fleet-wide choice.
-18. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
+16. **CI**: the merge gate runs `search-codec`'s lib tests (`rust (search)`, 54 s on PR #29 with
    main's cache: under the minute, no room for another crate). (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
@@ -650,7 +642,7 @@ create with a `parent` needs `write` on the parent (#188).
    (`test_support::assert_linear`), not wall time. Wall-clock bounds left to convert:
    `search-es` OpenSearch security (100 ms) and dynamic mappings (1 s), `search-painless` grok
    (5 s), `search-store`'s WAL.
-19. **Security**: a second review of what landed since the first (the `_inference` API, `semantic_text`,
+17. **Security**: a second review of what landed since the first (the `_inference` API, `semantic_text`,
    the new retrievers, workflow-restricted keys, service tokens, OpenSearch Security's new
    endpoints, ES|QL's new functions) landed in 7288684b9: `semantic_text` under field level
    security (queries and the semantic highlighter, `copy_to` sources included), an inference key

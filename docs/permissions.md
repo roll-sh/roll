@@ -224,7 +224,7 @@ Grant ("ID-JAG", Okta's Cross App Access) describe: the app trades the provider'
 roll token acting as that person, with no consent screen and no roll sign-in.
 
 - **Trusting a provider** (the operator): `PUT /v1/access/enterprise/idps {idps: [{issuer, jwks?,
-  matching?, domains?, admins?, name?, tenant?}]}` (`roll token enterprise trust <issuer> …`). `issuer` is an
+  matching?, domains?, admins?, name?, tenant?, sso?}]}` (`roll token enterprise trust <issuer> …`). `issuer` is an
   `https` URL; its keys are fetched from its metadata through the guarded client, or pinned
   (`jwks`). `matching` says how a person is found: `email` (the default: the assertion's `email`,
   with `email_verified: true`, in one of the provider's `domains`, which email matching requires,
@@ -232,6 +232,11 @@ roll token acting as that person, with no consent screen and no roll sign-in.
   `usr_…`). A provider names people of its own company, never anyone's: some let people set their
   own email, so an unverified one or another domain is `access_denied`. roll's admins act as the
   operator, past roll's own second factor: a provider signs them in only with `admins: true`.
+  The same provider as people's single sign-on is set up once: `sso` names its SSO connection
+  (docs/accounts.md, "SSO"; `--sso`, or the form's "same provider" choice), whose issuer it must
+  be, and then it vouches for the domains that connection's DNS records proved, read at each
+  sign-in instead of `domains` (a domain whose proof is gone, or a removed connection, trusts
+  nobody).
   A multi-tenant issuer (one issuer URL many companies share) names the person's tenant in each
   assertion: roll trusts the issuer with one `tenant` (`--tenant`), and refuses that issuer's other
   tenants, and any assertion naming a tenant from a provider trusted without one (anyone can be a
@@ -550,10 +555,16 @@ remembers only a request that named one. The builder writes it `prj_1/payments,p
 a project's keys to tick, as it lists a cluster's indices.
 
 It covers the routes of one key (`/v1/secrets/projects/{project}/transit/{name}/…`: encrypt,
-decrypt, sign, verify, HMAC, the public key), at their own actions, so a service that signs with
-one key needs write on that key only, not on the project. Listing, creating, rotating and deleting
-keys stay the project's (`roll_auth::scope::sub_resources` lists the products that have such
-names; secrets' rows name `{name}` with `.index("name")`).
+decrypt, sign, verify, HMAC, the public key; rotating, its minimum version and deleting it at
+admin), at their own actions, so a service that signs with one key needs write on that key only,
+not on the project. Roll secrets checks the key again itself (`Caller::need_key`). The list
+(`GET …/transit`) shows such a rule only the keys it names: the row filters by index
+(`filters_index`), roll-auth lets a rule limited to some indices match such a list and no other
+request that names none (secrets' health and leaks filter only by environment and folder, so a
+key-limited token gets a 403 there), and roll secrets asks the grant about each key
+(`Grants::reaches_key`); with none reachable it's a 403. Creating a key stays the project's
+(`roll_auth::scope::sub_resources` lists the products that have such names; secrets' rows name
+`{name}` with `.index("name")`).
 
 ### Presets
 
@@ -890,6 +901,10 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
 With accounts (docs/accounts.md), a signed-in person who isn't an admin makes tokens and connects
 MCP clients for themselves, as GitHub's fine-grained tokens act for the person who made them:
 
+- Sudo mode (docs/accounts.md): a token made from a session (a person's, or an admin's) needs a
+  sign-in or a confirmation in the last two hours, else 403 `{code: "reauth_required"}`; the
+  dashboard asks "Confirm it's you" and makes it then. The operator's token and a token's own
+  tokens have no session to prove.
 - `POST /v1/access/tokens` with their session makes a grant with `user: "usr_…"`, and so does the
   consent screen. A token theirs makes is theirs too.
 - **An admin approves what reaches far** (GitHub's organization approval of fine-grained tokens).
@@ -1038,12 +1053,36 @@ and Google mail a sign-in from somewhere new): a leaked token is used from somew
   OAuth client put in a name (Slack's `<!channel>`, Discord's `[label](url)`) is dropped, and Slack
   text is escaped.
 
+## Revoking at once
+
+An incident's cut-off revokes many tokens in one write: `POST /v1/access/tokens/revoke {ids, why}`
+(the operator's; at most 500 ids) revokes every listed token or none (an unknown id refuses the
+lot), puts `why` on each (`revoked_why`), and writes an audit row per token naming who and why.
+roll secrets' reach chooses the ids (the tokens and identities that can read a folder) and calls
+`Access::revoke_many` in process; roll-access never matches scopes a second way for it.
+
+## Decoy tokens
+
+A decoy (a honeytoken, as Thinkst's canary tokens are) is a token made to be found: `POST
+/v1/access/tokens {…, decoy: true}` (the builder's "A decoy"). Plant it where only an intruder would
+look (an old repo, a wiki page, a backup's config):
+
+- It never allows anything, whatever its rules say, and never waits for an admin's approval.
+- Any use answers exactly as a revoked or made-up token does (401 `invalid_token`), so whoever
+  holds it learns nothing, and the gate checks it before anything else (the idle-token rule would
+  otherwise retire a token nobody uses).
+- Each use is written on the token (`last_used_at`, `last_used_ip`), to the audit log
+  (`source: "decoy"`, the route and the client), and mailed to its owner and every admin (once an
+  hour per decoy and person). A decoy can't be turned into a working token.
+- It's checksummed like any `rlt_`, so scanners report a leaked decoy too (roll revokes it, which
+  ends the trap: plant another).
+
 ## Leaked tokens
 
 Other products' secrets made the same way are found and revoked the same way: apps' deploy hooks
-(`rlk_`, the secret in a hook's URL) are in `SECRET_PREFIXES`, and a product registers how to
-revoke its own with `Access::on_leaked` (rolld wires apps' when apps is in). The audit log has each
-revocation.
+(`rlk_`, the secret in a hook's URL), previews' deploy hooks (`rlb_`) and SSO connections' SCIM tokens (`rlp_`, docs/accounts.md)
+are in `SECRET_PREFIXES`, and a product registers how to revoke its own with `Access::on_leaked`
+(rolld wires apps' when apps is in, previews' when they are, and accounts' always). The audit log has each revocation.
 
 
 A token pasted into a file is a token anyone who reads that file holds. roll revokes one as soon as
@@ -1113,10 +1152,11 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
 | `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}`; `?product=` (and `&resource=`) only those with a rule on that product by name (naming that `{id}` or `{project}`), as a product's page lists its own tokens; `?kind=workload` the workload tokens instead |
-| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?}` → 201 `{grant, token}`; `token` is shown this once |
+| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?, decoy?}` → 201 `{grant, token}`; `token` is shown this once; `decoy`: a honeytoken ("Decoy tokens"); 403 `reauth_required` from a session without a recent proof |
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
+| `POST /v1/access/tokens/revoke` | operator | `{ids, why}`: every listed token revoked at once, all or none (404 for an unknown id), `why` on each → `{revoked: Grant[]}` |
 | `POST /v1/access/requests` | the token itself | `{product, action, resource?, environment?, path?, index?, for, reason}`: ask for one more rule for a while ("Access requests"); `202` the pending approval |
 | `DELETE /v1/access/tokens/{id}/temporary/{approval}` | operator | take back what an approval allowed it for a while, and the approval if its request hasn't used it |
 | `POST /v1/access/tokens/{id}/tighten` | operator | `{from, days?}`: apply the proposal, made again now, if its rules are still `from` (else 409) → the grant |
@@ -1129,7 +1169,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/approvals/{id}` | the grant that asked, or access read | an approval; `?wait=55` waits for a decision |
 | `POST /v1/access/approvals/{id}/approve` | operator | `{remember?: "1h" \| "8h" \| "1d" \| "always"}`: also allow the same action on the same resource ("Remembered approvals") |
 | `POST /v1/access/approvals/{id}/deny` | operator | `{reason?}` |
-| `GET /v1/access/audit` | access read | `?grant=&product=&action=&decision=&source=&resource=&before=&limit=`; `resource` is who touched it: that resource or anything under it (`cl_1` finds `cl_1/logs-a`); `&format=jsonl` answers one event per line and `&format=csv` a row each (UTC times, every cell quoted; a formula character is defused with `'` at a cell's start and after a `;`, tab or `|` inside it, which some spreadsheets split on), as a download (the audit page and `roll mcp audit --format csv` or `jsonl`) |
+| `GET /v1/access/audit` | access read | `?grant=&product=&action=&decision=&source=&resource=&before=&limit=`; `resource` is who touched it: that resource or anything under it (`cl_1` finds `cl_1/logs-a`); `&format=jsonl` answers one event per line and `&format=csv` a row each (UTC times, every cell quoted; a formula character is defused with `'` at a cell's start and after a `;`, tab or `|` inside it, which some spreadsheets split on), as a download (the audit page and `roll mcp audit --format csv` or `jsonl`). Rows that name people (`usr_` ids: an account event's actor, a change's `by`, a resource) carry `actor_handle` and `resource_handle`, disabled and deleted people too, looked up for each answer; the CSV has them as its last two columns |
 | `POST /v1/access/leaks/github` | public (GitHub's signature) | GitHub secret scanning reports: `[{token, type, url, source}]` → `[{token_hash, token_type, label}]`; live tokens are revoked |
 | `GET /v1/access/audit/sinks` | operator | where the log streams: `Sink[]` (`{id, url, status, error, cursor_at, delivered_at, created_at, created_by}`) |
 | `POST /v1/access/audit/sinks` | operator | `{url, from_start?}` → 201 `{sink, secret}`; the secret is shown this once |

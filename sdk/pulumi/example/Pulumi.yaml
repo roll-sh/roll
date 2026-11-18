@@ -1,0 +1,9 @@
+name: roll-secrets-example
+runtime: nodejs
+description: roll secrets from Pulumi through the roll Terraform provider (sdk/pulumi/README.md).
+packages:
+  roll:
+    source: terraform-provider
+    version: 1.5.1
+    parameters:
+      - ./bin/terraform-provider-roll
