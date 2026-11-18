@@ -743,6 +743,37 @@ as a private address.
     reads `[masked]` and its `_terms_enum` finds nothing, the parent reads `parent`; roll
     search's `expunging_a_branch_rewrites_the_segments_it_shares` pins the sequence).
   - Other products: a `seed` anonymises the rows instead.
+  - **Suggestions** (as Tonic's and Neon's anonymisation tools name columns that look personal):
+    `GET /v1/previews/projects/{project}/mask-suggestions` reads the columns of every Postgres,
+    NoSQL and search resource on the project's canvas that the project stands for
+    (`Workspace::trusts`) and that its previews branch whole (`branch`, not `schema` or `skip`),
+    and names those that look like people's data and have no mask yet, each with a rule
+    (`mask::suggest`). At most 2,000 columns are read per resource (`SUGGEST_COLUMNS_MAX`); one
+    with more, or one that can't be read, is named in `unread`. Postgres reads the parent's
+    `main` as the superuser with only the catalog's names in reach, as the schema diff does
+    (its tables' columns, a partitioned table's once, with type, `NOT NULL` and whether a unique
+    index covers it); NoSQL the parent's `/schema`, leaving out key columns (a table's or a view's
+    of it), which can't be masked; search the parent's `_mapping`, leaves only (a multi-field is
+    masked with its field). The rules dialog lists them under each resource's masks with "Add
+    mask", which adds the rule to the masks being edited (saved with the dialog).
+    - Names are split into words (`snake_case`, `camelCase`, `IPAddress`, dots) and matched
+      case-insensitively: an email (`email`); a name, phone, postal address, date of birth, IP
+      address, bank account or card number (`redact`, or `hash` where a unique index covers the
+      column, since one value for every row would fail it); a national id, tax id or passport
+      number (`hash`: unique, and joined on); a password, secret, token or API key (`null`, or
+      `redact` on a `NOT NULL` column).
+    - A rule the column's type can take: `redact`, `hash` and `email` write text, so a Postgres
+      column of another type gets `null`, or, `NOT NULL`, a `fixed:` value of its type
+      (`1970-01-01`, `0.0.0.0`, `0`), or nothing; a search field that isn't text-like is
+      `remove`d (`redact` and `email` write strings), and a search secret is `remove`d; NoSQL gets
+      `mask_default()` (`mask_null()` for a secret), which any type takes (`mask_hash` changes the
+      type a client reads). Booleans are never suggested.
+    - Left out on purpose: usernames, logins and handles (a preview's test accounts sign in with
+      them, and they're often unique: masking them locks those accounts out), the names of things
+      (`filename`, `hostname`, `company_name`), a bare `name` on a table that isn't about people
+      (`products.name`; `users.name` and `customers.name` are suggested), times (`*_at`, `*_on`),
+      references (`*_id`, but a national or tax id), counts, kinds and flags (`is_*`, `has_*`,
+      `email_verified`).
 - **Data as of a point in time** (Neon's time-travel branches): `data_at` (`-24h`, `-30m`, `-7d`
   or an RFC 3339 time, 30 days back at most) makes each branching and reset start from the
   parent as it was then, where the product keeps history: Postgres (pg-control's point in time;
@@ -1104,6 +1135,7 @@ and admins see every project.
 | `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
 | `GET /v1/previews/projects/{project}/settings` | | `Settings` |
 | `PUT /v1/previews/projects/{project}/settings` | `Settings` (partial) | `Settings` |
+| `GET /v1/previews/projects/{project}/mask-suggestions` | | `{suggestions: [{resource, path, rule, why}], unread: [{resource, why}]}`: columns of the project's branched (`branch`) Postgres, NoSQL and search resources that look like people's data and have no mask yet, with a rule their type takes ("Masked columns", Suggestions); `resource` is `masking`'s key (`postgres:<ref>`). At most 2,000 columns read per resource; one with more, or one that couldn't be read, is in `unread`. As the settings are: the operator and whoever sees the project |
 | `GET /v1/previews/projects/{project}/usage` | | `{previews, sleeping_usd_month, active_usd_hour, month_to_date_usd, bytes, spent_usd_month, max_usd_month}` |
 | `GET /v1/previews/projects/{project}/bypass` | | `{enabled, created_at, header}` (never the secret) |
 | `POST /v1/previews/projects/{project}/bypass` | | 201 `{enabled, created_at, header, secret}`: a new secret, shown only here; the old one stops working |

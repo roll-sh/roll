@@ -53,6 +53,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/activity", get(activity))
         .route("/v1/previews/projects/{project}/settings", get(settings).put(put_settings))
         .route("/v1/previews/projects/{project}/usage", get(usage))
+        .route("/v1/previews/projects/{project}/mask-suggestions", get(mask_suggestions))
         .route("/v1/previews/projects/{project}/bypass", get(bypass).post(rotate_bypass).delete(delete_bypass))
         .route("/v1/previews/projects/{project}/hooks", get(hooks).post(create_hook))
         .route("/v1/previews/projects/{project}/hooks/{hook}", axum::routing::delete(delete_hook))
@@ -583,6 +584,12 @@ async fn settings(AxState(e): S, Path(project): Path<String>) -> crate::Result<J
     })
     .await
     .map(Json)
+}
+
+/// Columns of the project's data that look like people's data and aren't masked yet:
+/// `{suggestions: [{resource, path, rule, why}], unread: [{resource, why}]}`.
+async fn mask_suggestions(AxState(e): S, Path(project): Path<String>) -> crate::Result<Json<Value>> {
+    e.mask_suggestions(&project).await.map(Json)
 }
 
 async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> crate::Result<Json<crate::Settings>> {

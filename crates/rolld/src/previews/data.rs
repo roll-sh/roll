@@ -170,6 +170,26 @@ impl Brancher for Postgres {
         Ok(Some((lines(s(&from["endpoint"]["id"]), None).await?, lines(s(&b["endpoint"]["id"]), role).await?)))
     }
 
+    /// The parent's table columns (`main`, the branch previews start from), as the superuser
+    /// with only the catalog's names in reach, as `schema` reads it. Reading starts its compute
+    /// if it sleeps.
+    async fn columns(&self, parent: &str, max: usize) -> anyhow::Result<Vec<roll_previews::mask::Column>> {
+        let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
+        let branches = p["branches"].as_array().cloned().unwrap_or_default();
+        let main = branches.iter().find(|b| b["name"] == "main").or_else(|| branches.iter().find(|b| b["parent_id"].is_null())).ok_or_else(|| anyhow::anyhow!("{parent} has no main branch"))?;
+        let ep = s(&main["endpoint"]["id"]).ok_or_else(|| anyhow::anyhow!("{parent}'s main branch has no endpoint"))?;
+        let sql = format!("SET search_path = pg_catalog, pg_temp; {COLUMNS_SQL} LIMIT {max}");
+        let v = self.0.post(&format!("/v1/endpoints/{}/query", seg(&ep)), json!({ "sql": sql })).await?;
+        let rows = v["results"].as_array().and_then(|r| r.last()).and_then(|r| r["rows"].as_array()).cloned().unwrap_or_default();
+        Ok(rows
+            .iter()
+            .filter_map(|r| serde_json::from_str::<Value>(r[0].as_str()?).ok())
+            .filter_map(|c| {
+                Some(roll_previews::mask::Column { path: s(&c["path"])?, r#type: s(&c["type"]), not_null: c["not_null"] == true, unique: c["unique"] == true })
+            })
+            .collect())
+    }
+
     /// A branch's own bytes (its local data directory, else its objects), at Postgres's rates.
     async fn usage(&self, parent: &str, branch: &str) -> anyhow::Result<Usage> {
         let p = self.0.get(&format!("/v1/projects/{}", seg(parent))).await?;
@@ -186,6 +206,18 @@ impl Brancher for Postgres {
 
 /// What a Postgres branch's `kept` says: it has a role of its own (pg-control's `app_role`).
 const APP_ROLE: &str = r#"{"app_role":true}"#;
+
+/// The user's tables' columns (a partitioned table's, not each partition's), one JSON object
+/// each (`{path, type, not_null, unique}`), for mask suggestions. A name with a dot in it can't
+/// be named by a mask (`schema.table.column`), so it's left out.
+const COLUMNS_SQL: &str = r"
+SELECT json_build_object('path', s.nspname || '.' || c.relname || '.' || a.attname, 'type', format_type(a.atttypid, a.atttypmod), 'not_null', a.attnotnull,
+       'unique', EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisunique AND a.attnum = ANY (i.indkey)))::text
+  FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace s ON s.oid = c.relnamespace
+ WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relkind IN ('r', 'p') AND NOT c.relispartition
+   AND s.nspname NOT IN ('pg_catalog', 'information_schema') AND s.nspname NOT LIKE 'pg\_%'
+   AND strpos(s.nspname || c.relname || a.attname, '.') = 0
+ ORDER BY s.nspname, c.relname, a.attnum";
 
 /// One line per object in the user's schemas, for `roll_previews::schema::diff`: tables, views,
 /// sequences, columns (type, nullability, default), indexes, constraints, enums, functions and
@@ -358,6 +390,12 @@ impl Brancher for Nosql {
     async fn mask_problems(&self, parent: &str, columns: &std::collections::BTreeMap<String, String>) -> anyhow::Result<Vec<String>> {
         let schema = self.0.get(&format!("/v1/nosql/databases/{}/schema", seg(parent))).await?;
         Ok(roll_previews::mask::nosql_key_masks(&schema, columns))
+    }
+
+    /// The parent's columns that can be masked (not a key's: `mask::nosql_columns`).
+    async fn columns(&self, parent: &str, max: usize) -> anyhow::Result<Vec<roll_previews::mask::Column>> {
+        let schema = self.0.get(&format!("/v1/nosql/databases/{}/schema", seg(parent))).await?;
+        Ok(roll_previews::mask::nosql_columns(&schema, max))
     }
 
     /// NoSQL resets in place: same id, endpoint and credentials.
@@ -849,6 +887,14 @@ impl Brancher for Search {
             out.extend(roll_previews::mask::search_field_masks(&mapping, &specs, &indices));
         }
         Ok(out)
+    }
+
+    /// The parent's fields from its mappings, through the operator's console request (as `schema`).
+    async fn columns(&self, parent: &str, max: usize) -> anyhow::Result<Vec<roll_previews::mask::Column>> {
+        let v = self.0.post(&format!("/v1/search/clusters/{}/request", seg(parent)), json!({ "method": "GET", "path": "/_mapping" })).await?;
+        anyhow::ensure!(v["status"].as_u64() == Some(200), "reading {parent}'s mappings: {}", v["status"]);
+        let body: Value = serde_json::from_str(v["body"].as_str().unwrap_or("{}"))?;
+        Ok(roll_previews::mask::search_columns(&body, max))
     }
 
     async fn find(&self, parent: &str, name: &str) -> anyhow::Result<Option<String>> {

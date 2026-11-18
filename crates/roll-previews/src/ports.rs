@@ -102,6 +102,12 @@ pub trait Brancher: Send + Sync {
         Ok(None)
     }
 
+    /// The parent's columns (or a search cluster's fields) with their types, at most `max`, for
+    /// mask suggestions ([`crate::mask::suggest`]). None from products without columns to mask.
+    async fn columns(&self, _parent: &str, _max: usize) -> anyhow::Result<Vec<crate::mask::Column>> {
+        Ok(Vec::new())
+    }
+
     /// The parent's schema and the branch's, one line per object, for [`crate::schema::diff`].
     /// `None` from products without a schema to compare.
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {

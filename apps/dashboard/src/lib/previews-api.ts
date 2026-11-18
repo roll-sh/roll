@@ -52,6 +52,22 @@ export function unmaskedNote(kind: string, mode: "branch" | "schema" | "skip", m
   return "Previews get its data as it is (it can't be masked): a seed can replace it with made-up data, or skip it.";
 }
 
+/** A column (or search field) of a branched resource that looks like people's data and has no
+ * mask yet (`GET …/mask-suggestions`), with the rule that fits its type. */
+export interface MaskSuggestion {
+  /** `"postgres:<ref>"`, `"nosql:<ref>"` or `"search:<ref>"`, as `masking` keys it. */
+  resource: string;
+  path: string;
+  rule: string;
+  why: string;
+}
+
+export interface MaskSuggestions {
+  suggestions: MaskSuggestion[];
+  /** Resources whose columns couldn't all be read. */
+  unread: { resource: string; why: string }[];
+}
+
 export interface PreviewCost {
   sleeping_usd_month: number;
   active_usd_hour: number;
@@ -501,6 +517,8 @@ export const previewsApi = {
   settings: (projectId: string) => call<PreviewSettings>("GET", `${project(projectId)}/settings`),
   putSettings: (projectId: string, patch: SettingsPatch) => call<PreviewSettings>("PUT", `${project(projectId)}/settings`, patch),
   usage: (projectId: string) => call<PreviewUsage>("GET", `${project(projectId)}/usage`),
+  /** Columns of the project's branched data that look like people's data and aren't masked. */
+  maskSuggestions: (projectId: string) => call<MaskSuggestions>("GET", `${project(projectId)}/mask-suggestions`),
   bypass: (projectId: string) => call<PreviewBypass>("GET", `${project(projectId)}/bypass`),
   /** A new secret (the old one stops working), shown only in this answer. */
   rotateBypass: (projectId: string) => call<PreviewBypass>("POST", `${project(projectId)}/bypass`),

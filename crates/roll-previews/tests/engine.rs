@@ -641,6 +641,23 @@ async fn masked_postgres_is_masked_before_it_serves_and_new_rules_reach_it() {
     assert_eq!(e.engine.store.row(&p.id).unwrap().state, State::Ready);
 }
 
+/// The rules dialog's suggestions: an unmasked column that looks like people's data is offered
+/// with a rule, a masked one isn't, and neither is a resource whose previews get only its schema.
+#[tokio::test]
+async fn mask_suggestions_name_unmasked_peoples_data_of_branched_resources() {
+    use roll_previews::mask::Column;
+    let e = env(json!({ "enabled": true, "masking": { "postgres:prj_db": { "public.users.name": "redact" } }, "resources": { "postgres:prj_shape": "schema" } }));
+    e.ws.place(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Postgres, "prj_shape", 0.0, 0.0).unwrap();
+    let col = |path: &str| Column { path: path.into(), r#type: Some("text".into()), ..Column::default() };
+    e.pg.columns.lock().insert("prj_db".into(), vec![col("public.users.email"), col("public.users.name"), col("public.users.created_at"), col("public.products.name")]);
+    e.pg.columns.lock().insert("prj_shape".into(), vec![col("public.users.email")]);
+    let got = e.engine.mask_suggestions(&e.project).await.unwrap();
+    assert_eq!(
+        got,
+        json!({ "suggestions": [{ "resource": "postgres:prj_db", "path": "public.users.email", "rule": "email", "why": "an email address" }], "unread": [] })
+    );
+}
+
 #[tokio::test]
 async fn the_secrets_environment_is_trusted_only_for_trusted_changes_where_production_is_allowed() {
     let e = env(json!({ "enabled": true }));

@@ -66,6 +66,58 @@ impl Engine {
         if problems.is_empty() { Ok(()) } else { Err(crate::Error::BadRequest(problems.join("; "))) }
     }
 
+    /// Columns of the project's data that look like people's data and aren't masked yet
+    /// (`GET …/mask-suggestions`): of every Postgres, NoSQL and search resource on its canvas that
+    /// the project stands for (`Workspace::trusts`) and its previews branch whole (`branch`, not
+    /// `schema` or `skip`), at most [`crate::mask::SUGGEST_COLUMNS_MAX`] columns read each. A
+    /// resource that can't be read (its product not on this node, unreachable) is named in
+    /// `unread`, as one with more columns than are read is.
+    pub async fn mask_suggestions(&self, project_id: &str) -> crate::Result<serde_json::Value> {
+        let max = crate::mask::SUGGEST_COLUMNS_MAX;
+        let project = self.workspace_project(project_id)?;
+        let s = self.store.settings(project_id)?;
+        let resources: Vec<(Kind, String)> = project
+            .resources
+            .iter()
+            .filter(|r| self.workspace.trusts(&project, r.kind, &r.r#ref))
+            .filter_map(|r| Kind::of_workspace(r.kind).map(|k| (k, r.r#ref.clone())))
+            .filter(|(k, parent)| matches!(k, Kind::Postgres | Kind::Nosql | Kind::Search) && s.mode_of(*k, parent) == Some(Mode::Branch))
+            .collect();
+        let read = futures::future::join_all(resources.iter().map(|(k, parent)| async move {
+            let b = self.brancher(*k)?;
+            b.columns(parent, max + 1).await
+        }))
+        .await;
+        let (mut suggestions, mut unread) = (Vec::new(), Vec::new());
+        for ((kind, parent), columns) in resources.iter().zip(read) {
+            let key = format!("{}:{parent}", kind.as_str());
+            let mut columns = match columns {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(resource = %key, error = %format!("{e:#}"), "previews: reading columns for mask suggestions");
+                    unread.push(serde_json::json!({ "resource": key, "why": "its columns couldn't be read" }));
+                    continue;
+                }
+            };
+            if columns.len() > max {
+                columns.truncate(max);
+                unread.push(serde_json::json!({ "resource": key, "why": format!("only its first {max} columns were read") }));
+            }
+            let masked = s.masking.get(&key);
+            for c in &columns {
+                // Already masked, or a path the settings wouldn't take as a mask.
+                let unnameable = c.path.len() > 200 || (*kind == Kind::Search && c.path.contains(['*', ',', '/', ' ', '\\']));
+                if unnameable || masked.is_some_and(|m| m.contains_key(&c.path)) {
+                    continue;
+                }
+                if let Some(x) = crate::mask::suggest(*kind, c) {
+                    suggestions.push(serde_json::json!({ "resource": key, "path": c.path, "rule": x.rule, "why": x.why }));
+                }
+            }
+        }
+        Ok(serde_json::json!({ "suggestions": suggestions, "unread": unread }))
+    }
+
     /// A head nobody approved yet: nothing of it runs (its services sleep) until a writer does.
     async fn await_approval(&self, r: &Row) -> anyhow::Result<()> {
         for svc in self.store.services(&r.id)? {
