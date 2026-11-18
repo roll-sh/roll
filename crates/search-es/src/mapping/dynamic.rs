@@ -678,12 +678,17 @@ mod tests {
             update(m, r#"{"foo_x":"1","baz_x":"2","ab":"3","abab":"4"}"#).unwrap().unwrap().to_json(),
             format!(r#"{{"properties":{{"ab":{{"type":"long"}},"abab":{text},"baz_x":{text},"foo_x":{{"type":"keyword"}}}}}}"#)
         );
-        // Matching is linear: a pattern that backtracks exponentially stays instant.
+        // Matching is linear in the field name: a pattern that a backtracking engine takes
+        // exponential time on stays linear.
         let evil = format!(r#"{{"dynamic_templates":[{{"t":{{"match":"{}b","match_pattern":"regex","mapping":{{"type":"keyword"}}}}}}]}}"#, "a*".repeat(20));
-        let start = std::time::Instant::now();
         let u = update(&evil, &format!(r#"{{"{}":"x"}}"#, "a".repeat(40))).unwrap().unwrap().to_json();
-        assert!(start.elapsed() < std::time::Duration::from_secs(1));
         assert!(u.contains(r#""type":"text""#), "{u}");
+        let ctx = MappingCtx::from_settings(&crate::meta::settings::Settings::new());
+        let mapping = Mapping::parse(parse(evil.as_bytes()).unwrap().unwrap().as_object().unwrap(), &ctx).unwrap();
+        let doc = |n: usize| parse(format!(r#"{{"{}":"x"}}"#, "a".repeat(n)).as_bytes()).unwrap().unwrap();
+        search_test_support::assert_linear("matching a regex template", 20_000, doc, |d| {
+            assert!(dynamic_update(&mapping, d.as_object().unwrap(), &ctx).unwrap().is_some());
+        });
         // Java's classes are ASCII: `\w+` doesn't match `é`.
         let w = r#"{"dynamic_templates":[{"t":{"match":"\\w+_\\d","match_pattern":"regex","mapping":{"type":"keyword"}}}]}"#;
         let u = update(w, r#"{"ab_1":"x","é_1":"y","ab_١":"z"}"#).unwrap().unwrap().to_json();

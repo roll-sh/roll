@@ -2,6 +2,7 @@ import { ArrowRight, Check, ChevronRight, Plus, RefreshCw, SquareTerminal, Trash
 import { useCallback, useEffect, useState } from "react";
 import { esJson, type SearchCluster } from "@/lib/search-api";
 import {
+  draftToRule,
   linesToRules,
   reloadSummary,
   ruleProblem,
@@ -10,17 +11,29 @@ import {
   synonymSetBody,
   synonymSettingsSnippet,
   type ReloadSummary,
+  type RuleDraft,
+  type RulesetSummary,
   type SynonymRule,
   type SynonymSetSummary,
   type SynonymsUpdate,
 } from "@/lib/search-relevance";
+import { rulePrefill, synonymPrefill } from "@/lib/search-analytics";
 import { Segmented } from "../redis/shared";
 import { btn, Confirm, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
-import { QueryRules, RulesetView } from "./query-rules";
+import { SearchAnalyticsPanel } from "./analytics";
+import { QueryRules, RuleEditor, RulesetView } from "./query-rules";
 import { BackTo, Empty, errText, LoadError, useLoad } from "./relevance-shared";
 
-/** What the tab shows: both lists, or one synonym set or ruleset opened. */
-type View = { kind: "lists" } | { kind: "set"; id: string } | { kind: "ruleset"; id: string };
+/**
+ * What the tab shows: the lists (analytics, synonym sets, rulesets), one synonym set or ruleset
+ * opened, or a synonym or query rule started from a query analytics listed.
+ */
+type View =
+  | { kind: "lists" }
+  | { kind: "set"; id: string }
+  | { kind: "ruleset"; id: string }
+  | { kind: "synonym-for"; query: string }
+  | { kind: "rule-for"; query: string };
 
 const enc = encodeURIComponent;
 /** Elasticsearch caps a page of sets or rules at 10,000 (`from` + `size`). */
@@ -47,10 +60,197 @@ export function RelevanceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
   }
   if (view.kind === "set") return <SynonymSetView key={view.id} cluster={cluster} id={view.id} onBack={back} onOpenConsole={onOpenConsole} />;
   if (view.kind === "ruleset") return <RulesetView key={view.id} cluster={cluster} id={view.id} onBack={back} />;
+  if (view.kind === "synonym-for") return <SynonymFor cluster={cluster} query={view.query} onBack={back} onSaved={(id) => setView({ kind: "set", id })} />;
+  if (view.kind === "rule-for") return <RuleFor cluster={cluster} query={view.query} onBack={back} onSaved={(id) => setView({ kind: "ruleset", id })} />;
   return (
     <div className="space-y-6">
+      <SearchAnalyticsPanel cluster={cluster} onAct={(p) => setView(p.kind === "synonym" ? { kind: "synonym-for", query: p.query } : { kind: "rule-for", query: p.query })} />
       <SynonymSets cluster={cluster} onOpen={(id) => setView({ kind: "set", id })} />
       <QueryRules cluster={cluster} onOpen={(id) => setView({ kind: "ruleset", id })} />
+    </div>
+  );
+}
+
+// --- From a query analytics listed -------------------------------------------------------------
+
+const NEW = "\u0000new";
+
+/** Where a synonym or rule started from a query goes: an existing set, or a new one by name. */
+function Target({ label, names, value, onChange, newName, onNewName, placeholder }: { label: string; names: string[]; value: string; onChange: (v: string) => void; newName: string; onNewName: (v: string) => void; placeholder: string }) {
+  return (
+    <div className="flex flex-wrap items-end gap-2">
+      <label className="grid gap-1 text-[12px] text-subtle">
+        {label}
+        <select className={`${input} min-w-40 py-1.5 font-mono text-[12px]`} value={value} onChange={(e) => onChange(e.target.value)}>
+          {names.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+          <option value={NEW}>New…</option>
+        </select>
+      </label>
+      {value === NEW && (
+        <label className="grid gap-1 text-[12px] text-subtle">
+          Name
+          <input autoFocus className={`${input} font-mono text-[12px]`} value={newName} onChange={(e) => onNewName(e.target.value)} placeholder={placeholder} spellCheck={false} />
+        </label>
+      )}
+    </div>
+  );
+}
+
+function SynonymFor({ cluster, query, onBack, onSaved }: { cluster: SearchCluster; query: string; onBack: () => void; onSaved: (set: string) => void }) {
+  const load = useCallback(
+    () => esJson<{ results: SynonymSetSummary[] }>(cluster.id, "GET", `/_synonyms?size=${PAGE}`).then((r) => r.results.map((s) => s.synonyms_set)),
+    [cluster.id],
+  );
+  const { value: sets, error } = useLoad(load);
+  const [target, setTarget] = useState<string | null>(null);
+  const [name, setName] = useState("search-analytics");
+  const [text, setText] = useState(() => synonymPrefill(query));
+  const [busy, setBusy] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const chosen = target ?? (sets && sets.length ? sets[0] : NEW);
+  const problem = ruleProblem(text);
+  // As prefilled, the rule waits for the term the query should also find: a hint, not an error.
+  const untouched = text === synonymPrefill(query);
+  const save = async () => {
+    setBusy(true);
+    setSaveError(null);
+    try {
+      if (chosen === NEW) {
+        await esJson(cluster.id, "PUT", `/_synonyms/${enc(name.trim())}`, synonymSetBody(linesToRules(text, [])));
+        onSaved(name.trim());
+      } else {
+        await esJson(cluster.id, "PUT", `/_synonyms/${enc(chosen)}/${enc(newRuleId())}`, { synonyms: text.trim() });
+        onSaved(chosen);
+      }
+    } catch (e) {
+      setSaveError(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="space-y-6">
+      <BackTo onBack={onBack} />
+      <Panel
+        title={
+          <span>
+            Add a synonym for <span className="font-mono">{query}</span>
+          </span>
+        }
+      >
+        {error ? (
+          <p className="px-5 py-4 text-[13px] text-danger">{error}</p>
+        ) : !sets ? (
+          <p className="px-5 py-4 text-[13px] text-subtle">
+            <span className="shimmer">Loading synonym sets…</span>
+          </p>
+        ) : (
+          <form
+            className="space-y-4 px-5 py-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!problem) save();
+            }}
+          >
+            <Target label="Synonym set" names={sets} value={chosen} onChange={setTarget} newName={name} onNewName={setName} placeholder="products" />
+            <label className="grid gap-1 text-[12px] text-subtle">
+              Rule
+              <input autoFocus={chosen !== NEW} className={`${input} font-mono text-[12px]`} value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} aria-label="Synonym rule" />
+            </label>
+            {untouched ? (
+              <p className="text-[12px] text-muted">
+                Add the term <span className="font-mono text-fg">{query}</span> should also find after the comma, or rewrite it with{" "}
+                <span className="font-mono text-fg">=&gt;</span>.
+              </p>
+            ) : problem ? (
+              <p className="text-[12px] text-danger">{problem}</p>
+            ) : (
+              text.trim() && <RuleText text={text} />
+            )}
+            <RuleSyntax />
+            {saveError && <p className="text-[13px] text-danger">{saveError}</p>}
+            <div className="flex gap-2">
+              <button type="submit" className={primary} disabled={busy || !!problem || (chosen === NEW && !name.trim())}>
+                {busy ? <span className="shimmer">Saving…</span> : "Add synonym"}
+              </button>
+              <button type="button" onClick={onBack} className={btn}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+function RuleFor({ cluster, query, onBack, onSaved }: { cluster: SearchCluster; query: string; onBack: () => void; onSaved: (ruleset: string) => void }) {
+  const load = useCallback(
+    () => esJson<{ results: RulesetSummary[] }>(cluster.id, "GET", "/_query_rules?size=1000").then((r) => r.results.map((s) => s.ruleset_id)),
+    [cluster.id],
+  );
+  const { value: sets, error } = useLoad(load);
+  const [target, setTarget] = useState<string | null>(null);
+  const [name, setName] = useState("search-analytics");
+  const [draft, setDraft] = useState<RuleDraft>(() => rulePrefill(query));
+  const [busy, setBusy] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const chosen = target ?? (sets && sets.length ? sets[0] : NEW);
+  const save = async () => {
+    setBusy(true);
+    setSaveError(null);
+    try {
+      const set = chosen === NEW ? name.trim() : chosen;
+      const { rule_id, ...body } = draftToRule(draft);
+      // Putting a rule into a ruleset that doesn't exist creates it.
+      await esJson(cluster.id, "PUT", `/_query_rules/${enc(set)}/_rule/${enc(rule_id)}`, body);
+      onSaved(set);
+    } catch (e) {
+      setSaveError(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="space-y-6">
+      <BackTo onBack={onBack} />
+      <Panel
+        title={
+          <span>
+            Add a query rule for <span className="font-mono">{query}</span>
+          </span>
+        }
+      >
+        {error ? (
+          <p className="px-5 py-4 text-[13px] text-danger">{error}</p>
+        ) : !sets ? (
+          <p className="px-5 py-4 text-[13px] text-subtle">
+            <span className="shimmer">Loading rulesets…</span>
+          </p>
+        ) : (
+          <div className="space-y-4 px-5 py-4">
+            <Target label="Ruleset" names={sets} value={chosen} onChange={setTarget} newName={name} onNewName={setName} placeholder="promotions" />
+            <p className="text-[12px] text-subtle">
+              The rule matches when a search sends <span className="font-mono">query_string</span> equal to the query in its{" "}
+              <span className="font-mono">rule</span> retriever&apos;s <span className="font-mono">match_criteria</span>. Name the documents to pin or hide.
+            </p>
+            <RuleEditor draft={draft} onChange={setDraft} idEditable />
+            {saveError && <p className="text-[13px] text-danger">{saveError}</p>}
+            <div className="flex gap-2">
+              <button className={primary} onClick={save} disabled={busy || !draft.rule_id.trim() || (chosen === NEW && !name.trim())}>
+                {busy ? <span className="shimmer">Saving…</span> : "Add rule"}
+              </button>
+              <button onClick={onBack} className={btn}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </Panel>
     </div>
   );
 }

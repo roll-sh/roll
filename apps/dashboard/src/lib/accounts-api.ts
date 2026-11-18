@@ -20,6 +20,8 @@ export interface User {
   disabled: boolean;
   created_at: number;
   totp: boolean;
+  /** How many passkeys they have (with `totp`: whether they have a second factor). */
+  passkeys?: number;
   /** GitHub, Google, or an SSO connection's link (`sso:<id>`). */
   identities: { provider: Provider | `sso:${string}`; login: string; email: string }[];
 }
@@ -48,7 +50,7 @@ export interface Invite {
 export type SessionState =
   | { status: "anonymous" }
   | { status: "mfa_required"; methods: ("totp" | "recovery" | "passkey")[]; csrf: string }
-  | { status: "signed_in"; user: User; session: Session; csrf: string; second_factor_required?: boolean };
+  | { status: "signed_in"; user: User; session: Session; csrf: string; second_factor_required?: boolean; passkey_required?: boolean };
 
 export type SignInAnswer = Exclude<SessionState, { status: "anonymous" }>;
 
@@ -146,6 +148,8 @@ export function activityText(e: Activity, me: string): string {
   if (e.action.includes("/me/passkeys")) return verb === "DELETE" ? was("A passkey was removed", "Removing a passkey") : verb === "PATCH" ? was("A passkey was renamed", "Renaming a passkey") : was("A passkey was added", "Adding a passkey");
   if (e.action.includes("/me/identities")) return was("A sign-in method was unlinked", "Unlinking a sign-in method");
   if (e.action.includes("/me/sessions") || e.action.endsWith("/sessions")) return was(`Sessions were ended by ${by}`, "Ending sessions");
+  if (e.action.endsWith("/me/email/confirm")) return was("Your account moved to another address", "Moving your account to another address");
+  if (e.action.endsWith("/me/email")) return was("A move to another address was started", "Starting a move to another address");
   if (e.action === "PATCH /v1/accounts/me") return was("Your profile was changed", "A change to your profile");
   return e.ok ? `${e.action} by ${by}` : `${e.action} by ${by} was refused`;
 }
@@ -166,6 +170,15 @@ export interface ResetRequest {
   state: "pending" | "approved" | "denied";
   decided_by: string | null;
   decided_at: number | null;
+}
+
+/** The company's account policy (docs/accounts.md): the whole of it goes back on a change. */
+export interface AccountPolicy {
+  require_second_factor: boolean;
+  /** A session unused this many minutes ends (15 to a week; absent: a week). */
+  idle_minutes?: number;
+  /** Whose sessions must use a passkey (or come from their SSO): phishing-resistant sign-in. */
+  phishing_resistant?: "admins" | "everyone";
 }
 
 /** Allowed networks (docs/accounts.md): where people's sessions may be used from. */
@@ -247,6 +260,11 @@ export const accountsApi = {
   /** Your own security log: sign-ins and changes to your account, newest first. */
   activity: (before?: number) => call<{ events: Activity[] }>("GET", `/me/activity${before ? `?before=${before}` : ""}`),
   updateMe: (name: string) => call<User>("PATCH", "/me", { name }),
+  /** Move your account to `email`: a code goes there (docs/accounts.md, "Your address"). */
+  changeEmail: (email: string) => call<{ challenge: string }>("POST", "/me/email", { email }),
+  confirmEmail: (challenge: string, code: string) => call<User>("POST", "/me/email/confirm", { challenge, code }),
+  /** Delete your own account for good, `confirm` being your handle (docs/accounts.md, "Deleting your account"). */
+  deleteMe: (confirm: string) => call<null>("DELETE", "/me", { confirm }),
   sessions: () => call<Session[]>("GET", "/me/sessions"),
   revokeSession: (id: string) => call<null>("DELETE", `/me/sessions/${encodeURIComponent(id)}`),
   unlink: (provider: Provider | `sso:${string}`) => call<null>("DELETE", `/me/identities/${encodeURIComponent(provider)}`),
@@ -264,8 +282,8 @@ export const accountsApi = {
   removePasskey: (id: string) => call<null>("DELETE", `/me/passkeys/${encodeURIComponent(id)}`),
   /** Your data as one JSON document (sudo mode): a file to save. */
   exportData: () => call<Record<string, unknown>>("POST", "/me/export"),
-  accountPolicy: () => call<{ require_second_factor: boolean }>("GET", "/policy"),
-  setAccountPolicy: (p: { require_second_factor: boolean }) => call<{ require_second_factor: boolean }>("PUT", "/policy", p),
+  accountPolicy: () => call<AccountPolicy>("GET", "/policy"),
+  setAccountPolicy: (p: AccountPolicy) => call<AccountPolicy>("PUT", "/policy", p),
   networkPolicy: () => call<NetworkPolicy>("GET", "/network-policy"),
   setNetworkPolicy: (p: NetworkPolicy) => call<NetworkPolicy>("PUT", "/network-policy", p),
   requestReset: (reason: string) => call<{ id: string; state: string }>("POST", "/signin/reset-request", { reason }),

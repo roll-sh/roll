@@ -2,11 +2,12 @@
 //! snapshot-repo-test-kit): writes, reads, overwrites, lists and deletes test blobs to check
 //! that a repository's storage behaves as snapshots need.
 //!
-//! An `s3` repository's bucket is really exercised, under `<base_path>/roll/temp-analysis-<id>/`
+//! An `s3`, `gcs` or `azure` repository's bucket is really exercised, under `<base_path>/roll/temp-analysis-<id>/`
 //! ([`analyze_bucket`]): a contended register (compare-and-exchange by `If-Match`, every
-//! increment must land), an uncontended one, overwrite protection (of concurrent writers with
-//! `If-None-Match: *` exactly one wins), then each blob is written (in parts past
-//! `buffer_size`, as snapshot contents are), sometimes read before its write, overwritten, or
+//! increment must land; a GCS generation with `ifGenerationMatch`), an uncontended one,
+//! overwrite protection (of concurrent writers with `If-None-Match: *` exactly one wins), then
+//! each blob is written (in parts past `buffer_size` or a GCS chunk or Azure block, as snapshot
+//! contents are), sometimes read before its write, overwritten, or
 //! written and aborted, and read back (whole or a range) byte for byte; the blobs must then all
 //! be listed with their sizes, and gone once deleted. The first check that fails fails the
 //! analysis with Elasticsearch's answer, after removing what it wrote. Writes and reads pay the
@@ -216,12 +217,12 @@ pub async fn analyze_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 Ok(Ok(o)) => o,
                 Ok(Err(e)) => {
                     remove_all(&bucket, &blob_path).await;
-                    return Err(analysis_failed(&name, &blob_path, false, e));
+                    return Err(analysis_failed(&name, &repo, &blob_path, false, e));
                 }
                 Err(_) => {
                     remove_all(&bucket, &blob_path).await;
                     let cause = verification(&name, format!("analysis timed out after [{}]", p.timeout.string_rep()));
-                    return Err(analysis_failed(&name, &blob_path, true, cause));
+                    return Err(analysis_failed(&name, &repo, &blob_path, true, cause));
                 }
             }
         }
@@ -254,11 +255,15 @@ fn verification(name: &str, msg: impl std::fmt::Display) -> EsError {
 }
 
 /// The failure an analysis of a bucket answers (`RepositoryAnalyzeAction`'s, with
-/// `S3Repository`'s detail on S3-compatible storage), having tried to remove what it wrote.
-fn analysis_failed(name: &str, blob_path: &str, timed_out: bool, cause: EsError) -> EsError {
+/// `S3Repository`'s detail on S3-compatible storage; `BlobStoreRepository`'s on the others),
+/// having tried to remove what it wrote.
+fn analysis_failed(name: &str, repo: &Repository, blob_path: &str, timed_out: bool, cause: EsError) -> EsError {
     let left = format!("Elasticsearch attempted to remove the data it wrote at [{blob_path}] but may have left some behind. If so, please now remove this data manually.");
     let msg = match timed_out {
         true => format!("Repository analysis timed out. Consider specifying a longer timeout using the [?timeout] request parameter. See [{ANALYZE_DOCS}] for more information. {left}"),
+        false if repo.ty != "s3" => format!(
+            "Elasticsearch observed the storage system underneath this repository behaved incorrectly which indicates it is not suitable for use with Elasticsearch snapshots. See [{ANALYZE_DOCS}] for further information. {left}"
+        ),
         false => format!(
             "Elasticsearch observed the storage system underneath this repository behaved incorrectly which indicates it is not suitable for use with Elasticsearch snapshots. Typically this happens when using storage other than AWS S3 which incorrectly claims to be S3-compatible. If so, please report this incompatibility to your storage supplier. Do not report Elasticsearch issues involving storage systems which claim to be S3-compatible unless you can demonstrate that the same issue exists when using a genuine AWS S3 repository. See [{ANALYZE_DOCS}] for further information about repository analysis, and [{S3_COMPATIBLE_DOCS}] for further information about support for S3-compatible repository implementations. {left}"
         ),
@@ -270,14 +275,14 @@ fn analysis_failed(name: &str, blob_path: &str, timed_out: bool, cause: EsError)
 async fn remove_all(bucket: &s3::Bucket, blob_path: &str) {
     let dir = format!("{}{blob_path}/", bucket.prefix);
     let cleanup = async {
-        if let Ok(listed) = bucket.s3.list(&dir).await {
+        if let Ok(listed) = bucket.store.list(&dir).await {
             for (k, _) in listed {
-                let _ = bucket.s3.delete(&k).await;
+                let _ = bucket.store.delete(&k).await;
             }
         }
-        if let Ok(uploads) = bucket.s3.list_uploads(&dir, 10_000).await {
+        if let Ok(uploads) = bucket.store.list_uploads(&dir, 10_000).await {
             for (k, id) in uploads {
-                let _ = bucket.s3.abort_multipart(&k, &id).await;
+                let _ = bucket.store.abort(&k, &id).await;
             }
         }
     };
@@ -444,7 +449,7 @@ async fn analyze_bucket(ctx: &Ctx<'_>, bucket: &s3::Bucket, p: &Params, sizes: &
 
     // Every blob written is listed with its size, and a prefix nothing has lists nothing.
     let started = Instant::now();
-    let listed: std::collections::BTreeMap<String, u64> = bucket.s3.list(&dir).await.map_err(|e| fail("listing the analysis blobs", e))?.into_iter().collect();
+    let listed: std::collections::BTreeMap<String, u64> = bucket.store.list(&dir).await.map_err(|e| fail("listing the analysis blobs", e))?.into_iter().collect();
     let listing_elapsed = started.elapsed().as_nanos() as u64;
     let key = |b: &Blob| format!("{dir}{}", b.name);
     let missing: Vec<&str> = blobs.iter().filter(|b| !b.abort && !listed.contains_key(&key(b))).map(|b| b.name.as_str()).collect();
@@ -461,7 +466,7 @@ async fn analyze_bucket(ctx: &Ctx<'_>, bucket: &s3::Bucket, p: &Params, sizes: &
     if !aborted.is_empty() {
         return Err(verification(name, format!("listBlobsByPrefix(\"test-blob-\") returned incorrect results: missing=[], unexpected=[{}]", aborted.join(", "))));
     }
-    let nothing = bucket.s3.list(&format!("{dir}nonexistent-prefix-")).await.map_err(|e| fail("listing the analysis blobs", e))?;
+    let nothing = bucket.store.list(&format!("{dir}nonexistent-prefix-")).await.map_err(|e| fail("listing the analysis blobs", e))?;
     if !nothing.is_empty() {
         let keys: Vec<&str> = nothing.iter().map(|(k, _)| k.strip_prefix(dir.as_str()).unwrap_or(k)).collect();
         return Err(verification(name, format!("listBlobsByPrefix(\"nonexistent-prefix-\") should return empty results but returned [{}]", keys.join(", "))));
@@ -470,10 +475,10 @@ async fn analyze_bucket(ctx: &Ctx<'_>, bucket: &s3::Bucket, p: &Params, sizes: &
     // Deleting them all leaves nothing.
     let started = Instant::now();
     for k in listed.keys() {
-        bucket.s3.delete(k).await.map_err(|e| fail("deleting the analysis blobs", e))?;
+        bucket.store.delete(k).await.map_err(|e| fail("deleting the analysis blobs", e))?;
     }
     let delete_elapsed = started.elapsed().as_nanos() as u64;
-    let left = bucket.s3.list(&dir).await.map_err(|e| fail("listing the analysis blobs", e))?;
+    let left = bucket.store.list(&dir).await.map_err(|e| fail("listing the analysis blobs", e))?;
     if !left.is_empty() {
         let keys: Vec<&str> = left.iter().map(|(k, _)| k.strip_prefix(dir.as_str()).unwrap_or(k)).collect();
         return Err(verification(name, format!("failed to clean up blobs [{}]", keys.join(", "))));
@@ -487,17 +492,23 @@ async fn analyze_bucket(ctx: &Ctx<'_>, bucket: &s3::Bucket, p: &Params, sizes: &
 async fn register_checks(bucket: &s3::Bucket, dir: &str, p: &Params, lanes: usize) -> EsResult<()> {
     let name = bucket.name.as_str();
     let fail = |what: &str, e: crate::s3::Error| verification(name, format!("{what}: {e}"));
+    // `AzureBlobContainer`: a register read from a secondary location may be stale.
+    if let crate::blob::Store::Azure(c) = &bucket.store
+        && c.location_mode() != crate::azure::LocationMode::PrimaryOnly
+    {
+        return Err(verification(name, format!("consistent register operations are not supported with location_mode [{}]", c.location_mode().name())));
+    }
     let uuid = random_uuid();
     // Contended: `register_operation_count` increments by compare-and-exchange, all landing.
     let contended = &format!("{dir}test-register-contended-{uuid}");
     let increment = |_: &usize| async move {
         for _ in 0..REGISTER_ATTEMPTS {
-            let (value, etag) = match bucket.s3.get_tagged(contended, 64).await.map_err(|e| fail("reading a register", e))? {
+            let (value, etag) = match bucket.store.get_tagged(contended, 64).await.map_err(|e| fail("reading a register", e))? {
                 Some((b, etag)) => (register_value(&b).ok_or_else(|| verification(name, "register holds unexpected value [corrupt]"))?, Some(etag)),
                 None => (0, None),
             };
             let next = Bytes::from((value + 1).to_be_bytes().to_vec());
-            if bucket.s3.put_if(contended, next, etag.as_deref()).await.map_err(|e| fail("writing a register", e))?.is_some() {
+            if bucket.store.put_if(contended, next, etag.as_deref()).await.map_err(|e| fail("writing a register", e))?.is_some() {
                 return Ok(());
             }
         }
@@ -509,22 +520,22 @@ async fn register_checks(bucket: &s3::Bucket, dir: &str, p: &Params, lanes: usiz
             r?;
         }
     }
-    let value = bucket.s3.get_tagged(contended, 64).await.map_err(|e| fail("reading a register", e))?.and_then(|(b, _)| register_value(&b));
+    let value = bucket.store.get_tagged(contended, 64).await.map_err(|e| fail("reading a register", e))?.and_then(|(b, _)| register_value(&b));
     if value != Some(ops.len() as u64) {
         let shown = value.map_or("absent".to_string(), |v| v.to_string());
         return Err(verification(name, format!("register holds unexpected value [{shown}]")));
     }
     // Uncontended: a fresh register is written once, and only once.
     let uncontended = format!("{dir}test-register-uncontended-{uuid}");
-    let first = bucket.s3.put_if(&uncontended, Bytes::from(1u64.to_be_bytes().to_vec()), None).await.map_err(|e| fail("writing a register", e))?;
-    let again = bucket.s3.put_if(&uncontended, Bytes::from(2u64.to_be_bytes().to_vec()), None).await.map_err(|e| fail("writing a register", e))?;
+    let first = bucket.store.put_if(&uncontended, Bytes::from(1u64.to_be_bytes().to_vec()), None).await.map_err(|e| fail("writing a register", e))?;
+    let again = bucket.store.put_if(&uncontended, Bytes::from(2u64.to_be_bytes().to_vec()), None).await.map_err(|e| fail("writing a register", e))?;
     if first.is_none() || again.is_some() {
         return Err(verification(name, format!("register holds unexpected value [{}]", if first.is_none() { 0 } else { 2 })));
     }
     // Overwrite protection: of concurrent creators of one blob exactly one wins.
     let blob = format!("test-overwrite-blob-{uuid}");
     let key = format!("{dir}{blob}");
-    let wins = crate::api::by_query::join_all((0..lanes.max(2)).map(|i| bucket.s3.put_new(&key, Bytes::from(format!("writer {i}")))).collect()).await;
+    let wins = crate::api::by_query::join_all((0..lanes.max(2)).map(|i| bucket.store.put_new(&key, Bytes::from(format!("writer {i}")))).collect()).await;
     let mut won = 0;
     for w in wins {
         won += usize::from(w.map_err(|e| fail("writing an overwrite-protected blob", e))?);
@@ -562,11 +573,11 @@ async fn analyze_blob(ctx: &Ctx<'_>, bucket: &s3::Bucket, dir: &str, node: &str,
     let started = Instant::now();
     if b.abort {
         // A write abandoned partway leaves nothing behind.
-        let mut up = transfer::Upload::new(&bucket.s3, &bucket.io, bucket.budget.clone(), key.clone(), bucket.sizes.buffer);
+        let mut up = transfer::Upload::new(&bucket.store, &bucket.io, bucket.budget.clone(), key.clone(), bucket.sizes.buffer);
         write_content(&mut up, b.seed, b.size as u64).await.map_err(|e| failed_write(bucket, &key, e))?;
         run.write_throttled += up.throttled_nanos;
         up.abort().await;
-        if bucket.s3.open(&key, None).await.map_err(|e| fail("reading a blob", e))?.is_some() {
+        if bucket.store.open(&key, None).await.map_err(|e| fail("reading a blob", e))?.is_some() {
             return Err(verification(name, format!("node [{node}] found blob [{}] after its write was aborted", b.name)));
         }
         run.write_elapsed = started.elapsed().as_nanos() as u64;
@@ -600,7 +611,7 @@ async fn analyze_blob(ctx: &Ctx<'_>, bucket: &s3::Bucket, dir: &str, node: &str,
 
 fn failed_write(bucket: &s3::Bucket, key: &str, f: transfer::Failed) -> EsError {
     match f {
-        transfer::Failed::S3(e) => verification(&bucket.name, format!("write failed for [{key}]: {e}")),
+        transfer::Failed::Store(e) => verification(&bucket.name, format!("write failed for [{key}]: {e}")),
         transfer::Failed::Breaker(e) => e,
     }
 }
@@ -616,15 +627,15 @@ async fn write_blob(bucket: &s3::Bucket, key: &str, seed: u64, size: u64, create
         content(seed, 0, &mut body);
         run.write_throttled += bucket.io.write(size).await;
         let fresh = match create {
-            true => bucket.s3.put_new(key, Bytes::from(body)).await,
-            false => bucket.s3.put(key, Bytes::from(body)).await.map(|_| true),
+            true => bucket.store.put_new(key, Bytes::from(body)).await,
+            false => bucket.store.put(key, Bytes::from(body)).await.map(|_| true),
         };
         return match fresh.map_err(|e| verification(name, format!("write failed for [{key}]: {e}")))? {
             true => Ok(()),
             false => Err(verification(name, format!("blob [{key}] already existed before it was written"))),
         };
     }
-    let mut up = transfer::Upload::new(&bucket.s3, &bucket.io, bucket.budget.clone(), key.to_string(), bucket.sizes.buffer);
+    let mut up = transfer::Upload::new(&bucket.store, &bucket.io, bucket.budget.clone(), key.to_string(), bucket.sizes.buffer);
     write_content(&mut up, seed, size).await.map_err(|e| failed_write(bucket, key, e))?;
     up.finish().await.map_err(|e| failed_write(bucket, key, e))?;
     run.write_throttled += up.throttled_nanos;
@@ -659,7 +670,7 @@ struct Read {
 async fn read_range(ctx: &Ctx<'_>, bucket: &s3::Bucket, key: &str, seed: u64, range: (u64, u64)) -> Result<Read, crate::s3::Error> {
     let started = Instant::now();
     let mut out = Read { found: false, bytes: 0, checksum: 0, expected: 0, first_byte: 0, elapsed: 0, throttled: 0 };
-    let Some(mut body) = bucket.s3.open(key, Some(range)).await? else {
+    let Some(mut body) = bucket.store.open(key, Some(range)).await? else {
         out.elapsed = started.elapsed().as_nanos() as u64;
         return Ok(out);
     };

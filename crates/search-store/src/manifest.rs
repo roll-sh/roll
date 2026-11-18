@@ -218,11 +218,11 @@ impl ClusterState {
 
 /// Decompress a zstd frame, growing the output with what actually decompresses (never to a
 /// size the frame claims) and refusing more than `limit` bytes.
-fn inflate_bounded(data: &[u8], limit: u64) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn inflate_bounded(data: &[u8], limit: u64) -> anyhow::Result<Vec<u8>> {
     use std::io::Read;
     let mut raw = Vec::new();
     let n = zstd::stream::read::Decoder::new(data)?.take(limit + 1).read_to_end(&mut raw)?;
-    anyhow::ensure!(n as u64 <= limit, "cluster state decompresses past {limit} bytes");
+    anyhow::ensure!(n as u64 <= limit, "the object decompresses past {limit} bytes");
     Ok(raw)
 }
 
