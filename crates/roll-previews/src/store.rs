@@ -185,6 +185,13 @@ CREATE TABLE IF NOT EXISTS git_reports (
     comment_id INTEGER,
     comment_hash TEXT
 );
+CREATE TABLE IF NOT EXISTS pull_comments (
+    service TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    comment_id INTEGER NOT NULL,
+    PRIMARY KEY (service, repo, number)
+);
 CREATE TABLE IF NOT EXISTS git_pulls (
     preview_id TEXT PRIMARY KEY,
     number INTEGER NOT NULL,
@@ -626,7 +633,7 @@ impl Store {
                 db.add_column("previews", col, "INTEGER")?;
             }
         }
-        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head", "teardown_error", "schema_risks"] {
+        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head", "teardown_error", "schema_risks", "reported_by"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "TEXT")?;
             }
@@ -1123,6 +1130,26 @@ impl Store {
     /// warning; `None`: not close).
     pub fn goes_at(&self, id: &str) -> Result<Option<i64>> {
         Ok(self.db.read(|c| c.query_row("SELECT goes_at FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    /// The name of the project that reports this preview's change (or pull request) when it's
+    /// another project's (roll previews' `refresh_voice`); `None`: this one reports it.
+    pub fn reported_by(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT reported_by FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    /// Sets [`Store::reported_by`]: whether it changed (written only then).
+    pub fn set_reported_by(&self, id: &str, by: Option<&str>) -> Result<bool> {
+        if self.reported_by(id)?.as_deref() == by {
+            return Ok(false);
+        }
+        Ok(self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE previews SET reported_by = ? WHERE id = ? AND reported_by IS NOT ?", params![by, id, by])?))? > 0)
+    }
+
+    /// The active previews of `repo`'s `branch` in every project (a Git URL service's branch has
+    /// one in each project whose canvas holds the service).
+    pub fn branch_rows(&self, repo: &str, branch: Option<&str>) -> Result<Vec<Row>> {
+        Ok(self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM previews WHERE repo = ? AND branch IS ? AND desired = 'active' ORDER BY id"), params![repo, branch], row))?)
     }
 
     pub fn set_goes_at(&self, id: &str, at: Option<i64>) -> Result<()> {
@@ -2082,6 +2109,19 @@ impl Store {
         })
     }
 
+    /// The comment a Git URL service's previews keep on pull request `number` of `repo`, whichever
+    /// project's preview posted it: the next project to speak for the service edits the same one.
+    pub fn pull_comment(&self, service: &str, repo: &str, number: i64) -> Result<Option<i64>> {
+        Ok(self.db.read(|c| c.query_row("SELECT comment_id FROM pull_comments WHERE service = ? AND repo = ? AND number = ?", params![service, repo, number], |r| r.get(0)).optional())?)
+    }
+
+    pub fn set_pull_comment(&self, service: &str, repo: &str, number: i64, comment_id: i64) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("INSERT INTO pull_comments (service, repo, number, comment_id) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (service, repo, number) DO UPDATE SET comment_id = excluded.comment_id", params![service, repo, number, comment_id])?;
+            Ok::<_, Error>(())
+        })
+    }
+
     // ── leases: the dynamic credentials a service started with (roll secrets'; ids only) ──
 
     /// Lease ids a start of `service` was given, each thought to end `expires_at` (ms) until a
@@ -2232,6 +2272,7 @@ impl Store {
             g
         });
         let goes_at = self.goes_at(&r.id)?;
+        let reported_by = self.reported_by(&r.id)?;
         // The screenshot row in one read, without its images.
         let f = self.shot_facts(&r.id)?;
         let screenshot_at = f.at;
@@ -2316,6 +2357,7 @@ impl Store {
             kept_until,
             pull,
             goes_at,
+            reported_by,
             earlier,
             screenshot_at,
             visual_change,

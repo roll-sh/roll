@@ -1107,8 +1107,10 @@ impl Engine {
         // The change hears it went, and how its teardown failed if it did.
         let teardown = self.store.teardown_error(&r.id)?;
         self.source.forget(&view, teardown.as_deref()).await;
-        // A Git URL service's pull request too.
-        if let Ok(s) = self.store.settings(&r.project_id) {
+        // A Git URL service's pull request too, unless another project's preview of it speaks
+        // now (it carries the comment on; saying this one went could land after it).
+        let hands_over = matches!(self.refresh_voice(r), Ok((_, false)));
+        if !hands_over && let Ok(s) = self.store.settings(&r.project_id) {
             self.report_on_git(&view, &s, Some(teardown.as_deref())).await;
         }
         // What it cost this month stays counted against the project's budget.
@@ -1128,6 +1130,9 @@ impl Engine {
 
     pub(super) async fn report(&self, row: Row) {
         let Ok(s) = self.store.settings(&row.project_id) else { return };
+        // Who speaks for a Git URL service's branch as of now: another project's preview of it
+        // stays on its own sheet (`report_on_git`).
+        let _ = self.refresh_voice(&row);
         if let Ok(mut p) = self.store.view(row) {
             // The open notes, newest first (a few), for the pull request's comment.
             if p.change.is_some() {
@@ -1151,6 +1156,10 @@ impl Engine {
     /// tried at the next report.
     pub(super) async fn report_on_git(&self, p: &Preview, s: &crate::Settings, deleted: Option<Option<&str>>) {
         let (Some(gr), Some(service)) = (self.git_report.get(), p.repo.strip_prefix("git:")) else { return };
+        // Another project speaks for the service: its own preview posts (and says it went).
+        if p.reported_by.is_some() {
+            return;
+        }
         // One report at a time per preview (what's posted, and the comment's id, read and kept
         // in turn).
         let turn = self.git_reporting.lock().entry(p.id.clone()).or_default().clone();
@@ -1193,15 +1202,64 @@ impl Engine {
         if last_hash.as_deref() == Some(hash.as_str()) {
             return;
         }
+        // The pull request's comment, whichever project's preview posted it: one per pull request.
+        let comment_id = comment_id.or_else(|| self.store.pull_comment(service, &repo, pull.number).ok().flatten());
         match gr.comment(service, &repo, pull.number as u64, &body.comment, comment_id.map(|i| i as u64)).await {
             Ok(Some(id)) => {
                 let _ = self.store.set_git_report(&p.id, None, Some((id as i64, &hash)));
+                let _ = self.store.set_pull_comment(service, &repo, pull.number, id as i64);
             }
             Ok(None) => {}
             Err(e) => tracing::warn!(preview = %p.id, error = %e, "previews: a Git URL preview's pull request comment"),
         }
     }
 
+}
+
+impl Engine {
+    /// The project roll code's `POST …/preview` makes a change's preview in, as `(id, name)`: of
+    /// the projects with previews on that stand for `kind r#ref` (`Workspace::trusts`), the one
+    /// that has had it on its canvas longest, then by id.
+    pub fn speaker(&self, kind: roll_workspace::Kind, r#ref: &str) -> Option<(String, String)> {
+        self.workspace
+            .projects_of(kind.as_str(), r#ref)
+            .ok()?
+            .iter()
+            .filter_map(|id| self.workspace.get(roll_workspace::Scope::All, id).ok())
+            .filter(|p| self.workspace.trusts(p, kind, r#ref) && self.store.settings(&p.id).is_ok_and(|s| s.enabled))
+            .filter_map(|p| p.resources.iter().find(|x| x.kind == kind && x.r#ref == r#ref).map(|x| (x.added_at, p.id.clone(), p.name.clone())))
+            .min()
+            .map(|(_, id, name)| (id, name))
+    }
+
+    /// Keeps `row`'s [`crate::Preview::reported_by`] up to date: `(changed, it speaks)`. With no
+    /// speaker at all (its project's previews just turned off) it speaks for itself. Only a Git
+    /// URL service's previews can be quiet: each project with the service on its canvas has its
+    /// own preview of a branch, where a change has one preview (made by its repo's speaker).
+    /// An error (the workspace or the store unread) changes nothing: the voice stored stays.
+    pub(super) fn refresh_voice(&self, row: &Row) -> anyhow::Result<(bool, bool)> {
+        let Some(svc) = row.repo.strip_prefix("git:") else { return Ok((false, true)) };
+        // Of the projects with an active preview of this branch (each stands for the service, or
+        // its preview would be gone), the one that has had the service on its canvas longest:
+        // a project whose rules skip the branch has no preview, so it never silences one that does.
+        let mut speaker: Option<(i64, String, String)> = None;
+        let mut operators = false;
+        for r in self.store.branch_rows(&row.repo, row.branch.as_deref())? {
+            let p = self.workspace.get(roll_workspace::Scope::All, &r.project_id)?;
+            if r.id == row.id {
+                operators = p.owner.is_empty();
+            }
+            let Some(added) = p.resources.iter().find(|x| x.kind == roll_workspace::Kind::Service && x.r#ref == svc).map(|x| x.added_at) else { continue };
+            let key = (added, p.id.clone(), p.name.clone());
+            if speaker.as_ref().is_none_or(|s| key < *s) {
+                speaker = Some(key);
+            }
+        }
+        // Named only on the operator's projects, which see every project: a person's project
+        // never learns another owner's project's name (they're 404s to them).
+        let by = speaker.filter(|(_, id, _)| *id != row.project_id).map(|(_, _, name)| if operators { name } else { "another project".into() });
+        Ok((self.store.set_reported_by(&row.id, by.as_deref())?, by.is_none()))
+    }
 }
 
 /// `owner/name` of a pull request's page (`https://<host>/<owner>/<name>/pull/<n>`).

@@ -235,6 +235,11 @@ pub struct Preview {
     /// When it goes unless it's used or kept, said once that's close (a day, or a quarter of a
     /// shorter TTL): the change, its pull request and the sheet warn.
     pub goes_at: Option<i64>,
+    /// The project that reports a Git URL service's pull request (`roll/preview`, the comment),
+    /// when it's another one: the service is on two projects' canvases, each has a preview of the
+    /// branch, and only the one that has had it longest speaks for it (`Engine::refresh_voice`). Its name on the
+    /// operator's projects; "another project" on a person's.
+    pub reported_by: Option<String>,
     /// Earlier pushes of the change's services, still reachable (newest first; the last
     /// [`store::PINNED_KEEP`] per service).
     pub earlier: Vec<Pinned>,
