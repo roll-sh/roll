@@ -182,6 +182,10 @@ pub struct GitPush {
     pub sha: Option<String>,
     /// The pushed commit's message, as the push said it (`[skip ci]` is the receiver's to read).
     pub message: String,
+    /// Who pushed or acted, as the event says (GitHub's and Gitea's `sender.login`, GitLab's
+    /// `user_username` or `user.username`, Bitbucket's `actor.nickname`): untrusted text, at
+    /// most 100 characters, for rules like roll previews' `skip_authors`, never for trust.
+    pub pusher: Option<String>,
     /// A pull request's (or merge request's) push, opening or closing: `branch` is its own for a
     /// same-repository one, `pull/<number>` for a fork's.
     pub pull: Option<GitPull>,
