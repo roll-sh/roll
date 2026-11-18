@@ -1689,7 +1689,11 @@ Ranked by what a person notices first. Done so far:
    and #259 (a preview made by hand is only of a repo the project stands for, and never another
    project's: both on main, found by an independent review) and #266 (`skip_authors`: no preview
    for a dependency bot's pull request unless asked, Netlify's and Vercel's ignored builds) and
-   #272 (deploy hooks: a secret URL a headless CMS calls to rebuild a branch's previews).
+   #272 (deploy hooks: a secret URL a headless CMS calls to rebuild a branch's previews), #234
+   (Roll only on roll apps' builds: a closed build has no secrets and only a proxy to public
+   hosts; `closed: true` on each deploy) and #251 on it (`report: false` on every `pv-`
+   environment, so a pull request hears only previews' `roll/preview`). #234 and #251 passed
+   `scripts/preview-apps.sh` on main with apps' socket-path fix (#271).
 2. **A project's own preview domain** (Vercel's preview deployment suffix): previews at
    `<service>-<slug>.preview.acme.dev`, so cookies scoped to the team's domain and OAuth redirect
    allowlists work. Agreed with the apps thread on 2026-11-18: it goes through roll apps' domain
@@ -1703,22 +1707,14 @@ Ranked by what a person notices first. Done so far:
    certificates", the roll cloud thread). Waits on apps' record kind.
 3. **Bots on Git URL services:** roll apps' `GitPull` carries no author, so `skip_authors` doesn't
    reach a Git URL service's pull requests (with the apps thread).
-4. **Roll only on roll apps' builds** (draft #234; apps' #222, #238 and #240 are on main, but main's `scripts/preview-apps.sh` fails at Roll only since: a request never reaches a closed `pv-` instance through its sandbox, so its health check fails; apps reproduced it and is fixing it): a closed
-   environment's build gets none of its secrets and, with #238, no way out but the egress relay.
-   rolld's adapter deploys nothing to a closed environment that doesn't say `build_closed`, and
-   sends `closed: true` on each deploy, so an older node refuses it. A Git URL fork's head is
-   approved under Roll only again.
-5. **One GitHub voice per pull request** (draft #251; apps' #249 is on main; waits on #234's live check): every `pv-`
-   environment carries `report: false`, so roll apps posts no status or Deployment next to
-   previews' `roll/preview`.
-6. **Deploy a preview's roll apps services at once** (measured twice and not landed; branch
+4. **Deploy a preview's roll apps services at once** (measured twice and not landed; branch
    `feature/roll-previews-deploy-at-once`). With cold builds it was within the noise, and with a
    second push's cached builds one run in two was faster. Try it on an idle host, or with more
    services.
-7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-8. **Watch: pg-control's recovery to a time seconds old** (unowned).
-9. **Watch: a cold start on a Docker name conflict.**
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+7. **Watch: a cold start on a Docker name conflict.**
 
 Landed in previews' lock turn of 2026-11-17 (main 42a3bbe1b, one combined gate with both live
 checks):
