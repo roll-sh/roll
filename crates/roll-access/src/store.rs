@@ -196,6 +196,7 @@ pub const UNCONSENTED_CLIENT_MS: i64 = 90 * 24 * 3600 * 1000;
 pub const MAX_CLIENT_PAYLOAD: usize = 1500;
 
 #[derive(Clone, Debug, Serialize)]
+
 pub struct Grant {
     pub id: String,
     pub name: String,
@@ -1244,6 +1245,30 @@ impl Store {
         self.get(id)
     }
 
+    /// Revoke every grant in `ids` at once, with why (an incident's cut-off): all or none, an
+    /// unknown id refuses the lot. One already revoked keeps its first time and why. The grants as
+    /// they are now, in `ids`' order.
+    pub fn revoke_many(&self, ids: &[String], why: &str) -> Result<Vec<Grant>> {
+        if ids.is_empty() || ids.len() > MAX_REVOKE {
+            return Err(Error::BadRequest(format!("1 to {MAX_REVOKE} token ids")));
+        }
+        let why: String = why.chars().filter(|c| !c.is_control()).take(300).collect();
+        let now = code_sql::now_ms();
+        self.db.write(|c| {
+            for id in ids {
+                if c.query_row("SELECT 1 FROM grants WHERE id = ?", [id.as_str()], |_| Ok(())).optional()?.is_none() {
+                    return Err(Error::NotFound(format!("no token {id}: nothing was revoked")));
+                }
+            }
+            for id in ids {
+                c.execute("UPDATE grants SET revoked_at = ?, revoked_why = ? WHERE id = ? AND revoked_at IS NULL", params![now, why, id])?;
+                c.execute("DELETE FROM grant_secrets WHERE grant_id = ?", [id.as_str()])?;
+            }
+            Ok(())
+        })?;
+        ids.iter().map(|id| self.get(id)).collect()
+    }
+
     /// Allow `rule` on a grant: for good (`until: None`, added to its rules unless they hold it), or
     /// until a time (its temporary rules, the lapsed ones dropped).
     pub fn remember(&self, id: &str, rule: &roll_auth::scope::Rule, until: Option<i64>, approval: &str) -> Result<Grant> {
@@ -2072,3 +2097,6 @@ impl Store {
         })
     }
 }
+
+/// The most tokens one bulk revoke takes (`Store::revoke_many`).
+pub const MAX_REVOKE: usize = 500;
