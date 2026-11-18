@@ -26,12 +26,18 @@ const FSM_DEPTH: u32 = 3;
 const VM_HEAPBLOCKS: usize = (BLCKSZ - PAGE_HEADER) * 4;
 const MAX_EXTEND_BY: usize = 64;
 
-/// The running session, as a key: sessions run on threads of their own.
+/// The running session, as a key: sessions run on threads of their own. (Made once a thread:
+/// every row a heap places asks.)
 fn session_key() -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    std::thread::current().id().hash(&mut h);
-    h.finish()
+    thread_local! {
+        static KEY: u64 = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::thread::current().id().hash(&mut h);
+            h.finish()
+        };
+    }
+    KEY.with(|k| *k)
 }
 
 pub fn maxalign(n: usize) -> usize {
