@@ -3018,7 +3018,8 @@ inconsistencies are fixed in #264:
 - R10. **Honeytokens** (M): decoy `rlt_` tokens are roll-access's (`decoy: true`, on roll MCP's list);
   database roles and IAM users that alert on use are this side's, once those land.
 - R11. **Moving in from 1Password, Bitwarden SM, Parameter Store, GCP, Azure and Akeyless** (S each).
-- R12. **A split deployment key** (M; N of M to recover or rotate it). R13. **A FIPS build** (L).
+- R12. **A split deployment key** (building: `feature/roll-secrets-key-shares`; Shamir N of M,
+  checksummed shares, backups recoverable without one holder). R13. **A FIPS build** (L).
   R14. **Format-preserving encryption** (M, low). R15. Clearing a copied value from the clipboard: not
   done, since a page can't read the clipboard without a prompt and clearing blindly could wipe
   what was copied since.
@@ -3027,8 +3028,11 @@ inconsistencies are fixed in #264:
    #73, #75, #71 (main's tree afterwards was exactly the gated one), and #147 behind them, gated on
    their tree. One flake on the way (a CI checkout hung past its 2-minute limit; #71 re-queued after a
    re-simulation of the new order). Next: batch 2 the same way, prepared and gated before the next
-   lock turn: the green, unstacked ones first (#79 with #95, #81, #82, #83, #86, #87, #88, #92, #97,
-   #102, #105, #110, #113, #117, #169, #194, #212, #213), then the stacks on #132 and #136.
+   lock turn: ready (2026-11-18 07:20): 24 PRs in four queue rounds (`batch-2.txt`, `batch2-round.sh`),
+   every one levelled with main and the combined tree gated on every step (Rust on SQLite and
+   Postgres, access, CLI, dashboard, and the Go, Terraform, Python, Ansible, Ruby, Java and .NET
+   clients); logged in the merge order after search's next turn, waiter `rs79-lock`. Then batch 3:
+   the #132 stack in four rounds (`batch-3.txt`; #166 last, after #173), with #144, #86 and #248.
 0a. **The thirtieth independent security review** (2026-11-17, tonight's PRs #132, #136, #144,
    #165, #166, #173, #194, #227, #229, read cold): no high finding; ACME's JWS, nonces, EAB and
    tls-alpn-01 verifier, the gateway's allow-list, bounds and revocation, and every PR's network
