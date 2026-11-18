@@ -190,8 +190,10 @@ pub struct GitPull {
     pub url: String,
     /// From another repository (head and base repository ids differ): its code is untrusted.
     pub fork: bool,
-    /// Who opened it, as the event says (GitHub's `user.login`, GitLab's `user.username`):
-    /// untrusted text, for rules like roll previews' `skip_authors` (`*[bot]`), never for trust.
+    /// Who opened it, as the event says (GitHub's `pull_request.user.login`; GitLab's
+    /// `user.username` only when that actor is the opener, `author_id`, since GitLab's hook names
+    /// no opener otherwise: None on another person's push to it): untrusted text, for rules like
+    /// roll previews' `skip_authors` (`*[bot]`), never for trust.
     pub author: Option<String>,
 }
 
