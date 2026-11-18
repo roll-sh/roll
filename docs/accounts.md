@@ -485,6 +485,14 @@ address is refused while it's on, and a session from elsewhere gets 403 `{code: 
 that leaves out the saving admin's own address is refused (400 `lockout`). The operator's token and
 roll tokens aren't held to it (tokens have their own `ip_allow`).
 
+### Idle timeout
+
+The same policy sets how long an unused session lasts, as Okta's idle session lifetime:
+`PUT /v1/accounts/policy {require_second_factor, idle_minutes}` (15 minutes to a week; absent:
+roll's week). A session's last use is noted every five minutes, so the timeout holds to within
+that. It applies at once to every session, on its next use. ("Sessions and second factors" on
+the account page; a `PUT` sends the whole policy.)
+
 ### Sudo mode
 
 As GitHub does, a change to how an account is reached needs the person to have proved who they
@@ -592,8 +600,8 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 | --- | --- | --- |
 | `GET /v1/accounts/passkey-policy` | | `{require, models: [{aaguid, name, roots}]}` (hardware keys only) |
 | `PUT /v1/accounts/passkey-policy` | `{require, models}` | the policy, checked (UUIDs, names, PEM roots; a model when required); sudo mode; 400 `{code: "policy"}` |
-| `GET /v1/accounts/policy` | | `{require_second_factor}` |
-| `PUT /v1/accounts/policy` | `{require_second_factor}` | the policy (sudo mode) |
+| `GET /v1/accounts/policy` | | `{require_second_factor, idle_minutes?}` |
+| `PUT /v1/accounts/policy` | `{require_second_factor, idle_minutes?}` | the policy (sudo mode; the whole of it); 400 `policy` |
 | `GET /v1/accounts/network-policy` | | `{on, networks}` (allowed networks) |
 | `PUT /v1/accounts/network-policy` | `{on, networks}` | the policy, networks normalised; sudo mode; 400 `networks` or `lockout` |
 | `GET /v1/accounts/reset-requests` | | `ResetRequest[]`: `{id, user, email, handle, reason, ip, user_agent, created_at, state, decided_by, decided_at}`, pending first |
