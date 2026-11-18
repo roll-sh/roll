@@ -1,7 +1,7 @@
 import { HorizonMark } from "@roll/brand";
 import { ExternalLink, Rocket, RotateCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type DeployCommits, type Environment, type LogLine } from "@/lib/apps-api";
+import { appsApi, FUNCTION_ROUTES, runFunctions, deploymentUrl, followChanges, followLog, formatMs, isPending, shortSha, stepDurations, TRIGGER_LABEL, type Deployment, type DeployCommits, type Environment, type LogLine } from "@/lib/apps-api";
 import { btn, panel } from "../ui";
 import { PlanDetails } from "./new-service";
 import { usePageVisible } from "./live";
@@ -281,6 +281,34 @@ function Commits({ c }: { c: DeployCommits }) {
   );
 }
 
+/** A static site's functions, made a service and routed to (`runFunctions`). */
+function RunFunctions({ service, env, dirs }: { service: string; env: string; dirs: string[] }) {
+  const [state, setState] = useState<{ busy: boolean; done?: string; error?: string }>({ busy: false });
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3 text-[12px]">
+      <span className="min-w-0 flex-1 text-muted">
+        {state.done ?? state.error ?? `Its ${dirs.join(" and ")} don't run on a static site: a service of them, with their paths routed to it, does.`}
+      </span>
+      {!state.done && (
+        <button
+          type="button"
+          className={btn}
+          disabled={state.busy}
+          onClick={() => {
+            setState({ busy: true });
+            runFunctions(service, env, dirs).then(
+              (s) => setState({ busy: false, done: `${s.name} runs them; ${dirs.map((d) => FUNCTION_ROUTES[d]).join(" and ")} go to it once it's deployed.` }),
+              (e: unknown) => setState({ busy: false, error: e instanceof Error ? e.message : String(e) }),
+            );
+          }}
+        >
+          Run its functions
+        </button>
+      )}
+    </div>
+  );
+}
+
 function BuildLog({ service, env, d }: { service: string; env: string; d: Deployment }) {
   const { lines, error } = useBuildLog(service, env, d);
   const steps = useSteps(service, env, d);
@@ -314,6 +342,7 @@ function BuildLog({ service, env, d }: { service: string; env: string; d: Deploy
       {d.plan && (
         <div className="mt-3 rounded-lg border border-line bg-panel p-3">
           <PlanDetails plan={d.plan} />
+          {(d.plan.functions?.length ?? 0) > 0 && <RunFunctions service={service} env={env} dirs={d.plan.functions ?? []} />}
         </div>
       )}
     </section>

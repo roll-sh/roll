@@ -763,6 +763,12 @@ pub enum AppsCmd {
         #[arg(long, default_value_t = 60)]
         minutes: i64,
     },
+    /// Run a static site's functions (`netlify/functions/`, `api/`): a service of them from the
+    /// same source (the `functions` builder), and the site's environment routing their paths to it.
+    Functions {
+        #[command(flatten)]
+        target: Target,
+    },
     /// A manual rollout waiting after its step: `advance` to the next step, `all` to every
     /// request, or `abort` back to what was live.
     Rollout {
@@ -3366,6 +3372,30 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             v
+        }
+        AppsCmd::Functions { target } => {
+            let svc = service(api, &target).await?;
+            let path = env_path(&svc, &target.env);
+            let env = api.get(&path).await?;
+            let dep = match env["active"]["id"].as_str() {
+                Some(d) => api.get(&format!("{path}/deploys/{}", enc(d))).await?,
+                None => anyhow::bail!("{} has nothing deployed in {}: deploy it first, so its plan says where its functions are", s(&svc["name"]), target.env),
+            };
+            let dirs: Vec<String> = dep["plan"]["functions"].as_array().into_iter().flatten().filter_map(|d| d.as_str().map(str::to_string)).collect();
+            anyhow::ensure!(!dirs.is_empty(), "its live deployment's plan found no functions (netlify/functions/ or api/ on a static site)");
+            let name: String = format!("{}-fn", s(&svc["name"])).chars().take(40).collect();
+            let mut build = svc["build"].clone();
+            build["builder"] = json!("functions");
+            let fns = api.post("/v1/apps/services", json!({ "project": svc["project"], "name": name, "source": svc["source"], "build": build, "run": { "port": 8080 } })).await?;
+            let wanted: Vec<&str> = dirs.iter().filter_map(|d| match d.as_str() { "netlify/functions" => Some("/.netlify/functions/*"), "api" => Some("/api/*"), _ => None }).collect();
+            let mut routes: Vec<Value> = env["routes"].as_array().cloned().unwrap_or_default().into_iter().filter(|r| !wanted.contains(&r["path"].as_str().unwrap_or(""))).collect();
+            routes.extend(wanted.iter().map(|p| json!({ "path": p, "service": name })));
+            api.call(reqwest::Method::PUT, &path, Some(json!({ "routes": routes }))).await?;
+            if !json_out {
+                println!("{name} runs its functions; {} go to it once it's deployed", wanted.join(" and "));
+                return Ok(());
+            }
+            fns
         }
         AppsCmd::Rollout { target, action } => {
             let svc = service(api, &target).await?;
