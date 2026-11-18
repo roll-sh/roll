@@ -54,6 +54,7 @@ pub mod store;
 pub mod traces;
 pub mod visit;
 pub mod vitals;
+pub mod forms;
 pub mod track;
 pub mod traffic;
 
@@ -260,6 +261,8 @@ pub struct Apps {
     pub(crate) vitals_seen: Mutex<HashMap<String, (i64, u32)>>,
     /// Custom events taken this minute, per environment ([`track`]).
     pub(crate) events_seen: Mutex<HashMap<String, (i64, u32)>>,
+    /// Form submissions taken this minute, per environment ([`forms`]).
+    pub(crate) forms_seen: Mutex<HashMap<String, (i64, u32)>>,
     /// When each environment's log was last looked at for new errors ([`errors`]).
     pub(crate) errors_seen: Mutex<HashMap<String, i64>>,
     /// Manual rollouts waiting for a person, by deployment: what they say, and the wake.
@@ -486,6 +489,7 @@ impl Apps {
             visits: Mutex::new(HashMap::new()),
             vitals_seen: Mutex::new(HashMap::new()),
             events_seen: Mutex::new(HashMap::new()),
+            forms_seen: Mutex::new(HashMap::new()),
             errors_seen: Mutex::new(HashMap::new()),
             rollout_waits: Mutex::new(HashMap::new()),
             calling: Mutex::new(std::collections::HashSet::new()),

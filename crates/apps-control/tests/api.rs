@@ -1562,6 +1562,55 @@ async fn roll_toml_sets_run_settings_per_environment() {
     assert_eq!(up(&w), 1, "a redeploy keeps what roll.toml set");
 }
 
+/// A static site's marked form takes submissions (Netlify Forms): kept sealed per environment, a
+/// honeypot's dropped, read back only through the reveal route, each one an event naming its
+/// fields and never their values.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_static_sites_form_keeps_its_submissions() {
+    let w = world().await;
+    w.code.push("f0f0f0f0f0f0", "site", &[("package.json", r#"{"name":"site","scripts":{"build":"vite build"},"devDependencies":{"vite":"5.0.0"}}"#)]);
+    let (_, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "site", "source": {"kind": "repo", "repo": "acme/site"} }))).await;
+    let id = svc["id"].as_str().unwrap_or_else(|| panic!("{svc}")).to_string();
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let host = host(&svc["environments"][0]["url"]);
+    let post = |path: &'static str, ct: &'static str, body: String| {
+        let (public, host) = (w.public.clone(), host.clone());
+        async move {
+            let resp = public.oneshot(Request::builder().method("POST").uri(path).header("host", &host).header("content-type", ct).body(Body::from(body)).unwrap()).await.unwrap();
+            (resp.status(), resp.headers().get("location").map(|v| v.to_str().unwrap().to_string()))
+        }
+    };
+    let form = "application/x-www-form-urlencoded";
+    // Sent from its page: kept, and the sender goes to its action's page.
+    assert_eq!(post("/contact.html", form, "email=ana%40example.com&message=hello+there".into()).await, (StatusCode::SEE_OTHER, Some("/thanks.html".into())));
+    // A bot filled the honeypot: answered the same, never kept.
+    assert_eq!(post("/contact.html", form, "email=x&bot-field=buy+now".into()).await.0, StatusCode::SEE_OTHER);
+    assert_eq!(post("/contact.html", "multipart/form-data; boundary=x", "--x--".into()).await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(post("/contact.html", form, format!("message={}", "x".repeat(70_000))).await.0, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(post("/index.html", form, "a=b".into()).await.0, StatusCode::METHOD_NOT_ALLOWED, "a page with no form takes no POST");
+    assert_eq!(post("/index.html", "multipart/form-data; boundary=x", "--x--".into()).await.0, StatusCode::METHOD_NOT_ALLOWED, "nor is it a form's error");
+    // Posted straight to its action (a script's fetch), by its form-name: the second one.
+    assert_eq!(post("/thanks.html", form, "form-name=contact&email=bo%40example.com".into()).await.0, StatusCode::SEE_OTHER);
+    let base = format!("/v1/apps/services/{id}/environments/production/forms");
+    let (_, forms) = call(&w.api, "GET", &base, None).await;
+    assert_eq!((forms[0]["name"].as_str(), forms[0]["submissions"].as_i64()), (Some("contact"), Some(2)), "{forms}");
+    let (_, subs) = call(&w.api, "GET", &format!("{base}/contact/submissions"), None).await;
+    assert_eq!(subs[0]["fields"], json!([{"name": "email", "value": "bo@example.com"}]), "the newest first: {subs}");
+    // The page after the newest: the first one, whole.
+    let (_, older) = call(&w.api, "GET", &format!("{base}/contact/submissions?before={}", subs[0]["id"].as_str().unwrap()), None).await;
+    assert_eq!(older.as_array().map(|a| a.len()), Some(1), "{older}");
+    assert_eq!(older[0]["fields"], json!([{"name": "email", "value": "ana@example.com"}, {"name": "message", "value": "hello there"}]), "{older}");
+    // Its event names the fields, never what was sent.
+    let (_, ev) = call(&w.api, "GET", "/v1/apps/events?after=0", None).await;
+    let sent: Vec<&Value> = ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "form.submitted").collect();
+    assert_eq!((sent.len(), &sent[0]["data"]["fields"]), (2, &json!(["email", "message"])), "{ev}");
+    assert!(!ev.to_string().contains("ana@example.com"), "{ev}");
+    for sub in [&subs[0], &older[0]] {
+        assert_eq!(call(&w.api, "DELETE", &format!("{base}/contact/submissions/{}", sub["id"].as_str().unwrap()), None).await.0, StatusCode::NO_CONTENT);
+    }
+    assert_eq!(call(&w.api, "GET", &format!("{base}/contact/submissions"), None).await.1, json!([]));
+}
+
 /// A static build with a client-side router is a single-page app: a page path it has no file for
 /// answers its index.html; an asset that's missing stays a 404.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4606,8 +4655,12 @@ async fn errors_and_latency_read_by_route() {
     for p in ["/users/1", "/users/2?tab=a", "/users/3"] {
         assert_eq!(visit(&w, &h, p).await.0, StatusCode::OK);
     }
-    let (inst, ..) = w.fake.instances(&id).into_iter().next().unwrap();
-    w.fake.sicken(&inst);
+    // Every instance it has (a loaded host can have started another by now) answers 500s.
+    let all = w.fake.instances(&id);
+    let inst = all[0].0.clone();
+    for (i, ..) in &all {
+        w.fake.sicken(i);
+    }
     assert_eq!(visit(&w, &h, "/checkout").await.0, StatusCode::INTERNAL_SERVER_ERROR);
     // Ids folded, the query dropped, the failing route counted as one.
     let mut v = Value::Null;

@@ -562,17 +562,31 @@ struct SiteRequest {
     if_range: Option<String>,
     request_id: Option<String>,
     seen: Seen,
+    /// A POST's content type and body (a form's, at most [`crate::forms::MAX_BODY`]; None past it).
+    form: Option<(Option<String>, Option<bytes::Bytes>)>,
 }
 
 impl SiteRequest {
+    /// [`Self::of`], with a POST's body read (a static site takes one only for its forms).
+    async fn read(req: Request) -> SiteRequest {
+        let mut r = SiteRequest::of(&req);
+        if req.method() == axum::http::Method::POST {
+            let ct = req.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_string);
+            r.form = Some((ct, axum::body::to_bytes(req.into_body(), crate::forms::MAX_BODY).await.ok()));
+        }
+        r
+    }
+
     fn of(req: &Request) -> SiteRequest {
         let h = |n: &str| req.headers().get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
-        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), query: req.uri().query().map(str::to_string), if_none_match: h("if-none-match"), accept_encoding: h("accept-encoding"), range: h("range"), if_range: h("if-range"), request_id: h("x-request-id"), seen: Seen::of(req) }
+        SiteRequest { method: req.method().clone(), path: req.uri().path().to_string(), query: req.uri().query().map(str::to_string), if_none_match: h("if-none-match"), accept_encoding: h("accept-encoding"), range: h("range"), if_range: h("if-range"), request_id: h("x-request-id"), seen: Seen::of(req), form: None }
     }
 }
 
 async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &crate::live::Template, req: SiteRequest, service: &str, env: &str, began: Instant) -> Response {
     let key = tpl.site.clone().unwrap_or_default();
+    // Who sent a form (its limit is per sender), before the access line takes what was seen.
+    let client = req.seen.ip.clone();
     let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: req.seen, span: None, deployment: Default::default() };
     let request_id = req.request_id.as_deref().map(|v| v.chars().take(64).collect()).unwrap_or_else(|| crate::model::random(16));
     let done = |status: u16, bytes: u64| {
@@ -580,6 +594,33 @@ async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &cr
         access.write(status, began, bytes, "site", &request_id, false, 0);
     };
     let head = req.method == axum::http::Method::HEAD;
+    // A POST to one of its forms ([`crate::forms`]): kept, and the sender sent on.
+    if let Some((ct, body)) = &req.form
+        && let Ok(site) = apps.site(&key).await
+        && !site.forms.is_empty()
+    {
+        let path = percent_encoding::percent_decode_str(&req.path).decode_utf8_lossy().into_owned();
+        match apps.form_post(&site.forms, service, env, &path, client.as_deref(), ct.as_deref(), body.as_deref()).await {
+            Some(Ok(next)) => {
+                // Its action's page when the site has it; else roll's thanks.
+                if let Some(to) = next.filter(|n| crate::sites::exists(&site, n)) {
+                    done(303, 0);
+                    let mut r = StatusCode::SEE_OTHER.into_response();
+                    if let Ok(v) = HeaderValue::from_str(&to) {
+                        r.headers_mut().insert(header::LOCATION, v);
+                    }
+                    return r;
+                }
+                done(200, 0);
+                return page(StatusCode::OK, "Thanks", "Your submission was received.");
+            }
+            Some(Err((status, why))) => {
+                done(status, 0);
+                return page(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST), "Not sent", &why);
+            }
+            None => {}
+        }
+    }
     if req.method != axum::http::Method::GET && !head {
         done(405, 0);
         let mut r = StatusCode::METHOD_NOT_ALLOWED.into_response();
@@ -1222,6 +1263,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     let acquired = match deployment {
         // One deployment's own URL: that deployment, whatever is live.
         Some(d) => match apps.deployment_template(service, env, d).await {
+            // A deployment's own URL takes no form's submission: only what's live keeps them.
             Ok(t) if t.site.is_some() => return with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await),
             Ok(t) => {
                 again = Some(Again::Deployment(Box::new(t.clone())));
@@ -1232,7 +1274,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         None => match live.may_wake().map(|_| live.route(bucket)) {
             // A static site's files answer (a gradual rollout's bucket chose which deployment's).
             Ok(Some(t)) if t.site.is_some() => {
-                let mut r = with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::of(&req), service, env, began).await);
+                let mut r = with_feedback(feedback, serve_site(&apps, &live, &t, SiteRequest::read(req).await, service, env, began).await);
                 if let (true, Some(b)) = (fresh, bucket) {
                     let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
                     if let Ok(c) = HeaderValue::from_str(&format!("{BUCKET}={b}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax{secure}")) {

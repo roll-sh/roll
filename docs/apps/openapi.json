@@ -2103,6 +2103,141 @@
         "x-roll-action": "admin (what's written runs next)"
       }
     },
+    "/v1/apps/services/{id}/environments/{env}/forms": {
+      "get": {
+        "description": "Answers `{ name, submissions, last_at }[]`: a static site's forms with submissions kept.",
+        "operationId": "getServicesIdEnvironmentsEnvForms",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ name, submissions, last_at }[]`: a static site's forms with submissions kept"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List forms",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "read"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/forms/{form}/submissions": {
+      "get": {
+        "description": "Answers `{ id, created_at, fields: { name, value }[] }[]`, the newest first (limit 1–200, default 50; `before` a submission's id: the page after it); each read is `audit.forms.read`.",
+        "operationId": "getServicesIdEnvironmentsEnvFormsFormSubmissions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "form",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`{ id, created_at, fields: { name, value }[] }[]`, the newest first (limit 1–200, default 50; `before` a submission's id: the page after it); each read is `audit.forms.read`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List submissions",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "reveal (what people sent)"
+      }
+    },
+    "/v1/apps/services/{id}/environments/{env}/forms/{form}/submissions/{sub}": {
+      "delete": {
+        "description": "Answers 204; `audit.forms.deleted`.",
+        "operationId": "deleteServicesIdEnvironmentsEnvFormsFormSubmissionsSub",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "env",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "form",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sub",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "204; `audit.forms.deleted`"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete submission",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "delete"
+      }
+    },
     "/v1/apps/services/{id}/environments/{env}/hook": {
       "delete": {
         "description": "Answers 204.",
