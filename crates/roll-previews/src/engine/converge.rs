@@ -441,6 +441,15 @@ impl Engine {
         let mut still_deploying = false;
         let mut checks: Vec<(String, String, String)> = Vec::new();
         let mut deployed: Vec<String> = Vec::new();
+        // Rebuilds a deploy hook asked for: each one is a deploy of every service, built afresh.
+        let rebuilds = self.store.rebuilds(&r.id)?;
+        let rebuilt = if rebuilds > 0 { format!("#r{rebuilds}") } else { String::new() };
+
+        // (what's sent, its fingerprint, the revision, whether it's the change's own repo)
+        let mut to_deploy: Vec<(Target, String, String, bool)> = Vec::new();
+
+        // The project's own preview domain, when it has one (`Store::set_project_domain`).
+        let domain = self.store.project_domain(&r.project_id)?;
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             if let Some(path) = &spec.health {
@@ -448,7 +457,7 @@ impl Engine {
             }
             // What it costs is what it runs with: a backend's preview size when it has one.
             let memory_mb = if on_apps { self.apps.memory_mb(&r.id, &spec.name).await.unwrap_or(spec.memory_mb) } else { spec.memory_mb };
-            let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, memory_mb, &|h| self.cfg.url(h))?;
+            let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, memory_mb, &|h| self.cfg.url_in(domain.as_ref(), h))?;
             // A redeploy when the revision moved, or what it's deployed with did (its variables:
             // a reset's new URLs, changed overrides; on roll apps its access): the runtime
             // restarts it on its next request, roll apps redeploys it.
@@ -459,8 +468,12 @@ impl Engine {
             let feedback = s.feedback && r.change_id.is_some() && access_token.is_some();
             // Egress too: a service moves onto (or off) the preview's own network by restarting.
             let fingerprint = config_fingerprint(&vars, access_token.is_some() && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps)
-                + &if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() };
-            let config_moved = self.store.service_config(&r.id, &spec.name)?.as_deref() != Some(fingerprint.as_str());
+                + &if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() }
+                + &rebuilt;
+            let was = self.store.service_config(&r.id, &spec.name)?;
+            let config_moved = was.as_deref() != Some(fingerprint.as_str());
+            // Moved only by a rebuild (or with one): the same head built again, nothing cached.
+            let fresh = rebuilds > 0 && was.as_deref().and_then(|w| w.rsplit_once("#r")).is_none_or(|(_, n)| n != rebuilds.to_string());
             // The head it ran stays reachable at a URL of its own (Vercel's per-push URLs): the
             // change's own services on the runtime, a trusted change's.
             if !on_apps
@@ -468,7 +481,7 @@ impl Engine {
                 && r.trusted
                 && let Some(old) = svc.deployed.as_deref().filter(|d| *d != rev && !d.is_empty())
             {
-                for gone in self.store.pin(&r.id, &spec.name, old, &|h| self.cfg.url(h))? {
+                for gone in self.store.pin(&r.id, &spec.name, old, &|h| self.cfg.url_in(domain.as_ref(), h))? {
                     self.apps.remove(&r.id, &gone).await.map_err(|e| anyhow::anyhow!("removing {gone}: {e:#}"))?;
                 }
             }
@@ -501,47 +514,61 @@ impl Engine {
                     feedback,
                     egress: s.egress_for(r.trusted),
                     egress_hosts: s.egress_hosts.clone(),
+                    rebuild: fresh.then_some(rebuilds),
                 };
                 self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
-                match self.apps.deploy(&t).await {
-                    Ok(url) => {
-                        self.deploying_since.lock().remove(&(r.id.clone(), spec.name.clone()));
-                        if let Some(url) = url {
-                            self.store.set_service_url(&r.id, &spec.name, &url)?;
-                        }
-                        let state = self.apps.status(&r.id, &spec.name).unwrap_or(ServiceState::Sleeping);
-                        self.store.set_service(&r.id, &spec.name, state, Some(&rev), None)?;
-                        self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
-                        // A new deploy is checked again, even at the same revision.
-                        self.store.set_healthy(&r.id, &spec.name, "")?;
-                        self.store.log(&r.id, &format!("deployed {} at {}", spec.name, short(&rev)))?;
-                        if repo == r.repo {
-                            deployed.push(spec.name.clone());
-                        }
+                to_deploy.push((t, fingerprint, rev.clone(), repo == r.repo));
+            }
+        }
+        // Every deploy at once (on roll apps each waits for its rollout), their outcomes in order.
+        let mut failed: Option<String> = None;
+        let outcomes = futures::future::join_all(to_deploy.iter().map(|(t, ..)| self.apps.deploy(t))).await;
+        for ((t, fingerprint, rev, own), outcome) in to_deploy.into_iter().zip(outcomes) {
+            let spec = &t.spec;
+            match outcome {
+                Ok(url) => {
+                    self.deploying_since.lock().remove(&(r.id.clone(), spec.name.clone()));
+                    if let Some(url) = url {
+                        self.store.set_service_url(&r.id, &spec.name, &url)?;
                     }
-                    // Accepted, not live yet: no slot waits on a build; come back and ask again.
-                    Err(e) if e.downcast_ref::<crate::ports::StillDeploying>().is_some() => {
-                        let now = self.store.now_ms()?;
-                        let since = *self.deploying_since.lock().entry((r.id.clone(), spec.name.clone())).or_insert(now);
-                        if now - since > DEPLOY_WAIT_MS {
-                            self.deploying_since.lock().remove(&(r.id.clone(), spec.name.clone()));
-                            let msg = format!("{e:#}, for over {} minutes", DEPLOY_WAIT_MS / 60_000);
-                            self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
-                            anyhow::bail!("deploying {}: {msg}", spec.name);
-                        }
-                        self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
-                        // The backend has what this deploy sent (its variables): a change made
-                        // meanwhile, even one back to how it was before, is sent again.
-                        self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
-                        still_deploying = true;
-                    }
-                    Err(e) => {
-                        let msg = format!("{e:#}");
-                        self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
-                        anyhow::bail!("deploying {}: {msg}", spec.name);
+                    let state = self.apps.status(&r.id, &spec.name).unwrap_or(ServiceState::Sleeping);
+                    self.store.set_service(&r.id, &spec.name, state, Some(&rev), None)?;
+                    self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
+                    // A new deploy is checked again, even at the same revision.
+                    self.store.set_healthy(&r.id, &spec.name, "")?;
+                    self.store.log(&r.id, &format!("deployed {} at {}", spec.name, short(&rev)))?;
+                    if own {
+                        deployed.push(spec.name.clone());
                     }
                 }
+                // Accepted, not live yet: no slot waits on a build; come back and ask again.
+                Err(e) if e.downcast_ref::<crate::ports::StillDeploying>().is_some() => {
+                    let now = self.store.now_ms()?;
+                    let since = *self.deploying_since.lock().entry((r.id.clone(), spec.name.clone())).or_insert(now);
+                    if now - since > DEPLOY_WAIT_MS {
+                        self.deploying_since.lock().remove(&(r.id.clone(), spec.name.clone()));
+                        let msg = format!("{e:#}, for over {} minutes", DEPLOY_WAIT_MS / 60_000);
+                        self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
+                        failed.get_or_insert(format!("deploying {}: {msg}", spec.name));
+                        continue;
+                    }
+                    self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
+                    // The backend has what this deploy sent (its variables): a change made
+                    // meanwhile, even one back to how it was before, is sent again.
+                    self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
+                    still_deploying = true;
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
+                    failed.get_or_insert(format!("deploying {}: {msg}", spec.name));
+                }
             }
+        }
+        // Every outcome is kept first: a failed deploy doesn't lose the others' (which would be
+        // deployed again for nothing).
+        if let Some(e) = failed {
+            anyhow::bail!(e);
         }
         if still_deploying {
             let again = self.store.now_ms()? + DEPLOY_POLL_MS;

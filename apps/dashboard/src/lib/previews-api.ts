@@ -322,6 +322,8 @@ export interface PreviewSettings {
   paths: string[];
   /** …that none of these match. */
   ignore_paths: string[];
+  /** Globs on a change's author (a pull request's GitHub login, `*[bot]`): skipped unless asked. */
+  skip_authors?: string[];
   /** `"<kind>:<ref>"` → mode; resources not listed get `data`. A patch replaces the whole map. */
   resources: Record<string, ResourceRule>;
   data: "branch" | "schema";
@@ -392,6 +394,15 @@ export interface PreviewBypass {
   header: string;
   /** Only in the answer that made it. */
   secret?: string;
+}
+
+/** A deploy hook (a headless CMS's publish webhook): calling its URL builds the project's previews of `branches` again at their heads. */
+export interface PreviewHook {
+  id: string;
+  name: string;
+  branches: string[];
+  created_at: number;
+  fired_at: number | null;
 }
 
 export type PreviewSource = { branch: string; change?: never } | { change: string; branch?: never };
@@ -494,6 +505,10 @@ export const previewsApi = {
   /** A new secret (the old one stops working), shown only in this answer. */
   rotateBypass: (projectId: string) => call<PreviewBypass>("POST", `${project(projectId)}/bypass`),
   deleteBypass: (projectId: string) => call<void>("DELETE", `${project(projectId)}/bypass`),
+  hooks: (projectId: string) => call<{ hooks: PreviewHook[] }>("GET", `${project(projectId)}/hooks`),
+  /** A new hook; `path` (its secret URL) is only in this answer. */
+  createHook: (projectId: string, name: string, branches: string[]) => call<{ hook: PreviewHook; path: string }>("POST", `${project(projectId)}/hooks`, { name, branches }),
+  deleteHook: (projectId: string, id: string) => call<void>("DELETE", `${project(projectId)}/hooks/${encodeURIComponent(id)}`),
 };
 
 /** Server-sent events in `text` (after `rest`, what was left of the last chunk): the complete

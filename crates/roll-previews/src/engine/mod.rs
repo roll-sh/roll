@@ -96,6 +96,14 @@ impl Default for Config {
 }
 
 impl Config {
+    /// A host label's URL under a project's own preview domain (`(base, https)`), or under rolld's.
+    pub fn url_in(&self, domain: Option<&(String, bool)>, host: &str) -> String {
+        match domain {
+            Some((base, https)) => format!("{}://{host}.{base}", if *https { "https" } else { "http" }),
+            None => self.url(host),
+        }
+    }
+
     pub fn url(&self, host: &str) -> String {
         let port = match (self.scheme.as_str(), self.port) {
             ("http", Some(80)) | ("https", Some(443)) | (_, None) => String::new(),
@@ -174,6 +182,8 @@ pub struct Engine {
     deploying_since: Mutex<HashMap<(String, String), i64>>,
     /// The unresolved secrets last told per preview (each set once in its activity).
     secrets_told: Mutex<HashMap<String, Vec<String>>>,
+    /// When each project's own preview domain was last read from roll apps (ms).
+    domain_read: Mutex<HashMap<String, i64>>,
     /// The paths a head changes (`repo`, `head`, or `from..head`), for the path filters. Between
     /// two changesets they never change; since the merge base they could, if part of the change
     /// lands first, and then the next push reads them again. Cleared past [`PATHS_KEPT`] heads.
@@ -227,6 +237,7 @@ impl Engine {
             usage_read: Mutex::new(HashMap::new()),
             metrics_read: Mutex::new(HashMap::new()),
             secrets_told: Mutex::new(HashMap::new()),
+            domain_read: Mutex::new(HashMap::new()),
             paths_seen: Mutex::new(HashMap::new()),
             shots_wanted: Mutex::new(std::collections::HashSet::new()),
             shots_running: Mutex::new(HashMap::new()),
@@ -709,7 +720,7 @@ fn wants(s: &Settings, c: &ChangeInfo) -> bool {
     }
     match asks(c) {
         Some(asked) => asked,
-        None => !s.manual && (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*")),
+        None => !s.manual && (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*")) && !crate::glob::any(&s.skip_authors, &c.author),
     }
 }
 
@@ -823,6 +834,11 @@ mod tests {
         assert!(!wants(&s, &ChangeInfo { branch: Some("fix/x".into()), ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { draft: true, ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { title: "Fix typo [Skip Preview]".into(), ..ch.clone() }));
+        // A dependency bot's pull request is skipped by its author, unless a person asks.
+        let bots = Settings { skip_authors: vec!["*[bot]".into()], ..s.clone() };
+        let bump = ChangeInfo { author: "dependabot[bot]".into(), ..ch.clone() };
+        assert!(wants(&bots, &ChangeInfo { author: "ada".into(), ..ch.clone() }) && !wants(&bots, &bump));
+        assert!(wants(&bots, &ChangeInfo { labels: vec!["preview".into()], ..bump.clone() }), "a label asks");
         assert!(wants(&s, &ChangeInfo { title: "[preview] try the new nav".into(), branch: Some("fix/x".into()), draft: true, ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { title: "[preview]".into(), open: false, ..ch.clone() }));
         // Unused for 6 of a week's hours: quiet; within a day: when. A 4-hour TTL warns an hour ahead.

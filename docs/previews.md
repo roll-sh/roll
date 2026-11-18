@@ -68,6 +68,11 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
   - A change gets a preview when the project's rules match it: its branch matches `branches`
     (globs, `*` by default), it is not a draft unless `drafts`, and it is trusted or its head is
     approved.
+  - With `skip_authors` set (globs on who opened the change: a pull request's GitHub login, so
+    `dependabot[bot]`, or `*[bot]` for every bot account), a change by one of them gets no
+    preview, as Netlify's and Vercel's users skip dependency bots with an ignored build step. A
+    `[preview]` title or a `preview` label still asks for one. A Git URL service's pull requests
+    on roll apps carry no author yet, so the rule doesn't reach them.
   - With `paths` or `ignore_paths` set (gitignore-style patterns, as CODEOWNERS and
     `.roll/review.yaml` read them), a change also has to touch a path that `paths` matches (any
     path, when it's empty) and `ignore_paths` doesn't: Render's build filters, Vercel's ignored
@@ -213,7 +218,13 @@ state. A pass of the reconciler:
        "Schema changes").
    5. The secrets environment `pv-<preview id>` is ensured (base, overrides, resource URLs).
    6. Every service whose revision is not the one it should run is redeployed (the change's head
-      for its repo; for the others their branch of the same name, else their default head).
+      for its repo; for the others their branch of the same name, else their default head), all
+      of them at once. Every outcome is kept before the first failure fails the converge, so a
+      service that deployed isn't deployed again. Measured on 2026-11-18 with two roll apps
+      services, six interleaved pairs in both orders under 32–79 load: a push with cached builds
+      is live again in 4.2 s against 5.8 s one after another (medians; at once won 5 of 6, the
+      sixth a tie). A first push with cold builds is no faster (CPU-bound: two builds share the
+      cores), within the noise in both orders.
    7. The preview becomes `ready` (or `sleeping`), and the change and the PR hear about it.
    Every write that asks for a converge (a push, a delete, a reset, a refresh) bumps the row's
    `generation`. A converge settles a row only if its generation hasn't moved since it started,
@@ -282,7 +293,11 @@ behind the `Apps` trait:
 - **roll apps** (`feature/roll-apps`, docs/apps/). When the project has roll apps services, they
   are the preview's services.
   - Each gets an ephemeral environment `pv-<preview id>`: `PUT …/environments/pv-…`
-    `{branch: null, ephemeral: true}`.
+    `{branch: null, ephemeral: true, report: false}`. `report: false` (apps' #249) keeps roll
+    apps from posting its own commit status and GitHub Deployment for the environment's deploys.
+    The pull request then hears one voice: previews' `roll/preview` and comment. A roll apps
+    older than that, such as a node not yet upgraded on a fleet, refuses the field. Then the
+    environment is made without it, and both report.
   - The branches' URLs and the project's overrides are set as its variables.
   - Every variable of a link to a branched resource comes from the branch, under roll apps'
     names (a stream's `KAFKA_BROKERS`/`KAFKA_USERNAME`/`KAFKA_PASSWORD`, a bucket's
@@ -331,6 +346,21 @@ behind the `Apps` trait:
   - Labels are cut to 63 characters, and a clash gets the preview id's last 4 characters.
   - The domain is rolld's preview domain (`--code-preview-domain`), served on the API port like
     roll code's own previews.
+- A project with its own preview domain (roll apps' project preview domain: a verified wildcard
+  custom domain, `*.preview.acme.dev`) has its previews answer at `<service>-<slug>.preview.acme.dev`
+  instead (Vercel's preview deployment suffix), so cookies scoped to the team's domain and OAuth
+  redirect allowlists work.
+  - **Who serves what:** one wildcard record (`*.preview.acme.dev`) points at roll apps'
+    ingress. A `pv-` environment says its label (`preview_host`), and apps serves that name.
+    Apps hands any other name under the domain to previews' router, in process (apps'
+    `PreviewRouter`, #278), which serves a roll-runtime service, and only for the project that
+    holds the domain. Previews answers the 404 for a name it doesn't hold. rolld's API port
+    serves the same names too (a node without apps' ingress).
+  - **Changes:** the domain is read from roll apps at most once a minute. When it's verified,
+    changed or removed, the project's runtime services' URLs move and every preview reports
+    again, so the pull request's links follow.
+  - **TLS:** plain HTTP for now, on a local node or behind the user's own TLS proxy. TLS waits on
+    wildcard certificates over DNS-01 (roll apps' "Wildcard certificates", on the edge).
 - A service gets this environment, later entries winning:
   1. its `roll.toml` `[preview] env`;
   2. the resolved secrets environment (`pv-<preview id>`, inheriting its base);
@@ -353,6 +383,15 @@ behind the `Apps` trait:
      | Queue | `AMQP_URL` |
      | Tasks | `ROLL_TASKS_URL`, `ROLL_TASKS_TOKEN` |
      | Search | `ELASTICSEARCH_URL` (the branch's own login in it), and a data-only credential of the branch as production's link gets: `ELASTICSEARCH_API_KEY`, or `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD` on OpenSearch |
+
+     A search branch starts with its parent's IP allowlist (`ip_allowlist`, search's #243). Masking
+     a branch goes through roll search's own console route, so it works whatever the list says.
+     A preview's services reach the branch as any client does, so a cluster with a list must
+     admit the addresses roll's hosts send from: on one node, the host or the Docker bridge's
+     gateway (search's architecture.md, "Client addresses and IP allowlists"). On roll cloud there
+     are no fixed outbound addresses yet (apps' Next), so a cluster that previews' services call
+     keeps `[]` for now. roll adds no exception for its own instances: one would let every
+     tenant's app past every list.
 
      With two resources of a kind, the first one takes the plain name and the others add
      `_<NAME>` (`DATABASE_URL_ANALYTICS`).
@@ -393,10 +432,16 @@ none of the service's environments follows, after checking the branch really is 
   its services asleep meanwhile. One waiting holds a place under `max_previews` (anyone can open
   them). A close deletes the preview. A later push never makes a row trusted again. A fork's row
   is found by its number (a writer's branch named `pull/7` is another preview). Approving is a
-  person's call (a token gets 403). Under Roll only it's refused: roll apps holds the `pv-`
-  environment's instance to it (apps' #143) but not its build, which sees the environment's
-  variables on an open network (an adversarial review's finding). A title loses control and
-  invisible formatting characters.
+  person's call (a token gets 403). Under Roll only the instance runs closed: roll apps holds
+  the `pv-` environment's instance to it (apps' #143), on a gateway that doesn't reach the host's
+  services (#240). The build gets none of its secret values (#222, `build_closed`), on a network
+  of its own (#238). It can't reach the host's services, the metadata endpoint or any private
+  range. Its only way out is a proxy to public hosts, so a fork's build can fetch its packages but
+  never reaches roll or the node, and never has a secret to send. rolld's adapter deploys nothing
+  to a closed environment that doesn't say `build_closed`, and each deploy says `closed: true`.
+  A roll apps that predates either refuses it, so an older node can't build a fork's head
+  open.
+  A title loses control and invisible formatting characters.
   `a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head`; live in
   `scripts/preview-apps.sh` with GitHub's `pull_request` events through roll apps' hook (#115:
   `GitPushes::takes_pulls`).
@@ -542,9 +587,12 @@ previews' code may reach:
   for by the roll secrets thread (2026-11-17). It holds for its services and for its seed,
   release and teardown jobs: each runs on the preview's own network, with the listed hosts
   through its egress proxy (an adversarial review found the jobs ran on Docker's default bridge).
-  On roll apps it holds for the instance (apps' #143). A roll apps build isn't held to it: the
-  build sees the environment's variables on an open network. So a fork's head on a Git URL service
-  under Roll only isn't approved to run until roll apps builds closed environments that way.
+  On roll apps it holds for the instance (apps' #143; its gateway isolated from the host's
+  services, #240). The build has none of its secret values (#222, `build_closed`). It runs on a
+  network of its own whose only way out is a proxy to public hosts (#238), so it reaches neither
+  roll nor the node. A roll apps that doesn't say `build_closed` gets nothing
+  deployed under Roll only, trusted previews' included (a closed environment's build also loses
+  sealed values such as a private registry's token).
 
 Under `"roll"`, a preview's services resolve names through Docker's embedded DNS with
 TEST-NET-1 (`192.0.2.1`, never routed) as its upstream. The network's own names (`roll-egress`,
@@ -900,6 +948,24 @@ What dominates, from most to least:
 - **Bytes the preview writes.** Everything else branches copy-on-write and pays only for those
   (streams included: a stream branch shares its parent's chunks).
 
+### Deploy hooks
+
+A headless CMS (Contentful, Sanity, Strapi) publishes content that a static site reads at
+build time, so its previews show old content until they're built again. Vercel's and Netlify's
+deploy hooks are a secret URL the CMS's publish webhook calls. roll's are the same:
+- **Made per project** (the rules dialog's "Deploy hooks", or `POST …/projects/{project}/hooks`)
+  with a name and branch globs. The URL is shown once and kept as its SHA-256. It's a roll secret
+  (`rlb_`, checksummed), so secret scanning finds a leaked one and roll revokes it.
+- **Calling it** builds every active preview of those branches again at its head, with nothing
+  cached: roll apps builds with `no_cache`; roll's runtime runs a service's build at each start
+  anyway, so it restarts it. Each preview's activity says which hook and from what address.
+- **At most once a minute per hook:** a CMS that saves often makes one rebuild, not one per save.
+- **Anything but a live hook is a 404**, so the URL tells a guesser nothing.
+
+The rebuild is a number on the preview, part of what each service was deployed with, so a
+rebuild that's asked while a deploy is under way still runs once it's done, and converging again
+builds nothing more.
+
 ### Feedback on the preview page
 
 Vercel Comments, Netlify's drawer: people reviewing a preview leave notes on its pages, and they
@@ -1009,7 +1075,7 @@ and admins see every project.
 | Route | Body | Answer |
 | --- | --- | --- |
 | `GET /v1/previews?project=&state=` | | `Preview[]`, newest first, light (`Preview::light`): every count and state a row reads, without each page's accessibility issues, links and comparison, the first page's issues' markup and axe-core's words, or the words against main (by the bounds, about 130 KB a preview whose pages have the most violations, down to a few KB); `GET …/{id}` has all of it |
-| `POST /v1/previews` | `{project, repo, branch? , change?}` | 201 `Preview` (or 200 with the existing one) |
+| `POST /v1/previews` | `{project, repo, branch? , change?}` | 201 `Preview` (or 200 with the project's existing one). 404 unless the repo is on the project's canvas and the project stands for it (`Workspace::trusts`, as for the previews it makes itself: a preview builds and runs the repo). 409 when the change's preview is another project's (a change has one; it's never handed to another project) |
 | `GET /v1/previews/{id}` | | `Preview` |
 | `DELETE /v1/previews/{id}` | | 202 `Preview` (`desired: "deleted"`) |
 | `POST /v1/previews/{id}/refresh` | | `Preview`: redeploy now |
@@ -1041,6 +1107,10 @@ and admins see every project.
 | `GET /v1/previews/projects/{project}/usage` | | `{previews, sleeping_usd_month, active_usd_hour, month_to_date_usd, bytes, spent_usd_month, max_usd_month}` |
 | `GET /v1/previews/projects/{project}/bypass` | | `{enabled, created_at, header}` (never the secret) |
 | `POST /v1/previews/projects/{project}/bypass` | | 201 `{enabled, created_at, header, secret}`: a new secret, shown only here; the old one stops working |
+| `GET /v1/previews/projects/{project}/hooks` | | `{hooks: [{id, name, branches, created_at, fired_at}]}` (never their secrets) |
+| `POST /v1/previews/projects/{project}/hooks` | `{name, branches?}` (1–64 characters; globs, `["*"]` by default; at most 20 hooks a project) | 201 `{hook, path}`: `path` is `/v1/previews/hooks/rlb_…`, shown only here (kept as its SHA-256) |
+| `DELETE /v1/previews/projects/{project}/hooks/{hook}` | | 204 |
+| `POST /v1/previews/hooks/{secret}` | any (ignored: a CMS's own payload) | 202 `{rebuilt: [preview ids], coalesced}`: every active preview of the hook's project whose branch a glob matches is built again at its head with nothing cached (roll apps' `no_cache`; the runtime builds at each start), each said in its activity with the caller's address. At most once a minute per hook (`coalesced: true`, nothing done). No token: the secret is the credential (rolld's gate lets `/v1/previews/hooks` through); anything but a live hook is a 404. A leaked `rlb_` secret is revoked like a token (`Access::on_leaked`) |
 | `DELETE /v1/previews/projects/{project}/bypass` | | 204 |
 
 - 400: a bad body or setting. 404: no such preview, project or repo. 409: the change already has
@@ -1088,6 +1158,7 @@ type Settings = {
   manual: boolean;                    // only changes whose title asks ([preview]) get one (false)
   paths: string[];                    // what a change must touch (gitignore-style); [] is anything
   ignore_paths: string[];             // touching only these doesn't count ([])
+  skip_authors: string[];             // globs on who opened it (a pull request's GitHub login: "*[bot]"): no preview unless asked ([])
   resources: Record<string, "branch" | "schema" | "skip">;   // "<kind>:<ref>" → mode; unlisted: `data`
   data: "branch" | "schema";          // the default mode ("branch")
   reset_every_hours: number;          // 0: never
@@ -1704,50 +1775,55 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **A Git URL service's preview reported to its repository** (Vercel's deployment status and
-   comment on the pull request): a roll code repo's previews reach GitHub through roll code; a
-   Git URL service's reach only roll. Agreed with the apps thread: a Git URL service on github.com
-   connects through roll's GitHub App (`Service.github: { installation, repo }`, operator-only, an
-   installation already connected to the same owner). Previews' `GitReport` then posts
-   `roll/preview` with `Code::github_commit_status` and the pull request's comment with
-   `Code::github_comment` (an upsert by id), the installation read from the service, never the
-   event; the service's `git_login` is never used to write. Waits on apps' #120.
-2. **Egress rules for previews hosted on roll apps** (agreed with the apps thread, #2 in its
-   `## Next`): `"roll"` and `egress_hosts` cover only services roll's runtime runs (#135 says so
-   in the Rules dialog). roll apps runs a `pv-` environment's instance on an `--internal` network
-   of its own with `hosts` through `egress.js` (#137's private-address check), and a per-task
-   security group with no outbound rule on Fargate; previews then sends
-   `PUT …/environments/pv-… {egress: {mode, hosts}}` and checks it live in
-   `scripts/preview-apps.sh` (1.1.1.1 unreachable, a listed host through the proxy).
-3. **A preview's search branch with a data-only key, as production's link has**
-   (`feature/roll-previews-search-keys`, stacked on #123; gated after #123 lands): code that
-   needs more than production's link fails in its preview too.
-4. **Postgres without a reflinking file system**: a branch that starts from the parent's base
-   backup plus WAL with lazy pages, for ext4 hosts like this one. That's a pg-storage project of
-   its own (a page server); the fleet's XFS volumes already share blocks through reflinks, and an
-   idle preview's branch is evicted to object storage after an hour.
-5. **Screenshots of roll apps' services, and their feedback button, on the fleet**: on one node
-   they're done (`Reach` = roll apps' `Apps::reachable`; `scripts/preview-apps.sh`: the apps
-   service screenshotted in its instance's network, main's baseline on roll apps, the feedback
-   button on its environment). On a fleet an instance runs on its service's holder, and Fargate
-   has no container to join: previews' own internal screenshot route, run on the holder through
-   `cluster.dispatch(&apps_control::lease_key(service), …)` (the apps thread's advice), joins the
-   instance where `reachable` answers (Docker) and else loads the environment's URL through its
-   access link, in the browser container. Ranked lower: the cloud fleet runs instances on
-   Fargate, where neither `reachable` nor rolld's Docker screenshot works (a browser task of its
-   own, with the cloud thread).
-6. **Watch: pg-control's recovery to a time seconds old** (unowned; reported to the user by the
-   Postgres strategy session): a point-in-time branch at such a time stayed in recovery past two
-   minutes even with the parent's history reporting `end` past it, where pg-control's own test
-   (which waits on the safekeeper's flush position) passes. `data_at` is fine for times hours
-   old; the live script will check it once this is understood.
-7. **Watch: a cold start on a Docker name conflict**: one live run in six (right after a killed
-   daemon left containers) failed a wake with "the container name is already in use". A remove
-   that dropped the service's entry before stopping it could start a second container under the
-   name (fixed), and a preview's services starting at once each made its egress proxy under the
-   one name (fixed 2026-11-16: one make at a time per preview); if it comes back, log both
-   starts' container ids.
+1. **In review, for previews' next lock turn** (logged after search's and mcp's): #232 (a Git URL
+   preview reported on GitHub through roll's GitHub App), #246 on it (one voice per pull request:
+   a Git URL service on two projects' canvases is reported by the project that has had it longest,
+   with one comment across a handover; the other preview is `quiet` on its row, chip and sheet),
+   #233 (a page's words masked whole before they're cut), #245 (what a preview's services use)
+   and #259 (a preview made by hand is only of a repo the project stands for, and never another
+   project's: both on main, found by an independent review) and #266 (`skip_authors`: no preview
+   for a dependency bot's pull request unless asked, Netlify's and Vercel's ignored builds) and
+   #272 (deploy hooks: a secret URL a headless CMS calls to rebuild a branch's previews), #280
+   (a preview's services deploy at once: a cached push live again in 4.2 s against 5.8 s), #234
+   (Roll only on roll apps' builds: a closed build has no secrets and only a proxy to public
+   hosts; `closed: true` on each deploy) and #251 on it (`report: false` on every `pv-`
+   environment, so a pull request hears only previews' `roll/preview`). #234 and #251 passed
+   `scripts/preview-apps.sh` on main with apps' socket-path fix (#271).
+2. **Sign-in access** (Vercel Authentication, Netlify's team access): `access: "team"`, so only
+   people signed in to roll who can open the project open its previews, not whoever has the
+   link. On roll apps, the `pv-` environment gets apps' `access: {signed_in: true}`
+   ("Signing in to an environment"). On roll's runtime, previews' gate does the same: a page
+   load with no session goes to sign in on the dashboard, which asks for a one-use ticket as the
+   person; the preview's host trades it for a host-only cookie, checked again every 5 minutes.
+   Share links and the CI bypass keep working beside it.
+3. **A project's own preview domain, apps' half** (previews' half is #275; apps' is #278, with a `PreviewRouter` hook previews wires in rolld once it's on main, plus a live check): roll apps' project
+   preview domain (`POST/GET/DELETE /v1/apps/projects/{project}/preview-domain`, a verified
+   wildcard) and `preview_host` routing in `host_target`, third in apps' queue. Then a live
+   check in `scripts/preview-apps.sh`. TLS waits on wildcard certificates over DNS-01 on the edge.
+4. **Bots on Git URL services:** roll apps' `GitPull` carries no author, so `skip_authors` doesn't
+   reach a Git URL service's pull requests (with the apps thread).
+5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+   2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
+6. **Watch: pg-control's recovery to a time seconds old** (unowned).
+7. **Watch: a cold start on a Docker name conflict.**
 
+Landed in previews' lock turn of 2026-11-17 (main 42a3bbe1b, one combined gate with both live
+checks):
+- what a preview shows, masked: logs, job output, a start failure's output tail, page words,
+  health answers, refused hosts, request paths (#200, #203, #215);
+- roll apps variables sealed;
+- forks reach roll only by default, jobs included, with DNS forwarding nowhere (#206);
+- Roll only on roll apps' instances (#216, which also gets roll apps' refusals into the
+  activity);
+- concurrent branching and health checks (#196, #204: change → ready 11–14 s, from 15–19 s);
+- `became` ready and failed once a push, with Slack and failure templates (#197);
+- fleet screenshots on the service's holder, signed hops only (#214);
+- the request log (#215), and Linear, search keys, note pictures, the freeze window and the list
+  filter (#118, #153, #111, #174, #192).
+
+Looked at and not planned: sharing the default branch's running services with a preview
+(Signadot's sandboxes). A shared service writes to the baseline's data, not the preview's
+branches, so it's only right for a stateless service.
 
 Looked at and kept: previews' copy of a preview's variables in its roll apps environment, next
 to the `pv-` secrets environment roll apps reads itself (#31's `ForApps`). roll apps reads

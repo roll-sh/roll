@@ -427,6 +427,10 @@ pub struct Target {
     /// With `egress` `roll`: the hosts outside roll it may still reach, through the preview's
     /// egress proxy.
     pub egress_hosts: Vec<String>,
+    /// The `n`th rebuild a deploy hook asked for: built again at the same head with nothing
+    /// cached (a static site reads its content at build time). roll apps builds with `no_cache`;
+    /// the runtime builds at each start anyway.
+    pub rebuild: Option<i64>,
 }
 
 /// A deploy the backend accepted that hasn't finished (a build, a rollout): the converge leaves
@@ -530,7 +534,13 @@ pub trait Apps: Send + Sync {
     async fn seed(&self, _job: &SeedJob) -> anyhow::Result<(i32, String)> {
         anyhow::bail!("this server can't run seed commands")
     }
-    /// A PNG of the service's page as it first shows (`None`: this backend can't take one).
+    /// The project's own preview domain, verified (roll apps' project preview domain: a wildcard
+    /// custom domain, `*.preview.acme.dev`), as `(base, https)`: its previews answer on
+    /// `<label>.<base>`. `None`: none, or not verified yet (rolld's preview domain then).
+    async fn preview_domain(&self, _project: &str) -> Option<(String, bool)> {
+        None
+    }
+
     /// The memory the service's live deployment runs with in this preview (a backend's preview
     /// settings and the environment's own over the service's). `None`: not known, the catalog's.
     async fn memory_mb(&self, _preview: &str, _service: &str) -> Option<u32> {

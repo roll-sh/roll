@@ -1133,9 +1133,8 @@ async fn a_git_url_services_branch_push_makes_its_preview() {
 /// the next push waits again, and closing the pull request deletes it.
 #[tokio::test]
 async fn a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head() {
-    // A fork's head on roll apps runs only where the project opened forks' egress (roll apps'
-    // build isn't held to Roll only).
-    let e = env(json!({ "enabled": true, "egress_forks": "open" }));
+    // Forks reach roll only (the default): roll apps holds its instance and its build to it.
+    let e = env(json!({ "enabled": true }));
     e.ws.place(roll_workspace::Scope::All, &e.project, roll_workspace::Kind::Service, "svc_shop", 0.0, 0.0).unwrap();
     *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "shop".into(), repo: Some("git:svc_shop".into()), root: String::new(), memory_mb: 256 }]);
     let push = |sha: Option<&str>| roll_previews::ports::GitPush {
@@ -1152,10 +1151,6 @@ async fn a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head()
     let r = e.engine.store.rows(Some(&e.project)).unwrap().into_iter().find(|r| r.repo == "git:svc_shop").unwrap();
     assert_eq!((r.state, r.trusted, r.title.as_str(), deployed(&r.id)), (State::AwaitingApproval, false, "Faster cart", None), "nothing runs before an approval");
     assert!(matches!(e.engine.approve(&r.id, "f0", "ada"), Err(roll_previews::Error::Conflict(_))), "only the head it's at");
-    // Under Roll only, roll apps' build of it would still reach out: refused, until opened.
-    e.engine.store.put_settings(&e.project, &e.engine.store.settings(&e.project).unwrap().patched(&json!({ "egress": "roll" })).unwrap()).unwrap();
-    assert!(matches!(e.engine.approve(&r.id, "f1", "ada"), Err(roll_previews::Error::Conflict(_))), "not under Roll only");
-    e.engine.store.put_settings(&e.project, &e.engine.store.settings(&e.project).unwrap().patched(&json!({ "egress": "open" })).unwrap()).unwrap();
     e.engine.approve(&r.id, "f1", "ada").unwrap();
     e.engine.pass().await.unwrap();
     assert_eq!(deployed(&r.id).as_deref(), Some("f1"), "the approved head runs");
@@ -1439,4 +1434,92 @@ async fn the_project_that_has_had_a_service_longest_speaks_for_its_branches() {
     assert!(cart_theirs(), "the next project's preview speaks");
     let after: Vec<_> = gr.comments.lock()[made..].iter().filter(|c| c.0 == 3).cloned().collect();
     assert!(!after.is_empty() && after.iter().all(|c| c.1 == Some(77) && !c.2.contains("deleted")), "the same comment, never saying the preview went: {after:?}");
+}
+
+/// A preview made by hand (`POST /v1/previews`, `roll preview create`) is only of a repo the
+/// project stands for, as the ones it makes itself: anyone may put any repo on their own canvas,
+/// and a preview builds and runs it. And a change's preview in another project is never answered.
+#[tokio::test]
+async fn a_preview_made_by_hand_is_only_of_a_repo_the_project_stands_for() {
+    use roll_workspace::{Kind as Res, Scope};
+    struct Ada;
+    impl roll_workspace::Owners for Ada {
+        fn trusts(&self, user: &str, _kind: Res, r: &str) -> bool {
+            user == "usr_ada" && r == "acme/api"
+        }
+    }
+    let e = env(json!({ "enabled": true }));
+    e.ws.set_owners(Arc::new(Ada));
+    // A change of the repo Ada owns, previewed in the operator's project before it's on her canvas.
+    e.code.open(roll_previews::ports::ChangeInfo { repo: "acme/api".into(), ..change("chg_a", 5) });
+    e.engine.pass().await.unwrap();
+    let ours = e.engine.store.row_by_change("chg_a").unwrap().unwrap();
+    let theirs = e.ws.create("usr_ada", "ada-shop", "", None).unwrap();
+    // Ada's canvas has a repo she doesn't own, and the one she does.
+    for r in ["acme/web", "acme/api"] {
+        e.ws.place(Scope::All, &theirs.id, Res::Repo, r, 0.0, 0.0).unwrap();
+    }
+    e.engine.store.put_settings(&theirs.id, &roll_previews::Settings::default().patched(&json!({ "enabled": true })).unwrap()).unwrap();
+    e.code.heads.lock().insert("acme/web@feat/x".into(), "cs_x".into());
+    let err = e.engine.create(&theirs.id, "acme/web", Some("feat/x"), None, "ada").await.unwrap_err();
+    assert!(matches!(err, roll_previews::Error::NotFound(_)), "a repo she doesn't stand for: {err}");
+    // The change's preview is the operator's project's: never handed to her.
+    let err = e.engine.create(&theirs.id, "acme/api", None, Some("chg_a"), "ada").await.unwrap_err();
+    assert!(matches!(err, roll_previews::Error::Conflict(_)) && !err.to_string().contains(&ours.id), "{err}");
+}
+
+/// A deploy hook (Vercel's and Netlify's, for a headless CMS's publish webhook) builds the
+/// project's previews of its branches again at their heads, each service with nothing cached; a
+/// second call within a minute makes no second rebuild; anything but a live hook is a 404; a
+/// leaked one stops working.
+#[tokio::test]
+async fn a_deploy_hook_builds_its_branches_previews_again() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(ChangeInfo { branch: Some("feat/cart".into()), ..change("chg_1", 1) });
+    e.code.open(ChangeInfo { branch: Some("fix/typo".into()), ..change("chg_2", 2) });
+    e.engine.pass().await.unwrap();
+    let cart = e.engine.store.row_by_change("chg_1").unwrap().unwrap();
+    let (hook, path) = e.engine.create_hook(&e.project, "CMS", &["feat/*".into()]).unwrap();
+    let secret = path.strip_prefix("/v1/previews/hooks/").unwrap();
+    assert!(secret.starts_with("rlb_") && roll_auth::credentials::checksum_ok(secret), "a roll secret leak scanning finds: {secret}");
+    assert!(e.engine.store.hooks(&e.project).unwrap().iter().all(|h| h.id == hook.id), "listed, without its secret");
+
+    let (rebuilt, coalesced) = e.engine.run_hook(secret, Some("203.0.113.7")).unwrap();
+    assert_eq!((rebuilt, coalesced), (vec![cart.id.clone()], false), "only its branches' previews");
+    e.engine.pass().await.unwrap();
+    let services = e.engine.store.services(&cart.id).unwrap().len();
+    let fresh: Vec<_> = e.apps.rebuilt.lock().clone();
+    assert_eq!(fresh.len(), services, "every service built again: {fresh:?}");
+    assert!(fresh.iter().all(|(p, _, n)| *p == cart.id && *n == 1));
+    let said = e.engine.store.activity(&cart.id).unwrap().into_iter().map(|a| a.message).collect::<Vec<_>>();
+    assert!(said.iter().any(|m| m.contains("deploy hook \"CMS\" (from 203.0.113.7)")), "{said:?}");
+    // Converging again builds nothing more: one rebuild per call.
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.apps.rebuilt.lock().len(), services);
+    // Called again within the minute: coalesced.
+    assert_eq!(e.engine.run_hook(secret, None).unwrap(), (Vec::new(), true));
+    // A guess, or a leaked hook once revoked: the same 404.
+    assert!(matches!(e.engine.run_hook("rlb_nope", None), Err(roll_previews::Error::NotFound(_))));
+    assert!(e.engine.revoke_leaked_hook(secret).is_some());
+    assert!(matches!(e.engine.run_hook(secret, None), Err(roll_previews::Error::NotFound(_))));
+}
+
+/// A project with its own preview domain (roll apps' verified wildcard, `*.preview.acme.dev`)
+/// has its previews' services answer under it, and only its previews: a label of another
+/// project's preview under that domain names nothing.
+#[tokio::test]
+async fn a_projects_own_preview_domain_serves_only_its_previews() {
+    let e = env(json!({ "enabled": true }));
+    *e.apps.domain.lock() = Some(("preview.acme.dev".into(), false));
+    e.code.open(change("chg_d", 7));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_d").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().find(|s| s.name == "web").unwrap();
+    assert_eq!(web.url, format!("http://{}.preview.acme.dev", web.host), "its URL is on the project's domain");
+    assert_eq!(e.engine.store.service_for_domain_host(&web.host, "preview.acme.dev").unwrap(), Some((p.id.clone(), "web".to_string())));
+    // Another project's own domain doesn't reach this project's previews.
+    let none = |_: &str| String::new();
+    e.engine.store.set_project_domain("prj_other", Some(("preview.other.dev", false)), &none, &none).unwrap();
+    assert_eq!(e.engine.store.service_for_domain_host(&web.host, "preview.other.dev").unwrap(), None, "only the domain's own project's previews");
+    assert_eq!(e.engine.store.service_for_domain_host(&web.host, "preview.unknown.dev").unwrap(), None);
 }

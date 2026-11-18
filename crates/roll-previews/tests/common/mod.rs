@@ -211,6 +211,11 @@ pub type Vars = Vec<(String, String)>;
 #[derive(Default)]
 pub struct FakeApps {
     pub deployed: Mutex<HashMap<(String, String), String>>,
+    /// Every deploy a deploy hook asked for: (preview, service, its rebuild number).
+    pub rebuilt: Mutex<Vec<(String, String, i64)>>,
+
+    /// Every project's own preview domain, verified (roll apps' project preview domain).
+    pub domain: Mutex<Option<(String, bool)>>,
     /// roll apps' catalog for the project (unset: none, so roll.toml's services), and the memory
     /// its preview environments run with.
     pub catalog: Mutex<Option<Vec<roll_previews::ports::CatalogService>>>,
@@ -283,6 +288,9 @@ impl Apps for FakeApps {
             anyhow::bail!("the build failed");
         }
         self.deployed.lock().insert((t.preview.clone(), t.service.clone()), t.revision.clone());
+        if let Some(n) = t.rebuild {
+            self.rebuilt.lock().push((t.preview.clone(), t.service.clone(), n));
+        }
         self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
         self.feedback.lock().insert((t.preview.clone(), t.service.clone()), t.feedback);
         self.egress.lock().insert((t.preview.clone(), t.service.clone()), t.egress);
@@ -290,6 +298,9 @@ impl Apps for FakeApps {
     }
     async fn catalog(&self, _project: &str) -> anyhow::Result<Option<Vec<roll_previews::ports::CatalogService>>> {
         Ok(self.catalog.lock().clone())
+    }
+    async fn preview_domain(&self, _project: &str) -> Option<(String, bool)> {
+        self.domain.lock().clone()
     }
     async fn memory_mb(&self, _: &str, _: &str) -> Option<u32> {
         *self.memory.lock()

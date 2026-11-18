@@ -134,11 +134,35 @@ impl roll_previews::ports::Apps for RollApps {
         // runtime that can't is a 409, which fails the deploy rather than running it open).
         let closed = t.egress == roll_previews::settings::EgressRule::Roll;
         let egress = if closed { json!({ "mode": "roll", "hosts": t.egress_hosts }) } else { json!({ "mode": "open" }) };
-        let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress });
+        // One voice on a pull request: previews posts `roll/preview` and its comment for the
+        // environment, so roll apps posts no commit status or GitHub Deployment of its own (apps' #249).
+        let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress, "report": false });
         if self.feedback {
             body["feedback"] = json!(t.feedback);
         }
-        self.api.call(Method::PUT, &path, Some(body)).await?;
+        // Its label under the project's own preview domain (`<label>.preview.acme.dev`, roll apps'
+        // project preview domain): apps routes that name to this environment.
+        body["preview_host"] = json!(t.host);
+        // A roll apps that predates a field refuses it (a node not yet upgraded, on a fleet):
+        // `report` (#249; then its deploys report as well as previews) or `preview_host` (its
+        // rolld preview URL still works). The environment is made without the fields it doesn't know.
+        let mut made = self.api.call(Method::PUT, &path, Some(body.clone())).await;
+        for _ in 0..2 {
+            let unknown = match &made {
+                Err(e) => e.downcast_ref::<super::Refused>().filter(|r| r.status.as_u16() == 400).and_then(|r| r.error.strip_prefix("unknown field ")).filter(|f| matches!(*f, "report" | "preview_host")).map(str::to_string),
+                Ok(_) => None,
+            };
+            let Some(field) = unknown else { break };
+            body.as_object_mut().map(|o| o.remove(&field));
+            made = self.api.call(Method::PUT, &path, Some(body.clone())).await;
+        }
+        let made = made?;
+        // Roll only holds the build too: roll apps builds a closed environment without its secret
+        // values (apps' #222, `build_closed`). One that doesn't say so would build with them on an
+        // open network, where a fork's head could send them out: nothing is deployed there.
+        if closed && made["build_closed"] != json!(true) {
+            anyhow::bail!("roll apps here doesn't build closed environments without their secrets (build_closed): under Roll only, nothing is deployed to it");
+        }
         // Every variable the preview sets: the branches' plain names and the project's overrides,
         // and each prefixed link to a branched parent pointed at the branch (a link is roll apps'
         // own variable, which would still reach production).
@@ -174,12 +198,13 @@ impl roll_previews::ports::Apps for RollApps {
         }
         // What it may reach is part of what's deployed: a changed rule deploys again.
         let key = format!(
-            "{}@{}@{h:016x}{}{}{}",
+            "{}@{}@{h:016x}{}{}{}{}",
             t.environment,
             t.git.as_deref().unwrap_or("image"),
             if t.access_token.is_some() { "p" } else { "" },
             if self.feedback && t.feedback { "f" } else { "" },
-            if closed { format!("e{}", t.egress_hosts.join(",")) } else { String::new() }
+            if closed { format!("e{}", t.egress_hosts.join(",")) } else { String::new() },
+            t.rebuild.map(|n| format!("#r{n}")).unwrap_or_default()
         );
         // The deployment previews last started for exactly this, still under way or live: wait on
         // it (or it's done). The engine asks again while a deploy is in flight, and a redeploy
@@ -196,19 +221,35 @@ impl roll_previews::ports::Apps for RollApps {
         }
         // At the sha already (a reset's new URLs, say): run it again with the variables, no build.
         // Otherwise deploy, keyed so a retry after a crash returns the same deployment.
-        let at_sha = t.git.is_some() && env["active"]["revision"].as_str() == t.git.as_deref();
+        // A deploy hook's rebuild builds again even at the sha.
+        let at_sha = t.rebuild.is_none() && t.git.is_some() && env["active"]["revision"].as_str() == t.git.as_deref();
         let deployment = if at_sha {
             // Keyed too (roll apps takes `Idempotency-Key` on a redeploy): what's deployed and the
             // deployment it replaces, so a retry after a crash gets the same one, and variables
             // that come back to an earlier set never get that earlier, superseded, redeploy back.
             let idem = redeploy_key(&key, &s(&env["active"]["id"]).unwrap_or_default());
-            let body = json!({ "message": format!("roll preview {}: new variables", t.preview) });
+            let mut body = json!({ "message": format!("roll preview {}: new variables", t.preview) });
+            if closed {
+                body["closed"] = json!(true);
+            }
             self.api.call_with(Method::POST, &format!("{path}/redeploy"), Some(body), Some(&idem)).await?
         } else {
-            let body = match &t.git {
+            let mut body = match &t.git {
                 Some(sha) => json!({ "revision": sha, "message": format!("roll preview {}", t.preview) }),
                 None => json!({ "message": format!("roll preview {}", t.preview) }),
             };
+            // Nothing cached: the build's steps run again (a static site's content fetched anew).
+            if t.rebuild.is_some() {
+                body["no_cache"] = json!(true);
+                body["message"] = json!(format!("roll preview {}: built again by a deploy hook", t.preview));
+            }
+
+            // The build itself must be closed (the node that takes the deploy says so, or refuses
+            // it: one from before the field answers 400), not only the environment's answer above
+            // (a fleet's rolling upgrade can serve the two on different nodes).
+            if closed {
+                body["closed"] = json!(true);
+            }
             let mut idem = key.clone();
             // After a failed or canceled deploy, a retry is a new deploy (a registry timeout
             // doesn't fail the preview until the next push); a crash's retry still finds its own.
@@ -225,6 +266,15 @@ impl roll_previews::ports::Apps for RollApps {
         self.settle(&path, deployment).await?;
         let env = self.api.get(&path).await?;
         Ok(s(&env["url"]))
+    }
+
+    /// The project's verified preview domain (`GET /v1/apps/projects/{project}/preview-domain`:
+    /// `{hostname: "*.preview.acme.dev", status, tls, …}`; 404 when it has none).
+    async fn preview_domain(&self, project: &str) -> Option<(String, bool)> {
+        let d = self.api.get(&format!("/v1/apps/projects/{}/preview-domain", seg(project))).await.ok()?;
+        (d["status"].as_str() == Some("active")).then_some(())?;
+        let base = d["hostname"].as_str()?.strip_prefix("*.")?.to_ascii_lowercase();
+        Some((base, d["tls"].as_str() == Some("issued")))
     }
 
     async fn memory_mb(&self, preview: &str, service: &str) -> Option<u32> {
@@ -532,6 +582,10 @@ impl roll_previews::ports::Apps for Services {
 
     async fn memory_mb(&self, preview: &str, service: &str) -> Option<u32> {
         self.apps.memory_mb(preview, service).await
+    }
+
+    async fn preview_domain(&self, project: &str) -> Option<(String, bool)> {
+        self.apps.preview_domain(project).await
     }
 
     async fn deploy(&self, t: &roll_previews::ports::Target) -> anyhow::Result<Option<String>> {
