@@ -114,16 +114,24 @@ struct Cleanup {
 impl Drop for Cleanup {
     fn drop(&mut self) {
         let docker = |args: &[&str]| std::process::Command::new("docker").args(args).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-        let services = Store::new(self.db.clone(), Sealer::new("0123456789abcdef0123456789abcdef").unwrap()).and_then(|s| s.services(None)).unwrap_or_default();
-        for svc in services {
-            let ids = docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={}", svc.id)]);
+        // Deleted ones too (kept for a restore until they're deleted for good).
+        let ids: Vec<String> = Store::new(self.db.clone(), Sealer::new("0123456789abcdef0123456789abcdef").unwrap())
+            .and_then(|s| Ok(s.services(None)?.into_iter().map(|x| x.id).chain(s.deleted_services(None)?.into_iter().map(|(x, _)| x.id)).collect()))
+            .unwrap_or_default();
+        let rm = |ids: String| {
             let ids: Vec<&str> = ids.split_whitespace().collect();
             if !ids.is_empty() {
                 docker(&[&["rm", "-f", "-v"][..], &ids].concat());
             }
+        };
+        for svc in ids {
+            rm(docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={svc}")]));
         }
         let p = self.project.strip_prefix("prj_").unwrap_or(&self.project);
+        // Its closed builds' builder, then each network with what's still on it (its relays).
+        docker(&["buildx", "rm", "-f", &apps_control::runtime::docker::build_network_name(&self.project)]);
         for net in docker(&["network", "ls", "--filter", &format!("name={p}"), "--format", "{{.Name}}"]).lines().filter(|n| n.starts_with("roll-apps-") && n.contains(p)) {
+            rm(docker(&["ps", "-aq", "--filter", &format!("network={net}")]));
             docker(&["network", "rm", net]);
         }
     }
@@ -1143,6 +1151,34 @@ async fn a_closed_environment_reaches_nothing_but_its_listed_hosts() {
     assert_eq!(e["egress_refused"], json!([{"host": "unlisted.example.com"}]), "{e}");
     let closed = apps_control::closed_network_name(&w.project, "production");
     assert_eq!(docker(&["network", "inspect", "-f", "{{.Internal}} {{index .Options \"com.docker.network.bridge.gateway_mode_ipv4\"}}", &closed]).await.unwrap(), "true isolated");
+    // Another closed environment deleted on its own (a preview's): its network and its proxy's
+    // relay go with it, whatever is still on them.
+    let staging = format!("/v1/apps/services/{id}/environments/staging");
+    let (st, e) = call(&w.api, "PUT", &staging, Some(json!({"egress": {"mode": "roll", "hosts": ["api.example.com"]}})), "application/json", None).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let (_, r) = call(&w.api, "POST", &format!("{staging}/deploys"), Some(json!({})), "application/json", None).await;
+    let mut up = Value::Null;
+    for _ in 0..1200 {
+        let (_, x) = call(&w.api, "GET", &format!("{staging}/deploys/{}", r["id"].as_str().unwrap_or_else(|| panic!("{r}"))), None, "application/json", None).await;
+        if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
+            up = x;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(up["status"], "active", "{up}");
+    let staging_net = apps_control::closed_network_name(&w.project, "staging");
+    let relays = || {
+        let n = staging_net.clone();
+        async move { docker(&["ps", "-a", "--filter", &format!("network={n}"), "--format", "{{.Names}}"]).await.unwrap_or_default() }
+    };
+    assert!(relays().await.contains("roll-apps-egress-"), "{}", relays().await);
+    // One its live state doesn't know (an earlier process's instance) is still on the network.
+    let earlier = format!("roll-apps-{}-staging-earlier", id.strip_prefix("svc_").unwrap_or(&id));
+    docker(&["run", "-d", "--name", &earlier, "--label", &format!("sh.roll.apps={id}"), "--label", "sh.roll.apps.env=staging", "--network", &staging_net, "busybox:1.37", "sleep", "600"]).await.unwrap();
+    assert_eq!(call(&w.api, "DELETE", &staging, None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    assert!(docker(&["inspect", &earlier]).await.is_err(), "the earlier process's instance went too");
+    assert!(docker(&["network", "inspect", &staging_net]).await.is_err(), "the environment's network went: {}", relays().await);
     delete_for_good(&w.api, &id).await;
     for _ in 0..100 {
         if docker(&["network", "inspect", &closed]).await.is_err() {

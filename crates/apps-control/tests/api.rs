@@ -445,13 +445,16 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
         c.visitor_recheck = Duration::ZERO;
     })
     .await;
-    struct Allowed(std::sync::atomic::AtomicBool);
+    struct Allowed(std::sync::atomic::AtomicBool, std::sync::atomic::AtomicBool);
     impl apps_control::integrations::Visitors for Allowed {
         fn may_open(&self, user: &str, _project: &str) -> bool {
             user == "usr_ada" && self.0.load(std::sync::atomic::Ordering::SeqCst)
         }
+        fn session_live(&self, _user: &str, session: &str) -> bool {
+            session == "ses_1" && self.1.load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
-    let allowed = Arc::new(Allowed(true.into()));
+    let allowed = Arc::new(Allowed(true.into(), true.into()));
     w.apps.set_visitors(allowed.clone());
     let (svc, _) = image_service(&w, "admin", json!({"port": 80})).await;
     let id = svc["id"].as_str().unwrap().to_string();
@@ -496,6 +499,11 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
     };
     assert_eq!(ask(None, to.clone()).await.0, StatusCode::FORBIDDEN);
     assert_eq!(ask(Some("usr_ada"), "https://evil.example/".into()).await.0, StatusCode::BAD_REQUEST);
+    // The ticket goes to the environment's own scheme and port, whatever `to` names: never over
+    // another scheme, nor to whatever listens on another port of the address.
+    let origin = svc["environments"][0]["url"].as_str().unwrap().trim_end_matches('/').to_string();
+    let (_, t) = ask(Some("usr_ada"), format!("https://{h}:9999/dash?x=1")).await;
+    assert!(t["url"].as_str().unwrap().starts_with(&format!("{origin}/__roll/visit?ticket=")), "{t} vs {origin}");
     let (st, t) = ask(Some("usr_ada"), to.clone()).await;
     assert_eq!(st, StatusCode::OK, "{t}");
     let url = t["url"].as_str().unwrap();
@@ -520,6 +528,14 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
     let (_, hd, _) = get(url[url.find("/__roll/visit").unwrap()..].to_string(), None, true).await;
     let session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
     assert_eq!(get("/dash".into(), Some(session.clone()), true).await.0, StatusCode::OK);
+    // The roll login that let them in ends (signed out, or revoked): so does the session.
+    allowed.1.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(get("/dash".into(), Some(session.clone()), true).await.0, StatusCode::FOUND, "a revoked login's session ends");
+    allowed.1.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (_, t) = ask(Some("usr_ada"), to.clone()).await;
+    let url = t["url"].as_str().unwrap();
+    let (_, hd, _) = get(url[url.find("/__roll/visit").unwrap()..].to_string(), None, true).await;
+    let session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
     call(&w.api, "PUT", &env, Some(json!({"access": {"signed_in": true}}))).await;
     assert_eq!(get("/dash".into(), Some(session), true).await.0, StatusCode::FOUND);
 }
@@ -3524,8 +3540,17 @@ async fn a_web_service_scales_on_its_cpu() {
         panic!("never {n} running: {:?}", w.fake.instances(id));
     }
     until(&w, &id, 1).await;
-    w.fake.set_busy(&running(&w, &id)[0], 0.9);
+    let busy = running(&w, &id)[0].clone();
+    w.fake.set_busy(&busy, 0.9);
     until(&w, &id, 2).await;
+    // Each instance's own CPU and memory, its last hour by minute (Railway's per replica).
+    let (_, m) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/metrics?minutes=60"), None).await;
+    let each = m["by_instance"].as_array().unwrap_or_else(|| panic!("{m}"));
+    let of = |n: &str| each.iter().find(|x| x["instance"] == n).cloned().unwrap_or_else(|| panic!("{n} in {m}"));
+    let hot = of(&busy);
+    assert!(hot["cpu"].as_array().unwrap().last().unwrap().as_f64().unwrap() > 0.1, "{hot}");
+    assert_eq!(hot["memory_bytes"].as_array().unwrap().last().unwrap().as_u64(), Some(64 << 20), "{hot}");
+    assert_eq!(hot["minutes"].as_array().unwrap().len(), hot["cpu"].as_array().unwrap().len());
     for n in running(&w, &id) {
         w.fake.set_busy(&n, 0.05);
     }
@@ -4934,6 +4959,17 @@ async fn a_git_url_service_connects_to_rolls_github_app() {
     assert_eq!(*gh.deployments.lock(), vec![(1, "production".to_string(), true)]);
     let states: Vec<_> = gh.deployment_states.lock().iter().map(|(id, s, u)| (*id, s.clone(), u.is_some())).collect();
     assert_eq!(states, vec![(1, "in_progress".to_string(), false), (1, "success".to_string(), true)]);
+    // An environment someone else reports (roll previews' `pv-` ones, `report: false`): its
+    // deploys post no status and no Deployment; reporting again, they do.
+    let prod = format!("/v1/apps/services/{id}/environments/production");
+    let (st, e) = call(&w.api, "PUT", &prod, Some(json!({"report": false}))).await;
+    assert_eq!((st, &e["report"]), (StatusCode::OK, &json!(false)), "{e}");
+    let before = (gh.statuses.lock().len(), gh.deployments.lock().len());
+    let (_, q) = call(&w.api, "POST", &format!("{prod}/deploys"), Some(json!({}))).await;
+    settled(&w, &id, "production", q["id"].as_str().unwrap()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!((gh.statuses.lock().len(), gh.deployments.lock().len()), before, "nothing reported");
+    assert_eq!(call(&w.api, "PUT", &prod, Some(json!({"report": true}))).await.0, StatusCode::OK);
     // The App's own (verified) push reaches it with no hook set: run on its owner, it deploys the
     // pushed head; another installation's, or another repository's, doesn't.
     let second = git.commit_saying(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v2")], "via the App");

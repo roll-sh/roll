@@ -80,6 +80,8 @@ pub struct ClusterSpec {
     /// maps; past it the node commits the cluster's shards (moving that memory to segment
     /// files) at its next check. `None`: no limit of its own.
     pub max_resident_bytes: Option<u64>,
+    /// Who may reach the cluster's data plane, checked before authentication (empty: anyone).
+    pub ip_allowlist: crate::allow::IpAllowlist,
 }
 
 impl ClusterSpec {
@@ -95,6 +97,7 @@ impl ClusterSpec {
             max_requests_per_second: None,
             max_in_flight_bytes: None,
             max_resident_bytes: None,
+            ip_allowlist: Default::default(),
         }
     }
 

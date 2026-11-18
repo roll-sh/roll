@@ -4,6 +4,7 @@
  * the OAuth consent screen's answer. Change both together.
  */
 
+import { withSession } from "./code-token";
 import { apiHeaders, call, ROLL_API } from "./roll-api";
 
 export const ACTIONS = ["read", "write", "delete", "reveal", "deploy", "admin"] as const;
@@ -100,6 +101,8 @@ export interface Grant {
   revoked_why?: string;
   /** What its rules don't allow asks a person instead of being refused. */
   ask_otherwise?: boolean;
+  /** A decoy (honeytoken): it never works, and any use tells its owner and the admins. */
+  decoy?: boolean;
   /** Rules a person allowed for a while when approving its requests, each until a time (Unix ms). */
   temporary?: { rule: Rule; until: number; approval?: string }[];
   /** Its requests over the last day (in the list). */
@@ -114,6 +117,8 @@ export interface NewGrant {
   ip_allow?: string[];
   rate_per_minute?: number | null;
   ask_otherwise?: boolean;
+  /** A decoy: never works; any use is reported (docs/permissions.md, "Decoy tokens"). */
+  decoy?: boolean;
 }
 
 /** A token that needs attention (`GET /v1/access/checkup`). */
@@ -288,6 +293,9 @@ export interface AuditEvent {
   duration_ms: number;
   /** What made it: an MCP client's name and version, else its User-Agent (what it says it is). */
   client?: string;
+  /** The handle of the person who acted / the person it's about, when they're people (`usr_` ids). */
+  actor_handle?: string;
+  resource_handle?: string;
 }
 
 export interface Preset {
@@ -583,6 +591,8 @@ export interface EnterpriseIdp {
   name?: string;
   /** A multi-tenant issuer's one tenant roll trusts (its assertions' `tenant`). */
   tenant?: string;
+  /** The SSO connection that is this same provider (`sso_…`): its verified domains, as they are at each sign-in. */
+  sso?: string;
 }
 
 /** An app a trusted provider may vouch for: never its secret. */
@@ -606,14 +616,30 @@ export interface Enterprise {
   token_endpoint: string;
 }
 
+/**
+ * People's SSO connection as an enterprise identity provider too (one provider, set up once): the
+ * idps with it added, its issuer and verified domains coming from the connection (#252's `sso`).
+ */
+export function tieForAgents(idps: EnterpriseIdp[], c: { id: string; name: string; issuer: string }): EnterpriseIdp[] {
+  if (idps.some((i) => i.sso === c.id)) return idps;
+  return [...idps.filter((i) => i.issuer.replace(/\/$/, "") !== c.issuer.replace(/\/$/, "") || i.tenant), { issuer: c.issuer, name: c.name, matching: "email", sso: c.id }];
+}
+
+/** The idps without the one tied to SSO connection `id`. */
+export function untieForAgents(idps: EnterpriseIdp[], id: string): EnterpriseIdp[] {
+  return idps.filter((i) => i.sso !== id);
+}
+
 /** The trust-a-provider form as a provider, or what's wrong with it (the API checks it again). */
-export function idpFromForm(f: { issuer: string; name: string; matching: "email" | "aud_sub"; domains: string; jwks: string; admins: boolean; tenant?: string }): { idp: EnterpriseIdp } | { problem: string } {
+export function idpFromForm(f: { issuer: string; name: string; matching: "email" | "aud_sub"; domains: string; jwks: string; admins: boolean; tenant?: string; sso?: string }): { idp: EnterpriseIdp } | { problem: string } {
   const issuer = f.issuer.trim();
   if (!/^https:\/\/[^\s/]+/.test(issuer)) return { problem: "The issuer is an https URL" };
-  const domains = [...new Set(f.domains.split(/[\s,]+/).map((d) => d.trim().toLowerCase().replace(/^@/, "")).filter(Boolean))];
+  const sso = f.sso?.trim() || undefined;
+  // A provider tied to an SSO connection vouches for the domains a DNS record proved for it.
+  const domains = sso ? [] : [...new Set(f.domains.split(/[\s,]+/).map((d) => d.trim().toLowerCase().replace(/^@/, "")).filter(Boolean))];
   const bad = domains.find((d) => !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d));
   if (bad) return { problem: `${bad} isn't a domain` };
-  if (f.matching === "email" && domains.length === 0) return { problem: "Name the email domains it vouches for" };
+  if (f.matching === "email" && domains.length === 0 && !sso) return { problem: "Name the email domains it vouches for" };
   const jwks = f.jwks.trim();
   if (jwks) {
     try {
@@ -632,6 +658,7 @@ export function idpFromForm(f: { issuer: string; name: string; matching: "email"
       ...(f.admins ? { admins: true } : {}),
       ...(f.name.trim() ? { name: f.name.trim() } : {}),
       ...(f.tenant?.trim() ? { tenant: f.tenant.trim() } : {}),
+      ...(sso ? { sso } : {}),
     },
   };
 }
@@ -700,7 +727,7 @@ export const accessApi = {
   audit: (f: AuditFilter = {}) => call<AuditEvent[]>("GET", `/v1/access/audit${query(f)}`),
   /** The log as CSV (a spreadsheet) or JSON lines (a log tool), for a download. */
   auditExport: async (f: AuditFilter = {}, format: "csv" | "jsonl" = "csv") => {
-    const res = await fetch(`${ROLL_API}/v1/access/audit${query({ ...f, format })}`, { headers: apiHeaders(), cache: "no-store" });
+    const res = await fetch(`${ROLL_API}/v1/access/audit${query({ ...f, format })}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     return res.blob();
   },
@@ -747,6 +774,7 @@ export function grantMatches(g: Pick<Grant, "name" | "id" | "hint" | "client" | 
 
 /** Who an audit row is by: a change's person (`args.by`), else a request's grant, else the operator. */
 export function auditWho(e: AuditEvent): string {
+  if (e.actor_handle) return e.actor_handle;
   const args = e.args && typeof e.args === "object" ? (e.args as { by?: unknown; actor?: unknown }) : {};
   // People's accounts (docs/accounts.md, "Audit"): who acted (a person's id, operator, scim:<connection>).
   if (e.source === "accounts" && typeof args.actor === "string") return args.actor;

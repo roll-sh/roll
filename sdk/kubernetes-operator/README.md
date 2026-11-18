@@ -15,8 +15,10 @@ spec:
   path: /api         # optional
 ```
 
-- It checks each environment's digest every `ROLL_SYNC_EVERY` (default 30s) and reads values only
-  when it moved, or the Secret is missing.
+- It long-polls each RollSecret's digest, so a change reaches its Secret within seconds, and checks
+  every `ROLL_SYNC_EVERY` anyway (default 30s). It reads values only when the digest moved, or the
+  Secret is missing. Past 32 held polls per login, roll answers at once, and those RollSecrets fall
+  back to the interval.
 - It writes only Secrets it made: labelled `roll.sh/managed-by: rollsecret` and owned by their
   RollSecret, so deleting the RollSecret deletes them. A Secret of the same name someone else made
   is left alone, and the RollSecret's status says so.
