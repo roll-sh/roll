@@ -110,7 +110,8 @@ export type Problem = { key: string; problem: string };
 /** `withheld`: sensitive keys left out (only roll's runtimes and syncs read them); `sensitive`: those included (a runtime's read), never to be shown. */
 /** `digest` (with `?digest=1`): the folder's `…/digest`, taken just before this read (a watch compares from it). */
 /** `followed`: keys linked to a resource the ephemeral environment's preview branched, left out of `values`. */
-export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; withheld?: string[]; sensitive?: string[]; followed?: Followed[]; digest?: string };
+/** `plain`: of `linked`, keys whose link field isn't a credential (a host, a port): logs may show them; every other value is a secret. */
+export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld?: string[]; sensitive?: string[]; followed?: Followed[]; digest?: string };
 export type CellSource = "own" | "import" | "base";
 /** `misfit`: the typed-key rule the stored value breaks (shown only to whoever may reveal it). */
 export type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: CellSource; comment: boolean; personal: boolean; misfit?: string; expires_at?: number };

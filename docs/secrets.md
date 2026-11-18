@@ -135,6 +135,14 @@ do. It speaks the same HTTP API as the CLI and the clients, with a roll token or
   project's secrets, made through `POST /v1/access/tokens` as the dashboard's New token. Its
   secret is in the state (sensitive). Any change replaces it, and destroying it revokes it.
 - **`data.roll_secrets_values`** is an environment's resolved values, for another provider.
+- **What a project registers itself**: **`roll_secrets_ca`** (domains, `allow_ip`, `max_days`; the
+  CA's `certificate` out), **`roll_secrets_ssh_ca`** (principals, host domains; its `public_key` and
+  `known_hosts` out), **`roll_secrets_transit_key`** (an encryption key, with `deletion_protection` on by
+  default: what it encrypted can't be read once it's destroyed, so a rename or removal fails until
+  it's turned off) and **`roll_secrets_outside_database`**
+  (roles, group, CA; its admin URL `admin_url_wo` is write-only, Terraform 1.11+: sent once and
+  sealed in roll, never in the state, and bumping `admin_url_wo_version` registers it again). roll
+  changes none in place, so every attribute replaces them; keys link to them as to any resource.
 - **Without values in the state** (Terraform 1.10 and 1.11+), as Vault's and AWS' providers allow:
   - **`ephemeral "roll_secrets_values"`** reads an environment for one run, never into the plan or
     the state; it feeds another provider's configuration or a write-only argument. Strict: a key
@@ -167,6 +175,10 @@ steps:
   (a PEM key) arrives whole and can't add variables of its own. A key that doesn't resolve fails
   the step, naming it.
 - No dependencies: Node's own `fetch`, nothing to bundle or audit.
+- **`client-id: mcl_…`** signs the job in to roll for any product as a trusted machine client
+  (docs/permissions.md, "Machine clients": `roll token client create --github owner/repo`), with
+  the same OIDC token, and exports that token, masked first, as `ROLL_TOKEN`; with an
+  `environment` it then reads the values with it. It can't be combined with `identity` or `token`.
 - **`scan: true`** guards a repository on GitHub the way roll code guards the ones it hosts: the
   lines a pull request adds (`git diff base...HEAD`; check out with `fetch-depth: 0`) are cut into
   candidates as `roll secrets scan` cuts them and checked with `POST …/leaks` (fingerprints; only
@@ -215,7 +227,11 @@ Three ways, as the best products offer:
   Secret as it was. Its status says what happened. Outside the operator's own namespaces a
   RollSecret logs in as a service account of its own namespace (`spec.serviceAccountName`, a
   10-minute token the operator requests), so creating a RollSecret never reaches what the
-  operator's identity, or another team's, reaches.
+  operator's identity, or another team's, reaches. `spec.rolloutRestart` names the Deployments,
+  StatefulSets and DaemonSets that read the Secret: a change restarts them (`kubectl rollout
+  restart`'s annotation), each one that opts in with a `roll.sh/restart-on` annotation naming the
+  RollSecret (so a RollSecret's author can't restart a workload that didn't ask). One that couldn't
+  be restarted waits in `status.pendingRestarts` and is tried again on every pass.
 - **Push (the `kubernetes` sync)**: roll writes a Secret with credentials for the cluster it holds,
   sealed. For clusters roll can reach and the operator can't run in.
 ## Customer-managed keys
@@ -869,6 +885,12 @@ The URL (which may carry a token) and the signing secret are sealed with the pro
 only the host is shown. An answer is read once, never logged, and never part of an error. A rotator
 a key still links to can't be deleted, nor one with a retired credential still waiting out its
 grace period (its revocation goes through the rotator).
+
+A rotator is edited in place (`PATCH …/rotators/{id} {name?, url?}`, the pencil; a new URL is
+checked as adding one is) and its signing secret rotated (`POST …/rotators/{id}/rotate-secret`,
+the key button): the new `whsec_…` is shown once and signs every call from then on. Put it in the
+endpoint right away; a call the endpoint refuses in between fails, changes nothing (the value in
+use stays) and is retried, as any failed rotation or revocation is.
 
 ### Databases outside roll
 
@@ -1807,11 +1829,17 @@ last_synced_at, error}`:
   in front of every name at the target (`prefix: "APP_"` pushes `DB_URL` as `APP_DB_URL`). Personal
   values never sync, and neither do dynamic links (a short-lived credential would expire at the
   target): a dynamic key, or a reference that can't resolve, is left out and named in `error`.
-- **When.** The sweeper (every node, every 30 s) compares each sync's environment `digest` (the
-  hash `roll run --watch` polls) with the sync's `last_digest`. A sync whose digest moved is
-  claimed with a compare-and-swap on its `running_until` (5 minutes), so two nodes never push one
-  sync at once. A new sync first pushes at the next sweep. `POST …/syncs/{id}/run` pushes now, every key, whatever the digest says (also after
-  a live link's resource rotated, which moves no digest).
+- **When.** A change marks its project's syncs due in the same transaction (as does roll rotating
+  a live link's resource), and every node looks for due syncs every 2 seconds (one indexed read
+  when there are none), so a change reaches its targets in seconds however many syncs there are,
+  as Doppler's and Infisical's do. The sweeper (every node, every 30 s) still goes through the
+  rest, least recently checked first, each node claiming a batch of its own. Either compares the
+  sync's environment `digest` (the hash `roll run --watch` polls) with the sync's
+  `last_digest`. A sync whose digest moved is claimed with a compare-and-swap on its
+  `running_until` (5 minutes), so two nodes never push one sync at once. A new sync first pushes
+  within seconds. `POST …/syncs/{id}/run` pushes now, every key, whatever the digest says. The
+  2-second pass takes only the syncs a change marked; a credential changed where roll doesn't see
+  it (SQL, a product's own automation) reaches syncs at the next 30 s sweep, through the digest.
 - **Only what changed.** A sync remembers a stamp per name it pushed (the secret's id, version,
   fingerprint and link: no value). A push carries the values of every synced key and says which
   names `changed` since the last push, and which were `removed`: synced before, gone now (deleted,
@@ -2511,6 +2539,8 @@ isn't in the workspace is 404.
 | `GET /rotators` | | `Rotator[]` (`read` on the project) |
 | `POST /rotators` | `{name, url}` | 201 `Rotator & {secret}` (`admin`; the signing secret shown once) |
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
+| `PATCH /rotators/{id}` | `{name?, url?}` | `Rotator` (`admin`; a new URL is checked first) |
+| `POST /rotators/{id}/rotate-secret` | | `Rotator & {secret}` (`admin`; the new signing secret, shown once) |
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
@@ -2603,8 +2633,8 @@ type Change = { seq: number; environment: string; path: string; message: string;
 type ChangeDetail = Change & { items: Item[]; state?: { key: string; path: string; version: number; fp: string; comment: string; tags: string[]; link: Link | null; at: number }[] };
 // what: added | changed | deleted | comment | tags | link | rotated
 type Version = { version: number; seq: number; op: "set" | "delete"; what: string[]; purged: boolean; fp: string | null; comment: string; tags: string[]; link: Link | null; at: number; by: string };
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; withheld: string[]; sensitive: string[]; followed: Followed[] }; // followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
-type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; followed: Followed[]; digest?: string }; // digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld: string[]; sensitive: string[]; followed: Followed[] }; // plain: of linked, keys whose link field isn't a credential (a host, a port), which a consumer hiding secret values in logs may show (every other value is a secret); followed: keys linked to what the ephemeral environment's preview branched, not in values; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
+type Values = { values: Record<string, string>; problems: { key: string; problem: string }[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; followed: Followed[]; digest?: string }; // plain: as above; digest (with ?digest=1, not with seq or at): the folder's `…/digest`, taken just before this read; leases: ids of dynamic credentials issued; dynamic: the keys holding one; linked: keys from any link (addresses a consumer on another network rewrites)
 type Grid = { path: string; environments: string[]; rows: { key: string; cells: Record<string, Cell | null>; status: "same" | "different" | "missing"; required: boolean }[]; folders: string[]; previews: number };
 type Reach = { environment: string; path: string; key: string | null; protected: boolean; untrusted: boolean; tokens: Holder[]; identities: Holder[]; syncs: { id: string; kind: string; target: unknown; last_synced_at: number | null }[]; projects: string[]; imported_by: string[]; truncated: boolean; readers: { actor: string; last_at: number; reads: number }[]; uncounted: string }; // untrusted: checks, sandboxes and previews may read it (not protected)
 type Holder = { id: string; name: string; actions: Action[]; expires_at: number | null; last_used_at: number | null; created_by: string };

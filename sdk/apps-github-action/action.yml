@@ -8,8 +8,14 @@ inputs:
     description: rolld's API, e.g. https://api.roll.example.
     required: true
   token:
-    description: A roll token that may deploy the service (keep it in the repository's secrets; GitHub gives none to a fork's pull request).
-    required: true
+    description: A roll token that may deploy the service (keep it in the repository's secrets; GitHub gives none to a fork's pull request). Or use client-id.
+    required: false
+  client-id:
+    description: Sign in with the job's own OIDC token as this trusted machine client (mcl_…, made with `roll token client create … --github owner/repo`), instead of a stored token. The job needs `permissions: id-token: write`.
+    required: false
+  audience:
+    description: With client-id, the OIDC token's audience (default api-url, the client's default).
+    required: false
   service:
     description: The service (svc_…).
     required: true
