@@ -1619,7 +1619,7 @@ type Settings = {
   last seen, the service and its title, opening to its newest sample; the last hour, 6 or 24),
   plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
-- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|visitors|settings|usage|bypass|wait|up|down|masks|errors`.
+- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|visitors|settings|usage|bypass|wait|up|down|masks|errors|metrics|hooks`.
   - `roll preview up [--project P] [--repo owner/name] [--name N] [--no-wait] [--timeout S] [--force]`
     previews a checkout's working tree as it is, as `netlify deploy` and `vercel deploy` do from a
     directory: uncommitted and untracked files included, what `.gitignore` leaves out left out.

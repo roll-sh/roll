@@ -231,6 +231,23 @@ pub enum Preview {
         #[arg(long, default_value_t = 60)]
         minutes: u32,
     },
+
+    /// What a preview's running services use right now: cores of CPU, resident memory against
+    /// what each runs with.
+    Metrics { preview: String },
+    /// A project's deploy hooks (a secret URL a headless CMS calls on publish to build the
+    /// previews of some branches again): lists them; `--add NAME` makes one (its URL printed
+    /// once), `--rm HOOK` deletes one.
+    Hooks {
+        project: String,
+        #[arg(long, conflicts_with = "rm")]
+        add: Option<String>,
+        /// With --add: branch globs (default every branch).
+        #[arg(long, requires = "add")]
+        branches: Vec<String>,
+        #[arg(long)]
+        rm: Option<String>,
+    },
     /// The secret CI sends (header `x-roll-preview-bypass`) to reach a project's private
     /// previews: shows whether there is one, `--rotate` makes a new one (printed once), `--off`
     /// removes it.
@@ -1081,6 +1098,51 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 }
                 for g in groups {
                     println!("{:>5}x  {:>8}  {:<12} {}", g["count"], ago(g["last_seen"].as_i64().unwrap_or(0) / 1000), s(&g["service"]), s(&g["title"]));
+                }
+                return Ok(());
+            }
+            v
+        }
+
+        Preview::Metrics { preview } => {
+            let v = api.get(&format!("/v1/previews/{preview}/metrics")).await?;
+            if !as_json {
+                let services = v["services"].as_array().cloned().unwrap_or_default();
+                if services.is_empty() {
+                    println!("no service is running");
+                }
+                for m in services {
+                    let mb = m["memory_bytes"].as_f64().unwrap_or(0.0) / 1_048_576.0;
+                    println!("{:<16} {:.2} CPU  {:.0} of {} MB", s(&m["service"]), m["cpu"].as_f64().unwrap_or(0.0), mb, m["memory_mb"]);
+                }
+                return Ok(());
+            }
+            v
+        }
+        Preview::Hooks { project, add, branches, rm } => {
+            let path = format!("/v1/previews/projects/{}/hooks", project_id(api, &project).await?);
+            let v = match (add, rm) {
+                (Some(name), _) => {
+                    let branches = if branches.is_empty() { vec!["*".to_string()] } else { branches };
+                    let v = api.post(&path, json!({ "name": name, "branches": branches })).await?;
+                    if !as_json {
+                        println!("{}{}", api.base.trim_end_matches('/'), s(&v["path"]));
+                        eprintln!("POST to it from the CMS's publish webhook; it's shown only now");
+                        return Ok(());
+                    }
+                    v
+                }
+                (_, Some(hook)) => {
+                    api.call(reqwest::Method::DELETE, &format!("{path}/{hook}"), None).await?;
+                    json!({ "deleted": hook })
+                }
+                _ => api.get(&path).await?,
+            };
+            if !as_json && v.get("hooks").is_some() {
+                for h in v["hooks"].as_array().into_iter().flatten() {
+                    let branches: Vec<&str> = h["branches"].as_array().into_iter().flatten().filter_map(|b| b.as_str()).collect();
+                    let ran = h["fired_at"].as_i64().map_or("not run yet".to_string(), |t| format!("ran {} ago", ago(t / 1000)));
+                    println!("{}  {:<20} {}  {ran}", s(&h["id"]), s(&h["name"]), branches.join(","));
                 }
                 return Ok(());
             }
