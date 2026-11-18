@@ -337,10 +337,13 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert_eq!(s.waiting(), 21);
         drop(first);
-        quiet_task.await.unwrap();
-        for t in tasks {
-            t.await.unwrap();
-        }
+        let all = async {
+            quiet_task.await.unwrap();
+            for t in tasks {
+                t.await.unwrap();
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), all).await.unwrap_or_else(|_| panic!("queued requests still waiting after 30 s: {} waiting, {:?} ran", s.waiting(), order.lock()));
         let order = order.lock();
         // The quiet tenant runs second, not after the 20 queued noisy requests.
         let pos = order.iter().position(|x| x == "quiet").unwrap();
