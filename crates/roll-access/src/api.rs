@@ -23,6 +23,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/catalog", get(catalog_view))
         .route("/v1/access/check", post(check))
         .route("/v1/access/tokens", get(list).post(create))
+        .route("/v1/access/tokens/revoke", post(revoke_many))
         .route("/v1/access/tokens/{id}", get(get_one).patch(update).delete(revoke))
         .route("/v1/access/tokens/{id}/rotate", post(rotate))
         .route("/v1/access/tokens/{id}/approve", post(approve_token))
@@ -72,6 +73,7 @@ fn change_name(method: &axum::http::Method, route: &str) -> String {
         (&Method::POST, "/v1/access/tokens") => "create".into(),
         (&Method::PATCH, "/v1/access/tokens/{id}") => "change".into(),
         (&Method::DELETE, "/v1/access/tokens/{id}") => "revoke".into(),
+        (&Method::POST, "/v1/access/tokens/revoke") => "revoke_many".into(),
         (&Method::DELETE, "/v1/access/tokens/{id}/temporary/{approval}") => "forget".into(),
         (&Method::POST, "/v1/access/oauth/authorize") => "connect".into(),
         (&Method::POST, "/v1/access/oauth/devices/{code}") => "connect".into(),
@@ -549,6 +551,15 @@ impl Access {
     }
 
     async fn create_for(self: &Arc<Self>, ext: &Extensions, mut new: NewGrant) -> crate::Result<(crate::store::Grant, String)> {
+        // Sudo mode (docs/accounts.md): a token made from a person's session (theirs, or an
+        // admin's acting as the operator) needs a recent proof, so a stolen cookie can't mint a
+        // long-lived token. One a token makes is within that token; the operator's has no session.
+        if let (Some(u), None) = (ext.get::<roll_auth::SignedIn>(), ext.get::<roll_auth::Grant>())
+            && let Some(people) = self.people.get()
+            && !people.fresh(&u.user, &u.session).await.map_err(Error::Internal)?
+        {
+            return Err(Error::ReauthRequired("confirm it's you first (on your account page, or GET /v1/accounts/me/reauth): making a token needs a sign-in in the last two hours".into()));
+        }
         // A user's token is theirs, and so is one their token makes: it acts as them.
         let who = who(self, ext)?;
         // A person's own token past what the policy has an admin approve waits for one (one their
@@ -791,6 +802,59 @@ async fn revoke(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
         may_touch(&a, &g, &target).await?;
     }
     Ok(Json(json!(blocking(a, move |a| a.store.revoke(&id)).await?)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevokeMany {
+    ids: Vec<String>,
+    why: String,
+}
+
+/// An incident's cut-off (docs/permissions.md, "Revoking at once"): every listed token at once,
+/// all or none. The operator's.
+async fn revoke_many(State(a): S, ext: Extensions, axum::Json(b): axum::Json<RevokeMany>) -> crate::Result<Json<Value>> {
+    operator_only(&a, &ext, "revoke tokens in bulk")?;
+    let by = actor(&ext);
+    let revoked = a.revoke_many(b.ids, &b.why, &by).await?;
+    Ok(Json(json!({ "revoked": revoked })))
+}
+
+impl Access {
+    /// Revoke every grant in `ids` at once (roll secrets' incident cut-off calls this in process,
+    /// its reach choosing the ids): all or none, an audit row per grant with why and who.
+    pub async fn revoke_many(self: &Arc<Self>, ids: Vec<String>, why: &str, by: &str) -> crate::Result<Vec<crate::store::Grant>> {
+        let why = why.trim().to_string();
+        if why.is_empty() {
+            return Err(Error::BadRequest("say why (the incident): it's on every revoked token".into()));
+        }
+        let (w, a2) = (why.clone(), self.clone());
+        let revoked = tokio::task::spawn_blocking(move || a2.store.revoke_many(&ids, &w)).await.map_err(|e| Error::Internal(e.to_string()))??;
+        let at = code_sql::now_ms();
+        for g in &revoked {
+            self.store.audit(&crate::store::AuditEvent {
+                id: crate::new_id("aud"),
+                at,
+                grant_id: Some(g.id.clone()),
+                grant_name: Some(g.name.clone()),
+                source: "access".into(),
+                tool: None,
+                method: "POST".into(),
+                route: "/v1/access/tokens/revoke".into(),
+                product: Some("access".into()),
+                action: Some("admin".into()),
+                resource: Some(format!("revoked by {by}: {why}").chars().take(300).collect()),
+                decision: "revoke".into(),
+                approval: None,
+                status: 200,
+                args: None,
+                ip: None,
+                duration_ms: 0,
+                client: None,
+            });
+        }
+        Ok(revoked)
+    }
 }
 
 /// Take back what an approval allowed a token for a while. The operator decides approvals, so
