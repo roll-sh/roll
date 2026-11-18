@@ -86,6 +86,25 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
     `PATCH /v1/code/changes/{id} {labels}`); a skip, from the title or a label, wins.
   - `roll preview create --repo acme/web --branch feat-x` (or `POST /v1/previews`) makes one for a
     branch with no change. It lives until it is deleted or its TTL passes.
+- **One voice per pull request**: a Git URL service can be on two projects' canvases, the
+  operator's and an admin's, with each project standing for it. Then each project that wants a
+  branch gets its own preview of it, but only one posts `roll/preview` and the pull request's
+  comment.
+  - **Who posts:** of the projects with an active preview of the branch, the one that has had the
+    service on its canvas longest (ties go by id). roll apps puts a service on the canvas of the
+    project it's made in, so normally that's the service's own project. A project whose rules skip
+    the branch has no preview of it, so it never silences the one that does.
+  - **The quiet preview** says so on its sheet (`reported_by`). On the operator's projects that's
+    the speaker's name; on a person's project it's "another project", since a person never learns
+    another owner's project. Its row in the Previews tab carries a `quiet` tag, and its chip on the
+    canvas says so on hover.
+  - **Handover:** when the speaking preview goes (the service leaves that canvas, or its project's
+    rules drop the branch), the next preview's own node reports at once. The comment is kept with
+    the pull request, so the next preview edits the same one, and the preview that went doesn't
+    say so (that could land after the next one's).
+  - **A roll code change** has one preview, made by the first project with previews on that
+    stands for its repo. roll code's `POST /v1/code/changes/{id}/preview` picks the project that
+    has had the repo on its canvas longest.
 - **Update**: every new head redeploys the services of the change's repo at that head. Services
   from the project's other repos run at their own branch of the same name when they have one (a
   feature split across a front end and a back end previews as one, as Signadot, Bunnyshell and
@@ -381,6 +400,17 @@ none of the service's environments follows, after checking the branch really is 
   `a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head`; live in
   `scripts/preview-apps.sh` with GitHub's `pull_request` events through roll apps' hook (#115:
   `GitPushes::takes_pulls`).
+- They say themselves where the code lives (Vercel's status and comment): a `roll/preview`
+  commit status on the pushed commit (pending, ready, failed; a fork's that waits is pending,
+  "waiting for a writer", unlinked), and for a pull request's preview the same comment a roll code
+  change's gets, edited in place, saying "deleted" when it goes. Each is posted only when it
+  changed, and what was posted (the comment's id too) is kept, so a restart posts nothing new.
+  Through the `GitReport` port: rolld posts with roll apps' GitHub App connection (a short-lived
+  token for that one repository; never the service's git login); a service that isn't connected
+  gets nothing. The project's `github.status` and `github.comment` switches hold as for a roll
+  code change's. A comment's number and id belong to the repository its pull request's page
+  names: once the service is connected to another repository, nothing is posted there (an
+  independent review's finding). `a_git_url_preview_reports_its_status_and_pull_request_comment`.
 - roll code's discovery leaves them alone (they follow pushes, not roll code's branches), and
   keeps them while the service is on the canvas.
 
@@ -1025,6 +1055,7 @@ type Preview = {
   runs: string | null;                // the earlier head its services run (later pushes touched only ignored paths)
   earlier: {service: string; revision: string; url: string; share_url: string | null; at: number}[]; // earlier pushes, still reachable
   goes_at: number | null;             // when it goes (TTL, keep or expiry running out), once a day away (or a quarter of a shorter TTL)
+  reported_by: string | null;         // the project that reports a Git URL branch's pull request, when another one does (one voice per pull request)
   desired: "active" | "deleted";
   state: "queued" | "awaiting_approval" | "creating" | "ready" | "sleeping" | "updating" | "failed" | "deleting";
   error: string | null;

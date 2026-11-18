@@ -17,6 +17,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tower::ServiceExt;
 
+/// Delete a service for good (a first delete only stops it, for a restore): what it made goes.
+async fn delete_for_good(r: &axum::Router, id: &str) -> (StatusCode, Value) {
+    call(r, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    call(r, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await
+}
+
 async fn call(r: &axum::Router, method: &str, path: &str, body: Option<Value>, ct: &str, raw: Option<Vec<u8>>) -> (StatusCode, Value) {
     let b = match (body, raw) {
         (_, Some(raw)) => Body::from(raw),
@@ -65,6 +71,8 @@ struct World {
     project: String,
     db: code_sql::Db,
     ws: Arc<roll_workspace::Workspace>,
+    /// Its Docker objects go when it does ([`Cleanup`]).
+    _cleanup: Cleanup,
 }
 
 impl World {
@@ -91,6 +99,41 @@ impl World {
         let apps = Apps::new(cfg, store, deps);
         apps.start();
         (self.api, self.public, self.apps) = (apps_control::api::router(apps.clone()), apps_control::public::router(apps.clone()), apps);
+    }
+}
+
+/// What a test made on Docker goes with it, a failing one's too (a [`World`]'s guard): its services' containers and its
+/// project's networks (a network left behind holds one of Docker's address pools, and a host
+/// whose pools run out refuses every network after it). Only this test's: the services in its own
+/// store, the networks named for its own project.
+struct Cleanup {
+    db: code_sql::Db,
+    project: String,
+}
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let docker = |args: &[&str]| std::process::Command::new("docker").args(args).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        // Deleted ones too (kept for a restore until they're deleted for good).
+        let ids: Vec<String> = Store::new(self.db.clone(), Sealer::new("0123456789abcdef0123456789abcdef").unwrap())
+            .and_then(|s| Ok(s.services(None)?.into_iter().map(|x| x.id).chain(s.deleted_services(None)?.into_iter().map(|(x, _)| x.id)).collect()))
+            .unwrap_or_default();
+        let rm = |ids: String| {
+            let ids: Vec<&str> = ids.split_whitespace().collect();
+            if !ids.is_empty() {
+                docker(&[&["rm", "-f", "-v"][..], &ids].concat());
+            }
+        };
+        for svc in ids {
+            rm(docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={svc}")]));
+        }
+        let p = self.project.strip_prefix("prj_").unwrap_or(&self.project);
+        // Its closed builds' builder, then each network with what's still on it (its relays).
+        docker(&["buildx", "rm", "-f", &apps_control::runtime::docker::build_network_name(&self.project)]);
+        for net in docker(&["network", "ls", "--filter", &format!("name={p}"), "--format", "{{.Name}}"]).lines().filter(|n| n.starts_with("roll-apps-") && n.contains(p)) {
+            rm(docker(&["ps", "-aq", "--filter", &format!("network={net}")]));
+            docker(&["network", "rm", net]);
+        }
     }
 }
 
@@ -140,12 +183,13 @@ async fn docker_world_with(netns: Option<bool>, setup: impl FnOnce(&mut AppsConf
     apps.start();
     let api = apps_control::api::router(apps.clone());
     let public = apps_control::public::router(apps.clone());
-    Some(World { _dir: dir, apps, api, public, project, db, ws })
+    let _cleanup = Cleanup { db: db.clone(), project: project.clone() };
+    Some(World { _dir: dir, apps, api, public, project, db, ws, _cleanup })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_static_site_builds_and_its_cold_starts_are_measured() {
-    let Some(World { _dir, apps, api, public, project, .. }) = docker_world().await else { return };
+    let Some(World { _dir, apps, api, public, project, _cleanup, .. }) = docker_world().await else { return };
     // A pull through the Engine API with a login header (an empty one is anonymous): what a
     // private registry's pull runs, its progress read off the stream.
     {
@@ -257,7 +301,7 @@ async fn a_static_site_builds_and_its_cold_starts_are_measured() {
         median(thaw).as_millis(),
         median(warm).as_millis(),
     );
-    let (st, _) = call(&api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    let (st, _) = delete_for_good(&api, &id).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     let net = apps_control::network_name(&project, "production");
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &net]).await;
@@ -282,7 +326,7 @@ async fn a_static_sites_files_answer_without_a_container() {
     let running = apps_control::runtime::docker::docker(&["ps", "-q", "--filter", &format!("label=sh.roll.apps={id}")]).await.unwrap();
     assert!(running.is_empty(), "no container serves it: {running}");
     eprintln!("MEASURED static site from its files: first request {} ms (reads its index), warm median {} ms", first[0].as_millis(), median(warm).as_millis());
-    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
     w.apps.shutdown().await;
 }
@@ -313,17 +357,24 @@ async fn a_sites_vercel_json_and_netlify_toml_rules_answer() {
         let (st, _, body) = get(config).await;
         assert!(st != StatusCode::OK && !body.contains("s3cr3t"), "{config} isn't served: {st} {body}");
     }
-    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    delete_for_good(&w.api, &id).await;
 }
 
 /// A service from an upload of `files`, built from its generated Dockerfile and live: its id and host.
 async fn deploy_tree(w: &World, name: &str, files: &[(&str, &str)]) -> (String, String) {
-    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "upload"}, "run": {"memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
+    deploy_tree_with(w, name, files, json!({})).await
+}
+
+/// [`deploy_tree`] with the service's build settings.
+async fn deploy_tree_with(w: &World, name: &str, files: &[(&str, &str)], build: Value) -> (String, String) {
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": name, "source": {"kind": "upload"}, "build": build, "run": {"memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
     let tree = tempfile::tempdir().unwrap();
     for (path, body) in files {
-        std::fs::write(tree.path().join(path), body).unwrap();
+        let p = tree.path().join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
     }
     let mut bundle = Vec::new();
     roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
@@ -343,6 +394,35 @@ async fn deploy_tree(w: &World, name: &str, files: &[(&str, &str)]) -> (String, 
     assert_eq!(d["status"], "active", "{name}: {d}\n{log}");
     let (_, env) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production"), None, "application/json", None).await;
     (id, env["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string())
+}
+
+/// A static site's functions run (the `functions` builder): Netlify's Web handler and its Lambda
+/// one, Vercel's `(req, res)` and a TypeScript Web handler, each answering at its path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_static_sites_functions_build_and_answer() {
+    let Some(w) = docker_world().await else { return };
+    let files = [
+        ("index.html", "<h1>site</h1>"),
+        ("netlify/functions/hello.mjs", "export default async (req) => new Response(`hello ${new URL(req.url).searchParams.get('who')}`)"),
+        ("netlify/functions/legacy.js", "exports.handler = async (event) => ({ statusCode: 201, body: `legacy ${event.httpMethod}` })"),
+        ("api/ping.js", "module.exports = (req, res) => res.status(200).json({ pong: req.query.n })"),
+        ("api/web.ts", "export default async (req: Request): Promise<Response> => new Response('typed')"),
+    ];
+    let (_, host) = deploy_tree_with(&w, "site-fn", &files, json!({"builder": "functions"})).await;
+    let fetch = |path: &'static str| {
+        let req = Request::get(path).header("host", host.as_str()).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move {
+            let resp = public.oneshot(req).await.unwrap();
+            let st = resp.status();
+            (st, String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap())
+        }
+    };
+    assert_eq!(fetch("/.netlify/functions/hello?who=roll").await, (StatusCode::OK, "hello roll".to_string()));
+    assert_eq!(fetch("/.netlify/functions/legacy").await, (StatusCode::CREATED, "legacy GET".to_string()));
+    assert_eq!(fetch("/api/ping?n=7").await, (StatusCode::OK, r#"{"pong":"7"}"#.to_string()));
+    assert_eq!(fetch("/api/web").await, (StatusCode::OK, "typed".to_string()));
+    assert_eq!(fetch("/api/nope").await.0, StatusCode::NOT_FOUND);
 }
 
 /// What the generated Dockerfiles of Node, Python and Go make actually builds and answers, and a
@@ -377,7 +457,7 @@ async fn generated_node_python_and_go_images_build_and_answer() {
     }
     eprintln!("MEASURED Node 22 cold start from stopped (node server.js, no npm): median {} ms (all {:?})", median(cold.clone()).as_millis(), cold.iter().map(|d| d.as_millis()).collect::<Vec<_>>());
     for (id, _) in [&node, &python, &go] {
-        assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(delete_for_good(&w.api, id).await.0, StatusCode::NO_CONTENT);
     }
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
     w.apps.shutdown().await;
@@ -456,7 +536,7 @@ async fn a_cold_start_skips_network_setup_with_a_sandbox() {
         without.iter().map(|d| d.as_millis()).collect::<Vec<_>>(),
     );
     for (w, id) in [(&on, &a), (&off, &b)] {
-        assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(delete_for_good(&w.api, id).await.0, StatusCode::NO_CONTENT);
         let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
     }
     let left = apps_control::runtime::docker::docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={a}")]).await.unwrap();
@@ -572,7 +652,7 @@ async fn a_private_caller_wakes_a_sleeping_service() {
     let inside = docker(&["run", "--rm", "--network", &format!("container:{}", r.container), "--cap-drop", "ALL", "--read-only", "busybox:1.37", "wget", "-q", "-O-", &format!("http://127.0.0.1:{}/", r.port)]).await;
     assert!(inside.as_deref().is_ok_and(|b| b.contains("<h1>cold</h1>")), "{inside:?}");
     drop(r);
-    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
     let _ = docker(&["network", "rm", &net]).await;
     let left = docker(&["ps", "-aq", "--filter", &format!("label=sh.roll.apps={id}")]).await.unwrap();
     assert!(left.is_empty(), "the instance, its sandbox and its waker are gone: {left}");
@@ -640,7 +720,7 @@ async fn a_tcp_service_and_a_tunnel_reach_a_sleeping_port() {
     assert_eq!(&got, b"tunnelled\n");
     eprintln!("MEASURED a TCP service from asleep: {} ms to its echo; a tunnel from asleep: {} ms", tcp_cold.as_millis(), began.elapsed().as_millis());
     let _ = ws.close(None).await;
-    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
     w.apps.shutdown().await;
 }
@@ -672,7 +752,7 @@ async fn a_busy_instance_brings_another_on_its_cpu() {
     let said = log.as_array().into_iter().flatten().find_map(|l| l["text"].as_str().filter(|t| t.starts_with("scaled out: CPU")).map(str::to_string));
     assert!(two, "a second instance for its CPU: {log}");
     eprintln!("MEASURED CPU scaling on cgroups: a second instance {} s after the service was made ({})", began.elapsed().as_secs(), said.unwrap_or_default());
-    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
     w.apps.shutdown().await;
 }
@@ -715,7 +795,7 @@ async fn a_restart_keeps_the_running_container() {
     assert_eq!(get(&w.public, &host).await.0, StatusCode::OK);
     assert_eq!(paused().await.unwrap(), "false");
     assert_eq!(started(name.clone()).await, before, "thawed, not started again");
-    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
     // Its project's network went with its last service there (one a project made per
     // environment would otherwise pile up until Docker has no address pool left).
     let net = apps_control::network_name(&w.project, "production");
@@ -748,7 +828,7 @@ async fn an_app_on_loopback_fails_its_deploy_saying_so() {
     assert!(x["error"].as_str().unwrap_or("").contains("only, which nothing outside its container reaches"), "{x}");
     let took = x["finished_at"].as_i64().unwrap() - x["steps"].as_array().unwrap().iter().find(|s| s["step"] == "rollout").and_then(|s| s["at"].as_i64()).unwrap();
     assert!(took < 15_000, "not the whole 30 s health timeout: {took} ms");
-    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
 }
 
 /// A multi-stage Dockerfile whose last stage isn't what runs: `build.target` builds its stage.
@@ -782,7 +862,7 @@ async fn a_dockerfiles_stage_is_built_by_its_target() {
     let resp = w.public.clone().oneshot(Request::get("/").header("host", host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
     let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
     assert!(body.contains("the web stage"), "{body}");
-    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
 }
 
 /// What the proxy itself costs on warm traffic: the same instance through roll's public route
@@ -852,7 +932,7 @@ async fn the_proxys_own_cost_is_measured() {
         rps_via,
         rps_own
     );
-    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
 }
 
 
@@ -925,7 +1005,7 @@ async fn deno_dotnet_and_elixir_trees_build_and_answer() {
         let resp = w.public.clone().oneshot(Request::get("/").header("host", host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
         let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
         assert!(body.contains(want), "{name}: {body}");
-        assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+        assert_eq!(delete_for_good(&w.api, &id).await.0, StatusCode::NO_CONTENT);
     }
 }
 
@@ -973,7 +1053,7 @@ async fn a_linked_database_on_loopback_is_reached_from_the_container() {
     let relay = apps_control::runtime::links::relay_name(&apps_control::network_name(&w.project, "production"), port);
     assert!(docker(&["inspect", &relay]).await.is_ok(), "the relay is on the project's network");
     // Deleting the service removes its network, and the relay with it.
-    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    delete_for_good(&w.api, &id).await;
     for _ in 0..100 {
         if docker(&["inspect", &relay]).await.is_err() {
             break;
@@ -1021,17 +1101,23 @@ async fn an_uploaded_image_runs_and_names_nothing_on_the_host() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(String::from_utf8_lossy(&body).trim(), "uploaded");
     assert!(docker(&["image", "inspect", &tag]).await.is_err(), "the archive's name was applied on the host");
-    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    delete_for_good(&w.api, &id).await;
 }
 
-/// Egress `roll` on real Docker: the instance runs on a network with no route out and is still
-/// served (at its address there); a direct connection out fails, and its proxy (through the
-/// relay on that network) refuses a host the environment doesn't list, which then shows.
+/// Egress `roll` on real Docker: the instance runs on a network with no route out and no address
+/// of the host's (an isolated gateway), and is still served (through its sandbox's socket); a
+/// direct connection out fails, so does one to a service the host serves on every interface,
+/// and its proxy (through the relay on that network) refuses a host the environment doesn't
+/// list, which then shows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_closed_environment_reaches_nothing_but_its_listed_hosts() {
     let Some(w) = docker_world().await else { return };
     use apps_control::runtime::docker::docker;
-    let start = "(env -u http_proxy -u HTTP_PROXY wget -q -T 3 -O /dev/null http://1.1.1.1/ && echo out:open || echo out:closed; wget -T 5 -O /dev/null http://unlisted.example.com/ 2>&1 | grep -o '403' | head -1 | sed 's/^/proxy:/') > /tmp/got; mkdir -p /tmp/w; cp /tmp/got /tmp/w/index.html; httpd -f -p $PORT -h /tmp/w";
+    // A service of the host's on every interface: where the network's gateway would be, the
+    // host answers it (the network's first address, `.1`).
+    let host_service = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    let hp = host_service.local_addr().unwrap().port();
+    let start = format!("(env -u http_proxy -u HTTP_PROXY wget -q -T 3 -O /dev/null http://1.1.1.1/ && echo out:open || echo out:closed; gw=$(ip route | awk '/scope link/{{split($1,a,\"/\"); split(a[1],o,\".\"); print o[1]\".\"o[2]\".\"o[3]\".1\"; exit}}'); nc -z -w 2 $gw {hp} && echo host:open || echo host:closed; wget -T 5 -O /dev/null http://unlisted.example.com/ 2>&1 | grep -o '403' | head -1 | sed 's/^/proxy:/') > /tmp/got; mkdir -p /tmp/w; cp /tmp/got /tmp/w/index.html; httpd -f -p $PORT -h /tmp/w");
     let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "closed", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"port": 8080, "start": start, "memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
     assert_eq!(st, StatusCode::CREATED, "{svc}");
     let id = svc["id"].as_str().unwrap().to_string();
@@ -1059,12 +1145,41 @@ async fn a_closed_environment_reaches_nothing_but_its_listed_hosts() {
     let host = svc["environments"][0]["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
     let resp = w.public.clone().oneshot(Request::get("/").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
     let body = String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
-    assert_eq!(body.split_whitespace().collect::<Vec<_>>(), ["out:closed", "proxy:403"], "{body}");
+    assert_eq!(body.split_whitespace().collect::<Vec<_>>(), ["out:closed", "host:closed", "proxy:403"], "{body}");
+    drop(host_service);
     let (_, e) = call(&w.api, "GET", &env, None, "application/json", None).await;
     assert_eq!(e["egress_refused"], json!([{"host": "unlisted.example.com"}]), "{e}");
     let closed = apps_control::closed_network_name(&w.project, "production");
-    assert_eq!(docker(&["network", "inspect", "-f", "{{.Internal}}", &closed]).await.unwrap(), "true");
-    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    assert_eq!(docker(&["network", "inspect", "-f", "{{.Internal}} {{index .Options \"com.docker.network.bridge.gateway_mode_ipv4\"}}", &closed]).await.unwrap(), "true isolated");
+    // Another closed environment deleted on its own (a preview's): its network and its proxy's
+    // relay go with it, whatever is still on them.
+    let staging = format!("/v1/apps/services/{id}/environments/staging");
+    let (st, e) = call(&w.api, "PUT", &staging, Some(json!({"egress": {"mode": "roll", "hosts": ["api.example.com"]}})), "application/json", None).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let (_, r) = call(&w.api, "POST", &format!("{staging}/deploys"), Some(json!({})), "application/json", None).await;
+    let mut up = Value::Null;
+    for _ in 0..1200 {
+        let (_, x) = call(&w.api, "GET", &format!("{staging}/deploys/{}", r["id"].as_str().unwrap_or_else(|| panic!("{r}"))), None, "application/json", None).await;
+        if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
+            up = x;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(up["status"], "active", "{up}");
+    let staging_net = apps_control::closed_network_name(&w.project, "staging");
+    let relays = || {
+        let n = staging_net.clone();
+        async move { docker(&["ps", "-a", "--filter", &format!("network={n}"), "--format", "{{.Names}}"]).await.unwrap_or_default() }
+    };
+    assert!(relays().await.contains("roll-apps-egress-"), "{}", relays().await);
+    // One its live state doesn't know (an earlier process's instance) is still on the network.
+    let earlier = format!("roll-apps-{}-staging-earlier", id.strip_prefix("svc_").unwrap_or(&id));
+    docker(&["run", "-d", "--name", &earlier, "--label", &format!("sh.roll.apps={id}"), "--label", "sh.roll.apps.env=staging", "--network", &staging_net, "busybox:1.37", "sleep", "600"]).await.unwrap();
+    assert_eq!(call(&w.api, "DELETE", &staging, None, "application/json", None).await.0, StatusCode::NO_CONTENT);
+    assert!(docker(&["inspect", &earlier]).await.is_err(), "the earlier process's instance went too");
+    assert!(docker(&["network", "inspect", &staging_net]).await.is_err(), "the environment's network went: {}", relays().await);
+    delete_for_good(&w.api, &id).await;
     for _ in 0..100 {
         if docker(&["network", "inspect", &closed]).await.is_err() {
             break;
@@ -1072,6 +1187,51 @@ async fn a_closed_environment_reaches_nothing_but_its_listed_hosts() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(docker(&["network", "inspect", &closed]).await.is_err(), "the closed network and its proxy's relay went with the service");
+}
+
+/// A closed environment's build on real Docker runs on its project's builder, on a network with
+/// no route out and no way to the host: its steps have only the proxy (by address), a direct
+/// connection out fails, and the builder and its network go with the project's last service.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_environments_build_has_no_way_out_but_the_proxy() {
+    let Some(w) = docker_world().await else { return };
+    use apps_control::runtime::docker::docker;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "cb", "source": {"kind": "upload"}, "run": {"type": "worker", "start": "sleep 3600", "memory_mb": 256, "cpu": 0.25} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll"}})), "application/json", None).await;
+    assert_eq!((st, e["build_closed"].as_bool()), (StatusCode::OK, Some(true)), "{e}");
+    let tree = tempfile::tempdir().unwrap();
+    let probe = "RUN (ip route; echo \"proxy=$HTTPS_PROXY\"; wget -q -T 3 -O /dev/null http://1.1.1.1/ && echo out:open || echo out:closed) > /probe";
+    std::fs::write(tree.path().join("Dockerfile"), format!("FROM busybox:1.37\n{probe}\n")).unwrap();
+    let mut bundle = Vec::new();
+    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+    let (st, d) = call(&w.api, "POST", &format!("{env}/deploys"), None, "application/gzip", Some(bundle)).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    let dep = d["id"].as_str().unwrap().to_string();
+    let began = Instant::now();
+    let mut d = Value::Null;
+    for _ in 0..3000 {
+        let (_, x) = call(&w.api, "GET", &format!("{env}/deploys/{dep}"), None, "application/json", None).await;
+        if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
+            d = x;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, log) = call(&w.api, "GET", &format!("{env}/deploys/{dep}/logs"), None, "application/json", None).await;
+    assert_eq!(d["status"], "active", "{d} {log}");
+    eprintln!("MEASURED a closed build (its builder made, BuildKit's image pulled if missing): {} s", began.elapsed().as_secs());
+    let image = d["image"].as_str().unwrap().to_string();
+    let probe = docker(&["run", "--rm", "--network", "none", &image, "cat", "/probe"]).await.unwrap();
+    assert!(!probe.contains("default"), "no route out: {probe}");
+    assert!(probe.contains("proxy=http://") && probe.contains(":3128") && probe.contains("out:closed"), "{probe}");
+    let net = apps_control::runtime::docker::build_network_name(&w.project);
+    assert_eq!(docker(&["network", "inspect", "-f", "{{.Internal}}", &net]).await.unwrap(), "true");
+    delete_for_good(&w.api, &id).await;
+    assert!(docker(&["buildx", "inspect", &net]).await.is_err(), "the project's builder went with its last service");
+    assert!(docker(&["network", "inspect", &net]).await.is_err(), "and its network, with the proxy's relay");
 }
 
 /// A closed environment (egress `roll`) keeps its network sandbox: asleep, another service on its
@@ -1107,7 +1267,7 @@ async fn a_closed_environments_private_caller_wakes_it() {
     assert!(body.as_deref().is_ok_and(|b| b.contains("<h1>cold</h1>")), "the waker took the call: {body:?}");
     live.sleep().await;
     assert_eq!(get(&w.public, &host).await.0, StatusCode::OK, "a public request wakes it too");
-    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    delete_for_good(&w.api, &id).await;
     let _ = docker(&["network", "rm", &net]).await;
     w.apps.shutdown().await;
 }
@@ -1145,5 +1305,5 @@ async fn a_variable_kept_as_a_file_is_in_the_container() {
     let resp = w.public.clone().oneshot(Request::get("/").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
     let body = String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
     assert_eq!(body, "from-a-file\nline two");
-    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    delete_for_good(&w.api, &id).await;
 }
