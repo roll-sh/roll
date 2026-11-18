@@ -129,6 +129,9 @@ them (`api::Caller`):
   node-wide figures (`loaded`, `cache`).
 - A person's own token (docs/permissions.md, "Users' own tokens") acts as them: it reaches search
   (`search` is in `USER_REACH`) and sees only their clusters, narrowed again by its rules.
+- Terraform (below) calls these routes as `roll search` does, with the same tokens: a person's
+  configuration manages only their clusters and is held to their caps (a create past one fails
+  with the cap's message).
 - A person's workspace project stands only for their own clusters (`Workspace::trusts`: rolld's
   `Owners` reads the owner), so previews, roll secrets' links and roll apps' links take only
   those.
@@ -154,6 +157,24 @@ is decided (PROXY protocol, a trusted proxy's header, the fleet's signed forward
 owner must allow for roll apps and previews, is in architecture.md, "Client addresses and IP
 allowlists". `crates/search-control/tests/control.rs` `ip_allowlists_turn_addresses_away_before_credentials`
 and `tests/cluster.rs` `a_forward_carries_the_clients_address_to_the_owner` cover it.
+
+**Terraform** (Elastic Cloud's `ec_deployment` and `elasticstack` providers, AWS's
+`aws_opensearch_domain`). roll's provider (`sdk/terraform-provider-roll`, its README has the
+details) has `roll_search_cluster` (name, flavor, `always_on` or `idle_timeout_s`, limits,
+`ip_allowlist`; computed endpoint, status, version and the password from create; a new name or
+flavor makes a new cluster; import by id or name; destroy deletes it, restorable for
+`deleted_retention_s`, 7 days by default), `roll_search_api_key` (`access`, or Elasticsearch
+`role_descriptors` through the cluster's `_security/api_key`, and an `expiration`; its secret is
+sensitive, replaced on any change, revoked on destroy; also an ephemeral resource, revoked when
+the run ends), `roll_search_snapshot_repository` (`s3`, `gcs` or `azure` through
+`PUT _snapshot/<name>`, credentials in a sensitive map roll seals apart and never returns) and
+the data source `roll_search_cluster` (by id or name). Reading keys and repositories never
+wakes a sleeping cluster. There's no `deletion_protection` (roll has no setting to enforce it;
+`prevent_destroy` covers the plan). `TestSearchAsCode`, `TestSearchClusterCap` and
+`TestSearchKeyEphemeral` (`internal/provider/search_test.go`) drive Terraform against a fake
+`/v1/search`: create, change in place, a new flavor, import, destroy, the cap's 409, and keys'
+secrets kept out of the plan and the state. Left: remote-cluster links (#347) and allowed
+origins (browser search), once they're on main.
 
 | method | path | |
 | ------ | ---- | - |
@@ -467,6 +488,10 @@ requests); `gcs` and `azure` snapshot repositories (#293); the rest of ILM and t
 lifecycle (#297); timing tests that load can't break (#312); and the request path's large
 futures boxed (#321: a debug build's deepest stack in the cluster test fell to 836,912 B of
 a worker's 2 MiB, so the six above could land together).
+
+Built 2026-11-19 (in review): Terraform for search clusters (#350's item 3): clusters, API keys
+(also ephemeral), snapshot repositories and a cluster data source in `sdk/terraform-provider-roll`
+("Terraform" above); remote-cluster links and allowed origins follow once they're on main.
 
 1. **Search from the browser** (in progress; Algolia's search-only and secured API keys,
    Typesense's scoped keys, Meilisearch's tenant tokens, Elastic's search applications): a web

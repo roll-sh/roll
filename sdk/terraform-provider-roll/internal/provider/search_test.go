@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -544,61 +546,53 @@ resource "roll_search_cluster" "more" {
 	})
 }
 
-// An ephemeral key goes into roll secrets write-only: never in the state, revoked as the run
-// closes.
+// An ephemeral key for the run: a provisioner uses it, it's never in the state, and it's revoked
+// as the run closes.
 func TestSearchKeyEphemeral(t *testing.T) {
-	search := newFakeSearch()
-	search.clusters["srch_1"] = &fakeCluster{id: "srch_1", name: "shop", flavor: "elasticsearch", idle: 900, maxInFlight: 64, maxBody: 100, allow: []map[string]any{}, keys: map[string]bool{}}
-	secrets := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/v1/search") {
-			search.ServeHTTP(w, r)
-		} else {
-			secrets.ServeHTTP(w, r)
-		}
-	}))
+	f := newFakeSearch()
+	f.clusters["srch_1"] = &fakeCluster{id: "srch_1", name: "shop", flavor: "elasticsearch", idle: 900, maxInFlight: 64, maxBody: 100, allow: []map[string]any{}, keys: map[string]bool{}}
+	srv := httptest.NewServer(f)
 	defer srv.Close()
+	used := filepath.Join(t.TempDir(), "key")
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: searchFactories(),
-		TerraformVersionChecks:   []tfversion.TerraformVersionCheck{tfversion.SkipBelow(tfversion.Version1_11_0)},
+		TerraformVersionChecks:   []tfversion.TerraformVersionCheck{tfversion.SkipBelow(tfversion.Version1_10_0)},
 		Steps: []resource.TestStep{{
 			Config: fmt.Sprintf(`
 provider "roll" {
   api_url = %q
   token   = "rlt_terraform"
-  project = "prj_a"
 }
-ephemeral "roll_search_api_key" "ci" {
+ephemeral "roll_search_api_key" "seed" {
   cluster    = "shop"
-  name       = "ci"
+  name       = "seed"
+  access     = "admin"
   expiration = "1h"
 }
-resource "roll_secret" "search" {
-  environment      = "production"
-  key              = "SEARCH_API_KEY"
-  value_wo         = ephemeral.roll_search_api_key.ci.encoded
-  value_wo_version = 1
+resource "terraform_data" "seed" {
+  provisioner "local-exec" {
+    command     = "printf %%s \"$KEY\" > %s"
+    environment = { KEY = ephemeral.roll_search_api_key.seed.encoded }
+  }
 }
-`, srv.URL),
+`, srv.URL, used),
 			Check: func(s *terraform.State) error {
-				search.mu.Lock()
-				defer search.mu.Unlock()
-				secrets.mu.Lock()
-				defer secrets.mu.Unlock()
-				got, _ := secrets.keys["production:/SEARCH_API_KEY"]["value"].(string)
-				if !regexp.MustCompile(`^key[0-9]+@shop:secret-key[0-9]+$`).MatchString(mustDecode(got)) {
-					return fmt.Errorf("roll secrets got a value that isn't the key")
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				b, err := os.ReadFile(used)
+				if err != nil || !regexp.MustCompile(`^key[0-9]+@shop:secret-key[0-9]+$`).MatchString(mustDecode(string(b))) {
+					return fmt.Errorf("the provisioner didn't get the key (%v)", err)
 				}
-				if strings.Contains(fmt.Sprintf("%#v", s.RootModule().Resources), got) {
+				if strings.Contains(fmt.Sprintf("%#v", s.RootModule().Resources), string(b)) {
 					return fmt.Errorf("the key is in the state")
 				}
 				// Each open (plan and apply) made one; every one is revoked.
-				for id, revoked := range search.clusters["srch_1"].keys {
+				for id, revoked := range f.clusters["srch_1"].keys {
 					if !revoked {
 						return fmt.Errorf("the run's key %s wasn't revoked", id)
 					}
 				}
-				if len(search.revoked) == 0 {
+				if len(f.revoked) == 0 {
 					return fmt.Errorf("no key was made")
 				}
 				return nil
