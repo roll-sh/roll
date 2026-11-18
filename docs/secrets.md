@@ -2980,7 +2980,8 @@ followed key, renamed or not, gets its branch's value or a blank: the hole the t
 found is closed, checked live), #68 (AWS through roll's issuer; roles and users edited in
 place, 2026-11-17 as 3f829ca42) and #198 (plain link fields, 2026-11-17 as bc805ae41: roll apps
 hides every value from roll secrets in its logs unless it's plain connection detail).
-On main since 2026-11-18: #69–#73, #75–#77 and #147 (batch 1).
+On main since 2026-11-18: #69–#73, #75–#77 and #147 (batch 1); #79, #81–#83, #87, #88, #92, #95,
+#97, #102, #105, #110, #113, #117, #121, #124, #128, #145, #169, #194, #212, #213, #227, #229 (batch 2).
 In pull requests to main, each green: #79 with #95,
 #81 (read quotas across the fleet), #82 (metrics), #83 (scheduled backups), #86 (rotation
 windows), #87 (encryption keys by name), #88 (password policies), #92 (SaaS rotators, the
@@ -3006,8 +3007,11 @@ cache waited out. Ranked now:
    when the lookup errored. Low: #290 replay and a shared default server ID, #262's rotator URL in state,
    #274's ignored URL setters, #281's offline verify, #277's limiter reset, #248's cache clear-all.
    Sound: #276, #279, #284 (one stderr note).
-2. **Land batch 2** (24 PRs, gated; waiter `rs79-lock` behind search and apps' #295), then batch 3
-   (the #132 stack, #144, #86) and batch 4 (today's PRs).
+2. **Batch 2 landed** (2026-11-18, one lock turn, main 49a6f1d8c): 24 PRs in four queue rounds, #79–#229,
+   #81–#213, #92–#212, #117–#128; main's tree after each round was exactly the simulated one, and
+   after the last the exact tree re-gated on the day's main (3feff202b). Next: batch 3 (the #132
+   stack, #144, #86) and batch 4 (today's PRs: six apply clean on batch 2, five need levelling;
+   `batch-4-notes.txt`).
 3. **R2, cut off everything that reaches a folder** (#304): tokens through roll-access's bulk revoke,
    identities disabled, leases ended, shares and exports cut, syncs paused, an optional freeze (423).
    Fixing: a project admin could revoke the operator's all-projects tokens (a cross-project denial
