@@ -1,6 +1,6 @@
 import { Building2, Check, Copy, Fingerprint, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { accountsApi, activityText, refreshSession, useSession, type Activity, type Invite, type NetworkPolicy, type Passkey, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
+import { accountsApi, activityText, refreshSession, useSession, type Activity, type AccountPolicy, type Invite, type NetworkPolicy, type Passkey, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
 import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } from "@/lib/webauthn";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { SsoSection } from "./account-sso";
@@ -377,24 +377,36 @@ function Passkeys() {
   );
 }
 
-/** Admins: a second factor for everyone (docs/accounts.md). */
+/** Admins: the company's session policy (docs/accounts.md): a second factor for everyone, an idle timeout. */
 function EveryoneSecondFactor() {
-  const [on, setOn] = useState<boolean | null>(null);
+  const [policy, setPolicy] = useState<AccountPolicy | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    accountsApi.accountPolicy().then((p) => setOn(p.require_second_factor), () => setOn(null));
+    accountsApi.accountPolicy().then(setPolicy, () => setPolicy(null));
   }, []);
-  if (on === null) return null;
+  if (!policy) return null;
+  const save = (p: AccountPolicy) => accountsApi.setAccountPolicy(p).then((saved) => (setPolicy(saved), setError(null)), (err) => setError(errorText(err)));
   return (
-    <Section id="require-2fa" title="A second factor for everyone" lead="People without an authenticator app or a passkey can use only their account page until they set one up. Sign-ins through your company's SSO are its provider's to check.">
+    <Section id="require-2fa" title="Sessions and second factors" lead="For everyone signed in: a second factor (people without one can use only their account page until they set one up; SSO sign-ins are its provider's to check), and how long an unused session lasts.">
       <div className={`${card} space-y-2 p-4`}>
         <label className="flex items-center gap-2 text-[12.5px]">
-          <input
-            type="checkbox"
-            checked={on}
-            onChange={(e) => accountsApi.setAccountPolicy({ require_second_factor: e.target.checked }).then((p) => (setOn(p.require_second_factor), setError(null)), (err) => setError(errorText(err)))}
-          />
+          <input type="checkbox" checked={policy.require_second_factor} onChange={(e) => void save({ ...policy, require_second_factor: e.target.checked })} />
           Require a second factor
+        </label>
+        <label className="flex items-center gap-2 text-[12.5px]">
+          A session unused for
+          <select
+            value={policy.idle_minutes ?? 0}
+            onChange={(e) => void save({ ...policy, idle_minutes: Number(e.target.value) || undefined })}
+            className="rounded-md border border-line-2 bg-canvas px-1.5 py-0.5 text-[12px]"
+          >
+            {[15, 30, 60, 240, 480, 1440, 0].map((m) => (
+              <option key={m} value={m}>
+                {m === 0 ? "a week" : m < 60 ? `${m} minutes` : m === 60 ? "an hour" : m < 1440 ? `${m / 60} hours` : "a day"}
+              </option>
+            ))}
+          </select>
+          ends
         </label>
         {error && <p className="text-[12px] text-danger">{error}</p>}
       </div>

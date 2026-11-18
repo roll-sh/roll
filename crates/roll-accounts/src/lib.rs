@@ -523,7 +523,9 @@ impl Accounts {
         })?;
         let Some(((id, user, level), (seen_at, expires_at), (handle, admin, disabled, code_owner))) = row else { return Ok(None) };
         let full = level == "full";
-        if disabled || expires_at <= now || (full && seen_at + SESSION_IDLE_MS <= now) {
+        // A company's idle timeout (its account policy), else roll's week.
+        let idle = self.account_policy()?.idle_ms();
+        if disabled || expires_at <= now || (full && seen_at + idle <= now) {
             return Ok(None);
         }
         if !full {

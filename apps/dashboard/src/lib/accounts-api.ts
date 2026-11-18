@@ -166,6 +166,13 @@ export interface ResetRequest {
   decided_at: number | null;
 }
 
+/** The company's account policy (docs/accounts.md): the whole of it goes back on a change. */
+export interface AccountPolicy {
+  require_second_factor: boolean;
+  /** A session unused this many minutes ends (15 to a week; absent: a week). */
+  idle_minutes?: number;
+}
+
 /** Allowed networks (docs/accounts.md): where people's sessions may be used from. */
 export interface NetworkPolicy {
   on: boolean;
@@ -246,8 +253,8 @@ export const accountsApi = {
   addPasskey: (id: string, name: string, credential: unknown) => call<Passkey>("POST", "/me/passkeys", { id, name, credential }),
   renamePasskey: (id: string, name: string) => call<Passkey>("PATCH", `/me/passkeys/${encodeURIComponent(id)}`, { name }),
   removePasskey: (id: string) => call<null>("DELETE", `/me/passkeys/${encodeURIComponent(id)}`),
-  accountPolicy: () => call<{ require_second_factor: boolean }>("GET", "/policy"),
-  setAccountPolicy: (p: { require_second_factor: boolean }) => call<{ require_second_factor: boolean }>("PUT", "/policy", p),
+  accountPolicy: () => call<AccountPolicy>("GET", "/policy"),
+  setAccountPolicy: (p: AccountPolicy) => call<AccountPolicy>("PUT", "/policy", p),
   networkPolicy: () => call<NetworkPolicy>("GET", "/network-policy"),
   setNetworkPolicy: (p: NetworkPolicy) => call<NetworkPolicy>("PUT", "/network-policy", p),
   requestReset: (reason: string) => call<{ id: string; state: string }>("POST", "/signin/reset-request", { reason }),
