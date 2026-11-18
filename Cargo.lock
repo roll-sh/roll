@@ -311,6 +311,7 @@ dependencies = [
  "roll-cluster",
  "roll-fetch",
  "roll-workspace",
+ "s3-image",
  "serde",
  "serde_json",
  "sha2 0.10.9",

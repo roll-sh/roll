@@ -37,6 +37,8 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
                 return r;
             }
             match apps.env_for_host(&host).await {
+                // Image optimization on the environment's own host (`/__roll/image`).
+                Some((service, env, None, _)) if req.uri().path() == crate::images::PATH => crate::images::serve(apps, service, env, req).await,
                 Some((service, env, deployment, port)) => {
                     let mut req = req;
                     if let Some(p) = port {

@@ -45,6 +45,7 @@ roll-cluster.workspace = true
 roll-auth.workspace = true
 roll-fetch.workspace = true
 roll-workspace.workspace = true
+s3-image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
