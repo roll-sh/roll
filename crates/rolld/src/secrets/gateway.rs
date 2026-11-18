@@ -1252,4 +1252,65 @@ mod tests {
         assert!(refused.contains("allow-list") && !refused.contains("fakeadminpw"), "{refused}");
         assert!(other_seen.lock().unwrap().is_empty());
     }
+
+    /// Against the real servers scripts/secrets-outside-check.sh starts (`ROLL_E2E_ES_URL`,
+    /// `ROLL_E2E_OS_URL`, `ROLL_E2E_CASSANDRA_URL`, `ROLL_E2E_SCYLLA_URL`, whichever are set, and
+    /// `ROLL_E2E_OUTSIDE_CA`), after their own tests made the role `reader`: through a gateway that
+    /// allows only their addresses, a dynamic login is made in the group, rotated, logs in with
+    /// the new password and not the old one, and is dropped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn real_outside_servers_through_the_gateway() {
+        let roots: Vec<String> = ["ROLL_E2E_ES_URL", "ROLL_E2E_OS_URL", "ROLL_E2E_CASSANDRA_URL", "ROLL_E2E_SCYLLA_URL"].iter().filter_map(|k| std::env::var(k).ok()).collect();
+        assert!(!roots.is_empty(), "no ROLL_E2E_*_URL set");
+        let ca = std::fs::read_to_string(std::env::var("ROLL_E2E_OUTSIDE_CA").expect("ROLL_E2E_OUTSIDE_CA")).unwrap();
+        let addr = |u: &str| {
+            let u = url::Url::parse(u).unwrap();
+            format!("{}:{}", u.host_str().unwrap(), u.port().unwrap())
+        };
+        let r = Rolld::start().await;
+        let (gw, token) = r.gateway("vpc").await;
+        let (_agent, lines) = r.up(&gw, &token, &roots.iter().map(|u| addr(u)).collect::<Vec<_>>());
+        r.linked(&gw).await;
+        let call = async |c: Call| {
+            let (hub, g) = (r.hub.clone(), gw.clone());
+            tokio::task::spawn_blocking(move || hub.call(&g, c)).await.unwrap()
+        };
+        let as_user = |url: &str, user: &str, password: &str| {
+            let mut u = url::Url::parse(url).unwrap();
+            u.set_username(user).unwrap();
+            u.set_password(Some(password)).unwrap();
+            u.set_path("");
+            u.to_string()
+        };
+        // Letters and digits (CQL's plain fallback takes nothing else), strong enough for OpenSearch.
+        let pw = || {
+            let mut b = [0u8; 18];
+            getrandom::fill(&mut b).unwrap();
+            b.iter().map(|x| format!("{x:02x}")).collect::<String>() + "Aa1"
+        };
+        for root in &roots {
+            let cql = root.starts_with("cassandra://");
+            // Cassandra 5 refuses a role's second password change within 5 s.
+            let settle = async || {
+                if cql {
+                    tokio::time::sleep(Duration::from_millis(5500)).await;
+                }
+            };
+            let check = |url: String| Call::DbCheck { url, ca: Some(ca.clone()), roles: vec![], group: None };
+            call(Call::DbCheck { url: root.clone(), ca: Some(ca.clone()), roles: vec![], group: Some("reader".into()) }).await.unwrap();
+            let (name, first, second) = (roll_secrets::names::new_id("roll_gw", 10).to_lowercase(), pw(), pw());
+            call(Call::DbCreateLogin { url: root.clone(), ca: Some(ca.clone()), name: name.clone(), password: first.clone(), group: "reader".into(), until: 0 }).await.unwrap();
+            call(check(as_user(root, &name, &first))).await.unwrap_or_else(|e| panic!("{root}: the new login logs in: {e}"));
+            settle().await;
+            call(Call::DbSetPassword { url: root.clone(), ca: Some(ca.clone()), role: name.clone(), password: second.clone() }).await.unwrap();
+            call(check(as_user(root, &name, &second))).await.unwrap_or_else(|e| panic!("{root}: the rotated password logs in: {e}"));
+            assert!(call(check(as_user(root, &name, &first))).await.is_err(), "the old password is refused");
+            settle().await;
+            call(Call::DbDropLogin { url: root.clone(), ca: Some(ca.clone()), name: name.clone() }).await.unwrap();
+            assert!(call(check(as_user(root, &name, &second))).await.is_err(), "a dropped login is refused");
+            let log = lines.lock().unwrap().join("\n");
+            assert!(log.contains(&format!("open {}", addr(root))), "the gateway dialed it: {log}");
+        }
+    }
 }

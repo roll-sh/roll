@@ -3,7 +3,7 @@
 # roll"): Elasticsearch, OpenSearch, Cassandra and ScyllaDB in Docker, each with authentication on
 # and TLS from a CA made here, then rolld's ignored tests for them (register, rotate, a dynamic
 # login with its group's grants, delete; for CQL, that tracing and ScyllaDB's audit log keep no
-# password roll sent). Containers are named roll-secrets-outside-check-… and
+# password roll sent), then the same servers through a gateway that allows only them. Containers are named roll-secrets-outside-check-… and
 # removed at the end; images are used as they are (pulled if missing, never removed here).
 #
 #   scripts/secrets-outside-check.sh [es] [os] [cassandra] [scylla]   (all four by default)
@@ -149,6 +149,9 @@ if want scylla; then
   TESTS+=(a_real_scylla)
 fi
 
+# Last, the same servers through a gateway (rolld's secrets::gateway; it uses the role `reader` the
+# tests above made).
+TESTS+=(real_outside_servers_through_the_gateway)
 for t in "${TESTS[@]}"; do
   echo "== $t"
   cargo test -q -p rolld --bin rolld "$t" -- --ignored --nocapture --test-threads 1
