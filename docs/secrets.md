@@ -3015,7 +3015,7 @@ inconsistencies are fixed in #264:
   chain written with each row, digests signed by roll's issuer key to the sinks, `audit verify`.
 - R9. **Secret requests** (building: `feature/roll-secrets-requests`): a link that asks someone outside
   roll for a value, sealed in their browser, landing as a change or a change request.
-- R10. **Honeytokens** (M): decoy `rlt_` tokens are roll-access's (`decoy: true`, on roll MCP's list);
+- R10. **Honeytokens** (M): decoy `rlt_` tokens are roll-access's (roll MCP's #270, `decoy: true`);
   database roles and IAM users that alert on use are this side's, once those land.
 - R11. **Moving in from 1Password, Bitwarden SM, Parameter Store, GCP, Azure and Akeyless** (S each).
 - R12. **A split deployment key** (building: `feature/roll-secrets-key-shares`; Shamir N of M,
