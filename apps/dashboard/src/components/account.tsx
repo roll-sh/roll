@@ -394,6 +394,18 @@ function EveryoneSecondFactor() {
           Require a second factor
         </label>
         <label className="flex items-center gap-2 text-[12.5px]">
+          Phishing-resistant sign-in (a passkey, or your SSO) for
+          <select
+            value={policy.phishing_resistant ?? ""}
+            onChange={(e) => void save({ ...policy, phishing_resistant: (e.target.value || undefined) as AccountPolicy["phishing_resistant"] })}
+            className="rounded-md border border-line-2 bg-canvas px-1.5 py-0.5 text-[12px]"
+          >
+            <option value="">nobody</option>
+            <option value="admins">admins</option>
+            <option value="everyone">everyone</option>
+          </select>
+        </label>
+        <label className="flex items-center gap-2 text-[12.5px]">
           A session unused for
           <select
             value={policy.idle_minutes ?? 0}

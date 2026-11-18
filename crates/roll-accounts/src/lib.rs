@@ -469,6 +469,10 @@ impl Accounts {
         if !db.has_column("sessions", "verified_at")? {
             db.add_column("sessions", "verified_at", "INTEGER")?;
         }
+        // When a session last used a passkey: phishing-resistant sign-in counts it.
+        if !db.has_column("sessions", "passkey_at")? {
+            db.add_column("sessions", "passkey_at", "INTEGER")?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;
@@ -565,7 +569,9 @@ impl Accounts {
     /// (a PIN or biometric) and holds the key, so it's both factors, as GitHub counts it.
     pub(crate) fn issue_passkey(&self, user: &str, user_agent: &str) -> Result<Issued> {
         self.sso_not_enforced(user)?;
-        self.issue_session(user, user_agent, Some("passkey"), true)
+        let issued = self.issue_session(user, user_agent, Some("passkey"), true)?;
+        self.mark_passkey(&issued.id)?;
+        Ok(issued)
     }
 
     fn issue_session(&self, user: &str, user_agent: &str, method: Option<&str>, both_factors: bool) -> Result<Issued> {
@@ -1055,11 +1061,9 @@ impl roll_auth::Sessions for Resolver {
         })
     }
 
-    fn second_factor_missing<'a>(&'a self, user: &'a str, session: &'a str) -> roll_auth::BoxFuture<'a, Result<bool, String>> {
+    fn missing<'a>(&'a self, user: &'a str, session: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::Missing>, String>> {
         let (accounts, user, session) = (self.0.clone(), user.to_string(), session.to_string());
-        Box::pin(async move {
-            tokio::task::spawn_blocking(move || accounts.second_factor_missing(&user, &session).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
-        })
+        Box::pin(async move { tokio::task::spawn_blocking(move || accounts.missing(&user, &session).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())? })
     }
 
     fn network_ok<'a>(&'a self, _user: &'a str, ip: Option<std::net::IpAddr>) -> roll_auth::BoxFuture<'a, Result<bool, String>> {

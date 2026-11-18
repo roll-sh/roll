@@ -1223,3 +1223,47 @@ async fn a_company_sets_an_idle_timeout() {
     db.write(|c| c.execute("UPDATE sessions SET seen_at = seen_at - 31 * 60000", ())).unwrap();
     assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
 }
+
+/// Phishing-resistant sign-in (docs/accounts.md): on for admins, an admin's session that hasn't
+/// used a passkey reaches only their account, and confirming it's them with one (or signing in
+/// with one) opens the rest; people who aren't admins are untouched until it's everyone's. An
+/// admin can't turn it on from a session that hasn't used one (it would lock them out).
+#[tokio::test]
+async fn a_company_requires_phishing_resistant_sign_in() {
+    let env = Env::new().await;
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@example.com", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let mut root = Browser::default();
+    env.email_sign_in(&mut root, "root@example.com", Some(&root_invite)).await;
+    let mut ada = Browser::default();
+    env.email_sign_in(&mut ada, "ada@example.com", Some(&env.invite("ada@example.com").await)).await;
+    let admins = json!({ "phishing_resistant": "admins" });
+
+    assert_eq!(env.call(&mut root, Method::PUT, "/v1/accounts/policy", Some(admins.clone())).await.status, StatusCode::CONFLICT, "not from an email-code session");
+    // The admin adds a passkey and confirms it's them with it.
+    let opts = env.call(&mut root, Method::POST, "/v1/accounts/me/passkeys/options", None).await.json;
+    let mut key = Authenticator::new(0x04 | 0x10);
+    assert_eq!(env.call(&mut root, Method::POST, "/v1/accounts/me/passkeys", Some(json!({ "id": opts["id"], "name": "Root's key", "credential": key.create(&opts) }))).await.status, StatusCode::CREATED);
+    let o = env.call(&mut root, Method::POST, "/v1/accounts/me/reauth/passkey/options", None).await.json;
+    let confirmed = env.call(&mut root, Method::POST, "/v1/accounts/me/reauth", Some(json!({ "id": o["id"], "credential": key.get(&o, WEB) }))).await;
+    assert_eq!(confirmed.status, StatusCode::OK, "{}", confirmed.json);
+    let set = env.call(&mut root, Method::PUT, "/v1/accounts/policy", Some(admins)).await;
+    assert_eq!((set.status, set.json["phishing_resistant"].as_str()), (StatusCode::OK, Some("admins")), "{}", set.json);
+    for b in [&mut root, &mut ada] {
+        assert_eq!(env.call(b, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::OK);
+    }
+
+    // The admin by email code elsewhere: only their account, until a passkey is used.
+    let mut laptop = Browser::default();
+    env.email_sign_in(&mut laptop, "root@example.com", None).await;
+    let refused = env.call(&mut laptop, Method::GET, "/v1/workspace/projects", None).await;
+    assert_eq!((refused.status, refused.json["code"].as_str()), (StatusCode::FORBIDDEN, Some("passkey_required")), "{}", refused.json);
+    assert_eq!(env.call(&mut laptop, Method::GET, "/v1/accounts/session", None).await.json["passkey_required"], true);
+    let mut signed = Browser::default();
+    let o = env.call(&mut signed, Method::POST, "/v1/accounts/signin/passkey/options", None).await.json;
+    assert_eq!(env.call(&mut signed, Method::POST, "/v1/accounts/signin/passkey", Some(json!({ "id": o["id"], "credential": key.get(&o, WEB) }))).await.status, StatusCode::OK);
+    assert_eq!(env.call(&mut signed, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::OK, "a passkey sign-in");
+
+    // Everyone's (the operator has no session to check): Ada too.
+    assert_eq!(env.operator(Method::PUT, "/v1/accounts/policy", json!({ "phishing_resistant": "everyone" })).await.status, StatusCode::OK);
+    assert_eq!(env.call(&mut ada, Method::GET, "/v1/workspace/projects", None).await.json["code"], "passkey_required");
+}
