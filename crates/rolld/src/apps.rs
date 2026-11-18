@@ -765,6 +765,11 @@ impl apps_control::integrations::Visitors for AccountsVisitors {
     fn may_open(&self, user: &str, _project: &str) -> bool {
         matches!(self.0.user(user), Ok(u) if !u.disabled && u.admin)
     }
+
+    /// The login is one of the person's live (unexpired, not signed out, not revoked) sessions.
+    fn session_live(&self, user: &str, session: &str) -> bool {
+        self.0.sessions_of(user, "").is_ok_and(|all| all.iter().any(|s| s.id == session))
+    }
 }
 
 #[cfg(test)]

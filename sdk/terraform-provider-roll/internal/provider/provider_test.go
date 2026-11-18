@@ -27,12 +27,76 @@ type fakeRolld struct {
 	identities map[string]map[string]any
 	syncs      map[string]map[string]any
 	tokens     map[string]map[string]any // roll-access's grants, kept when revoked
+	// Machine clients by id: {grant (an id in tokens), oidc | public_jwk}; and each rotate's body.
+	clients   map[string]map[string]any
+	rotations []map[string]any
 	// Dynamic credentials' leases a read with dynamic=true issued, and those revoked since.
 	issued, revoked []string
 	// What a project registers itself: cas, ssh-cas, transit, outside-databases.
 	regs map[string]map[string]map[string]any
 	// The admin URLs databases were registered with (never listed back).
 	adminURLs []string
+}
+
+// machineClients serves /v1/access/clients: made (a key or CI's identity) with a grant in tokens,
+// listed, rotated, revoked.
+func (f *fakeRolld) machineClients(r *http.Request, api string, write func(int, any)) {
+	rest := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/v1/access/clients"), "/")
+	id, action, _ := strings.Cut(rest, "/")
+	var b map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&b)
+	credential := func(c map[string]any) {
+		delete(c, "oidc")
+		delete(c, "public_jwk")
+		if o, ok := b["oidc"].(map[string]any); ok {
+			if o["audience"] == nil {
+				o["audience"] = api
+			}
+			c["oidc"] = o
+		}
+		if k := b["public_jwk"]; k != nil {
+			c["public_jwk"] = k
+		}
+	}
+	c := f.clients[id]
+	switch {
+	case r.Method == http.MethodPost && id == "":
+		if (b["oidc"] == nil) == (b["public_jwk"] == nil) {
+			write(400, map[string]string{"error": "one credential: public_jwk or oidc (Terraform never asks for a secret)"})
+			return
+		}
+		grant := map[string]any{"id": fmt.Sprintf("tok_%d", len(f.tokens)+1), "name": b["name"], "rules": b["rules"], "expires_at": b["expires_at"], "ip_allow": []any{}, "revoked_at": nil}
+		if b["ip_allow"] != nil {
+			grant["ip_allow"] = b["ip_allow"]
+		}
+		f.tokens[grant["id"].(string)] = grant
+		client := map[string]any{"grant": grant["id"]}
+		credential(client)
+		id = fmt.Sprintf("mcl_%d", len(f.clients)+1)
+		f.clients[id] = client
+		write(201, map[string]any{"client_id": id, "grant": grant, "token_endpoint": api + "/v1/access/oauth/token"})
+	case r.Method == http.MethodGet && id == "":
+		list := []any{}
+		for id, c := range f.clients {
+			var trusts any
+			if o, ok := c["oidc"].(map[string]any); ok {
+				trusts = map[string]any{"issuer": o["issuer"], "audience": o["audience"], "subject": o["subject"], "claims": o["claims"], "pinned_keys": nil}
+			}
+			list = append(list, map[string]any{"client_id": id, "signs_with_key": c["public_jwk"] != nil, "trusts": trusts, "last_sign_in": nil, "grant": f.tokens[c["grant"].(string)]})
+		}
+		write(200, list)
+	case c == nil:
+		write(404, map[string]string{"error": "machine client " + id})
+	case r.Method == http.MethodPost && action == "rotate":
+		f.rotations = append(f.rotations, b)
+		credential(c)
+		write(200, map[string]any{"grant": f.tokens[c["grant"].(string)]})
+	case r.Method == http.MethodDelete && action == "":
+		f.tokens[c["grant"].(string)]["revoked_at"] = 1
+		write(200, map[string]any{"grant": f.tokens[c["grant"].(string)]})
+	default:
+		write(404, map[string]string{"error": "no route"})
+	}
 }
 
 // grants serves roll-access's tokens: made with their rules, read, revoked.
@@ -50,6 +114,13 @@ func (f *fakeRolld) grants(r *http.Request, write func(int, any)) {
 		write(404, map[string]string{"error": "no token " + id})
 	case r.Method == http.MethodDelete:
 		f.tokens[id]["revoked_at"] = 1
+		write(200, f.tokens[id])
+	case r.Method == http.MethodPatch:
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		for k, v := range b {
+			f.tokens[id][k] = v
+		}
 		write(200, f.tokens[id])
 	default:
 		write(200, f.tokens[id])
@@ -142,6 +213,15 @@ func (f *fakeRolld) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasPrefix(r.URL.Path, "/v1/access/tokens") {
 		f.grants(r, write)
+		return
+	}
+	api := "http://" + r.Host
+	if strings.HasPrefix(r.URL.Path, "/v1/access/clients") {
+		f.machineClients(r, api, write)
+		return
+	}
+	if r.URL.Path == "/.well-known/oauth-authorization-server" {
+		write(200, map[string]any{"issuer": api, "token_endpoint": api + "/v1/access/oauth/token"})
 		return
 	}
 	for _, kind := range []string{"identities", "syncs", "cas", "ssh-cas", "transit", "outside-databases"} {
@@ -396,6 +476,121 @@ resource "roll_secret" "copy" {
 				},
 			),
 		}},
+	})
+}
+
+// A machine client for CI: made trusting GitHub Actions' identity, its rules changed in place on
+// its grant, its subject changed by a rotate (the client id stays), imported by its id, revoked.
+func TestMachineClientAsCode(t *testing.T) {
+	f := &fakeRolld{envs: map[string]*environment{}, keys: map[string]map[string]any{}, tokens: map[string]map[string]any{}, clients: map[string]map[string]any{}}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	// No subject: no credential at all, which the resource refuses (roll would make a secret).
+	config := func(actions, subject string) string {
+		oidc := ""
+		if subject != "" {
+			oidc = fmt.Sprintf(`
+  oidc {
+    issuer  = "https://token.actions.githubusercontent.com"
+    subject = %q
+    claims  = { repository_owner_id = "42" }
+  }`, subject)
+		}
+		return fmt.Sprintf(`
+provider "roll" {
+  api_url = %q
+  token   = "rlt_terraform"
+  project = "prj_a"
+}
+resource "roll_machine_client" "ci" {
+  name       = "web-ci"
+  expires_at = "2030-01-01T00:00:00Z"
+  rule {
+    product   = "apps"
+    resources = "*"
+    actions   = { %s }
+  }
+  rule {
+    product = "secrets"
+    resource { project = "prj_a" }
+    environments = ["production"]
+    actions      = { read = "allow" }
+  }%s
+}
+`, srv.URL, actions, oidc)
+	}
+	main, tag := "repo:acme/web:ref:refs/heads/main", "repo:acme/web:ref:refs/tags/*"
+	// What the fake holds: the client's grant and its oidc, and how many times it rotated.
+	held := func(check func(grant, oidc map[string]any, rotations int) error) resource.TestCheckFunc {
+		return func(*terraform.State) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			c := f.clients["mcl_1"]
+			if len(f.clients) != 1 || c == nil {
+				return fmt.Errorf("clients: %v", f.clients)
+			}
+			return check(f.tokens[c["grant"].(string)], c["oidc"].(map[string]any), len(f.rotations))
+		}
+	}
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){"roll": providerserver.NewProtocol6WithError(New("test")())},
+		Steps: []resource.TestStep{
+			{Config: config(`read = "allow"`, ""), ExpectError: regexp.MustCompile(`(?s)oidc.*public_jwk`)},
+			{
+				Config: config(`read = "allow", deploy = "allow"`, main),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("roll_machine_client.ci", "client_id", "mcl_1"),
+					resource.TestCheckResourceAttr("roll_machine_client.ci", "id", "mcl_1"),
+					resource.TestCheckResourceAttr("roll_machine_client.ci", "grant_id", "tok_1"),
+					resource.TestCheckResourceAttr("roll_machine_client.ci", "token_endpoint", srv.URL+"/v1/access/oauth/token"),
+					resource.TestCheckResourceAttr("roll_machine_client.ci", "oidc.audience", srv.URL),
+					held(func(grant, oidc map[string]any, _ int) error {
+						rules, _ := json.Marshal(grant["rules"])
+						want := `[{"actions":{"deploy":"allow","read":"allow"},"product":"apps","resources":"*"},{"actions":{"read":"allow"},"environments":["production"],"product":"secrets","resources":[{"project":"prj_a"}]}]`
+						if string(rules) != want || grant["expires_at"] != float64(1893456000000) || oidc["subject"] != main || fmt.Sprint(oidc["claims"]) != "map[repository_owner_id:42]" {
+							return fmt.Errorf("made %s, %v, %v", rules, grant, oidc)
+						}
+						return nil
+					}),
+				),
+			},
+			{
+				// Rules change in place on the grant: no new client, no rotate.
+				Config: config(`read = "allow", deploy = "allow", write = "ask"`, main),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("roll_machine_client.ci", "client_id", "mcl_1"),
+					held(func(grant, _ map[string]any, rotations int) error {
+						if rules := fmt.Sprint(grant["rules"]); !strings.Contains(rules, "write:ask") || rotations != 0 {
+							return fmt.Errorf("rules %s after %d rotations", rules, rotations)
+						}
+						return nil
+					}),
+				),
+			},
+			{
+				// A new subject is a new credential: rotated, the client id stays.
+				Config: config(`read = "allow", deploy = "allow", write = "ask"`, tag),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("roll_machine_client.ci", "client_id", "mcl_1"),
+					resource.TestCheckResourceAttr("roll_machine_client.ci", "oidc.subject", tag),
+					held(func(_, oidc map[string]any, rotations int) error {
+						if oidc["subject"] != tag || rotations != 1 {
+							return fmt.Errorf("oidc %v after %d rotations", oidc, rotations)
+						}
+						return nil
+					}),
+				),
+			},
+			{ResourceName: "roll_machine_client.ci", ImportState: true, ImportStateVerify: true},
+		},
+		CheckDestroy: func(*terraform.State) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if f.tokens["tok_1"]["revoked_at"] == nil {
+				return fmt.Errorf("the client wasn't revoked")
+			}
+			return nil
+		},
 	})
 }
 
