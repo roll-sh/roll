@@ -158,6 +158,15 @@ impl apps_control::integrations::GitHubApp for CodeGitHub {
     async fn deployment_status(&self, installation: u64, owner: &str, repo: &str, deployment: u64, state: &str, url: Option<&str>, description: &str) -> anyhow::Result<()> {
         Ok(self.0.github_deployment_status(installation, owner, repo, deployment, state, url, description).await?)
     }
+    async fn ci(&self, installation: u64, owner: &str, repo: &str, sha: &str) -> anyhow::Result<apps_control::integrations::Ci> {
+        use apps_control::integrations::Ci;
+        Ok(match self.0.github_ci(installation, owner, repo, sha).await? {
+            None => Ci::None,
+            Some(Ok(true)) => Ci::Passed,
+            Some(Ok(false)) => Ci::Pending,
+            Some(Err(which)) => Ci::Failed(which),
+        })
+    }
 }
 
 /// roll code as roll apps' source of trees and landings.
@@ -745,6 +754,16 @@ impl apps_control::integrations::Mailbox for AccountsMail {
 
     async fn send(&self, user: &str, subject: &str, text: &str) -> anyhow::Result<()> {
         self.0.mail_user(user, subject, text).await
+    }
+}
+
+/// Who may still open a sign-in-gated environment: an account that still signs in and may use
+/// roll apps, which rolld's gate gives admins today (a disabled or deleted one is a no at once).
+pub struct AccountsVisitors(pub Arc<roll_accounts::Accounts>);
+
+impl apps_control::integrations::Visitors for AccountsVisitors {
+    fn may_open(&self, user: &str, _project: &str) -> bool {
+        matches!(self.0.user(user), Ok(u) if !u.disabled && u.admin)
     }
 }
 

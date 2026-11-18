@@ -622,6 +622,18 @@ impl GitHub {
             .await
     }
 
+    /// A commit's check runs (`GET …/commits/{sha}/check-runs`, the first 100).
+    pub async fn commit_check_runs(&self, installation: u64, owner: &str, repo: &str, sha: &str) -> Result<Value> {
+        let path = repo_path(owner, repo, &format!("/commits/{}/check-runs?per_page=100", percent_encode(sha)));
+        self.get(Who::Installation(installation), &path).await
+    }
+
+    /// A commit's combined status (`GET …/commits/{sha}/status`: the latest of each context).
+    pub async fn commit_status(&self, installation: u64, owner: &str, repo: &str, sha: &str) -> Result<Value> {
+        let path = repo_path(owner, repo, &format!("/commits/{}/status?per_page=100", percent_encode(sha)));
+        self.get(Who::Installation(installation), &path).await
+    }
+
     // ── pull requests ──
 
     pub async fn pull_request(

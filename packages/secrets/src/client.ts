@@ -1,6 +1,6 @@
 import { SecretsError } from "./errors.js";
 import { openSealed } from "./seal.js";
-import type { ExportFormat, Lease, SealedValues, TransitPublicKey, Values } from "./types.js";
+import type { Deleted, ExportFormat, Lease, SealedValues, Totp, TransitPublicKey, Values, Written } from "./types.js";
 
 export type ClientOptions = {
   /** rolld's API, e.g. `https://api.roll.example` (no trailing `/v1`). */
@@ -54,19 +54,20 @@ const qs = (q: Record<string, string | undefined>) => {
 /**
  * A client for one project's secrets (docs/secrets.md, "Consumption"): its environments' values,
  * the runtime resolve (sealed to a key only this process holds, if asked), the digest that changes
- * when the values would, and a watch that follows it.
+ * when the values would, a watch that follows it, and one key's writes.
  */
 export function createClient(options: ClientOptions) {
   const base = options.api.replace(/\/+$/, "");
   const doFetch = options.fetch ?? fetch;
   let project: Promise<string> | null = options.project ? Promise.resolve(options.project) : null;
 
-  async function call(method: string, path: string, body?: unknown, raw = false): Promise<unknown> {
+  async function call(method: string, path: string, body?: unknown, raw = false, signal?: AbortSignal): Promise<unknown> {
     const res = await doFetch(`${base}${path}`, {
       method,
       headers: { authorization: `Bearer ${options.token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: "no-store",
+      signal,
     });
     const text = await res.text();
     if (!res.ok) {
@@ -91,24 +92,28 @@ export function createClient(options: ClientOptions) {
   }
   const env = async (e: string) => `/v1/secrets/projects/${enc(await projectId())}/environments/${enc(e)}`;
 
-  /** `fresh`: skip `cacheTtlMs` (a watch that saw the digest move reads anew). */
-  function values(environment: string, o?: { path?: string; format?: undefined; resolve?: boolean; fresh?: boolean }): Promise<Values>;
-  function values(environment: string, o: { path?: string; format: ExportFormat; resolve?: boolean }): Promise<string>;
-  async function values(environment: string, o: { path?: string; format?: ExportFormat; resolve?: boolean; fresh?: boolean } = {}): Promise<Values | string> {
-    const url = `${await env(environment)}/values${qs({ path: o.path, format: o.format, resolve: o.resolve === false ? "false" : undefined })}`;
+  /**
+   * `fresh`: skip `cacheTtlMs` (a watch that saw the digest move reads anew). `dynamic: false`:
+   * no dynamic credential is issued (for a reader that can't renew a lease): those keys are left
+   * out and named in `Values.dynamic`, and such an answer can be kept.
+   */
+  function values(environment: string, o?: { path?: string; format?: undefined; resolve?: boolean; dynamic?: boolean; fresh?: boolean }): Promise<Values>;
+  function values(environment: string, o: { path?: string; format: ExportFormat; resolve?: boolean; dynamic?: boolean }): Promise<string>;
+  async function values(environment: string, o: { path?: string; format?: ExportFormat; resolve?: boolean; dynamic?: boolean; fresh?: boolean } = {}): Promise<Values | string> {
+    const url = `${await env(environment)}/values${qs({ path: o.path, format: o.format, resolve: o.resolve === false ? "false" : undefined, dynamic: o.dynamic === false ? "false" : undefined })}`;
     if (!options.cacheTtlMs || o.format || o.fresh) {
       const v = (await call("GET", url, undefined, !!o.format)) as Values | string;
       // A fresh read is the newest answer: a kept one for the same folder goes.
       if (o.fresh) cache.delete(url);
       return v;
     }
-    return structuredClone(await cached(url, options.cacheTtlMs));
+    return structuredClone(await cached(url, options.cacheTtlMs, o.dynamic === false));
   }
 
   /** Values kept for `ttl` ms, then revalidated with their digest (a 304 keeps them). */
   const cache = new Map<string, { values: Values; etag: string | null; at: number }>();
   const now = options.now ?? Date.now;
-  async function cached(url: string, ttl: number): Promise<Values> {
+  async function cached(url: string, ttl: number, noDynamic: boolean): Promise<Values> {
     const hit = cache.get(url);
     if (hit && now() - hit.at < ttl) return hit.values;
     const sep = url.includes("?") ? "&" : "?";
@@ -133,11 +138,46 @@ export function createClient(options: ClientOptions) {
     }
     const v = JSON.parse(text) as Values;
     const etag = res.headers.get("etag")?.replace(/^W\//, "").replace(/"/g, "") ?? null;
-    // Never kept: dynamic credentials (they end with their lease) or a key that didn't resolve
-    // (the digest may not move when the link recovers).
-    if (v.dynamic.length || v.problems.length) cache.delete(url);
+    // Never kept: dynamic credentials (they end with their lease; with `dynamic=false` there are
+    // none, only their names) or a key that didn't resolve (the digest may not move when the link
+    // recovers).
+    if ((v.dynamic.length && !noDynamic) || v.problems.length) cache.delete(url);
     else cache.set(url, { values: v, etag, at: now() });
     return v;
+  }
+
+  const secret = async (environment: string, key: string, path?: string) => `${await env(environment)}/secrets/${enc(key)}${qs({ path })}`;
+
+  /**
+   * Sets `key` to `value` in `path`'s folder (the root by default), replacing a link the key had;
+   * `comment` and the change's `message` are optional. Answers the change and the key's new
+   * version; the same value again writes nothing (`change: null`). A protected environment, or a
+   * folder that needs approval, is a `SecretsError` with the code `approval_required` (open a
+   * change request instead). Errors never hold the value. Drops the cached reads.
+   */
+  async function set(environment: string, key: string, value: string, o: { path?: string; comment?: string; message?: string } = {}): Promise<Written> {
+    try {
+      return (await call("PUT", await secret(environment, key, o.path), { value, link: null, comment: o.comment, message: o.message })) as Written;
+    } finally {
+      cache.clear();
+    }
+  }
+
+  /**
+   * Deletes `key` from `path`'s folder. A key that isn't there (or only shows through a base or an
+   * import) is `{deleted: false}`, not an error; `approval_required` as for `set`. Drops the cached
+   * reads.
+   */
+  async function del(environment: string, key: string, o: { path?: string } = {}): Promise<Deleted> {
+    try {
+      const w = (await call("DELETE", await secret(environment, key, o.path))) as Written;
+      return { deleted: true, change: w.change };
+    } catch (e) {
+      if (e instanceof SecretsError && e.status === 404) return { deleted: false, change: null };
+      throw e;
+    } finally {
+      cache.clear();
+    }
   }
 
   function resolve(environment: string, o: { consumer: string; path?: string; sealTo?: undefined }): Promise<Values>;
@@ -146,8 +186,18 @@ export function createClient(options: ClientOptions) {
     return (await call("POST", `${await env(environment)}/resolve`, { consumer: o.consumer, path: o.path, seal_to: o.sealTo })) as Values | SealedValues;
   }
 
-  async function digest(environment: string, path?: string): Promise<string> {
-    return ((await call("GET", `${await env(environment)}/digest${qs({ path })}`)) as { digest: string }).digest;
+  /** A TOTP key's current code (docs/secrets.md, "TOTP keys"): needs reveal, audited without the code. */
+  async function totp(environment: string, key: string, o: { path?: string } = {}): Promise<Totp> {
+    return (await call("GET", `${await env(environment)}/secrets/${enc(key)}/totp${qs({ path: o.path })}`)) as Totp;
+  }
+
+  /**
+   * The folder's digest. With `since` and `waitSeconds` (at most 60), a long poll: it answers as
+   * soon as the digest differs from `since`, or with the same one when the wait runs out.
+   */
+  async function digest(environment: string, path?: string, o: { since?: string; waitSeconds?: number; signal?: AbortSignal } = {}): Promise<string> {
+    const wait = o.since && o.waitSeconds ? { since: o.since, wait: String(Math.min(25, Math.max(1, Math.round(o.waitSeconds)))) } : {};
+    return ((await call("GET", `${await env(environment)}/digest${qs({ path, ...wait })}`, undefined, false, o.signal)) as { digest: string }).digest;
   }
 
   async function renew(lease: string, ttlMinutes?: number): Promise<Lease> {
@@ -155,14 +205,17 @@ export function createClient(options: ClientOptions) {
   }
 
   /**
-   * Calls `onChange` with the values now, then polls the digest and calls it again whenever they
+   * Calls `onChange` with the values now, then follows the digest and calls it again whenever they
    * change, renewing the dynamic leases of the latest values every 10 minutes meanwhile (as
-   * `roll run --watch` does). Returns the function that stops it.
+   * `roll run --watch` does). It long-polls (a change arrives within a second or two); a server
+   * that answers at once is asked again every `intervalMs`. Returns the function that stops it.
    */
   function watch(environment: string, o: WatchOptions): () => void {
     const every = Math.max(1, o.intervalMs ?? 5000);
     const fail = o.onError ?? (() => {});
     let stopped = false;
+    // Stopping abandons a held long poll (nothing is called back after stop).
+    const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let leases: string[] = [];
     let last: string | null = null;
@@ -175,8 +228,13 @@ export function createClient(options: ClientOptions) {
     };
     const tick = async () => {
       if (stopped) return;
+      // How soon to ask again: at once after a held or changed answer, else `every`.
+      let next = every;
       try {
-        const now = await digest(environment, o.path);
+        const asked = Date.now();
+        const now = await digest(environment, o.path, last === null ? { signal: abort.signal } : { since: last, waitSeconds: 25, signal: abort.signal });
+        if (stopped) return;
+        if (last !== null && (now !== last || Date.now() - asked >= 1000)) next = 0;
         if (last === null || now !== last) {
           const before = last;
           last = now;
@@ -194,7 +252,7 @@ export function createClient(options: ClientOptions) {
       } catch (e) {
         fail(e);
       }
-      if (!stopped) timer = setTimeout(tick, every);
+      if (!stopped) timer = setTimeout(tick, next);
     };
     const renewing = setInterval(
       () => {
@@ -205,6 +263,7 @@ export function createClient(options: ClientOptions) {
     void tick();
     return () => {
       stopped = true;
+      abort.abort();
       clearTimeout(timer);
       clearInterval(renewing);
     };
@@ -234,7 +293,7 @@ export function createClient(options: ClientOptions) {
     return JSON.parse(new TextDecoder().decode(openSealed(r.sealed, secretKey, r.context))) as Record<string, string>;
   }
 
-  return { values, resolve, digest, renew, watch, open, transit, project: projectId };
+  return { values, set, delete: del, resolve, digest, totp, renew, watch, open, transit, project: projectId };
 }
 
 export type SecretsClient = ReturnType<typeof createClient>;

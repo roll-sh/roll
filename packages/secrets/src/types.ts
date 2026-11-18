@@ -97,6 +97,8 @@ export type Change = { seq: number; environment: string; path: string; message: 
 /** `what`: added | changed | deleted | comment | tags | link | rotated */
 export type Item = { key: string; path: string; type: SecretType; what: string[]; from_fp: string | null; to_fp: string | null };
 export type Written = { change: Change | null; secret: Secret | null; warnings: string[] };
+/** The client's `delete`: `deleted` is false when the key wasn't there. */
+export type Deleted = { deleted: boolean; change: Change | null };
 /** `change` is null when nothing changed. */
 /** `request`: the change request opened instead (a promotion into a protected environment). */
 export type Applied = { change: Change | null; items: Item[]; warnings: string[]; request?: ChangeRequest };
@@ -111,6 +113,8 @@ export type Problem = { key: string; problem: string };
 /** `digest` (with `?digest=1`): the folder's `…/digest`, taken just before this read (a watch compares from it). */
 /** `followed`: keys linked to a resource the ephemeral environment's preview branched, left out of `values`. */
 /** `plain`: of `linked`, keys whose link field isn't a credential (a host, a port): logs may show them; every other value is a secret. */
+/** `GET …/secrets/{key}/totp`: a TOTP key's code (a credential), valid until `expires_at` (ms: the end of its step). */
+export type Totp = { code: string; expires_at: number; period: number };
 export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld?: string[]; sensitive?: string[]; followed?: Followed[]; digest?: string };
 export type CellSource = "own" | "import" | "base";
 /** `misfit`: the typed-key rule the stored value breaks (shown only to whoever may reveal it). */
@@ -193,10 +197,13 @@ export type Token = {
 export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 /** `ciphertext`: base64url(nonce ‖ AES-256-GCM ciphertext) with `roll-share-v1` as associated data; `views` 1–10, `ttl_minutes` 5–10080. */
 export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number };
-export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email";
+export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email" | "totp";
 /** A key every standard environment must define in a folder; typed keys also say what its value must be. */
 /** `owner`: who supplies it (a person or team), named in health and the daily notice. */
-export type Required = { key: string; path: string; comment: string; type?: KeyType; pattern?: string; owner?: string };
+export type PasswordClass = "lower" | "upper" | "digit" | "symbol";
+/** What a key's values must be made of, and what generators make (`classes` defaults to letters and digits; `symbols` to `!#%&*+-=?^_~`). */
+export type PasswordPolicy = { length: number; classes?: PasswordClass[]; symbols?: string };
+export type Required = { key: string; path: string; comment: string; type?: KeyType; pattern?: string; owner?: string; password?: PasswordPolicy };
 /** A workload identity: CI jobs and clusters whose OIDC tokens match log in for a short-lived token. */
 export type Identity = {
   id: string;
@@ -224,12 +231,17 @@ export type Identity = {
 /** `jwks`: the issuer's keys (a JWKS document as text); then the issuer is never fetched. */
 export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string };
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
-export type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null };
+/** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
+export type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval };
+/** `by`: who approved it, in order (more than one when a policy asks for two people). */
+export type Approval = { id: string; by?: string[]; until?: number };
 /** `since`: rows at or after this time (ms); `before`: rows older than this id. */
 export type AuditFilter = { env?: string; key?: string; actor?: string; action?: string; before?: number; since?: number; limit?: number };
 export type AuditFormat = "csv" | "jsonl";
 /** An audit stream to a SIEM: signed batches of new rows, in order. */
-export type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
+/** `format`: how a batch goes (`roll` signed JSON; `splunk`, `datadog` and `bearer` carry a token that is never shown). */
+export type SinkFormat = "roll" | "splunk" | "datadog" | "bearer";
+export type Sink = { id: string; url: string; format: SinkFormat; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 export type Imported = Applied & { skipped: string[] };
 /** A local copy against a folder (`POST …/environments/{env}/diff`): names only. */
 export type FileDiff = { added: string[]; changed: string[]; same: string[]; missing: string[]; references: string[]; linked: string[] };
@@ -301,7 +313,13 @@ export type CloudAccount =
 export type NewCloudAccount = { name: string } & ({ cloud: "gcp"; audience: string; service_account: string } | { cloud: "azure"; tenant: string; client_id: string; scope?: string });
 /** A Postgres, MySQL, Redis or MongoDB server outside roll: two login roles that take turns (managed), a group dynamic logins join, or both; the admin URL stays sealed. */
 export type OutsideDatabase = { id: string; name: string; host: string; roles: string[]; group?: string; ca?: string; created_at: number; created_by: string };
+/** A GitHub App's installation; `repositories` and `permissions` are the most its tokens may reach. */
+export type GitHubApp = { id: string; name: string; app_id: number; installation_id: number; api_base: string; repositories: string[]; permissions: Record<string, string>; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
+/** A Kubernetes cluster whose service accounts get short-lived tokens per lease (dynamic `kubernetes` links); the admin token and the CA stay sealed. */
+export type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
+/** `token`: a service account token that may create tokens; `ca_pem`: the cluster's CA, when it isn't publicly trusted. */
+export type NewKubernetesCluster = { name: string; api_url: string; ca_pem?: string; token: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 
 /** A `roll-seal-v1` box (base64url fields): X25519 to the recipient, HKDF-SHA256, AES-256-GCM. */

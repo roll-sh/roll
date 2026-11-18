@@ -79,6 +79,10 @@ pub struct SearchArgs {
     /// cluster, one node at a time runs it.
     #[arg(long = "search-gc-interval", env = "ROLL_SEARCH_GC_INTERVAL", default_value_t = 3600)]
     pub search_gc_interval_s: u64,
+    /// Days a deleted cluster's storage is kept, so `POST /v1/search/clusters/{id}/restore`
+    /// can bring it back (billed as storage meanwhile); 0 deletes at once.
+    #[arg(long = "search-deleted-retention-days", env = "ROLL_SEARCH_DELETED_RETENTION_DAYS", default_value_t = 7)]
+    pub search_deleted_retention_days: u64,
     /// The name of every cluster's default snapshot repository, on roll's own object storage
     /// (empty: none).
     #[arg(long = "search-default-repository", env = "ROLL_SEARCH_DEFAULT_REPOSITORY", default_value = "found-snapshots")]
@@ -144,6 +148,7 @@ impl Search {
         cfg.history_retention = Duration::from_secs(args.search_history_s);
         cfg.test_features = args.search_test_features;
         cfg.gc_interval = (args.search_gc_interval_s > 0).then(|| Duration::from_secs(args.search_gc_interval_s));
+        cfg.deleted_retention = Duration::from_secs(args.search_deleted_retention_days.saturating_mul(86_400));
         cfg.default_repository = Some(args.search_default_repository.trim().to_string()).filter(|n| !n.is_empty());
         cfg.person_caps = search_control::store::Caps { clusters: args.search_max_clusters_per_person.into(), always_on: args.search_max_always_on_per_person.into() };
         if args.search_repository_allow_private {
