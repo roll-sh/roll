@@ -103,11 +103,43 @@ impl SyncTarget for FakeSync {
     }
 }
 
-/// Audit deliveries, kept instead of sent; and an OIDC issuer's keys, served.
+/// Audit deliveries, kept instead of sent; an OIDC issuer's keys, served; and STS, answering
+/// AWS identities' logins with the caller set in `sts`.
 #[derive(Default)]
-struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>);
+struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<FakeStsLogin>);
+
+/// STS as an AWS identity's login meets it: who signed (`None`: the signature doesn't match), and
+/// what was sent to it.
+#[derive(Default)]
+struct FakeStsLogin {
+    caller: Option<String>,
+    calls: Vec<StsSent>,
+}
+
+/// A request roll sent STS: the host, the headers and the body.
+type StsSent = (String, Vec<(String, String)>, String);
 
 impl roll_secrets::Deliver for Sent {
+    /// A recorded GetCallerIdentityResponse for the caller set, or STS's refusal.
+    fn sts(&self, host: &str, headers: &[(String, String)], body: &str, _: usize) -> roll_secrets::Result<(u16, Vec<u8>)> {
+        let mut sts = self.4.lock().unwrap();
+        sts.calls.push((host.to_string(), headers.to_vec(), body.to_string()));
+        let Some(arn) = sts.caller.clone() else {
+            return Ok((403, br#"<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><Error><Type>Sender</Type><Code>SignatureDoesNotMatch</Code><Message>The request signature we calculated does not match the signature you provided.</Message></Error><RequestId>4c8f1fbc-0000-4000-8000-000000000000</RequestId></ErrorResponse>"#.to_vec()));
+        };
+        let account = arn.split(':').nth(4).unwrap();
+        let answer = format!(r#"<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <GetCallerIdentityResult>
+    <Arn>{arn}</Arn>
+    <UserId>AROAEXAMPLEROLEID:session</UserId>
+    <Account>{account}</Account>
+  </GetCallerIdentityResult>
+  <ResponseMetadata>
+    <RequestId>01234567-89ab-cdef-0123-456789abcdef</RequestId>
+  </ResponseMetadata>
+</GetCallerIdentityResponse>"#);
+        Ok((200, answer.into_bytes()))
+    }
     fn check(&self, url: &str) -> roll_secrets::Result<()> {
         if url.starts_with("https://") { Ok(()) } else { Err(roll_secrets::Error::BadRequest("url is a public https:// URL".into())) }
     }
@@ -2625,6 +2657,91 @@ async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token()
     api.ok(Method::DELETE, &format!("/identities/{id}"), None).await;
     let (s, _) = api.req(Method::GET, "/environments/staging/values", None, Some(&token)).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+/// A signed GetCallerIdentity as roll's clients send one (STS checks the signature; roll checks the
+/// rest), dated `age` seconds ago, naming `server` in X-Roll-Server-ID.
+fn signed_caller_identity(url: &str, body: &str, server: Option<&str>, age: i64) -> Value {
+    let t = time::OffsetDateTime::now_utc() - time::Duration::seconds(age);
+    let date = format!("{:04}{:02}{:02}T{:02}{:02}{:02}Z", t.year(), u8::from(t.month()), t.day(), t.hour(), t.minute(), t.second());
+    let mut headers = json!({
+        "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+        "X-Amz-Date": date,
+        "X-Amz-Security-Token": "FwoGZXIvYXdzEXAMPLETOKEN",
+        "Authorization": format!("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/{}/us-east-1/sts/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-roll-server-id, Signature={}", &date[..8], "a".repeat(64)),
+    });
+    if let Some(s) = server {
+        headers["X-Roll-Server-ID"] = json!(s);
+    }
+    json!({ "method": "POST", "url": url, "headers": headers, "body": body })
+}
+
+#[tokio::test]
+async fn a_machine_on_aws_logs_in_with_its_iam_role_through_sts() {
+    let api = Api::new().await;
+    api.secrets.set_aws_server_id("https://roll.test/".into());
+    api.set("staging", "API_KEY", "staging-key").await;
+    api.set("production", "API_KEY", "prod-key").await;
+    let identity = |arn: &str| json!({ "name": "web", "kind": "aws", "arn": arn, "environments": ["staging"], "actions": ["read", "reveal"] });
+    // One role or user in one account: a wildcard anywhere but a session name is refused.
+    for open in ["arn:aws:iam::*:role/app", "arn:aws:iam::123456789012:role/*", "arn:aws:iam::123456789012:root"] {
+        assert_eq!(api.call(Method::POST, "/identities", Some(identity(open))).await.0, StatusCode::BAD_REQUEST, "{open}");
+    }
+    let i = api.ok(Method::POST, "/identities", Some(identity("arn:aws:iam::123456789012:role/app"))).await;
+    assert_eq!((i["kind"].as_str(), i["server_id"].as_str()), (Some("aws"), Some("https://roll.test")));
+    let id = i["id"].as_str().unwrap().to_string();
+    let sts = "https://sts.us-east-1.amazonaws.com/";
+    const BODY: &str = "Action=GetCallerIdentity&Version=2011-06-15";
+    let login = |aws: Value| api.call(Method::POST, "/v1/secrets/login", Some(json!({ "identity": id, "aws": aws })));
+    let answers = |arn: Option<&str>| api.sent.4.lock().unwrap().caller = arn.map(String::from);
+    let calls = || api.sent.4.lock().unwrap().calls.len();
+
+    // An instance profile's session is its role's.
+    answers(Some("arn:aws:sts::123456789012:assumed-role/app/i-0abcd1234efgh5678"));
+    let (s, l) = login(signed_caller_identity(sts, BODY, Some("https://roll.test"), 0)).await;
+    assert_eq!(s, StatusCode::OK, "{l}");
+    let token = l["token"].as_str().unwrap();
+    let (s, v) = api.req(Method::GET, "/environments/staging/values", None, Some(token)).await;
+    assert_eq!((s, v["values"]["API_KEY"].as_str()), (StatusCode::OK, Some("staging-key")));
+    assert_eq!(api.req(Method::GET, "/environments/production/values", None, Some(token)).await.0, StatusCode::FORBIDDEN);
+    // STS got the signed request as signed, at the URL roll rebuilt (its Host from that URL).
+    let (host, headers, body) = api.sent.4.lock().unwrap().calls[0].clone();
+    assert_eq!((host.as_str(), body.as_str()), ("sts.us-east-1.amazonaws.com", BODY));
+    let names: Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(names, ["authorization", "content-type", "x-amz-date", "x-amz-security-token", "x-roll-server-id"]);
+    let listed = api.ok(Method::GET, "/identities", None).await;
+    assert_eq!(listed[0]["last_subject"], "arn:aws:sts::123456789012:assumed-role/app/i-0abcd1234efgh5678");
+    let audit = api.ok(Method::GET, &format!("/audit?actor=identity:{id}"), None).await;
+    assert_eq!(audit[1]["action"], "identity.login");
+
+    // Another account's role of the same name, another role, a user: STS says who, roll refuses.
+    for other in ["arn:aws:sts::210987654321:assumed-role/app/i-0abcd1234efgh5678", "arn:aws:sts::123456789012:assumed-role/admin/i-0abcd1234efgh5678", "arn:aws:iam::123456789012:user/app"] {
+        answers(Some(other));
+        assert_eq!(login(signed_caller_identity(sts, BODY, Some("https://roll.test"), 0)).await.0, StatusCode::FORBIDDEN, "{other}");
+    }
+    // A signature STS doesn't accept.
+    answers(None);
+    assert_eq!(login(signed_caller_identity(sts, BODY, Some("https://roll.test"), 0)).await.0, StatusCode::UNAUTHORIZED);
+
+    // Refused before STS is contacted: a request for another server or none, an old one, another
+    // URL (only STS's, never one the client picks), another action.
+    answers(Some("arn:aws:sts::123456789012:assumed-role/app/i-0abcd1234efgh5678"));
+    let before = calls();
+    for (aws, want) in [
+        (signed_caller_identity(sts, BODY, None, 0), StatusCode::UNAUTHORIZED),
+        (signed_caller_identity(sts, BODY, Some("https://vault.example.com"), 0), StatusCode::UNAUTHORIZED),
+        (signed_caller_identity(sts, BODY, Some("https://roll.test"), 900), StatusCode::UNAUTHORIZED),
+        (signed_caller_identity("https://sts.amazonaws.com.attacker.example/", BODY, Some("https://roll.test"), 0), StatusCode::BAD_REQUEST),
+        (signed_caller_identity("http://169.254.169.254/latest/meta-data/", BODY, Some("https://roll.test"), 0), StatusCode::BAD_REQUEST),
+        (signed_caller_identity("https://sts.us-east-1.amazonaws.com/?Action=AssumeRole", BODY, Some("https://roll.test"), 0), StatusCode::BAD_REQUEST),
+        (signed_caller_identity(sts, "Action=AssumeRole&Version=2011-06-15", Some("https://roll.test"), 0), StatusCode::BAD_REQUEST),
+    ] {
+        let (s, e) = login(aws).await;
+        assert_eq!(s, want, "{e}");
+    }
+    assert_eq!(calls(), before, "nothing reached STS");
+    // An OIDC token for an AWS identity.
+    assert_eq!(api.call(Method::POST, "/v1/secrets/login", Some(json!({ "identity": id, "token": "a.b.c" }))).await.0, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

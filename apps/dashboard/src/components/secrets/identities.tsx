@@ -7,7 +7,9 @@ import { ago, button, card, Chip, dangerButton, ErrorNote, errorText, field, gho
 
 const GITHUB = "https://token.actions.githubusercontent.com";
 const GITLAB = "https://gitlab.com";
-type Provider = "github" | "gitlab" | "other";
+type Provider = "github" | "gitlab" | "aws" | "other";
+/** One role or user in one account; a `*` only ends a session name (the server checks it too). */
+const AWS_ARN = /^arn:aws(-cn|-us-gov)?:(iam::\d{12}:(role|user)\/([\w+=,.@-]+\/)*[\w+=,.@-]+|sts::\d{12}:assumed-role\/[\w+=,.@-]+\/[\w+=,.@-]*\*?)$/;
 
 /** What an identity takes, in a few words: `acme/web · refs/heads/main`. */
 function identitySummary(i: Pick<Identity, "issuer" | "subject" | "claims">): string {
@@ -16,9 +18,21 @@ function identitySummary(i: Pick<Identity, "issuer" | "subject" | "claims">): st
   return [repo ?? i.subject, ...claims].join(" · ");
 }
 
-/** The workflow lines a GitHub Actions job needs to log in as `id`. */
-function workflow(id: string, env: string): string {
-  return ["permissions: { id-token: write, contents: read }", `env: { ROLL_API_URL: ${ROLL_API}, ROLL_IDENTITY: ${id} }`, "steps:", `  - run: roll run --env ${env} -- ./deploy.sh`].join("\n");
+/** What a workload needs to log in as `i`: a GitHub Actions job's lines, or an AWS machine's environment. */
+function setup(i: Identity): string | null {
+  const env = i.environments?.[0] ?? "production";
+  if (i.issuer === GITHUB) return ["permissions: { id-token: write, contents: read }", `env: { ROLL_API_URL: ${ROLL_API}, ROLL_IDENTITY: ${i.id} }`, "steps:", `  - run: roll run --env ${env} -- ./deploy.sh`].join("\n");
+  if (i.kind !== "aws") return null;
+  // Signed requests name the server; only worth setting when the API's URL isn't that name.
+  const named = i.server_id && i.server_id !== ROLL_API.replace(/\/+$/, "") ? [`ROLL_AWS_SERVER_ID=${i.server_id}`] : [];
+  return [`ROLL_API_URL=${ROLL_API}`, `ROLL_IDENTITY=${i.id}`, ...named, `roll run --env ${env} -- ./server`].join("\n");
+}
+
+/** The sentence under a new identity: where it goes. */
+function readyText(i: Identity): string {
+  if (i.issuer === GITHUB) return " In the workflow:";
+  if (i.kind === "aws") return " On the machine (its instance profile, task role, IRSA or Pod Identity signs the login):";
+  return ` Set ROLL_IDENTITY=${i.id} and ROLL_OIDC_TOKEN (or ROLL_OIDC_TOKEN_FILE) in the workload.`;
 }
 
 /**
@@ -43,19 +57,19 @@ export function Identities() {
         </button>
       }
     >
-      <p className="mb-2 text-[11.5px] text-muted">CI jobs and clusters log in with their own OIDC token (GitHub Actions, GitLab, Kubernetes) and get a token for minutes: nothing to store or rotate.</p>
+      <p className="mb-2 text-[11.5px] text-muted">CI jobs, clusters and machines on AWS log in with their own OIDC token (GitHub Actions, GitLab, Kubernetes) or AWS role, and get a token for minutes: nothing to store or rotate.</p>
       {made && (
         <div className="fade-in mb-3 rounded-xl border border-accent/40 bg-panel p-3 shadow-card inset-shadow-highlight" role="status">
           <p className="text-[12.5px]">
-            <b className="font-medium">{made.name}</b> <span className="text-muted">is ready.{made.issuer === GITHUB ? " In the workflow:" : ` Set ROLL_IDENTITY=${made.id} and ROLL_OIDC_TOKEN (or ROLL_OIDC_TOKEN_FILE) in the workload.`}</span>
+            <b className="font-medium">{made.name}</b> <span className="text-muted">is ready.{readyText(made)}</span>
           </p>
-          {made.issuer === GITHUB && (
+          {setup(made) && (
             <div className="mt-2 flex items-start gap-2">
-              <pre className="min-w-0 flex-1 overflow-x-auto rounded-md border border-line-2 bg-panel-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed select-all">{workflow(made.id, made.environments?.[0] ?? "production")}</pre>
+              <pre className="min-w-0 flex-1 overflow-x-auto rounded-md border border-line-2 bg-panel-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed select-all">{setup(made)}</pre>
               <button
                 className={button}
                 onClick={() => {
-                  void navigator.clipboard?.writeText(workflow(made.id, made.environments?.[0] ?? "production"));
+                  void navigator.clipboard?.writeText(setup(made) ?? "");
                   setCopied(true);
                   setTimeout(() => setCopied(false), 1200);
                 }}
@@ -173,6 +187,7 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
   const [ttl, setTtl] = useState("15");
   const [ips, setIps] = useState("");
   const [jwks, setJwks] = useState("");
+  const [arn, setArn] = useState("");
   const [busy, setBusy] = useState(false);
   const ipList = ips.split(/[\s,]+/).filter(Boolean);
   const minutes = Number(ttl);
@@ -180,18 +195,21 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
   // Pinned keys: the issuer is only compared with iss (a cluster's own needn't be reachable).
   const keysOk = jwks.trim() === "" || jwksHasKeys(jwks);
   const otherOk = provider !== "other" || ((jwks.trim() ? issuer.trim() !== "" : issuer.trim().startsWith("https://")) && keysOk && subject.trim() !== "" && subject.trim() !== "*");
-  const ok = name.trim() !== "" && repoOk && otherOk && audience.trim() !== "" && picked.size > 0 && actions.size > 0 && Number.isInteger(minutes) && minutes >= 5 && minutes <= 60;
+  const arnOk = provider !== "aws" || AWS_ARN.test(arn.trim());
+  const ok = name.trim() !== "" && repoOk && otherOk && arnOk && (provider === "aws" || audience.trim() !== "") && picked.size > 0 && actions.size > 0 && Number.isInteger(minutes) && minutes >= 5 && minutes <= 60;
   const toggle = <T,>(set: Set<T>, v: T) => {
     const n = new Set(set);
     if (n.has(v)) n.delete(v);
     else n.add(v);
     return n;
   };
-  const shape = (): Pick<NewIdentity, "issuer" | "subject" | "claims" | "jwks"> => {
+  const shape = (): { kind: "aws"; arn: string } | { issuer: string; audience: string; subject: string; claims: Record<string, string>; jwks?: string } => {
+    if (provider === "aws") return { kind: "aws", arn: arn.trim() };
     const ref: Record<string, string> = branch.trim() ? { ref: `refs/heads/${branch.trim()}` } : {};
-    if (provider === "github") return { issuer: GITHUB, subject: `repo:${repo.trim()}:*`, claims: ref };
-    if (provider === "gitlab") return { issuer: GITLAB, subject: `project_path:${repo.trim()}:*`, claims: branch.trim() ? { ref: branch.trim() } : {} };
-    return { issuer: issuer.trim().replace(/\/+$/, ""), subject: subject.trim(), claims: {}, ...(jwks.trim() && { jwks: jwks.trim() }) };
+    const aud = audience.trim();
+    if (provider === "github") return { issuer: GITHUB, audience: aud, subject: `repo:${repo.trim()}:*`, claims: ref };
+    if (provider === "gitlab") return { issuer: GITLAB, audience: aud, subject: `project_path:${repo.trim()}:*`, claims: branch.trim() ? { ref: branch.trim() } : {} };
+    return { issuer: issuer.trim().replace(/\/+$/, ""), audience: aud, subject: subject.trim(), claims: {}, ...(jwks.trim() && { jwks: jwks.trim() }) };
   };
   return (
     <form
@@ -200,7 +218,7 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
         e.preventDefault();
         if (!ok) return;
         setBusy(true);
-        await onCreate({ name: name.trim(), audience: audience.trim(), ...shape(), environments: [...picked], actions: ACTIONS.filter((a) => actions.has(a)), ttl_minutes: minutes, ...(ipList.length && { allowed_ips: ipList }) });
+        await onCreate({ name: name.trim(), ...shape(), environments: [...picked], actions: ACTIONS.filter((a) => actions.has(a)), ttl_minutes: minutes, ...(ipList.length && { allowed_ips: ipList }) });
         setBusy(false);
       }}
       onKeyDown={(e) => e.key === "Escape" && onCancel()}
@@ -214,6 +232,9 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
           <Chip on={provider === "gitlab"} onClick={() => setProvider("gitlab")}>
             GitLab CI
           </Chip>
+          <Chip on={provider === "aws"} onClick={() => setProvider("aws")}>
+            AWS
+          </Chip>
           <Chip on={provider === "other"} onClick={() => setProvider("other")}>
             Other OIDC (Kubernetes…)
           </Chip>
@@ -224,7 +245,12 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
           <span className={label}>Name</span>
           <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="deploy" className={field} />
         </label>
-        {provider === "other" ? (
+        {provider === "aws" ? (
+          <label>
+            <span className={label}>Role or user ARN</span>
+            <input value={arn} onChange={(e) => setArn(e.target.value)} placeholder="arn:aws:iam::123456789012:role/web" className={`${field} font-mono`} aria-invalid={arn.trim() !== "" && !arnOk} />
+          </label>
+        ) : provider === "other" ? (
           <label>
             <span className={label}>Issuer (the token's iss)</span>
             <input value={issuer} onChange={(e) => setIssuer(e.target.value)} placeholder="https://oidc.eks.eu-west-1.amazonaws.com/id/…" className={`${field} font-mono`} />
@@ -235,7 +261,7 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
             <input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder={provider === "github" ? "acme/web" : "acme/platform/web"} className={`${field} font-mono`} aria-invalid={repo.trim() !== "" && !repoOk} />
           </label>
         )}
-        {provider === "other" ? (
+        {provider === "aws" ? null : provider === "other" ? (
           <label>
             <span className={label}>Subject (sub; * for any run)</span>
             <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="system:serviceaccount:prod:deployer" className={`${field} font-mono`} />
@@ -246,10 +272,17 @@ function NewIdentityForm({ envs, onCreate, onCancel }: { envs: string[]; onCreat
             <input value={branch} onChange={(e) => setBranch(e.target.value)} placeholder="main" className={`${field} font-mono`} />
           </label>
         )}
-        <label>
-          <span className={label}>Audience (aud)</span>
-          <input value={audience} onChange={(e) => setAudience(e.target.value)} className={`${field} font-mono`} />
-        </label>
+        {provider !== "aws" && (
+          <label>
+            <span className={label}>Audience (aud)</span>
+            <input value={audience} onChange={(e) => setAudience(e.target.value)} className={`${field} font-mono`} />
+          </label>
+        )}
+        {provider === "aws" && (
+          <p className="text-[11.5px] leading-snug text-muted sm:col-span-2">
+            Any session of the role logs in (an EC2 instance profile, an ECS task role, IRSA, Pod Identity). For some sessions only, use <span className="font-mono">arn:aws:sts::…:assumed-role/web/i-*</span>. The machine signs a GetCallerIdentity with its role, roll checks it with STS: nothing to store.
+          </p>
+        )}
         {provider === "other" && (
           <label className="sm:col-span-2">
             <span className={label}>Issuer&apos;s keys, for a cluster roll can&apos;t reach (optional; kubectl get --raw /openid/v1/jwks)</span>

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
+import hmac as _hmac
 import json
 import os
 import threading
@@ -24,7 +26,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-__all__ = ["Client", "Values", "Problem", "SecretsError", "login", "from_env", "generate_key", "public_key", "open_sealed"]
+__all__ = ["Client", "Values", "Problem", "SecretsError", "login", "login_aws", "aws_signed_request", "from_env", "generate_key", "public_key", "open_sealed"]
 
 
 class SecretsError(Exception):
@@ -315,10 +317,24 @@ def login(api: str, identity: str, oidc_token: str) -> Client:
     (docs/secrets.md, "Workload identities"): nothing long-lived in the workload's settings. The
     client logs in again with the same OIDC token before its roll token ends (``from_env`` reads a
     fresh OIDC token each time)."""
-    return _logged_in(api, identity, lambda: oidc_token)
+    return _logged_in(api, identity, lambda: {"token": oidc_token.strip()})
 
 
-def _logged_in(api: str, identity: str, source: Callable[[], str]) -> Client:
+def login_aws(api: str, identity: str, region: str = "", server_id: str = "") -> Client:
+    """Logs in as an AWS identity (docs/secrets.md, "AWS IAM") with the machine's own AWS credentials
+    (the standard chain, read again for each login): a GetCallerIdentity signed for ``region``
+    (empty: STS's global endpoint) naming ``server_id`` (empty: the API's URL), which roll sends to
+    STS."""
+    env = lambda k: (os.environ.get(k) or "").strip()  # noqa: E731
+    return _logged_in(api, identity, _aws_proof(api, region, server_id, env))
+
+
+def _aws_proof(api: str, region: str, server_id: str, env: Callable[[str], str]) -> Callable[[], Dict[str, Any]]:
+    server_id = server_id or api.rstrip("/")
+    return lambda: {"aws": aws_signed_request(_aws_credentials(env), region, server_id, time.time())}
+
+
+def _logged_in(api: str, identity: str, source: Callable[[], Dict[str, Any]]) -> Client:
     c = Client(api, "")
     c._login = _Relogin(identity, source)
     c._login.token(c, stale="")
@@ -329,7 +345,7 @@ class _Relogin:
     """Keeps a logged-in client's token fresh: a new login once less than a fifth of its life (at
     least a minute) is left, or when the server refuses it."""
 
-    def __init__(self, identity: str, source: Callable[[], str]):
+    def __init__(self, identity: str, source: Callable[[], Dict[str, Any]]):
         self.identity = identity
         self.source = source
         self.lock = threading.Lock()
@@ -343,7 +359,7 @@ class _Relogin:
             refused = stale == c.token
             if refused or ending:
                 try:
-                    r = Client(c.api, "", timeout=c.timeout)._send("", "POST", "/v1/secrets/login", {"identity": self.identity, "token": self.source().strip()})
+                    r = Client(c.api, "", timeout=c.timeout)._send("", "POST", "/v1/secrets/login", {"identity": self.identity, **self.source()})
                 except Exception:
                     # Renewing early that fails keeps the token it has until it really ends.
                     if refused or time.time() >= self.expires:
@@ -361,7 +377,9 @@ def from_env() -> Client:
     """A client as ``roll run`` makes one: ROLL_API_URL, then ROLL_TOKEN, or ROLL_IDENTITY with the
     workload's OIDC token from ROLL_OIDC_TOKEN, ROLL_OIDC_TOKEN_FILE (a Kubernetes projected token)
     or GitHub Actions (``permissions: id-token: write``; audience ROLL_OIDC_AUDIENCE, default the
-    API's URL). ROLL_PROJECT names the project when the token doesn't."""
+    API's URL); without one (or with ROLL_IDENTITY_KIND=aws), a GetCallerIdentity signed with the
+    machine's AWS credentials, naming ROLL_AWS_SERVER_ID (default the API's URL). ROLL_PROJECT names
+    the project when the token doesn't."""
     env = lambda k: (os.environ.get(k) or "").strip()  # noqa: E731
     api = env("ROLL_API_URL")
     if not api:
@@ -370,7 +388,15 @@ def from_env() -> Client:
         c = Client(api, env("ROLL_TOKEN"))
     elif env("ROLL_IDENTITY"):
         # The OIDC token is read again for each login (a projected token is replaced on disk).
-        c = _logged_in(api, env("ROLL_IDENTITY"), lambda: _oidc_token(api, env))
+        kind = env("ROLL_IDENTITY_KIND")
+        if kind not in ("", "aws", "oidc"):
+            raise SecretsError("ROLL_IDENTITY_KIND is aws or oidc, not " + kind, 400, "config")
+        oidc = any(env(k) for k in ("ROLL_OIDC_TOKEN", "ROLL_OIDC_TOKEN_FILE", "ACTIONS_ID_TOKEN_REQUEST_URL"))
+        if kind == "aws" or (kind == "" and not oidc):
+            source = _aws_proof(api, _aws_region(env), env("ROLL_AWS_SERVER_ID"), env)
+        else:
+            source = lambda: {"token": _oidc_token(api, env).strip()}  # noqa: E731
+        c = _logged_in(api, env("ROLL_IDENTITY"), source)
     else:
         raise SecretsError("set ROLL_TOKEN, or ROLL_IDENTITY for a workload identity", 400, "config")
     if env("ROLL_PROJECT"):
@@ -399,6 +425,176 @@ def _oidc_token(api: str, env: Callable[[str], str]) -> str:
     if not value:
         raise SecretsError("GitHub Actions didn't give its OIDC token (does the job have `permissions: id-token: write`?)", 502, "oidc")
     return value
+
+
+# An AWS identity's login (docs/secrets.md, "AWS IAM"): the machine's own AWS credentials sign an
+# sts:GetCallerIdentity that roll sends to STS, as Vault's AWS auth (IAM method) does. Credentials
+# come from the standard chain: the environment, the shared files' profile (static keys), a web
+# identity token (IRSA), the container endpoint (ECS task roles, EKS Pod Identity), then IMDSv2.
+
+_AWS_BODY = "Action=GetCallerIdentity&Version=2011-06-15"
+_AWS_CONTENT_TYPE = "application/x-www-form-urlencoded; charset=utf-8"
+
+
+def _sigv4(creds: Dict[str, str], region: str, service: str, method: str, path: str, query: str, headers: Dict[str, str], payload: str, amz_date: str) -> str:
+    """The Authorization header of a Signature Version 4 request: every header (lowercase names) is
+    signed, and ``query`` is already canonical."""
+    names = sorted(headers)
+    canonical = "".join(f"{k}:{headers[k].strip()}\n" for k in names)
+    signed = ";".join(names)
+    request = "\n".join([method, path, query, canonical, signed, hashlib.sha256(payload.encode()).hexdigest()])
+    day = amz_date[:8]
+    scope = f"{day}/{region}/{service}/aws4_request"
+    to_sign = "\n".join(["AWS4-HMAC-SHA256", amz_date, scope, hashlib.sha256(request.encode()).hexdigest()])
+    key = ("AWS4" + creds["secret"]).encode()
+    for part in (day, region, service, "aws4_request"):
+        key = _hmac.new(key, part.encode(), hashlib.sha256).digest()
+    signature = _hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
+    return f"AWS4-HMAC-SHA256 Credential={creds['key']}/{scope}, SignedHeaders={signed}, Signature={signature}"
+
+
+def _sts_endpoint(region: str) -> "tuple[str, str]":
+    if not region:
+        return "sts.amazonaws.com", "us-east-1"
+    if region.startswith("cn-"):
+        return f"sts.{region}.amazonaws.com.cn", region
+    return f"sts.{region}.amazonaws.com", region
+
+
+def aws_signed_request(creds: Dict[str, str], region: str, server_id: str, at: float) -> Dict[str, Any]:
+    """A signed GetCallerIdentity for roll to send on (``creds``: ``key``, ``secret``, ``token``),
+    naming ``server_id`` in X-Roll-Server-ID (signed, so it can't be replayed at another server)."""
+    host, signing_region = _sts_endpoint(region)
+    amz_date = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(at))
+    headers = {"content-type": _AWS_CONTENT_TYPE, "host": host, "x-amz-date": amz_date, "x-roll-server-id": server_id}
+    if creds.get("token"):
+        headers["x-amz-security-token"] = creds["token"]
+    auth = _sigv4(creds, signing_region, "sts", "POST", "/", "", headers, _AWS_BODY, amz_date)
+    return {"method": "POST", "url": f"https://{host}/", "headers": {**headers, "authorization": auth}, "body": _AWS_BODY}
+
+
+def _aws_file(env: Callable[[str], str], var: str, name: str) -> str:
+    return env(var) or os.path.join(os.path.expanduser("~"), ".aws", name)
+
+
+def _profile(env: Callable[[str], str]) -> str:
+    return env("AWS_PROFILE") or env("AWS_DEFAULT_PROFILE") or "default"
+
+
+def _config_section(env: Callable[[str], str]) -> str:
+    p = _profile(env)
+    return "default" if p == "default" else "profile " + p
+
+
+def _profile_value(path: str, section: str, key: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return ""
+    inside = False
+    for line in (l.strip() for l in lines):
+        if line.startswith("[") and line.endswith("]"):
+            inside = line[1:-1].strip() == section
+        elif inside and "=" in line and line.split("=", 1)[0].strip() == key:
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
+def _aws_region(env: Callable[[str], str]) -> str:
+    return env("AWS_REGION") or env("AWS_DEFAULT_REGION") or _profile_value(_aws_file(env, "AWS_CONFIG_FILE", "config"), _config_section(env), "region")
+
+
+def _xml_text(doc: str, tag: str) -> str:
+    start = doc.find(f"<{tag}>")
+    end = doc.find(f"</{tag}>", start)
+    return doc[start + len(tag) + 2:end].strip() if start >= 0 and end >= 0 else ""
+
+
+def _container_url_ok(url: str) -> bool:
+    import ipaddress
+
+    u = urllib.parse.urlsplit(url)
+    if u.scheme == "https":
+        return True
+    if u.scheme != "http" or not u.hostname:
+        return False
+    if u.hostname == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(u.hostname)
+    except ValueError:
+        return False
+    return ip.is_loopback or str(ip) in ("169.254.170.2", "169.254.170.23", "fd00:ec2::23")
+
+
+def _fetch(req: urllib.request.Request, what: str, timeout: float) -> bytes:
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            return res.read(64 << 10)
+    except urllib.error.HTTPError as e:
+        raise SecretsError(f"{what} answered {e.code}", 502, "aws") from None
+    except (urllib.error.URLError, OSError) as e:
+        raise SecretsError(f"can't reach {what}: {e}", 502, "aws") from None
+
+
+def _creds_json(body: bytes, what: str) -> Dict[str, str]:
+    try:
+        v = json.loads(body)
+    except ValueError:
+        v = {}
+    if not v.get("AccessKeyId") or not v.get("SecretAccessKey"):
+        raise SecretsError(f"{what} answered no credentials", 502, "aws")
+    return {"key": v["AccessKeyId"], "secret": v["SecretAccessKey"], "token": v.get("Token") or ""}
+
+
+def _aws_credentials(env: Callable[[str], str]) -> Dict[str, str]:
+    if env("AWS_ACCESS_KEY_ID") and env("AWS_SECRET_ACCESS_KEY"):
+        return {"key": env("AWS_ACCESS_KEY_ID"), "secret": env("AWS_SECRET_ACCESS_KEY"), "token": env("AWS_SESSION_TOKEN")}
+    shared, cfg, section = _aws_file(env, "AWS_SHARED_CREDENTIALS_FILE", "credentials"), _aws_file(env, "AWS_CONFIG_FILE", "config"), _config_section(env)
+    value = lambda k: _profile_value(shared, _profile(env), k) or _profile_value(cfg, section, k)  # noqa: E731
+    if value("aws_access_key_id") and value("aws_secret_access_key"):
+        return {"key": value("aws_access_key_id"), "secret": value("aws_secret_access_key"), "token": value("aws_session_token")}
+    if env("AWS_PROFILE") and not env("AWS_WEB_IDENTITY_TOKEN_FILE"):
+        raise SecretsError(f"AWS profile {_profile(env)} has no access keys: roll reads a profile's static keys (for SSO, `eval \"$(aws configure export-credentials --format env)\"` first)", 400, "config")
+    # IRSA: the pod's projected token for the role, exchanged with STS (unsigned).
+    if env("AWS_WEB_IDENTITY_TOKEN_FILE") and env("AWS_ROLE_ARN"):
+        with open(env("AWS_WEB_IDENTITY_TOKEN_FILE"), encoding="utf-8") as f:
+            token = f.read().strip()
+        host, _ = _sts_endpoint(_aws_region(env))
+        form = {"Action": "AssumeRoleWithWebIdentity", "Version": "2011-06-15", "RoleArn": env("AWS_ROLE_ARN"), "RoleSessionName": env("AWS_ROLE_SESSION_NAME") or f"roll-{int(time.time())}", "WebIdentityToken": token}
+        req = urllib.request.Request(f"https://{host}/", data=urllib.parse.urlencode(form).encode(), headers={"Content-Type": _AWS_CONTENT_TYPE}, method="POST")
+        doc = _fetch(req, "STS (the web identity)", 10).decode("utf-8", "replace")
+        creds = _xml_text(doc, "Credentials")
+        if not creds:
+            raise SecretsError("STS answered no credentials for the web identity", 502, "aws")
+        return {"key": _xml_text(creds, "AccessKeyId"), "secret": _xml_text(creds, "SecretAccessKey"), "token": _xml_text(creds, "SessionToken")}
+    # ECS task roles (relative) and EKS Pod Identity (full, with a token).
+    rel = env("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
+    endpoint = "http://169.254.170.2" + rel if rel else env("AWS_CONTAINER_CREDENTIALS_FULL_URI")
+    if endpoint:
+        if not _container_url_ok(endpoint):
+            raise SecretsError(f"the container credentials endpoint is local or https, not {endpoint}", 400, "config")
+        req = urllib.request.Request(endpoint)
+        auth = env("AWS_CONTAINER_AUTHORIZATION_TOKEN")
+        if env("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"):
+            with open(env("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE"), encoding="utf-8") as f:
+                auth = f.read().strip()
+        if auth:
+            req.add_header("Authorization", auth)
+        return _creds_json(_fetch(req, "the container credentials endpoint", 5), "the container endpoint")
+    if env("AWS_EC2_METADATA_DISABLED").lower() == "true":
+        raise SecretsError("no AWS credentials (and the instance metadata service is off)", 400, "config")
+    # IMDSv2: a session token, the instance profile's role, its credentials.
+    base = (env("AWS_EC2_METADATA_SERVICE_ENDPOINT") or "http://169.254.169.254").rstrip("/")
+    what = "the instance metadata service (no AWS credentials in the environment, a profile, a web identity or a container)"
+    token = _fetch(urllib.request.Request(base + "/latest/api/token", method="PUT", headers={"X-aws-ec2-metadata-token-ttl-seconds": "300"}), what, 2).decode()
+    path = base + "/latest/meta-data/iam/security-credentials/"
+    roles = _fetch(urllib.request.Request(path, headers={"X-aws-ec2-metadata-token": token}), what, 2).decode().split("\n")
+    if not roles[0].strip():
+        raise SecretsError("the instance has no instance profile", 400, "config")
+    body = _fetch(urllib.request.Request(path + urllib.parse.quote(roles[0].strip()), headers={"X-aws-ec2-metadata-token": token}), what, 2)
+    return _creds_json(body, "the instance metadata service")
 
 
 # roll-seal-v1 boxes, as crates/roll-secrets/src/crypto.rs makes them: X25519 between a fresh key

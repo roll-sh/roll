@@ -22,6 +22,7 @@ mod secret_refs;
 mod fallback;
 mod secrets;
 mod apps;
+mod aws_login;
 mod login;
 
 /// roll — serverless infrastructure.

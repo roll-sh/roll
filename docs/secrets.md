@@ -2363,6 +2363,87 @@ minutes.
   ```
 - When roll-access takes over tokens, identities mint its scoped tokens instead; the routes stay.
 
+### AWS IAM
+
+A machine on AWS logs in with its own IAM role, as Vault's AWS auth (its IAM method) and
+Infisical's AWS Auth do: an EC2 instance profile, an ECS task role, EKS's IRSA or Pod Identity, a
+Lambda's role, or an IAM user's keys. Nothing is turned on in the account (unlike
+`GetWebIdentityToken`, which needs IAM outbound federation), nothing is stored on the machine, and
+roll holds no AWS credential.
+
+- **How.** The client signs an `sts:GetCallerIdentity` request with the machine's credentials
+  (Signature Version 4) but doesn't send it. It sends the signed request to roll
+  (`POST /v1/secrets/login {identity, aws: {method, url, headers, body}}`), roll sends it to STS,
+  and STS answers who signed it. roll then mints the same `workload` token an OIDC login gets
+  (the identity's scope and addresses, its TTL, `identity.login` in the audit log with the ARN).
+- **An identity** (`POST …/identities {name, kind: "aws", arn, environments?, paths?, actions,
+  ttl_minutes?, allowed_ips?}`, `roll secrets identities add web --aws ARN`, or "AWS" in the
+  dashboard's New identity) takes one role or user in one account:
+  - `arn:aws:iam::123456789012:role/web`: any session of the role. That covers an instance
+    profile's, a task's or a pod's. A role's path may be given; it isn't compared, since role
+    names are unique in an account and a session's ARN drops the path.
+  - `arn:aws:sts::123456789012:assumed-role/web/i-*`: only sessions whose name starts with
+    `i-` (EC2 instances), or one session exactly without the `*`.
+  - `arn:aws:iam::123456789012:user/ci`: one IAM user.
+
+  A `*` anywhere but the end of a session name is refused, as is the account's root and a
+  federated user. The ARN already names its account, so there's no separate `bound_account`.
+- **What roll checks before it sends anything.** A client can't choose where roll sends the
+  request:
+  - The method is `POST`. The URL is exactly `https://sts.amazonaws.com/`,
+    `https://sts.<region>.amazonaws.com/`, `https://sts-fips.<region>.amazonaws.com/` or
+    `https://sts.cn-<…>.amazonaws.com.cn/`, with no path, query, port or user. roll rebuilds the
+    URL from that host and checks it again before it sends.
+  - The body is exactly `Action=GetCallerIdentity&Version=2011-06-15`.
+  - The signature covers `Host`, `X-Amz-Date` and `X-Roll-Server-ID`, and nothing roll doesn't
+    send. Only `Authorization`, `Content-Type`, `X-Amz-Date`, `X-Amz-Security-Token`,
+    `X-Amz-Content-SHA256` and `X-Roll-Server-ID` go on to STS.
+  - `X-Roll-Server-ID` names this server, as Vault's `iam_server_id_header_value` does. A request
+    signed for another roll or a Vault can't be replayed here. The ID is
+    `ROLL_SECRETS_AWS_SERVER_ID` on rolld, or else its public URL (`ROLL_CODE_PUBLIC_URL`).
+    Clients send `ROLL_AWS_SERVER_ID`, or else their `ROLL_API_URL`. A wrong one is refused with
+    the ID to use, and the identity shows it as `server_id`.
+  - `X-Amz-Date` is within 5 minutes of roll's clock.
+
+  roll then sends the request through rolld's guarded client: no redirects, a 15 s timeout, and
+  at most 64 KiB of the answer read. STS's refusal (a bad signature, an expired session) is a 401
+  with STS's error code. An assumed role's session ARN
+  (`arn:aws:sts::123456789012:assumed-role/web/i-0abc…`) matches its role.
+- **What's left of a signed request.** A signed request is a credential for its 5 minutes (STS
+  takes it for 15). Clients send it to roll over HTTPS only. Logins share OIDC's rate limits
+  (120 a minute per identity, 240 per client address).
+- **The clients.** With `ROLL_IDENTITY=idn_…`, `roll run`, `roll secrets …`, the Go client
+  (`FromEnv`, `LoginAWS`) and the Python client (`from_env`, `login_aws`) sign and log in by
+  themselves when there's no OIDC token (`ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE`, GitHub
+  Actions'). `ROLL_IDENTITY_KIND=aws` picks AWS anyway, for a GitHub Actions job with an AWS
+  identity. Credentials come from the AWS SDKs' chain:
+  1. `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`.
+  2. The `AWS_PROFILE` profile's static keys in `~/.aws/credentials` or `~/.aws/config`. For SSO,
+     run `eval "$(aws configure export-credentials --format env)"` first.
+  3. IRSA's `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, exchanged with
+     `AssumeRoleWithWebIdentity`.
+  4. The container endpoint: ECS's `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, or EKS Pod
+     Identity's `AWS_CONTAINER_CREDENTIALS_FULL_URI` with its token file.
+  5. IMDSv2 (unless `AWS_EC2_METADATA_DISABLED=true`).
+
+  The region (`AWS_REGION`, `AWS_DEFAULT_REGION`, the profile's `region`) picks STS's regional
+  endpoint; without one, the client uses the global endpoint. Each login reads the credentials
+  again, so rotated instance or task credentials just work. The TypeScript client has no
+  workload login, OIDC or AWS.
+
+  ```sh
+  roll secrets identities add web --aws arn:aws:iam::123456789012:role/web --for-env production
+  ```
+
+  ```sh
+  # on the instance, task or pod: no secret to store
+  ROLL_API_URL=https://roll.example.com ROLL_IDENTITY=idn_… roll run --env production -- ./server
+  ```
+
+- **Not yet checked against real AWS.** The signing matches AWS's published Signature Version 4
+  example in all three clients, and roll's checks and STS's recorded answers are tested. A login
+  through real STS from an instance, a task or a pod is still to be confirmed.
+
 ### Protected environments and approvals
 
 An environment can be **protected** with a policy: `{"approvals": 1, "approvers": [principal…],
@@ -2533,8 +2614,8 @@ isn't in the workspace is 404.
 | `GET /identities` | | `Identity[]` (admin) |
 | `POST /identities` | `NewIdentity` | 201 `Identity` |
 | `DELETE /identities/{id}` | | 204 (its tokens revoked) |
-| `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept |
-| `POST /v1/secrets/login` | `{identity, token}` | `{token, expires_at, project, identity}` (public) |
+| `PUT /identities/{id}/jwks` | `{jwks}` | `Identity` (admin; a person's): its pinned keys replaced, its id kept (400 for an `aws` one) |
+| `POST /v1/secrets/login` | `{identity, token}` or `{identity, aws: {method, url, headers, body}}` | `{token, expires_at, project, identity}` (public; `aws`: a signed `GetCallerIdentity`, "AWS IAM") |
 | `GET /audit?env=&key=&actor=&action=&before=&since=&limit=&format=` | | `AuditEntry[]` newest first, or CSV/JSONL with `format` |
 | `GET /required` | | `Required[]` |
 | `PUT /required` | `Required[]` | `Required[]` (replaces the list; `admin`) |
@@ -2688,8 +2769,8 @@ type Request = { id: string; environment: string; path: string; message: string;
 type FolderPolicy = { path: string; approvals: number; approvers: string[]; created_at: number; created_by: string };
 type LinkTarget = { kind: string; ref: string; name: string; fields: { field: string; label: string; modes: Link["mode"][]; secret: boolean; suggest: string; credential?: string }[] };
 type Lease = { id: string; environment: string; path: string; key: string; kind: "dynamic" | "retired"; link: Link | null; consumer: string; issued_at: number; expires_at: number; revoked_at: number | null };
-type Identity = { id: string; name: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null; pinned_keys?: number };
-type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string };
+type Identity = { id: string; name: string; kind: "oidc" | "aws"; arn?: string; server_id?: string; issuer: string; audience: string; subject: string; claims: Record<string, string>; environments: string[] | null; paths: string[] | null; actions: Action[]; ttl_minutes: number; created_at: number; created_by: string; last_used_at: number | null; last_subject: string | null; allowed_ips: string[] | null; pinned_keys?: number };
+type NewIdentity = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[] } & ({ kind?: "oidc"; issuer: string; audience: string; subject: string; claims?: Record<string, string>; jwks?: string } | { kind: "aws"; arn: string });
 type Token = { id: string; name: string; environments: string[] | null; paths: string[] | null; actions: Action[]; expires_at: number | null; created_at: number; created_by: string; last_used_at: number | null; prefix: string; allowed_ips: string[] | null };
 type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 type Action = "read" | "reveal" | "write" | "delete" | "admin";

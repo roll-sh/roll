@@ -117,6 +117,49 @@ class AWorkload(unittest.TestCase):
         self.assertEqual((seen[-1], Rolld.state["logins"]), ("three", 2))
 
 
+class Login(BaseHTTPRequestHandler):
+    """roll's login route: keeps what it was sent."""
+
+    sent: list = []
+
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        Login.sent.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+        body = json.dumps({"token": "rlt_aws", "project": "prj_shop", "expires_at": 0}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class AnAWSIdentity(unittest.TestCase):
+    def test_signs_as_aws_published_example(self):
+        # The IAM ListUsers request in AWS's "Examples of the complete Signature Version 4 signing
+        # process", with its documented example keys.
+        creds = {"key": "AKIDEXAMPLE", "secret": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"}
+        headers = {"content-type": "application/x-www-form-urlencoded; charset=utf-8", "host": "iam.amazonaws.com", "x-amz-date": "20150830T123600Z"}
+        auth = roll_secrets._sigv4(creds, "us-east-1", "iam", "GET", "/", "Action=ListUsers&Version=2010-05-08", headers, "", "20150830T123600Z")
+        self.assertEqual(auth, "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/iam/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7")
+
+    def test_logs_in_with_a_signed_get_caller_identity(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Login)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        api = f"http://127.0.0.1:{server.server_address[1]}"
+        env = {"ROLL_API_URL": api, "ROLL_IDENTITY": "idn_web", "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE", "AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "AWS_SESSION_TOKEN": "EXAMPLETOKEN", "AWS_REGION": "eu-west-1"}
+        unset = ["ROLL_TOKEN", "ROLL_OIDC_TOKEN", "ROLL_OIDC_TOKEN_FILE", "ACTIONS_ID_TOKEN_REQUEST_URL", "ROLL_IDENTITY_KIND", "ROLL_AWS_SERVER_ID"]
+        with mock.patch.dict(os.environ, {**env, **{k: "" for k in unset}}, clear=False):
+            c = roll_secrets.from_env()
+        self.assertEqual(c.token, "rlt_aws")
+        sent = Login.sent[-1]
+        aws = sent["aws"]
+        self.assertEqual((sent["identity"], aws["url"], aws["body"]), ("idn_web", "https://sts.eu-west-1.amazonaws.com/", "Action=GetCallerIdentity&Version=2011-06-15"))
+        self.assertEqual((aws["headers"]["x-roll-server-id"], aws["headers"]["x-amz-security-token"]), (api, "EXAMPLETOKEN"))
+        self.assertIn("/eu-west-1/sts/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-roll-server-id, ", aws["headers"]["authorization"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

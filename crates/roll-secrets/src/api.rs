@@ -862,7 +862,9 @@ async fn delete_identity(State(s): S, Who(c): Who, Path((project, id)): Path<(St
 struct LoginBody {
     identity: String,
     /// The workload's OIDC token (a JWT).
-    token: String,
+    token: Option<String>,
+    /// An AWS identity's signed `sts:GetCallerIdentity` (aws_identity.rs).
+    aws: Option<crate::aws_identity::SignedRequest>,
 }
 
 /// A workload's OIDC token for a short-lived scoped token (public: the token is the credential).
@@ -891,8 +893,13 @@ async fn delete_cloud_account(State(s): S, Who(c): Who, Path((project, id)): Pat
 
 async fn login(State(s): S, parts: Parts, b: Bytes) -> crate::Result<Response> {
     let l: LoginBody = body(&b)?;
+    let proof = match (l.token, l.aws) {
+        (Some(t), None) => crate::Proof::Oidc(t),
+        (None, Some(a)) => crate::Proof::Aws(a),
+        _ => return Err(Error::BadRequest("a login carries a token (OIDC) or aws (a signed GetCallerIdentity)".into())),
+    };
     let ip = s.client_ip(&parts);
-    Ok(secret_response(ok(blocking(s, move |s| s.login(&l.identity, &l.token, ip)).await?)))
+    Ok(secret_response(ok(blocking(s, move |s| s.login(&l.identity, proof, ip)).await?)))
 }
 
 async fn required(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

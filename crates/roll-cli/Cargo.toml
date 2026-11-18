@@ -18,6 +18,8 @@ roll-server-tests = ["dep:nosql-engine", "dep:nosql-server", "dep:nosql-storage"
 aes-gcm.workspace = true
 curve25519-dalek.workspace = true
 hkdf.workspace = true
+# An AWS identity's login: Signature Version 4 by hand (aws_login.rs).
+hmac.workspace = true
 sha2.workspace = true
 agent-host.workspace = true
 apps-build.workspace = true

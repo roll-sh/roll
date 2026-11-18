@@ -10,7 +10,8 @@ need `cryptography` (`pip install "roll-secrets[seal]"`).
 import roll_secrets
 
 # ROLL_API_URL and ROLL_TOKEN (a roll token with a rule on the project), or ROLL_IDENTITY for a
-# workload identity's login with the workload's own OIDC token: no long-lived token in CI.
+# workload identity's login with the workload's own OIDC token or, on AWS, its own IAM role (a
+# signed GetCallerIdentity; docs/secrets.md, "AWS IAM"): no long-lived token in CI.
 c = roll_secrets.from_env()
 v = c.values("production")                       # v.values["DATABASE_URL"]
 

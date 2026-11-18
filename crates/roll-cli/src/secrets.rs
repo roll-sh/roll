@@ -935,13 +935,19 @@ pub enum Identities {
     #[command(alias = "list")]
     Ls,
     /// Let workloads whose OIDC tokens match log in. For GitHub Actions:
-    /// `add deploy --github acme/web --claim ref=refs/heads/main --for-env production`.
+    /// `add deploy --github acme/web --claim ref=refs/heads/main --for-env production`. For
+    /// machines on AWS: `add web --aws arn:aws:iam::123456789012:role/web --for-env production`.
     Add {
         name: String,
         /// A GitHub repo (`owner/name`): GitHub Actions' issuer, and every workflow of the repo
         /// (narrow with `--claim`).
-        #[arg(long, conflicts_with_all = ["issuer", "subject"])]
+        #[arg(long, conflicts_with_all = ["issuer", "subject", "aws"])]
         github: Option<String>,
+        /// An AWS role or user (`arn:aws:iam::<account>:role/<name>`, any of its sessions; or
+        /// `arn:aws:sts::<account>:assumed-role/<role>/<session prefix>*`): machines log in with
+        /// a signed GetCallerIdentity, checked by STS.
+        #[arg(long, value_name = "ARN", conflicts_with_all = ["issuer", "subject", "audience", "claims", "jwks"])]
+        aws: Option<String>,
         /// The token's issuer (`iss`), for any other OIDC provider.
         #[arg(long, requires = "subject")]
         issuer: Option<String>,
@@ -2343,19 +2349,23 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     println!("{}  {:<16} {}{keys}  {}  envs {}  {}  {} min  used {used}", s(&i["id"]), s(&i["name"]), s(&i["issuer"]), s(&i["subject"]), list(&i["environments"]), list(&i["actions"]), i["ttl_minutes"]);
                 }
             }
-            Identities::Add { name, github, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks } => {
-                let (issuer, subject) = match (github, issuer, subject) {
-                    (Some(repo), _, _) => ("https://token.actions.githubusercontent.com".to_string(), format!("repo:{repo}:*")),
-                    (None, Some(i), Some(s)) => (i, s),
-                    _ => bail!("give --github owner/repo, or --issuer and --subject"),
-                };
-                let claims: serde_json::Map<String, Value> = claims
-                    .iter()
-                    .map(|c| c.split_once('=').map(|(k, v)| (k.trim().to_string(), json!(v.trim()))).with_context(|| format!("--claim {c}: name=value")))
-                    .collect::<anyhow::Result<_>>()?;
+            Identities::Add { name, github, aws, issuer, subject, audience, claims, envs, paths, actions, ttl_minutes, allow_ips, jwks } => {
                 let actions = if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
-                let audience = audience.unwrap_or_else(|| c.api.base.clone());
-                let mut body = json!({ "name": name, "issuer": issuer, "audience": audience, "subject": subject, "claims": claims, "actions": actions });
+                let mut body = if let Some(arn) = &aws {
+                    json!({ "name": name, "kind": "aws", "arn": arn, "actions": actions })
+                } else {
+                    let (issuer, subject) = match (github, issuer, subject) {
+                        (Some(repo), _, _) => ("https://token.actions.githubusercontent.com".to_string(), format!("repo:{repo}:*")),
+                        (None, Some(i), Some(s)) => (i, s),
+                        _ => bail!("give --github owner/repo, --aws ARN, or --issuer and --subject"),
+                    };
+                    let claims: serde_json::Map<String, Value> = claims
+                        .iter()
+                        .map(|c| c.split_once('=').map(|(k, v)| (k.trim().to_string(), json!(v.trim()))).with_context(|| format!("--claim {c}: name=value")))
+                        .collect::<anyhow::Result<_>>()?;
+                    let audience = audience.unwrap_or_else(|| c.api.base.clone());
+                    json!({ "name": name, "issuer": issuer, "audience": audience, "subject": subject, "claims": claims, "actions": actions })
+                };
                 if !envs.is_empty() {
                     body["environments"] = json!(envs);
                 }
@@ -2378,6 +2388,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 println!("{}", s(&v["id"]));
                 eprintln!("Created {}. In the workload: ROLL_IDENTITY={} (and ROLL_API_URL), then `roll run …` logs in by itself.", s(&v["name"]), s(&v["id"]));
+                // Signed requests name the server: only worth saying when it isn't the API's URL.
+                if let Some(id) = v["server_id"].as_str().filter(|id| *id != c.api.base.trim_end_matches('/')) {
+                    eprintln!("Its AWS logins name this server as {id}: set ROLL_AWS_SERVER_ID={id} too if the workload reaches roll at another URL.");
+                }
             }
             Identities::Keys { id, jwks } => {
                 let doc = if jwks == "-" { std::io::read_to_string(std::io::stdin().take(1 << 20))? } else { std::fs::read_to_string(&jwks).with_context(|| format!("reading {jwks}"))? };
@@ -2924,9 +2938,47 @@ fn write_private(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
 
 /// A workload identity's login (`ROLL_IDENTITY`): the workload's own OIDC token, from
 /// `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` (a Kubernetes projected token) or GitHub Actions
-/// (`permissions: id-token: write`; audience `ROLL_OIDC_AUDIENCE`, default `roll`), for a
-/// short-lived secrets token and when it ends (ms).
+/// (`permissions: id-token: write`; audience `ROLL_OIDC_AUDIENCE`, default `roll`); without one
+/// (or with `ROLL_IDENTITY_KIND=aws`), a `GetCallerIdentity` signed with the machine's AWS
+/// credentials (aws_login.rs). A short-lived secrets token and when it ends (ms).
 pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String, i64)> {
+    let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
+    let oidc_source = ["ROLL_OIDC_TOKEN", "ROLL_OIDC_TOKEN_FILE", "ACTIONS_ID_TOKEN_REQUEST_URL"].iter().any(|k| env(k).is_some());
+    let aws = match env("ROLL_IDENTITY_KIND").as_deref().map(str::trim) {
+        Some("aws") => true,
+        Some("oidc") => false,
+        Some(k) => anyhow::bail!("ROLL_IDENTITY_KIND is aws or oidc, not {k}"),
+        None => !oidc_source,
+    };
+    let proof = if aws {
+        let signed = crate::aws_login::login_request(&api.http, &api.base)
+            .await
+            .context("ROLL_IDENTITY is set but there's no OIDC token (ROLL_OIDC_TOKEN, ROLL_OIDC_TOKEN_FILE, GitHub Actions with `permissions: id-token: write`) and no AWS credentials to sign with")?;
+        json!({ "identity": identity, "aws": signed })
+    } else {
+        json!({ "identity": identity, "token": oidc_token(api).await?.trim() })
+    };
+    // A request of its own, without a token (never through `Api::call`, which renews logins).
+    let mut req = api.http.post(format!("{}/v1/secrets/login", api.base)).json(&proof);
+    for (k, v) in &api.headers {
+        req = req.header(k, v);
+    }
+    let res = req.send().await.with_context(|| format!("can't reach {} to log in", api.base))?;
+    let status = res.status();
+    let v: Value = res.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        // Kept as a status: a failing server (5xx) is no answer to `--fallback`, a refusal isn't.
+        let message = format!("logging in with the workload identity: {}", v["error"].as_str().map(String::from).unwrap_or_else(|| status.to_string()));
+        return Err(anyhow::Error::new(crate::ApiStatus { status, message }));
+    }
+    let token = v["token"].as_str().map(str::to_string).context("the login answered no token")?;
+    // Without it every request would log in again: an answer that isn't roll's.
+    let ends = v["expires_at"].as_i64().context("the login answered no expiry")?;
+    Ok((token, ends))
+}
+
+/// The workload's OIDC token: `ROLL_OIDC_TOKEN`, `ROLL_OIDC_TOKEN_FILE` or GitHub Actions'.
+async fn oidc_token(api: &Api) -> anyhow::Result<String> {
     let env = |k: &str| std::env::var(k).ok().filter(|t| !t.trim().is_empty());
     let oidc = if let Some(t) = env("ROLL_OIDC_TOKEN") {
         t
@@ -2943,23 +2995,7 @@ pub async fn identity_login(api: &Api, identity: &str) -> anyhow::Result<(String
     } else {
         anyhow::bail!("ROLL_IDENTITY is set but there's no OIDC token: set ROLL_OIDC_TOKEN or ROLL_OIDC_TOKEN_FILE, or run in GitHub Actions with `permissions: id-token: write`");
     };
-    // A request of its own, without a token (never through `Api::call`, which renews logins).
-    let mut req = api.http.post(format!("{}/v1/secrets/login", api.base)).json(&json!({ "identity": identity, "token": oidc.trim() }));
-    for (k, v) in &api.headers {
-        req = req.header(k, v);
-    }
-    let res = req.send().await.with_context(|| format!("can't reach {} to log in", api.base))?;
-    let status = res.status();
-    let v: Value = res.json().await.unwrap_or(Value::Null);
-    if !status.is_success() {
-        // Kept as a status: a failing server (5xx) is no answer to `--fallback`, a refusal isn't.
-        let message = format!("logging in with the workload identity: {}", v["error"].as_str().map(String::from).unwrap_or_else(|| status.to_string()));
-        return Err(anyhow::Error::new(crate::ApiStatus { status, message }));
-    }
-    let token = v["token"].as_str().map(str::to_string).context("the login answered no token")?;
-    // Without it every request would log in again: an answer that isn't roll's.
-    let ends = v["expires_at"].as_i64().context("the login answered no expiry")?;
-    Ok((token, ends))
+    Ok(oidc)
 }
 
 /// A workload identity's login that renews itself: a login lasts minutes, and `roll run --watch`
