@@ -2794,22 +2794,24 @@ followed key, renamed or not, gets its branch's value or a blank: the hole the t
 found is closed, checked live), #68 (AWS through roll's issuer; roles and users edited in
 place, 2026-11-17 as 3f829ca42) and #198 (plain link fields, 2026-11-17 as bc805ae41: roll apps
 hides every value from roll secrets in its logs unless it's plain connection detail).
-In pull requests to main, each green: #69–#73, #75–#77, #79 with #95,
+On main since 2026-11-18: #69–#73, #75–#77 and #147 (batch 1).
+In pull requests to main, each green: #79 with #95,
 #81 (read quotas across the fleet), #82 (metrics), #83 (scheduled backups), #86 (rotation
 windows), #87 (encryption keys by name), #88 (password policies), #92 (SaaS rotators, the
 credential checked at registration), #97 (search keys say `access: data`), #102 (Kubernetes
 service-account tokens), #105 (Java), #110 (.NET with `IConfiguration`), #113 (an AWS Lambda
 extension that logs in with the function's role), #117 (an Ansible collection), #132 (LDAP and
-Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (Pulumi), #147
-(approvals in the audit, on #114), #165 (Elasticsearch, OpenSearch, Cassandra and ScyllaDB
+Active Directory), #136 (Snowflake, on #132), #144 (ACME on project CAs), #145 (Pulumi), #165 (Elasticsearch, OpenSearch, Cassandra and ScyllaDB
 outside roll, on #132), #166 (a gateway into private networks, on #132), #169 (a credential
 guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on #136), #194
 (TOTP keys).
 
-0. **Land in batches**: batch 1 is ready (`~/.local/share/roll-secrets/batch-1.txt`; the combined
-   tree gated green on all 17 steps): round 1 #69, #70, #72, #76, #77 as they are, round 2 #71, #73,
-   #75 after it (they merged #70's head, which the squash queue can't take in one round), within
-   one lock turn; #147 after, if it merges clean. Then batch 2 the same way.
+0. **Land in batches**: batch 1 landed in one lock turn (2026-11-18): #69, #70, #72, #76, #77, then
+   #73, #75, #71 (main's tree afterwards was exactly the gated one), and #147 behind them, gated on
+   their tree. One flake on the way (a CI checkout hung past its 2-minute limit; #71 re-queued after a
+   re-simulation of the new order). Next: batch 2 the same way, prepared and gated before the next
+   lock turn: the green, unstacked ones first (#79 with #95, #81, #82, #83, #86, #87, #88, #92, #97,
+   #102, #105, #110, #113, #117, #169, #194, #212, #213), then the stacks on #132 and #136.
 0a. **The thirtieth independent security review** (2026-11-17, tonight's PRs #132, #136, #144,
    #165, #166, #173, #194, #227, #229, read cold): no high finding; ACME's JWS, nonces, EAB and
    tls-alpn-01 verifier, the gateway's allow-list, bounds and revocation, and every PR's network
