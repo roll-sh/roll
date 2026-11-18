@@ -3678,7 +3678,9 @@ cache waited out. Ranked now:
      it can't handle; the quick start has no install or login; the dashboard's commands dead-end.
      Then a committed `[secrets]` in `roll.toml` and an interactive `setup` (Doppler's `doppler.yaml`).
    - P5, CI snippets that work on a fresh runner (the GitHub Action, GitLab's `id_tokens`).
-   - P6, MCP tools for import, link, rollback, environments, secret requests and cut-off (roll MCP).
+   - P6, MCP tools: import, rollback (destructive), create environment, link and link targets in roll
+     MCP's #353 (rollback's `bypass` left out); secret requests and cut-off when batch 4 lands; the
+     development preset (reveal allowed in unprotected development for a person's CLI) next from them.
    - P7–P8, **tests** (building: `feature/roll-secrets-test-gaps`): `roll run --watch`, the six links
      to roll's own products, and a `pnpm test:secrets` gate.
    - P9–P11, apps' variables, search's connectors and previews' variables as `roll://` references
