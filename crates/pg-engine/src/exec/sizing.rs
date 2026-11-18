@@ -2828,6 +2828,8 @@ pub fn updated(
     let mut kept: Option<(Tid, bool, crate::txn::multixact::Xmax)> = None;
     // (Whether the UPDATE changes a key column, as its executor found: `note_update_keys`.)
     let noted = UPDATE_KEYS.with(|k| k.take());
+    // (The new version's index entries went in with it, under one hold of the lock.)
+    let mut entered = false;
     let (tid, hot, v, big) = loop {
         let assumed = known.is_none();
         let old_exts: Vec<Ext> = known.take().unwrap_or_default();
@@ -2864,7 +2866,8 @@ pub fn updated(
         // page and its own row: in the shard lock's group of such writers, which don't wait
         // for each other (`modellock`). Anything else, or when it finds no room after all,
         // under the exclusive lock below.
-        if hot_ok && t.toast == 0 && exts.is_empty() && old_exts.is_empty() {
+        let grouped = hot_ok && t.toast == 0 && exts.is_empty() && old_exts.is_empty();
+        if grouped {
             let rf = modellock::group(db.relfiles.of(t.oid));
             let Some(heap) = rf.heaps.get(&t.oid) else {
                 return Ok(None);
@@ -2882,6 +2885,10 @@ pub fn updated(
                 break (tid, true, v, big);
             }
         }
+        // An update that won't be heap-only (a key column changed, or no room on the page
+        // just now) has its new index entries ready before the lock, to go in with the new
+        // version: one exclusive hold, not two, each closing the group above.
+        let pre = if !hot_ok || grouped { Some(update_entries(t, indexes, old, new, ctx)?) } else { None };
         let big;
         let (tid, hot) = {
             let mut rf = db.relfiles.of(t.oid).write();
@@ -2889,6 +2896,7 @@ pub fn updated(
                 heaps,
                 btrees,
                 toast,
+                gist_logs,
                 ..
             } = &mut *rf;
             if !heaps.contains_key(&t.oid) {
@@ -2937,6 +2945,13 @@ pub fn updated(
                 r
             };
             let r = heap.update_cid(old_key, new_key, len, (xid, cid), hot_ok, &v, &mut replace);
+            if !r.1
+                && let Some((ents, gist)) = pre
+            {
+                index_insert(btrees, heap, &v, ents, r.0);
+                gist_log(gist_logs, &gist, r.0);
+                entered = true;
+            }
             heap.settle_left(&v);
             big = heap.versions() > max_versions();
             r
@@ -2957,21 +2972,8 @@ pub fn updated(
             txn.put_state(mx::xmax_key(t.oid, new_key, tid), Some(mx::encode_xmax(carried)))?;
         }
     }
-    if !hot {
-        let mut ents = Vec::new();
-        for bix in indexes {
-            if bix.index.method != "btree" {
-                continue;
-            }
-            let Some(nv) = index_values(bix, new, ctx)? else {
-                continue;
-            };
-            // (Columns unchanged: values unchanged, without computing the old ones.)
-            let unchanged = columns_unchanged(bix, old, new)
-                || index_values(bix, old, ctx)?.is_some_and(|ov| same_vals(&ov, &nv));
-            ents.push((bix.index.oid, index_key(t, bix, nv, new, ctx), unchanged));
-        }
-        let gist = gist_entries(t.oid, indexes, new, None, ctx)?;
+    if !hot && !entered {
+        let (ents, gist) = update_entries(t, indexes, old, new, ctx)?;
         let mut rf = db.relfiles.of(t.oid).write();
         let RelFiles { heaps, btrees, gist_logs, .. } = &mut *rf;
         if let Some(heap) = heaps.get(&t.oid) {
@@ -2985,6 +2987,31 @@ pub fn updated(
     Ok(Some((tid, hot)))
 }
 
+/// The btree entries (index, key, whether the index's values are unchanged) and GiST entries
+/// an update's new version `new` of `old` gets when it isn't heap-only.
+#[allow(clippy::type_complexity)]
+fn update_entries(
+    t: &Table,
+    indexes: &[BoundIndex],
+    old: &[Value],
+    new: &[Value],
+    ctx: &ExecCtx,
+) -> Result<(Vec<(u32, Key, bool)>, Vec<(u32, Option<crate::catalog::gistsim::Key>)>)> {
+    let mut ents = Vec::new();
+    for bix in indexes {
+        if bix.index.method != "btree" {
+            continue;
+        }
+        let Some(nv) = index_values(bix, new, ctx)? else {
+            continue;
+        };
+        // (Columns unchanged: values unchanged, without computing the old ones.)
+        let unchanged = columns_unchanged(bix, old, new)
+            || index_values(bix, old, ctx)?.is_some_and(|ov| same_vals(&ov, &nv));
+        ents.push((bix.index.oid, index_key(t, bix, nv, new, ctx), unchanged));
+    }
+    Ok((ents, gist_entries(t.oid, indexes, new, None, ctx)?))
+}
 
 thread_local! {
     /// Whether the row the next `updated` replaces had a key column changed, as the UPDATE's
