@@ -363,6 +363,12 @@ async fn people_see_only_their_own_clusters() {
     assert_eq!(e.call_as("alice", Method::DELETE, "/v1/search/clusters/bob-app", None).await.0, 404);
     assert_eq!(e.call_as("alice", Method::POST, "/v1/search/clusters", Some(json!({ "name": "stolen", "parent": "bob-app" }))).await.0, 404, "nor branch it");
     assert_eq!(e.call_as("bob", Method::GET, "/v1/search/clusters/bob-app", None).await.0, 200, "bob's is still there");
+    for path in ["/v1/search/clusters/bob-app/metrics", "/v1/search/clusters/bob-app/slowlog"] {
+        assert_eq!(e.call_as("alice", Method::GET, path, None).await.0, 404, "{path}");
+    }
+    // Which node holds a cluster is the operator's to know (`status.node`), not its owner's.
+    let (_, shown) = e.call_as("bob", Method::GET, "/v1/search/clusters/bob-app", None).await;
+    assert!(shown["status"].is_object() && shown["status"].get("node").is_none(), "{shown}");
 
     // Her own branch is hers; one an admin cuts from her cluster is hers too.
     let (s, dev) = e.call_as("alice", Method::POST, "/v1/search/clusters/alice-app/branches", Some(json!({ "name": "alice-dev" }))).await;
@@ -377,6 +383,62 @@ async fn people_see_only_their_own_clusters() {
     assert!(mine["storage"].is_null() && mine["cache"].is_null() && mine["loaded"].is_null() && mine["pricing"].is_object(), "{mine}");
     let (_, all) = e.call_as("admin", Method::GET, "/v1/search", None).await;
     assert!(all["storage"].is_string() && all["cache"].is_object(), "{all}");
+}
+
+/// Requests show up in a cluster's metrics by kind, before and after the metering pass moves
+/// them to the catalog; a search and a write past their index's slow log thresholds show up in
+/// its slow log as Elasticsearch formats them, the search's source cut at 1,000 characters and
+/// the document's at `index.indexing.slowlog.source`, with the client's `X-Opaque-Id` and never
+/// its credentials.
+#[tokio::test]
+async fn metrics_and_slow_logs() {
+    use reqwest::Method;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({ "name": "perf" })).await;
+    let (user, pw) = creds(&c);
+    let settings = json!({ "settings": {
+        "index.search.slowlog.threshold.query.warn": "0ms",
+        "index.indexing.slowlog.threshold.index.info": "0ms",
+        "index.indexing.slowlog.source": "5",
+    } });
+    assert_eq!(e.es(&user, &pw, Method::PUT, "/logs", Some(settings)).await.0, 200);
+    assert_eq!(e.es(&user, &pw, Method::PUT, "/logs/_doc/1?refresh=true", Some(json!({ "msg": "hello world" }))).await.0, 201);
+    let long = "x".repeat(2000);
+    let search = json!({ "query": { "match": { "msg": long } } });
+    let r = e.http.post(format!("{}/logs/_search", e.es)).basic_auth(&user, Some(&pw)).header("X-Opaque-Id", "trace-1").json(&search).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(e.es(&user, &pw, Method::GET, "/missing/_search", None).await.0, 404);
+
+    let totals = |m: &Value, kind: &str, what: &str| m["totals"][kind][what].as_u64().unwrap_or(0);
+    // Before the pass: what the node recorded and hasn't handed on.
+    let live = e.get("/v1/search/clusters/perf/metrics?range=1h").await;
+    assert_eq!((totals(&live, "search", "requests"), totals(&live, "search", "2xx"), totals(&live, "search", "4xx")), (2, 1, 1), "{live}");
+    assert_eq!((totals(&live, "index", "requests"), totals(&live, "other", "requests")), (1, 1), "{live}");
+    assert!(live["totals"]["search"]["p50_ms"].as_f64().is_some_and(|ms| ms > 0.0), "{live}");
+    assert!(!live["points"].as_array().unwrap().is_empty() && live["step_s"] == 60, "{live}");
+    // After it: the same numbers, from the catalog.
+    e.control.sample().await.unwrap();
+    let kept = e.get("/v1/search/clusters/perf/metrics?range=1h").await;
+    assert_eq!(kept["totals"]["all"]["requests"], live["totals"]["all"]["requests"], "{kept}");
+    for range in ["24h", "14d"] {
+        let m = e.get(&format!("/v1/search/clusters/perf/metrics?range={range}")).await;
+        assert_eq!(totals(&m, "all", "requests"), 4, "{range}: {m}");
+    }
+    assert_eq!(e.call(Method::GET, "/v1/search/clusters/perf/metrics?range=1y", None).await.0, 400);
+
+    let log = e.get("/v1/search/clusters/perf/slowlog").await;
+    let entries = log["entries"].as_array().unwrap();
+    let query = entries.iter().find(|x| x["log.logger"] == "index.search.slowlog.query").unwrap_or_else(|| panic!("{log}"));
+    let source = query["elasticsearch.slowlog.source"].as_str().unwrap();
+    assert!(source.chars().count() == 1000 && source.starts_with("{\"query\":{\"match\":{\"msg\":\"xxx"), "{query}");
+    assert_eq!((query["log.level"].as_str(), query["elasticsearch.slowlog.id"].as_str()), (Some("WARN"), Some("trace-1")), "{query}");
+    assert_eq!((query["elasticsearch.slowlog.message"].as_str(), query["elasticsearch.slowlog.total_hits"].as_str()), (Some("[logs][0]"), Some("0 hits")), "{query}");
+    let write = entries.iter().find(|x| x["log.logger"] == "index.indexing.slowlog.index").unwrap_or_else(|| panic!("{log}"));
+    assert_eq!((write["log.level"].as_str(), write["elasticsearch.slowlog.id"].as_str(), write["elasticsearch.slowlog.source"].as_str()), (Some("INFO"), Some("1"), Some("{\"msg")), "{write}");
+    let text = log.to_string();
+    assert!(!text.contains(&pw) && !text.to_ascii_lowercase().contains("authorization"), "no credential in a slow log");
+    // Moved to the catalog by the pass above: still there, newest first.
+    assert_eq!(entries.first().map(|x| &x["log.logger"]), Some(&json!("index.search.slowlog.query")));
 }
 
 /// A person's clusters and always-on clusters are capped (`--search-max-*-per-person`); branches

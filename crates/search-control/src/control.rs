@@ -383,6 +383,50 @@ pub struct Usage {
     pub cost: Cost,
 }
 
+/// A metrics range: which ring it reads (`res`), the step of its points and how many.
+struct MetricsRange {
+    res: i64,
+    step: i64,
+    points: i64,
+}
+
+impl MetricsRange {
+    fn parse(range: &str) -> Option<MetricsRange> {
+        match range {
+            // A minute a point.
+            "1h" => Some(MetricsRange { res: 60, step: 60, points: 60 }),
+            // 15 minutes a point, from the minute ring.
+            "24h" => Some(MetricsRange { res: 60, step: 900, points: 96 }),
+            // 2 hours a point, from the hour ring.
+            "14d" => Some(MetricsRange { res: 3600, step: 7200, points: 168 }),
+            _ => None,
+        }
+    }
+}
+
+/// One kind's (or every kind's) requests over `seconds`, as the metrics route answers them.
+fn summary_json(k: &search_server::metrics::KindStats, seconds: i64) -> Value {
+    let ms = |q: f64| k.latency.quantile(q).map(|us| (us / 1000.0 * 1000.0).round() / 1000.0);
+    json!({
+        "requests": k.requests(),
+        "rate": k.requests() as f64 / seconds.max(1) as f64,
+        "2xx": k.ok,
+        "4xx": k.client_errors,
+        "5xx": k.server_errors,
+        "rejected": k.rejected,
+        "p50_ms": ms(0.5),
+        "p95_ms": ms(0.95),
+        "p99_ms": ms(0.99),
+    })
+}
+
+fn point_json(at: i64, s: &search_server::metrics::Stats, seconds: i64) -> Value {
+    let mut v = json!({ "at": at, "all": summary_json(&s.all(), seconds) });
+    for k in search_server::metrics::KINDS {
+        v[k.name()] = summary_json(s.kind(k), seconds);
+    }
+    v
+}
 
 pub struct Control {
     pub cfg: SearchConfig,
@@ -1811,6 +1855,12 @@ impl Control {
         for (name, n) in self.node.take_request_counts() {
             self.meter.count_requests(&name, n.min(i64::MAX as u64) as i64);
         }
+        for (name, o) in self.node.take_observations() {
+            // Lost if the catalog can't take them now: they are a picture, not a bill.
+            if let Err(e) = self.meter.observe(&name, o).await {
+                tracing::warn!(cluster = name, error = %e, "storing search metrics failed");
+            }
+        }
         let at = now_ms();
         for (name, forced) in self.meter.sample(at).await? {
             let due = forced || self.refreshed.lock().get(&name).is_none_or(|t| at - t >= self.cfg.stats_interval.as_millis() as i64);
@@ -1823,6 +1873,66 @@ impl Control {
             }
         }
         Ok(())
+    }
+
+    /// Request metrics of a cluster over `range` (`1h`, `24h` or `14d`): its buckets in the
+    /// catalog plus what this node recorded since the last metering pass, in points of the
+    /// range's step (only points with requests), and totals. See `docs/search/architecture.md`,
+    /// "Observability".
+    pub async fn metrics(&self, id: &str, range: &str) -> Result<Value> {
+        let c = self.get(id).await?;
+        let Some(r) = MetricsRange::parse(range) else {
+            return Err(ControlError::Invalid(format!("range must be 1h, 24h or 14d, not {range}")));
+        };
+        let now = now();
+        let to = now - now.rem_euclid(r.step);
+        let from = to - (r.points - 1) * r.step;
+        let mut buckets: std::collections::BTreeMap<i64, search_server::metrics::Stats> = std::collections::BTreeMap::new();
+        let mut add = |at: i64, s: &search_server::metrics::Stats| {
+            if at >= from {
+                buckets.entry(at - at.rem_euclid(r.step)).or_default().merge(s);
+            }
+        };
+        for (at, s) in self.store.metrics_since(&c.id, r.res, from).await? {
+            add(at, &s);
+        }
+        // Not flushed yet: what the cluster's owner (here) recorded since the last pass.
+        for (minute, s) in self.node.peek_observations(&c.name).minutes {
+            add(minute.min(i64::MAX as u64 / 60) as i64 * 60, &s);
+        }
+        let mut total = search_server::metrics::Stats::default();
+        let points: Vec<Value> = buckets
+            .iter()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(at, s)| {
+                total.merge(s);
+                point_json(*at, s, r.step)
+            })
+            .collect();
+        Ok(json!({
+            "range": range,
+            "step_s": r.step,
+            "from": from,
+            "to": to + r.step,
+            "points": points,
+            "totals": point_json(from, &total, r.points * r.step),
+        }))
+    }
+
+    /// A cluster's slow log, newest first: the catalog's entries and those this node hasn't
+    /// handed on yet, at most [`search_es::slowlog::MAX_ENTRIES`].
+    pub async fn slowlog(&self, id: &str) -> Result<Value> {
+        let c = self.get(id).await?;
+        let mut entries: Vec<Value> = self.node.peek_observations(&c.name).slow.iter().rev().map(search_es::slowlog::Entry::to_json).collect();
+        for row in self.store.slowlog(&c.id).await? {
+            if entries.len() >= search_es::slowlog::MAX_ENTRIES {
+                break;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(&row) {
+                entries.push(v);
+            }
+        }
+        Ok(json!({ "entries": entries, "max_entries": search_es::slowlog::MAX_ENTRIES }))
     }
 
     /// Re-reads a cluster's docs and stored bytes from its commit points.

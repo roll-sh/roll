@@ -132,6 +132,12 @@ async fn a_cluster_runs_on_its_owner_and_moves_on_a_drain() {
     // The next request loads it again, under a newer epoch, with everything in it.
     let (s, v) = call(&http, reqwest::Method::GET, format!("{}/items/_count", other.rest), auth, None).await;
     assert_eq!((s, v["count"].as_i64()), (200, Some(4)), "{v}");
+    // Its request metrics followed it: each node hands what it recorded to the shared catalog.
+    a.control.sample().await.unwrap();
+    b.control.sample().await.unwrap();
+    let (s, m) = call(&http, reqwest::Method::GET, format!("{}/v1/search/clusters/shop/metrics?range=1h", owner.api), None, None).await;
+    assert_eq!((s, m["totals"]["index"]["requests"].as_u64()), (200, Some(4)), "{m}");
+    assert!(m["totals"]["search"]["requests"].as_u64().unwrap_or(0) >= 3, "{m}");
 }
 
 /// Every cluster on the fleet has roll's default repository: a snapshot lifecycle policy takes

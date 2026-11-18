@@ -1682,6 +1682,8 @@ contexts of x-pack's version allowlist), `EsObj::Version`, `contexts::version_al
 | GET    | `/v1/search/clusters/{id}/indices`               | indices with docs, size, health |
 | POST   | `/v1/search/clusters/{id}/request`               | run one REST request (dashboard console) |
 | GET    | `/v1/search/clusters/{id}/usage`                 | metering, cost vs Elastic Cloud / Amazon OpenSearch Service |
+| GET    | `/v1/search/clusters/{id}/metrics`               | request rate, latency percentiles, errors and rejections by kind (`?range=1h\|24h\|14d`) |
+| GET    | `/v1/search/clusters/{id}/slowlog`               | the search and indexing slow logs, newest first (at most 500) |
 
 Errors follow the other control planes: `{"error": "..."}` with 400/404/409/500, plus 413 when a
 console request exceeds what the cluster's `max_body_mb` allows (`api::console_limit`: twice the

@@ -29,11 +29,12 @@ import { InferenceTab } from "./inference";
 import { ApiKeys } from "./api-keys";
 import { SearchConsole } from "./console";
 import { IndexBrowser } from "./index-browser";
+import { PerformanceTab } from "./performance";
 import { Playground } from "./playground";
 import { RelevanceTab } from "./relevance";
 import { CredentialsOnce, SearchStateDot, settingsOf, SettingsFields, stateLabel, useAction, useSearchClusters, type Run } from "./shared";
 
-const TABS = ["overview", "indices", "console", "playground", "analyze", "relevance", "inference", "branches", "usage", "settings"] as const;
+const TABS = ["overview", "indices", "console", "playground", "analyze", "relevance", "inference", "branches", "performance", "usage", "settings"] as const;
 type Tab = (typeof TABS)[number];
 
 /** Placeholder while the route's params resolve. */
@@ -219,6 +220,16 @@ export function SearchClusterPage({ id }: { id: string }) {
             busy={busy}
             run={run}
             onCreated={setRevealed}
+          />
+        )}
+        {tab === "performance" && (
+          <PerformanceTab
+            key={cluster.id}
+            cluster={cluster}
+            onOpenConsole={(text) => {
+              setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }));
+              setTab("console");
+            }}
           />
         )}
         {tab === "usage" && <UsageTab cluster={cluster} info={info} />}

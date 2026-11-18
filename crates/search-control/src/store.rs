@@ -21,6 +21,13 @@
 //! - `storage`: a change log of each cluster's stored bytes. Storage accrues while a cluster
 //!   sleeps too, so instead of a row per cluster per minute the log gets a row only when the
 //!   size changes, and GB-months are the integral of that step function over the window.
+//! - `metrics`: request metrics ([`search_server::metrics::Stats`]) in two fixed rings per
+//!   cluster, a row per slot: [`MINUTE_SLOTS`] one-minute buckets (24 hours) and [`HOUR_SLOTS`]
+//!   one-hour buckets (14 days). A slot is rewritten when its time comes round again, so a
+//!   cluster never has more than `MINUTE_SLOTS + HOUR_SLOTS` rows, and a cluster that served no
+//!   request in a minute writes nothing for it.
+//! - `slowlog`: the newest [`search_es::slowlog::MAX_ENTRIES`] slow log entries per cluster, as
+//!   Elasticsearch's JSON lines.
 //!
 //! The schema is created with `CREATE … IF NOT EXISTS` (`Db::ensure_schema`: on Postgres under
 //! an advisory lock, since nodes start together); it reads the `search.db` files the earlier
@@ -30,6 +37,7 @@
 //! microseconds; Postgres on a runtime of its own).
 
 use code_sql::{Db, OptionalExtension, Row, params};
+use search_server::metrics::Stats;
 use serde::Serialize;
 use std::path::Path;
 
@@ -207,6 +215,12 @@ CREATE TABLE IF NOT EXISTS search_usage (
 CREATE INDEX IF NOT EXISTS search_usage_cluster ON search_usage (cluster_id, at);
 CREATE TABLE IF NOT EXISTS search_storage (cluster_id TEXT NOT NULL, at INTEGER NOT NULL, bytes INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS search_storage_cluster ON search_storage (cluster_id, at);
+CREATE TABLE IF NOT EXISTS search_metrics (
+  cluster_id TEXT NOT NULL, res INTEGER NOT NULL, slot INTEGER NOT NULL, at INTEGER NOT NULL, data TEXT NOT NULL,
+  PRIMARY KEY (cluster_id, res, slot)
+);
+CREATE TABLE IF NOT EXISTS search_slowlog (cluster_id TEXT NOT NULL, at INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS search_slowlog_cluster ON search_slowlog (cluster_id, at);
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
@@ -250,6 +264,11 @@ fn deleted_row(r: &Row) -> code_sql::Result<DeletedCluster> {
     c.wake_at = None;
     Ok(DeletedCluster { cluster: c, deleted_at: r.get(22)?, purge_at: r.get(23)?, stored_as: r.get(24)?, reserved: r.get(25)? })
 }
+
+/// One-minute buckets a cluster keeps: 24 hours.
+pub const MINUTE_SLOTS: i64 = 1440;
+/// One-hour buckets a cluster keeps: 14 days.
+pub const HOUR_SLOTS: i64 = 336;
 
 /// Seconds in the 30-day month the GB-month figures use (AWS bills storage per 730-hour month;
 /// a 30-day month keeps `days / 30` exact in the dashboard).
@@ -576,6 +595,8 @@ impl Store {
             x.execute("DELETE FROM search_usage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_storage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_metrics WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1", params![id])?;
             Ok(true)
         })?)
     }
@@ -636,6 +657,8 @@ impl Store {
         self.db.write(|x| {
             x.execute("DELETE FROM search_clusters WHERE id = ?1", params![id])?;
             x.execute("DELETE FROM search_usage WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_metrics WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_storage WHERE cluster_id = ?1", params![id])?;
             x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1", params![id])
         })?;
@@ -672,6 +695,83 @@ impl Store {
             )
         })?;
         Ok(())
+    }
+
+    /// Adds minutes of request metrics (unix minute, what it saw) to the cluster's minute and
+    /// hour rings, in one transaction: a slot holding the same bucket adds up, one holding an
+    /// older bucket (a day or two weeks ago) is replaced.
+    pub async fn record_metrics(&self, id: &str, minutes: &[(u64, Stats)]) -> anyhow::Result<()> {
+        if minutes.is_empty() {
+            return Ok(());
+        }
+        self.db.write(|x| {
+            for (minute, stats) in minutes {
+                let t = (*minute).min(i64::MAX as u64 / 60) as i64 * 60;
+                for (res, slots) in [(60, MINUTE_SLOTS), (3600, HOUR_SLOTS)] {
+                    let at = t - t.rem_euclid(res);
+                    let slot = (at / res).rem_euclid(slots);
+                    let kept: Option<(i64, String)> = x
+                        .query_row("SELECT at, data FROM search_metrics WHERE cluster_id = ?1 AND res = ?2 AND slot = ?3", params![id, res, slot], |r| Ok((r.get(0)?, r.get(1)?)))
+                        .optional()?;
+                    let mut merged = match kept {
+                        Some((a, data)) if a == at => Stats::decode(&data),
+                        // An older bucket's slot (or a newer one's, from a node whose clock is
+                        // ahead: the newer is kept).
+                        Some((a, _)) if a > at => continue,
+                        _ => Stats::default(),
+                    };
+                    merged.merge(stats);
+                    x.execute(
+                        "INSERT INTO search_metrics (cluster_id, res, slot, at, data) VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT (cluster_id, res, slot) DO UPDATE SET at = excluded.at, data = excluded.data",
+                        params![id, res, slot, at, merged.encode()],
+                    )?;
+                }
+            }
+            Ok::<_, code_sql::Error>(())
+        })?;
+        Ok(())
+    }
+
+    /// The cluster's buckets of `res` seconds (60 or 3600) from `since` (unix seconds), oldest
+    /// first.
+    pub async fn metrics_since(&self, id: &str, res: i64, since: i64) -> anyhow::Result<Vec<(i64, Stats)>> {
+        let rows: Vec<(i64, String)> = self.db.read(|x| {
+            x.query("SELECT at, data FROM search_metrics WHERE cluster_id = ?1 AND res = ?2 AND at >= ?3 ORDER BY at", params![id, res, since], |r| Ok((r.get(0)?, r.get(1)?)))
+        })?;
+        Ok(rows.into_iter().map(|(at, d)| (at, Stats::decode(&d))).collect())
+    }
+
+    /// Appends slow log entries (unix ms, the entry as JSON), oldest first, and keeps the
+    /// cluster's newest [`search_es::slowlog::MAX_ENTRIES`].
+    pub async fn record_slowlog(&self, id: &str, entries: &[(i64, String)]) -> anyhow::Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let keep = search_es::slowlog::MAX_ENTRIES as i64;
+        self.db.write(|x| {
+            for (at, data) in entries {
+                x.execute("INSERT INTO search_slowlog (cluster_id, at, data) VALUES (?1, ?2, ?3)", params![id, at, data])?;
+            }
+            // The oldest past the newest `keep`.
+            let edge: Option<(i64, i64)> = x
+                .query_row(
+                    "SELECT at, rowid FROM search_slowlog WHERE cluster_id = ?1 ORDER BY at DESC, rowid DESC LIMIT 1 OFFSET ?2",
+                    params![id, keep - 1],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((at, rowid)) = edge {
+                x.execute("DELETE FROM search_slowlog WHERE cluster_id = ?1 AND (at < ?2 OR (at = ?2 AND rowid < ?3))", params![id, at, rowid])?;
+            }
+            Ok::<_, code_sql::Error>(())
+        })?;
+        Ok(())
+    }
+
+    /// The cluster's slow log entries, newest first.
+    pub async fn slowlog(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self.db.read(|x| x.query("SELECT data FROM search_slowlog WHERE cluster_id = ?1 ORDER BY at DESC, rowid DESC", params![id], |r| r.get(0)))?)
     }
 
     /// Totals over `[since, now]`.
@@ -885,11 +985,49 @@ mod tests {
         s.delete("srch_n").await.unwrap();
     }
 
+    async fn metrics_and_slowlog_rings(s: &Store) {
+        use search_server::metrics::{Kind, Recorder};
+        assert_eq!(s.insert(&cluster("srch_r", "rings"), Caps::NONE).await.unwrap(), Inserted::Yes);
+        let minute = |m: u64, n: u64| {
+            let r = Recorder::default();
+            for _ in 0..n {
+                r.record(std::time::UNIX_EPOCH + std::time::Duration::from_secs(m * 60), Kind::Search, 200, Some(std::time::Duration::from_millis(2)));
+            }
+            r.take().pop().map(|(m, st)| (m, *st)).unwrap()
+        };
+        // Day 0, minute 10, twice (two passes): the slot adds up; the hour too.
+        let m10 = 1_000_000_000 / 60 / 1440 * 1440 + 10;
+        s.record_metrics("srch_r", &[minute(m10, 2)]).await.unwrap();
+        s.record_metrics("srch_r", &[minute(m10, 3), minute(m10 + 1, 1)]).await.unwrap();
+        let mins = s.metrics_since("srch_r", 60, 0).await.unwrap();
+        assert_eq!(mins.iter().map(|(at, st)| (*at, st.all().requests())).collect::<Vec<_>>(), [(m10 as i64 * 60, 5), (m10 as i64 * 60 + 60, 1)]);
+        let hours = s.metrics_since("srch_r", 3600, 0).await.unwrap();
+        assert_eq!(hours.iter().map(|(_, st)| st.all().requests()).sum::<u64>(), 6);
+        // A day later the same minute slot is replaced, not added to: the ring stays fixed.
+        s.record_metrics("srch_r", &[minute(m10 + 1440, 7)]).await.unwrap();
+        let mins = s.metrics_since("srch_r", 60, 0).await.unwrap();
+        assert_eq!(mins.iter().map(|(at, st)| (*at, st.all().requests())).collect::<Vec<_>>(), [(m10 as i64 * 60 + 60, 1), ((m10 + 1440) as i64 * 60, 7)]);
+        // A late write for a bucket older than the slot's is dropped.
+        s.record_metrics("srch_r", &[minute(m10, 9)]).await.unwrap();
+        assert_eq!(s.metrics_since("srch_r", 60, 0).await.unwrap().len(), 2);
+        // Slow log: the newest MAX_ENTRIES stay, newest first.
+        let max = search_es::slowlog::MAX_ENTRIES as i64;
+        let entries: Vec<(i64, String)> = (0..max + 30).map(|i| (1000 + i / 2, format!("e{i}"))).collect();
+        s.record_slowlog("srch_r", &entries[..40]).await.unwrap();
+        s.record_slowlog("srch_r", &entries[40..]).await.unwrap();
+        let kept = s.slowlog("srch_r").await.unwrap();
+        assert_eq!(kept.len(), max as usize);
+        assert_eq!((kept[0].as_str(), kept[kept.len() - 1].as_str()), (&*format!("e{}", max + 29), "e30"));
+        s.delete("srch_r").await.unwrap();
+        assert!(s.metrics_since("srch_r", 60, 0).await.unwrap().is_empty() && s.slowlog("srch_r").await.unwrap().is_empty());
+    }
+
     async fn all(s: &Store) {
         crud(s).await;
         deleted_claims(s).await;
         usage_totals(s).await;
         storage_is_a_step_function(s).await;
+        metrics_and_slowlog_rings(s).await;
     }
 
     #[tokio::test]

@@ -165,6 +165,7 @@ pub fn scan(
     let cluster = ctx.cluster;
     let st = cluster.state();
     let req = crate::search::SearchRequest {
+        slowlog: Default::default(),
         indices: indices.to_vec(),
         opts: ctx.indices_options(crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED)?,
         source: crate::search_source::SearchSource { query: query.cloned(), ..Default::default() },
