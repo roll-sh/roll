@@ -7,7 +7,7 @@ import { acceptSignIn, accountsApi, AccountsError, useSession, type Provider, ty
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { TokenButton } from "./code/sign-in";
 import { useMarkState } from "./mark-state";
-import { credentialJSON, passkeyProblem, passkeysSupported, requestOptions } from "@/lib/webauthn";
+import { credentialJSON, passkeyAutofillSupported, passkeyProblem, passkeysSupported, requestOptions } from "@/lib/webauthn";
 
 const ERRORS: Record<string, string> = {
   state: "That sign-in took too long or came from another browser. Try again.",
@@ -71,9 +71,34 @@ export function SignInPage({ invite, step, returnTo, error }: { invite?: string;
     else play([["success", 900]], "idle");
     acceptSignIn(a);
   };
+  // Passkey autofill (GitHub's and Google's): on the start page, the email field offers the
+  // passkeys this browser holds for roll; picking one signs in. A browser runs one passkey request
+  // at a time, so the button below cancels this one first.
+  const autofill = useRef<AbortController | null>(null);
+  const autofillOn = current.kind === "start" && Boolean(providers?.passkey);
+  useEffect(() => {
+    if (!autofillOn) return;
+    const ctrl = new AbortController();
+    autofill.current = ctrl;
+    void (async () => {
+      if (!(await passkeyAutofillSupported())) return;
+      const o = await accountsApi.passkeySigninOptions().catch(() => null);
+      if (!o || ctrl.signal.aborted) return;
+      let used: PublicKeyCredential | null = null;
+      try {
+        used = (await navigator.credentials.get({ publicKey: requestOptions(o.publicKey), mediation: "conditional", signal: ctrl.signal } as CredentialRequestOptions)) as PublicKeyCredential | null;
+      } catch {
+        return; // cancelled, or nothing picked
+      }
+      if (used && !ctrl.signal.aborted) void run(async () => done(await accountsApi.passkeySignin(o.id, credentialJSON(used))));
+    })();
+    return () => ctrl.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autofillOn]);
   // A passkey: on its own from the start page, or as the second factor a sign-in owes.
   const passkey = () =>
     run(async () => {
+      autofill.current?.abort();
       const o = await accountsApi.passkeySigninOptions();
       let used: PublicKeyCredential | null;
       try {
@@ -297,7 +322,7 @@ function Start({
         >
           <input
             type="email"
-            autoComplete="email"
+            autoComplete="username webauthn"
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
