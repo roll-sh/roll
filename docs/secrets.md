@@ -3015,8 +3015,10 @@ inconsistencies are fixed in #264:
 - R7. **AWS IAM login for EC2/ECS/EKS** (S–M; a signed `GetCallerIdentity`, as Vault's): an account to confirm.
 - R8. **A tamper-evident audit log** (building: `feature/roll-secrets-audit-chain`): a per-project hash
   chain written with each row, digests signed by roll's issuer key to the sinks, `audit verify`.
-- R9. **Secret requests** (building: `feature/roll-secrets-requests`): a link that asks someone outside
-  roll for a value, sealed in their browser, landing as a change or a change request.
+- R9. **Secret requests** (#277): `roll secrets request KEY…` or "Request a value…" makes a link;
+  the answerer's browser seals each value to the request's own key, roll opens it only in the write
+  that stores it (a change, or a change request the requester can't approve), once, rate-limited,
+  audited. Screenshots in `~/.local/share/roll-review/secrets/requests/`.
 - R10. **Honeytokens** (M): decoy `rlt_` tokens are roll-access's (roll MCP's #270, `decoy: true`);
   database roles and IAM users that alert on use are this side's, once those land.
 - R11. **Moving in from 1Password, Bitwarden SM, Parameter Store, GCP, Azure and Akeyless** (S each).
