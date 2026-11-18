@@ -10623,10 +10623,11 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
-## Bulk writes, round 16: the reclaim trigger (agent 253)
+## Bulk writes, round 16: the reclaim trigger, COPY's line and field splitting (agent 253)
 
 BENCH.md "Bulk writes, round 16" has the measurements (joined windows, plain dist, lane C).
-One commit (`cand/a253`) on origin's `fec3375ea`. No format change.
+Two commits on origin's `fec3375ea`: `cand/a253` (the reclaim trigger) and `cand/a253-2` (COPY's
+splitting: on `cand/a253` for this section only, the code is independent). No format change.
 
 **The same-day three-server table first.** On `483b87253` (b0, before format 4) and on `c55ecbb73`
 (h0, format 4), the bulk script's twelve steps: PostgreSQL 52.24 G, pgrust 44.82, b0 56.62, h0
@@ -10661,15 +10662,31 @@ dictionaries: 13.18 -> 13.80 G).
   Test: `storage::tests::reclaim_thread_waits_for_pressure_or_idle_and_no_statement` (under the
   threshold kept; over it, kept while a statement runs and written once none does; idle, the
   same; rows equal).
+- **COPY's line and field splitting** (`split_text`, `plain_values`, `parse_copy_data`).
+  Agent 246 counted five or six passes over each chunk; the cost was less the passes than how
+  they were made: `str::split(char)` found each line and each field with a `memchr` call and
+  confirmed it with a `bcmp` call, each line was searched again for a backslash, and the chunk's
+  newlines were counted a few bytes at a time (64-bit counters, four bytes an iteration):
+  `parse_copy_data` alone was 10.9% of COPY's instructions (1.1 G, 1,100 a row of 49 bytes).
+  Now one `memchr2` pass over the chunk finds the lines' ends and their backslashes, a line's
+  fields are found by its delimiter's byte (`memchr_iter`; the delimiter is one ASCII byte, else
+  the general path), the newlines are counted by `memchr_iter`. `parse_copy_data` 1.12 -> 0.61 G.
+  Five alternating pairs against h0 (COPY in to INSERT ... SELECT): COPY in 10.28 -> 9.49 G
+  (-7.8% in every pair), the other four steps within 0.2%; with h1's other steps the script is
+  56.51 G (1.082x PostgreSQL's 52.24, 1.26x pgrust's). Behaviour unchanged (the same lines,
+  records, escapes, end marker and field counts; rows equal in every run). Verification:
+  `tools/quick-check.sh` on `2facfd033` (this commit alone on `7e470fc3b`): Clippy no new
+  warning; 78 tests in 3 binaries (golden, wire, wire_waits); regress 51,148 / 51,150, 0 newly
+  differing (its COPY suites among them); isolation 1,647 / 1,648; pg_dump_tap 14,609; and with
+  the reclaim trigger on `fec3375ea` and in the verify-checked run (below).
 
-Verification: `tools/quick-check.sh` on `fec3375ea` with this commit and `cand/a253-2`'s COPY
-commit (one run for both): Clippy 16 warnings, none new in a changed file; 375 tests in 19 binaries
-(the new test among them); crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 /
+Verification: `tools/quick-check.sh` on `fec3375ea` with both commits (one run): Clippy 16
+warnings, none new in a changed file; 375 tests in 19 binaries (the trigger's test among them); crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 /
 51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. Before agent 249's
-MultiXact landed, the same green for this commit alone on `7e470fc3b` and on `c55ecbb73` (the
+MultiXact landed, the same green for the trigger alone on `7e470fc3b` and on `c55ecbb73` (the
 first run on `7e470fc3b` failed `wire::protocol_cases`: 8 of 218 cases got no answer to their
 startup at host load 89-92, "startup quiet"; the binary alone passed at once, and the whole check
-again). `--profile verify-checked` (debug assertions, overflow checks) with the COPY commit, on
+again). `--profile verify-checked` (debug assertions, overflow checks), both commits on
 `7e470fc3b`: the lib's unit tests 238 passed, big_tables 21, crash_bulk 6, storage_linked_gc 4,
 power_cut_at_every_point (`--features powerloss`).
 
@@ -10693,10 +10710,9 @@ for files already in L1's form, it doesn't touch this script.
    arena would save; row locks), the compaction rewriting the table ~4.5 G (zstd 15%).
 2. VACUUM 5.50 against 2.53 G: the reclaim's rewrite (3.7 G, above) and the table's measure
    (`stored_tuple_len`, `measure_rows_with`: ~15%).
-3. COPY in 10.28 against 6.48: `parse_copy_data` alone 1.1 G (`str::split` by char: a `memchr`
-   and a `bcmp` call for each line and field, a byte-at-a-time newline count), zstd ~11%, the
-   size model ~10% over a dozen calls (`inserted_with`, `untracked_write`, `read_from`,
-   `CopyLoad::model`...), float and int parsing ~9%.
+3. COPY in 9.49 against 6.48: zstd ~11%, the size model ~10% over a dozen calls
+   (`inserted_with`, `untracked_write`, `read_from`, `CopyLoad::model`...), float and int parsing
+   ~9%, `InsertNode::next` / `plain_row` ~10%.
 4. CREATE INDEX 5.29 against 3.13: `stored_tuple_len` ~6% across the build's threads (a COPY
    into a table found empty could keep its measure, as a load after TRUNCATE does; it needs a
    check that no other commit wrote the table between the load's snapshot and its commit, which

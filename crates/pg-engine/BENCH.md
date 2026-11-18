@@ -296,16 +296,16 @@ load 45-70 throughout: HANDOFF "MultiXact").
 | `6d3b7e9e5` (h249 on `6913fd09c`: others' commits too) | 5 | 3 | +0.42% (-1.96 .. +4.65%) | -2.8% | +12.2% |
 | `6913fd09c` (h249's parent) | 5 | 0 (1.04-2.62 foreign cores after 4 tries each) | none (-7.6 .. +2.7%) | | |
 
-## Bulk writes, round 16: the reclaim trigger (2026-11-18, agent 253)
+## Bulk writes, round 16: the reclaim trigger, COPY's splitting (2026-11-18, agent 253)
 
 HANDOFF "Bulk writes, round 16" has what changed. Lane C, the 1M-row bulk script, joined windows
 (`bulkx.sh` with `JOIN=1`: each step's window runs on through the background work it left), plain
 dist builds (`tools/dist.sh`) of separate source snapshots: **b0** origin's `483b87253` (before
 format 4), **h0** origin's `c55ecbb73` (format 4), **h1** h0 with the reclaim trigger
-(`cand/a253`). G user instructions of the server's cgroup;
+(`cand/a253`), **c1** h0 with COPY's splitting. G user instructions of the server's cgroup;
 every counter ran 100% of its window. **Foreign load was over 1.0 core in every run** (wall-weighted
 over a run: 1.1-3.8 cores, other users' unpinned processes and builds on lane C's CPUs, the host
-at load 40-95: no pair met the 1.0 bar. The instruction counts repeat within
+at load 40-95; one c1 run 0.99): no pair met the 1.0 bar. The instruction counts repeat within
 0.1% run to run regardless (PostgreSQL's match agent 246's to the last digit); cycles don't (all
 steps 27.5-34.6 G on h0 and h1 alike) and aren't used. Rows equal in every run (count and sums
 of every column of both tables).
@@ -333,7 +333,8 @@ of every column of both tables).
 
 b0's DELETE window holds agent 247's quiet-moment rewrite of the two index files (13.18 against
 agent 246's 9.65 G before it); h0 adds format 4's dictionary compression in the compaction after
-the DELETE (+0.62 G).
+the DELETE (+0.62 G). With COPY's splitting (c1, below) COPY in is 9.485, all steps 56.51 G
+(1.082x PostgreSQL, 1.26x pgrust; h1's numbers with c1's COPY step).
 
 Peak memory (cgroup): PostgreSQL 879-913 MB, pgrust 907-1,225, b0 382-388, h0 333-353, h1 340-408
 (VACUUM's rewrite now in its window's page cache); VmHWM b0 280-283, h0 268-295, h1 272-300.
@@ -351,8 +352,20 @@ The store's files (`ls` steps, one run each: after the DELETE's compaction settl
 after VACUUM): h0 41.88 MB each time (the two index files written again within 2 s of the
 compaction); h1 42.39 MB of files and 0.28 MB of dead-entry sets until VACUUM, then 41.88 MB.
 
-Not measured: TPC-H q01/q06 and lane A's point reads. The change isn't on a read path (the
-trigger runs only in the reclaim thread, which a store without marked files never starts), and the scans of the bulk script are level in every
+### COPY's splitting: h0 against c1 (5 alternating pairs; COPY in to INSERT … SELECT, % per pair)
+
+| step | h0 | c1 | % per pair |
+|---|---|---|---|
+| COPY in | 10.282 | 9.485 | -7.8 x5 |
+| CREATE INDEX, CREATE UNIQUE INDEX, COPY out, INSERT … SELECT | | | -0.1 to +0.2 |
+| **these five** | 28.96 | 28.16 | -2.8 / -2.7 / -2.8 / -2.8 / -2.7 |
+
+`parse_copy_data` alone 1.12 -> 0.61 G (instruction samples). COPY in's cycles 4.65 -> 4.24 G at
+the median (ranges 4.44-7.02 and 4.08-7.15 under the foreign load).
+
+Not measured: TPC-H q01/q06 and lane A's point reads. Neither change is on a read path (the
+trigger runs only in the reclaim thread, which a store without marked files never starts; COPY's
+splitting only in COPY FROM's text format), and the scans of the bulk script are level in every
 pair.
 
 ## Bulk writes, round 15, part 2: integer filter kernels, kept index measures (2026-11-18, agent 246)
