@@ -55,10 +55,11 @@ impl Apps {
         self.refuse_paused(service, env).await?;
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["revision", "image", "message", "no_traffic", "no_cache", "image_upload"].contains(&k.as_str()) {
+            if !["revision", "image", "message", "no_traffic", "no_cache", "image_upload", "closed"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
+        self.require_closed(service, env, &o).await?;
         let text = |k: &str| -> Result<Option<String>> {
             match o.get(k) {
                 None | Some(Value::Null) => Ok(None),
@@ -194,6 +195,24 @@ impl Apps {
         Ok(dep)
     }
 
+    /// `closed: true` in a deploy's body (roll previews' for a fork's head): refused unless the
+    /// environment is closed and this node builds it closed (its own network, no secret value).
+    /// A node that predates the field refuses it as unknown, so the request fails closed.
+    async fn require_closed(self: &Arc<Self>, service: &str, env: &str, o: &serde_json::Map<String, Value>) -> Result<()> {
+        match o.get("closed") {
+            None | Some(Value::Null | Value::Bool(false)) => Ok(()),
+            Some(Value::Bool(true)) => {
+                let (sid, e) = (service.to_string(), env.to_string());
+                let row = self.db(move |s| s.environment(&sid, &e)).await?;
+                if !row.egress.closed() || !self.deps.runtime.closes_egress() {
+                    return Err(Error::Conflict(format!("{env} isn't built closed here (egress roll, on a node that closes it)")));
+                }
+                Ok(())
+            }
+            Some(_) => Err(Error::BadRequest("closed is a boolean".into())),
+        }
+    }
+
     /// `POST …/redeploy`: the active deployment's image again, with the service's current run
     /// settings and variables (variables are read when its instances are made), without a build
     /// and without moving to another revision. What a change of variables or settings needs,
@@ -216,9 +235,10 @@ impl Apps {
             }
         }
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| k.as_str() != "message") {
+        if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "message" | "closed")) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
+        self.require_closed(service, env, &o).await?;
         let message = match o.get("message") {
             None | Some(Value::Null) => None,
             Some(Value::String(m)) => Some(m.chars().take(500).collect::<String>()),
@@ -457,8 +477,24 @@ impl Apps {
 
     /// Old deployments of the services this node owns, past what each environment keeps
     /// (`keep_deployments`): pruned in the store, then their images (once no deployment names
-    /// them), static sites and build logs go. Every ten minutes.
+    /// them), static sites and build logs go; and deleted services kept past
+    /// [`crate::DELETED_KEPT_MS`] are deleted for good (by their owner, a node taking the lease
+    /// of one nobody holds). Every ten minutes.
     pub async fn prune(self: &Arc<Self>) {
+        let now = code_sql::now_ms();
+        if let Ok(deleted) = self.db(|s| s.deleted_services(None)).await {
+            for (svc, at) in deleted.into_iter().filter(|(_, at)| now - at >= crate::DELETED_KEPT_MS) {
+                let key = lease_key(&svc.id);
+                if !self.deps.cluster.owns(&key) && self.deps.cluster.preferred(&key).is_none_or(|n| n.id == self.deps.cluster.node_id()) {
+                    let _ = self.deps.cluster.lease(&key).await;
+                }
+                if self.owns(&svc.id)
+                    && let Err(e) = self.purge_service(&svc.id).await
+                {
+                    warn!(service = %svc.id, deleted_at = at, error = %e, "apps: deleting a deleted service for good failed");
+                }
+            }
+        }
         let Ok(services) = self.db(|s| s.services(None)).await else { return };
         let (keep, day_ago) = (self.cfg.keep_deployments.max(1), code_sql::now_ms() - self.cfg.keep_recent.as_millis() as i64);
         for svc in services.into_iter().filter(|s| self.owns(&s.id)) {
@@ -602,6 +638,11 @@ impl Apps {
         let Some(rev) = d.revision.clone() else { return };
         let (sid, e) = (d.service.clone(), d.environment.clone());
         let Ok((svc, env)) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await else { return };
+        // Someone else reports this environment's deploys (roll previews: one voice on a pull
+        // request).
+        if !env.report {
+            return;
+        }
         let status = crate::integrations::CommitStatus {
             context: format!("roll/apps/{}/{}", svc.name, d.environment),
             state,
@@ -1227,10 +1268,20 @@ impl Apps {
         self.logs.redact(&format!("build:{}", d.id), &d.id, resolved.secret_values());
         let closed_vars = env_row.egress.closed().then(|| resolved.without_secrets());
         let mut build_env = resolved.vars;
-        // A closed environment's build still has the default network (BuildKit builds on no
-        // other but `host` and `none`), so it gets no secret value: none of what roll's logs hide
-        // (sealed and roll secrets values, links' credentials, URL passwords), nor a variable that
-        // holds one. Its code can't send what it never has.
+        // A closed environment builds on a network of its project's own with no route out and no
+        // way to the host (`Runtime::build_egress`): its steps reach public hosts only, through
+        // roll's proxy (packages, base images), never the node's services, private ranges or its
+        // metadata. It still gets no secret value: none of what roll's logs hide (sealed and roll
+        // secrets values, links' credentials, URL passwords), nor a variable that holds one. Its
+        // code can't send what it never has.
+        let build_egress = match env_row.egress.closed() {
+            // Never on the default network instead: a node that can't build it closed fails it.
+            true => Some(self.deps.runtime.build_egress(&svc.project).await.map_err(|e| anyhow::anyhow!("a closed build's network: {e:#}"))?.ok_or_else(|| anyhow::anyhow!("this node can't build a closed environment (it needs Docker here)"))?),
+            false => None,
+        };
+        if build_egress.is_some() {
+            log.line("a closed environment builds on a network of its own: out only through roll's proxy, to public hosts");
+        }
         if let Some(kept) = closed_vars {
             let before = build_env.len();
             build_env = kept;
@@ -1363,6 +1414,7 @@ impl Apps {
             // A stage of the tree's own Dockerfile; a generated one's are roll's.
             target: svc.build.target.clone().filter(|_| plan.provider == apps_build::Provider::Dockerfile),
             layers,
+            egress: build_egress,
         };
         // The same inputs built before in this project (Railway's skipped builds): the same tree,
         // Dockerfile, target and build variables, and its image still kept. Never with `no_cache`.
@@ -1578,6 +1630,11 @@ impl Apps {
         // Lost again before this ran (a lease that changed hands twice): what runs is the next
         // owner's now, on a runtime the nodes share.
         if !self.owns(service) {
+            return;
+        }
+        // A deleted service runs nothing (its lease is held only to delete it for good).
+        let sid = service.to_string();
+        if self.db(move |s| s.service(&sid)).await.is_err() {
             return;
         }
         // The database's now: what started before is a previous owner's (or nobody's).
