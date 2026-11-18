@@ -638,6 +638,11 @@ impl Apps {
         let Some(rev) = d.revision.clone() else { return };
         let (sid, e) = (d.service.clone(), d.environment.clone());
         let Ok((svc, env)) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await else { return };
+        // Someone else reports this environment's deploys (roll previews: one voice on a pull
+        // request).
+        if !env.report {
+            return;
+        }
         let status = crate::integrations::CommitStatus {
             context: format!("roll/apps/{}/{}", svc.name, d.environment),
             state,

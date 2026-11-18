@@ -1116,6 +1116,10 @@ static ROWS: &[Row] = &[
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
+    // Request metrics and the slow logs (queries' and documents' sources, cut): reads of the
+    // cluster's data.
+    row("GET", "/v1/search/clusters/{id}/metrics", "search", R, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/slowlog", "search", R, one(PG, "cluster")),
     row("*", "/v1/search/clusters/{id}/", "search", M, one(PG, "cluster")),
     // An index's routes are about those indices (`{index}`: a name, or on reads an expression),
     // so a rule can grant some of a cluster's indices. The console (`request`) and the index list
