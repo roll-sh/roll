@@ -159,9 +159,10 @@ export function activityText(e: Activity, me: string): string {
 /** How long without using roll makes someone dormant (GitHub Enterprise's 90 days). */
 export const DORMANT_DAYS = 90;
 
-/** Whether `u` hasn't used roll in DORMANT_DAYS (by their last activity, else since they were made). */
+/** Whether `u` hasn't used roll (a sign-in, a session or one of their tokens) in DORMANT_DAYS. Unknown
+ * activity (`null`: not since roll began keeping it) isn't dormant. */
 export function dormant(u: Pick<User, "last_active_at" | "created_at" | "disabled">, now = Date.now()): boolean {
-  return !u.disabled && (u.last_active_at ?? u.created_at) < now - DORMANT_DAYS * 24 * 3600 * 1000;
+  return !u.disabled && u.last_active_at != null && u.last_active_at < now - DORMANT_DAYS * 24 * 3600 * 1000;
 }
 
 /** Which sign-ins this roll offers (`sso`: a company's provider answers for some domains). */

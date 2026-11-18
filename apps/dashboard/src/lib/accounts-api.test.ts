@@ -78,11 +78,11 @@ describe("a provider's logout in the security log", () => {
 });
 
 describe("dormant", () => {
-  it("is 90 days without using roll, counted from when they were made if never seen", () => {
+  it("is 90 days without using roll; unknown activity isn't dormant", () => {
     const day = 24 * 3600 * 1000, now = 1000 * day;
     expect(dormant({ last_active_at: now - 89 * day, created_at: 0, disabled: false }, now)).toBe(false);
     expect(dormant({ last_active_at: now - 91 * day, created_at: 0, disabled: false }, now)).toBe(true);
-    expect(dormant({ last_active_at: null, created_at: now - 91 * day, disabled: false }, now)).toBe(true);
-    expect(dormant({ last_active_at: null, created_at: now - 91 * day, disabled: true }, now)).toBe(false);
+    expect(dormant({ last_active_at: null, created_at: now - 91 * day, disabled: false }, now)).toBe(false);
+    expect(dormant({ last_active_at: now - 91 * day, created_at: 0, disabled: true }, now)).toBe(false);
   });
 });

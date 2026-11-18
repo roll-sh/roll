@@ -596,6 +596,16 @@ impl Accounts {
     }
 
     /// A user as they are now, for a token of theirs (roll-access): `None` once disabled or gone.
+    /// `user` used roll just now (a token's use): noted at most every five minutes, as a session's is.
+    pub fn note_active(&self, user: &str) -> Result<()> {
+        let now = self.db.now_ms()?;
+        let last = self.db.read(|c| c.query_row("SELECT last_active_at FROM users WHERE id = ?", [user], |r| r.get::<_, Option<i64>>(0)).optional())?.flatten();
+        if last.is_none_or(|t| now - t >= SEEN_EVERY_MS) {
+            self.db.write(|c| c.execute("UPDATE users SET last_active_at = ? WHERE id = ?", params![now, user]))?;
+        }
+        Ok(())
+    }
+
     pub fn person(&self, user: &str) -> Result<Option<roll_auth::SignedIn>> {
         let row = self.db.read(|c| {
             c.query_row("SELECT handle, admin, disabled, code_owner_id FROM users WHERE id = ?", [user], |r| {
@@ -1125,6 +1135,12 @@ impl roll_auth::Sessions for Resolver {
 
     fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
         self.0.person(user).map_err(|e| e.to_string())
+    }
+
+    fn used(&self, user: &str) {
+        if let Err(e) = self.0.note_active(user) {
+            tracing::warn!(error = %e, "accounts: noting a person's activity");
+        }
     }
 
     fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>, String> {
