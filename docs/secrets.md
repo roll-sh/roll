@@ -3662,8 +3662,8 @@ cache waited out. Ranked now:
    expires), and secrets' own workload logins trusting roll's issuer for apps' subjects; one issuer,
    never a second one.
 5. **A sealed start for the deployment key** (building: `feature/roll-secrets-sealed-start`, on #276):
-   rolld starts with products down until N of M holders post shares; then the thirty-second security
-   review of tonight's code (#304's fix, #329, #330, #303's fixes, the issuer work).
+   rolld starts with products down until N of M holders post shares. The thirty-second security
+   review (running, 2026-11-18 21:50): #304's fix, #329, #330 and every fix from the thirty-first.
 6. **R10's other decoys** (database roles, IAM users) once #270's tokens are wired to secrets' alerts;
    **R4** (GCP KMS, Azure Key Vault, HSM) and confirming #290, #284, #227, #229 on real accounts: the
    user's call.
