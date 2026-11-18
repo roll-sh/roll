@@ -321,8 +321,8 @@ impl Engine {
     }
 
     /// A link to the preview for someone outside the team, open for `hours` (1–720), on its own
-    /// token: the answer is the only time the link is shown. Only where the preview needs a
-    /// link (`access: link`); a public one needs none.
+    /// token: the answer is the only time the link is shown. Only where the preview isn't public
+    /// (`access: link` or `team`); a public one needs none.
     pub fn share(&self, id: &str, hours: u32, by: &str) -> Result<(crate::Share, String)> {
         if !(1..=KEEP_MAX_HOURS).contains(&hours) {
             return Err(Error::BadRequest(format!("hours: 1 to {KEEP_MAX_HOURS}")));
@@ -331,7 +331,7 @@ impl Engine {
         if r.desired == Desired::Deleted {
             return Err(Error::Conflict("the preview is being deleted".into()));
         }
-        if !self.store.access(id)?.is_some_and(|a| a.required) {
+        if !self.store.access(id)?.is_some_and(|a| a.required()) {
             return Err(Error::Conflict("the preview is public: anyone can open it without a link".into()));
         }
         let url = self.store.services(id)?.into_iter().next().map(|s| s.url).ok_or_else(|| Error::Conflict("the preview has no service to share yet".into()))?;

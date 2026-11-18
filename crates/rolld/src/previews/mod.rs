@@ -43,6 +43,23 @@ pub struct Running {
     pub internal: Option<axum::Router>,
 }
 
+/// Who may open a team-access project's previews: an account that still signs in and is an
+/// admin or owns the project now (a disabled or deleted one, or one whose project went to
+/// someone else, is a no at once). A failed lookup is a no.
+pub struct AccountsVisitors {
+    pub accounts: Arc<roll_accounts::Accounts>,
+    pub workspace: Arc<roll_workspace::Workspace>,
+}
+
+impl roll_previews::ports::Visitors for AccountsVisitors {
+    fn may_open(&self, user: &str, project: &str) -> bool {
+        match self.accounts.user(user) {
+            Ok(u) if !u.disabled => u.admin || self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty() && p.owner == user),
+            _ => false,
+        }
+    }
+}
+
 /// Open the store and start the engine: branches through this node's API, services as
 /// containers through roll code's isolation (Docker or Fargate), roll code's changes as the
 /// source, and roll code's preview backend in front of its own single-container previews.

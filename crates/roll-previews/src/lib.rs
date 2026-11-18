@@ -26,6 +26,7 @@ pub mod runtime;
 pub mod schema;
 pub mod settings;
 pub mod store;
+pub mod visit;
 pub mod visual;
 
 pub use engine::Engine;

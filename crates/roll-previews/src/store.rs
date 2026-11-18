@@ -87,6 +87,22 @@ CREATE TABLE IF NOT EXISTS shares (
     created_at INTEGER NOT NULL,
     revoked INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS visit_tickets (
+    hash TEXT PRIMARY KEY,
+    preview_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS visit_sessions (
+    hash TEXT PRIMARY KEY,
+    preview_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    checked_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS visit_sessions_project ON visit_sessions (project_id);
 CREATE TABLE IF NOT EXISTS pinned (
     preview_id TEXT NOT NULL,
     service TEXT NOT NULL,
@@ -294,19 +310,40 @@ pub const SLUG_MAX: usize = 40;
 /// Who may open a preview's services (`runtime`'s gate).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Access {
-    /// The link's token.
+    /// The link's token (it lets people in only under `access: link`).
     pub token: String,
-    /// Whether the link is needed (`access: link`), or anyone may (`public`).
-    pub required: bool,
+    /// The project's rule.
+    pub mode: crate::settings::Access,
     /// The project's bypass secret's SHA-256 (hex), for automation (`x-roll-preview-bypass`);
     /// never for a fork's (`trusted: false`) preview.
     pub bypass: Option<String>,
+}
+
+impl Access {
+    /// Whether anything at all is needed to open it (not `public`).
+    pub fn required(&self) -> bool {
+        self.mode != crate::settings::Access::Public
+    }
+
+    /// The link's token, while it lets people in (`access: link`).
+    pub fn link_token(&self) -> Option<&str> {
+        (self.mode == crate::settings::Access::Link && !self.token.is_empty()).then_some(self.token.as_str())
+    }
 }
 
 /// The SHA-256 (hex) a bypass secret is kept as.
 pub fn bypass_hash(secret: &str) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(secret.as_bytes()))
+}
+
+/// A signed-in visitor's session ([`Store::visit_session`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VisitSession {
+    pub user: String,
+    pub project: String,
+    pub expires_at: i64,
+    pub checked_at: i64,
 }
 
 /// Which preview a branched resource belongs to (for scoped tokens: feature/roll-mcp).
@@ -740,10 +777,17 @@ impl Store {
         let json = serde_json::to_string(s).expect("JSON");
         let now = self.now_ms()?;
         self.db.write(|c| {
+            let before: Option<String> = c.query_row("SELECT json FROM settings WHERE project_id = ?", [project], |r| r.get(0)).optional()?;
+            let before = before.and_then(|j| serde_json::from_str::<Settings>(&j).ok()).unwrap_or_default();
             c.execute(
                 "INSERT INTO settings (project_id, json, updated_at) VALUES (?, ?, ?) ON CONFLICT (project_id) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at",
                 params![project, json, now],
             )?;
+            // A change of who may open its previews ends every signed-in visitor's session.
+            if before.access != s.access {
+                c.execute("DELETE FROM visit_sessions WHERE project_id = ?", [project])?;
+                c.execute("DELETE FROM visit_tickets WHERE project_id = ?", [project])?;
+            }
             Ok::<_, Error>(())
         })?;
         Ok(s.clone())
@@ -754,6 +798,8 @@ impl Store {
             c.execute("DELETE FROM settings WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM bypass WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM budget_alerts WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM visit_sessions WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM visit_tickets WHERE project_id = ?", [project])?;
             Ok::<_, Error>(())
         })
     }
@@ -885,7 +931,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "visit_tickets", "visit_sessions", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1890,10 +1936,10 @@ impl Store {
             .optional()
         })?;
         let Some((token, project, bypass, trusted)) = row else { return Ok(None) };
-        let required = self.settings(&project)?.access == crate::settings::Access::Link;
+        let mode = self.settings(&project)?.access;
         // A fork's preview never opens to the project's secret: CI that visits it would hand the
         // secret to the fork's code.
-        Ok(Some(Access { token: token.unwrap_or_default(), required, bypass: bypass.filter(|_| trusted) }))
+        Ok(Some(Access { token: token.unwrap_or_default(), mode, bypass: bypass.filter(|_| trusted) }))
     }
 
     /// A new bypass secret for `project`'s private previews (replacing any): returned once,
@@ -2137,6 +2183,65 @@ impl Store {
         })?)
     }
 
+    // ── signed-in visitors (`access: team`, `visit.rs`) ──
+
+    /// A one-use ticket for `user` into preview `id`, kept by its SHA-256.
+    pub fn put_visit_ticket(&self, hash: &str, id: &str, project: &str, user: &str, expires_at: i64) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("INSERT INTO visit_tickets (hash, preview_id, project_id, user_id, expires_at) VALUES (?, ?, ?, ?, ?)", params![hash, id, project, user, expires_at])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// A ticket used: its person and project, if it was this preview's and still good. It goes
+    /// either way (and every expired one with it).
+    pub fn take_visit_ticket(&self, hash: &str, id: &str, now: i64) -> Result<Option<(String, String)>> {
+        self.db.write(|c| {
+            let row: Option<(String, String, String, i64)> =
+                c.query_row("SELECT preview_id, project_id, user_id, expires_at FROM visit_tickets WHERE hash = ?", [hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+            c.execute("DELETE FROM visit_tickets WHERE hash = ? OR expires_at < ?", params![hash, now])?;
+            Ok::<_, Error>(row.filter(|(p, _, _, exp)| p == id && *exp >= now).map(|(_, project, user, _)| (user, project)))
+        })
+    }
+
+    /// A signed-in visitor's session in preview `id`, kept by its SHA-256 (expired ones go).
+    pub fn put_visit_session(&self, hash: &str, id: &str, project: &str, user: &str, expires_at: i64, now: i64) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM visit_sessions WHERE expires_at < ?", [now])?;
+            c.execute(
+                "INSERT INTO visit_sessions (hash, preview_id, project_id, user_id, expires_at, checked_at) VALUES (?, ?, ?, ?, ?, ?)",
+                params![hash, id, project, user, expires_at, now],
+            )?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// A session in preview `id`: its person, project, when it ends and when its person was last
+    /// asked about.
+    pub fn visit_session(&self, hash: &str, id: &str) -> Result<Option<VisitSession>> {
+        Ok(self.db.read(|c| {
+            c.query_row("SELECT user_id, project_id, expires_at, checked_at FROM visit_sessions WHERE hash = ? AND preview_id = ?", [hash, id], |r| {
+                Ok(VisitSession { user: r.get(0)?, project: r.get(1)?, expires_at: r.get(2)?, checked_at: r.get(3)? })
+            })
+            .optional()
+        })?)
+    }
+
+    /// Its person may still open the project, as of `now`.
+    pub fn visit_checked(&self, hash: &str, now: i64) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("UPDATE visit_sessions SET checked_at = ? WHERE hash = ?", params![now, hash])?;
+            Ok::<_, Error>(())
+        })
+    }
+
+    pub fn end_visit_session(&self, hash: &str) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("DELETE FROM visit_sessions WHERE hash = ?", [hash])?;
+            Ok::<_, Error>(())
+        })
+    }
+
     /// The earlier pushes a preview keeps reachable, newest first.
     pub fn pinned(&self, id: &str) -> Result<Vec<crate::Pinned>> {
         Ok(self.db.read(|c| {
@@ -2186,11 +2291,9 @@ impl Store {
         let resources = self.resources(&r.id)?;
         let services = self.services_with_time(&r.id)?;
         let cost = self.cost_of(&r, &resources, &services)?;
-        // With link access, the links roll hands out carry the token (once; then a cookie).
-        let token = match self.access(&r.id)? {
-            Some(Access { token: t, required: true, .. }) if !t.is_empty() => Some(t),
-            _ => None,
-        };
+        // With link access, the links roll hands out carry the token (once; then a cookie). With
+        // team access they're plain: people sign in instead.
+        let token = self.access(&r.id)?.and_then(|a| a.link_token().map(str::to_string));
         let share = |u: &str| match &token {
             Some(t) => format!("{}/?roll_access={t}", u.trim_end_matches('/')),
             None => u.to_string(),
@@ -2311,7 +2414,7 @@ impl Store {
 }
 
 /// A preview's access token: 24 random characters of lowercase base32 (120 bits).
-fn new_token() -> String {
+pub(crate) fn new_token() -> String {
     const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
     let mut b = [0u8; 24];
     getrandom::fill(&mut b).expect("system randomness");

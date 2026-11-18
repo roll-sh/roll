@@ -354,10 +354,12 @@ impl Engine {
                 vars.push((key, crate::names::follow(kind, &field, own.clone())));
             }
         }
-        let (access_token, bypass) = match self.store.access(&r.id)? {
-            Some(crate::store::Access { token: t, required: true, bypass }) if !t.is_empty() => (Some(t), bypass),
-            _ => (None, None),
-        };
+        // Link access hands the backend the link's token; team access has it let in people
+        // signed in to roll instead. The bypass goes with either.
+        let access = self.store.access(&r.id)?;
+        let access_token = access.as_ref().and_then(|a| a.link_token().map(str::to_string));
+        let signed_in = access.as_ref().is_some_and(|a| a.mode == crate::settings::Access::Team);
+        let bypass = access.and_then(|a| a.bypass).filter(|_| access_token.is_some() || signed_in);
         // Every converge (at least every few minutes, for usage) pushes its expiry out: only a
         // preview nobody converges any more lets it lapse.
         let trusted = s.secrets.allow_production && r.trusted;
@@ -458,7 +460,8 @@ impl Engine {
             // The feedback button: the runtime's proxy adds it per request; roll apps at deploy.
             let feedback = s.feedback && r.change_id.is_some() && access_token.is_some();
             // Egress too: a service moves onto (or off) the preview's own network by restarting.
-            let fingerprint = config_fingerprint(&vars, access_token.is_some() && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps)
+            let fingerprint = config_fingerprint(&vars, (access_token.is_some() || signed_in) && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps)
+                + if signed_in && on_apps { "s" } else { "" }
                 + &if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() };
             let config_moved = self.store.service_config(&r.id, &spec.name)?.as_deref() != Some(fingerprint.as_str());
             // The head it ran stays reachable at a URL of its own (Vercel's per-push URLs): the
@@ -497,6 +500,7 @@ impl Engine {
                     vars: vars.clone(),
                     branches: branches.clone(),
                     access_token: access_token.clone(),
+                    signed_in,
                     bypass_sha256: bypass.clone(),
                     feedback,
                     egress: s.egress_for(r.trusted),

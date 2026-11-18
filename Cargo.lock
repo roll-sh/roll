@@ -7111,6 +7111,7 @@ dependencies = [
  "hyper-util",
  "image",
  "parking_lot",
+ "percent-encoding",
  "roll-auth",
  "roll-cluster",
  "roll-workspace",
@@ -7122,6 +7123,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "url",
 ]
 
 [[package]]

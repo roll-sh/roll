@@ -86,6 +86,9 @@ pub struct RuntimeConfig {
     /// The most services frozen on this node at once (their memory stays): the oldest are stopped
     /// past it.
     pub warm_max: usize,
+    /// How often a signed-in visitor's session (`access: team`) asks again whether its person may
+    /// still open the project.
+    pub visitor_recheck: Duration,
 }
 
 /// Playwright's image has a headless Chromium shell (its path names its version).
@@ -151,6 +154,7 @@ impl Default for RuntimeConfig {
             screenshot_command: SCREENSHOT_COMMAND.into(),
             warm_for: Duration::from_secs(8 * 3600),
             warm_max: 32,
+            visitor_recheck: Duration::from_secs(300),
         }
     }
 }
@@ -612,7 +616,7 @@ impl Runtime {
     fn feedback_target(&self, preview: &str, req: &Request) -> Option<String> {
         let web = self.cfg.dashboard.as_deref()?;
         let access = self.store.access(preview).ok().flatten()?;
-        if !access.required || !has_access_cookie(preview, &access.token, req) {
+        if !access.link_token().is_some_and(|t| has_access_cookie(preview, t, req)) {
             return None;
         }
         let row = self.store.row(preview).ok()?;
@@ -621,25 +625,42 @@ impl Runtime {
     }
 
     /// Link access: a request carries the preview's token in its query (it gets a cookie and is
-    /// sent to the same URL without it) or in that cookie; anything else is refused. `None`:
-    /// let it through.
-    fn gate(&self, preview: &str, service: &str, req: &Request) -> Option<Response> {
-        let crate::store::Access { token, required, bypass } = match self.store.access(preview) {
+    /// sent to the same URL without it) or in that cookie. Team access: a session of the
+    /// preview's own, from a ticket roll's dashboard gave a person signed in (`visit.rs`); the
+    /// link's token lets nobody in. Either way a share link and the CI bypass do; anything else
+    /// is refused. `None`: let it through.
+    fn gate(&self, preview: &str, service: &str, req: &mut Request) -> Option<Response> {
+        let access = match self.store.access(preview) {
             Ok(Some(a)) => a,
             Ok(None) => return None,
             Err(_) => return Some((StatusCode::SERVICE_UNAVAILABLE, "try again").into_response()),
         };
-        if !required {
+        if !access.required() {
             return None;
         }
         // Automation (end-to-end tests in CI): the project's bypass secret in a header, for every
         // request (no cookie, no redirect).
         let given = req.headers().get(BYPASS_HEADER).and_then(|v| v.to_str().ok());
-        if let (Some(want), Some(given)) = (&bypass, given)
+        if let (Some(want), Some(given)) = (&access.bypass, given)
             && same(&crate::store::bypass_hash(given), want)
         {
             return None;
         }
+        let team = access.mode == crate::settings::Access::Team;
+        if team {
+            // A ticket from roll's dashboard, coming back: the session it opens.
+            if req.uri().path() == crate::visit::PATH {
+                return Some(self.land_visit(preview, req));
+            }
+            if let Some(t) = take_cookie(req, &crate::visit::cookie(preview))
+                && self.visitor(preview, &t)
+            {
+                // In: a link token they also hold stays roll's, as the session does.
+                take_cookie(req, &format!("roll_access_{preview}"));
+                return None;
+            }
+        }
+        let token = access.link_token().unwrap_or_default().to_string();
         let cookie = format!("roll_access_{preview}");
         if has_access_cookie(preview, &token, req) {
             return None;
@@ -661,6 +682,9 @@ impl Runtime {
             let left = ((ends - self.store.now_ms().unwrap_or(ends)) / 1000).max(1);
             return Some(self.enter(req, "roll_share", &share_cookie, t, left));
         }
+        if team {
+            return Some(self.sign_in(preview, req));
+        }
         let through = match (&self.cfg.dashboard, self.store.row(preview)) {
             (Some(web), Ok(row)) => Some(format!(
                 "{}/dashboard/projects/{}/previews?preview={preview}&go={}",
@@ -671,6 +695,81 @@ impl Runtime {
             _ => None,
         };
         Some(private_page(through.as_deref()))
+    }
+
+    /// A visitor with no session of a team-access preview's: a page load goes to roll's
+    /// dashboard, which signs them in and sends them back with a ticket; anything else is a 401
+    /// that says where.
+    fn sign_in(&self, preview: &str, req: &Request) -> Response {
+        let Some(web) = self.cfg.dashboard.as_deref() else {
+            return roll_page(StatusCode::UNAUTHORIZED, "This preview is private", "<p>It lets in people signed in to roll, and this node doesn't know where roll is.</p>");
+        };
+        let host = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
+        let back = format!("{}://{host}{}", self.cfg.scheme, req.uri().path_and_query().map_or("/", |p| p.as_str()));
+        let url = format!("{}/dashboard/previews/visit?preview={}&to={}", web.trim_end_matches('/'), crate::visit::encode(preview), crate::visit::encode(&back));
+        let get = matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD);
+        if get
+            && is_page_load(req)
+            && let Ok(l) = HeaderValue::from_str(&url)
+        {
+            let mut r = StatusCode::FOUND.into_response();
+            r.headers_mut().insert(header::LOCATION, l);
+            r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            return r;
+        }
+        roll_page(StatusCode::UNAUTHORIZED, "This preview is private", &format!("<p><a href=\"{}\">Sign in to roll</a> to open it: it lets in people who can open its project.</p>", escape(&url)))
+    }
+
+    /// `/__roll/visit?ticket=…&to=…` on the preview's own host: the ticket traded for a session
+    /// cookie (host-only, 12 hours), then on to `to` on the same site.
+    fn land_visit(&self, preview: &str, req: &Request) -> Response {
+        let mut ticket = None;
+        let mut to = "/".to_string();
+        for pair in req.uri().query().unwrap_or("").split('&') {
+            if let Some(v) = pair.strip_prefix("ticket=") {
+                ticket = Some(percent_decode(v));
+            } else if let Some(v) = pair.strip_prefix("to=") {
+                to = crate::visit::local_path(&percent_decode(v));
+            }
+        }
+        let expired = || roll_page(StatusCode::UNAUTHORIZED, "This sign-in link has expired", "<p>Open the page again: roll signs you in and sends you back.</p>");
+        // Where it goes, checked before the ticket is used.
+        let Ok(location) = HeaderValue::from_str(&to) else { return expired() };
+        let Ok(now) = self.store.now_ms() else { return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response() };
+        let Some((user, project)) = ticket.and_then(|t| self.store.take_visit_ticket(&crate::store::bypass_hash(&t), preview, now).ok().flatten()) else {
+            return expired();
+        };
+        let session = format!("rls_{}", crate::store::new_token());
+        if self.store.put_visit_session(&crate::store::bypass_hash(&session), preview, &project, &user, now + crate::visit::SESSION_S * 1000, now).is_err() {
+            return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response();
+        }
+        let secure = if self.cfg.scheme == "https" { "; Secure" } else { "" };
+        let set = format!("{}={session}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax{secure}", crate::visit::cookie(preview), crate::visit::SESSION_S);
+        let mut r = StatusCode::FOUND.into_response();
+        let Ok(c) = HeaderValue::from_str(&set) else { return expired() };
+        r.headers_mut().insert(header::LOCATION, location);
+        r.headers_mut().insert(header::SET_COOKIE, c);
+        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        r
+    }
+
+    /// Whether `token` is a live session in `preview` whose person may still open the project,
+    /// asked again once it was last asked `visitor_recheck` ago; a session whose person may not
+    /// ends now.
+    fn visitor(&self, preview: &str, token: &str) -> bool {
+        let hash = crate::store::bypass_hash(token);
+        let (Ok(Some(s)), Ok(now)) = (self.store.visit_session(&hash, preview), self.store.now_ms()) else { return false };
+        if s.expires_at <= now {
+            return false;
+        }
+        if s.checked_at <= now - self.cfg.visitor_recheck.as_millis() as i64 {
+            if !self.engine().is_ok_and(|e| e.may_open(&s.user, &s.project)) {
+                let _ = self.store.end_visit_session(&hash);
+                return false;
+            }
+            let _ = self.store.visit_checked(&hash, now);
+        }
+        true
     }
 
     /// [`Runtime::proxy_to`], kept in the preview's request log.
@@ -893,22 +992,62 @@ fn has_access_cookie(preview: &str, token: &str, req: &Request) -> bool {
     !token.is_empty() && cookie_value(req, &format!("roll_access_{preview}")).is_some_and(|v| same(v, token))
 }
 
+/// Cookie `name` taken off `req`: its value, and the rest of the cookies kept.
+fn take_cookie(req: &mut Request, name: &str) -> Option<String> {
+    let mut found = None;
+    let mut kept = Vec::new();
+    for v in req.headers().get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()) {
+        for c in v.split(';').map(str::trim).filter(|c| !c.is_empty()) {
+            match c.split_once('=') {
+                Some((k, v)) if k == name => found = Some(v.to_string()),
+                _ => kept.push(c.to_string()),
+            }
+        }
+    }
+    found.as_ref()?;
+    req.headers_mut().remove(header::COOKIE);
+    if !kept.is_empty()
+        && let Ok(v) = HeaderValue::from_str(&kept.join("; "))
+    {
+        req.headers_mut().insert(header::COOKIE, v);
+    }
+    found
+}
+
+/// A page load: a browser says so (`Sec-Fetch-Dest: document`, so not a fetch, a fragment or an
+/// iframe); without that header, one that asks for HTML.
+fn is_page_load(req: &Request) -> bool {
+    let header_of = |h: &str| req.headers().get(h).and_then(|v| v.to_str().ok()).map(str::to_ascii_lowercase);
+    match header_of("sec-fetch-dest") {
+        Some(dest) => dest == "document",
+        None => header_of("accept").is_some_and(|a| a.contains("text/html")),
+    }
+}
+
+fn escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
 fn private_page(through: Option<&str>) -> Response {
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
     let action = match through {
-        Some(u) => format!("<p><a href=\"{}\">Open it through roll</a>: sign in, and you're sent on with its link.</p>", esc(u)),
+        Some(u) => format!("<p><a href=\"{}\">Open it through roll</a>: sign in, and you're sent on with its link.</p>", escape(u)),
         None => "<p>Open it from its link in roll.</p>".into(),
     };
+    roll_page(StatusCode::UNAUTHORIZED, "This preview is private", &action)
+}
+
+/// roll's own answer on a preview's host: a title and a line (`body` is HTML), dark first.
+fn roll_page(status: StatusCode, title: &str, body: &str) -> Response {
     let html = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Private preview · roll</title><style>\
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>{title} · roll</title><style>\
          :root{{color-scheme:dark light;--bg:#000;--fg:#ededed;--muted:#8f8f8f;--accent:#4c8dff}}\
          @media (prefers-color-scheme:light){{:root{{--bg:#fff;--fg:#111;--muted:#666}}}}\
          body{{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);\
          font:14px/1.5 ui-sans-serif,system-ui,sans-serif}}main{{max-width:520px;padding:24px}}\
          h1{{font-size:20px;font-weight:600;letter-spacing:-0.04em;margin:0 0 8px}}p{{color:var(--muted);margin:0}}\
-         a{{color:var(--accent)}}</style></head><body><main><h1>This preview is private</h1>{action}</main></body></html>"
+         a{{color:var(--accent)}}</style></head><body><main><h1>{title}</h1>{body}</main></body></html>"
     );
-    (StatusCode::UNAUTHORIZED, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], html).into_response()
+    (status, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], html).into_response()
 }
 
 /// Equal, in time that doesn't depend on where they differ.
@@ -1555,8 +1694,8 @@ pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> 
 }
 
 /// A request for a preview's service: through its gate, then to the service.
-async fn serve(rt: Arc<Runtime>, preview: String, service: String, req: Request) -> Response {
-    if let Some(r) = rt.gate(&preview, &service, &req) {
+async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Request) -> Response {
+    if let Some(r) = rt.gate(&preview, &service, &mut req) {
         return r;
     }
     // The feedback button: its script, and pages (a browser's GET for HTML) that load it.
@@ -1570,16 +1709,7 @@ async fn serve(rt: Arc<Runtime>, preview: String, service: String, req: Request)
         let path = req.uri().query().unwrap_or("").split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == "path").map(|(_, v)| percent_decode(v)).unwrap_or_default();
         return rt.feedback_notes(&preview, &path).await;
     }
-    // A page load: a browser says so (`Sec-Fetch-Dest: document`, so not a fetch, a fragment or
-    // an iframe); without that header, one that asks for HTML.
-    let page_load = {
-        let header_of = |h: &str| req.headers().get(h).and_then(|v| v.to_str().ok()).map(str::to_ascii_lowercase);
-        match header_of("sec-fetch-dest") {
-            Some(dest) => dest == "document",
-            None => header_of("accept").is_some_and(|a| a.contains("text/html")),
-        }
-    };
-    let feedback = target.is_some() && req.method() == axum::http::Method::GET && page_load;
+    let feedback = target.is_some() && req.method() == axum::http::Method::GET && is_page_load(&req);
     match rt.cluster.get().cloned() {
         Some(cluster) => {
             let rt2 = rt.clone();

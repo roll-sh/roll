@@ -383,8 +383,11 @@ pub struct Target {
     /// The preview's access token when its project's previews are private (`access: "link"`):
     /// a backend that serves the service itself (roll apps) checks it like the runtime does.
     pub access_token: Option<String>,
-    /// With `access_token`: the project's bypass secret's SHA-256 (hex), which opens it for
-    /// automation too (`x-roll-preview-bypass`).
+    /// The project's previews let in people signed in to roll who may open it (`access:
+    /// "team"`): a backend that serves the service itself (roll apps) gates it on signing in.
+    pub signed_in: bool,
+    /// With `access_token` or `signed_in`: the project's bypass secret's SHA-256 (hex), which
+    /// opens it for automation too (`x-roll-preview-bypass`).
     pub bypass_sha256: Option<String>,
     /// The feedback button on its pages (the project's `feedback`, a change's preview, link
     /// access): a backend that serves the pages itself (roll apps) adds it as the runtime does.
@@ -521,6 +524,13 @@ pub trait Apps: Send + Sync {
     /// The hosts the preview's egress proxy refused lately (its project's `egress_hosts` don't
     /// list them), each once. No default, as `warm`.
     async fn egress_refused(&self, preview: &str) -> Vec<String>;
+}
+
+/// Who may open a project's previews under `access: "team"` (rolld fills it from roll's
+/// accounts and the workspace): asked when a ticket is given and again every few minutes of a
+/// session. A failed lookup is a no.
+pub trait Visitors: Send + Sync {
+    fn may_open(&self, user: &str, project: &str) -> bool;
 }
 
 /// A project's secrets, per environment (roll secrets; docs/secrets.md).
