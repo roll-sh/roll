@@ -705,8 +705,22 @@ async fn references_imports_and_personal_values_resolve_and_cycles_are_reported(
     // A values answer carries the same digest, taken before its read: a watch compares from it.
     let (_, with) = api.call(Method::GET, "/environments/development/values?digest=1", None).await;
     assert_eq!((with["digest"].clone(), api.values("development", "/").await.get("digest").cloned()), (before.clone(), None), "asked for (a watch)");
+    // A watcher long-polls instead: unchanged, it holds until `wait` runs out; a change answers it
+    // at once (well before its 30 s), with the new digest.
+    let since = before.as_str().unwrap().to_string();
+    let (router, project) = (api.router.clone(), api.project.clone());
+    let waiting = tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let req = Request::get(format!("/v1/secrets/projects/{project}/environments/development/digest?since={since}&wait=30")).body(Body::empty()).unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let body: Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap()).unwrap();
+        (body["digest"].clone(), started.elapsed())
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     api.set("production", "DB_HOST", "prod2.db").await;
-    assert_ne!(api.ok(Method::GET, "/environments/development/digest", None).await["digest"], before);
+    let (moved, took) = waiting.await.unwrap();
+    assert!(moved != before && took < std::time::Duration::from_secs(10), "{moved} after {took:?}");
+    assert_eq!(api.ok(Method::GET, "/environments/development/digest", None).await["digest"], moved);
     api.set("production", "DB_HOST", "prod.db").await;
     let problems: Vec<&str> = v["problems"].as_array().unwrap().iter().map(|p| p["problem"].as_str().unwrap()).collect();
     assert!(problems.iter().any(|p| p.starts_with("cycle: A → B → A")), "{problems:?}");

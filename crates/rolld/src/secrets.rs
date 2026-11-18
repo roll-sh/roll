@@ -1100,6 +1100,18 @@ impl apps_control::integrations::SecretSource for ForApps {
         .await?
     }
 
+    async fn wait_digest(&self, project: &str, env: &str, since: &str, wait: std::time::Duration) -> anyhow::Result<Option<String>> {
+        let Some((secrets, _)) = self.0.get().cloned() else { return Ok(None) };
+        // Held polls are counted per principal: one per environment, so a service's watch never
+        // crowds out another's (the node's cap still holds).
+        let caller = roll_secrets::Caller::consumer(&format!("roll:apps:{project}/{env}"));
+        match roll_secrets::api::wait_digest(secrets, project.into(), env.into(), "/".into(), Some(since.into()), wait.as_secs(), caller).await {
+            Ok(d) => Ok(Some(d)),
+            Err(roll_secrets::Error::NotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// A new apps environment's own in roll secrets (`qa`), made as roll apps: a standard
     /// environment, no keys. The defaults (`production`, `staging`, `development`) come with the
     /// project whenever it's first used, so they're left to that.
