@@ -23,6 +23,7 @@ mod reconcile;
 mod reviews;
 pub(crate) mod sync;
 
+pub use notify::{preview_comment_for, preview_states};
 pub use reconcile::Reconciled;
 pub use sync::webhook;
 

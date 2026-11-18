@@ -381,6 +381,17 @@ none of the service's environments follows, after checking the branch really is 
   `a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head`; live in
   `scripts/preview-apps.sh` with GitHub's `pull_request` events through roll apps' hook (#115:
   `GitPushes::takes_pulls`).
+- They say themselves where the code lives (Vercel's status and comment): a `roll/preview`
+  commit status on the pushed commit (pending, ready, failed; a fork's that waits is pending,
+  "waiting for a writer", unlinked), and for a pull request's preview the same comment a roll code
+  change's gets, edited in place, saying "deleted" when it goes. Each is posted only when it
+  changed, and what was posted (the comment's id too) is kept, so a restart posts nothing new.
+  Through the `GitReport` port: rolld posts with roll apps' GitHub App connection (a short-lived
+  token for that one repository; never the service's git login); a service that isn't connected
+  gets nothing. The project's `github.status` and `github.comment` switches hold as for a roll
+  code change's. A comment's number and id belong to the repository its pull request's page
+  names: once the service is connected to another repository, nothing is posted there (an
+  independent review's finding). `a_git_url_preview_reports_its_status_and_pull_request_comment`.
 - roll code's discovery leaves them alone (they follow pushes, not roll code's branches), and
   keeps them while the service is on the canvas.
 
