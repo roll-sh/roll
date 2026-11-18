@@ -838,21 +838,21 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Next, ranked (now):** a real-browser run of turn 4's account work for the review pack
-   (`users-live/review-turn4.sh`: sessions' methods, signing out of the others, People's search and
-   dormant people, a person's security log, the longest session and its alert, resending an
-   invite); `previews_errors` and a mask-suggestions tool once previews' #326 and #324 land (in
-   previews' turn now); the policy alert naming the longest session once #333 and #337 are both on
-   main; turning off the dormant people from People in one step, once #345 and #349 land; apps'
-   forms tools (`apps_list_forms`, `apps_form_submissions` as a reveal) once apps' forms routes
-   land; a removed person's repositories handed to someone else (waits for a repository transfer
-   in roll code). Not doing: "remember this browser" for the second factor.
-   Open for the next turn (after previews; combined tree `wip/roll-mcp-turn4`, waiter
-   `roll-mcp-lock348`): the steadied progress test (#348), passkey autofill (#322), this list
-   (#323), an admin's per-person security log (#328), admin alerts (#333), `search_audit` and
-   `search_analytics` (#334), the longest session (#337), how each session signed in (#338),
-   signing out of all other sessions (#342), People's search (#345), dormant people (#349),
-   resending an invite (#351).
+1. **Next, ranked (now):** land turn 4 (15 PRs below, after previews); then open the follow-ups
+   built on its combined tree (`feature/roll-mcp-turn4-followups`: the policy alert naming the
+   longest session, People's Dormant filter and turning the dormant off in one step);
+   `previews_errors` and a mask-suggestions tool once previews' #326 and #324 land; secrets'
+   request (#277) and cut-off (#304) tools when secrets' batch 4 lands; apps' forms tools once
+   apps' forms routes land; a removed person's repositories handed to someone else (waits for a
+   repository transfer in roll code). Not doing: "remember this browser".
+   Open for the next turn (combined tree `wip/roll-mcp-turn4`, gated green; waiter
+   `roll-mcp-lock348`; land with `land-chain.sh`): the steadied tests (#348), passkey autofill
+   (#322), this list (#323), an admin's per-person security log (#328), admin alerts (#333),
+   `search_audit` and `search_analytics` (#334), the longest session (#337), how each session
+   signed in (#338), signing out of all other sessions (#342), People's search (#345), dormant
+   people (#349), resending an invite (#351), secrets tools for agents (#353), `roll login`'s
+   preset reading development's values (#354), tool answers that fit clients' limits (#355).
+   Checked in a real Chromium: `users-live/review-turn4.sh` (review pack `turn4.html`).
 2. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
    hardware keys only (#286), one provider for people and agents (#287), an SSO connection's
    session length (#289) and back-channel logout (#292), allowed networks (#294), a second factor
