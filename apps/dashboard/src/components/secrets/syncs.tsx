@@ -90,7 +90,8 @@ export function SyncsView() {
 const GROUPS: [string, string[]][] = [
   ["CI", ["github", "gitlab", "azure-devops", "circleci", "bitbucket"]],
   ["Hosting", ["vercel", "netlify", "render", "fly", "railway", "heroku", "digitalocean", "cloudflare"]],
-  ["Clouds and clusters", ["aws-ssm", "aws-secrets-manager", "google-secret-manager", "azure-key-vault", "kubernetes", "terraform-cloud"]],
+  ["Pages and backends", ["cloudflare-pages", "supabase"]],
+  ["Clouds and clusters", ["aws-ssm", "aws-secrets-manager", "google-secret-manager", "azure-key-vault", "azure-app-configuration", "vault-kv", "kubernetes", "terraform-cloud"]],
   ["Anything else", []],
 ];
 
@@ -102,6 +103,10 @@ function targetSummary(s: Sync): string {
   if (s.kind === "kubernetes") return `${str("namespace")}/${str("secret")}`;
   if (s.kind === "gitlab") return `${str("project")} · ${str("environment_scope") || "*"}`;
   if (s.kind === "render") return str("service");
+  if (s.kind === "supabase") return str("project_ref");
+  if (s.kind === "cloudflare-pages") return `${str("project")} · ${str("environment")}`;
+  if (s.kind === "azure-app-configuration") return `${str("store")}${str("label") ? ` · ${str("label")}` : ""}${str("prefix") ? ` · ${str("prefix")}…` : ""}`;
+  if (s.kind === "vault-kv") return `${str("mount") || "secret"}/${str("path")}`;
   if (s.kind === "netlify") return `${str("site")} · ${str("context") || "all"}`;
   if (s.kind === "fly") return str("app");
   if (s.kind === "railway") return `${str("project")} · ${str("environment")}${str("service") ? ` · ${str("service")}` : ""}`;

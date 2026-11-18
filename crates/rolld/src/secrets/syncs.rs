@@ -47,6 +47,11 @@ pub fn kinds(api: Api, allow_private: bool) -> Syncs {
     s.register(Arc::new(platforms::TerraformCloud(http.clone())));
     s.register(Arc::new(platforms::DigitalOcean(http.clone())));
     s.register(Arc::new(platforms::SecretsManager(http.clone())));
+    let guarded = platforms::Guarded::new(&http, allow_private);
+    s.register(Arc::new(platforms::Supabase(guarded.clone())));
+    s.register(Arc::new(platforms::CloudflarePages(guarded.clone())));
+    s.register(Arc::new(platforms::AzureAppConfig(guarded.clone())));
+    s.register(Arc::new(platforms::VaultKv(guarded)));
     s.register(Arc::new(platforms::Ssm(http)));
     s.register(Arc::new(platforms::Kubernetes { allow_private }));
     s.register(Arc::new(platforms::GitLab { allow_private }));
