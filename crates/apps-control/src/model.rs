@@ -439,6 +439,24 @@ pub enum RunType {
 pub struct Volume {
     pub mount: String,
     pub size_gb: u32,
+    /// Its backups' schedule and retention (Fly's snapshot retention, Railway's schedules);
+    /// none: one a day, the newest seven kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backups: Option<VolumeBackups>,
+}
+
+/// How often a volume is backed up and how many backups are kept.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VolumeBackups {
+    /// Hours between scheduled backups, 1–168; 0: none on a schedule (by hand only).
+    pub every_hours: u32,
+    /// The newest kept, 1–90 (scheduled and by hand alike).
+    pub keep: u32,
+}
+
+impl VolumeBackups {
+    pub const DEFAULT: VolumeBackups = VolumeBackups { every_hours: 24, keep: 7 };
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -941,6 +959,11 @@ impl Run {
             }
             if !(1..=500).contains(&v.size_gb) {
                 return bad("volume.size_gb is 1–500");
+            }
+            if let Some(b) = v.backups
+                && (b.every_hours > 168 || !(1..=90).contains(&b.keep))
+            {
+                return bad("volume.backups is {every_hours: 0–168 (0: by hand only), keep: 1–90}");
             }
             self.max_instances = 1;
             self.min_instances = self.min_instances.min(1);

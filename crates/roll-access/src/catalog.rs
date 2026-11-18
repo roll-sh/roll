@@ -1358,7 +1358,9 @@ static ROWS: &[Row] = &[
     // A volume's backups: making one changes nothing the app sees (write, production too);
     // restoring one replaces the volume's files (delete, as restoring over a branch is).
     row("POST", "/v1/apps/services/{id}/environments/{env}/volume/backups", "apps", W, one(PG, "service")).env(EnvFrom::Param("env")),
-    row("POST", "/v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")),
+    // `from` restores another environment's backup here (its files are that environment's data):
+    // reveal there too.
+    row("POST", "/v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore", "apps", D, one(PG, "service")).env(EnvFrom::Param("env")).copies_from(CopyFrom::Body("from")),
     // A shell runs any command where the service runs, with its variables (`env` prints them all):
     // admin in every environment, as an agent's shell is: its WebSocket, and all of a session
     // (opening, keys, screen, resizing, closing: what may close an admin's shell is admin too).

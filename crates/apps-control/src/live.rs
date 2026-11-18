@@ -2395,7 +2395,7 @@ mod tests {
     async fn a_volume_rollout_never_starts_the_old_deployment_on_the_volume() {
         let fake = Fake::new();
         let live = live(&fake);
-        let run = Run { volume: Some(crate::model::Volume { mount: "/data".into(), size_gb: 1 }), min_instances: 1, ..Run::default() };
+        let run = Run { volume: Some(crate::model::Volume { mount: "/data".into(), size_gb: 1, backups: None }), min_instances: 1, ..Run::default() };
         let old = template_of("dep_aaaaaaaaaaaa", run.clone(), &[]);
         let prepared = live.prepare(&old, None).await.unwrap();
         live.commit(old, prepared).await;

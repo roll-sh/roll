@@ -83,7 +83,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/hooks/{id}/{env}/{token}?image=` | none, or a repository's push webhook (GitHub's or GitLab's `push` JSON) | 202 `Deployment` (actor `deploy hook`); for a Git URL service a push to the environment's branch deploys that commit (trigger `push`, the commit's subject as its message, keyed by the commit so a redelivery is the same deploy), and another branch, a deleted branch, a `[skip ci]` commit or GitHub's ping is 200 `{ ignored }`; `image`: another tag or digest of an image service's own repository, else 400; any token that isn't the live hook's is a 404. No API token: the URL is the secret (rolld's `RULES` let it through to the hook's own check; access lines log the route pattern, never the token). Each deploy is `audit.hook.deployed` in the activity, with the caller's address | none (the URL) |
 | `GET /v1/apps/services/{id}/environments/{env}/volume/backups` | | `Backup[]`, newest first (7 kept) | read |
 | `POST /v1/apps/services/{id}/environments/{env}/volume/backups` | | 201 `Backup` (now) | write |
-| `POST /v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore` | | `Backup` (the volume as it was; the environment asleep meanwhile) | delete (it replaces the volume's files) |
+| `POST /v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore` | `{ from?: string }` (another environment of the service, whose backup `bid` is: seeding staging from production; 404 for one it doesn't have) | `Backup` (the volume as it was; what's there now backed up first under this environment's name; the environment asleep meanwhile) | delete (it replaces the volume's files); with `from`, reveal on that environment too |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel` | | `Deployment` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollout` | `{action: "advance" \| "all" \| "abort"}` | 202 `{deployment}`; 409 when it isn't waiting | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/restart` | | 202 `Environment` | deploy* |
@@ -225,7 +225,7 @@ type Run = {
                             // unhealthy is replaced as a crash. Changing it is a deploy (it runs in production)
   suspend_after_s: number;  // default 30; 0 never suspends
   sleep_after_s: number;    // default 600; min_instances > 0 never sleeps below min
-  volume?: { mount: string; size_gb: number };
+  volume?: { mount: string; size_gb: number; backups?: { every_hours: number /* 0–168; 0: by hand only */; keep: number /* 1–90 */ } /* none: daily, seven kept */ };
   alerts: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct: number; log_match?: string; log_count?: number }; // default 90, 5, 0, 10 (0 off); capacity_pct: the share of five minutes' requests that found every instance busy at max_instances, `alert.capacity`: `alert.*` events over five minutes; log_match: text its stdout/stderr holds log_count times (default 10) in five minutes, `alert.log`
   /** A gradual rollout (README "Gradual rollouts"): increasing percents 1–99 (at most five; []
    *  switches at once, the default), each for step_s (1–3600, default 120); a step whose 5xx

@@ -1602,6 +1602,23 @@ async fn a_volume_is_backed_up_and_restored() {
     assert!(trail.to_string().contains("audit.volume.restored"), "{trail}");
     let (st, _) = call(&w.api, "POST", &format!("{base}/123/restore"), None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+    // Staging seeded from production's backup (Fly's restore elsewhere): production's files on
+    // staging's volume, what staging had backed up first under its own name.
+    let staging_volume = apps_control::volume_name(&id, "staging");
+    w.fake.put_volume(&staging_volume, b"stale");
+    let (st, r) = call(&w.api, "POST", &format!("{staging}/volume/backups/{}/restore", b["id"].as_str().unwrap()), Some(json!({"from": "production"}))).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(w.fake.volume(&staging_volume).as_deref(), Some(&b"the first state"[..]));
+    let (_, kept) = call(&w.api, "GET", &format!("{staging}/volume/backups"), None).await;
+    assert!(kept.as_array().unwrap().iter().any(|b| b["size"] == 5), "staging's own state before: {kept}");
+    assert_eq!(call(&w.api, "POST", &format!("{staging}/volume/backups/{}/restore", b["id"].as_str().unwrap()), Some(json!({"from": "nope"}))).await.0, StatusCode::NOT_FOUND);
+    // Its own retention: the newest two kept.
+    assert_eq!(call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"volume": {"mount": "/data", "size_gb": 1, "backups": {"every_hours": 6, "keep": 0}}}}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, s) = call(&w.api, "PATCH", &format!("/v1/apps/services/{id}"), Some(json!({"run": {"volume": {"mount": "/data", "size_gb": 1, "backups": {"every_hours": 6, "keep": 2}}}}))).await;
+    assert_eq!((st, &s["run"]["volume"]["backups"]), (StatusCode::OK, &json!({"every_hours": 6, "keep": 2})), "{s}");
+    call(&w.api, "POST", &base, None).await;
+    let (_, list) = call(&w.api, "GET", &base, None).await;
+    assert_eq!(list.as_array().unwrap().len(), 2, "{list}");
 }
 
 /// Changes people make are an audit trail: what changed and who, never a value.
