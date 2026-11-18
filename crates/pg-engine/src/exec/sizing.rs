@@ -2866,12 +2866,21 @@ pub fn updated(
         // page and its own row: in the shard lock's group of such writers, which don't wait
         // for each other (`modellock`). Anything else, or when it finds no room after all,
         // under the exclusive lock below.
-        let grouped = hot_ok && t.toast == 0 && exts.is_empty() && old_exts.is_empty();
+        let grouped = hot_ok && exts.is_empty() && old_exts.is_empty();
         if grouped {
             let rf = modellock::group(db.relfiles.of(t.oid));
             let Some(heap) = rf.heaps.get(&t.oid) else {
                 return Ok(None);
             };
+            if assumed
+                && let Some(o) = rf.toast.get(&t.oid).and_then(|tt| tt.rows.get(old_key)).filter(|o| !o.is_empty())
+            {
+                // (The old version has values out of line after all: laid out again with them,
+                // under the exclusive lock. Only exclusive writers change what a table keeps
+                // out of line.)
+                known = Some(o.clone());
+                continue;
+            }
             let cid = ctx.txn.borrow_mut().output_cid();
             let mut replace = |at: Tid, o: &heapsim::Tup| {
                 let mode = if key_changed() { RowLockMode::Update } else { RowLockMode::NoKeyUpdate };
