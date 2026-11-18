@@ -379,6 +379,11 @@ impl Runtime for Fake {
             let i = m.get(name).ok_or_else(|| anyhow::anyhow!("no instance {name}"))?;
             i.spec.clone()
         };
+        // Its sidecars, after it, each saying so under its own name (never its variables' values).
+        for sc in &spec.sidecars {
+            let names: Vec<&str> = sc.vars.iter().map(|(k, _)| k.as_str()).collect();
+            log.renamed(&super::sidecar_name(name, &sc.name)).line(format!("sidecar {} running {} with {}", sc.name, sc.image, names.join(",")));
+        }
         // A job: `FAKE_EXIT`, or a command `exit <code>` (a pre-deploy command, a cron run).
         let exit = spec.command.as_deref().and_then(|c| c.strip_prefix("exit ")).and_then(|c| c.trim().parse::<i32>().ok());
         if let Some(code) = exit.or_else(|| var(&spec, "FAKE_EXIT").and_then(|c| c.parse::<i32>().ok())) {

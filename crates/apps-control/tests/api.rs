@@ -312,6 +312,50 @@ async fn image_service(w: &World, name: &str, run: Value) -> (Value, Value) {
     (svc, d)
 }
 
+/// Sidecars (Cloud Run's, Fly's): containers beside each instance, their images pinned with the
+/// deployment, each given its own settings and only the variables it names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sidecars_run_beside_each_instance_with_only_what_they_name() {
+    let w = world().await;
+    let proxy = json!({"name": "db-proxy", "image": "cloud-sql-proxy:2", "env": {"PORT": "5432"}, "variables": ["DATABASE_URL", "MISSING"], "memory_mb": 256});
+    let make = |name: &str, run: Value| json!({ "project": w.project, "name": name, "source": {"kind": "image", "image": "nginx:1.27"}, "run": run, "variables": {"DATABASE_URL": "postgres://u:p@db/x", "STRIPE_KEY": "sk_live"} });
+    for (run, why) in [
+        (json!({"type": "cron", "schedule": "@daily", "sidecars": [proxy]}), "a cron service has none"),
+        (json!({"port": 80, "sidecars": [proxy, proxy]}), "names are unique"),
+        (json!({"port": 80, "sidecars": [{"name": "x", "image": "y", "cpu": 4}]}), "cpu is 0.1–2"),
+        (json!({"port": 80, "sidecars": [{"name": "x", "image": "y", "variables": ["not a name"]}]}), "variables are names"),
+    ] {
+        assert_eq!(call(&w.api, "POST", "/v1/apps/services", Some(make("bad", run))).await.0, StatusCode::BAD_REQUEST, "{why}");
+    }
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(make("api", json!({"port": 80, "min_instances": 1, "sidecars": [proxy]})))).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
+    let mut inst = None;
+    for _ in 0..200 {
+        inst = w.fake.instances(&id).into_iter().find(|(_, _, st)| *st == FakeState::Running).map(|(n, _, _)| n);
+        if inst.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let inst = inst.expect("an instance runs");
+    let spec = w.fake.spec(&inst).unwrap();
+    let sc = &spec.sidecars[0];
+    assert_eq!((sc.name.as_str(), sc.memory_mb, sc.cpu), ("db-proxy", 256, 0.25));
+    // Pinned with the deployment (stored with it): a rollback or a redeploy runs the same one.
+    assert_eq!(sc.image, format!("cloud-sql-proxy:2@sha256:{}", "0".repeat(64)));
+    // Its own setting and the variable it named; not the app's others, nor one that isn't set.
+    let mut names: Vec<&str> = sc.vars.iter().map(|(k, _)| k.as_str()).collect();
+    names.sort();
+    assert_eq!(names, ["DATABASE_URL", "PORT"]);
+    // Its output in the environment's log under its own container's name.
+    let log = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/logs"), None).await.1;
+    let line = log.as_array().unwrap().iter().find(|l| l["text"].as_str().is_some_and(|t| t.starts_with("sidecar db-proxy running"))).unwrap_or_else(|| panic!("{log}"));
+    assert_eq!(line["instance"].as_str(), Some(format!("{inst}-sc-db-proxy").as_str()), "{line}");
+    assert!(!log.to_string().contains("sk_live"), "a value never goes in the log");
+}
+
 /// Traces: turned on, an environment's instances get the OpenTelemetry SDK's variables pointing
 /// at roll; what they send (OTLP JSON here) reads back as recent traces and as one trace's
 /// spans; another token is a 404; turned off, the variables go.

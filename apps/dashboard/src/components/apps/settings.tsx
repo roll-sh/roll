@@ -11,6 +11,7 @@ import { EnvironmentPanel, InstancesPanel } from "./environment";
 import { resourceKey } from "@/lib/workspace-resources";
 import { useWorkspace } from "@/lib/workspace-store";
 import { CPU, MEMORY, mb, type Runner } from "./shared";
+import { SidecarsPanel } from "./sidecars";
 
 
 /** The form's values, as text (empty: the default). */
@@ -303,6 +304,7 @@ export function SettingsTab({
     ...(form.type !== "cron" ? ([["scaling", "Scaling"]] as [string, string][]) : []),
     ["health", "Health and alerts"],
     ...(web ? ([["networking", "Networking"], ["rollout", "Rollout"]] as [string, string][]) : []),
+    ...(form.type !== "cron" ? ([["sidecars", "Sidecars"]] as [string, string][]) : []),
     ...(env ? ([["environment", "Environment"]] as [string, string][]) : []),
   ];
   const project: [string, string][] = [["project", "Notifications and limits"]];
@@ -718,6 +720,12 @@ export function SettingsTab({
             {runner.busy === "settings" ? <span className="shimmer">Saving…</span> : "Save"}
           </button>
         </div>
+
+        {service.run.type !== "cron" && (
+          <Anchor id="sidecars">
+            <SidecarsPanel service={service} runner={runner} />
+          </Anchor>
+        )}
 
         {env && (
           <Anchor id="environment" className="space-y-6">

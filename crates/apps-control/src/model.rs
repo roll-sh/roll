@@ -576,6 +576,47 @@ pub struct Run {
     /// Scheduler, Vercel crons): any service's, without a cron service of its own.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub schedules: Vec<Scheduled>,
+    /// Containers beside each instance (Cloud Run's sidecars, Fly's multi-container machines):
+    /// in its network namespace (they reach each other on localhost), started after it, frozen,
+    /// stopped and removed with it. A web service's or a worker's; at most four.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sidecars: Vec<Sidecar>,
+}
+
+/// A container beside each instance ([`Run::sidecars`]): a proxy, an agent, a collector.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sidecar {
+    /// Unique in the service: a-z, 0-9 and -, at most 20.
+    pub name: String,
+    /// Any image a registry this node may pull from has; pinned to its digest with each
+    /// deployment, so a rollback runs the same one.
+    pub image: String,
+    /// Run as `sh -c <command>` instead of the image's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Plain settings for it, shown as they are (at most 50): never a secret.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// The environment's own variables it gets, by name (its secrets too): none unless named.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<String>,
+    /// 0.1–2 (default 0.25), metered with the instance.
+    #[serde(default = "Sidecar::default_cpu")]
+    pub cpu: f64,
+    /// 64–4096 (default 128), metered with the instance.
+    #[serde(default = "Sidecar::default_memory")]
+    pub memory_mb: u32,
+}
+
+impl Sidecar {
+    fn default_cpu() -> f64 {
+        0.25
+    }
+
+    fn default_memory() -> u32 {
+        128
+    }
 }
 
 /// A schedule's state in an environment ([`Environment::schedules`]).
@@ -807,6 +848,7 @@ impl Default for Run {
             rollback_on_crash: false,
             rebuild_on_base: false,
             schedules: Vec::new(),
+            sidecars: Vec::new(),
         }
     }
 }
@@ -847,6 +889,36 @@ impl Run {
             }
             if sc.timeout_s.is_some_and(|t| !(1..=86_400).contains(&t)) {
                 return bad("schedules' timeout_s is 1–86400");
+            }
+        }
+        if !self.sidecars.is_empty() && !matches!(self.kind, RunType::Web | RunType::Worker) {
+            return bad("sidecars are a web service's or a worker's");
+        }
+        if self.sidecars.len() > 4 {
+            return bad("sidecars is at most 4");
+        }
+        let var_name = |k: &str| !k.is_empty() && k.len() <= 128 && !k.as_bytes()[0].is_ascii_digit() && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        for (i, sc) in self.sidecars.iter().enumerate() {
+            if sc.name.is_empty() || sc.name.len() > 20 || !sc.name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') || self.sidecars[..i].iter().any(|o| o.name == sc.name) {
+                return bad("sidecars' names are unique: a-z, 0-9 and -, at most 20");
+            }
+            if sc.image.is_empty() || sc.image.len() > 255 || !sc.image.bytes().all(|b| b.is_ascii_graphic()) {
+                return bad("a sidecar's image is an image reference");
+            }
+            if sc.command.as_ref().is_some_and(|c| c.trim().is_empty() || c.len() > 2000 || c.contains('\0')) {
+                return bad("a sidecar's command is 1–2000 characters");
+            }
+            if sc.env.len() > 50 || sc.variables.len() > 50 {
+                return bad("a sidecar has at most 50 env settings and 50 variables");
+            }
+            if let Some(k) = sc.env.keys().chain(sc.variables.iter()).find(|k| !var_name(k)) {
+                return Err(Error::BadRequest(format!("run.sidecars.{}: {k:?} isn't a variable name", sc.name)));
+            }
+            if sc.env.values().any(|v| v.len() > 4096 || v.contains('\0') || v.contains('\n')) {
+                return bad("a sidecar's env values are one line of at most 4096 characters");
+            }
+            if !(0.1..=2.0).contains(&sc.cpu) || !(64..=4096).contains(&sc.memory_mb) {
+                return bad("a sidecar's cpu is 0.1–2, its memory_mb 64–4096");
             }
         }
         let r = &self.rollout;

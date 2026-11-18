@@ -181,6 +181,61 @@
           "type": "boolean",
           "description": "Roll back when a new deployment crash-loops."
         },
+        "sidecars": {
+          "type": "array",
+          "maxItems": 4,
+          "description": "Containers beside each instance, in its network namespace (they reach each other on localhost): a web service's or a worker's.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "image"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9-]{1,20}$"
+              },
+              "image": {
+                "type": "string",
+                "description": "Pinned to its digest with each deployment."
+              },
+              "command": {
+                "type": "string",
+                "description": "Run as sh -c instead of the image's own."
+              },
+              "env": {
+                "type": "object",
+                "maxProperties": 50,
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Plain settings, shown as they are: never a secret."
+              },
+              "variables": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                  "type": "string"
+                },
+                "description": "The environment's own variables it gets, by name (its secrets too)."
+              },
+              "cpu": {
+                "type": "number",
+                "minimum": 0.1,
+                "maximum": 2,
+                "description": "Default 0.25, metered with the instance."
+              },
+              "memory_mb": {
+                "type": "integer",
+                "minimum": 64,
+                "maximum": 4096,
+                "description": "Default 128, metered with the instance."
+              }
+            }
+          }
+        },
         "schedules": {
           "type": "array",
           "maxItems": 20,

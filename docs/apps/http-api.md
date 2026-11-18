@@ -285,6 +285,7 @@ type Run = {
   /** Commands on a schedule on any service: each a job of the live deployment at its due times, skipped while its
    *  last job runs; at most 20; name a-z, 0-9 and - (unique, 32 at most), command 1–2000, timeout_s 1–86400. */
   schedules?: { name: string; schedule: string; command?: string; path?: string /* a web service's path GET'd instead of a command (Vercel's crons): through its own proxy on the owner, past its allow list, firewall, rate limit and access gate, with Authorization: Bearer $CRON_SECRET when the environment has one; a call still out skips the next; a non-2xx/3xx or no answer is cron.failed (data.path, http_status or error); timeout_s default 300 */; timezone?: string; timeout_s?: number }[];
+  sidecars?: { name: string /* a-z, 0-9 and -, at most 20, unique */; image: string /* pinned to its digest with each deployment */; command?: string /* sh -c, instead of the image's own */; env?: { [name: string]: string } /* plain settings, at most 50, shown as they are: never a secret */; variables?: string[] /* the environment's own variables it gets, by name, at most 50 */; cpu?: number /* 0.1–2, default 0.25 */; memory_mb?: number /* 64–4096, default 128 */ }[]; // at most 4, a web service's or a worker's: containers in each instance's network namespace (localhost), started after it, frozen, stopped and removed with it, metered with it; Docker only (the fleet refuses them for now)
 };
 
 type Service = {

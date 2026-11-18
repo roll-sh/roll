@@ -2368,6 +2368,7 @@ mod tests {
                 registry: None,
                 files: vec![],
                 health: None,
+                sidecars: vec![],
             },
             run,
             spa: false,

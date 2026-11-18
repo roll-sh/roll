@@ -66,6 +66,32 @@ pub struct InstanceSpec {
     pub registry: Option<RegistryLogin>,
     /// A worker's health check, run by the runtime in the instance ([`Runtime::unhealthy`]).
     pub health: Option<HealthCheck>,
+    /// Containers beside it in its network namespace ([`crate::model::Run::sidecars`]),
+    /// started after it and frozen, stopped and removed with it.
+    pub sidecars: Vec<SidecarSpec>,
+}
+
+/// A sidecar as the runtime starts it: its image pinned, its variables resolved.
+#[derive(Clone, PartialEq)]
+pub struct SidecarSpec {
+    pub name: String,
+    pub image: String,
+    pub command: Option<String>,
+    /// Its env settings and the variables it named. Never in `Debug`.
+    pub vars: Vec<(String, String)>,
+    pub cpu: f64,
+    pub memory_mb: u32,
+}
+
+impl std::fmt::Debug for SidecarSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SidecarSpec").field("name", &self.name).field("image", &self.image).field("vars", &self.vars.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>()).finish_non_exhaustive()
+    }
+}
+
+/// A sidecar's container: `<instance>-sc-<name>`.
+pub fn sidecar_name(instance: &str, sidecar: &str) -> String {
+    format!("{instance}-sc-{sidecar}")
 }
 
 /// A command run in an instance every `every`, healthy on exit 0; `failures` in a row make it
