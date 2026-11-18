@@ -2992,6 +2992,33 @@ outside roll, on #132), #166 (a gateway into private networks, on #132), #169 (a
 guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on #136), #194
 (TOTP keys).
 
+**The thirtieth product review** (2026-11-18, against Vault/OpenBao, Infisical, Doppler, AWS, 1Password,
+Akeyless, GitGuardian and Bitwarden SM, open PRs checked first) ranked these gaps; its four doc
+inconsistencies are fixed in #264:
+- R1. **Project members and roles for people** (L; every competitor's unit of sharing): waits on the
+  accounts/workspace and roll-access threads.
+- R2. **Cut off everything that reaches a folder** (M): reach lists it but can't act; one action to
+  revoke its tokens and identities, end leases and shares, pause syncs and optionally freeze reads.
+  Needs a bulk revoke in roll-access (roll MCP).
+- R3. **Credentials roll doesn't hold yet** (M): landings and `roll secrets scan` match stored values
+  only; share roll MCP's guard detectors and offer "store in roll, replace with `${KEY}`". With the
+  code and MCP threads.
+- R4. **GCP KMS, Azure Key Vault and HSM keys** (M), next to AWS KMS: real accounts (the user's call).
+- R5. **`roll://` wherever another roll product takes a key** (M): agent endpoints (they take `op://`),
+  the gateway's upstreams, review provider keys, storage replication and search snapshot credentials.
+- R6. **roll queues as a link provider** (S–M): the only workspace kind without one.
+- R7. **AWS IAM login for EC2/ECS/EKS** (S–M; a signed `GetCallerIdentity`, as Vault's): an account to confirm.
+- R8. **A tamper-evident audit log** (building: `feature/roll-secrets-audit-chain`): a per-project hash
+  chain written with each row, digests signed by roll's issuer key to the sinks, `audit verify`.
+- R9. **Secret requests** (building: `feature/roll-secrets-requests`): a link that asks someone outside
+  roll for a value, sealed in their browser, landing as a change or a change request.
+- R10. **Honeytokens** (M): decoy tokens, database roles and IAM users that alert on use.
+- R11. **Moving in from 1Password, Bitwarden SM, Parameter Store, GCP, Azure and Akeyless** (S each).
+- R12. **A split deployment key** (M; N of M to recover or rotate it). R13. **A FIPS build** (L).
+  R14. **Format-preserving encryption** (M, low). R15. Clearing a copied value from the clipboard: not
+  done, since a page can't read the clipboard without a prompt and clearing blindly could wipe
+  what was copied since.
+
 0. **Land in batches**: batch 1 landed in one lock turn (2026-11-18): #69, #70, #72, #76, #77, then
    #73, #75, #71 (main's tree afterwards was exactly the gated one), and #147 behind them, gated on
    their tree. One flake on the way (a CI checkout hung past its 2-minute limit; #71 re-queued after a
