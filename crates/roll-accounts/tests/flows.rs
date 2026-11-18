@@ -1199,3 +1199,46 @@ async fn a_person_moves_their_account_to_another_address() {
     assert_eq!(guess.json["code"], "bad_code");
     assert_eq!(change(&env, &mut ada, "ada@new.test").await.status, StatusCode::BAD_REQUEST, "already hers");
 }
+
+async fn delete(env: &Env, b: &mut Browser, confirm: &str) -> Answer {
+    env.call(b, Method::DELETE, "/v1/accounts/me", Some(json!({ "confirm": confirm }))).await
+}
+
+/// A person deletes their own account (docs/accounts.md, "Deleting your account"): from a fresh
+/// session, typing their handle; every way in ends at once, the address can be invited again,
+/// and nothing (an admin included) brings it back. The last admin can't leave.
+#[tokio::test]
+async fn a_person_deletes_their_own_account() {
+    let env = Env::new().await;
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@example.com", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let mut root = Browser::default();
+    env.email_sign_in(&mut root, "root@example.com", Some(&root_invite)).await;
+    let mut ada = Browser::default();
+    let signed = env.email_sign_in(&mut ada, "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json;
+    let (id, handle) = (signed["user"]["id"].as_str().unwrap().to_string(), signed["user"]["handle"].as_str().unwrap().to_string());
+
+    env.accounts.set_sudo_window(0);
+    assert_eq!(delete(&env, &mut ada, &handle).await.json["code"], "reauth_required", "a stolen cookie alone can't");
+    env.accounts.set_sudo_window(2 * 60 * 60 * 1000);
+    assert_eq!(delete(&env, &mut ada, "not-me").await.json["code"], "confirm");
+    assert_eq!(delete(&env, &mut root, "root").await.status, StatusCode::CONFLICT, "roll's last admin stays");
+
+    let gone = delete(&env, &mut ada, &handle).await;
+    assert_eq!(gone.status, StatusCode::NO_CONTENT, "{}", gone.json);
+    assert!(gone.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap().contains("Max-Age=0"));
+    assert_eq!(env.call(&mut ada, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
+    assert!(env.accounts.person(&id).unwrap().is_none(), "its tokens act as nobody");
+    assert!(mails_about(&env.outbox, "ada@example.com", "was deleted", 1).await[0].1.contains(&handle));
+    // Gone from the admin's list, and no admin turns it back on.
+    let people = env.call(&mut root, Method::GET, "/v1/accounts/users", None).await.json;
+    assert!(!people.to_string().contains(&id), "{people}");
+    assert_eq!(env.call(&mut root, Method::PATCH, &format!("/v1/accounts/users/{id}"), Some(json!({ "disabled": false }))).await.status, StatusCode::NOT_FOUND);
+
+    // The address signs nothing in; invited again, it's a new account.
+    let codes = count_codes(&env.outbox, "ada@example.com");
+    env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "ada@example.com" }))).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(count_codes(&env.outbox, "ada@example.com"), codes);
+    let again = env.email_sign_in(&mut Browser::default(), "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json;
+    assert_ne!(again["user"]["id"].as_str(), Some(id.as_str()), "{again}");
+}
