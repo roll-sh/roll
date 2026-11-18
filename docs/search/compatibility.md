@@ -1413,6 +1413,15 @@ the rest are skipped by the tests' own prerequisites.
   `reindex.remote.whitelist` (node setting, `search-dev --yaml-test-cluster` sets
   `127.0.0.1:*`); an empty whitelist rejects every remote, as in Elasticsearch.
 - Segment generations in `_segments` / `_cat/segments` number the current segments.
+- Remote clusters (`cluster.remote.<alias>.*`) reach another roll search cluster of the same
+  owner with API key based security (README.md, "Cross-cluster search"), or the node itself
+  (the YAML suites' loopback); roll speaks no transport protocol, so a seed or proxy address
+  outside roll is never connected. A remote's `credentials` are set through roll's API, not a
+  keystore. Searches merge as `ccs_minimize_roundtrips: true` does whatever the parameter says;
+  aggregations over several clusters merge from their JSON (bucket aggregations, `min`, `max`,
+  `sum`, `value_count`, `stats`; others are refused with a 400, and `histogram`s with calendar
+  intervals whose clusters' ranges don't overlap). Not across clusters yet: `scroll`, point in
+  time, suggesters, ES|QL `FROM <alias>:<index>`, and remotes of OpenSearch-flavor clusters.
 - Aggregations and sorting on keyed flattened sub-fields, `_index_mode` aggregations,
   nested sorts inside `top_hits`, and shard-level aggregation failures as partial results.
 - Compound retrievers (`rrf`, `linear`, `pinned`, `rule` and `rescorer` over them) follow

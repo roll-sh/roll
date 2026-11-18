@@ -147,6 +147,11 @@ impl<'a> Ctx<'a> {
         self.params.iter().any(|(k, _)| k == name)
     }
 
+    /// The query parameters in request order (repeats included).
+    pub fn query_pairs(&self) -> &[(String, String)] {
+        &self.params
+    }
+
     /// The query parameter names in request order (repeats included).
     pub fn query_names(&self) -> impl Iterator<Item = &str> {
         self.params.iter().map(|(k, _)| k.as_str())

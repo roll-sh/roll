@@ -551,6 +551,7 @@ impl Control {
         let meter = Meter::new(store.clone());
         let wakes = Arc::new(Wakes::default());
         let hooks = Arc::new(ControlHooks { meter: MeterHooks(meter.clone()), wakes: wakes.clone(), control: OnceLock::new() });
+        let links = Arc::new(crate::remotes::ControlLinks::new(cfg.domain.clone()));
         let node = Node::with_hooks(
             Arc::new(SqlCatalog { store: store.clone(), wakes: wakes.clone() }),
             Arc::new(GuardedStores { inner: ObjectStores::new(data.clone()), store: store.clone(), wakes: wakes.clone() }),
@@ -563,6 +564,7 @@ impl Control {
                 memory_budget: cfg.memory_budget,
                 sealer: cfg.sealer.clone(),
                 default_repository: cfg.default_repository.clone(),
+                links: Some(links.clone()),
                 ..NodeConfig::default()
             },
             hooks.clone(),
@@ -583,6 +585,7 @@ impl Control {
         });
         // Nothing can load before the node is handed out, so the hook always finds the control.
         let _ = hooks.control.set(Arc::downgrade(&control));
+        links.set(Arc::downgrade(&control));
         let _ = control.me.set(Arc::downgrade(&control));
         control.start_metering();
         control.start_gc();
@@ -1484,12 +1487,20 @@ impl Control {
     /// Sends a request to the cluster as its owner (through authentication and admission, so
     /// limits apply and it wakes the cluster like any client). On a fleet it runs on the node that
     /// owns the cluster: here, or sent there (an in-process caller on any node, as apps' links).
-    async fn call(&self, c: &SearchCluster, mut req: EsRequest) -> EsResponse {
-        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("host"));
+    pub(crate) async fn call(&self, c: &SearchCluster, mut req: EsRequest) -> EsResponse {
+        req.headers.retain(|(k, _)| {
+            !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("host") && !k.eq_ignore_ascii_case(search_es::remote::links::REMOTE_ACCESS_HEADER)
+        });
         let token = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", c.name, c.password));
         req.headers.push(("Authorization".into(), format!("Basic {token}")));
-        if self.node.get_loaded(&c.name).is_none()
-            && let Some(resp) = crate::cluster::to_owner(self, &c.name, &req).await
+        self.on_owner(&c.name, req).await
+    }
+
+    /// Runs `req` on cluster `name`'s owner node: here (waking it if it sleeps), or forwarded
+    /// there signed as roll's own request.
+    pub(crate) async fn on_owner(&self, name: &str, req: EsRequest) -> EsResponse {
+        if self.node.get_loaded(name).is_none()
+            && let Some(resp) = crate::cluster::to_owner(self, name, &req).await
         {
             return resp;
         }

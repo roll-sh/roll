@@ -109,6 +109,9 @@ pub struct ClusterConfig {
     /// ([`crate::api::snapshots::install_default_repository`]): clusters whose snapshot
     /// contents are durable in roll's object storage (`None`: no default repository).
     pub default_repository: Option<String>,
+    /// Reaches the roll search clusters this one names as remotes ([`crate::remote::links`]);
+    /// `None`: remotes reach only the node itself.
+    pub links: Option<std::sync::Arc<dyn crate::remote::links::Links>>,
 }
 
 impl ClusterConfig {
@@ -123,6 +126,7 @@ impl ClusterConfig {
             host_metrics: false,
             sealer: None,
             default_repository: None,
+            links: None,
         }
     }
 

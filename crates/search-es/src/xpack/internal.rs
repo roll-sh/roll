@@ -78,6 +78,7 @@ pub fn principal_of(u: &Value) -> Option<crate::xpack::security::Principal> {
             role_descriptors: a.get("role_descriptors").cloned().unwrap_or(Value::Null),
             limited_by: a.get("limited_by").cloned().unwrap_or(Value::Null),
             cross_cluster: a.get("cross_cluster").and_then(Value::as_bool).unwrap_or(false),
+            remote: None,
         })),
         None => crate::xpack::security::AuthKind::Realm,
     };
