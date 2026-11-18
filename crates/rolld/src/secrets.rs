@@ -90,6 +90,24 @@ impl Api {
         Ok(v)
     }
 
+    /// GET a product's route as the operator, reading at most `limit` bytes of its answer (JSON,
+    /// 2xx only): for objects whose size the caller knows, never the whole of whatever is there.
+    pub(crate) fn get_bounded(&self, path: &str, limit: usize) -> roll_secrets::Result<Json> {
+        let router = self.0.get().ok_or_else(|| Error::Link("the product APIs aren't up yet".into()))?.clone();
+        let mut req = Request::builder().method(Method::GET).uri(path);
+        req.extensions_mut().map(|e| e.insert(roll_auth::Operator));
+        let req = req.body(Body::empty()).map_err(|e| Error::Internal(e.to_string()))?;
+        let route = path.split('?').next().unwrap_or(path).to_string();
+        tokio::runtime::Handle::current().block_on(async move {
+            let resp = router.oneshot(req).await.map_err(|e| Error::Link(e.to_string()))?;
+            if !resp.status().is_success() {
+                return Err(Error::Link(format!("GET {route}: {}", resp.status().as_u16())));
+            }
+            let bytes = http_body_util::Limited::new(resp.into_body(), limit).collect().await.map_err(|_| Error::Link(format!("GET {route}: an answer over {limit} bytes")))?.to_bytes();
+            serde_json::from_slice(&bytes).map_err(|_| Error::Link(format!("GET {route}: not JSON")))
+        })
+    }
+
     /// Delete a product's resource; one that's already gone (404) is done.
     fn delete_gone(&self, path: &str) -> roll_secrets::Result<()> {
         match self.call_status(Method::DELETE, path, None)? {

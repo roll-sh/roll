@@ -43,6 +43,7 @@ pub mod kubernetes;
 mod oidc;
 mod read;
 mod metrics;
+pub mod backup_schedule;
 pub mod reach;
 pub mod refs;
 mod notices;
@@ -494,6 +495,7 @@ impl Secrets {
             links.register(Arc::new(ssh::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone() }));
         }
         db.ensure_schema(outside::SCHEMA)?;
+        db.ensure_schema(backup_schedule::SCHEMA)?;
         // A rotation's new admin URL, kept until the server took it (outside.rs).
         db.add_column("outside_dbs", "url_next", "BLOB")?;
         db.add_column("outside_dbs", "url_next_at", "INTEGER")?;
@@ -653,7 +655,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "aws_users", "aws_roles", "cloud_accounts", "kubernetes_clusters", "cas", "ca_certs", "ssh_cas", "github_apps"];
+const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "aws_users", "aws_roles", "cloud_accounts", "kubernetes_clusters", "cas", "ca_certs", "ssh_cas", "github_apps", "backup_schedules"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked, and no
 /// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,

@@ -87,6 +87,25 @@ pub trait Deliver: Send + Sync {
         let _ = (method, url, headers, body, limit);
         Err(crate::Error::Link("calling out isn't on this server".into()))
     }
+    /// Write `body` as object `key` in roll bucket `bucket` (scheduled backups).
+    fn put_object(&self, bucket: &str, key: &str, body: &Json) -> Result<()> {
+        let _ = (bucket, key, body);
+        Err(crate::Error::Link("buckets aren't on this server".into()))
+    }
+    /// Object `key` of roll bucket `bucket`, as JSON; an object over `limit` bytes is an error.
+    fn get_object(&self, bucket: &str, key: &str, limit: usize) -> Result<Json> {
+        let _ = (bucket, key, limit);
+        Err(crate::Error::Link("buckets aren't on this server".into()))
+    }
+    /// The keys under `prefix` in roll bucket `bucket`.
+    fn list_objects(&self, bucket: &str, prefix: &str) -> Result<Vec<String>> {
+        let _ = (bucket, prefix);
+        Err(crate::Error::Link("buckets aren't on this server".into()))
+    }
+    fn delete_object(&self, bucket: &str, key: &str) -> Result<()> {
+        let _ = (bucket, key);
+        Err(crate::Error::Link("buckets aren't on this server".into()))
+    }
 }
 
 /// How a batch is sent: `roll` (signed JSON), `splunk` (HTTP Event Collector events,
