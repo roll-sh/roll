@@ -721,7 +721,7 @@ impl Runtime {
         {
             let now = self.store.now_ms().unwrap_or(ends);
             // Who followed it isn't known (nobody signed in): that it was, once a day.
-            let _ = self.store.share_opened(preview, t, now.div_euclid(86_400_000));
+            let _ = self.store.share_opened(preview, t, now.div_euclid(86_400_000), now);
             let left = ((ends - now) / 1000).max(1);
             return Some(self.enter(req, "roll_share", &share_cookie, t, left));
         }

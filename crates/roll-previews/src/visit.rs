@@ -327,6 +327,8 @@ mod tests {
         assert_eq!(visit("/hello", "application/json", Some(cookie.split(';').next().unwrap())).await.0, 200);
         let (secret, _) = store.rotate_bypass(&project).unwrap();
         let bypass = Request::get("/hello").header(header::HOST, host).header(crate::runtime::BYPASS_HEADER, secret).body(axum::body::Body::empty()).unwrap();
+        let before = store.activity(&id).unwrap().len();
         assert_eq!(send(bypass).await.0, 200);
+        assert_eq!(store.activity(&id).unwrap().len(), before, "the CI bypass records nothing");
     }
 }

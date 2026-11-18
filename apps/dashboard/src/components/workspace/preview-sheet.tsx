@@ -694,7 +694,8 @@ function ActivityList({ id, updated }: { id: string; updated: number }) {
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
-    Promise.all([previewsApi.activity(id), previewsApi.visitors(id)]).then(
+    // The list is a nicety: an older node without it (a 404) leaves the activity as it is.
+    Promise.all([previewsApi.activity(id), previewsApi.visitors(id).catch(() => [])]).then(
       ([a, v]) => live && (setItems(a), setVisitors(v ?? []), setError(null)),
       (e) => live && setError(errorText(e)),
     );

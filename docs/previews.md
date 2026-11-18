@@ -839,8 +839,10 @@ as a private address.
     - *Who opened it.* Previews run on branches of production data, so a team sees who looked
       (Vercel's deployment protection logs access too). When a ticket is traded for a session,
       the same write adds "`<handle>` opened it (signed in to roll)" to the preview's activity
-      (the person's roll handle, as roll code names people): once per session, never per
-      request. It also keeps a `visits` row per person (`first_at`, `last_at`); `last_at` moves
+      (the person's roll handle, as roll code names people): at most once a day per person (a
+      new device or an ended session isn't news, and the activity keeps its last 200 lines),
+      never per request. Admins who open a person's preview are listed too, as anyone who may
+      open it is. It also keeps a `visits` row per person (`first_at`, `last_at`); `last_at` moves
       at each 5-minute recheck, not at each request. `GET /v1/previews/{id}/visitors` lists
       the last 8, latest first, as `[{who, last_at}]` (read access, like the activity), and
       the sheet's Activity tab shows them as "Who opened it". A share link isn't a person

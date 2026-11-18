@@ -2472,12 +2472,18 @@ impl Store {
                 "INSERT INTO visit_sessions (hash, preview_id, project_id, user_id, roll_session, expires_at, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 params![session, id, project, user, roll_session, expires_at, now],
             )?;
+            // A ticket from a node that predates handles has none: the handle kept stays.
             let who = if handle.is_empty() { user.as_str() } else { handle.as_str() };
+            let last: Option<i64> = c.query_row("SELECT last_at FROM visits WHERE preview_id = ? AND user_id = ?", [id, user.as_str()], |r| r.get(0)).optional()?;
             c.execute(
-                "INSERT INTO visits (preview_id, user_id, handle, first_at, last_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (preview_id, user_id) DO UPDATE SET handle = excluded.handle, last_at = excluded.last_at",
-                params![id, user, who, now, now],
+                "INSERT INTO visits (preview_id, user_id, handle, first_at, last_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (preview_id, user_id) DO UPDATE SET handle = CASE WHEN ? = '' THEN visits.handle ELSE excluded.handle END, last_at = excluded.last_at",
+                params![id, user, who, now, now, handle],
             )?;
-            append(c, id, now, &format!("{who} opened it (signed in to roll)"))?;
+            // In the activity once a day per person: a new device or an ended session isn't news,
+            // and the log keeps the last ACTIVITY_KEEP lines.
+            if last.is_none_or(|t| now - t >= 86_400_000) {
+                append(c, id, now, &format!("{who} opened it (signed in to roll)"))?;
+            }
             Ok::<_, Error>(Some(VisitSession { user, roll_session, project, expires_at, checked_at: now }))
         })
     }
@@ -2513,8 +2519,14 @@ impl Store {
 
     /// Share link `token` of preview `id` was followed on `day` (days since 1970): a line in the
     /// preview's activity, once per link per day. Whether this was the day's first.
-    pub fn share_opened(&self, id: &str, token: &str, day: i64) -> Result<bool> {
-        let now = self.now_ms()?;
+    /// A read first: a client that keeps no cookie follows the link on every request, and only the
+    /// day's first is a write.
+    pub fn share_opened(&self, id: &str, token: &str, day: i64, now: i64) -> Result<bool> {
+        let hash = bypass_hash(token);
+        let seen: Option<Option<i64>> = self.db.read(|c| c.query_row("SELECT opened_day FROM shares WHERE preview_id = ? AND hash = ?", params![id, hash], |r| r.get(0)).optional())?;
+        if seen.flatten().is_some_and(|d| d >= day) {
+            return Ok(false);
+        }
         self.db.write(|c| {
             let first = c.execute("UPDATE shares SET opened_day = ? WHERE preview_id = ? AND hash = ? AND (opened_day IS NULL OR opened_day < ?)", params![day, id, bypass_hash(token), day])? > 0;
             if first {
