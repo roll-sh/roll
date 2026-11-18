@@ -838,16 +838,18 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Next, ranked (now):** `previews_errors` and a mask-suggestions tool once previews #326 and
-   #324 are on main (previews tells this thread); an admin's view of where people sign in from
-   (each person's sign-in places, from the new-sign-in mails' table, in People); a removed
-   person's repositories handed to someone else (waits for a repository transfer in roll code).
-   Not doing: "remember this browser" for the second factor (sessions already last 30 days and
-   ask once per sign-in; it would only add a way around the second factor).
-   Open for the next turn (after apps and previews): passkey autofill (#322), this list (#323),
-   an admin's per-person security log (#328), admin alerts (#333), `search_audit` and
-   `search_analytics` (#334), the longest session (#337), how each session signed in (#338),
-   signing out of all other sessions (#342).
+1. **Next, ranked (now):** dormant people in People (each person's last activity, anyone idle
+   90 days marked, as GitHub Enterprise's dormant users report; in progress); People's search and
+   filters (name, address, handle; admins, no second factor, dormant, turned off) for companies
+   with hundreds of people over SCIM; resending an invite (a fresh link, the old one revoked);
+   `previews_errors` and a mask-suggestions tool once previews #326 and #324 are on main; a
+   removed person's repositories handed to someone else (waits for a repository transfer in roll
+   code). Dropped: an admin's view of sign-in places (#328's per-person log already shows each
+   sign-in's address and device). Not doing: "remember this browser" for the second factor.
+   Open for the next turn (after apps and previews; combined tree `wip/roll-mcp-turn4`): passkey
+   autofill (#322), this list (#323), an admin's per-person security log (#328), admin alerts
+   (#333), `search_audit` and `search_analytics` (#334), the longest session (#337), how each
+   session signed in (#338), signing out of all other sessions (#342).
 2. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
    hardware keys only (#286), one provider for people and agents (#287), an SSO connection's
    session length (#289) and back-channel logout (#292), allowed networks (#294), a second factor
