@@ -84,7 +84,8 @@ export interface Run {
   memory_target?: number;
   suspend_after_s: number;
   sleep_after_s: number;
-  volume?: { mount: string; size_gb: number };
+  /** backups: how often (hours, 0: by hand only) and how many are kept; none: daily, seven. */
+  volume?: { mount: string; size_gb: number; backups?: { every_hours: number; keep: number } };
   /** Metric alerts (`alert.*` events), over five minutes; each 0 is off. */
   /** log_match: text its output holds log_count times in five minutes (alert.log). */
   alerts?: { memory_pct: number; error_pct: number; p95_ms: number; capacity_pct?: number; log_match?: string; log_count?: number };
@@ -1112,7 +1113,8 @@ export const appsApi = {
   createHook: async (id: string, e: string) => `${ROLL_API}${(await call<{ path: string }>("POST", `${env(id, e)}/hook`)).path}`,
   removeHook: (id: string, e: string) => call<void>("DELETE", `${env(id, e)}/hook`),
   backUp: (id: string, e: string) => call<Backup>("POST", `${env(id, e)}/volume/backups`),
-  restore: (id: string, e: string, b: string) => call<Backup>("POST", `${env(id, e)}/volume/backups/${encodeURIComponent(b)}/restore`),
+  /** `from`: a backup of another environment of the service (seeding staging from production). */
+  restore: (id: string, e: string, b: string, from?: string) => call<Backup>("POST", `${env(id, e)}/volume/backups/${encodeURIComponent(b)}/restore`, from ? { from } : undefined),
   cancel: (id: string, e: string, d: string) => call<Deployment>("POST", `${dep(id, e, d)}/cancel`),
   /** What a person says to a manual rollout waiting for them. */
   rollout: (id: string, e: string, d: string, action: "advance" | "all" | "abort") => call<{ deployment: string }>("POST", `${dep(id, e, d)}/rollout`, { action }),

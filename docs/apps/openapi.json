@@ -3622,7 +3622,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/volume/backups/{bid}/restore": {
       "post": {
-        "description": "Answers `Backup` (the volume as it was; the environment asleep meanwhile).",
+        "description": "Answers `Backup` (the volume as it was; what's there now backed up first under this environment's name; the environment asleep meanwhile).",
         "operationId": "postServicesIdEnvironmentsEnvVolumeBackupsBidRestore",
         "parameters": [
           {
@@ -3650,9 +3650,19 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "`{ from?: string }` (another environment of the service, whose backup `bid` is: seeding staging from production; 404 for one it doesn't have)"
+        },
         "responses": {
           "200": {
-            "description": "`Backup` (the volume as it was; the environment asleep meanwhile)"
+            "description": "`Backup` (the volume as it was; what's there now backed up first under this environment's name; the environment asleep meanwhile)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -3662,7 +3672,7 @@
         "tags": [
           "services"
         ],
-        "x-roll-action": "delete (it replaces the volume's files)"
+        "x-roll-action": "delete (it replaces the volume's files); with `from`, reveal on that environment too"
       }
     },
     "/v1/apps/services/{id}/environments/{env}/wake": {

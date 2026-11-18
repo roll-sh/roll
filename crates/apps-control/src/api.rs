@@ -970,9 +970,19 @@ async fn backup_volume(State(apps): S, Path((id, env)): Path<(String, String)>, 
     Ok((StatusCode::CREATED, Json(b)).into_response())
 }
 
-async fn restore_volume(State(apps): S, Path((id, env, bid)): Path<(String, String, String)>, ext: Extensions) -> R {
-    let b = apps.restore_volume(&id, &env, &bid).await?;
-    apps.audit("volume.restored", &id, &env, actor(&ext), json!({ "backup": b.id })).await;
+async fn restore_volume(State(apps): S, Path((id, env, bid)): Path<(String, String, String)>, ext: Extensions, b: Bytes) -> R {
+    // `from`: another environment's backup (seeding staging from production).
+    let o = body(&b)?;
+    if let Some(k) = o.as_object().into_iter().flatten().map(|(k, _)| k).find(|k| k.as_str() != "from") {
+        return Err(Error::BadRequest(format!("unknown field {k}")));
+    }
+    let from = match o.get("from") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(f)) => Some(f.clone()),
+        Some(_) => return Err(Error::BadRequest("from is another environment's name".into())),
+    };
+    let b = apps.restore_volume(&id, &env, &bid, from.as_deref()).await?;
+    apps.audit("volume.restored", &id, &env, actor(&ext), json!({ "backup": b.id, "from": from })).await;
     ok(b)
 }
 

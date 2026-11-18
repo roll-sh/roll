@@ -884,9 +884,10 @@ pub enum AppsCmd {
         #[arg(long)]
         remove: bool,
     },
-    /// The environment's volume backups (daily, the newest seven kept): list them, `--now` to
-    /// back up now, or `--restore <id>` to put the volume back as it was then (asks first;
-    /// `--yes` doesn't).
+    /// The environment's volume backups (daily and the newest seven kept, unless
+    /// `run.volume.backups` says otherwise): list them, `--now` to back up now, or `--restore
+    /// <id>` to put the volume back as it was then; `--from <env>`: list or restore another
+    /// environment's backups here (seeding staging from production). Asks first; `--yes` doesn't.
     Backups {
         #[command(flatten)]
         target: Target,
@@ -894,6 +895,8 @@ pub enum AppsCmd {
         now: bool,
         #[arg(long, value_name = "ID")]
         restore: Option<String>,
+        #[arg(long, value_name = "ENV", conflicts_with = "now")]
+        from: Option<String>,
         #[arg(long, short = 'y')]
         yes: bool,
     },
@@ -3689,9 +3692,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 json!({ "url": url })
             }
         }
-        AppsCmd::Backups { target, now, restore, yes } => {
+        AppsCmd::Backups { target, now, restore, from, yes } => {
             let svc = service(api, &target).await?;
             let path = format!("{}/volume/backups", env_path(&svc, &target.env));
+            // Another environment's backups are listed where they are.
+            let listed = format!("{}/volume/backups", env_path(&svc, from.as_deref().unwrap_or(&target.env)));
             let when = |b: &Value| b["at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
             if now {
                 let b = api.post(&path, json!({})).await?;
@@ -3701,15 +3706,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 b
             } else if let Some(id) = restore {
-                confirm(yes, &target.env, "the volume's current files (they become the backup's)")?;
-                let b = api.post(&format!("{path}/{}/restore", enc(&id)), json!({})).await?;
+                confirm(yes, &target.env, "the volume's current files (they become the backup's; backed up first)")?;
+                let b = api.post(&format!("{path}/{}/restore", enc(&id)), json!({ "from": from })).await?;
                 if !json_out {
                     println!("restored {} from {}; it wakes on the next request", target.env, when(&b));
                     return Ok(());
                 }
                 b
             } else {
-                let v = api.get(&path).await?;
+                let v = api.get(&listed).await?;
                 if !json_out {
                     for b in v.as_array().into_iter().flatten() {
                         println!("{}  {}  {} KiB", s(&b["id"]), when(b), b["size"].as_u64().unwrap_or(0) / 1024);
