@@ -210,6 +210,17 @@ pub trait Authorizer: Send + Sync + 'static {
     fn handle(&self, req: Request, next: Next) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
 }
 
+/// One of roll accounts' SSO connections (docs/accounts.md, "SSO"), as it is now: what enterprise
+/// sign-in reads when an identity provider is tied to it ([`Sessions::sso_trust`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SsoTrust {
+    pub name: String,
+    /// Its issuer (`iss`).
+    pub issuer: String,
+    /// The email domains a DNS TXT record proved it speaks for.
+    pub verified: Vec<String>,
+}
+
 /// A signed-in user, in a request's extensions: the gate resolved the session cookie. Products
 /// read who it is from here (roll code: the user's owner; workspace: the user's projects).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -259,6 +270,20 @@ pub trait Sessions: Send + Sync + 'static {
     fn person_by_email<'a>(&'a self, email: &'a str) -> BoxFuture<'a, Result<Option<SignedIn>, String>> {
         let _ = email;
         Box::pin(async { Ok(None) })
+    }
+    /// The SSO connection `id` (`sso_…`), as it is now (`None`: no such connection). Enterprise
+    /// sign-in trusts a provider tied to one for its verified domains only. Never cached.
+    fn sso_trust<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<SsoTrust>, String>> {
+        let _ = id;
+        Box::pin(async { Ok(None) })
+    }
+    /// Whether session `session` (of `user`) proved who it is recently: sudo mode
+    /// (docs/accounts.md). A token made from a session needs it, so a stolen cookie can't mint a
+    /// long-lived token. True by default: an implementation without sudo mode keeps tokens as
+    /// they were. Never cached.
+    fn fresh<'a>(&'a self, user: &'a str, session: &'a str) -> BoxFuture<'a, Result<bool, String>> {
+        let _ = (user, session);
+        Box::pin(async { Ok(true) })
     }
     /// [`Sessions::person`] for callers off the request path (a product's background work checking
     /// a stored grant): blocking, never cached. `None` by default: an implementation that can't

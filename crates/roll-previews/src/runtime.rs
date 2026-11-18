@@ -1090,6 +1090,20 @@ impl Apps for Runtime {
         self.iso.follow(&container_name(&host), lines.clamp(1, 2000)).await
     }
 
+    /// Its running container's use, from Docker (a sleeping or frozen service has none).
+    async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
+        if self.iso.name() != "docker" {
+            return None;
+        }
+        let live = self.live.lock().get(&(preview.to_string(), service.to_string())).cloned()?;
+        if !matches!(*live.phase.borrow(), Phase::Running { .. }) {
+            return None;
+        }
+        let name = live.container.lock().clone()?;
+        let out = code_preview::docker::docker(&["stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}", &name]).await.ok()?;
+        crate::parse_docker_stats(&out)
+    }
+
     /// The service's page as a browser first shows it (a PNG): the browser runs in the service
     /// container's own network (it reaches nothing the service can't), bounded in memory, CPU and
     /// time, and goes when done.

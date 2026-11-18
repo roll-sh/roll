@@ -151,6 +151,12 @@ impl Engine {
                 self.mark_deleted(&r.id, if r.repo.starts_with("git:") { "its service is no longer in the project" } else { "its repo is no longer in the project" })?;
                 continue;
             }
+            // Another project's preview of the branch stopped speaking for it: this one does, at
+            // once, from its own node's converge (which ends in a report).
+            if let Ok((true, true)) = self.refresh_voice(&r) {
+                self.store.update(&r.id, |row| row.next_at = 0)?;
+                self.kick();
+            }
             // A baseline lasts while there are changes to compare with it.
             let held = r.is_baseline() && has_changes;
             let ttl_ms = s.ttl_hours as i64 * 3_600_000;

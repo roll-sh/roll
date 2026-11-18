@@ -95,6 +95,21 @@ impl Source for FakeCode {
             self.teardowns.lock().push((p.id.clone(), t.to_string()));
         }
     }
+    /// A plain body from the preview's state (roll code builds the real one from its summary).
+    fn git_report_body(&self, p: &Preview, _s: &Settings, deleted: Option<Option<&str>>) -> Option<roll_previews::ports::GitReportBody> {
+        let state = match (deleted, p.state) {
+            (Some(_), _) => None,
+            (None, roll_previews::State::Ready | roll_previews::State::Sleeping) => Some("success"),
+            (None, roll_previews::State::Failed) => Some("failure"),
+            (None, _) => Some("pending"),
+        };
+        Some(roll_previews::ports::GitReportBody {
+            state: state.map(str::to_string),
+            description: format!("{:?}", p.state),
+            target_url: p.services.first().map(|s| s.url.clone()),
+            comment: format!("{:?} at {}{}", p.state, p.head, if deleted.is_some() { ", deleted" } else { "" }),
+        })
+    }
     async fn budget(&self, repos: &[String], alert: &roll_previews::ports::BudgetAlert) -> anyhow::Result<()> {
         self.budgets.lock().push((repos.to_vec(), alert.clone()));
         Ok(())
@@ -196,6 +211,9 @@ pub type Vars = Vec<(String, String)>;
 #[derive(Default)]
 pub struct FakeApps {
     pub deployed: Mutex<HashMap<(String, String), String>>,
+    /// Every deploy a deploy hook asked for: (preview, service, its rebuild number).
+    pub rebuilt: Mutex<Vec<(String, String, i64)>>,
+
     /// Every project's own preview domain, verified (roll apps' project preview domain).
     pub domain: Mutex<Option<(String, bool)>>,
     /// roll apps' catalog for the project (unset: none, so roll.toml's services), and the memory
@@ -209,6 +227,8 @@ pub struct FakeApps {
     /// The variables each service was last deployed with.
     pub vars: Mutex<HashMap<(String, String), Vars>>,
     pub removed: Mutex<Vec<(String, String)>>,
+    /// What each service uses, by name (unset: not running).
+    pub metrics: Mutex<HashMap<String, (f64, u64)>>,
     /// What every service's log holds.
     pub log: Mutex<Vec<String>>,
     /// What each seed or release job was run able to reach.
@@ -268,6 +288,9 @@ impl Apps for FakeApps {
             anyhow::bail!("the build failed");
         }
         self.deployed.lock().insert((t.preview.clone(), t.service.clone()), t.revision.clone());
+        if let Some(n) = t.rebuild {
+            self.rebuilt.lock().push((t.preview.clone(), t.service.clone(), n));
+        }
         self.vars.lock().insert((t.preview.clone(), t.service.clone()), t.vars.clone());
         self.feedback.lock().insert((t.preview.clone(), t.service.clone()), t.feedback);
         self.egress.lock().insert((t.preview.clone(), t.service.clone()), t.egress);
@@ -300,6 +323,9 @@ impl Apps for FakeApps {
         self.deployed.lock().remove(&(p.to_string(), s.to_string()));
         self.removed.lock().push((p.to_string(), s.to_string()));
         Ok(())
+    }
+    async fn metrics(&self, _: &str, service: &str) -> Option<(f64, u64)> {
+        self.metrics.lock().get(service).copied()
     }
     async fn logs(&self, _: &str, _: &str, _: usize) -> Vec<String> {
         self.log.lock().clone()
@@ -346,6 +372,41 @@ impl Apps for FakeApps {
 }
 
 /// roll secrets as previews see it: every `ensure` (environment, trusted). With `dynamic`, each
+/// A Git URL service's repository: records each status and comment (a comment gets id 77,
+/// edits name it). `connected: false` posts nothing.
+/// A posted status: service, sha, state, description, link.
+pub type PostedStatus = (String, String, String, String, Option<String>);
+
+pub struct FakeGitReport {
+    pub connected: std::sync::atomic::AtomicBool,
+    pub statuses: Mutex<Vec<PostedStatus>>,
+    pub comments: Mutex<Vec<(u64, Option<u64>, String)>>,
+}
+
+impl Default for FakeGitReport {
+    fn default() -> Self {
+        FakeGitReport { connected: std::sync::atomic::AtomicBool::new(true), statuses: Mutex::new(Vec::new()), comments: Mutex::new(Vec::new()) }
+    }
+}
+
+#[async_trait]
+impl roll_previews::ports::GitReport for FakeGitReport {
+    async fn status(&self, service: &str, sha: &str, state: &str, description: &str, target_url: Option<&str>) -> anyhow::Result<bool> {
+        if !self.connected.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        self.statuses.lock().push((service.into(), sha.into(), state.into(), description.into(), target_url.map(Into::into)));
+        Ok(true)
+    }
+    async fn comment(&self, _service: &str, _repo: &str, number: u64, body: &str, existing: Option<u64>) -> anyhow::Result<Option<u64>> {
+        if !self.connected.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        self.comments.lock().push((number, existing, body.into()));
+        Ok(Some(77))
+    }
+}
+
 /// resolve issues a credential (`DB_PASSWORD=pw-<n>` under lease `lease-<n>`); renewals and
 /// revocations are recorded, and a lease in `ended` can't be renewed.
 #[derive(Default)]
