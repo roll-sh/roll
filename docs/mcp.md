@@ -668,6 +668,7 @@ previews are listed once those products are on.
 | `search_cluster_metrics` | A cluster's request rate, latency percentiles and answers by kind (`range` 1h, 24h, 14d). | `GET /v1/search/clusters/{id}/metrics` |
 | `search_slowlog` | A cluster's slowest recent requests. | `GET /v1/search/clusters/{id}/slowlog` |
 | `search_audit` | A cluster's security audit log (failed logins, access denials, changes to users, roles and keys; never a secret). | `GET /v1/search/clusters/{id}/audit` |
+| `search_analytics` | What a cluster's users search for: top queries, queries with no results, click-through (indices that opt in). | `GET /v1/search/clusters/{id}/analytics` |
 | `search_usage` | A cluster's metering and cost against Elastic Cloud and Amazon OpenSearch. | `GET /v1/search/clusters/{cluster}/usage` |
 | `search_get_index` | An index's mappings, settings and aliases. | `GET /v1/search/clusters/{cluster}/indices/{index}` |
 | `search_create_index` | Create an index with mappings and settings. | `PUT /v1/search/clusters/{cluster}/indices/{index}` |
