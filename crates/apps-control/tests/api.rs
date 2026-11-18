@@ -4056,6 +4056,11 @@ async fn a_service_is_made_again_from_its_own_settings() {
     let w = world().await;
     let run = json!({ "port": 80, "min_instances": 1, "health_path": "/healthz", "alerts": { "memory_pct": 80, "error_pct": 5, "p95_ms": 900, "log_match": "panic", "log_count": 3 }, "rollout": { "steps": [10, 50], "step_s": 60, "error_pct": 5 }, "affinity": true });
     let (a, _) = image_service(&w, "web", run).await;
+    // Its own build timeout (Render's), a minute up to six hours (held to the node's at a build).
+    let svc = format!("/v1/apps/services/{}", a["id"].as_str().unwrap());
+    assert_eq!(call(&w.api, "PATCH", &svc, Some(json!({"build": {"timeout_s": 30}}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, a) = call(&w.api, "PATCH", &svc, Some(json!({"build": {"timeout_s": 1200}}))).await;
+    assert_eq!((st, &a["build"]["timeout_s"]), (StatusCode::OK, &json!(1200)), "{a}");
     let (st, b) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "web-copy", "source": a["source"], "build": a["build"], "run": a["run"] }))).await;
     assert_eq!(st, StatusCode::CREATED, "{b}");
     assert_eq!((&b["run"], &b["build"]), (&a["run"], &a["build"]));

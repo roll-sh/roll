@@ -33,6 +33,8 @@ interface Form {
   watch: string;
   /** System packages, comma- or space-separated. */
   packages: string;
+  /** The build's timeout, minutes. */
+  buildTimeout: string;
   type: Run["type"];
   port: string;
   start: string;
@@ -99,6 +101,7 @@ export function formOf(s: Service): Form {
     buildStart: str(s.build.start),
     watch: (s.build.watch ?? []).join(", "),
     packages: (s.build.packages ?? []).join(" "),
+    buildTimeout: s.build.timeout_s ? String(Math.round(s.build.timeout_s / 60)) : "",
     type: s.run.type,
     port: str(s.run.port),
     start: str(s.run.start),
@@ -178,6 +181,10 @@ export function patchOf(s: Service, f: Form): ServicePatch {
   if (f.packages !== before.packages) {
     const list = f.packages.split(/[\s,]+/).filter(Boolean);
     build.packages = list.length ? list : null;
+  }
+  if (f.buildTimeout !== before.buildTimeout) {
+    const m = num(f.buildTimeout);
+    build.timeout_s = m === null ? null : m * 60;
   }
   if (Object.keys(build).length) patch.build = build;
   const run: Reset<Run> = {};
@@ -372,6 +379,9 @@ export function SettingsTab({
               </Field>
               <Field label="System packages" hint="installed in the generated image (apt, or apk on Alpine)">
                 {t("packages", "ffmpeg chromium")}
+              </Field>
+              <Field label="Build timeout" hint="minutes, 1–360; held to the node's own limit">
+                {t("buildTimeout", "the node's (30)")}
               </Field>
               {(form.sourceKind === "repo" || form.sourceKind === "git") && (
                 <Field label="Watch paths" hint="a push deploys only when it changes one">

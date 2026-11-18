@@ -194,6 +194,10 @@ type Build = {
    *  at most 50 names of lowercase letters, digits and + - . : = ~ _; refused for a static site and a
    *  distroless runtime, left to the tree's own Dockerfile. roll.toml `[app] packages` wins over it. */
   packages?: string[];
+  /** The longest its build may take, seconds (Render's, Cloud Build's): 60–21600, held to the node's
+   *  own limit (`ROLL_APPS_BUILD_TIMEOUT`, minutes, 30 by default; the build log says so when it
+   *  is); unset: the node's. */
+  timeout_s?: number;
 };
 
 type Run = {
