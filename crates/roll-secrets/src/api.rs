@@ -91,11 +91,12 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/rotations"), get(rotations))
         .route(&format!("{P}/kms"), get(kms_key).put(set_kms_key).delete(unset_kms_key))
         .route(&format!("{P}/aws-roles"), get(aws_roles).post(add_aws_role))
-        .route(&format!("{P}/aws-roles/{{id}}"), axum::routing::delete(delete_aws_role))
+        .route(&format!("{P}/aws-roles/{{id}}"), axum::routing::delete(delete_aws_role).patch(update_aws_role))
         .route(&format!("{P}/aws-users"), get(aws_users).post(add_aws_user))
-        .route(&format!("{P}/aws-users/{{id}}"), axum::routing::delete(delete_aws_user))
+        .route(&format!("{P}/aws-users/{{id}}"), axum::routing::delete(delete_aws_user).patch(update_aws_user))
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
-        .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
+        .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator).patch(update_rotator))
+        .route(&format!("{P}/rotators/{{id}}/rotate-secret"), post(rotate_rotator_secret))
         .route(&format!("{P}/transit"), get(transit_keys).post(add_transit_key))
         .route(&format!("{P}/transit/{{name}}"), axum::routing::patch(config_transit_key).delete(delete_transit_key))
         .route(&format!("{P}/transit/{{name}}/rotate"), post(rotate_transit_key))
@@ -122,8 +123,11 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/ocsp/{id}/{*request}", get(ocsp_get))
         .route(&format!("{P}/cloud-accounts"), get(cloud_accounts).post(add_cloud_account))
         .route(&format!("{P}/cloud-accounts/{{id}}"), axum::routing::delete(delete_cloud_account))
+        .route(&format!("{P}/github-apps"), get(github_apps).post(add_github_app))
+        .route(&format!("{P}/github-apps/{{id}}"), axum::routing::delete(delete_github_app))
         .route(&format!("{P}/outside-databases"), get(outside_databases).post(add_outside_database))
-        .route(&format!("{P}/outside-databases/{{id}}"), axum::routing::delete(delete_outside_database))
+        .route(&format!("{P}/outside-databases/{{id}}"), axum::routing::delete(delete_outside_database).patch(update_outside_database))
+        .route(&format!("{P}/outside-databases/{{id}}/rotate-admin"), post(rotate_outside_admin))
         .route(&format!("{P}/kubernetes"), get(kubernetes_clusters).post(add_kubernetes_cluster))
         .route(&format!("{P}/kubernetes/{{id}}"), axum::routing::delete(delete_kubernetes_cluster))
         .route(&format!("{P}/required"), get(required).put(set_required))
@@ -1007,6 +1011,16 @@ async fn add_aws_role(State(s): S, Who(c): Who, Path(project): Path<String>, b: 
     Ok(created(json!(blocking(s, move |s| s.add_aws_role(&project, n, &c)).await?)))
 }
 
+async fn update_aws_role(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let ch: crate::aws::AwsRoleChange = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.update_aws_role(&project, &id, ch, &c)).await?))
+}
+
+async fn update_aws_user(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let ch: crate::iam::AwsUserChange = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.update_aws_user(&project, &id, ch, &c)).await?))
+}
+
 async fn aws_users(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.aws_users(&project, &c)).await?))
 }
@@ -1042,8 +1056,34 @@ async fn add_rotator(State(s): S, Who(c): Who, Path(project): Path<String>, b: B
     Ok(secret_response(created(v)))
 }
 
+async fn update_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let ch: crate::rotators::RotatorChange = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.update_rotator(&project, &id, ch, &c)).await?))
+}
+
+async fn rotate_rotator_secret(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<Response> {
+    let (r, secret) = blocking(s, move |s| s.rotate_rotator_secret(&project, &id, &c)).await?;
+    let mut v = serde_json::to_value(&r).expect("JSON");
+    v["secret"] = json!(secret);
+    Ok(secret_response(ok(v)))
+}
+
 async fn delete_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_rotator(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn github_apps(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.github_apps(&project, &c)).await?))
+}
+
+async fn add_github_app(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::github_app::NewGitHubApp = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_github_app(&project, n, &c)).await?))
+}
+
+async fn delete_github_app(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_github_app(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1054,6 +1094,15 @@ async fn outside_databases(State(s): S, Who(c): Who, Path(project): Path<String>
 async fn add_outside_database(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let n: crate::outside::NewOutsideDatabase = body(&b)?;
     Ok(created(blocking(s, move |s| s.add_outside_database(&project, n, &c)).await?))
+}
+
+async fn update_outside_database(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let ch: crate::outside::OutsideDatabaseChange = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.update_outside_database(&project, &id, ch, &c)).await?))
+}
+
+async fn rotate_outside_admin(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.rotate_outside_admin(&project, &id, &c)).await?))
 }
 
 async fn delete_outside_database(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
