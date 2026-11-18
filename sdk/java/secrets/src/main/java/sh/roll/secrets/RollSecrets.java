@@ -255,13 +255,28 @@ public final class RollSecrets {
         }
     }
 
-    private Map<String, Object> call(String method, String path, Map<String, Object> body) {
+    Map<String, Object> call(String method, String path, Map<String, Object> body) {
         return call(method, path, body, Duration.ZERO);
     }
 
     private Map<String, Object> call(String method, String path, Map<String, Object> body, Duration wait) {
         Answer a = authed(t -> send(t, method, path, body, Map.of(), wait));
         return a.body().isEmpty() ? Map.of() : parse(a.body());
+    }
+
+    /** A request whose answer is a JSON array of objects. */
+    List<Map<String, Object>> callList(String method, String path) {
+        Answer a = authed(t -> send(t, method, path, null, Map.of(), Duration.ZERO));
+        Object v;
+        try {
+            v = Json.parse(a.body());
+        } catch (IllegalArgumentException e) {
+            throw new RollSecretsException(0, "invalid", e.getMessage());
+        }
+        if (!(v instanceof List)) {
+            throw new RollSecretsException(0, "invalid", "the answer isn't a list");
+        }
+        return Json.objects(Map.of("items", v), "items");
     }
 
     private static Map<String, Object> parse(String body) {
@@ -463,6 +478,17 @@ public final class RollSecrets {
             body.put("ttl_minutes", (long) ttlMinutes);
         }
         return Lease.of(call("POST", "/v1/secrets/projects/" + seg(projectId()) + "/leases/" + seg(lease) + "/renew", body));
+    }
+
+    // Encryption keys.
+
+    /**
+     * The project's encryption key {@code name} (docs/secrets.md, "Encryption keys"): encrypt,
+     * decrypt, sign, verify and HMAC through roll, the key never leaving it. Nothing is asked
+     * until one of its operations is called.
+     */
+    public Transit transit(String name) {
+        return new Transit(this, Objects.requireNonNull(name));
     }
 
     // Watching.

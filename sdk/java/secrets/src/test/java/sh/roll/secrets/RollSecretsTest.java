@@ -286,6 +286,104 @@ class RollSecretsTest {
         }
     }
 
+    /**
+     * Transit sends bytes as base64 and decrypts back to the same bytes, as the other clients do;
+     * a context is bound in, a refused key is roll's error, and nothing printable holds plaintext,
+     * an input or the token.
+     */
+    @Test
+    void transitRoundTripsBytesUnderItsContextAndPrintsNoPlaintext() throws Exception {
+        String keys = "/v1/secrets/projects/prj_a/transit/";
+        List<Map<String, Object>> sent = new ArrayList<>();
+        try (FakeRolld rolld = new FakeRolld(r -> {
+            Map<String, Object> b = r.body.isEmpty() ? Map.of() : r.json();
+            synchronized (sent) {
+                sent.add(b);
+            }
+            Object context = b.getOrDefault("context", "");
+            // A server that "encrypts" by echoing with the context alongside: enough to check the
+            // encoding both ways and that the context goes with both calls.
+            switch (r.path) {
+                case "/v1/secrets/projects/prj_a/transit/cards/encrypt":
+                    r.answer(200, Map.of("ciphertext", "roll:v1:" + b.get("plaintext") + ":" + context));
+                    return;
+                case "/v1/secrets/projects/prj_a/transit/cards/decrypt": {
+                    String[] ct = ((String) b.get("ciphertext")).split(":", 4);
+                    if (!ct[3].equals(context)) {
+                        r.answer(400, Map.of("error", "the ciphertext doesn't open under this key and context"));
+                        return;
+                    }
+                    r.answer(200, Map.of("plaintext", ct[2]));
+                    return;
+                }
+                case "/v1/secrets/projects/prj_a/transit/cards/sign":
+                    r.answer(200, Map.of("signature", "roll:v2:sig-" + b.get("input")));
+                    return;
+                case "/v1/secrets/projects/prj_a/transit/cards/verify":
+                    r.answer(200, Map.of("valid", ("roll:v2:sig-" + b.get("input")).equals(b.get("signature"))));
+                    return;
+                case "/v1/secrets/projects/prj_a/transit/cards/hmac":
+                    r.answer(200, Map.of("hmac", "roll:v2:hmac-" + b.get("input")));
+                    return;
+                case "/v1/secrets/projects/prj_a/transit/cards/public":
+                    r.answer(200, List.of(
+                            Map.of("version", 1, "public_key", "ZmFrZS1wdWJsaWMta2V5LTE=", "pem", "-----BEGIN PUBLIC KEY-----\nfake1\n-----END PUBLIC KEY-----\n",
+                                    "jwk", Map.of("kty", "OKP", "crv", "Ed25519", "x", "ZmFrZS0x", "kid", "cards:v1", "alg", "EdDSA", "use", "sig")),
+                            Map.of("version", 2, "public_key", "ZmFrZS1wdWJsaWMta2V5LTI=", "pem", "-----BEGIN PUBLIC KEY-----\nfake2\n-----END PUBLIC KEY-----\n",
+                                    "jwk", Map.of("kty", "OKP", "crv", "Ed25519", "x", "ZmFrZS0y", "kid", "cards:v2", "alg", "EdDSA", "use", "sig"))));
+                    return;
+                default:
+                    r.answer(403, Map.of("error", "this token can't use the key payroll", "code", "forbidden"));
+            }
+        })) {
+            RollSecrets c = RollSecrets.builder(k -> null).api(rolld.url()).token("rlt_fake_transit").project("prj_a").build();
+            Transit cards = c.transit("cards");
+
+            String ct = cards.encrypt("héllo ✓", "order:42");
+            assertEquals(Map.of("plaintext", "aMOpbGxvIOKckw==", "context", "order:42"), sent.get(0));
+            assertEquals("héllo ✓", new String(cards.decrypt(ct, "order:42"), StandardCharsets.UTF_8));
+            RollSecretsException elsewhere = assertThrows(RollSecretsException.class, () -> cards.decrypt(ct, "order:43"));
+            assertEquals(400, elsewhere.status());
+
+            byte[] raw = {0, (byte) 255, (byte) 128, 7};
+            String bare = cards.encrypt(raw);
+            assertFalse(sent.get(sent.size() - 1).containsKey("context"), "no context isn't sent");
+            assertTrue(java.util.Arrays.equals(raw, cards.decrypt(bare)));
+
+            String sig = cards.sign("fake-webhook-body");
+            assertTrue(sig.startsWith("roll:v2:"));
+            assertTrue(cards.verify("fake-webhook-body", sig));
+            assertFalse(cards.verify("fake-webhook-body-changed", sig));
+            assertEquals(cards.hmac("fake@example.com"), cards.hmac("fake@example.com".getBytes(StandardCharsets.UTF_8)));
+
+            List<TransitPublicKey> pub = cards.publicKeys();
+            assertEquals(List.of(1, 2), pub.stream().map(TransitPublicKey::version).collect(java.util.stream.Collectors.toList()));
+            assertEquals("cards:v2", pub.get(1).jwk().get("kid"));
+            assertEquals("ZmFrZS1wdWJsaWMta2V5LTI=", pub.get(1).publicKey());
+
+            String plaintext = "fake-card-4242-4242";
+            String encoded = Base64.getEncoder().encodeToString(plaintext.getBytes(StandardCharsets.UTF_8));
+            Transit payroll = c.transit("payroll");
+            RollSecretsException refused = assertThrows(RollSecretsException.class, () -> payroll.encrypt(plaintext, "order:42"));
+            assertEquals(403, refused.status());
+            assertEquals("forbidden", refused.code());
+            assertEquals("this token can't use the key payroll", refused.getMessage());
+            for (RuntimeException e : List.of(refused,
+                    assertThrows(RollSecretsException.class, () -> payroll.sign(plaintext)),
+                    assertThrows(RollSecretsException.class, () -> payroll.decrypt("roll:v1:" + encoded + ":")))) {
+                java.io.StringWriter trace = new java.io.StringWriter();
+                e.printStackTrace(new java.io.PrintWriter(trace));
+                for (String secret : List.of(plaintext, encoded, "rlt_fake_transit")) {
+                    assertFalse(trace.toString().contains(secret), "an error shows " + secret);
+                }
+            }
+            for (Object printed : List.of(cards, payroll, c)) {
+                assertFalse(printed.toString().contains("rlt_fake_transit"));
+            }
+            assertEquals("Transit[cards]", cards.toString());
+        }
+    }
+
     @Test
     void jsonRoundTripsTheShapesTheClientUses() {
         Map<String, Object> o = Json.object("{\"a\":\"\\u00e9\\n\\\"x\\\"\",\"b\":[1,2.5,true,null],\"c\":{}}");
