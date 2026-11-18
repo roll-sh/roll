@@ -48,7 +48,7 @@ export interface Invite {
 export type SessionState =
   | { status: "anonymous" }
   | { status: "mfa_required"; methods: ("totp" | "recovery" | "passkey")[]; csrf: string }
-  | { status: "signed_in"; user: User; session: Session; csrf: string };
+  | { status: "signed_in"; user: User; session: Session; csrf: string; second_factor_required?: boolean };
 
 export type SignInAnswer = Exclude<SessionState, { status: "anonymous" }>;
 
@@ -264,6 +264,8 @@ export const accountsApi = {
   removePasskey: (id: string) => call<null>("DELETE", `/me/passkeys/${encodeURIComponent(id)}`),
   /** Your data as one JSON document (sudo mode): a file to save. */
   exportData: () => call<Record<string, unknown>>("POST", "/me/export"),
+  accountPolicy: () => call<{ require_second_factor: boolean }>("GET", "/policy"),
+  setAccountPolicy: (p: { require_second_factor: boolean }) => call<{ require_second_factor: boolean }>("PUT", "/policy", p),
   networkPolicy: () => call<NetworkPolicy>("GET", "/network-policy"),
   setNetworkPolicy: (p: NetworkPolicy) => call<NetworkPolicy>("PUT", "/network-policy", p),
   requestReset: (reason: string) => call<{ id: string; state: string }>("POST", "/signin/reset-request", { reason }),

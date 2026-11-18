@@ -462,6 +462,18 @@ or link shows up in their inbox, not only in their security log.
   is mailed for what they did before). Without mail configured nothing is sent.
 - The mail goes out off the request, after the sign-in's answer.
 
+### Second factor for everyone
+
+As GitHub's organizations and Google Workspace require it: an admin turns on `PUT
+/v1/accounts/policy {require_second_factor: true}` (sudo mode; "A second factor for everyone" on
+the account page), and a person whose session has no second factor (no authenticator app on, no
+passkey) reaches only `/v1/accounts…`, where they set one up; anything else is 403 `{code:
+"second_factor_required"}` (rolld's gate asks, `roll_auth::Sessions::second_factor_missing`, never
+cached), and `GET /v1/accounts/session` says `second_factor_required` so the dashboard points them to
+their account page. Once they have one, their session works again. A session their company's SSO
+provider signed in passes (the provider checks). The operator's token and roll tokens aren't
+sessions.
+
 ### Allowed networks
 
 As GitHub Enterprise's IP allow list: an admin lists the company's networks (`PUT
@@ -580,6 +592,8 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 | --- | --- | --- |
 | `GET /v1/accounts/passkey-policy` | | `{require, models: [{aaguid, name, roots}]}` (hardware keys only) |
 | `PUT /v1/accounts/passkey-policy` | `{require, models}` | the policy, checked (UUIDs, names, PEM roots; a model when required); sudo mode; 400 `{code: "policy"}` |
+| `GET /v1/accounts/policy` | | `{require_second_factor}` |
+| `PUT /v1/accounts/policy` | `{require_second_factor}` | the policy (sudo mode) |
 | `GET /v1/accounts/network-policy` | | `{on, networks}` (allowed networks) |
 | `PUT /v1/accounts/network-policy` | `{on, networks}` | the policy, networks normalised; sudo mode; 400 `networks` or `lockout` |
 | `GET /v1/accounts/reset-requests` | | `ResetRequest[]`: `{id, user, email, handle, reason, ip, user_agent, created_at, state, decided_by, decided_at}`, pending first |

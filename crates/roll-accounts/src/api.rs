@@ -45,6 +45,7 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/signin/reset-request", post(request_reset))
         .route("/v1/accounts/reset-requests", get(list_resets))
         .route("/v1/accounts/passkey-policy", get(passkey_policy).put(set_passkey_policy))
+        .route("/v1/accounts/policy", get(account_policy).put(set_account_policy))
         .route("/v1/accounts/network-policy", get(network_policy).put(set_network_policy))
         .route("/v1/accounts/reset-requests/{id}/approve", post(approve_reset))
         .route("/v1/accounts/reset-requests/{id}/deny", post(deny_reset))
@@ -198,7 +199,7 @@ fn session_body(a: &Accounts, issued_token: &str, user: &str, session: &str, sec
     if second_factor {
         return Ok(json!({ "status": "mfa_required", "methods": second_methods(a, user), "csrf": csrf }));
     }
-    Ok(json!({ "status": "signed_in", "user": a.user(user)?, "session": a.session_info(session)?, "csrf": csrf }))
+    Ok(json!({ "status": "signed_in", "user": a.user(user)?, "session": a.session_info(session)?, "csrf": csrf, "second_factor_required": a.second_factor_missing(user, session)? }))
 }
 
 /// How a person owing a second factor can give it: TOTP, a recovery code, and a passkey if they
@@ -654,6 +655,18 @@ async fn set_passkey_policy(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Res
     admin_sudo(&a, &me, &op).await?;
     let p: crate::attestation::Policy = body(&b)?;
     Ok(Json(blocking(&a, move |a| a.set_passkey_policy(p)).await?).into_response())
+}
+
+/// Account policy (docs/accounts.md): a second factor for everyone.
+async fn account_policy(State(a): S, me: Me, op: Op) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    Ok(Json(blocking(&a, |a| a.account_policy()).await?).into_response())
+}
+
+async fn set_account_policy(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response> {
+    admin_sudo(&a, &me, &op).await?;
+    let p: crate::policy::AccountPolicy = body(&b)?;
+    Ok(Json(blocking(&a, move |a| a.set_account_policy(p)).await?).into_response())
 }
 
 /// Allowed networks (docs/accounts.md): where people's sessions may be used from.
