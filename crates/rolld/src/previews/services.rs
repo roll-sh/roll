@@ -550,6 +550,18 @@ impl apps_control::integrations::GitPushes for GitPushes {
     }
 }
 
+/// Names under a project's own preview domain that no roll apps environment holds (a service on
+/// roll's own runtime): roll apps' ingress hands them on, in process, to previews' router, which
+/// answers a 404 for a name it doesn't hold.
+pub struct DomainRouter(pub Arc<roll_previews::runtime::Runtime>);
+
+#[async_trait]
+impl apps_control::integrations::PreviewRouter for DomainRouter {
+    async fn serve(&self, req: axum::extract::Request) -> axum::response::Response {
+        roll_previews::runtime::serve_host(self.0.clone(), req).await
+    }
+}
+
 pub struct Notes(pub std::sync::Weak<roll_previews::Engine>);
 
 #[async_trait]
