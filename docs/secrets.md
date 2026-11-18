@@ -3027,8 +3027,10 @@ inconsistencies are fixed in #264:
   audited. Screenshots in `~/.local/share/roll-review/secrets/requests/`.
 - R10. **Honeytokens** (M): decoy `rlt_` tokens are roll-access's (roll MCP's #270, `decoy: true`);
   database roles and IAM users that alert on use are this side's, once those land.
-- R11. **Moving in from 1Password, Bitwarden SM, Parameter Store, GCP, Azure and Akeyless** (building:
-  `feature/roll-secrets-import-more`, each through its own CLI).
+- R11. **Moving in from 1Password, Bitwarden SM, Parameter Store, GCP, Azure and Akeyless** (#284):
+  each through its own CLI with the user's login, bounded (500 secrets, 16 MiB, 60 s), stopping on an
+  unreadable secret or a collision, `--dry-run` for every source, `--sensitive` opt-in for
+  SecureStrings. Shapes from vendor docs only (Akeyless least sure): real accounts are the user's call.
 - R12. **A split deployment key** (#276): `roll secrets key split/combine`, Shamir N of M in a small
   I/O-free crate (`roll-keyshares`), checksummed `rlks_` shares with a set id and a key check (a
   wrong mix is an error, never a wrong key); backup keys split the same way. Next: a Vault-style
