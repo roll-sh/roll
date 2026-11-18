@@ -134,11 +134,21 @@ impl roll_previews::ports::Apps for RollApps {
         // runtime that can't is a 409, which fails the deploy rather than running it open).
         let closed = t.egress == roll_previews::settings::EgressRule::Roll;
         let egress = if closed { json!({ "mode": "roll", "hosts": t.egress_hosts }) } else { json!({ "mode": "open" }) };
-        let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress });
+        // One voice on a pull request: previews posts `roll/preview` and its comment for the
+        // environment, so roll apps posts no commit status or GitHub Deployment of its own (apps' #249).
+        let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress, "report": false });
         if self.feedback {
             body["feedback"] = json!(t.feedback);
         }
-        let made = self.api.call(Method::PUT, &path, Some(body)).await?;
+        let made = match self.api.call(Method::PUT, &path, Some(body.clone())).await {
+            // A roll apps older than #249 (a node not yet upgraded, on a fleet) refuses the field:
+            // the environment is made all the same, and its deploys report as well as previews.
+            Err(e) if e.downcast_ref::<super::Refused>().is_some_and(|r| r.status.as_u16() == 400 && r.error == "unknown field report") => {
+                body.as_object_mut().map(|o| o.remove("report"));
+                self.api.call(Method::PUT, &path, Some(body)).await?
+            }
+            r => r?,
+        };
         // Roll only holds the build too: roll apps builds a closed environment without its secret
         // values (apps' #222, `build_closed`). One that doesn't say so would build with them on an
         // open network, where a fork's head could send them out: nothing is deployed there.
