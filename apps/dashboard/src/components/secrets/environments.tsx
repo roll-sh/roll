@@ -248,7 +248,7 @@ function Notify({ env, onError }: { env: Environment; onError: (e: string) => vo
 }
 
 /** How long old values stay readable: the sweeper destroys older versions' values after that (never a current one). */
-const TYPE_LABEL: Record<KeyType, string> = { url: "URL", int: "integer", port: "port", bool: "boolean", json: "JSON", email: "email" };
+const TYPE_LABEL: Record<KeyType, string> = { url: "URL", int: "integer", port: "port", bool: "boolean", json: "JSON", email: "email", totp: "TOTP seed" };
 
 /** A password policy's classes, as the form offers them (other sets and symbols: the API and `roll secrets required add`). */
 const CLASS_SETS: { value: string; label: string; classes: PasswordClass[] }[] = [

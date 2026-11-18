@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import threading
@@ -26,6 +27,23 @@ class SealedBoxes(unittest.TestCase):
             roll_secrets.open_sealed(BOX, KEY, "roll-secrets:prj_a:staging:app:web")
         with self.assertRaises(ValueError):
             roll_secrets.open_sealed(BOX, roll_secrets.generate_key(), CONTEXT)
+
+
+class Totp(unittest.TestCase):
+    def test_codes_match_rfc_6238(self):
+        # RFC 6238, Appendix B: each algorithm's own test seed, 8 digits, 30 s steps.
+        seeds = {"SHA1": b"12345678901234567890", "SHA256": b"12345678901234567890123456789012", "SHA512": b"1234567890" * 6 + b"1234"}
+        vectors = [(59, ("94287082", "46119246", "90693936")), (1111111109, ("07081804", "68084774", "25091201")), (1234567890, ("89005924", "91819424", "93441116")), (20000000000, ("65353130", "77737706", "47863826"))]
+        for i, (alg, seed) in enumerate(seeds.items()):
+            uri = f"otpauth://totp/roll:test?secret={base64.b32encode(seed).decode()}&algorithm={alg}&digits=8"
+            for at, codes in vectors:
+                self.assertEqual(roll_secrets.totp_at(uri, at).code, codes[i], f"{alg} at {at}")
+        # Bare base32: SHA1, 6 digits, 30 s.
+        self.assertEqual(roll_secrets.totp_at("gezd gnbv gy3t qojq gezd gnbv gy3t qojq", 59), roll_secrets.Totp("287082", 60_000, 30))
+        with self.assertRaises(ValueError) as e:
+            roll_secrets.totp_at("otpauth://totp/x?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=9")
+        self.assertNotIn("GEZD", str(e.exception))
+        self.assertNotIn("287082", repr(roll_secrets.totp_at("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", 59)))
 
 
 class Rolld(BaseHTTPRequestHandler):

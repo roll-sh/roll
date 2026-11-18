@@ -113,6 +113,8 @@ export type Problem = { key: string; problem: string };
 /** `digest` (with `?digest=1`): the folder's `…/digest`, taken just before this read (a watch compares from it). */
 /** `followed`: keys linked to a resource the ephemeral environment's preview branched, left out of `values`. */
 /** `plain`: of `linked`, keys whose link field isn't a credential (a host, a port): logs may show them; every other value is a secret. */
+/** `GET …/secrets/{key}/totp`: a TOTP key's code (a credential), valid until `expires_at` (ms: the end of its step). */
+export type Totp = { code: string; expires_at: number; period: number };
 export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld?: string[]; sensitive?: string[]; followed?: Followed[]; digest?: string };
 export type CellSource = "own" | "import" | "base";
 /** `misfit`: the typed-key rule the stored value breaks (shown only to whoever may reveal it). */
@@ -195,7 +197,7 @@ export type Token = {
 export type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 /** `ciphertext`: base64url(nonce ‖ AES-256-GCM ciphertext) with `roll-share-v1` as associated data; `views` 1–10, `ttl_minutes` 5–10080. */
 export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_minutes?: number };
-export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email";
+export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email" | "totp";
 /** A key every standard environment must define in a folder; typed keys also say what its value must be. */
 /** `owner`: who supplies it (a person or team), named in health and the daily notice. */
 export type PasswordClass = "lower" | "upper" | "digit" | "symbol";

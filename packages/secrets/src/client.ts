@@ -1,6 +1,6 @@
 import { SecretsError } from "./errors.js";
 import { openSealed } from "./seal.js";
-import type { Deleted, ExportFormat, Lease, SealedValues, TransitPublicKey, Values, Written } from "./types.js";
+import type { Deleted, ExportFormat, Lease, SealedValues, Totp, TransitPublicKey, Values, Written } from "./types.js";
 
 export type ClientOptions = {
   /** rolld's API, e.g. `https://api.roll.example` (no trailing `/v1`). */
@@ -186,6 +186,11 @@ export function createClient(options: ClientOptions) {
     return (await call("POST", `${await env(environment)}/resolve`, { consumer: o.consumer, path: o.path, seal_to: o.sealTo })) as Values | SealedValues;
   }
 
+  /** A TOTP key's current code (docs/secrets.md, "TOTP keys"): needs reveal, audited without the code. */
+  async function totp(environment: string, key: string, o: { path?: string } = {}): Promise<Totp> {
+    return (await call("GET", `${await env(environment)}/secrets/${enc(key)}/totp${qs({ path: o.path })}`)) as Totp;
+  }
+
   /**
    * The folder's digest. With `since` and `waitSeconds` (at most 60), a long poll: it answers as
    * soon as the digest differs from `since`, or with the same one when the wait runs out.
@@ -288,7 +293,7 @@ export function createClient(options: ClientOptions) {
     return JSON.parse(new TextDecoder().decode(openSealed(r.sealed, secretKey, r.context))) as Record<string, string>;
   }
 
-  return { values, set, delete: del, resolve, digest, renew, watch, open, transit, project: projectId };
+  return { values, set, delete: del, resolve, digest, totp, renew, watch, open, transit, project: projectId };
 }
 
 export type SecretsClient = ReturnType<typeof createClient>;

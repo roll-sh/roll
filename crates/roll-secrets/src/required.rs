@@ -4,7 +4,8 @@
 //!
 //! A required key may also have a type and a pattern (typed keys): a write whose value doesn't fit
 //! is refused, naming the key and never the value, and a resolved value that doesn't fit (through
-//! a reference) is a problem, so `roll run` won't start with it.
+//! a reference) is a problem, so `roll run` won't start with it. A `totp` key's value is a TOTP
+//! seed, which hands out one-time codes (`totp.rs`).
 
 use crate::access::{Action, Caller, Scope};
 use crate::write::{Item, ItemAction};
@@ -141,6 +142,8 @@ pub enum KeyType {
     Bool,
     Json,
     Email,
+    /// A TOTP seed: an `otpauth://totp/…` URI or base32 (docs/secrets.md, "TOTP keys").
+    Totp,
 }
 
 impl KeyType {
@@ -154,6 +157,7 @@ impl KeyType {
             KeyType::Port => v.parse::<u16>().is_ok_and(|p| p > 0),
             KeyType::Bool => ["true", "false", "1", "0", "yes", "no"].contains(&v.to_ascii_lowercase().as_str()),
             KeyType::Json => serde_json::from_str::<serde_json::Value>(v).is_ok(),
+            KeyType::Totp => crate::totp::parse(v).is_ok(),
             KeyType::Email => v.split_once('@').is_some_and(|(l, d)| !l.is_empty() && d.contains('.') && !d.starts_with('.') && !d.ends_with('.') && !d.contains('@')) && !v.contains(char::is_whitespace),
         }
     }
@@ -166,6 +170,7 @@ impl KeyType {
             KeyType::Bool => "a boolean",
             KeyType::Json => "JSON",
             KeyType::Email => "an email address",
+            KeyType::Totp => "a TOTP seed (an otpauth://totp/ URI or base32)",
         }
     }
 }
@@ -191,7 +196,9 @@ impl Rule<'_> {
         if let Some(t) = r.kind
             && !t.fits(v)
         {
-            return Some(format!("{} must be {}", r.key, t.name()));
+            // A TOTP seed has several rules: say which one (never the value).
+            let why = if t == KeyType::Totp { crate::totp::parse(v).err().map(|w| format!(": {w}")).unwrap_or_default() } else { String::new() };
+            return Some(format!("{} must be {}{why}", r.key, t.name()));
         }
         match (&self.pattern, &r.pattern) {
             (Some(re), Some(p)) if !re.is_match(v) => return Some(format!("{} must match {p}", r.key)),
