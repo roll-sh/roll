@@ -54,9 +54,24 @@ pub struct InstanceSpec {
     /// After this long with no traffic the instance may end itself (Fargate's guard proxy: a
     /// task whose node went away still stops). None: never (min_instances, workers).
     pub idle_stop_s: Option<u32>,
+    /// Variables kept as files (`files` on the environment's variables): (absolute path,
+    /// contents), written into the instance before it starts. Never in `Debug`.
+    pub files: Vec<(String, String)>,
     /// The private registry login its image pulls with, where the runtime pulls at each start
     /// (Fargate: the task's repository credentials). Never in `Debug`.
     pub registry: Option<RegistryLogin>,
+    /// A worker's health check, run by the runtime in the instance ([`Runtime::unhealthy`]).
+    pub health: Option<HealthCheck>,
+}
+
+/// A command run in an instance every `every`, healthy on exit 0; `failures` in a row make it
+/// unhealthy. `start` is the grace before failures count.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HealthCheck {
+    pub command: String,
+    pub every: Duration,
+    pub failures: u32,
+    pub start: Duration,
 }
 
 impl std::fmt::Debug for InstanceSpec {
@@ -162,6 +177,11 @@ pub trait Runtime: Send + Sync {
     /// Wait for a started instance to exit: its exit code.
     async fn wait(&self, name: &str) -> anyhow::Result<i32>;
     async fn running(&self, name: &str) -> bool;
+    /// Whether its health check ([`InstanceSpec::health`]) failed `failures` times in a row. A
+    /// runtime that runs no checks answers false.
+    async fn unhealthy(&self, _name: &str) -> bool {
+        false
+    }
     /// Take on `spec.name`, still running from another process (a node that died, rolld before
     /// a restart) and of `spec.deployment` (its label or tag says so), as this process's own,
     /// its output followed into `log` from now. None: not running here, another deployment's,
@@ -217,8 +237,9 @@ pub trait Runtime: Send + Sync {
     async fn egress_proxy(&self, _network: &str, _service: &str, _hosts: &[String]) -> anyhow::Result<String> {
         anyhow::bail!("this runtime has no egress proxy")
     }
-    /// The hosts the egress proxy for `hosts` refused lately (none: it hasn't, or isn't here).
-    fn egress_refused(&self, _hosts: &[String]) -> Vec<egress::Refused> {
+    /// The hosts closed `network`'s egress proxy for `hosts` refused lately (none: it hasn't, or
+    /// isn't here).
+    fn egress_refused(&self, _network: &str, _hosts: &[String]) -> Vec<egress::Refused> {
         Vec::new()
     }
     /// A project environment's network nothing uses any more (its last service there went):

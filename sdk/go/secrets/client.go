@@ -1,6 +1,7 @@
 // Package secrets is a client for roll secrets (docs/secrets.md, "Consumption"): an environment's
 // values, the runtime resolve (sealed to a key only this process holds, if asked), the digest that
-// changes when the values would, and a watch that follows it. It mirrors @roll/secrets.
+// changes when the values would, a watch that follows it, and one key's writes. It mirrors
+// @roll/secrets.
 //
 // A client holds a roll token (`rlt_…`, roll-access's) with a rule on one project, the operator
 // token, or the short-lived token a workload identity's login gives (Login, FromEnv).
@@ -17,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -252,21 +254,151 @@ func orRoot(path string) string {
 	return path
 }
 
+// ValuesOption changes what Values reads.
+type ValuesOption func(*valuesOptions)
+
+type valuesOptions struct{ noDynamic bool }
+
+// WithoutDynamic reads without issuing dynamic credentials (`dynamic=false`), for a reader that
+// can't renew a lease: those keys are left out and named in Values.Dynamic, and such an answer can
+// be kept by CacheTTL.
+func WithoutDynamic() ValuesOption { return func(o *valuesOptions) { o.noDynamic = true } }
+
 // Values are env's values under path ("" for the root), references resolved.
-func (c *Client) Values(ctx context.Context, env, path string) (*Values, error) {
+func (c *Client) Values(ctx context.Context, env, path string, opts ...ValuesOption) (*Values, error) {
+	var o valuesOptions
+	for _, f := range opts {
+		f(&o)
+	}
 	e, err := c.env(ctx, env)
 	if err != nil {
 		return nil, err
 	}
+	u := e + "/values" + query(path)
+	if o.noDynamic {
+		if path == "" {
+			u += "?dynamic=false"
+		} else {
+			u += "&dynamic=false"
+		}
+	}
 	if c.CacheTTL > 0 {
-		v, err := c.cachedValues(ctx, e+"/values"+query(path))
+		v, err := c.cachedValues(ctx, u, o.noDynamic)
 		if err != nil {
 			return nil, err
 		}
 		return v.clone(), nil
 	}
 	var v Values
-	return &v, c.call(ctx, http.MethodGet, e+"/values"+query(path), nil, &v)
+	return &v, c.call(ctx, http.MethodGet, u, nil, &v)
+}
+
+// Change is one change to an environment: its number in the project, who made it and when.
+type Change struct {
+	Seq         int64  `json:"seq"`
+	Environment string `json:"environment"`
+	Path        string `json:"path"`
+	Message     string `json:"message"`
+	By          string `json:"by"`
+	At          int64  `json:"at"`
+	Keys        int    `json:"keys"`
+	Kind        string `json:"kind"`
+}
+
+// Secret is a key's record, never its value.
+type Secret struct {
+	ID        string   `json:"id"`
+	Key       string   `json:"key"`
+	Path      string   `json:"path"`
+	Type      string   `json:"type"`
+	Version   int64    `json:"version"`
+	Comment   string   `json:"comment"`
+	Tags      []string `json:"tags"`
+	FP        string   `json:"fp"`
+	UpdatedAt int64    `json:"updated_at"`
+	UpdatedBy string   `json:"updated_by"`
+	ExpiresAt *int64   `json:"expires_at"`
+}
+
+// Written is what a write answers: the change (nil when nothing changed) and the key now.
+type Written struct {
+	Change   *Change  `json:"change"`
+	Secret   *Secret  `json:"secret"`
+	Warnings []string `json:"warnings"`
+}
+
+// Deleted is what Delete answers: Deleted is false when the key wasn't there.
+type Deleted struct {
+	Deleted bool
+	Change  *Change
+}
+
+// SetOptions are Set's optional fields.
+type SetOptions struct {
+	// Comment replaces the key's comment; nil keeps it.
+	Comment *string
+	// Message is the change's.
+	Message string
+}
+
+func (c *Client) secretURL(ctx context.Context, env, path, key string) (string, error) {
+	e, err := c.env(ctx, env)
+	if err != nil {
+		return "", err
+	}
+	return e + "/secrets/" + url.PathEscape(key) + query(path), nil
+}
+
+// dropCache forgets every kept Values answer: a write may change any of them (a reference or an
+// import elsewhere may follow the key).
+func (c *Client) dropCache() {
+	c.cacheMu.Lock()
+	c.cache = nil
+	c.cacheMu.Unlock()
+}
+
+// Set sets key to value in path's folder ("" for the root), replacing a link the key had. The same
+// value again writes nothing (Written.Change is nil). A protected environment, or a folder that
+// needs approval, is an *Error with the Code `approval_required` (open a change request instead).
+// Errors never hold the value. Drops the kept Values answers.
+func (c *Client) Set(ctx context.Context, env, path, key, value string, o SetOptions) (*Written, error) {
+	u, err := c.secretURL(ctx, env, path, key)
+	if err != nil {
+		return nil, err
+	}
+	body := map[string]any{"value": value, "link": nil}
+	if o.Comment != nil {
+		body["comment"] = *o.Comment
+	}
+	if o.Message != "" {
+		body["message"] = o.Message
+	}
+	defer c.dropCache()
+	var w Written
+	if err := c.call(ctx, http.MethodPut, u, body, &w); err != nil {
+		return nil, err
+	}
+	return &w, nil
+}
+
+// Delete deletes key from path's folder. A key that isn't there (or only shows through a base or
+// an import) is Deleted false, not an error; `approval_required` as for Set. Drops the kept Values
+// answers.
+func (c *Client) Delete(ctx context.Context, env, path, key string) (*Deleted, error) {
+	u, err := c.secretURL(ctx, env, path, key)
+	if err != nil {
+		return nil, err
+	}
+	defer c.dropCache()
+	var w Written
+	if err := c.call(ctx, http.MethodDelete, u, nil, &w); err != nil {
+		var e *Error
+		if errors.As(err, &e) && e.Status == http.StatusNotFound {
+			return &Deleted{}, nil
+		}
+		return nil, err
+	}
+	return &Deleted{Deleted: true, Change: w.Change}, nil
 }
 
 // freshValues is Values without CacheTTL (a watch that saw the digest move reads anew); a kept
@@ -302,8 +434,9 @@ func (v *Values) clone() *Values {
 }
 
 // cachedValues answers from memory within CacheTTL, else revalidates with the digest (a 304
-// keeps the values) or reads them again.
-func (c *Client) cachedValues(ctx context.Context, path string) (*Values, error) {
+// keeps the values) or reads them again. noDynamic: read with `dynamic=false`, so naming dynamic
+// keys holds no credential.
+func (c *Client) cachedValues(ctx context.Context, path string, noDynamic bool) (*Values, error) {
 	now := time.Now
 	if c.Now != nil {
 		now = c.Now
@@ -316,14 +449,14 @@ func (c *Client) cachedValues(ctx context.Context, path string) (*Values, error)
 	}
 	var out *Values
 	err := c.authed(ctx, func(token string) (err error) {
-		out, err = c.revalidate(ctx, token, path, hit, ok, now)
+		out, err = c.revalidate(ctx, token, path, hit, ok, now, noDynamic)
 		return err
 	})
 	return out, err
 }
 
 // revalidate is one conditional read of path with token: a 304 keeps hit's values.
-func (c *Client) revalidate(ctx context.Context, token, path string, hit cached, ok bool, now func() time.Time) (*Values, error) {
+func (c *Client) revalidate(ctx context.Context, token, path string, hit cached, ok bool, now func() time.Time, noDynamic bool) (*Values, error) {
 	sep := "?"
 	if strings.Contains(path, "?") {
 		sep = "&"
@@ -375,9 +508,10 @@ func (c *Client) revalidate(ctx context.Context, token, path string, hit cached,
 	}
 	etag := strings.Trim(strings.TrimPrefix(res.Header.Get("ETag"), "W/"), `"`)
 	c.cacheMu.Lock()
-	// Never kept: dynamic credentials (they end with their lease) or a key that didn't resolve (the
-	// digest may not move when the link recovers).
-	if len(v.Dynamic) > 0 || len(v.Problems) > 0 {
+	// Never kept: dynamic credentials (they end with their lease; with `dynamic=false` there are
+	// none, only their names) or a key that didn't resolve (the digest may not move when the link
+	// recovers).
+	if (len(v.Dynamic) > 0 && !noDynamic) || len(v.Problems) > 0 {
 		delete(c.cache, path)
 	} else {
 		if c.cache == nil {
@@ -432,14 +566,32 @@ func (c *Client) ResolveSealed(ctx context.Context, env, path, consumer string, 
 
 // Digest moves whenever env's values under path would; it reads no value.
 func (c *Client) Digest(ctx context.Context, env, path string) (string, error) {
+	return c.DigestSince(ctx, env, path, "", 0)
+}
+
+// DigestSince long-polls the digest: it answers as soon as it differs from since, or with the same
+// one once wait (at most a minute) runs out. A server without long polls answers at once.
+func (c *Client) DigestSince(ctx context.Context, env, path, since string, wait time.Duration) (string, error) {
 	e, err := c.env(ctx, env)
 	if err != nil {
 		return "", err
 	}
+	q := query(path)
+	// Under the client's own timeout, and the server's 25 s.
+	if c.HTTP != nil && c.HTTP.Timeout > 0 {
+		wait = min(wait, c.HTTP.Timeout-5*time.Second)
+	}
+	if since != "" && wait >= time.Second {
+		sep := "?"
+		if q != "" {
+			sep = "&"
+		}
+		q += sep + "since=" + url.QueryEscape(since) + "&wait=" + strconv.Itoa(int(min(wait, 25*time.Second)/time.Second))
+	}
 	var d struct {
 		Digest string `json:"digest"`
 	}
-	return d.Digest, c.call(ctx, http.MethodGet, e+"/digest"+query(path), nil, &d)
+	return d.Digest, c.call(ctx, http.MethodGet, e+"/digest"+q, nil, &d)
 }
 
 // Renew pushes a dynamic lease's expiry out by ttlMinutes (0: its link's TTL).
@@ -489,7 +641,8 @@ func (c *Client) Watch(ctx context.Context, env string, w Watch) error {
 	var last string
 	var leases []string
 	tick := func() {
-		now, err := c.Digest(ctx, env, w.Path)
+		// A long poll: a change arrives within a second or two (Every paces a server without them).
+		now, err := c.DigestSince(ctx, env, w.Path, last, 25*time.Second)
 		if err != nil {
 			fail(err)
 			return

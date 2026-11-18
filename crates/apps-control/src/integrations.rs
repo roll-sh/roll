@@ -123,6 +123,14 @@ pub trait SecretSource: Send + Sync {
     async fn digest(&self, _project: &str, _env: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
+
+    /// The digest once it differs from `since`, or as it is after `wait` (at most 25 s): roll
+    /// secrets long-polls it, so a redeploy can follow a change within a second or two. By
+    /// default, the digest at once.
+    async fn wait_digest(&self, project: &str, env: &str, _since: &str, _wait: std::time::Duration) -> anyhow::Result<Option<String>> {
+        self.digest(project, env).await
+    }
+
     /// The project's `env` made in the store if it's missing (an apps environment named
     /// something roll secrets doesn't start with, `qa`), so its secrets have somewhere to go.
     /// Idempotent; never called for a preview's (previews make those, with their base).
@@ -217,6 +225,10 @@ pub trait GitHubApp: Send + Sync {
     /// That deployment's state (`in_progress`, `success`, `failure`), with where it answers.
     #[allow(clippy::too_many_arguments)]
     async fn deployment_status(&self, installation: u64, owner: &str, repo: &str, deployment: u64, state: &str, url: Option<&str>, description: &str) -> anyhow::Result<()>;
+    /// What a commit's checks on GitHub say (roll's own left out), for `wait_for_ci`.
+    async fn ci(&self, _installation: u64, _owner: &str, _repo: &str, _sha: &str) -> anyhow::Result<Ci> {
+        Ok(Ci::None)
+    }
 }
 
 /// Whether a person may still open a project's environments (rolld answers from roll-accounts:

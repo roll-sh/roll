@@ -6,8 +6,10 @@
 //! Each platform's own credential is a secret of the sync's environment and folder, named in the
 //! target (`token_key`, `access_key_id_key`…): roll-secrets resolves it at each push and never
 //! pushes it ([`SyncTarget::credentials`]). The hosts are fixed public API hosts, so the client
-//! needs no `PublicOnly`; it has timeouts, no redirects and a bounded read. Errors name keys and
-//! the target, and from the platform only its status and error code: never a value or a token.
+//! needs no `PublicOnly`; it has timeouts, no redirects and a bounded read. `azure-devops`, whose
+//! path takes the tenant's organization, goes through the same client with `PublicOnly` too.
+//! Errors name keys and the target, and from the platform only its status and error code: never a
+//! value or a token.
 
 use super::{bad, block_on, target};
 use roll_secrets::syncs::{Push, Resources, SyncField, SyncTarget};
@@ -38,6 +40,11 @@ pub(super) struct Http {
     /// `https://login.microsoftonline.com`; the vault's own host when `None`.
     azure_login: String,
     azure_vault: Option<String>,
+    /// `https://dev.azure.com`, called through `guarded`.
+    azure_devops: String,
+    /// The client with `roll_net::PublicOnly` (and no proxy), for platforms whose host takes a
+    /// tenant's name; tests point it at a mock on loopback, so there it's `client`.
+    guarded: reqwest::Client,
     /// `https://circleci.com/api/v2`.
     circleci: String,
     /// `https://api.bitbucket.org/2.0`.
@@ -58,6 +65,8 @@ impl Http {
         h.google_token = "https://oauth2.googleapis.com/token".into();
         h.azure_login = "https://login.microsoftonline.com".into();
         h.azure_vault = None;
+        h.azure_devops = "https://dev.azure.com".into();
+        h.guarded = Http::builder().dns_resolver(roll_net::PublicOnly).no_proxy().build().expect("an HTTP client");
         h.circleci = "https://circleci.com/api/v2".into();
         h.bitbucket = "https://api.bitbucket.org/2.0".into();
         h.terraform = "https://app.terraform.io/api/v2".into();
@@ -66,14 +75,13 @@ impl Http {
     }
 
     fn with_bases(vercel: &str, cloudflare: &str, ssm: Option<&str>, render: &str, netlify: &str) -> Http {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .connect_timeout(Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent("roll-secrets-sync")
-            .build()
-            .expect("an HTTP client");
-        Http { client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2"), heroku: vercel.into(), google: vercel.into(), google_token: format!("{vercel}/token"), azure_login: vercel.into(), azure_vault: Some(vercel.into()), circleci: vercel.into(), bitbucket: format!("{vercel}/2.0"), terraform: format!("{vercel}/api/v2"), digitalocean: format!("{vercel}/v2") }
+        let client = Http::builder().build().expect("an HTTP client");
+        Http { guarded: client.clone(), azure_devops: vercel.into(), client, vercel: vercel.into(), cloudflare: cloudflare.into(), ssm: ssm.map(Into::into), render: render.into(), netlify: netlify.into(), fly: format!("{render}/graphql"), railway: format!("{netlify}/graphql/v2"), heroku: vercel.into(), google: vercel.into(), google_token: format!("{vercel}/token"), azure_login: vercel.into(), azure_vault: Some(vercel.into()), circleci: vercel.into(), bitbucket: format!("{vercel}/2.0"), terraform: format!("{vercel}/api/v2"), digitalocean: format!("{vercel}/v2") }
+    }
+
+    /// Timeouts, no redirects.
+    fn builder() -> reqwest::ClientBuilder {
+        reqwest::Client::builder().timeout(Duration::from_secs(20)).connect_timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none()).user_agent("roll-secrets-sync")
     }
 
     /// Send, and read at most [`ANSWER_MAX`] of the answer as JSON (`Null` if it isn't).
@@ -385,7 +393,7 @@ impl SyncTarget for Kubernetes {
             return Err(bad("the synced values are over a Secret's 1 MiB"));
         }
         let client = self.client(ca)?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None, circleci: String::new(), bitbucket: String::new(), terraform: String::new(), digitalocean: String::new() };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None, azure_devops: String::new(), guarded: client.clone(), circleci: String::new(), bitbucket: String::new(), terraform: String::new(), digitalocean: String::new() };
         let what = format!("kubernetes {}/{}", k.namespace, k.secret);
         let base = format!("{}/api/v1/namespaces/{}/secrets", k.server.as_str().trim_end_matches('/'), k.namespace);
         let data: serde_json::Map<String, Json> = p.values.iter().map(|(n, v)| (n.clone(), json!(base64::engine::general_purpose::STANDARD.encode(v.expose())))).collect();
@@ -799,6 +807,180 @@ impl SyncTarget for AzureKeyVault {
                 if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
                     return Err(Error::Link(format!("{what}: deleting {name}: {status} {}", code_of(&got))));
                 }
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── azure-devops ──
+
+/// An Azure DevOps variable group's variables, all secret. The group is found by name in its
+/// project and put back whole (Azure's update replaces the variable set): only the names this sync
+/// pushes or removes change, and every other variable goes back as it came (a secret's value comes
+/// back `null`, which Azure keeps as it is). Signed in with a PAT, or as a Microsoft Entra service
+/// principal (client credentials, as `azure-key-vault`). `dev.azure.com` through the guarded client.
+pub(super) struct AzureDevOps(pub(super) Http);
+
+struct AdoTarget {
+    organization: String,
+    project: String,
+    group: String,
+    auth: AdoAuth,
+}
+
+enum AdoAuth {
+    /// The key holding a personal access token.
+    Pat(String),
+    /// A service principal: tenant, client id, the key holding its client secret.
+    Entra { tenant: String, client_id: String, secret_key: String },
+}
+
+const ADO_API: &str = "api-version=7.1";
+/// Azure DevOps' own resource, the scope an Entra token for it asks for.
+const ADO_SCOPE: &str = "499b84ac-1321-427f-aa17-267ca6975798/.default";
+/// Prefixes Azure Pipelines keeps for itself: a variable named so never reaches a task or script.
+const ADO_RESERVED: &[&str] = &["endpoint", "input", "secret", "path", "securefile"];
+
+impl AzureDevOps {
+    fn target(&self, t: &Json) -> Result<AdoTarget> {
+        let fields = [("organization", true), ("project", true), ("group", true), ("token_key", false), ("tenant_id", false), ("client_id", false), ("client_secret_key", false)];
+        let [organization, project, group, token_key, tenant, client, secret] = target("azure-devops", t, fields)?;
+        let organization = organization.unwrap_or_default();
+        if !ident(&organization, 50, "-") || organization.starts_with('-') || organization.ends_with('-') {
+            return Err(bad("organization is an Azure DevOps organization's name (letters, digits and -, as in dev.azure.com/<organization>)"));
+        }
+        let project = project.unwrap_or_default();
+        if !ident(&project, 64, " -_.") || project.starts_with(['_', '.']) || project.ends_with('.') {
+            return Err(bad("project is an Azure DevOps project's name or id (letters, digits, spaces and -_.)"));
+        }
+        let group = group.unwrap_or_default();
+        if group.chars().count() > 128 || group.chars().any(|c| c.is_control() || c == '*') {
+            return Err(bad("group is a variable group's name (up to 128 characters, no *)"));
+        }
+        let auth = match (token_key, tenant, client, secret) {
+            (Some(k), None, None, None) => AdoAuth::Pat(key_field("azure-devops", "token_key", Some(k))?),
+            (None, Some(tenant), Some(client_id), Some(secret)) => {
+                if !ident(&tenant, 64, "-.") {
+                    return Err(bad("tenant_id is a Microsoft Entra tenant's id or domain"));
+                }
+                if !ident(&client_id, 64, "-") {
+                    return Err(bad("client_id is an app registration's client id"));
+                }
+                AdoAuth::Entra { tenant, client_id, secret_key: key_field("azure-devops", "client_secret_key", Some(secret))? }
+            }
+            _ => return Err(bad("an azure-devops target signs in with token_key (a PAT), or with tenant_id, client_id and client_secret_key (a service principal)")),
+        };
+        Ok(AdoTarget { organization, project, group, auth })
+    }
+}
+
+/// A name Azure Pipelines takes for a variable its tasks and scripts see.
+fn ado_name(name: &str) -> Result<()> {
+    let lower = name.to_ascii_lowercase();
+    if !ident(name, 255, "._") || ADO_RESERVED.iter().any(|p| lower.starts_with(p)) {
+        return Err(bad(format!("{name} can't be an Azure Pipelines variable's name (endpoint, input, secret, path and securefile are reserved prefixes): leave it out with keys, or set a prefix")));
+    }
+    Ok(())
+}
+
+impl SyncTarget for AzureDevOps {
+    fn kind(&self) -> &str {
+        "azure-devops"
+    }
+    fn label(&self) -> &str {
+        "Azure DevOps variable group"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "organization", label: "Organization", required: true, placeholder: "acme" },
+            SyncField { name: "project", label: "Project", required: true, placeholder: "shop" },
+            SyncField { name: "group", label: "Variable group", required: true, placeholder: "shop-production" },
+            SyncField { name: "token_key", label: "Key holding a PAT (Variable Groups: read, create & manage)", required: false, placeholder: "AZURE_DEVOPS_PAT" },
+            SyncField { name: "tenant_id", label: "Or a service principal: tenant id", required: false, placeholder: "contoso.onmicrosoft.com" },
+            SyncField { name: "client_id", label: "Its client id", required: false, placeholder: "00000000-0000-0000-0000-000000000000" },
+            SyncField { name: "client_secret_key", label: "Key holding its client secret", required: false, placeholder: "AZURE_DEVOPS_CLIENT_SECRET" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["token_key", "client_secret_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let t = self.target(t)?;
+        for name in p.changed {
+            ado_name(name)?;
+        }
+        let what = format!("azure-devops {}/{}", t.organization, t.project);
+        let client = &self.0.guarded;
+        // Azure DevOps' `typeKey` (`VariableGroupNotFoundException`), never the answer.
+        let code_of = |v: &Json| v["typeKey"].as_str().unwrap_or_default().to_string();
+        block_on(async {
+            let auth = match &t.auth {
+                AdoAuth::Pat(key) => {
+                    use base64::Engine as _;
+                    let pat = credential(p, key)?;
+                    // Zeroed when dropped: it holds the token.
+                    zeroize::Zeroizing::new(format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!(":{pat}"))))
+                }
+                AdoAuth::Entra { tenant, client_id, secret_key } => {
+                    let secret = credential(p, secret_key)?;
+                    let form = format!("grant_type=client_credentials&client_id={}&client_secret={}&scope={}", urlencoding::encode(client_id), urlencoding::encode(secret), urlencoding::encode(ADO_SCOPE));
+                    let login = client.post(format!("{}/{tenant}/oauth2/v2.0/token", self.0.azure_login)).header("content-type", "application/x-www-form-urlencoded").body(form);
+                    let (status, v) = self.0.send(login, &what).await?;
+                    match v["access_token"].as_str() {
+                        Some(tok) if status.is_success() => zeroize::Zeroizing::new(format!("Bearer {tok}")),
+                        _ => return Err(Error::Link(format!("{what}: signing in: {status} {}", v["error"].as_str().unwrap_or_default()))),
+                    }
+                }
+            };
+            let org = format!("{}/{}", self.0.azure_devops, t.organization);
+            let list = format!("{org}/{}/_apis/distributedtask/variablegroups?groupName={}&{ADO_API}", urlencoding::encode(&t.project), urlencoding::encode(&t.group));
+            let (status, v) = self.0.send(client.get(list).header("authorization", auth.as_str()), &what).await?;
+            // A refused PAT gets a sign-in page (203), not JSON.
+            let Some(groups) = v["value"].as_array().filter(|_| status.is_success()) else {
+                return Err(Error::Link(format!("{what}: listing variable groups: {status} {}", if v.is_object() { code_of(&v) } else { "(not Azure DevOps' JSON: was the token refused?)".into() })));
+            };
+            let mut found = groups.iter().filter(|g| g["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(&t.group)));
+            let (Some(group), None) = (found.next(), found.next()) else {
+                return Err(Error::Link(format!("{what}: no variable group named {} (create it in Pipelines → Library first)", t.group)));
+            };
+            let id = group["id"].as_i64().ok_or_else(|| Error::Link(format!("{what}: {} has no id", t.group)))?;
+            if group["type"].as_str().is_some_and(|k| k != "Vsts") {
+                return Err(Error::Link(format!("{what}: {} is linked to a Key Vault, whose secrets it shows: sync to the vault instead", t.group)));
+            }
+            // The update writes the whole group. Azure DevOps never returns a secret variable's
+            // value, so one roll doesn't manage can't be written back as it was: a group holding
+            // one is refused rather than risk clearing it. Roll's own are always sent with their
+            // values (every one, not only what changed), and plain variables go back as they came.
+            let ours = |k: &str| p.values.keys().chain(p.removed).any(|n| n.eq_ignore_ascii_case(k));
+            let current = group["variables"].as_object().cloned().unwrap_or_default();
+            let foreign: Vec<&str> = current.iter().filter(|(k, v)| !ours(k) && v["isSecret"] == true).map(|(k, _)| k.as_str()).collect();
+            if !foreign.is_empty() {
+                return Err(Error::Link(format!(
+                    "{what}: {} holds secret variables roll doesn't manage ({}): Azure DevOps never returns a secret's value, so writing the group back could clear them; give the sync a group of its own",
+                    t.group,
+                    foreign.join(", ")
+                )));
+            }
+            let mut variables: serde_json::Map<String, Json> = current.into_iter().filter(|(k, _)| !ours(k)).collect();
+            for (name, v) in p.values {
+                variables.insert(name.clone(), json!({ "value": v.expose(), "isSecret": true }));
+            }
+            let mut body = json!({
+                "name": group["name"], "description": group["description"], "type": "Vsts", "variables": variables,
+                "variableGroupProjectReferences": group["variableGroupProjectReferences"],
+            });
+            if !group["providerData"].is_null() {
+                body["providerData"] = group["providerData"].clone();
+            }
+            let put = client.put(format!("{org}/_apis/distributedtask/variablegroups/{id}?{ADO_API}")).header("authorization", auth.as_str()).json(&body);
+            let (status, v) = self.0.send(put, &what).await?;
+            if !status.is_success() || v["id"].as_i64() != Some(id) {
+                return Err(Error::Link(format!("{what}: updating {}: {status} {}", t.group, code_of(&v))));
             }
             Ok(())
         })
@@ -1437,7 +1619,7 @@ impl SyncTarget for GitLab {
             b = b.dns_resolver(roll_net::PublicOnly).no_proxy();
         }
         let client = b.build().map_err(|e| Error::Internal(e.to_string()))?;
-        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None, circleci: String::new(), bitbucket: String::new(), terraform: String::new(), digitalocean: String::new() };
+        let http = Http { client: client.clone(), vercel: String::new(), cloudflare: String::new(), ssm: None, render: String::new(), netlify: String::new(), fly: String::new(), railway: String::new(), heroku: String::new(), google: String::new(), google_token: String::new(), azure_login: String::new(), azure_vault: None, azure_devops: String::new(), guarded: client.clone(), circleci: String::new(), bitbucket: String::new(), terraform: String::new(), digitalocean: String::new() };
         let what = format!("gitlab {}", g.project);
         let vars = format!("{}/api/v4/projects/{}/variables", g.base.as_str().trim_end_matches('/'), urlencoding::encode(&g.project));
         let scope = urlencoding::encode(&g.scope).into_owned();
@@ -1732,6 +1914,500 @@ impl SyncTarget for SecretsManager {
     }
 }
 
+// ── supabase, cloudflare-pages, azure-app-configuration and vault-kv ──
+
+/// The client the kinds below call through: rolld's guarded one (`roll_net::PublicOnly`, no proxy,
+/// no redirects, timeouts, at most [`ANSWER_MAX`] of an answer read), private addresses only where
+/// rolld allows them for webhooks; and their API bases (tests point them at a mock).
+#[derive(Clone)]
+pub(super) struct Guarded {
+    http: Http,
+    allow_private: bool,
+    /// `https://api.supabase.com`.
+    supabase: String,
+    /// `None`: the store's own host, `https://{store}.azconfig.io`.
+    azconfig: Option<String>,
+}
+
+impl Guarded {
+    pub(super) fn new(http: &Http, allow_private: bool) -> Guarded {
+        let mut http = http.clone();
+        http.client = guarded_client(allow_private, None).expect("an HTTP client");
+        Guarded { http, allow_private, supabase: "https://api.supabase.com".into(), azconfig: None }
+    }
+}
+
+/// Timeouts, no redirects, `PublicOnly` (and no proxy) unless private addresses are allowed, and a
+/// CA of the target's own when given.
+fn guarded_client(allow_private: bool, ca: Option<&str>) -> Result<reqwest::Client> {
+    let mut b = reqwest::Client::builder().timeout(Duration::from_secs(20)).connect_timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none()).user_agent("roll-secrets-sync");
+    if let Some(pem) = ca {
+        b = b.add_root_certificate(reqwest::Certificate::from_pem(pem.as_bytes()).map_err(|_| bad("the CA isn't a PEM certificate"))?);
+    }
+    if !allow_private {
+        b = b.dns_resolver(roll_net::PublicOnly).no_proxy();
+    }
+    b.build().map_err(|e| Error::Internal(e.to_string()))
+}
+
+// ── supabase ──
+
+/// A Supabase project's Edge Function secrets, through the Management API: one `POST` upserts the
+/// changed names, one `DELETE` removes the names this sync pushed before. Supabase keeps
+/// `SUPABASE_` for the variables it injects.
+pub(super) struct Supabase(pub(super) Guarded);
+
+impl Supabase {
+    /// (project ref, token_key)
+    fn target(&self, t: &Json) -> Result<(String, String)> {
+        let [project, token_key] = target("supabase", t, [("project_ref", true), ("token_key", true)])?;
+        let project = project.unwrap_or_default();
+        if project.len() != 20 || !project.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+            return Err(bad("project_ref is a Supabase project's ref (the 20 letters in <ref>.supabase.co)"));
+        }
+        Ok((project, key_field("supabase", "token_key", token_key)?))
+    }
+}
+
+impl SyncTarget for Supabase {
+    fn kind(&self) -> &str {
+        "supabase"
+    }
+    fn label(&self) -> &str {
+        "Supabase Edge Function secrets"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "project_ref", label: "Project ref", required: true, placeholder: "abcdefghijklmnopqrst" },
+            SyncField { name: "token_key", label: "Key holding a personal access token", required: true, placeholder: "SUPABASE_ACCESS_TOKEN" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["token_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn refuses(&self, name: &str) -> Option<String> {
+        name.to_ascii_uppercase()
+            .starts_with("SUPABASE_")
+            .then(|| format!("{name} can't be a Supabase secret's name (SUPABASE_ is Supabase's own): leave it out with keys, or set a prefix"))
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let (project, token_key) = self.target(t)?;
+        let token = credential(p, &token_key)?;
+        if let Some(why) = p.changed.iter().find_map(|n| self.refuses(n)) {
+            return Err(bad(why));
+        }
+        let what = format!("supabase {project}");
+        let url = format!("{}/v1/projects/{project}/secrets", self.0.supabase);
+        let h = &self.0.http;
+        block_on(async {
+            for names in p.changed.chunks(100) {
+                let body: Vec<Json> = names.iter().filter_map(|n| p.values.get(n).map(|v| json!({ "name": n, "value": v.expose() }))).collect();
+                if body.is_empty() {
+                    continue;
+                }
+                // Supabase answers `{message}` and no code: its status alone.
+                let (status, _) = h.send(h.client.post(&url).bearer_auth(token).json(&body), &what).await?;
+                if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: {status}")));
+                }
+            }
+            if !p.removed.is_empty() {
+                let (status, _) = h.send(h.client.delete(&url).bearer_auth(token).json(&p.removed), &what).await?;
+                if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+                    return Err(Error::Link(format!("{what}: deleting {}: {status}", p.removed.join(", "))));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── cloudflare-pages ──
+
+/// A Cloudflare Pages project's environment variables in one of its two environments, as
+/// `secret_text`: one `PATCH` of the project sets the changed names and removes the names this sync
+/// pushed before (`null`, Cloudflare's way to delete one). The token is handled as `cloudflare`'s.
+pub(super) struct CloudflarePages(pub(super) Guarded);
+
+impl CloudflarePages {
+    /// (account, project, environment, token_key)
+    fn target(&self, t: &Json) -> Result<(String, String, String, String)> {
+        let [account, project, environment, token_key] = target("cloudflare-pages", t, [("account", true), ("project", true), ("environment", true), ("token_key", true)])?;
+        let (account, project) = (account.unwrap_or_default(), project.unwrap_or_default());
+        let project_ok = ident(&project, 63, "-") && !project.starts_with('-') && !project.chars().any(|c| c.is_ascii_uppercase());
+        if !ident(&account, 64, "") || !project_ok {
+            return Err(bad("account is a Cloudflare account id, project a Pages project's name (lowercase letters, digits and -)"));
+        }
+        let environment = environment.unwrap_or_default();
+        if environment != "production" && environment != "preview" {
+            return Err(bad("environment is production or preview"));
+        }
+        Ok((account, project, environment, key_field("cloudflare-pages", "token_key", token_key)?))
+    }
+}
+
+impl SyncTarget for CloudflarePages {
+    fn kind(&self) -> &str {
+        "cloudflare-pages"
+    }
+    fn label(&self) -> &str {
+        "Cloudflare Pages environment variables"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "account", label: "Account id", required: true, placeholder: "023e105f4ecef8ad9ca31a8372d0c353" },
+            SyncField { name: "project", label: "Pages project", required: true, placeholder: "shop-web" },
+            SyncField { name: "environment", label: "Pages environment", required: true, placeholder: "production or preview" },
+            SyncField { name: "token_key", label: "Key holding the API token", required: true, placeholder: "CLOUDFLARE_API_TOKEN" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["token_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let (account, project, environment, token_key) = self.target(t)?;
+        let token = credential(p, &token_key)?;
+        too_long(p, 5 * 1024, "a Pages variable's 5 KiB")?;
+        let mut vars = serde_json::Map::new();
+        for name in p.changed {
+            if let Some(v) = p.values.get(name) {
+                vars.insert(name.clone(), json!({ "type": "secret_text", "value": v.expose() }));
+            }
+        }
+        for name in p.removed {
+            vars.insert(name.clone(), Json::Null);
+        }
+        if vars.is_empty() {
+            return Ok(());
+        }
+        let what = format!("cloudflare-pages {project} {environment}");
+        let h = &self.0.http;
+        let body = json!({ "deployment_configs": { environment.as_str(): { "env_vars": Json::Object(vars) } } });
+        let req = h.client.patch(format!("{}/client/v4/accounts/{account}/pages/projects/{project}", h.cloudflare)).bearer_auth(token).json(&body);
+        block_on(async {
+            let (status, v) = h.send(req, &what).await?;
+            if !status.is_success() {
+                return Err(Error::Link(format!("{what}: {status} {}", cf_codes(&v))));
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── azure-app-configuration ──
+
+/// Key-values in an Azure App Configuration store, `<prefix><KEY>` under one label (none by
+/// default), signed in as `azure-key-vault` is. Plain values: App Configuration's own guidance puts
+/// secrets in Key Vault references, which is what `azure-key-vault` is for. Key-values roll creates
+/// carry the tag `managed-by=roll-secrets`; only those are written or deleted.
+pub(super) struct AzureAppConfig(pub(super) Guarded);
+
+struct AacTarget {
+    store: String,
+    label: Option<String>,
+    prefix: String,
+    tenant: String,
+    client_id: String,
+    secret_key: String,
+}
+
+const AAC_API: &str = "api-version=2023-11-01";
+/// A key-value's largest size (key, label, value and tags together).
+const AAC_MAX: usize = 10_000;
+
+impl AzureAppConfig {
+    fn target(&self, t: &Json) -> Result<AacTarget> {
+        let fields = [("store", true), ("label", false), ("prefix", false), ("tenant_id", true), ("client_id", true), ("client_secret_key", true)];
+        let [store, label, prefix, tenant, client, secret] = target("azure-app-configuration", t, fields)?;
+        let store = store.unwrap_or_default();
+        // The store's name is the host's first label: nothing else gets in.
+        if store.len() < 5 || !ident(&store, 50, "-") || store.starts_with('-') || store.ends_with('-') {
+            return Err(bad("store is an App Configuration store's name (5–50 letters, digits and -, as in <store>.azconfig.io)"));
+        }
+        // No `*`, `,` or `\`: App Configuration's filters read them.
+        if label.as_ref().is_some_and(|l| !ident(l, 128, "-_.:/")) {
+            return Err(bad("label is letters, digits and -_.:/ (production)"));
+        }
+        let prefix = prefix.unwrap_or_default();
+        if !prefix.is_empty() && (!ident(&prefix, 256, "-_.:/") || prefix == "." || prefix == "..") {
+            return Err(bad("prefix is letters, digits and -_.:/ (shop:)"));
+        }
+        let tenant = tenant.unwrap_or_default();
+        if !ident(&tenant, 64, "-.") {
+            return Err(bad("tenant_id is a Microsoft Entra tenant's id or domain"));
+        }
+        let client_id = client.unwrap_or_default();
+        if !ident(&client_id, 64, "-") {
+            return Err(bad("client_id is an app registration's client id"));
+        }
+        Ok(AacTarget { store, label, prefix, tenant, client_id, secret_key: key_field("azure-app-configuration", "client_secret_key", secret)? })
+    }
+}
+
+/// App Configuration's problem `type`, its last part (`key-locked`); Entra's `error`. Never a
+/// `title` or `detail`, which name the key or quote the request.
+fn aac_code(v: &Json) -> String {
+    v["type"].as_str().and_then(|t| t.rsplit('/').next()).or(v["error"].as_str()).or(v["error"]["code"].as_str()).unwrap_or_default().to_string()
+}
+
+impl SyncTarget for AzureAppConfig {
+    fn kind(&self) -> &str {
+        "azure-app-configuration"
+    }
+    fn label(&self) -> &str {
+        "Azure App Configuration"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "store", label: "Store name", required: true, placeholder: "shop-config" },
+            SyncField { name: "label", label: "Label (optional)", required: false, placeholder: "production" },
+            SyncField { name: "prefix", label: "Key prefix (optional)", required: false, placeholder: "shop:" },
+            SyncField { name: "tenant_id", label: "Tenant id", required: true, placeholder: "contoso.onmicrosoft.com" },
+            SyncField { name: "client_id", label: "App registration's client id", required: true, placeholder: "00000000-0000-0000-0000-000000000000" },
+            SyncField { name: "client_secret_key", label: "Key holding its client secret", required: true, placeholder: "AZURE_SYNC_CLIENT_SECRET" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["client_secret_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let t = self.target(t)?;
+        let secret = credential(p, &t.secret_key)?;
+        too_long(p, AAC_MAX, "a key-value's 10 KB")?;
+        let what = format!("azure-app-configuration {}", t.store);
+        let h = &self.0.http;
+        let store = self.0.azconfig.clone().unwrap_or_else(|| format!("https://{}.azconfig.io", t.store));
+        // No label is `%00`, App Configuration's null label.
+        let label = t.label.as_deref().map(|l| urlencoding::encode(l).into_owned()).unwrap_or_else(|| "%00".into());
+        let url = |name: &str| format!("{store}/kv/{}?label={label}&{AAC_API}", urlencoding::encode(&format!("{}{name}", t.prefix)));
+        let ours = |v: &Json| v["tags"]["managed-by"] == "roll-secrets";
+        block_on(async {
+            let form = format!(
+                "grant_type=client_credentials&client_id={}&client_secret={}&scope={}",
+                urlencoding::encode(&t.client_id),
+                urlencoding::encode(secret),
+                urlencoding::encode(&format!("https://{}.azconfig.io/.default", t.store))
+            );
+            let login = h.client.post(format!("{}/{}/oauth2/v2.0/token", h.azure_login, t.tenant)).header("content-type", "application/x-www-form-urlencoded").body(form);
+            let (status, v) = h.send(login, &what).await?;
+            let token = match v["access_token"].as_str() {
+                Some(tok) if status.is_success() => tok.to_string(),
+                _ => return Err(Error::Link(format!("{what}: signing in: {status} {}", aac_code(&v)))),
+            };
+            for name in p.changed {
+                let Some(v) = p.values.get(name) else { continue };
+                // Whether it's roll's must be known before writing: a refused read stops here.
+                let (status, got) = h.send(h.client.get(url(name)).bearer_auth(&token), &what).await?;
+                if status.is_success() && !ours(&got) {
+                    return Err(Error::Link(format!("{what}: {}{name} exists and roll didn't create it (no managed-by=roll-secrets tag): roll never writes to it", t.prefix)));
+                }
+                if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+                    return Err(Error::Link(format!("{what}: reading {}{name}: {status} {}", t.prefix, aac_code(&got))));
+                }
+                let body = json!({ "value": v.expose(), "tags": { "managed-by": "roll-secrets" } });
+                let put = h.client.put(url(name)).bearer_auth(&token).header("content-type", "application/vnd.microsoft.appconfig.kv+json").body(serde_json::to_vec(&body).expect("JSON"));
+                let (status, got) = h.send(put, &what).await?;
+                if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: {}{name}: {status} {}", t.prefix, aac_code(&got))));
+                }
+            }
+            for name in p.removed {
+                let (status, got) = h.send(h.client.get(url(name)).bearer_auth(&token), &what).await?;
+                // Gone already, or someone else's: nothing of roll's to delete.
+                if status == reqwest::StatusCode::NOT_FOUND || (status.is_success() && !ours(&got)) {
+                    continue;
+                }
+                if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: reading {}{name}: {status} {}", t.prefix, aac_code(&got))));
+                }
+                let (status, got) = h.send(h.client.delete(url(name)).bearer_auth(&token), &what).await?;
+                if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+                    return Err(Error::Link(format!("{what}: deleting {}{name}: {status} {}", t.prefix, aac_code(&got))));
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── vault-kv ──
+
+/// One secret on a HashiCorp Vault (or OpenBao) KV v2 mount holding the folder's keys, written
+/// whole on each push (a removed key is simply left out). The server is the tenant's: fetched like
+/// a webhook (`PublicOnly`, https, no redirects), with its own CA when given. Roll marks the secret
+/// it creates with the custom metadata `managed-by=roll-secrets` and never replaces one without it.
+pub(super) struct VaultKv(pub(super) Guarded);
+
+struct VaultTarget {
+    address: url::Url,
+    mount: String,
+    path: String,
+    namespace: Option<String>,
+    auth: VaultAuth,
+    ca_key: Option<String>,
+}
+
+enum VaultAuth {
+    /// The key holding a token.
+    Token(String),
+    /// AppRole: its mount, the role id, the key holding a secret id.
+    AppRole { mount: String, role_id: String, secret_id_key: String },
+}
+
+/// What one secret holds at most, as JSON (Consul's storage entry limit).
+const VAULT_MAX: usize = 512 * 1024;
+const VAULT_MARK: (&str, &str) = ("managed-by", "roll-secrets");
+
+/// A Vault path: `/`-separated parts of letters, digits and `-_.`, none of them `.` or `..`.
+fn vault_path(s: &str, max: usize) -> bool {
+    s.len() <= max && s.split('/').all(|p| ident(p, 128, "-_.") && p != "." && p != "..")
+}
+
+impl VaultKv {
+    fn target(&self, t: &Json) -> Result<VaultTarget> {
+        let fields = [
+            ("address", true),
+            ("mount", false),
+            ("path", true),
+            ("namespace", false),
+            ("token_key", false),
+            ("role_id", false),
+            ("secret_id_key", false),
+            ("approle_mount", false),
+            ("ca_key", false),
+        ];
+        let [address, mount, path, namespace, token_key, role_id, secret_id_key, approle_mount, ca_key] = target("vault-kv", t, fields)?;
+        let address = super::Hooks::new(self.0.allow_private).url(&address.unwrap_or_default()).map_err(|_| bad("address is the Vault server's public https:// URL"))?;
+        if address.query().is_some() || address.fragment().is_some() || !address.username().is_empty() {
+            return Err(bad("address is the Vault server's URL, without a query or credentials"));
+        }
+        let mount = mount.unwrap_or_else(|| "secret".into());
+        let path = path.unwrap_or_default();
+        if !vault_path(&mount, 256) || !vault_path(&path, 512) {
+            return Err(bad("mount and path are Vault paths: letters, digits and -_. between /"));
+        }
+        if namespace.as_ref().is_some_and(|n| !vault_path(n, 256)) {
+            return Err(bad("namespace is a Vault namespace's path (admin/shop)"));
+        }
+        let auth = match (token_key, role_id, secret_id_key) {
+            (Some(k), None, None) => VaultAuth::Token(key_field("vault-kv", "token_key", Some(k))?),
+            (None, Some(role_id), Some(k)) => {
+                let mount = approle_mount.unwrap_or_else(|| "approle".into());
+                if !ident(&role_id, 256, "-_.") || !vault_path(&mount, 256) {
+                    return Err(bad("role_id is an AppRole's role id, approle_mount the AppRole auth mount (approle)"));
+                }
+                VaultAuth::AppRole { mount, role_id, secret_id_key: key_field("vault-kv", "secret_id_key", Some(k))? }
+            }
+            _ => return Err(bad("a vault-kv target signs in with token_key, or with role_id and secret_id_key (AppRole)")),
+        };
+        let ca_key = ca_key.map(|k| key_field("vault-kv", "ca_key", Some(k))).transpose()?;
+        Ok(VaultTarget { address, mount, path, namespace, auth, ca_key })
+    }
+}
+
+impl SyncTarget for VaultKv {
+    fn kind(&self) -> &str {
+        "vault-kv"
+    }
+    fn label(&self) -> &str {
+        "HashiCorp Vault / OpenBao KV"
+    }
+    fn fields(&self) -> &[SyncField] {
+        const F: &[SyncField] = &[
+            SyncField { name: "address", label: "Vault address", required: true, placeholder: "https://vault.example.com:8200" },
+            SyncField { name: "mount", label: "KV v2 mount (default secret)", required: false, placeholder: "secret" },
+            SyncField { name: "path", label: "Secret path", required: true, placeholder: "shop/production" },
+            SyncField { name: "namespace", label: "Namespace (Enterprise, HCP)", required: false, placeholder: "admin" },
+            SyncField { name: "token_key", label: "Key holding a token (or use AppRole)", required: false, placeholder: "VAULT_TOKEN" },
+            SyncField { name: "role_id", label: "AppRole role id", required: false, placeholder: "db02de05-fa39-4855-059b-67221c5c2f63" },
+            SyncField { name: "secret_id_key", label: "Key holding the AppRole secret id", required: false, placeholder: "VAULT_SECRET_ID" },
+            SyncField { name: "approle_mount", label: "AppRole mount (default approle)", required: false, placeholder: "approle" },
+            SyncField { name: "ca_key", label: "Key holding the server's CA (PEM)", required: false, placeholder: "VAULT_CA" },
+        ];
+        F
+    }
+    fn credentials(&self, t: &Json) -> Vec<String> {
+        credential_keys(t, &["token_key", "secret_id_key", "ca_key"])
+    }
+    fn check(&self, _: &str, _: &Resources, t: &Json) -> Result<()> {
+        self.target(t).map(|_| ())
+    }
+    fn push(&self, t: &Json, p: &Push<'_>) -> Result<()> {
+        let v = self.target(t)?;
+        let ca = v.ca_key.as_deref().map(|k| credential(p, k)).transpose()?;
+        // The whole folder each time: removed keys just aren't in it.
+        let all: std::collections::BTreeMap<&str, &str> = p.values.iter().map(|(k, v)| (k.as_str(), v.expose())).collect();
+        let body = zeroize::Zeroizing::new(serde_json::to_vec(&json!({ "data": all })).expect("JSON"));
+        drop(all);
+        if body.len() > VAULT_MAX {
+            return Err(bad(format!("the synced values come to {} bytes as JSON, over the {} KiB roll writes to one Vault secret", body.len(), VAULT_MAX >> 10)));
+        }
+        let mut h = self.0.http.clone();
+        h.client = guarded_client(self.0.allow_private, ca)?;
+        let base = v.address.as_str().trim_end_matches('/').to_string();
+        let what = format!("vault-kv {}/{}", v.mount, v.path);
+        let with = |r: reqwest::RequestBuilder, token: Option<&str>| {
+            let r = match &v.namespace {
+                Some(n) => r.header("x-vault-namespace", n),
+                None => r,
+            };
+            match token {
+                Some(t) => r.header("x-vault-token", t),
+                None => r,
+            }
+        };
+        block_on(async {
+            // Vault's errors are messages, not codes: its status alone.
+            let token = match &v.auth {
+                VaultAuth::Token(k) => zeroize::Zeroizing::new(credential(p, k)?.to_string()),
+                VaultAuth::AppRole { mount, role_id, secret_id_key } => {
+                    let secret_id = credential(p, secret_id_key)?;
+                    let req = with(h.client.post(format!("{base}/v1/auth/{mount}/login")), None).json(&json!({ "role_id": role_id, "secret_id": secret_id }));
+                    let (status, got) = h.send(req, &what).await?;
+                    match got["auth"]["client_token"].as_str() {
+                        Some(tok) if status.is_success() => zeroize::Zeroizing::new(tok.to_string()),
+                        _ => return Err(Error::Link(format!("{what}: AppRole login: {status}"))),
+                    }
+                }
+            };
+            let metadata = format!("{base}/v1/{}/metadata/{}", v.mount, v.path);
+            let (status, got) = h.send(with(h.client.get(&metadata), Some(token.as_str())), &what).await?;
+            if status.is_success() {
+                if got["data"]["custom_metadata"][VAULT_MARK.0] != VAULT_MARK.1 {
+                    return Err(Error::Link(format!("{what}: the secret exists and roll didn't create it (no {}={} custom metadata): roll never replaces it", VAULT_MARK.0, VAULT_MARK.1)));
+                }
+            } else if status == reqwest::StatusCode::NOT_FOUND {
+                // Marked first: a write that fails after it leaves a secret roll still knows as its own.
+                let mark = json!({ "custom_metadata": { VAULT_MARK.0: VAULT_MARK.1, "roll-environment": p.environment, "roll-path": p.path } });
+                let (status, _) = h.send(with(h.client.post(&metadata), Some(token.as_str())).json(&mark), &what).await?;
+                if !status.is_success() {
+                    return Err(Error::Link(format!("{what}: marking it roll's: {status}")));
+                }
+            } else {
+                return Err(Error::Link(format!("{what}: reading its metadata: {status}")));
+            }
+            let req = with(h.client.post(format!("{base}/v1/{}/data/{}", v.mount, v.path)), Some(token.as_str())).header("content-type", "application/json").body(body.to_vec());
+            let (status, _) = h.send(req, &what).await?;
+            if !status.is_success() {
+                return Err(Error::Link(format!("{what}: writing it: {status}")));
+            }
+            Ok(())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1769,6 +2445,31 @@ mod tests {
             // Bitbucket: OLD exists (by uuid), NEW doesn't.
             if pq.starts_with("/2.0/repositories/acme/web/pipelines_config/variables") && method == Method::GET {
                 return (StatusCode::OK, axum::Json(json!({ "values": [{ "uuid": "{old-1}", "key": "OLD", "secured": true }] })));
+            }
+            // Azure DevOps: shop-production holds OLD (roll's, synced before), the team's KEEP (a
+            // secret: no value comes back) and PLAIN; signed in with the PAT or an Entra token.
+            if let Some(rest) = pq.strip_prefix("/acme/") {
+                let auth = headers.get("authorization").and_then(|a| a.to_str().ok()).unwrap_or_default();
+                if auth != "Basic OmFkby1wYXQtdGVzdA==" && auth != "Bearer akv.test" {
+                    // What a refused PAT gets: a sign-in page.
+                    return (StatusCode::NON_AUTHORITATIVE_INFORMATION, axum::Json(Json::Null));
+                }
+                return match (method.as_str(), rest) {
+                    ("GET", "shop/_apis/distributedtask/variablegroups?groupName=shop-production&api-version=7.1") => (StatusCode::OK, axum::Json(json!({ "count": 2, "value": [
+                        { "id": 8, "name": "shop-production-old", "type": "Vsts", "variables": {} },
+                        { "id": 7, "name": "shop-production", "type": "Vsts", "description": "the shop's",
+                          "variables": { "OLD": { "value": null, "isSecret": true }, "KEEP": { "value": null, "isSecret": true }, "PLAIN": { "value": "x" } },
+                          "variableGroupProjectReferences": [{ "name": "shop-production", "projectReference": { "id": "00000000-0000-0000-0000-0000000000aa", "name": "shop" } }] },
+                    ] }))),
+                    ("GET", "shop/_apis/distributedtask/variablegroups?groupName=shop-staging&api-version=7.1") => (StatusCode::OK, axum::Json(json!({ "count": 1, "value": [
+                        { "id": 9, "name": "shop-staging", "type": "Vsts",
+                          "variables": { "OLD": { "value": null, "isSecret": true }, "PLAIN": { "value": "x" } },
+                          "variableGroupProjectReferences": [{ "name": "shop-staging", "projectReference": { "id": "00000000-0000-0000-0000-0000000000aa", "name": "shop" } }] },
+                    ] }))),
+                    ("PUT", "_apis/distributedtask/variablegroups/7?api-version=7.1") => (StatusCode::OK, axum::Json(json!({ "id": 7 }))),
+                    ("PUT", "_apis/distributedtask/variablegroups/9?api-version=7.1") => (StatusCode::OK, axum::Json(json!({ "id": 9 }))),
+                    _ => (StatusCode::NOT_FOUND, axum::Json(json!({ "typeKey": "VariableGroupNotFoundException", "message": "no" }))),
+                };
             }
             // Azure: sign-in, then Key Vault (OLD is roll's, NEW doesn't exist yet).
             if pq == "/contoso.onmicrosoft.com/oauth2/v2.0/token" {
@@ -1920,6 +2621,43 @@ mod tests {
         );
         assert!(calls[0].2.as_str().unwrap().contains("client_secret=s3cret%26%3D&scope=https%3A%2F%2Fvault.azure.net%2F.default"), "{}", calls[0].2);
         assert_eq!((calls[2].2["value"].as_str(), calls[2].2["tags"].clone()), (Some("v-123"), json!({ "managed-by": "roll-secrets" })));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn azure_devops_writes_a_group_of_its_own_and_refuses_one_with_secrets_it_doesnt_manage() {
+        let (base, seen) = mock().await;
+        // A group holding a secret roll doesn't manage (KEEP) is refused, naming it: Azure DevOps never
+        // returns a secret's value, so writing the group back could clear it.
+        let t = json!({ "organization": "acme", "project": "shop", "group": "shop-production", "token_key": "ADO_PAT" });
+        let refused = push(Arc::new(AzureDevOps(http(&base))), t.clone(), &[("ADO_PAT", "ado-pat-test")]).await.unwrap_err().to_string();
+        assert!(refused.contains("KEEP") && refused.contains("group of its own") && !refused.contains("v-123"), "{refused}");
+        assert!(seen.lock().unwrap().iter().all(|(m, _, _)| m != "PUT"), "nothing written");
+        // A group of roll's own: OLD is gone, every roll value is sent with its value, PLAIN goes back as it came.
+        seen.lock().unwrap().clear();
+        let staging = json!({ "organization": "acme", "project": "shop", "group": "shop-staging", "token_key": "ADO_PAT" });
+        push(Arc::new(AzureDevOps(http(&base))), staging, &[("ADO_PAT", "ado-pat-test")]).await.unwrap();
+        let calls = seen.lock().unwrap().clone();
+        let route: Vec<(&str, &str)> = calls.iter().map(|(m, p, _)| (m.as_str(), p.as_str())).collect();
+        assert_eq!(
+            route,
+            [("GET", "/acme/shop/_apis/distributedtask/variablegroups?groupName=shop-staging&api-version=7.1"), ("PUT", "/acme/_apis/distributedtask/variablegroups/9?api-version=7.1")]
+        );
+        let put = &calls[1].2;
+        assert_eq!(put["variables"], json!({ "PLAIN": { "value": "x" }, "NEW": { "value": "v-123", "isSecret": true } }));
+        assert_eq!((put["name"].as_str(), put["variableGroupProjectReferences"][0]["projectReference"]["name"].as_str()), (Some("shop-staging"), Some("shop")));
+        // A refused PAT gets a sign-in page: the error says so, and holds neither token nor value.
+        let refused = push(Arc::new(AzureDevOps(http(&base))), t, &[("ADO_PAT", "wrong-pat")]).await.unwrap_err().to_string();
+        assert!(refused.contains("203") && !refused.contains("wrong-pat") && !refused.contains("v-123"), "{refused}");
+        // Or as a service principal, for Azure DevOps' own resource.
+        seen.lock().unwrap().clear();
+        let sp = json!({ "organization": "acme", "project": "shop", "group": "shop-staging", "tenant_id": "contoso.onmicrosoft.com", "client_id": "app-1", "client_secret_key": "ADO_SECRET" });
+        push(Arc::new(AzureDevOps(http(&base))), sp, &[("ADO_SECRET", "sp-secret-test")]).await.unwrap();
+        let calls = seen.lock().unwrap().clone();
+        assert!(calls[0].2.as_str().unwrap().contains("scope=499b84ac-1321-427f-aa17-267ca6975798%2F.default"), "{}", calls[0].2);
+        assert_eq!(calls.len(), 3);
+        for bad in [json!({ "organization": "evil.com/x", "project": "shop", "group": "g", "token_key": "K" }), json!({ "organization": "acme", "project": "shop", "group": "g*", "token_key": "K" })] {
+            assert!(AzureDevOps(http(&base)).check("p", &BTreeSet::new(), &bad).is_err(), "{bad}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2109,5 +2847,181 @@ mod tests {
         assert!(wrong.contains("InvalidSignatureException") && !wrong.contains("not-it") && !wrong.contains("v-123"), "{wrong}");
         let host_in_region = json!({ "region": "evil.com/x", "prefix": "/a/", "access_key_id_key": "AK", "secret_access_key_key": "SK" });
         assert!(Ssm(http(&base)).check("p", &BTreeSet::new(), &host_in_region).is_err());
+    }
+
+    /// One fake for supabase, cloudflare-pages, azure-app-configuration and vault-kv. A request
+    /// without the right credential gets an answer that quotes it and a value back, which no error
+    /// may repeat. App Configuration has `shop:OLD` (roll's) and `shop:THEIRS` (not); Vault has
+    /// `theirs/app` (not roll's), and keeps the metadata roll writes.
+    async fn fake_more() -> (String, Seen) {
+        type Marks = Arc<Mutex<BTreeMap<String, Json>>>;
+        async fn any(State((seen, marks)): State<(Seen, Marks)>, method: Method, uri: Uri, headers: HeaderMap, body: axum::body::Bytes) -> (StatusCode, axum::Json<Json>) {
+            let pq = uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default();
+            seen.lock().unwrap().push((method.to_string(), pq.clone(), serde_json::from_slice(&body).unwrap_or_else(|_| Json::String(String::from_utf8_lossy(&body).into()))));
+            let auth = headers.get("authorization").and_then(|a| a.to_str().ok()).unwrap_or_default().to_string();
+            let leak = json!({ "message": format!("refused {auth} with v-123"), "errors": [{ "code": 10000, "message": format!("refused {auth} with v-123") }] });
+            if pq.starts_with("/v1/projects/") {
+                return if auth == "Bearer sbp_fake_token" { (StatusCode::CREATED, axum::Json(json!({}))) } else { (StatusCode::UNAUTHORIZED, axum::Json(leak)) };
+            }
+            if pq.starts_with("/client/v4/accounts/") {
+                return if auth == "Bearer cf-fake-token" { (StatusCode::OK, axum::Json(json!({ "success": true, "errors": [] }))) } else { (StatusCode::FORBIDDEN, axum::Json(leak)) };
+            }
+            if pq == "/contoso.onmicrosoft.com/oauth2/v2.0/token" {
+                return if String::from_utf8_lossy(&body).contains("client_secret=fake-client-secret") {
+                    (StatusCode::OK, axum::Json(json!({ "access_token": "aac.fake", "token_type": "Bearer" })))
+                } else {
+                    (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": "invalid_client", "error_description": format!("{} v-123", String::from_utf8_lossy(&body)) })))
+                };
+            }
+            if let Some(rest) = pq.strip_prefix("/kv/") {
+                if auth != "Bearer aac.fake" {
+                    return (StatusCode::UNAUTHORIZED, axum::Json(leak));
+                }
+                let key = rest.split('?').next().unwrap_or_default();
+                return match (method.as_str(), key) {
+                    ("GET", "shop%3AOLD") => (StatusCode::OK, axum::Json(json!({ "key": "shop:OLD", "value": "old-v", "tags": { "managed-by": "roll-secrets" } }))),
+                    ("GET", "shop%3ATHEIRS") => (StatusCode::OK, axum::Json(json!({ "key": "shop:THEIRS", "value": "their-v", "tags": {} }))),
+                    ("GET", _) => (StatusCode::NOT_FOUND, axum::Json(Json::Null)),
+                    _ => (StatusCode::OK, axum::Json(json!({}))),
+                };
+            }
+            if let Some(rest) = pq.strip_prefix("/v1/") {
+                if rest == "auth/approle/login" {
+                    let asked: Json = serde_json::from_slice(&body).unwrap_or_default();
+                    return if asked["secret_id"] == "fake-secret-id" { (StatusCode::OK, axum::Json(json!({ "auth": { "client_token": "hvs.fake" } }))) } else { (StatusCode::BAD_REQUEST, axum::Json(json!({ "errors": [format!("invalid secret id {}", asked["secret_id"])] }))) };
+                }
+                if headers.get("x-vault-token").and_then(|t| t.to_str().ok()) != Some("hvs.fake") {
+                    return (StatusCode::FORBIDDEN, axum::Json(json!({ "errors": ["permission denied v-123"] })));
+                }
+                let mut marks = marks.lock().unwrap();
+                if let Some(path) = rest.strip_prefix("secret/metadata/") {
+                    return match (method.as_str(), marks.get(path)) {
+                        ("GET", Some(m)) => (StatusCode::OK, axum::Json(json!({ "data": { "custom_metadata": m } }))),
+                        ("GET", None) => (StatusCode::NOT_FOUND, axum::Json(json!({ "errors": [] }))),
+                        _ => {
+                            let asked: Json = serde_json::from_slice(&body).unwrap_or_default();
+                            marks.insert(path.to_string(), asked["custom_metadata"].clone());
+                            (StatusCode::NO_CONTENT, axum::Json(Json::Null))
+                        }
+                    };
+                }
+                return (StatusCode::OK, axum::Json(json!({ "data": { "version": 1 } })));
+            }
+            (StatusCode::NOT_FOUND, axum::Json(Json::Null))
+        }
+        let seen: Seen = Default::default();
+        let marks: Marks = Arc::new(Mutex::new(BTreeMap::from([("theirs/app".to_string(), json!({ "owner": "platform-team" }))])));
+        let app = axum::Router::new().fallback(any).with_state((seen.clone(), marks));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base, seen)
+    }
+
+    /// The kinds behind the guarded client, pointed at `base` (a loopback mock: private allowed).
+    fn guarded(base: &str) -> Guarded {
+        Guarded { http: http(base), allow_private: true, supabase: base.into(), azconfig: Some(base.into()) }
+    }
+
+    fn routes(seen: &Seen) -> Vec<(String, String)> {
+        seen.lock().unwrap().iter().map(|(m, p, _)| (m.clone(), p.clone())).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn supabase_upserts_changed_secrets_deletes_removed_ones_and_refuses_its_reserved_names() {
+        let (base, seen) = fake_more().await;
+        let t = json!({ "project_ref": "abcdefghijklmnopqrst", "token_key": "SUPABASE_ACCESS_TOKEN" });
+        push(Arc::new(Supabase(guarded(&base))), t.clone(), &[("SUPABASE_ACCESS_TOKEN", "sbp_fake_token")]).await.unwrap();
+        let calls = seen.lock().unwrap().clone();
+        let url = "/v1/projects/abcdefghijklmnopqrst/secrets";
+        assert_eq!(routes(&seen), [("POST".to_string(), url.to_string()), ("DELETE".to_string(), url.to_string())]);
+        assert_eq!((calls[0].2.clone(), calls[1].2.clone()), (json!([{ "name": "NEW", "value": "v-123" }]), json!(["OLD"])));
+        let wrong = push(Arc::new(Supabase(guarded(&base))), t, &[("SUPABASE_ACCESS_TOKEN", "sbp_wrong_token")]).await.unwrap_err().to_string();
+        assert!(wrong.contains("401") && !wrong.contains("sbp_wrong_token") && !wrong.contains("v-123"), "{wrong}");
+        let s = Supabase(guarded(&base));
+        assert!(s.refuses("SUPABASE_URL").is_some_and(|w| w.contains("SUPABASE_ is Supabase's own")) && s.refuses("STRIPE_KEY").is_none());
+        assert!(s.check("p", &BTreeSet::new(), &json!({ "project_ref": "../../v1/organizations", "token_key": "T" })).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cloudflare_pages_patches_secret_text_and_nulls_removed_variables() {
+        let (base, seen) = fake_more().await;
+        let t = json!({ "account": "acc1", "project": "shop-web", "environment": "preview", "token_key": "CLOUDFLARE_API_TOKEN" });
+        push(Arc::new(CloudflarePages(guarded(&base))), t.clone(), &[("CLOUDFLARE_API_TOKEN", "cf-fake-token")]).await.unwrap();
+        let (method, path, body) = seen.lock().unwrap()[0].clone();
+        assert_eq!((method.as_str(), path.as_str()), ("PATCH", "/client/v4/accounts/acc1/pages/projects/shop-web"));
+        assert_eq!(body, json!({ "deployment_configs": { "preview": { "env_vars": { "NEW": { "type": "secret_text", "value": "v-123" }, "OLD": null } } } }));
+        let wrong = push(Arc::new(CloudflarePages(guarded(&base))), t.clone(), &[("CLOUDFLARE_API_TOKEN", "cf-wrong")]).await.unwrap_err().to_string();
+        assert!(wrong.contains("403 Forbidden 10000") && !wrong.contains("cf-wrong") && !wrong.contains("v-123"), "{wrong}");
+        let mut staging = t;
+        staging["environment"] = json!("staging");
+        assert!(CloudflarePages(guarded(&base)).check("p", &BTreeSet::new(), &staging).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn azure_app_configuration_signs_in_for_the_store_and_writes_only_its_own_key_values() {
+        let (base, seen) = fake_more().await;
+        let t = json!({ "store": "shop-config", "label": "production", "prefix": "shop:", "tenant_id": "contoso.onmicrosoft.com", "client_id": "app-1", "client_secret_key": "AZURE_SECRET" });
+        push(Arc::new(AzureAppConfig(guarded(&base))), t.clone(), &[("AZURE_SECRET", "fake-client-secret")]).await.unwrap();
+        let calls = seen.lock().unwrap().clone();
+        let at = |k: &str| format!("/kv/shop%3A{k}?label=production&api-version=2023-11-01");
+        let route: Vec<(&str, &str)> = calls.iter().map(|(m, p, _)| (m.as_str(), p.as_str())).collect();
+        assert_eq!(
+            route,
+            [
+                ("POST", "/contoso.onmicrosoft.com/oauth2/v2.0/token"),
+                ("GET", at("NEW").as_str()),
+                ("PUT", at("NEW").as_str()),
+                ("GET", at("OLD").as_str()),
+                ("DELETE", at("OLD").as_str()),
+            ]
+        );
+        assert!(calls[0].2.as_str().unwrap().contains("&scope=https%3A%2F%2Fshop-config.azconfig.io%2F.default"), "{}", calls[0].2);
+        assert_eq!(calls[2].2, json!({ "value": "v-123", "tags": { "managed-by": "roll-secrets" } }));
+        // Someone's own key-value, and a wrong client secret: refused, and no value in the error.
+        let theirs = tokio::task::spawn_blocking({
+            let (t, base) = (t.clone(), base.clone());
+            move || {
+                let values = BTreeMap::from([("THEIRS".to_string(), Value::new("v-123".to_string()))]);
+                let creds = BTreeMap::from([("AZURE_SECRET".to_string(), Value::new("fake-client-secret".to_string()))]);
+                let changed = vec!["THEIRS".to_string()];
+                let p = Push { sync: "syn_1", project: "prj_1", resources: &BTreeSet::new(), environment: "production", path: "/", digest: "d", at: 0, values: &values, changed: &changed, removed: &[], secret: None, credentials: &creds };
+                AzureAppConfig(guarded(&base)).push(&t, &p)
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+        assert!(theirs.contains("roll didn't create it") && !theirs.contains("their-v") && !theirs.contains("v-123"), "{theirs}");
+        let wrong = push(Arc::new(AzureAppConfig(guarded(&base))), t.clone(), &[("AZURE_SECRET", "not-the-secret")]).await.unwrap_err().to_string();
+        assert!(wrong.contains("invalid_client") && !wrong.contains("not-the-secret") && !wrong.contains("v-123"), "{wrong}");
+        let mut evil = t;
+        evil["store"] = json!("evil.com/x?");
+        assert!(AzureAppConfig(guarded(&base)).check("p", &BTreeSet::new(), &evil).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vault_kv_writes_one_marked_secret_without_removed_keys_and_never_replaces_anothers() {
+        let (base, seen) = fake_more().await;
+        let t = |path: &str| json!({ "address": base, "path": path, "role_id": "role-1", "secret_id_key": "VAULT_SECRET_ID" });
+        let creds = [("VAULT_SECRET_ID", "fake-secret-id")];
+        push(Arc::new(VaultKv(guarded(&base))), t("shop/production"), &creds).await.unwrap();
+        push(Arc::new(VaultKv(guarded(&base))), t("shop/production"), &creds).await.unwrap();
+        let calls = seen.lock().unwrap().clone();
+        let route: Vec<(&str, &str)> = calls.iter().map(|(m, p, _)| (m.as_str(), p.as_str())).collect();
+        let (login, meta, data) = ("/v1/auth/approle/login", "/v1/secret/metadata/shop/production", "/v1/secret/data/shop/production");
+        // The first push marks the new secret; the second finds it roll's.
+        assert_eq!(route, [("POST", login), ("GET", meta), ("POST", meta), ("POST", data), ("POST", login), ("GET", meta), ("POST", data)]);
+        assert_eq!(calls[2].2["custom_metadata"]["managed-by"], "roll-secrets");
+        assert_eq!(calls[3].2, json!({ "data": { "NEW": "v-123" } }), "OLD left out");
+        let theirs = push(Arc::new(VaultKv(guarded(&base))), t("theirs/app"), &creds).await.unwrap_err().to_string();
+        assert!(theirs.contains("roll didn't create it"), "{theirs}");
+        assert!(!seen.lock().unwrap().iter().any(|(m, p, _)| m == "POST" && p == "/v1/secret/data/theirs/app"));
+        let wrong = push(Arc::new(VaultKv(guarded(&base))), json!({ "address": base, "path": "shop/production", "token_key": "VAULT_TOKEN" }), &[("VAULT_TOKEN", "hvs.wrong")]).await.unwrap_err().to_string();
+        assert!(wrong.contains("403") && !wrong.contains("hvs.wrong") && !wrong.contains("v-123"), "{wrong}");
+        let guarded_only = VaultKv(Guarded { allow_private: false, ..guarded(&base) });
+        assert!(guarded_only.check("p", &BTreeSet::new(), &t("shop/production")).is_err(), "a private address");
+        assert!(VaultKv(guarded(&base)).check("p", &BTreeSet::new(), &json!({ "address": base, "path": "shop/../sys", "token_key": "T" })).is_err());
     }
 }

@@ -1,6 +1,6 @@
 import { Lock, Rocket, Trash2, Unlock } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { appsApi, formatFirewall, formatHeaders, parseAllowList, parseFirewall, parseHeaders, PRODUCTION, shortSha, type Backup, type Environment, type EnvRunField, type Service } from "@/lib/apps-api";
+import { appsApi, formatFirewall, formatHeaders, parseAllowList, parseFirewall, parseHeaders, PRODUCTION, shortSha, type Backup, type Environment, type EnvRunField, type Service, formatRoutes, parseRoutes } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
 import { clock, CPU, MEMORY, mb, since, StateBadge, SureButton, type Runner } from "./shared";
@@ -88,11 +88,17 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
   const hdrText = formatHeaders(env.headers ?? []);
   const [hdr, setHdr] = useState(hdrText);
   useEffect(() => setHdr(hdrText), [hdrText]);
+  const routeText = formatRoutes(env.routes ?? []);
+  const [routes, setRoutes] = useState(routeText);
+  useEffect(() => setRoutes(routeText), [routeText]);
   const rateText = env.rate_limit ? String(env.rate_limit.per_minute) : "";
   const [rate, setRate] = useState(rateText);
   useEffect(() => setRate(rateText), [rateText]);
   const { copied, copy } = useCopy();
   const repo = service.source.kind === "repo";
+  // A Git URL's checks roll can read: through its GitHub App, or GitLab's and Bitbucket's with its Git login.
+  const ciReadable =
+    service.source.kind === "git" && (!!service.github || (!!service.git_login && /^https?:\/\/(gitlab\.|bitbucket\.org\/)/i.test(service.source.url)));
   const busy = runner.busy !== null;
   const branchChanged = branch.trim() !== (env.branch ?? "");
 
@@ -144,7 +150,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </form>
         )}
 
-        {repo && (
+        {(repo || ciReadable) && (
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
             <div>
               <p className="text-[13px] font-medium">Wait for CI</p>
@@ -162,12 +168,12 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </div>
         )}
 
-        {service.source.kind === "git" && (
+        {service.source.kind === "git" && !ciReadable && (
           <div className="px-5 py-4">
             <p className="text-[13px] font-medium">Wait for CI</p>
             <p className="mt-1 text-[12px] text-muted">
-              To deploy only after your tests pass, deploy from the workflow with roll's GitHub Action (<span className="font-mono">sdk/apps-github-action</span>, after the test job), and
-              clear this environment's branch so a push doesn't deploy first.
+              To deploy only after your tests pass, connect the service to roll's GitHub App, or give a GitLab or Bitbucket repository a Git login with a token (Settings), to wait for its checks here; or deploy from the workflow with roll's GitHub
+              Action (<span className="font-mono">sdk/apps-github-action</span>, after the test job) and clear this environment's branch so a push doesn't deploy first.
             </p>
           </div>
         )}
@@ -213,6 +219,34 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
           </div>
           <button className={btn} disabled={busy} aria-pressed={!!env.traces} onClick={() => runner.run("traces", () => appsApi.putEnvironment(service.id, env.name, { traces: !env.traces }))}>
             {env.traces ? "Turn off" : "Turn on"}
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <div>
+            <p className="text-[13px] font-medium">Hold deploys</p>
+            <p className="mt-1 text-[12px] text-muted">
+              {env.held
+                ? "Pushes, deploy hooks and tag moves build without going live; you put one live from Deployments."
+                : "Release on your own schedule: pushes still build, and wait for you to put them live."}
+            </p>
+          </div>
+          <button className={btn} disabled={busy} aria-pressed={!!env.held} onClick={() => runner.run("hold", () => appsApi.putEnvironment(service.id, env.name, { held: !env.held }))}>
+            {env.held ? "Resume deploys" : "Hold deploys"}
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+          <div>
+            <p className="text-[13px] font-medium">Web Vitals</p>
+            <p className="mt-1 text-[12px] text-muted">
+              {env.vitals
+                ? "Its pages carry roll's small script, which measures each page load in the visitor's browser (no cookie, no id); the Metrics tab shows the p75s."
+                : "Measure how fast its pages are for real visitors: roll adds a small script to its HTML pages, nothing to install."}
+            </p>
+          </div>
+          <button className={btn} disabled={busy} aria-pressed={!!env.vitals} onClick={() => runner.run("vitals", () => appsApi.putEnvironment(service.id, env.name, { vitals: !env.vitals }))}>
+            {env.vitals ? "Turn off" : "Turn on"}
           </button>
         </div>
 
@@ -432,7 +466,7 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
                 <p className="mt-1 text-[12px] text-muted">
                   {env.firewall?.length
                     ? `${env.firewall.length} ${env.firewall.length === 1 ? "rule" : "rules"}, in order: the first that matches a request decides.`
-                    : "No rules. One a line: deny /admin/*, deny method=DELETE, allow /admin/health, deny ua=BadBot."}
+                    : "No rules. One a line: deny /admin/*, deny method=DELETE, allow /admin/health, deny ua=BadBot, limit 10 /login method=POST (10 a minute a client)."}
                 </p>
               </div>
               <button className={btn} disabled={busy || fw === fwText} onClick={() => runner.run("firewall", () => appsApi.putEnvironment(service.id, env.name, { firewall: parseFirewall(fw) }))}>
@@ -471,6 +505,31 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
               placeholder={"Strict-Transport-Security: max-age=63072000\nX-Frame-Options: DENY"}
               spellCheck={false}
               aria-label="Response headers, one a line"
+              className={`${input} mt-2 w-full font-mono text-[12px]`}
+            />
+          </div>
+        )}
+
+        {service.run.type === "web" && !service.run.tcp && (
+          <div className="px-5 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-[13px] font-medium">Routes to other services</p>
+                <p className="mt-1 text-[12px] text-muted">
+                  One a line, a path and a service of the project: <code className="font-mono">/api/* api</code> sends those paths to its {env.name} environment, as they came. The first that matches decides.
+                </p>
+              </div>
+              <button className={btn} disabled={busy || routes === routeText} onClick={() => runner.run("routes", () => appsApi.putEnvironment(service.id, env.name, { routes: parseRoutes(routes) }))}>
+                Save
+              </button>
+            </div>
+            <textarea
+              value={routes}
+              onChange={(e) => setRoutes(e.target.value)}
+              rows={Math.min(8, Math.max(2, routes.split("\n").length))}
+              placeholder={"/api/* api\n/auth/* auth"}
+              spellCheck={false}
+              aria-label="Routes to other services, one a line"
               className={`${input} mt-2 w-full font-mono text-[12px]`}
             />
           </div>

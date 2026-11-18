@@ -76,6 +76,8 @@ pub struct Row {
     /// The product answers only what the caller's grant reaches per environment and path (secrets'
     /// health and leak scan): rules limited to some environments or paths match it too.
     pub filters_itself: bool,
+    /// The product answers only the indices the grant reaches (`roll_auth::scope::Resource::filters_index`).
+    pub filters_index: bool,
     /// Other resources whose credentials the request hands to this one (apps' links put a
     /// database's address and password in a service's variables): it also needs `reveal` on each.
     pub lends: Option<Lend>,
@@ -197,7 +199,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -239,6 +241,12 @@ impl Row {
     /// and leaks): a rule limited to some environments or folders matches it too.
     const fn filters_itself(mut self) -> Row {
         self.filters_itself = true;
+        self
+    }
+    /// A list that keeps only the indices the caller's `Grant` reaches (secrets' encryption keys):
+    /// a rule limited to some indices matches it too.
+    const fn filters_index(mut self) -> Row {
+        self.filters_index = true;
         self
     }
     const fn lends(mut self, l: Lend) -> Row {
@@ -740,10 +748,11 @@ fn apps_create_action(b: &Value) -> Action {
 /// A service's run settings that change only how much of it runs and how it's watched: its size,
 /// scale, health checks, timers, alerts, rollout and restarts. Every other run key decides what
 /// production runs, when, or who reaches it (start, pre-deploy, schedule, schedules and their
-/// timezone and retries, kind, port, volume, public, tcp, and `rollback_on_crash`, which has roll
+/// timezone and retries, kind, port, volume, public, tcp, a worker's `health_command`, which runs
+/// in its instances, and `rollback_on_crash`, which has roll
 /// put an older deployment live by itself), and so does any key apps adds later until it's listed
 /// here: a new setting is never a quiet way into production.
-const APPS_WRITE_RUN: [&str; 18] = [
+const APPS_WRITE_RUN: [&str; 21] = [
     "min_instances",
     "max_instances",
     "concurrency",
@@ -751,6 +760,8 @@ const APPS_WRITE_RUN: [&str; 18] = [
     "memory_mb",
     "health_path",
     "health_timeout_s",
+    "health_every_s",
+    "health_failures",
     "suspend_after_s",
     "sleep_after_s",
     "alerts",
@@ -758,6 +769,7 @@ const APPS_WRITE_RUN: [&str; 18] = [
     "scale",
     "drain_s",
     "cpu_target",
+    "memory_target",
     "restart",
     "restart_tries",
     "affinity",
@@ -1099,6 +1111,8 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/search/clusters/{id}", "search", D, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/branches", "search", W, one(PG, "cluster")).reveals(SEARCH_SECRETS),
     row("POST", "/v1/search/clusters/{id}/password", "search", REVEAL, one(PG, "cluster")),
+    // A deleted cluster back (its id still resolves while it is kept): a write, like a create.
+    row("POST", "/v1/search/clusters/{id}/restore", "search", W, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")),
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
@@ -1170,7 +1184,11 @@ static ROWS: &[Row] = &[
     // A signing secret signs calls that mint vendor keys: shown only to who may also reveal.
     row("POST", "/v1/secrets/projects/{project}/rotators", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
     row("DELETE", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),
-    row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/rotators/{id}/rotate-secret", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
+    // Lists only the keys the caller's grant reaches (`Grants::reaches_key`, each key's name as
+    // its index), so a rule limited to some keys sees those.
+    row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")).filters_index(),
     row("POST", "/v1/secrets/projects/{project}/transit", "secrets", ADMIN, one(&["project"], "project")),
     // Each key's routes name it (`.index("name")`): a rule can grant one key
     // (`{"id": "prj_x", "index": "payments"}`); the list and making a key stay the project's.
@@ -1200,9 +1218,17 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/cloud-accounts", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cloud-accounts", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/cloud-accounts/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/github-apps", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/github-apps", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/github-apps/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/outside-databases", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/outside-databases", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/outside-databases/{id}/rotate-admin", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/kubernetes", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/kubernetes", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/kubernetes/{id}", "secrets", ADMIN, one(&["project"], "project")),
     // A backup seals every environment's values to a key the caller chooses; a restore loads a
     // whole project. Both are admin in secrets too.
     row("POST", "/v1/secrets/projects/{project}/backup", "secrets", ADMIN, one(&["project"], "project")),

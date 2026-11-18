@@ -41,11 +41,17 @@ pub fn kinds(api: Api, allow_private: bool) -> Syncs {
     s.register(Arc::new(platforms::Heroku(http.clone())));
     s.register(Arc::new(platforms::GoogleSecrets(http.clone())));
     s.register(Arc::new(platforms::AzureKeyVault(http.clone())));
+    s.register(Arc::new(platforms::AzureDevOps(http.clone())));
     s.register(Arc::new(platforms::CircleCi(http.clone())));
     s.register(Arc::new(platforms::Bitbucket(http.clone())));
     s.register(Arc::new(platforms::TerraformCloud(http.clone())));
     s.register(Arc::new(platforms::DigitalOcean(http.clone())));
     s.register(Arc::new(platforms::SecretsManager(http.clone())));
+    let guarded = platforms::Guarded::new(&http, allow_private);
+    s.register(Arc::new(platforms::Supabase(guarded.clone())));
+    s.register(Arc::new(platforms::CloudflarePages(guarded.clone())));
+    s.register(Arc::new(platforms::AzureAppConfig(guarded.clone())));
+    s.register(Arc::new(platforms::VaultKv(guarded)));
     s.register(Arc::new(platforms::Ssm(http)));
     s.register(Arc::new(platforms::Kubernetes { allow_private }));
     s.register(Arc::new(platforms::GitLab { allow_private }));
@@ -260,6 +266,31 @@ impl Hooks {
         self.send_signed(url, who, delivery, secret, body, None).map(|_| ())
     }
 
+    /// POST `body` as is with `headers` (a SIEM's own format and credential): the same guards, any
+    /// 2xx is success, the answer drained up to [`ANSWER_MAX`].
+    fn post_plain(&self, url: &url::Url, content_type: &str, headers: &[(&str, String)], body: Vec<u8>) -> Result<()> {
+        let host = url.host_str().unwrap_or_default().to_string();
+        block_on(async {
+            let mut req = self.client.post(url.clone()).header("content-type", content_type);
+            for (k, v) in headers {
+                req = req.header(*k, v);
+            }
+            let mut resp = req.body(body).send().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))?;
+            let status = resp.status();
+            let mut read = 0;
+            while read < ANSWER_MAX {
+                match resp.chunk().await {
+                    Ok(Some(c)) => read += c.len(),
+                    _ => break,
+                }
+            }
+            if !status.is_success() {
+                return Err(Error::Link(format!("{host} answered {status}")));
+            }
+            Ok(())
+        })
+    }
+
     /// POST `body` signed; with `keep`, the 2xx answer (at most `keep` bytes), else it's drained.
     fn send_signed(&self, url: &url::Url, who: (&str, &str), delivery: &str, secret: &Value, body: &Json, keep: Option<usize>) -> Result<zeroize::Zeroizing<Vec<u8>>> {
         use hmac::Mac as _;
@@ -312,6 +343,13 @@ impl Hooks {
     }
 }
 
+/// An audit event with its project named (an index or a SIEM holds many projects' events).
+fn with_project(e: &Json, project: &str) -> Json {
+    let mut e = e.clone();
+    e["project"] = Json::String(project.to_string());
+    e
+}
+
 /// Audit sinks' deliveries (roll_secrets::sinks): the same client, signature and guards.
 /// The products' routes too: a sink can be a roll bucket (`bucket:<name>`).
 pub struct AuditDeliver(Hooks, Api);
@@ -341,10 +379,80 @@ impl roll_secrets::Deliver for AuditDeliver {
             let records: Vec<Json> = body["events"].as_array().into_iter().flatten().map(|e| serde_json::json!({ "key": e["id"].to_string(), "value": e })).collect();
             return self.1.call(axum::http::Method::POST, &format!("/v1/streams/{}/topics/{}/records", urlencoding::encode(stream), urlencoding::encode(topic)), Some(serde_json::json!({ "records": records }))).map(|_| ());
         }
+        // An index of a roll search cluster: one document per event, its id the audit id, so a
+        // retried batch writes the same documents again (bulk, in one request).
+        if let Some(rest) = url.strip_prefix(roll_secrets::sinks::SEARCH) {
+            let (cluster, index) = rest.split_once('/').ok_or_else(|| Error::BadRequest(format!("{url}: search:<cluster>/<index>")))?;
+            let project = body["project"].as_str().unwrap_or_default();
+            let mut ndjson = String::new();
+            for e in body["events"].as_array().into_iter().flatten() {
+                ndjson.push_str(&serde_json::json!({ "index": { "_id": e["id"].to_string() } }).to_string());
+                ndjson.push('\n');
+                ndjson.push_str(&with_project(e, project).to_string());
+                ndjson.push('\n');
+            }
+            let path = format!("/v1/search/clusters/{}/indices/{}/bulk", urlencoding::encode(cluster), urlencoding::encode(index));
+            let (status, v) = self.1.post_raw(&path, "application/x-ndjson", ndjson.into_bytes())?;
+            if !status.is_success() {
+                return Err(Error::Link(format!("search {cluster}/{index}: {} {}", status.as_u16(), v.get("error").map(|e| e.to_string()).unwrap_or_default())));
+            }
+            // Bulk answers 200 with per-document errors: any is a failed batch, sent again later.
+            if v["errors"].as_bool() == Some(true) {
+                let first = v["items"].as_array().into_iter().flatten().find_map(|i| i["index"]["error"]["reason"].as_str()).unwrap_or("a document was refused");
+                return Err(Error::Link(format!("search {cluster}/{index}: {first}")));
+            }
+            return Ok(());
+        }
         let u = self.0.url(url)?;
         // A retried batch (or notice) is the same body: the same delivery.
         let delivery = delivery_id(&format!("{id}:{body}"));
         self.0.post_signed(&u, ("x-roll-sink", id), &delivery, secret, body)
+    }
+
+    /// A batch as a SIEM takes it (roll_secrets::sinks::FORMATS): Splunk's HTTP Event Collector
+    /// (one event per line), Datadog's Logs intake (a JSON array), or roll's JSON with a bearer
+    /// token. Never a value: audit rows hold none, and the token goes only in its header.
+    fn post_format(&self, url: &str, id: &str, secret: &Value, format: &str, token: Option<&Value>, body: &Json) -> Result<()> {
+        if format == "roll" {
+            return self.post(url, id, secret, body);
+        }
+        let token = token.ok_or_else(|| Error::BadRequest(format!("a {format} sink needs its token")))?;
+        let u = self.0.url(url)?;
+        let (project, events) = (body["project"].as_str().unwrap_or_default(), body["events"].as_array().cloned().unwrap_or_default());
+        let (content_type, header, payload) = match format {
+            "splunk" => {
+                let lines: Vec<String> = events
+                    .iter()
+                    .map(|e| serde_json::json!({ "time": e["at"].as_i64().unwrap_or_default() as f64 / 1000.0, "host": "roll", "source": "roll-secrets", "sourcetype": "roll:audit", "event": with_project(e, project) }).to_string())
+                    .collect();
+                ("application/json", ("authorization", format!("Splunk {}", token.expose())), lines.join("\n").into_bytes())
+            }
+            "datadog" => {
+                let logs: Vec<Json> = events
+                    .iter()
+                    .map(|e| serde_json::json!({ "ddsource": "roll", "service": "roll-secrets", "ddtags": format!("project:{project},action:{}", e["action"].as_str().unwrap_or_default()), "message": e["summary"], "roll": with_project(e, project) }))
+                    .collect();
+                ("application/json", ("dd-api-key", token.expose().to_string()), serde_json::to_vec(&logs).expect("JSON"))
+            }
+            "bearer" => ("application/json", ("authorization", format!("Bearer {}", token.expose())), serde_json::to_vec(body).expect("JSON")),
+            f => return Err(Error::BadRequest(format!("no sink format {f}"))),
+        };
+        self.0.post_plain(&u, content_type, &[header, ("x-roll-sink", id.to_string())], payload)
+    }
+
+    /// A Kubernetes API server (roll_secrets::kubernetes): with its own CA, [`Self::request`]
+    /// through a client of its own that trusts only that CA, with the same guards (HTTPS, public,
+    /// no redirects, the timeout, a bounded answer). Nothing else's calls trust it.
+    fn request_trusting(&self, ca: Option<&str>, method: &str, url: &str, headers: &[(&str, &Value)], body: Option<(&str, &Value)>, limit: usize) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        let Some(pem) = ca else { return self.request(method, url, headers, body, limit) };
+        let host = self.0.url(url)?.host_str().unwrap_or_default().to_string();
+        let roots = reqwest::Certificate::from_pem_bundle(pem.as_bytes()).ok().filter(|c| !c.is_empty()).ok_or_else(|| bad(format!("the CA for {host} isn't PEM certificates")))?;
+        let mut b = reqwest::Client::builder().timeout(Duration::from_secs(15)).redirect(reqwest::redirect::Policy::none()).user_agent("roll-secrets-sync").tls_certs_only(roots);
+        if !self.0.allow_private {
+            b = b.dns_resolver(roll_net::PublicOnly).no_proxy();
+        }
+        let client = b.build().map_err(|_| bad(format!("the CA for {host} isn't one roll can use")))?;
+        AuditDeliver(Hooks { client, allow_private: self.0.allow_private }, self.1.clone()).request(method, url, headers, body, limit)
     }
 
     /// A rotator's call: the same guards and signature, and its answer. Each call is its own
@@ -353,6 +461,37 @@ impl roll_secrets::Deliver for AuditDeliver {
         let u = self.0.url(url)?;
         let delivery = roll_secrets::names::new_id("dlv", 16);
         self.0.send_signed(&u, ("x-roll-rotator", id), &delivery, secret, body, Some(limit))
+    }
+
+    /// A vendor's API (roll_secrets::saas): the same guards (HTTPS, public, no redirects, the
+    /// timeout), any status, at most `limit` bytes of answer. Headers, body and answer may hold
+    /// credentials: an error names the host and what failed, never them.
+    fn request(&self, method: &str, url: &str, headers: &[(&str, &Value)], body: Option<(&str, &Value)>, limit: usize) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        let u = self.0.url(url)?;
+        let host = u.host_str().unwrap_or_default().to_string();
+        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| Error::Internal(format!("{method} isn't an HTTP method")))?;
+        let mut req = self.0.client.request(method, u);
+        for (name, value) in headers {
+            let mut v = reqwest::header::HeaderValue::from_str(value.expose()).map_err(|_| bad(format!("a {name} header roll can't send to {host}")))?;
+            v.set_sensitive(true);
+            req = req.header(*name, v);
+        }
+        req = match body {
+            Some((content_type, b)) => req.header("content-type", content_type).body(b.expose().as_bytes().to_vec()),
+            None => req.header("content-length", "0"),
+        };
+        block_on(async {
+            let mut resp = req.send().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))?;
+            let status = resp.status().as_u16();
+            let mut out = zeroize::Zeroizing::new(Vec::new());
+            while let Some(c) = resp.chunk().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))? {
+                if out.len() + c.len() > limit {
+                    return Err(Error::Link(format!("{host}: an answer over {limit} bytes")));
+                }
+                out.extend_from_slice(&c);
+            }
+            Ok((status, out))
+        })
     }
 
     /// An OIDC issuer's documents: the same guards, a 2xx only, at most `limit` bytes.
@@ -463,5 +602,147 @@ impl SyncTarget for Notify {
             "changed_keys": p.changed, "removed_keys": p.removed, "at": p.at,
         });
         self.0.post(&url, p, &body)
+    }
+}
+
+#[cfg(test)]
+mod search_sink {
+    use roll_secrets::Deliver as _;
+    use serde_json::{Value as Json, json};
+    use std::sync::{Arc, Mutex};
+
+    /// An index of a roll search cluster gets each event as a document through its bulk route, its
+    /// id the audit id (a retried batch writes the same ones); per-document errors fail the batch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_search_sink_bulk_indexes_events_by_their_audit_id() {
+        let seen: Arc<Mutex<Vec<(String, String, String)>>> = Arc::default();
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (s, r) = (seen.clone(), refuse.clone());
+        let router = axum::Router::new().route(
+            "/v1/search/clusters/{id}/indices/{index}/bulk",
+            axum::routing::post(move |axum::extract::Path((id, index)): axum::extract::Path<(String, String)>, h: axum::http::HeaderMap, body: String| async move {
+                s.lock().unwrap().push((format!("{id}/{index}"), h["content-type"].to_str().unwrap().to_string(), body));
+                if r.load(std::sync::atomic::Ordering::SeqCst) {
+                    return axum::Json(json!({ "errors": true, "items": [{ "index": { "error": { "reason": "mapper_parsing_exception" } } }] }));
+                }
+                axum::Json(json!({ "errors": false, "items": [] }))
+            }),
+        );
+        let api = super::super::Api::default();
+        api.set(router);
+        let d = Arc::new(super::AuditDeliver::new(false, api));
+        let body = json!({ "sink": "snk_1", "project": "prj_a", "events": [{ "id": 7, "at": 1, "action": "secrets.write" }, { "id": 8, "at": 2, "action": "secrets.export" }] });
+        let send = |d: Arc<super::AuditDeliver>, body: Json| tokio::task::spawn_blocking(move || d.post("search:cl_1/roll-audit", "snk_1", &roll_secrets::Value::new("whsec_x"), &body));
+        send(d.clone(), body.clone()).await.unwrap().unwrap();
+        let (target, ct, ndjson) = seen.lock().unwrap()[0].clone();
+        let lines: Vec<Json> = ndjson.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!((target.as_str(), ct.as_str(), lines.len()), ("cl_1/roll-audit", "application/x-ndjson", 4));
+        assert_eq!((lines[0]["index"]["_id"].as_str(), lines[1]["action"].as_str(), lines[3]["project"].as_str()), (Some("7"), Some("secrets.write"), Some("prj_a")));
+        refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = send(d, body).await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("mapper_parsing_exception"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use roll_secrets::Deliver as _;
+    use serde_json::{Value as Json, json};
+    use std::sync::{Arc, Mutex};
+
+    /// A SIEM sink gets the batch as that SIEM takes it, with its token in its own header (and no
+    /// roll signature): Splunk's events one per line, Datadog's logs as an array.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn siem_sinks_get_their_own_format_and_header() {
+        type Seen = Arc<Mutex<Vec<(String, Option<String>, Option<String>, String)>>>;
+        let seen: Seen = Arc::default();
+        let s = seen.clone();
+        let app = axum::Router::new().fallback(move |h: axum::http::HeaderMap, body: String| {
+            let s = s.clone();
+            async move {
+                let get = |k: &str| h.get(k).map(|v| v.to_str().unwrap().to_string());
+                s.lock().unwrap().push((get("authorization").or(get("dd-api-key")).unwrap_or_default(), get("x-roll-signature-256"), get("x-roll-sink"), body));
+                "ok"
+            }
+        });
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/ingest", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let d = Arc::new(super::AuditDeliver::new(true, super::super::Api::default()));
+        let body = json!({ "sink": "snk_1", "project": "prj_a", "events": [{ "id": 1, "at": 1_700_000_000_000i64, "action": "secrets.write", "summary": "set A" }, { "id": 2, "at": 1_700_000_001_000i64, "action": "secrets.export", "summary": "read" }] });
+        for (format, token) in [("splunk", "hec-1"), ("datadog", "dd-key")] {
+            let (d, url, body) = (d.clone(), url.clone(), body.clone());
+            tokio::task::spawn_blocking(move || d.post_format(&url, "snk_1", &roll_secrets::Value::new("whsec_x"), format, Some(&roll_secrets::Value::new(token)), &body)).await.unwrap().unwrap();
+        }
+        let seen = seen.lock().unwrap().clone();
+        let (auth, signature, sink, splunk) = &seen[0];
+        assert_eq!((auth.as_str(), signature, sink.as_deref()), ("Splunk hec-1", &None, Some("snk_1")));
+        let events: Vec<Json> = splunk.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!((events.len(), events[0]["time"].as_f64(), events[0]["sourcetype"].as_str(), events[1]["event"]["project"].as_str()), (2, Some(1_700_000_000.0), Some("roll:audit"), Some("prj_a")));
+        let (key, _, _, datadog) = &seen[1];
+        let logs: Json = serde_json::from_str(datadog).unwrap();
+        assert_eq!((key.as_str(), logs[0]["message"].as_str(), logs[1]["ddtags"].as_str()), ("dd-key", Some("set A"), Some("project:prj_a,action:secrets.export")));
+    }
+}
+
+/// A cluster's own CA (`request_trusting`).
+#[cfg(test)]
+mod cluster_ca_tests {
+    use super::*;
+    use roll_secrets::Deliver;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::rustls;
+
+    /// A CA, and a TLS server on localhost with a certificate it signed that answers `{}`.
+    async fn tls_server() -> (String, u16) {
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = rcgen::CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap().signed_by(&key, &ca).unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()))
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    // A client that doesn't trust the certificate ends the handshake: nothing to answer.
+                    let Ok(mut tls) = acceptor.accept(tcp).await else { return };
+                    let mut buf = [0u8; 4096];
+                    let _ = tls.read(&mut buf).await;
+                    let _ = tls.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").await;
+                    let _ = tls.shutdown().await;
+                });
+            }
+        });
+        (ca.pem(), port)
+    }
+
+    /// A Kubernetes cluster's own CA (roll secrets' `kubernetes` links) is trusted for that
+    /// cluster's calls, and only for them: neither another CA nor the system roots take it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_clusters_own_ca_is_trusted_for_its_calls_only() {
+        let (ca, port) = tls_server().await;
+        let (other, _) = tls_server().await;
+        // Private addresses allowed: the server is on localhost.
+        let d = AuditDeliver::new(true, Api::default());
+        let url = format!("https://localhost:{port}/api");
+        let (own, with_other, with_roots) = tokio::task::spawn_blocking(move || {
+            let call = |ca: Option<&str>| d.request_trusting(ca, "GET", &url, &[], None, 1024).map(|(s, b)| (s, b.to_vec()));
+            (call(Some(&ca)), call(Some(&other)), call(None))
+        })
+        .await
+        .unwrap();
+        assert_eq!(own.unwrap(), (200, b"{}".to_vec()));
+        assert!(with_other.is_err(), "another CA");
+        assert!(with_roots.is_err(), "the system roots");
     }
 }
