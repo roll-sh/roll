@@ -27,7 +27,10 @@
 
 use crate::meter::{Meter, MeterHooks, engine_figures, index_figures, now_ms};
 use crate::pricing::{Cost, Pricing};
-use crate::store::{Caps, DeletedCluster, Inserted, IpRule, Over, Recorded, SearchCluster, Store, UsageTotals};
+mod browser_keys;
+pub use browser_keys::NewBrowserKey;
+
+use crate::store::{Caps, CorsSettings, DeletedCluster, Inserted, IpRule, Over, Recorded, SearchCluster, Store, UsageTotals};
 pub use crate::wake::SqlCatalog;
 use crate::wake::{ControlHooks, GuardedStores, LOAD_WAIT, Wakes};
 use base64::Engine;
@@ -194,6 +197,23 @@ pub struct ClusterOptions {
     /// Who may reach the data plane: CIDRs or addresses, each a string or `{cidr, description?}`
     /// (at most [`search_server::allow::MAX_ENTRIES`]); `[]` opens the cluster to anyone again.
     pub ip_allowlist: Option<Vec<IpRuleInput>>,
+    /// Which web pages may call the cluster from a browser (`http.cors.*`); `null` or no
+    /// `allow_origin` turns CORS off.
+    #[serde(default, deserialize_with = "present")]
+    pub cors: Option<Option<CorsSettings>>,
+}
+
+/// A field that was given, `null` included (`Some(None)`), apart from one left out (`None`).
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> std::result::Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
+}
+
+/// CORS settings as given: checked as the node reads them and kept as browsers send origins
+/// (`None`: off).
+fn cors_settings(given: Option<CorsSettings>) -> Result<Option<CorsSettings>> {
+    let Some(g) = given.filter(|g| !g.allow_origin.is_empty()) else { return Ok(None) };
+    let cors = search_server::cors::Cors::new(&g.allow_origin, g.allow_methods.as_deref(), g.allow_headers.as_deref(), g.max_age).map_err(|e| ControlError::Invalid(format!("cors: {e}")))?;
+    Ok(Some(CorsSettings { allow_origin: cors.origins().iter().map(|o| o.as_written()).collect(), ..g }))
 }
 
 /// An allowlist entry as given (roll apps' `allow_ips` take the same).
@@ -342,6 +362,14 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.max_body_bytes = Some((c.max_body_mb.max(1) as usize) << 20);
     spec.destructive_requires_name = c.destructive_requires_name;
     spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
+    spec.cors = c.cors.as_ref().and_then(|g| match search_server::cors::Cors::new(&g.allow_origin, g.allow_methods.as_deref(), g.allow_headers.as_deref(), g.max_age) {
+        Ok(c) => Some(Arc::new(c)),
+        // Checked when written; one that no longer parses (a hand-edited catalog) allows nobody.
+        Err(e) => {
+            tracing::error!(cluster = c.name, error = e, "a cluster's CORS settings in the catalog don't parse: CORS is off");
+            None
+        }
+    });
     spec
 }
 
@@ -741,6 +769,9 @@ impl Control {
         if let Some(v) = o.ip_allowlist {
             c.ip_allowlist = ip_rules(v)?;
         }
+        if let Some(v) = o.cors {
+            c.cors = cors_settings(v)?;
+        }
         if let Some(v) = o.flavor {
             c.flavor = v.to_ascii_lowercase();
         }
@@ -808,6 +839,7 @@ impl Control {
             owner: None,
             restored_at: None,
             ip_allowlist: Vec::new(),
+            cors: None,
         }
     }
 
@@ -2143,6 +2175,7 @@ mod tests {
             owner: None,
             restored_at: None,
             ip_allowlist: vec![IpRule { cidr: "203.0.113.0/24".into(), description: None }],
+            cors: None,
         };
         let s = spec_for(&c);
         assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());

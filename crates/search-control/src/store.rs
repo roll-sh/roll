@@ -91,6 +91,27 @@ pub struct SearchCluster {
     /// Who may reach its data plane (Elastic Cloud's traffic filters): canonical CIDRs, each with
     /// an optional description; empty: anyone. Branches start with their parent's.
     pub ip_allowlist: Vec<IpRule>,
+    /// Which web pages may call it from a browser (`http.cors.*`, checked after the
+    /// allowlist); `None`: CORS off. Branches start with their parent's.
+    pub cors: Option<CorsSettings>,
+}
+
+/// A cluster's `http.cors.*` (docs/search/README.md, "Search from the browser"): as checked by
+/// `search_server::cors::Cors::new`, which keeps origins as browsers send them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorsSettings {
+    /// `scheme://host[:port]`, `/regex/` or `*`.
+    pub allow_origin: Vec<String>,
+    /// `http.cors.allow-methods` (`None`: Elasticsearch's default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_methods: Option<Vec<String>>,
+    /// `http.cors.allow-headers` (`None`: Elasticsearch's default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_headers: Option<Vec<String>>,
+    /// `http.cors.max-age`, in seconds (`None`: Elasticsearch's 1728000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<i64>,
 }
 
 /// One entry of a cluster's IP allowlist.
@@ -237,10 +258,10 @@ CREATE INDEX IF NOT EXISTS search_slowlog_cluster ON search_slowlog (cluster_id,
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist";
+                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, ip_allowlist, cors";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at, ip_allowlist, cors";
 /// What deleted clusters' reads add to [`READ_COLS`].
 const DELETED_COLS: &str = "deleted_name, deleted_at, purge_at, stored_as, name";
 
@@ -269,21 +290,29 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         restored_at: r.get(20)?,
         // Unreadable, the cluster can't be looked up (and so can't be reached), never opened up.
         ip_allowlist: serde_json::from_str(&r.get::<_, String>(21)?).map_err(|e| code_sql::Error::Conversion(format!("ip_allowlist: {e}")))?,
+        cors: match r.get::<_, Option<String>>(22)? {
+            Some(j) => Some(serde_json::from_str(&j).map_err(|e| code_sql::Error::Conversion(format!("cors: {e}")))?),
+            None => None,
+        },
     })
 }
 
 fn deleted_row(r: &Row) -> code_sql::Result<DeletedCluster> {
     let mut c = row(r)?;
-    c.name = r.get(22)?;
+    c.name = r.get(23)?;
     c.loaded_on = None;
     c.wake_at = None;
-    Ok(DeletedCluster { cluster: c, deleted_at: r.get(23)?, purge_at: r.get(24)?, stored_as: r.get(25)?, reserved: r.get(26)? })
+    Ok(DeletedCluster { cluster: c, deleted_at: r.get(24)?, purge_at: r.get(25)?, stored_as: r.get(26)?, reserved: r.get(27)? })
 }
 
 /// One-minute buckets a cluster keeps: 24 hours.
 pub const MINUTE_SLOTS: i64 = 1440;
 /// One-hour buckets a cluster keeps: 14 days.
 pub const HOUR_SLOTS: i64 = 336;
+
+fn cors_json(cors: &Option<CorsSettings>) -> Option<String> {
+    cors.as_ref().map(|c| serde_json::to_string(c).unwrap_or_else(|_| "null".into()))
+}
 
 fn allowlist_json(rules: &[IpRule]) -> String {
     serde_json::to_string(rules).expect("rules serialize")
@@ -324,6 +353,8 @@ impl Store {
         db.add_column("search_clusters", "owner", "TEXT")?;
         // Clusters made before allowlists are open, as they were.
         db.add_column("search_clusters", "ip_allowlist", "TEXT NOT NULL DEFAULT '[]'")?;
+        // Clusters made before browser search have CORS off, as Elasticsearch does.
+        db.add_column("search_clusters", "cors", "TEXT")?;
         db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_owner ON search_clusters (owner, created_at)")?;
         // Deleted clusters kept for restoring.
         db.add_column("search_clusters", "deleted_at", "INTEGER")?;
@@ -353,7 +384,7 @@ impl Store {
                 return Ok(Inserted::Over(over));
             }
             x.execute(
-                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"),
+                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"),
                 params![
                     c.id,
                     c.name,
@@ -372,7 +403,8 @@ impl Store {
                     c.docs,
                     c.stored_bytes,
                     c.owner,
-                    allowlist_json(&c.ip_allowlist)
+                    allowlist_json(&c.ip_allowlist),
+                    cors_json(&c.cors)
                 ],
             )
             .map(|_| Inserted::Yes)
@@ -401,7 +433,7 @@ impl Store {
             }
             x.execute(
                 "UPDATE search_clusters SET flavor = ?2, password = ?3, idle_timeout_s = ?4, max_in_flight = ?5, max_body_mb = ?6,
-                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9 WHERE id = ?1",
+                 destructive_requires_name = ?7, password_rotated_at = ?8, ip_allowlist = ?9, cors = ?10 WHERE id = ?1",
                 params![
                     c.id,
                     c.flavor,
@@ -411,7 +443,8 @@ impl Store {
                     c.max_body_mb,
                     c.destructive_requires_name,
                     c.password_rotated_at,
-                    allowlist_json(&c.ip_allowlist)
+                    allowlist_json(&c.ip_allowlist),
+                    cors_json(&c.cors)
                 ],
             )?;
             Ok::<_, code_sql::Error>(Ok(()))
@@ -911,6 +944,7 @@ mod tests {
             owner: None,
             restored_at: None,
             ip_allowlist: Vec::new(),
+            cors: None,
         }
     }
 

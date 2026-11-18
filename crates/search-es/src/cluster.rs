@@ -96,6 +96,9 @@ pub struct ClusterConfig {
     /// attributes) or `node.processors`. They show in node info, `_cat/nodeattrs` and the
     /// cluster settings defaults as on Elasticsearch.
     pub node_settings: Vec<(String, String)>,
+    /// Node settings the host changes while the cluster runs (roll's per-cluster `http.cors.*`),
+    /// shown after [`ClusterConfig::node_settings`] wherever those are.
+    pub http_settings: std::sync::Arc<parking_lot::RwLock<Vec<(String, String)>>>,
     /// Publish Elasticsearch's test cluster features too (`-Dtests.testfeatures.enabled`, as
     /// the clusters the YAML REST suites run against do).
     pub test_features: bool,
@@ -119,11 +122,20 @@ impl ClusterConfig {
             node_name: name.to_string(),
             destructive_requires_name: true,
             node_settings: Vec::new(),
+            http_settings: Default::default(),
             test_features: false,
             host_metrics: false,
             sealer: None,
             default_repository: None,
         }
+    }
+
+    /// The node settings as shown now: [`ClusterConfig::node_settings`], then
+    /// [`ClusterConfig::http_settings`].
+    pub fn shown_node_settings(&self) -> Vec<(String, String)> {
+        let mut all = self.node_settings.clone();
+        all.extend(self.http_settings.read().iter().cloned());
+        all
     }
 
     /// A node setting's value.

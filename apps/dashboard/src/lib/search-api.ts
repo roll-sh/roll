@@ -90,11 +90,54 @@ export interface IpRule {
   description?: string;
 }
 
+/** A cluster's `http.cors.*`: which web pages may call it from a browser. */
+export interface CorsSettings {
+  /** `scheme://host[:port]`, `/regex/` or `*`, kept as browsers send origins. */
+  allow_origin: string[];
+  /** Elasticsearch's defaults when left out. */
+  allow_methods?: string[];
+  allow_headers?: string[];
+  max_age?: number;
+}
+
 /** What `PATCH /v1/search/clusters/{id}` takes. */
 export type SearchClusterPatch = Partial<SearchSettings> & {
   /** Only these networks reach the cluster's endpoint ([]: anyone). */
   ip_allowlist?: (string | IpRule)[];
+  /** null (or no origins) turns CORS off. */
+  cors?: CorsSettings | null;
 };
+
+/** A key a web page ships (`/v1/search/clusters/{id}/browser-keys`): read-only and rate limited. */
+export interface BrowserKey {
+  id: string;
+  name: string | null;
+  /** The indices it reads, or … */
+  indices?: string[];
+  /** … the one search application whose template it may run. */
+  application?: string;
+  /** A query every search through it is filtered by. */
+  filter?: Record<string, unknown>;
+  rate_limit: { per_minute: number; per_ip_per_minute?: number } | null;
+  /** Unix seconds. */
+  created_at: number | null;
+  expires_at: number | null;
+}
+
+/** A new browser key: `api_key` (sent as `Authorization: ApiKey …`) is shown once. */
+export interface NewBrowserKey extends BrowserKey {
+  api_key: string;
+  url: string;
+}
+
+export interface BrowserKeyRequest {
+  name: string;
+  indices?: string[];
+  application?: string;
+  filter?: Record<string, unknown>;
+  expires_in_s?: number;
+  rate_limit?: { per_minute?: number; per_ip_per_minute?: number };
+}
 
 export interface BranchRef {
   id: string;
@@ -122,6 +165,8 @@ export interface SearchCluster extends SearchSettings {
   owner?: string | null;
   /** Only these networks reach its endpoint ([]: anyone). The dashboard and API aren't filtered. */
   ip_allowlist: IpRule[];
+  /** Which web pages may call it from a browser (null: CORS off). */
+  cors?: CorsSettings | null;
   url: string;
   host: string;
   port: number;
@@ -251,6 +296,9 @@ export const searchApi = {
   createKey: (id: string, name: string, access: KeyAccess, expiresInS?: number) =>
     call<NewSearchKey>("POST", `${cl(id)}/keys`, { name, access, expires_in_s: expiresInS }),
   revokeKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/keys/${encodeURIComponent(key)}`),
+  browserKeys: (id: string) => call<{ keys: BrowserKey[] }>("GET", `${cl(id)}/browser-keys`),
+  createBrowserKey: (id: string, k: BrowserKeyRequest) => call<NewBrowserKey>("POST", `${cl(id)}/browser-keys`, k),
+  revokeBrowserKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/browser-keys/${encodeURIComponent(key)}`),
 };
 
 /**

@@ -1125,6 +1125,11 @@ static ROWS: &[Row] = &[
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
+    // Keys a web page ships (read-only, rate limited): the new key's secret is in the answer;
+    // the list has none.
+    row("GET", "/v1/search/clusters/{id}/browser-keys", "search", R, one(PG, "cluster")),
+    row("POST", "/v1/search/clusters/{id}/browser-keys", "search", REVEAL, one(PG, "cluster")),
+    row("DELETE", "/v1/search/clusters/{id}/browser-keys/{key}", "search", ADMIN, one(PG, "cluster")),
     // Request metrics and the slow logs (queries' and documents' sources, cut): reads of the
     // cluster's data.
     row("GET", "/v1/search/clusters/{id}/metrics", "search", R, one(PG, "cluster")),

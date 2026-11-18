@@ -8089,6 +8089,7 @@ dependencies = [
  "mimalloc",
  "parking_lot",
  "rcgen",
+ "regex",
  "reqwest",
  "search-codec",
  "search-es",

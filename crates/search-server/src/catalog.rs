@@ -82,6 +82,9 @@ pub struct ClusterSpec {
     pub max_resident_bytes: Option<u64>,
     /// Who may reach the cluster's data plane, checked before authentication (empty: anyone).
     pub ip_allowlist: crate::allow::IpAllowlist,
+    /// Which web pages may call the cluster from a browser (`http.cors.*`; `None`: CORS off,
+    /// Elasticsearch's default). Checked after the IP allowlist.
+    pub cors: Option<Arc<crate::cors::Cors>>,
 }
 
 impl ClusterSpec {
@@ -98,6 +101,7 @@ impl ClusterSpec {
             max_in_flight_bytes: None,
             max_resident_bytes: None,
             ip_allowlist: Default::default(),
+            cors: None,
         }
     }
 

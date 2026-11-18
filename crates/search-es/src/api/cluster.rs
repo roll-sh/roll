@@ -1158,7 +1158,7 @@ pub fn get_settings(ctx: &Ctx) -> EsResult<Reply> {
         let m = super::nodes::NodeMetrics::sample(ctx.cluster);
         let mut node = vec![("node.attr.ml.allocated_processors_double".to_string(), format!("{:.1}", m.processors as f64))];
         node.extend(super::nodes::node_attributes(ctx.cluster, &m).into_iter().map(|(k, v)| (format!("node.attr.{k}"), v)));
-        node.extend(ctx.cluster.config.node_settings.iter().cloned());
+        node.extend(ctx.cluster.config.shown_node_settings());
         for (k, v) in node {
             if !set.contains(&k) {
                 defaults.set(k, v);

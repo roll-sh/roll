@@ -318,6 +318,7 @@ mod tests {
                     owner: None,
                     restored_at: None,
                     ip_allowlist: Vec::new(),
+                    cors: None,
                 },
                 crate::store::Caps::NONE,
             )
