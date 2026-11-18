@@ -3008,7 +3008,8 @@ inconsistencies are fixed in #264:
 - R4. **GCP KMS, Azure Key Vault and HSM keys** (M), next to AWS KMS: real accounts (the user's call).
 - R5. **`roll://` wherever another roll product takes a key** (M): agent endpoints (they take `op://`),
   the gateway's upstreams, review provider keys, storage replication and search snapshot credentials.
-- R6. **roll queues as a link provider** (S–M): the only workspace kind without one.
+- R6. **roll queues as a link provider** (building: `feature/roll-secrets-queue-links`): the only
+  workspace kind without one.
 - R7. **AWS IAM login for EC2/ECS/EKS** (S–M; a signed `GetCallerIdentity`, as Vault's): an account to confirm.
 - R8. **A tamper-evident audit log** (building: `feature/roll-secrets-audit-chain`): a per-project hash
   chain written with each row, digests signed by roll's issuer key to the sinks, `audit verify`.
@@ -3093,8 +3094,10 @@ inconsistencies are fixed in #264:
    database engine has them; two roles taking turns and a login per lease, each checked live
    (Elasticsearch 9.5.5, OpenSearch 3.9.0, Cassandra 5.0.9, ScyllaDB 2026.3.3). Cassandra's
    credentials cache let a dropped role in for ~1.6 s, so a lease's end sets a password nobody knows
-   first. All four go through a gateway too (#166, checked against the real servers). Building: their
-   admin's own password rotated (`rotate-admin` fell through to Postgres's statement for them).
+   first. All four go through a gateway too (#166, checked against the real servers), and their admin's
+   own password rotates (`rotate-admin`, #165: it fell through to Postgres's statement), waiting out
+   Cassandra's ~2 s credentials cache; other schemes are refused by name. Building: the same wait on
+   managed rotations, so a turn never hands out a password Cassandra still refuses.
    Next: OpenSearch's narrower permission set, and Couchbase and Oracle (Vault has both).
 4c. **MongoDB Atlas through its Admin API** (#173, on #136): Atlas refuses the user commands on
    every tier and rolls back changes made another way, so the MongoDB engine never could rotate an
