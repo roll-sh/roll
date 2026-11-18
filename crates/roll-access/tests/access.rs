@@ -32,9 +32,9 @@ impl Resolver for DefaultBranch {
 }
 
 /// Signed-in people: a cookie `rls_<user>` is that user's session; a user taken out is disabled.
-/// The people accounts knows, and what they've been mailed (`user: subject`).
+/// The people accounts knows, what they've been mailed (`user: subject`), and its SSO connections.
 #[derive(Default)]
-struct People(std::sync::Mutex<std::collections::HashMap<String, roll_auth::SignedIn>>, std::sync::Mutex<Vec<String>>);
+struct People(std::sync::Mutex<std::collections::HashMap<String, roll_auth::SignedIn>>, std::sync::Mutex<Vec<String>>, std::sync::Mutex<std::collections::HashMap<String, roll_auth::SsoTrust>>);
 
 impl People {
     fn add(&self, user: &str, handle: &str) {
@@ -43,6 +43,14 @@ impl People {
     }
     fn remove(&self, user: &str) {
         self.0.lock().unwrap().remove(user);
+    }
+    /// An SSO connection `id` for `issuer` with these proven domains (`None`: removed).
+    fn sso(&self, id: &str, at: Option<(&str, &[&str])>) {
+        let mut all = self.2.lock().unwrap();
+        match at {
+            Some((issuer, verified)) => all.insert(id.into(), roll_auth::SsoTrust { name: "Okta".into(), issuer: issuer.into(), verified: verified.iter().map(|d| d.to_string()).collect() }),
+            None => all.remove(id),
+        };
     }
     fn set_admin(&self, user: &str, admin: bool) {
         if let Some(p) = self.0.lock().unwrap().get_mut(user) {
@@ -70,6 +78,10 @@ impl roll_auth::Sessions for People {
     fn person_by_email<'a>(&'a self, email: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SignedIn>, String>> {
         let p = self.0.lock().unwrap().values().find(|p| format!("{}@acme.test", p.handle) == email.to_lowercase()).cloned();
         Box::pin(async move { Ok(p) })
+    }
+    fn sso_trust<'a>(&'a self, id: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SsoTrust>, String>> {
+        let t = self.2.lock().unwrap().get(id).cloned();
+        Box::pin(async move { Ok(t) })
     }
     fn admins(&self) -> roll_auth::BoxFuture<'_, Result<Vec<String>, String>> {
         Box::pin(async { Ok(vec!["usr_root".to_string()]) })
@@ -2327,6 +2339,24 @@ async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
     assert_eq!(sign_in(idjag(claims("j10", "root@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied");
     trust(true).await;
     assert_eq!(sign_in(idjag(claims("j11", "root@acme.test", &api, &client_id)), secret.clone()).await.0, StatusCode::OK);
+    trust(false).await;
+    // The same provider as people's SSO connection: its issuer, and the domains its DNS records
+    // proved, as they are at each sign-in (never typed domains).
+    let tie = |idp: Value| {
+        let d = &d;
+        async move { d.call(OPERATOR, Method::PUT, "/v1/access/enterprise/idps", Some(json!({ "idps": [idp] }))).await.0 }
+    };
+    d.people.sso("sso_okta", Some((okta, &["acme.test"])));
+    d.people.sso("sso_other", Some(("https://other.example", &["acme.test"])));
+    assert_eq!(tie(json!({ "issuer": okta, "jwks": jwks, "sso": "sso_nope" })).await, StatusCode::BAD_REQUEST, "no such connection");
+    assert_eq!(tie(json!({ "issuer": okta, "jwks": jwks, "sso": "sso_other" })).await, StatusCode::BAD_REQUEST, "another issuer's connection");
+    assert_eq!(tie(json!({ "issuer": okta, "jwks": jwks, "sso": "sso_okta", "domains": ["acme.test"] })).await, StatusCode::BAD_REQUEST, "its domains are the connection's");
+    assert_eq!(tie(json!({ "issuer": okta, "jwks": jwks, "sso": "sso_okta" })).await, StatusCode::OK);
+    assert_eq!(sign_in(idjag(claims("j50", "alice@acme.test", &api, &client_id)), secret.clone()).await.0, StatusCode::OK);
+    d.people.sso("sso_okta", Some((okta, &[])));
+    assert_eq!(sign_in(idjag(claims("j51", "alice@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied", "the domain's proof is gone");
+    d.people.sso("sso_okta", None);
+    assert_eq!(sign_in(idjag(claims("j52", "alice@acme.test", &api, &client_id)), secret.clone()).await.1["error"], "access_denied", "the connection is gone");
     trust(false).await;
     // Exactly one audience (draft-ietf-oauth-identity-assertion-authz-grant-06 §4.4.1): an array
     // of one is roll's, a second audience is refused.

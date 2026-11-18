@@ -229,5 +229,7 @@ describe("idpFromForm", () => {
       idp: { issuer: "https://acme.okta.com", matching: "email", domains: ["acme.com", "acme.co.uk"], admins: true, name: "Okta" },
     });
     expect(idpFromForm({ ...form, matching: "aud_sub" })).toEqual({ idp: { issuer: "https://acme.okta.com", matching: "aud_sub", name: "Okta" } });
+    // Tied to an SSO connection: its proven domains, never typed ones.
+    expect(idpFromForm({ ...form, domains: "evil.com", sso: "sso_1" })).toEqual({ idp: { issuer: "https://acme.okta.com", matching: "email", name: "Okta", sso: "sso_1" } });
   });
 });
