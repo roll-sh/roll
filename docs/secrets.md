@@ -3631,9 +3631,12 @@ cache waited out. Ranked now:
    Sound: #276, #279, #284 (one stderr note).
 2. **Batch 2 landed** (2026-11-18, one lock turn, main 49a6f1d8c): 24 PRs in four queue rounds, #79–#229,
    #81–#213, #92–#212, #117–#128; main's tree after each round was exactly the simulated one, and
-   after the last the exact tree re-gated on the day's main (3feff202b). Next: batch 3 (the #132
-   stack, #144, #86) and batch 4 (today's PRs: six apply clean on batch 2, five need levelling;
-   `batch-4-notes.txt`).
+   after the last the exact tree re-gated on the day's main (3feff202b). Batch 3 is ready (2026-11-18
+   evening): #132; #136 + #165; #173; #166; #144 in five queue rounds, levelled, each gated, the
+   combined tree gated on main c59fca59c with the live outside-databases check (`batch-3.txt`,
+   `batch3-round.sh`); in the order after apps and mcp, waiter `rs132-lock`. Then batch 4: today's
+   PRs (#248 #262 #264 #274 #276 #277 #279 #281 #284 #290 #303 #304 #329 #330, the issuer work) and
+   #86 (`batch-4-notes.txt`).
 3. **R2, cut off everything that reaches a folder** (#304): tokens through roll-access's bulk revoke,
    identities disabled, leases ended, shares and exports cut, syncs paused, an optional freeze (423).
    Fixed (3b1757d45): a project admin could revoke the operator's all-projects tokens (a cross-project
