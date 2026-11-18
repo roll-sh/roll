@@ -468,11 +468,29 @@ As GitHub's organizations and Google Workspace require it: an admin turns on `PU
 /v1/accounts/policy {require_second_factor: true}` (sudo mode; "A second factor for everyone" on
 the account page), and a person whose session has no second factor (no authenticator app on, no
 passkey) reaches only `/v1/accounts…`, where they set one up; anything else is 403 `{code:
-"second_factor_required"}` (rolld's gate asks, `roll_auth::Sessions::second_factor_missing`, never
+"second_factor_required"}` (rolld's gate asks, `roll_auth::Sessions::missing`, never
 cached), and `GET /v1/accounts/session` says `second_factor_required` so the dashboard points them to
 their account page. Once they have one, their session works again. A session their company's SSO
 provider signed in passes (the provider checks). The operator's token and roll tokens aren't
 sessions.
+
+### Phishing-resistant sign-in
+
+As Okta's authenticator policy and Google's Advanced Protection: `PUT /v1/accounts/policy
+{phishing_resistant: "admins" | "everyone"}` (sudo mode; "Phishing-resistant sign-in" on the
+account page) holds those people's sessions to a passkey, because a lookalike page can relay an
+email code or an authenticator app's code and can't relay a passkey.
+
+- A session counts once it has used a passkey (`sessions.passkey_at`): signed in with one,
+  finished its second factor with one, or confirmed it's you with one (sudo mode's
+  `POST /me/reauth`). An SSO session counts too: the provider's own policy decides how it signs
+  in.
+- Until then it reaches only `/v1/accounts…` (to add a passkey and use it); anything else is 403
+  `{code: "passkey_required"}`, from the same gate check as a missing second factor
+  (`roll_auth::Missing::Passkey`), and `GET /v1/accounts/session` says `passkey_required` so the
+  dashboard points them to their account page.
+- An admin turning it on must be in a session that used a passkey (409 otherwise), or they'd hold
+  their own session to it; the operator's token has no session to check.
 
 ### Allowed networks
 
@@ -600,8 +618,8 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 | --- | --- | --- |
 | `GET /v1/accounts/passkey-policy` | | `{require, models: [{aaguid, name, roots}]}` (hardware keys only) |
 | `PUT /v1/accounts/passkey-policy` | `{require, models}` | the policy, checked (UUIDs, names, PEM roots; a model when required); sudo mode; 400 `{code: "policy"}` |
-| `GET /v1/accounts/policy` | | `{require_second_factor, idle_minutes?}` |
-| `PUT /v1/accounts/policy` | `{require_second_factor, idle_minutes?}` | the policy (sudo mode; the whole of it); 400 `policy` |
+| `GET /v1/accounts/policy` | | `{require_second_factor, idle_minutes?, phishing_resistant?}` |
+| `PUT /v1/accounts/policy` | `{require_second_factor, idle_minutes?, phishing_resistant?: "admins" \| "everyone"}` | the policy (sudo mode; the whole of it); 400 `policy`; 409 turning on phishing-resistant sign-in from a session that hasn't used a passkey |
 | `GET /v1/accounts/network-policy` | | `{on, networks}` (allowed networks) |
 | `PUT /v1/accounts/network-policy` | `{on, networks}` | the policy, networks normalised; sudo mode; 400 `networks` or `lockout` |
 | `GET /v1/accounts/reset-requests` | | `ResetRequest[]`: `{id, user, email, handle, reason, ip, user_agent, created_at, state, decided_by, decided_at}`, pending first |

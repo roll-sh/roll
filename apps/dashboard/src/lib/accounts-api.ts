@@ -50,7 +50,7 @@ export interface Invite {
 export type SessionState =
   | { status: "anonymous" }
   | { status: "mfa_required"; methods: ("totp" | "recovery" | "passkey")[]; csrf: string }
-  | { status: "signed_in"; user: User; session: Session; csrf: string; second_factor_required?: boolean };
+  | { status: "signed_in"; user: User; session: Session; csrf: string; second_factor_required?: boolean; passkey_required?: boolean };
 
 export type SignInAnswer = Exclude<SessionState, { status: "anonymous" }>;
 
@@ -175,6 +175,8 @@ export interface AccountPolicy {
   require_second_factor: boolean;
   /** A session unused this many minutes ends (15 to a week; absent: a week). */
   idle_minutes?: number;
+  /** Whose sessions must use a passkey (or come from their SSO): phishing-resistant sign-in. */
+  phishing_resistant?: "admins" | "everyone";
 }
 
 /** Allowed networks (docs/accounts.md): where people's sessions may be used from. */

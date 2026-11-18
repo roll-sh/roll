@@ -110,16 +110,16 @@ export function AppShell({ crumb, actions, bleed = false, children }: { crumb: R
   );
 }
 
-/** A company that requires a second factor (docs/accounts.md): until this person sets one up,
- * only their account works, so the shell says where to go. */
+/** A company that requires a second factor or a passkey sign-in (docs/accounts.md): until this
+ * person has it, only their account works, so the shell says where to go. */
 function SecondFactorNotice() {
   const session = useSession();
-  if (session.status !== "signed_in" || !session.second_factor_required) return null;
+  if (session.status !== "signed_in" || !(session.second_factor_required || session.passkey_required)) return null;
   return (
     <div className="border-b border-line bg-accent/[0.06] px-4 py-2 text-[12.5px]">
-      Your company requires a second factor.{" "}
+      {session.passkey_required ? "Your company requires a passkey." : "Your company requires a second factor."}{" "}
       <Link href="/dashboard/account" className="text-accent hover:underline">
-        Set up an authenticator app or a passkey
+        {session.passkey_required ? "Add one and confirm it's you with it" : "Set up an authenticator app or a passkey"}
       </Link>{" "}
       to use the rest of roll.
     </div>
