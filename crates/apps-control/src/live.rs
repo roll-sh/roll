@@ -1839,16 +1839,17 @@ impl EnvLive {
                         let d = u.cpu_ns.saturating_sub(prev) as f64 / 1e9;
                         i.record(now_ms() / 60_000, d, elapsed, u.memory_bytes);
                         cpu += d;
+                        // Its sidecars' use is the instance's (usage adds it): so is their size.
                         if let Some(tpl) = self.serving(&i.deployment) {
                             used += d;
-                            capacity += tpl.run.cpu * elapsed;
+                            capacity += (tpl.run.cpu + tpl.spec.sidecars_size().0) * elapsed;
                         }
                     }
                     *seen = Some(u.cpu_ns);
                     mem += u.memory_bytes;
                     if let Some(tpl) = self.serving(&i.deployment) {
                         mem_used += u.memory_bytes as f64;
-                        mem_cap += ((tpl.run.memory_mb as u64) << 20) as f64;
+                        mem_cap += (((tpl.run.memory_mb + tpl.spec.sidecars_size().1) as u64) << 20) as f64;
                     }
                 }
                 // A runtime that can't say what an instance uses (Fargate, which bills by size ×
@@ -2268,7 +2269,9 @@ impl EnvLive {
         let _ = self.runtime.stop(&inst.name, Duration::from_secs(10)).await;
         let secs = began.elapsed().as_secs_f64();
         // A run is metered at its allocation: it's short, and the container is gone after.
-        self.meter.lock().sample(now_ms(), secs * tpl.run.cpu * 0.5, (tpl.run.memory_mb as u64) << 20, secs, 1);
+        // With its sidecars' size: they run beside it.
+        let (side_cpu, side_mb) = tpl.spec.sidecars_size();
+        self.meter.lock().sample(now_ms(), secs * (tpl.run.cpu + side_cpu) * 0.5, ((tpl.run.memory_mb + side_mb) as u64) << 20, secs, 1);
         self.runtime.remove(&inst.name).await;
         let (code, timed_out, canceled) = ran?;
         Ok(Exit { deployment: tpl.deployment.clone(), container: inst.name.clone(), code, timed_out, canceled })
@@ -2313,7 +2316,9 @@ impl EnvLive {
             return Err(e);
         }
         self.runtime.settle(&inst.name).await;
-        Ok(ConsoleBox { name: inst.name.clone(), began: Instant::now(), cpu: tpl.run.cpu, memory_mb: tpl.run.memory_mb })
+        // Metered with its sidecars, which run beside it.
+        let (side_cpu, side_mb) = tpl.spec.sidecars_size();
+        Ok(ConsoleBox { name: inst.name.clone(), began: Instant::now(), cpu: tpl.run.cpu + side_cpu, memory_mb: tpl.run.memory_mb + side_mb })
     }
 
     /// A console ended: its container stops and goes, metered at its allocation as a run is.

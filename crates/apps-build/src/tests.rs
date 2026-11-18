@@ -768,7 +768,14 @@ fn scala_clojure_gleam_and_a_start_script_build_and_run() {
     assert_eq!((p.provider, p.start.as_deref()), (Provider::Shell, Some("bash /app/start.sh")));
     has(&p, &["FROM debian:bookworm-slim", "COPY --chown=app . .", "USER app"]);
     assert_eq!(detect(&[("start.sh", ""), ("package.json", "{\"scripts\":{\"start\":\"node a.js\"}}")]).provider, Provider::Node);
-    assert_eq!(detect(&[("start.sh", ""), ("index.html", "<h1>hi</h1>")]).provider, Provider::Shell, "it says what runs");
+    assert_eq!(detect(&[("start.sh", ""), ("index.html", "<h1>hi</h1>")]).provider, Provider::Static, "a site with a dev script stays files");
+    // sbt's normalizedName keeps `_`; Play's seed writes the name triple-quoted.
+    let p = detect(&[("build.sbt", "name := \"\"\"my_app\"\"\"\n"), ("project/plugins.sbt", "addSbtPlugin(\"com.github.sbt\" % \"sbt-native-packager\" % \"1.10.4\")\n")]);
+    assert_eq!(p.start.as_deref(), Some("/app/bin/my_app"));
+    // Neither plugin, a start set: the compiled tree on the sbt image, the start run in it.
+    let p = plan(&tree(&[("build.sbt", "name := \"x\"\n")]), &Overrides { start: Some("sbt run".into()), ..Overrides::default() }).unwrap();
+    assert_eq!(p.build.as_deref(), Some("sbt -batch compile"));
+    has(&p, &["cp -r /src/. /out/", "FROM sbtscala/scala-sbt"]);
 }
 
 #[test]

@@ -1,6 +1,6 @@
-//! A root `start.sh` and no language roll builds (Railpack's and Nixpacks' shell provider; before a
-//! static site, which it may serve itself): the tree on a small Debian image, the script run with
-//! bash. Packages it needs come from the service's `packages` (apt).
+//! A root `start.sh` and nothing else roll builds (Railpack's and Nixpacks' shell provider; after a
+//! static site, so one with a dev script stays served as files): the tree on a small Debian image,
+//! the script run with bash. Packages it needs come from the service's `packages` (apt).
 
 use crate::df::Df;
 use crate::{Commands, Draft, Error, Overrides, Provider, Tree};
@@ -12,7 +12,7 @@ pub(crate) fn detect(tree: &dyn Tree, _: &Overrides) -> Result<Option<Draft>, Er
         return Ok(None);
     }
     let notes = vec![
-        "found start.sh and no language roll builds: run with bash on debian:bookworm-slim".to_string(),
+        "found start.sh and nothing else roll builds: run with bash on debian:bookworm-slim".to_string(),
         "what it needs installed goes in the service's packages (apt), or a Dockerfile".to_string(),
     ];
     let render = Box::new(move |c: &Commands<'_>| {

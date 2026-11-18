@@ -798,9 +798,12 @@ impl Apps {
         let mut dep = d.clone();
         // Its sidecars' images pinned with it (a rollback or a redeploy runs the same ones).
         let mut run = run;
+        // Every one's registry is checked, a pinned one's too (its pull comes at create).
+        for sc in &run.sidecars {
+            self.check_registry(&sc.image).await.map_err(|e| e.context(format!("sidecar {}", sc.name)))?;
+        }
         if run.sidecars.iter().any(|s| !s.image.contains("@sha256:")) {
             for sc in run.sidecars.iter_mut().filter(|s| !s.image.contains("@sha256:")) {
-                self.check_registry(&sc.image).await?;
                 let pinned = self.deps.runtime.pull(&sc.image, log, None).await.map_err(|e| e.context(format!("sidecar {}", sc.name)))?;
                 log.line(format!("sidecar {}: pinned {pinned}", sc.name));
                 sc.image = pinned;

@@ -1076,7 +1076,7 @@ async fn clojure_gleam_and_a_start_script_build_and_answer() {
     let erl = "-module(hi_ffi).\n-export([serve/0]).\nserve() ->\n    Port = list_to_integer(os:getenv(\"PORT\", \"8080\")),\n    {ok, L} = gen_tcp:listen(Port, [binary, {active, false}, {reuseaddr, true}, {ip, {0,0,0,0}}]),\n    loop(L).\nloop(L) ->\n    {ok, C} = gen_tcp:accept(L),\n    _ = gen_tcp:recv(C, 0, 1000),\n    gen_tcp:send(C, <<\"HTTP/1.1 200 OK\\r\\ncontent-length: 14\\r\\nconnection: close\\r\\n\\r\\ngleam says hi\\n\">>),\n    gen_tcp:close(C),\n    loop(L).\n";
     builds_and_answers(&w, "gleam-hi", &[("gleam.toml", "name = \"hi\"\nversion = \"1.0.0\"\n"), ("src/hi.gleam", "@external(erlang, \"hi_ffi\", \"serve\")\nfn serve() -> Nil\n\npub fn main() {\n  serve()\n}\n"), ("src/hi_ffi.erl", erl)], "gleam says hi", json!({})).await;
     // A start.sh and the packages it needs (apt).
-    builds_and_answers(&w, "shell-hi", &[("start.sh", "#!/bin/bash\nexec python3 -m http.server \"$PORT\" --bind 0.0.0.0\n"), ("index.html", "a start script says hi")], "a start script says hi", json!({"packages": ["python3"]})).await;
+    builds_and_answers(&w, "shell-hi", &[("start.sh", "#!/bin/bash\nmkdir -p /tmp/s && echo 'a start script says hi' > /tmp/s/index.html\nexec python3 -m http.server \"$PORT\" --bind 0.0.0.0 --directory /tmp/s\n")], "a start script says hi", json!({"packages": ["python3"]})).await;
 }
 
 /// A link to a database on this host's loopback reaches it from the container, through the

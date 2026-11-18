@@ -1940,8 +1940,8 @@ names; strings, numbers or booleans as text of at most 200), kept as a line of t
 `events:` log with its route and the edge's country, nothing about the visitor; anything else is a
 400, more than 1,200 a minute an environment a 429. It goes through the environment's gates (allow
 list, firewall, rate limit, access) as a page does. `events` lists the 20 most counted names, each
-with its properties' five most common values (500 names and 500 values a property counted apart
-at most). The Metrics tab's Visitors panel and `roll apps analytics` show them.
+with its properties' five most common values (500 names, 20 properties a name and 500 values
+a property counted apart at most, so beacons that invent keys can't make a read hold millions). The Metrics tab's Visitors panel and `roll apps analytics` show them.
 `analytics_count_page_views_and_visitors`, `track::tests`.
 
 ## Caching answers
@@ -2692,17 +2692,20 @@ a Dockerfile, each answering through roll (55 s for the three from a warm cache,
 Scala (a `build.sbt`) builds on the sbt image with the build definition (`build.sbt`, `project/`)
 copied and `sbt update`d first, Coursier's, Ivy's and sbt's caches mounted: with
 sbt-native-packager in `project/plugins.sbt` (or Play) it's `sbt stage`, run as
-`target/universal/stage/bin/<name>` (sbt's `normalizedName` of `name :=`; Play gets
+`target/universal/stage/bin/<name>` (sbt's `normalizedName` of `name :=`, `"""…"""` too: lowercase,
+`_` kept, other runs as `-`; Play gets
 `-Dhttp.port=$PORT`, and a note on `PLAY_HTTP_SECRET_KEY`); with sbt-assembly it's `sbt assembly`,
-the jar run with `java -jar`; neither is the person's to say (a 400 unless start is set). Clojure:
+the jar run with `java -jar`; neither is the person's to say (a 400 unless start is set; with one,
+`sbt compile` and the tree run on the sbt image). Clojure:
 a `project.clj` is `lein uberjar` on the Leiningen image, a `deps.edn` with a `build.clj` and a
 `:build` alias is tools.build's `clojure -T:build uber` on the tools.deps image (a deps.edn
 without them needs build and start set); the standalone jar, wherever the build put it, runs on
 the JRE. Both run on `eclipse-temurin:21-jre` as an `app` user with `-XX:MaxRAMPercentage=75`.
 Gleam (a `gleam.toml`, the Erlang target) is `gleam export erlang-shipment` on the Gleam image,
 run as `entrypoint.sh run` on the same image; a JavaScript target is a 400 saying so. A root
-`start.sh` and no language roll builds (after every language, so one beside a package.json is
-Node's; before a static site, since it says what runs) is run with bash on
+`start.sh` and nothing else roll builds (after every language and a static site, so one beside a
+package.json is Node's and one beside an index.html, a dev script, leaves the site served as files)
+is run with bash on
 `debian:bookworm-slim`, what it needs from the service's `packages` (apt). Plan-tested
 (`scala_clojure_gleam_and_a_start_script_build_and_run`); `clojure_gleam_and_a_start_script_build_and_answer`
 builds a Leiningen app on the JDK's HTTP server, a Gleam app with an Erlang FFI server and a

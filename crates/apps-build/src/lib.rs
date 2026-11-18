@@ -361,10 +361,11 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         scala::detect,
         clojure::detect,
         gleam::detect,
-        // After every language (a start.sh beside a package.json is Node's), before a static
-        // site: a start.sh beside an index.html says what to run.
-        shell::detect,
+        // A static site first: one with a dev-only start.sh beside its index.html stays served
+        // as files (no instance), as it was before start.sh was built.
         static_site::detect,
+        // Last: a start.sh runs when nothing else says how to build the tree.
+        shell::detect,
     ];
     for detect in PROVIDERS {
         if let Some(draft) = detect(tree, &o)? {

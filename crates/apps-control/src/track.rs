@@ -28,6 +28,8 @@ const TOP_VALUES: usize = 5;
 /// Names counted apart before the rest are left out: a page that names events by an id can't
 /// make the map grow with every one.
 const MAX_NAMES: usize = 500;
+/// Properties counted apart per name.
+const MAX_PROPS: usize = 20;
 
 pub(crate) fn key(service: &str, env: &str) -> String {
     format!("events:{service}/{env}")
@@ -119,6 +121,11 @@ impl Apps {
             let entry = by.entry(e.name).or_default();
             entry.0 += 1;
             for (k, v) in e.props {
+                // A name's properties are counted apart up to MAX_PROPS: beacons that make up a
+                // new key each time can't make one read hold millions of them.
+                if entry.1.len() >= MAX_PROPS && !entry.1.contains_key(&k) {
+                    continue;
+                }
                 let values = entry.1.entry(k).or_default();
                 // As names are: a property that takes a new value every time stays bounded.
                 if values.len() < MAX_NAMES || values.contains_key(&v) {

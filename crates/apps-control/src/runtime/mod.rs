@@ -89,6 +89,13 @@ impl std::fmt::Debug for SidecarSpec {
     }
 }
 
+impl InstanceSpec {
+    /// What its sidecars are given, CPUs and MB: metered and scaled on with the instance.
+    pub fn sidecars_size(&self) -> (f64, u32) {
+        self.sidecars.iter().fold((0.0, 0), |(c, m), s| (c + s.cpu, m + s.memory_mb))
+    }
+}
+
 /// A sidecar's container: `<instance>-sc-<name>`.
 pub fn sidecar_name(instance: &str, sidecar: &str) -> String {
     format!("{instance}-sc-{sidecar}")
