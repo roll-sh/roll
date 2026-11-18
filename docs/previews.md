@@ -1688,12 +1688,9 @@ Ranked by what a person notices first. Done so far:
    #233 (a page's words masked whole before they're cut), #245 (what a preview's services use)
    and #259 (a preview made by hand is only of a repo the project stands for, and never another
    project's: both on main, found by an independent review) and #266 (`skip_authors`: no preview
-   for a dependency bot's pull request unless asked, Netlify's and Vercel's ignored builds).
-2. **Deploy hooks** (Vercel's and Netlify's): a secret URL a headless CMS calls when content is
-   published, so the project's previews of a branch glob rebuild at their heads (a static site
-   reads its content at build time). Made per project (the URL shown once, its SHA-256 kept),
-   coalesced to one rebuild a minute, named in each preview's activity.
-3. **A project's own preview domain** (Vercel's preview deployment suffix): previews at
+   for a dependency bot's pull request unless asked, Netlify's and Vercel's ignored builds) and
+   #272 (deploy hooks: a secret URL a headless CMS calls to rebuild a branch's previews).
+2. **A project's own preview domain** (Vercel's preview deployment suffix): previews at
    `<service>-<slug>.preview.acme.dev`, so cookies scoped to the team's domain and OAuth redirect
    allowlists work. Agreed with the apps thread on 2026-11-18: it goes through roll apps' domain
    records, one verified wildcard `Domain` per project for its previews (the same CNAME and
@@ -1704,24 +1701,24 @@ Ranked by what a person notices first. Done so far:
    local node, or the user's own TLS proxy); TLS needs wildcard certificates over DNS-01, with
    `_acme-challenge` delegated to a zone roll answers, which waits on the edge (apps' "Wildcard
    certificates", the roll cloud thread). Waits on apps' record kind.
-4. **Bots on Git URL services:** roll apps' `GitPull` carries no author, so `skip_authors` doesn't
+3. **Bots on Git URL services:** roll apps' `GitPull` carries no author, so `skip_authors` doesn't
    reach a Git URL service's pull requests (with the apps thread).
-5. **Roll only on roll apps' builds** (draft #234; apps' #222, #238 and #240 are on main, but main's `scripts/preview-apps.sh` fails at Roll only since: a request never reaches a closed `pv-` instance through its sandbox, so its health check fails; apps reproduced it and is fixing it): a closed
+4. **Roll only on roll apps' builds** (draft #234; apps' #222, #238 and #240 are on main, but main's `scripts/preview-apps.sh` fails at Roll only since: a request never reaches a closed `pv-` instance through its sandbox, so its health check fails; apps reproduced it and is fixing it): a closed
    environment's build gets none of its secrets and, with #238, no way out but the egress relay.
    rolld's adapter deploys nothing to a closed environment that doesn't say `build_closed`, and
    sends `closed: true` on each deploy, so an older node refuses it. A Git URL fork's head is
    approved under Roll only again.
-6. **One GitHub voice per pull request** (draft #251; apps' #249 is on main; waits on #234's live check): every `pv-`
+5. **One GitHub voice per pull request** (draft #251; apps' #249 is on main; waits on #234's live check): every `pv-`
    environment carries `report: false`, so roll apps posts no status or Deployment next to
    previews' `roll/preview`.
-7. **Deploy a preview's roll apps services at once** (measured twice and not landed; branch
+6. **Deploy a preview's roll apps services at once** (measured twice and not landed; branch
    `feature/roll-previews-deploy-at-once`). With cold builds it was within the noise, and with a
    second push's cached builds one run in two was faster. Try it on an idle host, or with more
    services.
-8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-9. **Watch: pg-control's recovery to a time seconds old** (unowned).
-10. **Watch: a cold start on a Docker name conflict.**
+8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+9. **Watch: a cold start on a Docker name conflict.**
 
 Landed in previews' lock turn of 2026-11-17 (main 42a3bbe1b, one combined gate with both live
 checks):
