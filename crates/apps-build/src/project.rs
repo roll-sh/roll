@@ -138,7 +138,7 @@ pub struct DbEntry {
 }
 
 /// What `[databases]` can declare: roll's products a service links by name.
-pub const DB_KINDS: [&str; 5] = ["postgres", "redis", "bucket", "stream", "nosql"];
+pub const DB_KINDS: [&str; 6] = ["postgres", "redis", "bucket", "stream", "nosql", "search"];
 
 pub fn valid_name(n: &str) -> bool {
     !n.is_empty() && n.len() <= 32 && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') && !n.starts_with('-') && !n.ends_with('-')
@@ -458,9 +458,9 @@ mod tests {
     /// (its URLs); a self-link or a name that's both an app and a database is refused.
     #[test]
     fn a_file_links_buckets_streams_and_other_apps() {
-        let f = parse_project("[apps.web]\nimage = \"a:1\"\nlinks = [\"api\", \"uploads\"]\n[apps.api]\nimage = \"b:1\"\nlinks = [\"events\", \"db\"]\n[databases.uploads]\nkind = \"bucket\"\n[databases.events]\nkind = \"stream\"\n[databases.db]\nkind = \"nosql\"\n").unwrap();
+        let f = parse_project("[apps.web]\nimage = \"a:1\"\nlinks = [\"api\", \"uploads\"]\n[apps.api]\nimage = \"b:1\"\nlinks = [\"events\", \"db\", \"logs\"]\n[databases.uploads]\nkind = \"bucket\"\n[databases.events]\nkind = \"stream\"\n[databases.db]\nkind = \"nosql\"\n[databases.logs]\nkind = \"search\"\n").unwrap();
         assert_eq!(f.apps["web"].links.iter().map(|l| link_kind(&f, l)).collect::<Vec<_>>(), ["service", "bucket"]);
-        assert_eq!(f.apps["api"].links.iter().map(|l| link_kind(&f, l)).collect::<Vec<_>>(), ["stream", "nosql"]);
+        assert_eq!(f.apps["api"].links.iter().map(|l| link_kind(&f, l)).collect::<Vec<_>>(), ["stream", "nosql", "search"]);
         assert!(parse_project("[apps.web]\nimage = \"a:1\"\nlinks = [\"web\"]\n").is_err(), "a self-link");
         assert!(parse_project("[apps.db]\nimage = \"a:1\"\n[databases.db]\nkind = \"redis\"\n").is_err(), "one name, two things");
         assert!(parse_project("[apps.web]\nimage = \"a:1\"\n[databases.q]\nkind = \"mysql\"\n").is_err(), "a kind roll doesn't have");

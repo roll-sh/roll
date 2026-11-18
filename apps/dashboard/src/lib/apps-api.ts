@@ -177,7 +177,7 @@ export interface ProjectImport {
       branch: string | null;
       run: Partial<Run>;
       /** A database's kind, or `service`: another app of the file, by its name. */
-      links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "service"; name: string }[];
+      links: { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "search" | "service"; name: string }[];
       /** What it's set to as it is. */
       variables: Record<string, string>;
       /** Made once, when the service is (`{ generate = "secret" }`): 32 random bytes in hex. */
@@ -188,7 +188,7 @@ export interface ProjectImport {
       environments?: Record<string, { branch: string | null; run: Partial<Record<EnvRunField, number>>; variables: Record<string, string> }>;
     }
   >;
-  databases: Record<string, { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" }>;
+  databases: Record<string, { kind: "postgres" | "redis" | "bucket" | "stream" | "nosql" | "search" }>;
 }
 
 export interface NewService {
