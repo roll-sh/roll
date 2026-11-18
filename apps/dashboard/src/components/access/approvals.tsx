@@ -1,11 +1,12 @@
 import { Bell, Hand } from "lucide-react";
 import { useEffect, useState } from "react";
-import { accessApi, approvalWhere, productName, REMEMBER, RISKY, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
+import { accessApi, accessRequest, approversText, parseApprovers, approvalWhere, deciderName, forLabel, gateProgress, productName, REMEMBER, RISKY, rememberable, type Approval, type ChatTarget, type Remember } from "@/lib/access-api";
 import { createIntegrationsApi, type ChatInstall } from "@/lib/integrations-api";
 import { call } from "@/lib/roll-api";
 import { useShownOwner } from "../agents/use-connection";
 import { btn, Connecting, danger, EmptyPanel, ErrorNote, input, Panel, primary } from "../ui";
 import { AccessShell, relative, usePoll } from "./shell";
+import { useResourceNames } from "./use-names";
 
 /**
  * `/dashboard/access/approvals`: requests waiting on you (an `ask` action), live, with exactly what
@@ -14,6 +15,7 @@ import { AccessShell, relative, usePoll } from "./shell";
  */
 export function Approvals({ focus }: { focus?: string }) {
   const pending = usePoll(() => accessApi.approvals("pending"), 2500);
+  const { data: me } = usePoll(() => accessApi.me(), 60_000);
   const recent = usePoll(() => accessApi.approvals(), 10_000);
   const refresh = async () => {
     await Promise.all([pending.refresh(), recent.refresh()]);
@@ -40,7 +42,7 @@ export function Approvals({ focus }: { focus?: string }) {
         ) : (
           <section className="space-y-3" aria-label="Waiting for you">
             {waiting.map((a) => (
-              <Pending key={a.id} a={a} focused={a.id === focus} refresh={refresh} />
+              <Pending key={a.id} a={a} focused={a.id === focus} refresh={refresh} viewer={deciderName(me)} />
             ))}
           </section>
         )}
@@ -64,17 +66,20 @@ export function Approvals({ focus }: { focus?: string }) {
   );
 }
 
-function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refresh: () => Promise<void> }) {
+function Pending({ a, focused, refresh, viewer }: { a: Approval; focused: boolean; refresh: () => Promise<void>; viewer: string | null }) {
   const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
   const [reason, setReason] = useState("");
   const [denying, setDenying] = useState(false);
   const [remember, setRemember] = useState<Remember>("once");
   const [error, setError] = useState<string | null>(null);
+  // Approved here, and roll's policy asks someone else too: this person's part is done.
+  const [approvedNow, setApprovedHere] = useState(false);
+  const approvedHere = approvedNow || Boolean(viewer && a.approved_by?.includes(viewer));
   const decide = async (approve: boolean) => {
     setBusy(approve ? "approve" : "deny");
     setError(null);
     try {
-      if (approve) await accessApi.approve(a.id, remember);
+      if (approve) setApprovedHere((await accessApi.approve(a.id, remember)).state === "pending");
       else await accessApi.deny(a.id, reason.trim() || undefined);
       await refresh();
     } catch (e) {
@@ -84,6 +89,7 @@ function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refre
     }
   };
   const destructive = RISKY.includes(a.action);
+  const { resourceName } = useResourceNames();
   return (
     <article className={`rise rounded-xl border bg-panel p-5 ${focused ? "border-accent/60" : "border-line"}`}>
       <div className="flex flex-wrap items-start gap-3">
@@ -99,12 +105,25 @@ function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refre
             ) : null}
           </p>
           <h2 className="mt-1 truncate font-mono text-[14px]">
-            {a.resource ?? productName(a.product)}
-            {approvalWhere(a) && <span className="text-muted"> · {approvalWhere(a)}</span>}
+            <span title={a.resource ?? undefined}>{a.resource ? resourceName(a.product, a.resource) : productName(a.product)}</span>
+            {(approvalWhere(a) || (accessRequest(a) && "every environment")) && <span className="text-muted"> · {approvalWhere(a) || "every environment"}</span>}
           </h2>
-          <p className="mt-1 font-mono text-[11px] text-subtle">
-            {a.method} {a.route} · asked {relative(a.created_at)} · expires {relative(a.expires_at)}
-          </p>
+          {accessRequest(a) ? (
+            <p className="mt-1 text-[13px]">
+              <span className="text-muted">asks for {forLabel(accessRequest(a)!.for)}:</span> {accessRequest(a)!.reason}
+              <span className="font-mono text-[11px] text-subtle"> · asked {relative(a.created_at)} · expires {relative(a.expires_at)}</span>
+            </p>
+          ) : (
+            <p className="mt-1 font-mono text-[11px] text-subtle">
+              {a.method} {a.route} · asked {relative(a.created_at)} · expires {relative(a.expires_at)}
+            </p>
+          )}
+          {gateProgress(a) && (
+            <p className="mt-1 text-[12px] text-accent">
+              {gateProgress(a)}
+              {approvedHere && <span className="text-muted"> · you've approved: it waits for someone else</span>}
+            </p>
+          )}
         </div>
         <div className="flex shrink-0 gap-2">
           {rememberable(a) && (
@@ -122,7 +141,7 @@ function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refre
               ))}
             </select>
           )}
-          <button onClick={() => decide(true)} disabled={busy !== null} className={destructive ? danger : primary}>
+          <button onClick={() => decide(true)} disabled={busy !== null || approvedHere} className={destructive ? danger : primary}>
             {busy === "approve" ? <span className="shimmer">Approving…</span> : "Approve"}
           </button>
           <button onClick={() => (denying ? decide(false) : setDenying(true))} disabled={busy !== null} className={btn}>
@@ -130,7 +149,7 @@ function Pending({ a, focused, refresh }: { a: Approval; focused: boolean; refre
           </button>
         </div>
       </div>
-      {a.args !== null && a.args !== undefined && <Args args={a.args} />}
+      {a.args !== null && a.args !== undefined && !accessRequest(a) && <Args args={a.args} />}
       {denying && (
         <input
           autoFocus
@@ -185,7 +204,7 @@ function ChatSetting() {
         setCurrent(n.chat);
         setInstall(n.chat?.install ?? "");
         setChannel(n.chat?.channel ?? "");
-        setApprovers(n.chat?.approvers?.join(", ") ?? "");
+        setApprovers(n.chat ? approversText(n.chat) : "");
       })
       .catch(() => setCurrent(null));
   }, []);
@@ -233,8 +252,8 @@ function ChatSetting() {
           className="rise flex flex-wrap items-center gap-2"
           onSubmit={(e) => {
             e.preventDefault();
-            const ids = approverIds(approvers);
-            if (install && channel.trim() && ids.length) void save({ install, channel: channel.trim().replace(/^#/, ""), approvers: ids });
+            const { approvers: ids, people } = parseApprovers(approvers);
+            if (install && channel.trim() && ids.length) void save({ install, channel: channel.trim().replace(/^#/, ""), approvers: ids, ...(Object.keys(people).length ? { people } : {}) });
           }}
         >
           <select value={install} onChange={(e) => setInstall(e.target.value)} className={input} aria-label="Slack workspace">
@@ -249,11 +268,11 @@ function ChatSetting() {
           <input
             value={approvers}
             onChange={(e) => setApprovers(e.target.value)}
-            placeholder="Who may decide: Slack member ids (U0123…, U0456…)"
+            placeholder="Who may decide: Slack member ids (U0123…, U0456=usr_… links an account)"
             className={`${input} min-w-64 flex-1 font-mono text-[12px]`}
             aria-label="Approvers' Slack member ids"
           />
-          <button type="submit" disabled={!install || !channel.trim() || approverIds(approvers).length === 0} className={primary}>
+          <button type="submit" disabled={!install || !channel.trim() || parseApprovers(approvers).approvers.length === 0} className={primary}>
             Save
           </button>
         </form>
@@ -261,11 +280,6 @@ function ChatSetting() {
       <ErrorNote error={error} />
     </div>
   );
-}
-
-/** Slack member ids typed as a list (commas, spaces or new lines). */
-function approverIds(text: string): string[] {
-  return [...new Set(text.split(/[\s,]+/).map((s) => s.trim().replace(/^@/, "")).filter(Boolean))];
 }
 
 /**
