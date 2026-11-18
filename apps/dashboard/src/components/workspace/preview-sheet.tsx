@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { appsApi } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
-import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare, type RequestLine } from "@/lib/previews-api";
+import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics } from "@/lib/previews-api";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
@@ -77,6 +77,7 @@ export function PreviewSheet({
   const [deleting, setDeleting] = useState(false);
   const gone = p.desired === "deleted";
   const asleep = p.state === "sleeping";
+  const metrics = useServiceMetrics(p);
 
   const run = async (key: string, fn: () => Promise<Preview>) => {
     setBusy(key);
@@ -183,6 +184,7 @@ export function PreviewSheet({
                       <StateDot state={s.state} />
                       <span className="font-medium">{s.name}</span>
                       <span className="text-[11px] text-subtle">{s.state}</span>
+                      {metrics.get(s.name) && <span className="font-mono text-[10.5px] text-subtle">{metricsText(metrics.get(s.name)!)}</span>}
                       {s.deployed && <span className="ml-auto font-mono text-[10.5px] text-subtle">{s.deployed.slice(0, 8)}</span>}
                     </div>
                     <div className="mt-0.5 flex items-center gap-2">
@@ -470,6 +472,7 @@ export function PreviewSheet({
                       : "with its change",
                 ],
                 ["created by", p.created_by],
+                ...(p.reported_by ? ([["reported by", `${p.reported_by}: the pull request hears from that project's preview, not this one`]] as [string, string][]) : []),
               ]}
             />
           </>
@@ -1296,6 +1299,38 @@ export function PhoneCode({ id, service }: { id: string; service: string }) {
 
 /** Lines a followed log keeps. */
 const LOG_KEEP = 2000;
+
+/** What its running services use, read again every 15 s while one runs and the sheet is in view. */
+function useServiceMetrics(p: Preview): Map<string, ServiceMetrics> {
+  const [m, setM] = useState<Map<string, ServiceMetrics>>(new Map());
+  const running = p.services.some((s) => s.state === "running");
+  const visible = useVisible();
+  useEffect(() => {
+    if (!running || !visible) {
+      setM(new Map());
+      return;
+    }
+    let live = true;
+    const read = () =>
+      previewsApi.metrics(p.id).then(
+        (r) => live && setM(new Map(r.services.map((x) => [x.service, x]))),
+        () => {},
+      );
+    void read();
+    const t = setInterval(read, 15_000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [p.id, running, visible]);
+  return m;
+}
+
+/** `0.25 CPU · 96 of 256 MB`. */
+function metricsText(m: ServiceMetrics): string {
+  const mb = Math.round(m.memory_bytes / (1024 * 1024));
+  return `${m.cpu < 0.01 ? "0" : m.cpu.toFixed(2)} CPU · ${mb}${m.memory_mb > 0 ? ` of ${m.memory_mb}` : ""} MB`;
+}
 
 /** Its latest requests through roll (Vercel's request log): newest first, errors at a glance. */
 function Requests({ preview: p }: { preview: Preview }) {
