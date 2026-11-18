@@ -38,6 +38,16 @@ pub struct TestNode {
     pub addr: SocketAddr,
 }
 
+/// Cancels the node's running tasks when a test ends, passed or failed. A by-query run keeps
+/// scanning after its request is dropped, as Elasticsearch's does, so a test that fails while
+/// one runs an endless script would otherwise never end: dropping the test's runtime waits for
+/// the thread running it.
+impl Drop for TestNode {
+    fn drop(&mut self) {
+        self.node.cancel_tasks();
+    }
+}
+
 /// A node with clusters `c1` (password `pw1`) and `c2` (password `pw2`).
 pub async fn start(cfg: NodeConfig, opts: ListenOptions) -> TestNode {
     let catalog = Arc::new(StaticCatalog::new());
@@ -115,15 +125,44 @@ pub async fn read_response<S: AsyncRead + Unpin>(s: &mut S, buf: &mut Vec<u8>, h
     }
 }
 
-pub async fn send_on<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Resp {
+/// How long a request may go unanswered before the test fails.
+const ANSWER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// `fut`'s output, or a panic naming `what` once `limit` has passed. The clock is a thread of
+/// its own: a task that blocks a runtime worker can stop the runtime's I/O driver, and its
+/// timers (`tokio::time::timeout`) with it, while this still wakes the test.
+pub async fn within<T>(limit: std::time::Duration, what: impl FnOnce() -> String, fut: impl std::future::Future<Output = T>) -> T {
+    let (alarm, rang) = tokio::sync::oneshot::channel::<()>();
+    let (done, finished) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        if finished.recv_timeout(limit) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+            let _ = alarm.send(());
+        }
+    });
+    let out = tokio::select! {
+        out = fut => out,
+        _ = rang => panic!("{} in {limit:?}", what()),
+    };
+    drop(done);
+    out
+}
+
+async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Resp {
     s.write_all(&request(method, path, headers, body)).await.unwrap();
     let mut buf = Vec::new();
     read_response(s, &mut buf, method == "HEAD").await
 }
 
+pub async fn send_on<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Resp {
+    within(ANSWER_DEADLINE, || format!("{method} {path}: no answer"), exchange(s, method, path, headers, body)).await
+}
+
 pub async fn send(addr: SocketAddr, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Resp {
-    let mut s = TcpStream::connect(addr).await.unwrap();
-    send_on(&mut s, method, path, headers, body).await
+    let connected = async {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        exchange(&mut s, method, path, headers, body).await
+    };
+    within(ANSWER_DEADLINE, || format!("{method} {path}: no answer"), connected).await
 }
 
 pub fn basic(user: &str, pass: &str) -> String {
