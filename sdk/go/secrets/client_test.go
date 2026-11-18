@@ -358,3 +358,86 @@ func TestPrintingNeverShowsAValueOrTheToken(t *testing.T) {
 		t.Fatalf("keys should still show: %s", fmt.Sprint(v))
 	}
 }
+
+// One key's record (A its own, B a link's through the base) and A's value, stored as a reference
+// that resolve=true follows, after a login whose OIDC token comes from a source.
+func TestAKeysRecordAndStoredValueAfterALoginFromATokenSource(t *testing.T) {
+	var mu sync.Mutex
+	logins, valueReads := 0, 0
+	records := map[string]any{
+		"A": map[string]any{"key": "A", "path": "/api", "type": "shared", "version": 3, "comment": "made up", "tags": []string{}, "link": nil, "source": map[string]string{"kind": "own"}},
+		"B": map[string]any{"key": "B", "path": "/api", "type": "shared", "version": 1, "comment": "", "link": map[string]string{"kind": "postgres", "ref": "pg_1", "field": "url", "mode": "live"}, "source": map[string]string{"kind": "base", "environment": "development"}},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		answer := func(status int, v any) {
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(v)
+		}
+		if r.URL.Path == "/v1/secrets/login" {
+			var b map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			if b["identity"] != "idn_ci" || b["token"] != "fake-oidc" {
+				answer(401, map[string]string{"error": "no identity idn_ci takes this token"})
+				return
+			}
+			logins++
+			answer(200, map[string]any{"token": "rlt_reads", "project": "prj_a", "expires_at": time.Now().Add(time.Hour).UnixMilli()})
+			return
+		}
+		key, ok := strings.CutPrefix(r.URL.Path, "/v1/secrets/projects/prj_a/environments/staging/secrets/")
+		if !ok || r.Header.Get("Authorization") != "Bearer rlt_reads" || r.URL.Query().Get("path") != "/api" {
+			answer(401, map[string]string{"error": "who"})
+			return
+		}
+		if key == "A/value" {
+			valueReads++
+			v := "fake-resolved"
+			if r.URL.Query().Get("resolve") == "false" {
+				v = "${development.FAKE_URL}"
+			}
+			answer(200, map[string]any{"value": v, "problems": []any{}})
+			return
+		}
+		if rec, ok := records[key]; ok {
+			answer(200, rec)
+			return
+		}
+		answer(404, map[string]string{"error": "no secret " + key + " in staging:/api"})
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+
+	sourced := 0
+	c, err := LoginWithIdentity(ctx, srv.URL, "idn_ci", func(context.Context) (string, error) { sourced++; return "fake-oidc", nil })
+	if err != nil || sourced != 1 || logins != 1 || c.Project != "prj_a" {
+		t.Fatalf("the source gives the login its OIDC token: %v %d %d", err, sourced, logins)
+	}
+	c.CacheTTL = time.Hour
+
+	a, err := c.Secret(ctx, "staging", "/api", "A")
+	if err != nil || a.Version != 3 || a.Comment != "made up" || a.LinkKind != "" || a.Source.Kind != "own" {
+		t.Fatalf("%+v %v", a, err)
+	}
+	b, err := c.Secret(ctx, "staging", "/api", "B")
+	if err != nil || b.LinkKind != "postgres" || b.Source != (Source{Kind: "base", Environment: "development"}) {
+		t.Fatalf("a link shows its kind only: %+v %v", b, err)
+	}
+	if s, err := c.Secret(ctx, "staging", "/api", "NOPE"); s != nil || err != nil {
+		t.Fatalf("a missing key is nil: %+v %v", s, err)
+	}
+
+	for range 2 {
+		if v, err := c.StoredValue(ctx, "staging", "/api", "A"); err != nil || v != "${development.FAKE_URL}" {
+			t.Fatalf("the reference as written: %q %v", v, err)
+		}
+	}
+	if valueReads != 2 {
+		t.Fatalf("never kept, whatever CacheTTL says: %d reads", valueReads)
+	}
+	var e *Error
+	if _, err := c.StoredValue(ctx, "staging", "/api", "NOPE"); !errors.As(err, &e) || e.Status != 404 {
+		t.Fatalf("%v", err)
+	}
+}

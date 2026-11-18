@@ -99,6 +99,12 @@ export type Item = { key: string; path: string; type: SecretType; what: string[]
 export type Written = { change: Change | null; secret: Secret | null; warnings: string[] };
 /** The client's `delete`: `deleted` is false when the key wasn't there. */
 export type Deleted = { deleted: boolean; change: Change | null };
+/**
+ * The client's `secret`: one key's record as a folder sees it, never its value. `link_kind` is the
+ * kind of the link the value comes from (`postgres`, `github`…), null for a value stored in roll;
+ * `source` says where it's set (its own, a base's or an import's).
+ */
+export type SecretInfo = Pick<Secret, "key" | "path" | "type" | "version" | "comment" | "tags" | "source" | "updated_at" | "updated_by" | "expires_at"> & { link_kind: string | null };
 /** `change` is null when nothing changed. */
 /** `request`: the change request opened instead (a promotion into a protected environment). */
 export type Applied = { change: Change | null; items: Item[]; warnings: string[]; request?: ChangeRequest };

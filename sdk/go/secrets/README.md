@@ -3,7 +3,8 @@
 A client for roll secrets (docs/secrets.md, "Consumption"), with the same surface as
 `@roll/secrets`: an environment's values, the runtime resolve (sealed to a key only this
 process holds, if asked), the digest that moves when the values would, a watch that
-follows it and renews dynamic leases, and one key's writes. Standard library only.
+follows it and renews dynamic leases, one key's record and stored value, and one key's
+writes. Standard library only.
 
 ```go
 // ROLL_API_URL and ROLL_TOKEN (a roll token with a rule on the project), or ROLL_IDENTITY
@@ -46,6 +47,20 @@ v, err = c.Values(ctx, "production", "", secrets.WithoutDynamic())
 // both drop what CacheTTL kept.
 w, err := c.Set(ctx, "staging", "/api", "FEATURE_FLAGS", "beta", secrets.SetOptions{})
 d, err := c.Delete(ctx, "staging", "/api", "OLD_KEY") // d.Deleted
+
+// One key's reads, for a tool that writes only what differs. Secret is the key's record
+// without its value (Version, Comment, LinkKind, Source.Kind "own", "base" or "import"), nil
+// when the folder has no such key. StoredValue is the value as stored, references unresolved:
+// a reveal, audited and never kept by CacheTTL, and no error holds it.
+s, err := c.Secret(ctx, "staging", "/api", "FEATURE_FLAGS")
+stored, err := c.StoredValue(ctx, "staging", "/api", "FEATURE_FLAGS")
+
+// A workload identity's login with a token source called for a fresh OIDC token at each
+// login (FromEnv uses secrets.OIDCTokenFromEnv).
+c, err = secrets.LoginWithIdentity(ctx, api, "idn_…", func(ctx context.Context) (string, error) {
+	b, err := os.ReadFile(tokenFile)
+	return string(b), err
+})
 ```
 
 Tests: `go test -race ./...` here (CI's `sdk` job), or without Go installed:

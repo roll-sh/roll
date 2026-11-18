@@ -87,7 +87,8 @@ jobs:
           filter: dashboard...
       - run: pnpm --filter dashboard exec vitest run --shard=${{ matrix.shard }}/3
 
-  # roll secrets' Go, Python and Ruby clients (sdk/): the same surface as @roll/secrets.
+  # roll secrets' Go, Python and Ruby clients (sdk/): the same surface as @roll/secrets; the Ansible
+  # collection on the Python one.
   sdk:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -142,6 +143,13 @@ jobs:
       - name: Ruby
         working-directory: sdk/ruby/roll_secrets
         run: ruby -w -Ilib -Itest -e 'Dir["test/*_test.rb"].each { |f| require_relative f }'
+      # The roll.secrets collection on the Python client: the plugins in process, then a playbook
+      # through ansible-galaxy and ansible-playbook against a fake rolld.
+      - name: Ansible
+        working-directory: sdk/ansible
+        run: |
+          pip install -q ansible-core==2.21.6 ../python/roll_secrets
+          python -m unittest discover -s tests
 
   # roll secrets' Java client (sdk/java/secrets), in its own job so the sdk one stays quick.
   java:

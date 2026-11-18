@@ -74,7 +74,7 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    and `watch` follows the digest and renews dynamic credentials' leases, as `roll run --watch` does:
 
    ```ts
-   import { createClient, generateKeyPair } from "@roll/secrets";
+   import { createClient, generateKeyPair, loginWithIdentity } from "@roll/secrets";
 
    const secrets = createClient({ api: process.env.ROLL_API_URL!, token: process.env.ROLL_TOKEN! });
    const { values } = await secrets.values("staging");
@@ -97,14 +97,33 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    await secrets.set("staging", "FEATURE_FLAGS", "beta", { path: "/api", comment: "rollout" });
    const { deleted } = await secrets.delete("staging", "OLD_KEY", { path: "/api" });
 
+   // One key's reads, for a tool that writes only what differs (a playbook's check mode). `secret`
+   // is the key's record without its value (`GET …/secrets/{key}`: `version`, `comment`, the
+   // link's `link_kind` only, and `source`: own, base or import), null when the folder has no such
+   // key. `storedValue` is the value as stored, references unresolved (`…/value?resolve=false`):
+   // a reveal, audited and never cached, and no error holds it.
+   const record = await secrets.secret("staging", "FEATURE_FLAGS", { path: "/api" });
+   const stored = await secrets.storedValue("staging", "FEATURE_FLAGS", { path: "/api" });
+
+   // A workload identity's login with the workload's own OIDC token: `tokenSource` is called for a
+   // fresh one at each login (the first, then before the roll token ends and when it's refused).
+   const ci = await loginWithIdentity({ api: process.env.ROLL_API_URL!, identity: "idn_…", tokenSource: () => readFile(tokenFile, "utf8") });
+
    // An encryption key (below, "Encryption keys"): the key stays in roll.
    const cards = secrets.transit("cards");
    const ct = await cards.encrypt(cardNumber, `order:${id}`);
    const index = await cards.hmac(email); // a lookup column over encrypted emails
    ```
 
-   The Go and Python clients name these `Values(…, secrets.WithoutDynamic())`, `Set` and
-   `Delete`, and `values(…, dynamic=False)`, `set` and `delete`.
+   The Go and Python clients name these `Values(…, secrets.WithoutDynamic())`, `Set`, `Delete`,
+   `Secret` (a `*SecretInfo`, nil when missing), `StoredValue` and
+   `secrets.LoginWithIdentity(ctx, api, identity, tokenSource)`, and `values(…, dynamic=False)`,
+   `set`, `delete`, `secret` (a `SecretInfo`, None when missing), `stored_value` and
+   `roll_secrets.login_with_identity(api, identity, token_source)`. All three export the OIDC
+   token source their `fromEnv`/`FromEnv`/`from_env` uses (`oidcTokenFromEnv`, `OIDCTokenFromEnv`,
+   `oidc_token_from_env`): `ROLL_OIDC_TOKEN`, the file `ROLL_OIDC_TOKEN_FILE` names, or GitHub
+   Actions' token for `ROLL_OIDC_AUDIENCE` (the API's URL by default). In TypeScript,
+   `await fromEnv()` reads `ROLL_API_URL`, `ROLL_TOKEN` or `ROLL_IDENTITY`, and `ROLL_PROJECT`.
 
    In Go, `sdk/go/secrets` has the same surface, and `FromEnv` logs a workload identity in with
    its own OIDC token as `roll run` does (`ROLL_IDENTITY`). It logs in again before the login's
@@ -273,6 +292,25 @@ steps:
   candidates as `roll secrets scan` cuts them and checked with `POST …/leaks` (fingerprints; only
   values the token may reveal), and each stored value found fails the check with an annotation on
   its file and line naming the key and environment, never the value.
+## Ansible
+`sdk/ansible` is the `roll.secrets` collection, as Vault's `community.hashi_vault` and 1Password's
+`onepassword.connect` are, built on the Python client (`sdk/python/roll_secrets`) with the same
+settings (`ROLL_API_URL`, `ROLL_TOKEN` or `ROLL_IDENTITY` with an OIDC token, `ROLL_PROJECT`):
+```yaml
+- ansible.builtin.template: { src: api.env.j2, dest: /etc/api.env, mode: "0600" }
+  vars:
+    db_url: "{{ lookup('roll.secrets.secret', 'DB_URL', environment='production', path='/api', project='shop') }}"
+  no_log: true
+- roll.secrets.secret: { environment: staging, key: LOG_LEVEL, value: info }   # or state: absent
+  delegate_to: localhost
+```
+- The lookup returns values, or a folder with `as_dict=true`, marked unsafe so Ansible never
+  templates them. It reads with `dynamic=false`: a playbook renews no lease, so dynamic keys are
+  left out and none is issued unless `dynamic=true` asks. Reads go through the client's cache
+  (`cache_ttl`, 30 s), which spans one task's worker process.
+- The module sets or deletes one key and is idempotent (the same value writes nothing). Check mode
+  compares the stored value on the host running the module (`reveal`), and the result never holds
+  the value (`value` is `no_log`). Errors name the key and roll's message, never a value.
 ## Azure Pipelines
 
 A pipeline logs in with its own OIDC token, as GitHub Actions' jobs do: nothing long-lived in its
@@ -3459,6 +3497,8 @@ rotating a database's admin password and editing registrations in place (#75), s
    the cache, transit); its Spring `PropertySource` adapter is next. .NET
    is built (`sdk/dotnet/secrets`, `feature/roll-secrets-dotnet`: values, sealed resolves with its
    own X25519, long-polled watches, the cache, transit, and `AddRollSecrets` for `IConfiguration`).
+   The Ansible collection is built (`sdk/ansible`, `roll.secrets`: a lookup and a module, as
+   Vault's and 1Password's; `feature/roll-secrets-ansible`).
 10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
    CAs**.
 11. *Landing (approved):* #20 and #62 are on main; the follow-ups go one at a time when the merge

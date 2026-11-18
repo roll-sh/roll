@@ -1,10 +1,11 @@
 // Package secrets is a client for roll secrets (docs/secrets.md, "Consumption"): an environment's
 // values, the runtime resolve (sealed to a key only this process holds, if asked), the digest that
-// changes when the values would, a watch that follows it, and one key's writes. It mirrors
-// @roll/secrets.
+// changes when the values would, a watch that follows it, one key's record and stored value, and
+// one key's writes. It mirrors @roll/secrets.
 //
 // A client holds a roll token (`rlt_…`, roll-access's) with a rule on one project, the operator
-// token, or the short-lived token a workload identity's login gives (Login, FromEnv).
+// token, or the short-lived token a workload identity's login gives (Login, LoginWithIdentity,
+// FromEnv).
 package secrets
 
 import (
@@ -321,6 +322,101 @@ type Secret struct {
 	UpdatedAt int64    `json:"updated_at"`
 	UpdatedBy string   `json:"updated_by"`
 	ExpiresAt *int64   `json:"expires_at"`
+}
+
+// SecretInfo is one key's record as a folder sees it, never its value.
+type SecretInfo struct {
+	Key     string
+	Path    string
+	Type    string
+	Version int64
+	Comment string
+	Tags    []string
+	// LinkKind is the kind of the link the value comes from (postgres, github…); "" for a value
+	// stored in roll.
+	LinkKind  string
+	Source    Source
+	UpdatedAt int64
+	UpdatedBy string
+	ExpiresAt *int64
+}
+
+// Source is where a key's record comes from: Kind "own" (set in the folder itself), "base" (the
+// environment's base, Environment) or "import" (an imported folder: Environment and Path, and
+// Project when another project shares it).
+type Source struct {
+	Kind        string `json:"kind"`
+	Environment string `json:"environment,omitempty"`
+	Path        string `json:"path,omitempty"`
+	Project     string `json:"project,omitempty"`
+}
+
+// Secret is key's record as path's folder ("" for the root) sees it, without its value: its
+// version, comment, link kind and where it's set (Source: its own, a base's or an import's). nil,
+// with no error, when the folder has no such key.
+func (c *Client) Secret(ctx context.Context, env, path, key string) (*SecretInfo, error) {
+	u, err := c.secretURL(ctx, env, path, key)
+	if err != nil {
+		return nil, err
+	}
+	var s struct {
+		Key     string   `json:"key"`
+		Path    string   `json:"path"`
+		Type    string   `json:"type"`
+		Version int64    `json:"version"`
+		Comment string   `json:"comment"`
+		Tags    []string `json:"tags"`
+		Link    *struct {
+			Kind string `json:"kind"`
+		} `json:"link"`
+		Source    Source `json:"source"`
+		UpdatedAt int64  `json:"updated_at"`
+		UpdatedBy string `json:"updated_by"`
+		ExpiresAt *int64 `json:"expires_at"`
+	}
+	if err := c.call(ctx, http.MethodGet, u, nil, &s); err != nil {
+		var e *Error
+		if errors.As(err, &e) && e.Status == http.StatusNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	info := &SecretInfo{Key: s.Key, Path: s.Path, Type: s.Type, Version: s.Version, Comment: s.Comment, Tags: s.Tags, Source: s.Source, UpdatedAt: s.UpdatedAt, UpdatedBy: s.UpdatedBy, ExpiresAt: s.ExpiresAt}
+	if s.Link != nil {
+		info.LinkKind = s.Link.Kind
+	}
+	return info, nil
+}
+
+// StoredValue is key's value as stored, references left as written (`resolve=false`). It's a
+// reveal: the token needs `reveal`, the read is audited, and CacheTTL never keeps it. A linked
+// key's value still comes from its link. A key that doesn't read (sensitive, a link that failed)
+// is an *Error with the Code `unresolved`; errors never hold the value.
+func (c *Client) StoredValue(ctx context.Context, env, path, key string) (string, error) {
+	e, err := c.env(ctx, env)
+	if err != nil {
+		return "", err
+	}
+	q := query(path)
+	if q == "" {
+		q = "?resolve=false"
+	} else {
+		q += "&resolve=false"
+	}
+	var r struct {
+		Value    *string   `json:"value"`
+		Problems []Problem `json:"problems"`
+	}
+	if err := c.call(ctx, http.MethodGet, e+"/secrets/"+url.PathEscape(key)+"/value"+q, nil, &r); err != nil {
+		return "", err
+	}
+	if len(r.Problems) > 0 {
+		return "", &Error{Status: 409, Code: "unresolved", Message: key + " doesn't read: " + r.Problems[0].Problem}
+	}
+	if r.Value == nil {
+		return "", &Error{Status: 502, Message: "the answer for " + key + " has no value"}
+	}
+	return *r.Value, nil
 }
 
 // Written is what a write answers: the change (nil when nothing changed) and the key now.

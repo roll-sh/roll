@@ -298,3 +298,68 @@ class OneKeyWrites(unittest.TestCase):
             c.set("production", "C", "fake-value-2", path="/api")
         self.assertEqual((e.exception.code, e.exception.status), ("approval_required", 409))
         self.assertNotIn("fake-value-2", repr(e.exception) + str(e.exception) + repr(e.exception.__cause__) + repr(e.exception.__context__))
+
+
+class Reads(BaseHTTPRequestHandler):
+    """rolld's one-key reads after a workload identity's login: a key's record (A its own, B a
+    link's through the base) and A's value, stored as a reference that resolve=true follows."""
+
+    state = {"logins": 0, "values": 0}
+    prefix = "/v1/secrets/projects/prj_a/environments/staging/secrets/"
+    records = {
+        "A": {"key": "A", "path": "/api", "type": "shared", "version": 3, "comment": "made up", "tags": [], "link": None, "source": {"kind": "own"}, "updated_at": 1, "updated_by": "rlt_x", "expires_at": None},
+        "B": {"key": "B", "path": "/api", "type": "shared", "version": 1, "comment": "", "tags": [], "link": {"kind": "postgres", "ref": "pg_1", "field": "url", "mode": "live"}, "source": {"kind": "base", "environment": "development"}, "updated_at": 2, "updated_by": "rlt_x", "expires_at": None},
+    }
+
+    def log_message(self, *_):
+        pass
+
+    def answer(self, code, body):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def do_POST(self):
+        b = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if (self.path, b) != ("/v1/secrets/login", {"identity": "idn_ci", "token": "fake-oidc"}):
+            return self.answer(401, {"error": "no identity idn_ci takes this token"})
+        Reads.state["logins"] += 1
+        self.answer(200, {"token": "rlt_reads", "project": "prj_a", "expires_at": int(time.time() * 1000) + 3_600_000})
+
+    def do_GET(self):
+        u = urllib.parse.urlsplit(self.path)
+        q = urllib.parse.parse_qs(u.query)
+        key = u.path[len(Reads.prefix):]
+        if self.headers.get("Authorization") != "Bearer rlt_reads" or q.get("path") != ["/api"]:
+            return self.answer(401, {"error": "who"})
+        if key == "A/value":
+            Reads.state["values"] += 1
+            return self.answer(200, {"value": "fake-resolved" if q.get("resolve") != ["false"] else "${development.FAKE_URL}", "problems": []})
+        if key in Reads.records:
+            return self.answer(200, Reads.records[key])
+        self.answer(404, {"error": f"no secret {key} in staging:/api"})
+
+
+class OneKeyReads(unittest.TestCase):
+    def test_a_keys_record_and_stored_value_after_a_login_from_a_token_source(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Reads)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        sourced = []
+        c = roll_secrets.login_with_identity(f"http://127.0.0.1:{server.server_address[1]}", "idn_ci", lambda: sourced.append(1) or "fake-oidc", cache_ttl=3600)
+        self.assertEqual((len(sourced), Reads.state["logins"], c.project), (1, 1, "prj_a"), "the source gives the login its OIDC token")
+        self.assertIs(roll_secrets._logged_in, roll_secrets.login_with_identity)
+
+        a = c.secret("staging", "A", path="/api")
+        self.assertEqual((a.version, a.comment, a.link_kind, a.source.kind), (3, "made up", None, "own"))
+        b = c.secret("staging", "B", path="/api")
+        self.assertEqual((b.link_kind, b.source), ("postgres", roll_secrets.Source("base", "development")), "a link shows its kind only")
+        self.assertIsNone(c.secret("staging", "NOPE", path="/api"), "a missing key is None")
+
+        self.assertEqual(c.stored_value("staging", "A", path="/api"), "${development.FAKE_URL}", "the reference as written")
+        c.stored_value("staging", "A", path="/api")
+        self.assertEqual(Reads.state["values"], 2, "never kept, whatever cache_ttl says")
+        with self.assertRaises(roll_secrets.SecretsError) as e:
+            c.stored_value("staging", "NOPE", path="/api")
+        self.assertEqual(e.exception.status, 404)
