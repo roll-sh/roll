@@ -1804,11 +1804,11 @@ Ranked by what a person notices first. Done so far:
    for its instances, the same grouping over roll's runtime's logs (stack traces joined, ids and
    numbers taken out), masked as logs are; the count on the row and the pull request comment's
    "What went wrong".
-6. **A project's own preview domain, the wiring** (previews' half #275 is on main): after apps'
+6. **A project's own preview domain, the wiring, in review** (draft #341, on #305; previews' half #275 is on main): after apps'
    #278, rolld hands apps' `PreviewRouter` previews' `runtime::serve_host`, and
    `scripts/preview-apps.sh` checks a verified domain over plain HTTP, a roll apps service and a
    runtime one by label. TLS waits on wildcard certificates over DNS-01 on the edge.
-7. **Bots on Git URL services** (draft #305, on apps' #282): previews' own `GitPull` carries the
+7. **Bots on Git URL services** (draft #305, on apps' #282; and draft #343 on apps' #317: a bot's branch push makes no preview at all, by its pusher): previews' own `GitPull` carries the
    opener and `skip_authors` reaches a Git URL service's pull requests. Undraft once #282 is on
    main.
 8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
