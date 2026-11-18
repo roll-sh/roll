@@ -10727,6 +10727,192 @@ pg_dump_tap 14,609 passed. Again on the rebased head (`79047fd52`, one rerun aft
 engine found its ephemeral-range port taken): 432 tests in 27 binaries, the same crash, regress, isolation
 and pg_dump results. No format change.
 
+## Store blocks and caches: small caches, the block cache's lookups, peak memory (agent 247)
+
+BENCH.md "Store blocks and caches" has the measurements. Two commits (`cand/a247-2`): the bottom
+level's format 2 blocks smaller and compressed with a per-file zstd dictionary, read through kept
+scratch; and a cached block in one allocation. **A storage format change, one-way for older
+builds** (below). Reclaiming marked files came first, on its own (`cand/a247`, landed:
+"Reclaiming marked files" below).
+
+**Where a small cache's time went** (base `6d3b7e9e5`, TPC-H SF1, 256 MB cache, lane C). zstd was
+58-60% of q07's and q09's cycles: `ZSTD_decompressSequences` 47%, the entropy tables each block's
+header made the decoder build ~12%. Counting the block reads by kind (an instrumented build,
+per run): q09 missed 429k row blocks and 25k index blocks, decompressing 6.65 GB of row blocks
+in 16.9 s of its 23 s of CPU; q07 170k row and 106k index blocks (7.1 + 2.3 s); q17 38k row
+blocks. These are a nested loop's heap fetches: uniformly random over about 1 GB of rows, so the
+hit rate is about cache / data at any block size (4 kB blocks: 443k misses), and only the cost of
+a miss can move. A miss decompressed a whole 16 kB block for one row.
+
+What each option costs, measured alone (`storage::sst::study`, FMT_ONLY=blocks: every TPC-H file's
+entries written again in blocks of a target, each block body through each codec; one CPU,
+loaded host; MB of block bodies stored, decompression µs a row block / an index block):
+
+| blocks | codec | MB | rows µs | index µs | note |
+|---|---|---|---|---|---|
+| 16 kB | zstd 1 (base) | 547 | 29.6-42.4 | 11.0-12.0 | |
+| 16 kB | zstd 1 + dictionary (cover, 16 kB / 1 MB) | 538 | 35.1-41.2 | 8.3-9.2 | training 13-16 s for the data set |
+| 16 kB | zstd 1 + dictionary (finalized, 16 kB / 256 kB) | 538 | 37.3 | 8.3 | training 0.16 s |
+| 16 kB | zstd 1 + dictionary (finalized, 8 kB / 1 MB) | 519 | 38.6 | 8.7 | |
+| 8 kB | zstd 1 | 592 | 18.9-20.3 | 7.8-8.3 | |
+| 8 kB | zstd 1 + dictionary (finalized, 16 kB / 256 kB) | 553 | 16.6 | 4.9 | |
+| 4 kB | zstd 1 | 663 | 11.2-11.9 | 4.8-5.2 | |
+| 4 kB | zstd 1 + dictionary (finalized) | 571 | 11.3 | 3.5 | |
+| 16 kB | LZ4 | 722 | 8.8 | 3.4 | |
+| 4 kB | LZ4 | 831 | 2.3 | 0.7 | |
+
+(The file sizes count the block bodies only; each file's index and bloom filter come on top:
+the TPC-H data directory after its load and a clean close is 563 MB at 16 kB blocks (format 2),
+585 MB at 8 kB / 4 kB with dictionaries (format 4), 638 MB in format 1.)
+
+So the miss cost is the block's size and the codec: 4 kB blocks with a dictionary cut a row
+miss's decompression to a third, but a scan (q01, q06 at 256 MB, all misses) paid 8% more a byte
+and four times the blocks (q01 +23%, q06 +16% cycles); LZ4 cuts it to a fourth at 16 kB but writes 32% more
+(722 MB of blocks, more than format 1's 638 MB data directory), and at 4 kB 52% more. A
+dictionary alone at 16 kB doesn't help (rows decompress no faster: their time is the sequences,
+not the tables), and a cover-trained one cost 13-16 s of CPU for the data set's files (every
+flush and compaction trains one): `ZDICT_finalizeDictionary` over sampled content gives the same
+sizes and speed in 1/80 of the time. A small side cache of decompressed blocks is a bigger
+block cache by its size: with misses uniform over 1 GB of rows, 32 MB more would cut them by
+about 3%. LZ4 for hot levels: TPC-H's data is all in L1 after its load (no L0), so a hot
+level's codec doesn't meet these misses; L0's files are written as before.
+
+**Measured** (BENCH "Store blocks and caches"; plain dist builds; lane C; b247 = origin's
+`6d3b7e9e5`, c10 = this candidate's code on it): TPC-H SF1 at a 256 MB cache, 22 queries, five
+alternating rounds: **-32.7% user instructions** (every round -32.7 to -33.7%), cycles -19.6% at the
+median (-7.7 to -26.5%; four rounds over 1.0 foreign core), the one clean round's wall 40.1 -> 34.5
+s; q07 -56%, q09 -49%, q08 -54%, q20 -50%, q17 -45%, q14 -40%, q11 -52%; q02 +46% (its partsupp scan
+is a bulk read nothing caches at 256 MB, and its blocks are twice as many: still decompressed every
+run). VmHWM 612-637 -> 578-582 MB. At 2 GB: instructions -0.1% (every round -0.02 to -0.9%; scans
++0.5 to +0.9%: twice the block boundaries), cycles -1.1% at the median (all rounds over 1.0
+foreign core), VmHWM level (1,690-1,695 -> 1,690-1,692 MB). The bulk script +0.6% (pairs +0.0 to
++1.2%: the compaction after its DELETE +9.6%, its outputs compressed against their dictionaries;
+COPY, CREATE INDEX, INSERT ... SELECT +0.2 to +0.5%). The TPC-H data directory after its load and
+a clean close: 585 MB (b247 563, format 1 638). Every result hash equal across builds.
+Point selects (8 clients) and range reads level (instructions -0.7% at the median, both on lane B:
+lane A was held by another agent's runs). **With every server confined to 1 GB** (256 MB caches,
+each server's files dropped from the page cache first; BENCH's three-server table): c10 46.4 and
+38.8 s for the 22 queries against PostgreSQL's 48.9 and 53.6 and pgrust's 54.9 and 58.9 (b247 50.7
+and 43.8): the target, at least as fast as PostgreSQL with the same memory, is met in wall time;
+the engine's CPU (107 and 96 s) is still above PostgreSQL's (78, 87) and pgrust's (61): its
+data, 585 MB against their 3 GB, stays in the page cache, while each miss still decompresses.
+
+**What changed** (two commits):
+
+- **8 kB row blocks and 4 kB index blocks in L1, each file with a zstd dictionary** (format 4).
+  `SstWriter` ends a format 2 block of a table's rows at 8 kB of format 1's bytes (`ROW_BLOCK`),
+  of an index's entries at 4 kB (`INDEX_BLOCK`), and holds back its first 256 kB of blocks
+  (`DICT_SAMPLE`) to make a 16 kB dictionary of them (`finalize_dict`: an even share of each
+  sample's middle as content, the samples' entropy tables at level 1), then writes every block
+  compressed with it (codec 3) and the dictionary after the blocks, with a crc32 (footer of
+  nine words: `FOOTER4_LEN`). A file with under 64 kB of blocks or 8 blocks gets none (format 2,
+  readable by earlier builds). Only the bottom level's writers do this (compaction outputs,
+  rewrites into L1: `Store::sst_writer`); a transaction's runs and L0's files (flushes,
+  ingested commits: `SstWriter::plain_blocks`, `Store::l0_writer`) are written as before (16 kB,
+  no dictionary): compressing against a dictionary takes twice the match-finding time
+  (`ZSTD_compressBlock_fast_dictMatchState`), on a statement's path for a run (COPY +6.5%,
+  INSERT ... SELECT +9.9% instructions when runs had them). A compaction or a clean close writes
+  them in L1's form, as it writes linked runs again now.
+- **Reads through kept scratch** (`sst::SCRATCH`): the bytes read, the buffer they decompress
+  into and a zstd context are kept (up to 32, the least recently returned dropped first) instead
+  of allocated for each miss (a 6-16 kB buffer each and a 92 kB context). A context remembers
+  its last dictionary: a block's file's dictionary is used in a context that last had it when
+  one is kept. (zstd decodes a block whose context last had another dictionary "cold", through
+  its prefetching decoder `ZSTD_decompressSequencesLong` with the dictionary prefetched: 39% of
+  q09's cycles with a context a thread, as heap fetches go file to file, and a fifth of q02's
+  with a pool that handed out its newest context for another dictionary.)
+- **A cached block in one allocation**: `Block::data` holds the entries, the values, the restart
+  words and restarts' value offsets (from `rs`, as format 2's body has them before its trailer:
+  `Block::load` copies up to there) and the last key (from `lk`), read in place (`restart`,
+  `rval`); format 1's `decode_with` lays its blocks out the same way (`Block::assemble`). Three
+  allocations a block fewer, about 150 bytes a block the cache didn't count (with blocks half the
+  size, TPC-H at 2 GB peaked 25 MB higher), three allocations a miss fewer.
+- `bulk_range` counts a range's bytes by its blocks' stored bytes (x4: `BULK_RATIO`) rather than
+  16 kB a block.
+- `storage::sst::study`'s `blocks` study (FMT_ONLY=blocks, FMT_T): the table above.
+
+**Format.** A manifest naming a file with a dictionary says store format 4 (`STORE_FORMAT`, the
+files' footer `FORMAT_DICT`); builds before this refuse it at open ("of storage format 4, newer
+than this build reads (3)"), before WAL replay or any write, so nothing is misread; formats 1-3
+are read as before. Every store this build compacts becomes format 4: **one-way for older
+binaries** (no downgrade tool), as format 2 was. Dictionaries are checked by their crc32 at open
+(XX001, as blocks are); a format 3 footer is refused as a bad footer (3 is a store's format,
+never a file's).
+
+**Peak memory at 256 MB (item 2).** Agent 239's +2% (VmHWM median 616 -> 631 MB over seven
+rounds, b239 against h239) is not a consistent rise. Measured with one binary (e1) on format 1
+data (written with `ROLL_SST_FORMAT=1`) and format 2 data, five alternating pairs of the 22
+queries: VmHWM per pair +19, -7, +1, 0, +28 MB (format 1 599-614 MB, format 2 601-636; medians
+608 and 614), cgroup peaks 585 and 625 against 612 and 612. The cache holds the same bytes block
+for block in both formats (`format2_reads_as_format1`), so the difference can only come from
+what a miss allocates: format 2's decompression output is about the size of the block the cache
+keeps, so the two share an allocator size class and pages, and the transient ones freed among
+the cached ones leave pages part-used; format 1's transient buffers were a size class larger.
+Kept read scratch (above) removes those allocations; with this round's blocks the 256 MB peak is
+lower than b247's (below).
+
+**The block cache's lookups (item 4).** Not lock contention: `perf record` of point selects at 8
+and 32 clients (lane A) and of TPC-H q17, q20 (2 GB, workers) shows no `lock_slow`, no futex
+waits. `SstReader::block_with` (the cache's hit path, inlined) was 2.1% of the point selects'
+cycles at 8 and 32 clients and 5.8% of q20's at 2 GB, its samples on the map's control bytes and
+bucket (about 60%), the shard mutex's `lock cmpxchg` and the block's `Arc` increment: the cache
+misses of a cold lookup, not waits. Its cost in scans doubles with blocks half the size (q06 at
+2 GB 1.6 -> 3.4% of cycles, q21 1.9 -> 3.7%). **Measured and not kept**: placing a file's
+neighbouring blocks together (a file's runs of 16 blocks in one shard, a shard's map hashing
+(file, block) to the file's spread plus the block) brought that to 0.9% and 1.5%, but TPC-H q02 at
+256 MB took +188% instructions and q11 +42% against b247 (without it, the candidate:
+q02 10.7 G, q11 2.2 G, against b247's 7.3 and 4.5), in the same plan with the same rows
+(EXPLAIN ANALYZE equal but for times; planning 6.4 -> 11.9 ms): every lookup was dearer, not the
+hit rate. The likeliest cause is the hash: a file's blocks in consecutive buckets pack a full
+SwissTable into long runs that a lookup (a miss the longest) walks, worst where many files' runs
+overlap (partsupp's). Rotating the run's shard (`(file mix + run) % 16`, balanced) didn't change
+q02; a CLOCK quirk found on the way is a lead (below). The patch is
+`~/.cache/a247/patches/cache-layout.patch`. No sharding beyond 16 or lock-free path was built: the
+lookups don't wait.
+
+Tests: `sst::tests::dictionary_blocks_read_as_plain_ones` (a file with a dictionary reads as one
+without, block for block, whether few or all blocks came before the dictionary was made; a file
+too small for one has none; a flipped byte of the dictionary is refused at open, XX001),
+`newer_formats_are_refused` (format 5 refused, format 3 a bad footer), `format2_reads_as_format1`
+(format 4's blocks and the one-allocation block layout byte for byte as format 1's decode makes
+them, at 16 kB targets), `storage::tests::deletions_mark_dead_entries_instead_of_rewriting` (the
+manifest's format 4 with dictionaries). (Whether the crash tests' small compactions reach a
+file with a dictionary, 64 kB of blocks, was not checked: a crash case with one is left.)
+
+Verified on `48d7612a5` (origin's head, `cand/a247` landed): `tools/quick-check.sh` (build, clippy
+with no new warning, tests 369 passed in 19 binaries, crash seeds 1-3 x 2 rounds and
+power_cut_at_every_point, regress 51,148 / 51,150 with none newly differing, isolation 1,647 /
+1,648, pg_dump_tap 14,609), the storage unit tests, block_format, storage_format,
+storage_upgrade_batches, storage_linked_gc, crash_bulk and power_cut_at_every_point built
+`--profile verify-checked`. Not gated on the PGO build (no inlining or function-boundary change
+was the aim; the plain dist builds above are what was measured).
+
+Left (largest first):
+1. A heap fetch's miss still decompresses a whole 8 kB row block (about 12-17 µs) for one row, where
+   PostgreSQL copies one 8 kB page from the OS page cache; the misses themselves are cache / data
+   (uniform over a table bigger than the cache). What's left of q09's and q07's time at 256 MB is
+   still mostly zstd. Next: smaller row blocks for the tables an index's fetches read most (the
+   access pattern per file is known at compaction: a reader could count point and scan reads),
+   or a row block's entries in independently compressed frames of 1-2 kB with the file's
+   dictionary, the block cache keeping the decoded frames.
+2. The compaction's writes with a dictionary: matching against an attached dictionary
+   (`ZSTD_compressBlock_fast_dictMatchState`) takes twice the match-finding time; the compaction
+   after the bulk script's DELETE is +22% (c1). A dictionary copied into the context
+   (`ZSTD_dictForceCopy`, the experimental API) or dictionaries only for files past a size.
+3. The block cache's CLOCK: after evicting at the hand, `swap_remove` moves the newest entry into
+   that slot and the hand stays, so the next eviction in the shard takes the block just inserted
+   unless something read it already (a run of blocks into one shard evict each other). Moving the
+   hand past the slot is the CLOCK it means to be; not measured.
+4. The block index of a format 4 file: twice to four times the blocks, each with its whole last key
+   (in the file and in memory, `BlockIndex::keys`): prefix-coding them in format 4's index would
+   take back most of the 22 MB the TPC-H data directory grew by.
+5. The cache's hit path: a lookup still takes the shard's mutex and the block's `Arc` count; at
+   2 GB the lookups of a scan are twice as many. A layout that keeps a file's blocks together
+   without packing the map's buckets (a per-run slot array, or a better hash with the shard kept
+   per run) is what the dropped change measured as worth having for scans.
+6. Copying a compaction's input blocks that it doesn't change (format 2 and 4 blocks are what a
+   writer would write; agent 231's design item 6).
+
 ## Storage round 2, part 2: dead-entry sets, linkable runs in format 2 (agent 245)
 
 BENCH.md "Storage round 2, part 2" has the measurements: on the 1M-row bulk script, settled

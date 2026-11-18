@@ -546,6 +546,326 @@ completeness). PostgreSQL and pgrust: four passes each.
   than PostgreSQL on q01, q09, q12 and q18 (0.20-0.86x), more on the rest (q02, q04, q11, q20,
   the lookups' queries, 2.3-3.7x PostgreSQL's).
 
+## Store blocks and caches (2026-11-17, agent 247)
+
+HANDOFF "Store blocks and caches" has what changed and why. Builds, all plain dist (`tools/dist.sh`,
+line tables) of separate source snapshots, each with its own target dir: **b247** origin's
+`6d3b7e9e5` (the round's base); **e1** b247 with the round's experiment knobs (block targets,
+dictionaries and format 1 writing from the environment, block-read counters); **c1** 8 kB / 4 kB
+blocks with dictionaries in every format 2 file, contexts in a pool of 16 handed out newest
+first; **c3** c1 with kept read scratch (contexts kept with their dictionary, the least recently
+returned dropped); **c4** c3 with the cache layout (measured, not kept); **c5** c4 with a
+transaction's runs and L0's files written as before; **c8** c5 with a cached block in one
+allocation and the layout's shards rotating; **c10** c8 without the cache layout (the
+candidate's code, `cand/a247-2`: c3's reads, c5's writes, c8's blocks); **r1** b247 with
+reclaiming marked files (`cand/a247`, BENCH "Reclaiming marked files"). TPC-H SF1 on lane C (servers 14,15,32,33; clients 16,17,34,35), each run
+under the lane's lock; agent 245's harnesses (`gpass.sh`: a fresh engine on the arm's loaded data,
+a warm-up pass of the 22 queries, then per query 3 runs in one `perf stat` window). The host was
+at load 25-65 throughout; passes over 1.0 foreign core are marked.
+
+### Where a small cache's time went (b247's data, 256 MB cache, e1's block-read counters, one run each)
+
+| query | row blocks missed | MB of row blocks decompressed | s in `raw_block`, rows | index blocks missed | s, index | query CPU s |
+|---|---|---|---|---|---|---|
+| q07 | 170,186 | 2,638 | 7.1 | 105,567 | 2.3 | 11.8 |
+| q09 | 428,696 | 6,653 | 16.9 | 24,937 | 0.5 | 23.0 |
+| q17 | 38,404 | 597 | 2.4 | 0 | 0 | 3.8 |
+| q01 (scan) | 36,362 | 565 | 2.1 | 0 | 0 | 3.7 |
+
+The same counters with 4 kB blocks and a dictionary (x4d): q09 443k row misses, 1,742 MB, 11.3 s;
+q01 145k, 572 MB, 2.4 s: the misses stay (heap fetches uniform over ~1 GB of rows), the bytes
+fall. Profile of q07 on b247 (`perf record -F 999`, cycles): `ZSTD_decompressSequences` 46.7%,
+`ZSTD_buildFSETable` 5.8, `HUF_readDTableX1` 2.5, `FSE_decompress_wksp` 1.6, `FSE_readNCount` 1.5,
+`HUF_readStats` 1.0%.
+
+### Block size and codec (`storage::sst::study`, FMT_ONLY=blocks, b247's TPC-H store; one CPU of the build set, loaded: two runs, ranges)
+
+| blocks | codec | MB of block bodies | rows µs a block decompressed | index µs | rows ns a kB |
+|---|---|---|---|---|---|
+| 16 kB | zstd 1 (b247) | 546.8 | 29.6-42.4 | 11.0-12.0 | 2,112-2,771 |
+| 16 kB | + cover dictionary 16 kB / 1 MB (13-16 s of training) | 538.0 | 35.1-41.2 | 8.3-9.2 | 2,298-2,696 |
+| 16 kB | + finalized dictionary 16 kB / 256 kB (0.16 s) | 537.8 | 37.3 | 8.3 | 2,437 |
+| 16 kB | + finalized dictionary 8 kB / 1 MB (0.7 s) | 518.5 | 38.6 | 8.7 | 2,525 |
+| 8 kB | zstd 1 | 591.6 | 18.9-20.3 | 7.8-8.3 | 2,458-2,638 |
+| 8 kB | + finalized 16 kB / 256 kB | 552.6 | 16.6 | 4.9 | 2,156 |
+| 4 kB | zstd 1 | 663.1 | 11.2-11.9 | 4.8-5.2 | 2,872-3,053 |
+| 4 kB | + finalized 16 kB / 256 kB | 571.1 | 11.3 | 3.5 | 2,912 |
+| 16 kB | LZ4 | 722.3 | 8.8 | 3.4 | 575 |
+| 4 kB | LZ4 | 830.6 | 2.3 | 0.7 | 592 |
+
+Data directory after the TPC-H load and a clean close: b247 563 MB (format 2, 16 kB), 4 kB index
+blocks 595, 4 kB everything with cover dictionaries 595, 8 kB rows / 4 kB index with them 584,
+16 kB with them 554, c1/c5's (8 kB / 4 kB, finalized dictionaries) 585, format 1 (e1 with
+`ROLL_SST_FORMAT=1`) 639.
+
+### Variants, one binary (e1) on each variant's own load (256 MB, 8 queries, 3 rounds, medians)
+
+| variant | G instructions | cycles G | wall s | q01 / q06 cycles | HWM MB |
+|---|---|---|---|---|---|
+| 16 kB, no dictionary (b247's data) | 398.6 | 264.3 | 33.3 | 10.7 / 9.7 | 551-562 |
+| 8 kB rows, 4 kB index, cover dictionaries | 283.4 (-28.9%) | 220.6 (-15.8%) | 26.1 | +1.8 / +0.4% | 513-514 |
+| 4 kB, cover dictionaries | 228.4 (-42.7%) | 204.3 (-24.8%) | 23.4 | +23.2 / +16.4% | 511-512 |
+| 16 kB, cover dictionaries | 415.7 (+4.3%) | 297.4 (+9.1%) | 32.8 | | 567-584 |
+
+(q01 q03 q06 q07 q09 q17 q18 q21; every pair's instructions within 0.5 points of the median.)
+
+### c10 against b247, TPC-H SF1 at 256 MB (the candidate; each arm on its own load; 5 alternating rounds; G user instructions / median s, medians over rounds)
+
+| query | b247 G / s | c10 G / s | instructions | per round | cycles |
+|---|---|---|---|---|---|
+| q01 | 20.61 / 1.14 | 18.79 / 1.23 | -8.8% | -9.1..-8.5 | +2.3% |
+| q02 | 7.32 / 0.95 | 10.73 / 1.82 | +46.6% | +45.8..+51.9 | +72.0% |
+| q03 | 21.11 / 1.62 | 17.19 / 1.39 | -18.6% | -18.7..-18.5 | -13.3% |
+| q04 | 15.60 / 1.03 | 11.19 / 1.00 | -28.3% | -28.3..-28.2 | -11.1% |
+| q05 | 15.34 / 1.23 | 10.94 / 0.96 | -28.7% | -28.7..-28.5 | -27.0% |
+| q06 | 18.86 / 1.10 | 17.15 / 1.31 | -9.1% | -9.1..-9.0 | +8.9% |
+| q07 | 69.54 / 4.84 | 30.84 / 3.15 | -55.6% | -55.7..-55.6 | -41.1% |
+| q08 | 23.48 / 1.84 | 11.14 / 1.18 | -52.6% | -52.7..-52.4 | -40.1% |
+| q09 | 151.05 / 12.70 | 77.86 / 7.68 | -48.5% | -52.5..-48.2 | -40.5% |
+| q10 | 22.71 / 1.70 | 21.04 / 1.65 | -7.4% | -7.5..-7.3 | +4.0% |
+| q11 | 4.52 / 0.72 | 2.17 / 0.67 | -51.9% | -54.7..-50.5 | -16.1% |
+| q12 | 21.61 / 1.34 | 19.95 / 1.55 | -7.7% | -8.0..-7.6 | +9.9% |
+| q13 | 10.50 / 1.51 | 10.28 / 1.70 | -2.0% | -2.1..-2.0 | +7.6% |
+| q14 | 8.99 / 0.81 | 5.77 / 0.65 | -35.9% | -36.1..-35.7 | -24.0% |
+| q15 | 17.60 / 1.19 | 15.94 / 1.24 | -9.4% | -9.6..-9.2 | +5.4% |
+| q16 | 5.67 / 0.48 | 5.62 / 0.53 | -0.9% | -1.0..-0.9 | +5.5% |
+| q17 | 51.67 / 6.69 | 31.07 / 5.31 | -39.9% | -40.6..-39.6 | -15.9% |
+| q18 | 50.15 / 3.52 | 44.82 / 3.45 | -10.6% | -10.7..-10.6 | +2.2% |
+| q19 | 4.59 / 0.35 | 2.72 / 0.24 | -40.8% | -40.9..-40.5 | -28.7% |
+| q20 | 15.50 / 2.54 | 8.10 / 1.93 | -47.7% | -47.8..-47.4 | -24.4% |
+| q21 | 36.92 / 2.71 | 25.80 / 2.21 | -30.1% | -30.3..-30.0 | -18.1% |
+| q22 | 4.79 / 0.42 | 3.41 / 0.36 | -28.8% | -30.3..-27.7 | -14.7% |
+| **all 22** | 598.1 / 50.43 | 402.5 / 41.21 | **-32.7%** | | -20.6% |
+
+Per round (22-query sums):
+
+```
+round 1: instr -32.71%  cycles -20.29%  wall 53.13 -> 44.08 s  HWM 637 -> 578 MB  foreign 1.31/1.61 FLAG
+round 2: instr -32.70%  cycles -7.68%  wall 39.77 -> 46.18 s  HWM 581 -> 579 MB  foreign 0.88/1.76 FLAG
+round 3: instr -32.70%  cycles -19.50%  wall 40.13 -> 34.48 s  HWM 612 -> 581 MB  foreign 0.47/0.67
+round 4: instr -32.80%  cycles -26.54%  wall 60.30 -> 40.04 s  HWM 615 -> 580 MB  foreign 1.78/1.22 FLAG
+round 5: instr -33.73%  cycles -19.63%  wall 55.44 -> 53.61 s  HWM 632 -> 582 MB  foreign 1.7/2.13 FLAG
+```
+
+### c10 against b247 at 2 GB (5 alternating rounds)
+
+| query | b247 G / s | c10 G / s | instructions | per round | cycles |
+|---|---|---|---|---|---|
+| q01 | 11.19 / 0.58 | 11.25 / 0.56 | +0.5% | +0.5..+0.5 | +0.2% |
+| q02 | 2.93 / 0.69 | 2.95 / 0.66 | +0.6% | +0.5..+0.6 | +10.8% |
+| q03 | 6.36 / 0.70 | 6.31 / 0.64 | -0.7% | -2.6..+0.4 | -15.9% |
+| q04 | 4.01 / 0.38 | 4.02 / 0.40 | +0.2% | -0.0..+0.5 | +2.8% |
+| q05 | 4.33 / 0.59 | 4.21 / 0.58 | -2.7% | -2.9..-2.5 | -8.5% |
+| q06 | 8.06 / 0.48 | 8.13 / 0.56 | +0.8% | +0.8..+0.9 | +17.1% |
+| q07 | 5.23 / 0.89 | 5.18 / 0.65 | -1.0% | -1.1..-0.9 | -20.6% |
+| q08 | 2.06 / 0.41 | 2.02 / 0.41 | -1.9% | -2.5..-1.8 | -9.4% |
+| q09 | 11.99 / 1.98 | 11.48 / 1.90 | -4.2% | -11.5..-3.2 | -11.5% |
+| q10 | 9.61 / 0.96 | 9.69 / 1.20 | +0.8% | +0.6..+0.9 | +5.4% |
+| q11 | 0.87 / 0.29 | 0.88 / 0.33 | +1.6% | +1.3..+1.8 | +5.8% |
+| q12 | 8.60 / 0.59 | 8.67 / 0.75 | +0.9% | -2.3..+0.9 | +5.6% |
+| q13 | 7.83 / 1.47 | 7.85 / 1.64 | +0.3% | -0.9..+0.6 | +1.4% |
+| q14 | 1.73 / 0.35 | 1.74 / 0.45 | +0.8% | +0.6..+1.2 | +4.5% |
+| q15 | 6.94 / 0.59 | 7.00 / 0.58 | +0.9% | +0.4..+4.6 | +10.4% |
+| q16 | 4.99 / 0.58 | 4.98 / 0.51 | -0.0% | -0.9..+0.2 | +0.6% |
+| q17 | 6.18 / 1.34 | 6.28 / 1.43 | +1.5% | +0.7..+1.9 | +9.2% |
+| q18 | 30.20 / 2.79 | 30.16 / 3.14 | -0.1% | -0.2..-0.1 | +2.3% |
+| q19 | 0.96 / 0.13 | 0.97 / 0.15 | +1.1% | +0.9..+1.7 | -0.9% |
+| q20 | 1.50 / 0.54 | 1.51 / 0.56 | +1.1% | +0.9..+1.2 | +3.3% |
+| q21 | 10.41 / 0.93 | 10.45 / 0.93 | +0.3% | +0.2..+0.4 | -0.5% |
+| q22 | 1.68 / 0.20 | 1.69 / 0.22 | +0.5% | +0.4..+0.6 | +2.9% |
+| **all 22** | 147.7 / 17.44 | 147.4 / 18.24 | **-0.1%** | | -1.1% |
+
+```
+round 1: instr -0.92%  cycles +5.67%  wall 16.15 -> 20.27 s  HWM 1695 -> 1690 MB  foreign 1.54/2.75 FLAG
+round 2: instr -0.14%  cycles -7.30%  wall 21.49 -> 16.21 s  HWM 1693 -> 1690 MB  foreign 2.8/1.61 FLAG
+round 3: instr -0.17%  cycles +2.77%  wall 16.99 -> 20.60 s  HWM 1690 -> 1690 MB  foreign 2.03/2.79 FLAG
+round 4: instr -0.02%  cycles +3.86%  wall 14.72 -> 18.36 s  HWM 1693 -> 1691 MB  foreign 1.4/2.34 FLAG
+round 5: instr -0.16%  cycles -11.43%  wall 18.50 -> 13.19 s  HWM 1693 -> 1692 MB  foreign 2.33/1.18 FLAG
+```
+
+### c1 against b247, TPC-H SF1 at 256 MB (each arm on its own load, 5 alternating rounds; G user instructions / median s, medians over rounds)
+
+| query | b247 G / s | c1 G / s | instructions | per round | cycles |
+|---|---|---|---|---|---|
+| q01 | 20.59 / 1.14 | 18.97 / 1.02 | -7.8% | -8.1..-7.8 | -2.7% |
+| q02 | 7.24 / 1.06 | 11.58 / 1.80 | +59.9% | +58.4..+63.5 | +54.5% |
+| q03 | 21.14 / 1.82 | 18.29 / 1.60 | -13.4% | -13.6..-13.3 | -3.0% |
+| q04 | 15.60 / 1.22 | 12.00 / 0.96 | -23.1% | -23.3..-23.0 | -15.8% |
+| q05 | 15.33 / 1.31 | 11.81 / 1.15 | -23.0% | -23.2..-22.9 | -12.4% |
+| q06 | 18.87 / 1.10 | 17.26 / 1.11 | -8.6% | -8.7..-8.5 | -1.6% |
+| q07 | 69.64 / 5.38 | 36.12 / 3.51 | -48.1% | -50.1..+10629509.2 | -32.2% |
+| q08 | 23.47 / 2.13 | 12.88 / 1.23 | -45.1% | -45.1..-45.0 | -34.7% |
+| q09 | 150.86 / 11.89 | 93.44 / 8.17 | -38.1% | -38.2..-37.9 | -25.5% |
+| q10 | 22.72 / 1.62 | 21.13 / 1.67 | -7.0% | -7.1..-6.9 | +3.8% |
+| q11 | 4.52 / 0.86 | 2.40 / 0.45 | -46.9% | -48.7..-44.9 | -45.4% |
+| q12 | 21.63 / 1.40 | 20.05 / 1.32 | -7.3% | -7.5..-7.0 | +1.8% |
+| q13 | 10.48 / 1.49 | 10.26 / 1.23 | -2.2% | -2.4..-1.9 | -6.0% |
+| q14 | 8.99 / 0.82 | 5.80 / 0.52 | -35.5% | -35.6..-35.3 | -27.6% |
+| q15 | 17.61 / 1.18 | 16.02 / 1.01 | -9.0% | -9.1..-8.8 | -5.9% |
+| q16 | 5.67 / 0.55 | 5.64 / 0.47 | -0.6% | -0.7..-0.4 | -1.6% |
+| q17 | 51.81 / 6.93 | 32.95 / 4.05 | -36.4% | -36.8..-35.5 | -26.6% |
+| q18 | 50.14 / 3.55 | 45.19 / 3.09 | -9.9% | -10.0..-9.7 | -4.6% |
+| q19 | 4.59 / 0.36 | 2.93 / 0.25 | -36.2% | -36.4..-36.1 | -27.2% |
+| q20 | 15.49 / 2.42 | 9.20 / 1.74 | -40.6% | -40.8..-40.5 | -23.4% |
+| q21 | 36.95 / 2.34 | 26.96 / 2.18 | -27.0% | -27.1..-26.9 | -11.4% |
+| q22 | 4.79 / 0.32 | 3.78 / 0.32 | -21.2% | -21.7..-20.2 | -3.4% |
+| **all 22** | 598.1 / 50.90 | 434.7 / 38.85 | **-27.3%** | | -17.1% |
+
+Per round (22-query sums): instructions -27.3, -27.4, -27.5, -17.8 (b247's pass at 1.93 foreign
+cores), -27.3%; cycles -14.5, -16.4, -10.8, -5.6, -21.9%; wall 50.7 -> 42.3, 51.9 -> 42.3, 43.3 ->
+39.3, 55.5 -> 41.3, 56.9 -> 35.3 s; VmHWM 599-626 -> 572-584 MB. Only round 3 had both passes
+under 1.0 foreign core. Result hashes equal in every pass. q02 is c1's one loss: in this
+sequence (after the warm-up pass and q01's runs) most of q02's blocks miss in both builds, and
+c1 decoded a fifth of them "cold" (a context pool handing out its newest context): fixed in c3.
+
+### c1 against b247 at 2 GB (5 rounds)
+
+| query | b247 G / s | c1 G / s | instructions | per round | cycles |
+|---|---|---|---|---|---|
+| q01 | 11.19 / 0.58 | 11.25 / 0.74 | +0.5% | +0.5..+0.6 | +7.0% |
+| q02 | 2.93 / 0.61 | 2.95 / 0.70 | +0.5% | +0.5..+0.6 | +9.4% |
+| q03 | 6.34 / 0.64 | 6.35 / 0.67 | +0.2% | -0.1..+1.8 | +7.2% |
+| q04 | 4.01 / 0.38 | 4.01 / 0.36 | +0.0% | -0.1..+0.2 | +3.2% |
+| q05 | 4.33 / 0.51 | 4.35 / 0.68 | +0.3% | +0.2..+0.6 | +14.1% |
+| q06 | 8.06 / 0.51 | 8.13 / 0.58 | +0.9% | +0.9..+1.6 | +9.1% |
+| q07 | 5.23 / 0.79 | 5.23 / 0.76 | +0.2% | -0.0..+0.6 | +2.3% |
+| q08 | 2.06 / 0.34 | 2.06 / 0.48 | -0.0% | -0.3..+0.1 | +12.7% |
+| q09 | 11.88 / 1.75 | 11.85 / 1.87 | -0.2% | -0.9..-0.2 | +3.9% |
+| q10 | 9.61 / 0.80 | 9.70 / 0.82 | +0.9% | +0.9..+1.0 | +3.4% |
+| q11 | 0.87 / 0.20 | 0.87 / 0.23 | +0.4% | -0.3..+1.2 | +2.7% |
+| q12 | 8.60 / 0.62 | 8.68 / 0.58 | +0.9% | +0.8..+0.9 | -0.6% |
+| q13 | 7.86 / 1.39 | 7.83 / 1.33 | -0.4% | -2.5..+0.2 | -3.6% |
+| q14 | 1.73 / 0.33 | 1.74 / 0.28 | +0.4% | +0.1..+0.8 | -3.0% |
+| q15 | 6.94 / 0.43 | 7.01 / 0.42 | +0.9% | +0.9..+1.0 | -0.4% |
+| q16 | 4.97 / 0.41 | 5.00 / 0.43 | +0.5% | -0.5..+2.6 | +4.3% |
+| q17 | 6.18 / 1.08 | 6.31 / 0.84 | +2.1% | +0.4..+2.7 | -6.0% |
+| q18 | 30.19 / 2.06 | 30.18 / 2.19 | -0.0% | -3.8..+0.2 | +1.0% |
+| q19 | 0.96 / 0.08 | 0.97 / 0.09 | +0.5% | +0.2..+0.7 | +10.1% |
+| q20 | 1.50 / 0.32 | 1.50 / 0.41 | +0.3% | +0.2..+0.4 | +12.1% |
+| q21 | 10.40 / 0.68 | 10.44 / 0.80 | +0.3% | +0.2..+0.4 | +7.0% |
+| q22 | 1.68 / 0.14 | 1.69 / 0.14 | +0.6% | +0.2..+0.8 | +3.7% |
+| **all 22** | 147.5 / 14.67 | 148.1 / 15.39 | **+0.4%** | | +3.1% |
+
+Instructions +0.36, -0.47, +0.38, +0.36, +0.46% a round (scans +0.5 to +1.7%: twice the block
+boundaries; q18 -2%); cycles +5.4, +4.0, -5.8, +0.3, +2.5% (four rounds over 1.0 foreign core);
+VmHWM 1,691-1,707 -> 1,717-1,723 MB (+25 MB: the fixed cost of each cached block outside its data,
+for twice the blocks). `perf record` (cycles, 2 GB): `SstReader::block_with` q06 1.57% (b247) ->
+3.40% (c1) -> 0.91% (c4, the cache layout), q21 1.86 -> 3.71 -> 1.48%.
+
+### c1, c3, c4 (256 MB, the fetch-bound queries, 2 alternating rounds; medians)
+
+| query | c1 G | c3 G (kept scratch) | c4 G (and the cache layout) |
+|---|---|---|---|
+| q02 | 10.62 | 9.86 (-7.1%) | 17.29 (+62.8%) |
+| q07 | 35.86 | 30.85 (-14.0%) | 29.69 (-17.2%) |
+| q09 | 93.00 | 78.90 (-15.2%) | 77.16 (-17.0%) |
+| q17 | 33.47 | 31.43 (-6.1%) | 28.79 (-14.0%) |
+| q20 | 9.20 | 8.16 (-11.3%) | 7.82 (-15.0%) |
+| q21 | 27.11 | 26.21 (-3.3%) | 26.12 (-3.7%) |
+| all six | 209.3 (168.2 G cycles, 22.2 s) | 185.4 (151.3, 21.5) | 186.9 (149.0, 21.0) |
+
+c4's q02 decompressed more (`ZSTD_decompressSequences` 68% of its instructions against c3's 60%,
+no lock waits). Rotating a file's runs through the shards (c8) didn't change it: the layout is not
+in the candidate (HANDOFF, item 4).
+
+### Peak memory at 256 MB, format 1 against format 2 (item 2; e1 on format 1 data and on b247's format 2 data, 22 queries, 5 alternating rounds)
+
+| round | VmHWM format 1, MB | format 2 | difference |
+|---|---|---|---|
+| 1 | 599 | 618 | +19 |
+| 2 | 608 | 601 | -7 |
+| 3 | 604 | 605 | +1 |
+| 4 | 614 | 614 | 0 |
+| 5 | 608 | 636 | +28 |
+
+Medians 608 and 614 MB (+1%); cgroup peaks (memory.peak, two rounds each) 585 / 625 and 612 / 612
+MB. Format 2 took 16% fewer instructions in every round with an exact count (-15.8 to -16.1%).
+
+### The block cache's lookups (item 4; `perf record -F 1999` cycles of the server)
+
+| workload | `block_with` (the hit path, inlined) | `lock_slow` / futex | its hottest instructions |
+|---|---|---|---|
+| point select, 8 clients, lane A (b247) | 2.14% | none | map bucket and control bytes ~60%, mutex `lock cmpxchg` ~15%, `Arc` `lock incq` ~25% |
+| point select, 32 clients (b247) | 2.30% | none | the same |
+| TPC-H q20 at 2 GB (b247, 2 workers and the leader) | 5.80% | none | the same |
+| TPC-H q06 at 2 GB: b247 / c1 / c4 | 1.57 / 3.40 / 0.91% | none | |
+| TPC-H q21 at 2 GB: b247 / c1 / c4 | 1.86 / 3.71 / 1.48% | none | |
+
+
+### The cache layout, measured and not kept (c8: c5 with one-allocation blocks and the layout, shards rotating; 256 MB, 4 rounds against b247)
+
+| query | b247 G / s | c8 G / s | instructions | per round | cycles |
+| q02 | 7.28 / 1.21 | 20.90 / 3.86 | +187.3% | +185.2..+191.9 | +153.0% |
+| q06 | 18.86 / 1.17 | 16.11 / 1.06 | -14.6% | -14.7..-14.4 | -7.0% |
+| q09 | 151.09 / 11.21 | 76.31 / 6.87 | -49.5% | -49.8..-49.4 | -39.6% |
+| q11 | 4.60 / 0.74 | 7.43 / 2.10 | +61.7% | +26.6..+77.7 | +102.2% |
+| **all 22** | 598.0 / 51.09 | 404.1 / 42.09 | **-32.4%** | | -24.1% |
+
+The same as c10 but for q02 (+188% against c10's +46%) and q11 (+42% against -52%); q02's plan
+and rows the same (EXPLAIN ANALYZE, both 100 rows; execution 973 -> 1,266 ms, planning 6.4 ->
+11.9 ms on a fresh engine).
+
+### Bulk (1M rows, settled, bg_ steps counted; G user instructions, 5 alternating pairs, lane C)
+
+```
+step                         b247      c10  median%  per pair %
+copy_in                    10.494   10.531    +0.4  +0.3 / +0.4 / +0.4 / +0.4 / +0.3
+create_index                5.363    5.373    +0.2  +0.2 / +0.3 / +0.2 / +0.2 / +0.2
+create_unique_index         4.111    4.127    +0.4  +0.3 / +0.3 / +0.4 / +0.4 / +0.6
+copy_out                    3.086    3.086    +0.0  +0.0 / +0.0 / +0.0 / +0.0 / +0.0
+insert_select               7.040    7.075    +0.5  +0.5 / +0.6 / +0.2 / +0.6 / +0.2
+update_half                12.812   12.812    +0.0  +0.0 / +0.0 / -0.1 / -0.0 / +0.0
+delete_quarter              6.202    6.118    -0.6  +0.0 / +0.5 / -2.5 / -5.1 / -0.6
+bg_delete_quarter           3.784    4.036    +6.1  +5.7 / +13.5 / +3.0 / +24.7 / +6.1
+vacuum                      1.795    1.784    -0.6  -0.6 / -0.6 / -0.6 / -0.6 / -0.6
+analyze                     0.469    0.472    +0.6  +0.6 / +0.6 / +0.6 / +0.6 / +0.6
+count_after                 0.436    0.437    +0.2  +0.2 / +0.2 / +0.2 / +0.2 / +0.2
+seq_count                   0.179    0.180    +0.6  +0.6 / +0.6 / +0.6 / +0.6 / +0.6
+seq_sum                     0.385    0.386    +0.3  +0.3 / +0.3 / +0.3 / +0.3 / +0.3
+count_star                  0.179    0.180    +0.6  +0.6 / +0.6 / +0.6 / +0.6 / +0.6
+sum_a                       0.385    0.386    +0.3  +0.3 / +0.3 / +0.3 / +0.3 / +0.3
+truncate                    0.005    0.003   -40.0  -20.0 / -40.0 / -25.0 / -40.0 / -40.0
+drop_table                  0.003    0.005   +66.7  -40.0 / +66.7 / +20.0 / +66.7 / +100.0
+ALL STEPS                  55.630   55.988    +0.6  +0.6 / +1.1 / +0.0 / +1.2 / +0.5
+cycles all                 29.592   30.333    +2.3  -17.6 / +0.4 / +5.9 / +4.7 / +2.3
+MB written                168.200  192.900    +0.4  +0.4 / -0.1 / +39.3 / +15.4 / -0.1
+```
+
+Rows equal in every run (count and sums of every column of both tables); foreign load 2.3-5.0
+cores at each run's busiest step; VmHWM b247 276-288 MB, c10 270-287. c1 (dictionaries in every
+format 2 file, a transaction's runs included) was +3.9% (COPY in +6.5%, INSERT ... SELECT +9.9%,
+CREATE INDEX +2.8%, the compaction after DELETE +22%): `ZSTD_compressBlock_fast_dictMatchState`
+9.4% of COPY's instructions against `ZSTD_compressBlock_fast_noDict`'s 4.8% (profiles of the step).
+
+### Point and range reads (alternating pairs, a fresh server and 100,000-row fixture each)
+
+| cell | pairs | instr/op | cycles/op | CPU/op | ops/s |
+|---|---|---|---|---|---|
+| point select, 8 clients, on lane B (lane A held by another agent's runs for hours) | 5 | median -0.7% (clean pairs -0.7, -1.5%) | -1.8% (clean -3.0, -1.8%) | -5.2% | +24% (three pairs over 1.0 foreign core) |
+| range read (100 rows), 8 clients, lane B | 5 | median -0.7% (the clean pair -0.7%) | -1.7% (clean +4.1%) | -8.4% | +66% (four pairs over 1.0 foreign core) |
+
+Cached reads run the same block code on blocks half the size: level.
+
+### TPC-H SF1 with every server confined to 1 GB (docker `--memory 1g --memory-swap 1g`, lane C, the same day)
+
+Caches at 256 MB: PostgreSQL's and pgrust's `shared_buffers = 256MB`, the engine's `--cache-mb 256`;
+`max_parallel_workers_per_gather = 2`, `max_parallel_workers = 8` on all four. Each server's
+data files were dropped from the page cache before its pass (`dd iflag=nocache`, the data
+directories bind-mounted and owned by uid 1000), so a container is charged for every page it
+reads in. Sum of the 22 queries' median walls over 3 runs each, after a warm-up pass; CPU from
+the bench client. Two passes each, in turn.
+
+| server | data on disk | pass 1 wall / CPU s | pass 2 wall / CPU s | memory (cgroup peak / anon at the end) |
+|---|---|---|---|---|
+| PostgreSQL 18.6 | 3,034 MB (with WAL) | 48.85 / 78.2 | 53.60 / 87.2 | 1,024 (the limit: page cache) |
+| pgrust | 3,034 MB | 54.91 / 61.0 | 58.85 / 61.0 | 1,024 |
+| roll b247 (plain dist) | 563 MB | 50.72 / 125.3 | 43.81 / 113.5 | 1,024 / 522, 519 MB |
+| roll c10 (plain dist) | 585 MB | **46.40** / 106.7 | **38.83** / 96.3 | 1,024 / 479, 476 MB |
+
+Every result hash equal across the servers' passes. pgrust's published binary is PGO-built; the
+engine's are plain dist. The engine's CPU is above both others' (its parallel workers and the
+decompression a miss still costs): wall, not CPU, is where it leads at this memory.
+
 ## Storage round 2, part 2: dead-entry sets, linkable runs in format 2 (2026-11-17, agent 245)
 
 HANDOFF "Storage round 2, part 2" has what changed. **c1** is `cand/a245` (`d262652cb`, the
