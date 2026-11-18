@@ -150,6 +150,15 @@ pub struct Note {
     pub at: i64,
 }
 
+/// What answers a name under a project's preview domain that no roll apps environment holds (a
+/// preview on roll's own runtime, from roll.toml's `[preview]`): rolld fills it with roll
+/// previews' router, called in process with the request as it came (its Host unchanged).
+/// Unset: those names are a 404.
+#[async_trait]
+pub trait PreviewRouter: Send + Sync {
+    async fn serve(&self, req: axum::extract::Request) -> axum::response::Response;
+}
+
 /// roll previews' notes, for a preview environment's own host (rolld fills it with
 /// `roll_previews::Engine::notes_for`). Unset: no list, only the button.
 #[async_trait]

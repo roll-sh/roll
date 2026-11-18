@@ -1953,6 +1953,61 @@ async fn a_custom_domain_reaches_another_port_of_the_app() {
     assert_eq!(visit(&w, h, "/").await.1["port"], json!(8080));
 }
 
+/// A project's own preview domain (Vercel's preview deployment suffix): a wildcard verified as a
+/// custom domain is; a preview environment answers to its `preview_host` one label under it, and
+/// any other label is none of roll apps'.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_preview_environment_answers_under_its_projects_preview_domain() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "web", json!({"port": 80})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/projects/{}/preview-domain", w.project);
+    assert_eq!(call(&w.api, "GET", &base, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"hostname": "preview.acme.dev"}))).await.0, StatusCode::BAD_REQUEST, "a wildcard");
+    let (st, d) = call(&w.api, "POST", &base, Some(json!({"hostname": "*.preview.acme.dev"}))).await;
+    assert_eq!((st, d["status"].as_str()), (StatusCode::CREATED, Some("pending")), "{d}");
+    // A preview environment and its label (roll previews sets it on the pv- environment it makes).
+    let pv = format!("/v1/apps/services/{id}/environments/pv-1");
+    assert_eq!(call(&w.api, "PUT", &pv, Some(json!({"ephemeral": true, "preview_host": "Web_PR1"}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, e) = call(&w.api, "PUT", &pv, Some(json!({"ephemeral": true, "preview_host": "web-pr1-shop"}))).await;
+    assert_eq!((st, e["preview_host"].as_str()), (StatusCode::OK, Some("web-pr1-shop")), "{e}");
+    let (_, r) = call(&w.api, "POST", &format!("{pv}/deploys"), Some(json!({}))).await;
+    settled(&w, &id, "pv-1", r["id"].as_str().unwrap()).await;
+    let other = format!("/v1/apps/services/{id}/environments/pv-2");
+    assert_eq!(call(&w.api, "PUT", &other, Some(json!({"ephemeral": true, "preview_host": "web-pr1-shop"}))).await.0, StatusCode::CONFLICT, "one label an environment");
+    // Not verified yet: nothing answers under it.
+    assert_eq!(visit(&w, "web-pr1-shop.preview.acme.dev", "/").await.0, StatusCode::NOT_FOUND);
+    w.dns.add("_roll-challenge.preview.acme.dev", "TXT", d["token"].as_str().unwrap());
+    let (_, v) = call(&w.api, "POST", &format!("{base}/verify"), None).await;
+    assert_eq!(v["status"], "active", "{v}");
+    let (st, body) = visit(&w, "web-pr1-shop.preview.acme.dev", "/").await;
+    assert_eq!((st, body["deployment"].as_str()), (StatusCode::OK, r["id"].as_str()), "{body}");
+    assert_eq!(visit(&w, "someone-else.preview.acme.dev", "/").await.0, StatusCode::NOT_FOUND, "another label is none of roll apps'");
+    // With roll previews' router on the node, such a label is its (a preview on roll's own
+    // runtime), the request as it came; one held by an environment stays roll apps'.
+    struct Previews;
+    #[async_trait::async_trait]
+    impl apps_control::integrations::PreviewRouter for Previews {
+        async fn serve(&self, req: axum::extract::Request) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            format!("previews for {}", req.headers()["host"].to_str().unwrap()).into_response()
+        }
+    }
+    w.apps.set_preview_router(Arc::new(Previews));
+    let req = Request::builder().uri("/").header("host", "someone-else.preview.acme.dev").body(Body::empty()).unwrap();
+    let resp = w.public.clone().oneshot(req).await.unwrap();
+    let text = String::from_utf8(axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap().to_vec()).unwrap();
+    assert_eq!(text, "previews for someone-else.preview.acme.dev");
+    assert_eq!(visit(&w, "web-pr1-shop.preview.acme.dev", "/").await.1["deployment"].as_str(), r["id"].as_str());
+    assert_eq!(visit(&w, "nobody.elsewhere.dev", "/").await.0, StatusCode::NOT_FOUND, "only under an active preview domain");
+    // Another project can't take it, nor a service's custom domain.
+    let p2 = w.apps.deps.workspace.as_ref().unwrap().create("", "other", "", None).unwrap().id;
+    assert_eq!(call(&w.api, "POST", &format!("/v1/apps/projects/{p2}/preview-domain"), Some(json!({"hostname": "*.preview.acme.dev"}))).await.0, StatusCode::CONFLICT);
+    // Gone: its names answer nothing.
+    assert_eq!(call(&w.api, "DELETE", &base, None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(visit(&w, "web-pr1-shop.preview.acme.dev", "/").await.0, StatusCode::NOT_FOUND);
+}
+
 /// Where every tenant's CNAME points at one target (Cloudflare for SaaS), a CNAME proves nothing:
 /// a hostname someone else already points there (or left pointing) needs its TXT challenge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -68,6 +68,8 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/limits", get(limits).put(set_limits))
         .route("/v1/apps/projects/{project}/drains", get(drains).post(add_drain))
         .route("/v1/apps/projects/{project}/export", post(export_project))
+        .route("/v1/apps/projects/{project}/preview-domain", get(preview_domain).post(set_preview_domain).delete(delete_preview_domain))
+        .route("/v1/apps/projects/{project}/preview-domain/verify", post(verify_preview_domain))
         .route("/v1/apps/projects/{project}/drains/{did}", axum::routing::delete(delete_drain).patch(update_drain))
         .route("/v1/apps/projects/{project}/drains/{did}/test", post(test_drain))
         .route("/v1/apps/projects/{project}/notifications/{nid}", axum::routing::delete(delete_target).patch(update_target))
@@ -158,6 +160,23 @@ async fn on_owner(State(apps): S, req: Request, next: Next) -> Response {
     }
     let cluster = apps.deps.cluster.clone();
     cluster.dispatch(&lease_key(&id), req, |req, _guard| next.run(req)).await
+}
+
+async fn preview_domain(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.preview_domain(&project).await?)
+}
+
+async fn set_preview_domain(State(apps): S, Path(project): Path<String>, b: Bytes) -> R {
+    Ok((StatusCode::CREATED, Json(apps.set_preview_domain(&project, body(&b)?).await?)).into_response())
+}
+
+async fn verify_preview_domain(State(apps): S, Path(project): Path<String>) -> R {
+    ok(apps.verify_preview_domain(&project).await?)
+}
+
+async fn delete_preview_domain(State(apps): S, Path(project): Path<String>) -> R {
+    apps.delete_preview_domain(&project).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn overview(State(apps): S) -> R {

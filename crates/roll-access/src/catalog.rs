@@ -1322,6 +1322,11 @@ static ROWS: &[Row] = &[
     // runtime output elsewhere and its signing secret comes back once: reveal. The URL is never
     // answered (only its host).
     row("GET", "/v1/apps/projects/{project}/drains", "apps", R, one(&["project"], "project")),
+    // The project's preview domain: which names its preview environments answer under.
+    row("GET", "/v1/apps/projects/{project}/preview-domain", "apps", R, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/preview-domain", "apps", W, one(&["project"], "project")),
+    row("DELETE", "/v1/apps/projects/{project}/preview-domain", "apps", D, one(&["project"], "project")),
+    row("POST", "/v1/apps/projects/{project}/preview-domain/verify", "apps", W, one(&["project"], "project")),
     // Its services as roll.toml: settings and variables' names, never a value.
     row("POST", "/v1/apps/projects/{project}/export", "apps", R, one(&["project"], "project")),
     row("POST", "/v1/apps/projects/{project}/drains", "apps", REVEAL, one(&["project"], "project")),

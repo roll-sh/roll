@@ -31,6 +31,10 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps` | | `Overview` | read |
 | `POST /v1/apps/plan` | `PlanRequest` | `Plan`; with `roots: true` (a repo or a Git URL, no `root`): `{ roots: { root, provider, framework? }[] }`, the folders up to three levels down that build on their own (a start command, a framework or a Dockerfile: no library package, docs or dependencies), at most 20 | read |
 | `POST /v1/apps/projects/{project}/export` | `{ databases? }` (`{"postgres:<ref>": "db"}`: the names of the databases its services link, as the caller lists them; one not named is named after its ref) | `{ roll_toml, notes }`: its services (source, branch, the run settings that differ from a new service's), the postgres and redis databases they link, variables by name only in its header; read back with the parser `roll up --all` uses before it's answered; 409 for a project with no service | read |
+| `GET /v1/apps/projects/{project}/preview-domain` | | `Domain` (404: none): the project's own preview domain, a wildcard its preview environments answer under by their `preview_host`; `tls` is `none` (plain HTTP until wildcard certificates, DNS-01, are issued here) | read |
+| `POST /v1/apps/projects/{project}/preview-domain` | `{ hostname: "*.preview.acme.dev" }` (a wildcard; one a project, a new one replaces it; 409 when another project's previews or any service's domain has it) | 201 `Domain` (pending: the same CNAME, `target` its own, or `_roll-challenge` TXT a custom domain takes) | write |
+| `POST /v1/apps/projects/{project}/preview-domain/verify` | | `Domain` (active once its DNS checks out, else pending with what DNS answered) | write |
+| `DELETE /v1/apps/projects/{project}/preview-domain` | | 204 (its names answer nothing; the environments keep their labels for another) | delete |
 | `POST /v1/apps/import` | `{ roll_toml }`, `{ compose }`, another platform's file (`{ render }` a Blueprint's render.yaml, `{ fly }` fly.toml, `{ railway }` railway.json or railway.toml, `{ heroku, procfile? }` app.json and its Procfile; read as roll.toml with `notes` on what isn't carried over) (each at most 1 MiB; one at a time), `{ repo, revision? }` (that roll code repo's root roll.toml, at its default branch's head unless a revision is named: a "deploy to roll" link), or `{ git, branch? }` (a public Git repository's root roll.toml by URL, at most 64 KiB, at its branch's head; https, no credentials, a public address). From a repo or a Git URL, an app that names only a `root` becomes that repository's source at that folder (a Git URL's following the branch it was read from), not an upload | `ProjectImport` (read, nothing made: checked as `roll up --all` checks it; 400 says what's wrong) | read |
 | `GET /v1/apps/services?project=&deleted=` | | `Service[]`; `deleted=true`: `{id, project, name, deleted_at, purge_at}[]` (unix ms, newest first), the deleted services kept for a restore until `purge_at`, 48 hours after the delete | read |
 | `POST /v1/apps/services` | `NewService` | 201 `Service` | deploy* (a repo or image source deploys production at once; write for an upload source) |
@@ -381,6 +385,7 @@ type EnvironmentPut = {
    *  the app's. */
   vitals?: boolean;
   report?: boolean; // false: its deploys post no commit status and no GitHub Deployment (someone else reports them: roll previews, for its `pv-` environments)
+  preview_host?: string | null; // the one DNS label it answers to under its project's preview domain (`<label>.preview.acme.dev`; roll previews sets it), unique in the project (409); null: none
   follow_tag?: boolean;
   /** A preview environment (ephemeral) only, set by roll previews: a visitor who came in through
    *  its access link gets roll previews' feedback button on its pages (`/__roll/feedback.js`
@@ -449,6 +454,7 @@ type Environment = EnvironmentSummary & {
   traces: boolean; // its instances send OpenTelemetry traces to roll
   vitals: boolean; // its pages measure their Web Vitals for roll (`…/vitals`)
   report: boolean; // its deploys are reported to the Git host (default true)
+  preview_host?: string; // its label under the project's preview domain
   egress: { mode: "roll" | "open"; hosts: string[] }; // what its code may reach (roll: roll and the hosts)
   egress_refused?: { host: string; private?: true }[]; // hosts its egress proxy refused lately, oldest first, at most 20: not listed, or (private) listed but resolving only to private addresses
   feedback: boolean;          // a preview's pages carry roll previews' feedback button

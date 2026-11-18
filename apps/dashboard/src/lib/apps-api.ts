@@ -1043,6 +1043,11 @@ export const appsApi = {
   /** The folders of a repo's or a Git URL's tree that build on their own (a monorepo's apps). */
   roots: (req: { repo: string } | { git: string; branch?: string; git_login?: { username: string; password: string } }) => call<{ roots: RootCandidate[] }>("POST", "/v1/apps/plan", { ...req, roots: true }),
   /** The project as roll.toml: `databases` names what its services link (`{"postgres:<id>": "db"}`). */
+  /** The project's own preview domain (a wildcard its preview environments answer under). */
+  previewDomain: (project: string) => call<Domain>("GET", `/v1/apps/projects/${enc(project)}/preview-domain`),
+  setPreviewDomain: (project: string, hostname: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/preview-domain`, { hostname }),
+  verifyPreviewDomain: (project: string) => call<Domain>("POST", `/v1/apps/projects/${enc(project)}/preview-domain/verify`),
+  removePreviewDomain: (project: string) => call<null>("DELETE", `/v1/apps/projects/${enc(project)}/preview-domain`),
   exportProject: (project: string, databases: Record<string, string>) => call<{ roll_toml: string; notes: string[] }>("POST", `/v1/apps/projects/${enc(project)}/export`, { databases }),
   /** A roll.toml or Compose file read as a project (nothing made). */
   importProject: (file: ImportFile | { repo: string; revision?: string } | { git: string; branch?: string }) => call<ProjectImport>("POST", "/v1/apps/import", file),
