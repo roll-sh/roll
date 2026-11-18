@@ -682,8 +682,8 @@ async fn delete_hook(AxState(e): S, Path((project, hook)): Path<(String, String)
 
 /// A deploy hook fired: 202 `{rebuilt: [preview ids], coalesced}`; anything but a live hook is
 /// a 404. The body is ignored (a CMS sends its own payload).
-async fn run_hook(AxState(e): S, Path(secret): Path<String>, from: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>) -> crate::Result<Response> {
-    let from = from.map(|c| c.0.ip().to_string());
+async fn run_hook(AxState(e): S, Path(secret): Path<String>, req: axum::extract::Request) -> crate::Result<Response> {
+    let from = req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_string());
     let (rebuilt, coalesced) = blocking(e, move |e| e.run_hook(&secret, from.as_deref())).await?;
     Ok((StatusCode::ACCEPTED, Json(json!({ "rebuilt": rebuilt, "coalesced": coalesced }))).into_response())
 }
