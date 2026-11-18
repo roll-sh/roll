@@ -1268,7 +1268,8 @@ mod tests {
     /// `ROLL_E2E_OS_URL`, `ROLL_E2E_CASSANDRA_URL`, `ROLL_E2E_SCYLLA_URL`, whichever are set, and
     /// `ROLL_E2E_OUTSIDE_CA`), after their own tests made the role `reader`: through a gateway that
     /// allows only their addresses, a dynamic login is made in the group, rotated, logs in with
-    /// the new password and not the old one, and is dropped.
+    /// the new password and not the old one, changes its own password (rotate-admin's call), and
+    /// is dropped.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore]
     async fn real_outside_servers_through_the_gateway() {
@@ -1317,9 +1318,15 @@ mod tests {
             call(Call::DbSetPassword { url: root.clone(), ca: Some(ca.clone()), role: name.clone(), password: second.clone() }).await.unwrap();
             call(check(as_user(root, &name, &second))).await.unwrap_or_else(|e| panic!("{root}: the rotated password logs in: {e}"));
             assert!(call(check(as_user(root, &name, &first))).await.is_err(), "the old password is refused");
+            // Its own password, as rotate-admin changes the admin's.
+            settle().await;
+            let third = pw();
+            call(Call::DbSetOwnPassword { url: as_user(root, &name, &second), ca: Some(ca.clone()), password: third.clone() }).await.unwrap_or_else(|e| panic!("{root}: its own password: {e}"));
+            call(check(as_user(root, &name, &third))).await.unwrap_or_else(|e| panic!("{root}: its own new password logs in: {e}"));
+            assert!(call(check(as_user(root, &name, &second))).await.is_err(), "the password before its own change is refused");
             settle().await;
             call(Call::DbDropLogin { url: root.clone(), ca: Some(ca.clone()), name: name.clone() }).await.unwrap();
-            assert!(call(check(as_user(root, &name, &second))).await.is_err(), "a dropped login is refused");
+            assert!(call(check(as_user(root, &name, &third))).await.is_err(), "a dropped login is refused");
             let log = lines.lock().unwrap().join("\n");
             assert!(log.contains(&format!("open {}", addr(root))), "the gateway dialed it: {log}");
         }

@@ -29,7 +29,12 @@ const FRAME_MAX: usize = 256 * 1024;
 /// The most rows of one answer looked at.
 const ROWS_MAX: usize = 1000;
 
+/// How long [`settled`] waits for a new password to log in: past Cassandra's default
+/// `credentials_validity` (2 s).
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The URL's settings: `cassandra://admin:password@host:9142/keyspace` (the keyspace optional).
+#[derive(Clone)]
 pub(super) struct Url {
     host: String,
     port: u16,
@@ -59,6 +64,13 @@ pub(super) fn parse(url: &str) -> Result<Url, String> {
         return Err("a keyspace is letters, digits and _".into());
     }
     Ok(Url { host, port: u.port().unwrap_or(9142), user: decode(u.username())?, password: decode(u.password().unwrap_or(""))?, keyspace: (!keyspace.is_empty()).then(|| keyspace.to_string()) })
+}
+
+impl Url {
+    /// The same login with `password`.
+    pub(super) fn with_password(&self, password: &str) -> Url {
+        Url { password: password.to_string(), ..self.clone() }
+    }
 }
 
 fn name_ok(name: &str) -> bool {
@@ -101,6 +113,7 @@ pub(super) struct Conn {
     io: Framed<Tls, ClientCodec>,
     ctx: Ctx,
     host: String,
+    user: String,
     keyspace: Option<String>,
 }
 
@@ -147,7 +160,7 @@ async fn connect(u: &Url, ca: Option<&str>, via: &Via) -> Result<Conn, String> {
     let io = via.dial(&u.host, u.port).await?;
     // The certificate is checked against the URL's host, whichever address it was reached at.
     let tls = tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, io).await.map_err(|e| format!("{}: TLS: {e}", u.host))?;
-    let mut c = Conn { io: Framed::new(tls, ClientCodec::new().with_max_frame_size(FRAME_MAX)), ctx: Ctx::new(Version::V4), host: u.host.clone(), keyspace: u.keyspace.clone() };
+    let mut c = Conn { io: Framed::new(tls, ClientCodec::new().with_max_frame_size(FRAME_MAX)), ctx: Ctx::new(Version::V4), host: u.host.clone(), user: u.user.clone(), keyspace: u.keyspace.clone() };
     let mut resp = exchange(&mut c, Request::Startup(Startup::new("3.0.0"))).await?;
     let mut answered = false;
     loop {
@@ -251,6 +264,26 @@ pub(super) async fn check(c: &mut Conn, roles: &[String], group: Option<&str>) -
 pub(super) async fn set_password(c: &mut Conn, role: &str, password: &str) -> Result<(), String> {
     let who = ident(role)?;
     with_password(c, |p| format!("ALTER ROLE {who} WITH {p}"), password).await
+}
+
+/// The URL's own role gets `password` (any role may change its own), hashed where the server takes
+/// it (ScyllaDB's `ALTER ROLE` doesn't: see [`with_password`]).
+pub(super) async fn set_own_password(c: &mut Conn, password: &str) -> Result<(), String> {
+    let who = ident(&c.user)?;
+    with_password(c, |p| format!("ALTER ROLE {who} WITH {p}"), password).await
+}
+
+/// Cassandra keeps a role's credentials cached (`credentials_validity`, 2 s by default) and takes
+/// its old password, not the new one, until they expire: wait, at most [`SETTLE`], until `u` (the
+/// new password) logs in. The change is made either way, so this never fails: the caller checks.
+pub(super) async fn settled(u: &Url, ca: Option<&str>, via: &Via) {
+    let until = tokio::time::Instant::now() + SETTLE;
+    loop {
+        match tokio::time::timeout(TIMEOUT, connect(u, ca, via)).await {
+            Ok(Err(e)) if e.contains("bad credentials") && tokio::time::Instant::now() < until => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+            _ => return,
+        }
+    }
 }
 
 pub(super) async fn create_login(c: &mut Conn, name: &str, password: &str, group: &str) -> Result<(), String> {
@@ -435,7 +468,14 @@ mod tests {
             g.create_login(&at(&root, Some(&ca)), name, &rootpw, "reader", 0).unwrap();
             logs_in(name, &rootpw).unwrap();
             g.drop_login(&at(&root, Some(&ca)), name).unwrap();
-            (first, second, upw, rootpw)
+            // The admin's own password (rotate-admin): the new one logs in and still manages the
+            // roles, the old one is refused.
+            let own = pw();
+            settle();
+            g.set_own_password(&at(&admin, Some(&ca)), &own).unwrap();
+            g.check(&at(&as_user(&admin, "roll_admin", &own, "app"), Some(&ca)), &roles, Some("reader")).unwrap();
+            assert!(logs_in("roll_admin", &admin_pw).is_err(), "the admin's old password is refused");
+            (first, second, upw, rootpw, own)
         })
         .await
         .unwrap();
@@ -446,14 +486,15 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_secs(3));
         let traces = cells(&root2, &ca2, "SELECT parameters FROM system_traces.sessions").await.join("\n");
         assert!(traces.contains("HASHED PASSWORD = '$2a$10$"), "tracing is on and saw a hashed password");
-        let (first, second, upw, rootpw) = sent;
+        let (first, second, upw, rootpw, own) = sent;
         assert!(!traces.contains(&rootpw), "the superuser's login's password isn't in a statement");
         if scylla {
             let audit = cells(&root2, &ca2, "SELECT operation FROM audit.audit_log").await.join("\n");
             assert!(audit.contains("ALTER ROLE \"app_blue\" WITH PASSWORD = '***'"), "{audit}");
-            assert!(![&first, &second, &upw].iter().any(|p| audit.contains(p.as_str())), "ScyllaDB's audit log masks passwords");
+            assert!(audit.contains("ALTER ROLE \"roll_admin\" WITH PASSWORD = '***'"), "{audit}");
+            assert!(![&first, &second, &upw, &own].iter().any(|p| audit.contains(p.as_str())), "ScyllaDB's audit log masks passwords");
         } else {
-            assert!(![&first, &second, &upw].iter().any(|p| traces.contains(p.as_str())), "no password roll sent is in a statement");
+            assert!(![&first, &second, &upw, &own].iter().any(|p| traces.contains(p.as_str())), "no password roll sent is in a statement");
         }
     }
 }

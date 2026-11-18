@@ -61,13 +61,15 @@ pub(super) struct Conn {
     http: Https,
     /// `Basic …` for the admin.
     auth: String,
+    /// The admin's password, which OpenSearch's account API wants to change it.
+    password: String,
     flavor: Flavor,
 }
 
 fn connect(u: &Url, ca: Option<&str>, via: &Via) -> Result<Conn, String> {
     use base64::Engine as _;
     let auth = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", u.user, u.password)));
-    Ok(Conn { http: Https::new(&u.host, u.port, ca, via.clone())?, auth, flavor: u.flavor })
+    Ok(Conn { http: Https::new(&u.host, u.port, ca, via.clone())?, auth, password: u.password.clone(), flavor: u.flavor })
 }
 
 /// One call to `segments` (each percent-encoded); `None` for a read's 404, the answer's JSON (or
@@ -150,6 +152,17 @@ pub(super) async fn set_password(c: &Conn, role: &str, password: &str) -> Result
         Flavor::Elasticsearch => call(c, Method::POST, &["_security", "user", role, "_password"], Some(json!({ "password": password }))).await,
         // A patch, so the user's roles, backend roles and attributes stay as they are.
         Flavor::OpenSearch => call(c, Method::PATCH, &user(c, role), Some(json!([{ "op": "add", "path": "/password", "value": password }]))).await,
+    }
+    .map(|_| ())
+}
+
+/// The URL's own user gets `password`: Elasticsearch's change-password API as that user (every
+/// user may change its own), OpenSearch's account API, which wants the current password too (the
+/// URL's). Neither echoes a body roll can see: `call` drops a refused body's reason.
+pub(super) async fn set_own_password(c: &Conn, password: &str) -> Result<(), String> {
+    match c.flavor {
+        Flavor::Elasticsearch => call(c, Method::POST, &["_security", "user", "_password"], Some(json!({ "password": password }))).await,
+        Flavor::OpenSearch => call(c, Method::PUT, &["_plugins", "_security", "api", "account"], Some(json!({ "current_password": c.password, "password": password }))).await,
     }
     .map(|_| ())
 }
@@ -275,6 +288,13 @@ mod tests {
             g.drop_login(&at(&admin, Some(&ca)), name).unwrap();
             assert!(logs_in(name, &upw).is_err(), "a deleted user is refused");
             g.drop_login(&at(&admin, Some(&ca)), name).unwrap();
+            // The admin's own password (rotate-admin): the new one logs in and still manages the
+            // users, the old one is refused.
+            let own = pw();
+            g.set_own_password(&at(&admin, Some(&ca)), &own).unwrap();
+            g.check(&at(&as_user(&admin, "roll_admin", &own), Some(&ca)), &roles, Some("reader")).unwrap();
+            let old = g.check(&at(&admin, Some(&ca)), &[], None).unwrap_err();
+            assert!(old.contains("401") && !old.contains(&own), "{old}");
         })
         .await
         .unwrap();
