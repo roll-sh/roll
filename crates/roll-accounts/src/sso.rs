@@ -73,8 +73,10 @@ pub struct Connection {
     pub redirect_uri: String,
     /// The TXT record that proves a domain: `name` with the domain in place of `<domain>`.
     pub dns: DnsRecord,
-    /// Its provider provisions people over SCIM (it has a token).
+    /// Its provider provisions people over SCIM (it has a live token).
     pub scim: bool,
+    /// Its SCIM token was found leaked and revoked: where (until an admin makes a new one).
+    pub scim_leaked: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -194,7 +196,7 @@ fn is_entra(issuer: &str) -> bool {
     url::Url::parse(issuer).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).is_some_and(|h| h == "login.microsoftonline.com" || h == "sts.windows.net")
 }
 
-const COLUMNS: &str = "id, name, issuer, client_id, domains, verified, enforce, provision, created_at, challenge, (SELECT COUNT(*) FROM scim_tokens t WHERE t.connection_id = sso_connections.id) AS scim";
+const COLUMNS: &str = "id, name, issuer, client_id, domains, verified, enforce, provision, created_at, challenge, (SELECT COUNT(*) FROM scim_tokens t WHERE t.connection_id = sso_connections.id AND t.leaked IS NULL) AS scim, (SELECT leaked FROM scim_tokens t WHERE t.connection_id = sso_connections.id) AS scim_leaked";
 
 impl Accounts {
     fn sso_redirect_uri(&self, id: &str) -> String {
@@ -218,6 +220,7 @@ impl Accounts {
             created_at: r.get(8)?,
             dns: DnsRecord { name: "_roll-sso.<domain>".into(), value: format!("roll-sso={challenge}") },
             scim: r.get::<_, i64>(10)? > 0,
+            scim_leaked: r.get(11)?,
         })
     }
 

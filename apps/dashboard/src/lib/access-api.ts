@@ -100,6 +100,8 @@ export interface Grant {
   revoked_why?: string;
   /** What its rules don't allow asks a person instead of being refused. */
   ask_otherwise?: boolean;
+  /** A decoy (honeytoken): it never works, and any use tells its owner and the admins. */
+  decoy?: boolean;
   /** Rules a person allowed for a while when approving its requests, each until a time (Unix ms). */
   temporary?: { rule: Rule; until: number; approval?: string }[];
   /** Its requests over the last day (in the list). */
@@ -114,6 +116,8 @@ export interface NewGrant {
   ip_allow?: string[];
   rate_per_minute?: number | null;
   ask_otherwise?: boolean;
+  /** A decoy: never works; any use is reported (docs/permissions.md, "Decoy tokens"). */
+  decoy?: boolean;
 }
 
 /** A token that needs attention (`GET /v1/access/checkup`). */
@@ -583,6 +587,8 @@ export interface EnterpriseIdp {
   name?: string;
   /** A multi-tenant issuer's one tenant roll trusts (its assertions' `tenant`). */
   tenant?: string;
+  /** The SSO connection that is this same provider (`sso_…`): its verified domains, as they are at each sign-in. */
+  sso?: string;
 }
 
 /** An app a trusted provider may vouch for: never its secret. */
@@ -607,13 +613,15 @@ export interface Enterprise {
 }
 
 /** The trust-a-provider form as a provider, or what's wrong with it (the API checks it again). */
-export function idpFromForm(f: { issuer: string; name: string; matching: "email" | "aud_sub"; domains: string; jwks: string; admins: boolean; tenant?: string }): { idp: EnterpriseIdp } | { problem: string } {
+export function idpFromForm(f: { issuer: string; name: string; matching: "email" | "aud_sub"; domains: string; jwks: string; admins: boolean; tenant?: string; sso?: string }): { idp: EnterpriseIdp } | { problem: string } {
   const issuer = f.issuer.trim();
   if (!/^https:\/\/[^\s/]+/.test(issuer)) return { problem: "The issuer is an https URL" };
-  const domains = [...new Set(f.domains.split(/[\s,]+/).map((d) => d.trim().toLowerCase().replace(/^@/, "")).filter(Boolean))];
+  const sso = f.sso?.trim() || undefined;
+  // A provider tied to an SSO connection vouches for the domains a DNS record proved for it.
+  const domains = sso ? [] : [...new Set(f.domains.split(/[\s,]+/).map((d) => d.trim().toLowerCase().replace(/^@/, "")).filter(Boolean))];
   const bad = domains.find((d) => !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d));
   if (bad) return { problem: `${bad} isn't a domain` };
-  if (f.matching === "email" && domains.length === 0) return { problem: "Name the email domains it vouches for" };
+  if (f.matching === "email" && domains.length === 0 && !sso) return { problem: "Name the email domains it vouches for" };
   const jwks = f.jwks.trim();
   if (jwks) {
     try {
@@ -632,6 +640,7 @@ export function idpFromForm(f: { issuer: string; name: string; matching: "email"
       ...(f.admins ? { admins: true } : {}),
       ...(f.name.trim() ? { name: f.name.trim() } : {}),
       ...(f.tenant?.trim() ? { tenant: f.tenant.trim() } : {}),
+      ...(sso ? { sso } : {}),
     },
   };
 }
