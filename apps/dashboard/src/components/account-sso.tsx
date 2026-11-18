@@ -1,5 +1,6 @@
 import { Building2, Copy } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { accessApi, tieForAgents, untieForAgents, type EnterpriseIdp } from "@/lib/access-api";
 import { accountsApi, ssoDomains, type SsoConnection } from "@/lib/accounts-api";
 
 const card = "rounded-xl border border-line-2 bg-sheet inset-shadow-highlight";
@@ -20,6 +21,12 @@ export function SsoSection() {
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(() => accountsApi.ssoConnections().then(setList, (e) => setError(errorText(e))), []);
   useEffect(() => void load(), [load]);
+  // Enterprise sign-in's providers (agents): a connection can be one too, set up once.
+  const [idps, setIdps] = useState<EnterpriseIdp[] | null>(null);
+  useEffect(() => {
+    accessApi.enterprise().then((e) => setIdps(e.idps), () => setIdps(null));
+  }, []);
+  const saveIdps = (next: EnterpriseIdp[]) => accessApi.setIdps(next).then((r) => setIdps(r.idps), (e) => setError(errorText(e)));
   const change = (id: string, c: { enforce?: boolean; provision?: boolean }) => accountsApi.updateSso(id, c).then(load, (e) => setError(errorText(e)));
   return (
     <section id="sso" className="rise scroll-mt-16">
@@ -113,6 +120,25 @@ export function SsoSection() {
               </div>
             )}
             <Scim connection={c} onChange={load} onError={setError} />
+            {idps && (
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-muted">
+                {idps.some((i) => i.sso === c.id) ? (
+                  <>
+                    Agents sign in through it too (enterprise sign-in, for its verified domains).
+                    <button onClick={() => void saveIdps(untieForAgents(idps, c.id))} className={btn}>
+                      Stop
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    Let it sign in your people&apos;s agents too (enterprise sign-in), for the domains it proved.
+                    <button disabled={c.verified.length === 0} onClick={() => void saveIdps(tieForAgents(idps, c))} className={btn}>
+                      Use for agents too
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
             <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[12px] text-muted">
               <label className="flex items-center gap-1.5">
                 <input type="checkbox" checked={c.enforce} onChange={(e) => void change(c.id, { enforce: e.target.checked })} />

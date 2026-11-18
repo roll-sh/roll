@@ -612,6 +612,20 @@ export interface Enterprise {
   token_endpoint: string;
 }
 
+/**
+ * People's SSO connection as an enterprise identity provider too (one provider, set up once): the
+ * idps with it added, its issuer and verified domains coming from the connection (#252's `sso`).
+ */
+export function tieForAgents(idps: EnterpriseIdp[], c: { id: string; name: string; issuer: string }): EnterpriseIdp[] {
+  if (idps.some((i) => i.sso === c.id)) return idps;
+  return [...idps.filter((i) => i.issuer.replace(/\/$/, "") !== c.issuer.replace(/\/$/, "") || i.tenant), { issuer: c.issuer, name: c.name, matching: "email", sso: c.id }];
+}
+
+/** The idps without the one tied to SSO connection `id`. */
+export function untieForAgents(idps: EnterpriseIdp[], id: string): EnterpriseIdp[] {
+  return idps.filter((i) => i.sso !== id);
+}
+
 /** The trust-a-provider form as a provider, or what's wrong with it (the API checks it again). */
 export function idpFromForm(f: { issuer: string; name: string; matching: "email" | "aud_sub"; domains: string; jwks: string; admins: boolean; tenant?: string; sso?: string }): { idp: EnterpriseIdp } | { problem: string } {
   const issuer = f.issuer.trim();
