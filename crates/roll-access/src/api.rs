@@ -553,8 +553,9 @@ impl Access {
         let who = who(self, ext)?;
         // A person's own token past what the policy has an admin approve waits for one (one their
         // token makes is within that token, which was approved).
+        // A decoy allows nothing, so nothing about it waits for an admin.
         let asker = match &who {
-            Who::User(u) if self.policy_now().needs_approval(&new.rules, new.ask_otherwise) => Some(u.handle.clone()),
+            Who::User(u) if !new.decoy && self.policy_now().needs_approval(&new.rules, new.ask_otherwise) => Some(u.handle.clone()),
             _ => None,
         };
         new.pending = asker.is_some();

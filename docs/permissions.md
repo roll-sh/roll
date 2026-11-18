@@ -1038,6 +1038,22 @@ and Google mail a sign-in from somewhere new): a leaked token is used from somew
   OAuth client put in a name (Slack's `<!channel>`, Discord's `[label](url)`) is dropped, and Slack
   text is escaped.
 
+## Decoy tokens
+
+A decoy (a honeytoken, as Thinkst's canary tokens are) is a token made to be found: `POST
+/v1/access/tokens {…, decoy: true}` (the builder's "A decoy"). Plant it where only an intruder would
+look (an old repo, a wiki page, a backup's config):
+
+- It never allows anything, whatever its rules say, and never waits for an admin's approval.
+- Any use answers exactly as a revoked or made-up token does (401 `invalid_token`), so whoever
+  holds it learns nothing, and the gate checks it before anything else (the idle-token rule would
+  otherwise retire a token nobody uses).
+- Each use is written on the token (`last_used_at`, `last_used_ip`), to the audit log
+  (`source: "decoy"`, the route and the client), and mailed to its owner and every admin (once an
+  hour per decoy and person). A decoy can't be turned into a working token.
+- It's checksummed like any `rlt_`, so scanners report a leaked decoy too (roll revokes it, which
+  ends the trap: plant another).
+
 ## Leaked tokens
 
 Other products' secrets made the same way are found and revoked the same way: apps' deploy hooks
@@ -1113,7 +1129,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
 | `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}`; `?product=` (and `&resource=`) only those with a rule on that product by name (naming that `{id}` or `{project}`), as a product's page lists its own tokens; `?kind=workload` the workload tokens instead |
-| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?}` → 201 `{grant, token}`; `token` is shown this once |
+| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?, decoy?}` → 201 `{grant, token}`; `token` is shown this once; `decoy`: a honeytoken ("Decoy tokens") |
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |

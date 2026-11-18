@@ -246,6 +246,9 @@ pub struct Grant {
     /// directly. Set by [`Store::by_secret`]; never stored on the grant.
     #[serde(skip)]
     pub mcp_only: bool,
+    /// A decoy: never allows; any use is reported (docs/permissions.md, "Decoy tokens").
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub decoy: bool,
     /// Narrowed to reading for this request (`scope=read-only`): never asks.
     #[serde(skip)]
     pub read_only: bool,
@@ -410,6 +413,11 @@ pub struct NewGrant {
     /// Set by roll, never by the caller: it waits for an admin's approval.
     #[serde(skip)]
     pub pending: bool,
+    /// A decoy (a honeytoken, docs/permissions.md "Decoy tokens"): it never allows anything, and
+    /// any use tells its owner and the admins, so one planted where only an intruder would look
+    /// (a repo, a config, a wiki) gives them away.
+    #[serde(default)]
+    pub decoy: bool,
 }
 
 /// A change to a grant: only the fields it has.
@@ -673,9 +681,9 @@ fn write_audit(db: &Db, events: &[AuditEvent]) {
 /// The longest an old secret keeps working after a rotation (Stripe's limit too).
 pub const MAX_KEEP_OLD_MS: i64 = 7 * 86_400_000;
 
-/// A grant's columns, as `grant_row` reads them (26 of them: a query may add its own after).
+/// A grant's columns, as `grant_row` reads them (28 of them: a query may add its own after).
 const GRANT_COLUMNS: &str = "g.id, g.name, g.kind, g.rules, g.expires_at, g.ip_allow, g.created_by, g.created_at, g.last_used_at, g.last_used_ip, g.revoked_at, \
-     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.user_id, g.revoked_why, g.temp_rules, g.ask_otherwise, g.not_before, g.pending, g.approved_at, g.decided_by, g.hint";
+     c.id, c.name, c.uri, c.redirect_uris, c.created_at, c.last_used_at, g.rate_per_minute, g.user_id, g.revoked_why, g.temp_rules, g.ask_otherwise, g.not_before, g.pending, g.approved_at, g.decided_by, g.hint, g.decoy";
 const GRANT_FROM: &str = "grants g LEFT JOIN oauth_clients c ON c.id = g.client_id";
 
 /// A secret as a list may show it: its prefix and its last four characters (`rlt_…a1b2`). The last
@@ -722,6 +730,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         approved_at: r.get(24)?,
         decided_by: r.get(25)?,
         hint: r.get(26)?,
+        decoy: r.get::<_, Option<bool>>(27)?.unwrap_or(false),
         ip_allow: serde_json::from_str(&ip).unwrap_or_default(),
         created_by: r.get(6)?,
         created_at: r.get(7)?,
@@ -896,6 +905,9 @@ impl Store {
         }
         db.ensure_schema("CREATE INDEX IF NOT EXISTS grants_user ON grants (user_id);")?;
         // Why it was revoked, when roll did it (a leaked secret).
+        if !db.has_column("grants", "decoy")? {
+            db.add_column("grants", "decoy", "INTEGER")?;
+        }
         if !db.has_column("grants", "revoked_why")? {
             db.add_column("grants", "revoked_why", "TEXT")?;
         }
@@ -1019,8 +1031,8 @@ impl Store {
             }
             let shown = (kind == GrantKind::Token).then(|| hint(&token));
             c.execute(
-                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise, not_before, pending, hint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, new.name.trim(), kind_s, rules, new.expires_at, ip, created_by, now, client_id, new.rate_per_minute.map(i64::from), user, new.ask_otherwise, new.not_before, new.pending, shown],
+                "INSERT INTO grants (id, name, kind, rules, expires_at, ip_allow, created_by, created_at, client_id, rate_per_minute, user_id, ask_otherwise, not_before, pending, hint, decoy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, new.name.trim(), kind_s, rules, new.expires_at, ip, created_by, now, client_id, new.rate_per_minute.map(i64::from), user, new.ask_otherwise, new.not_before, new.pending, shown, new.decoy],
             )?;
             c.execute(
                 "INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -1029,6 +1041,13 @@ impl Store {
             Ok(())
         })?;
         Ok((self.get(&id)?, token))
+    }
+
+    /// A decoy was used from `ip`: when and where, as a token's use is shown.
+    pub fn tripped(&self, id: &str, ip: Option<&str>) -> Result<()> {
+        let now = code_sql::now_ms();
+        self.db.write(|c| c.execute("UPDATE grants SET last_used_at = ?, last_used_ip = ? WHERE id = ? AND decoy = 1", params![now, ip, id]))?;
+        Ok(())
     }
 
     pub fn get(&self, id: &str) -> Result<Grant> {

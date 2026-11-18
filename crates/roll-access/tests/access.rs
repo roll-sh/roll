@@ -2400,3 +2400,36 @@ async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/enterprise/apps/{client_id}"), None).await.1["revoked"], 2);
     assert_eq!(d.call(&token2, Method::GET, "/v1/access", None).await.0, StatusCode::UNAUTHORIZED);
 }
+
+/// A decoy token (docs/permissions.md, "Decoy tokens"): it never allows anything, answers as an
+/// unknown token does, and its use is in the audit log, on the token, and in the admins' mail.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_decoy_token_allows_nothing_and_gives_its_user_away() {
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    // A person's decoy never waits for an admin, whatever its rules (they're never used).
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "approve_people": ["reveal", "admin"] }))).await.0, StatusCode::OK);
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "admin": "allow" } }]);
+    let (s, g) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "aws creds in the old wiki", "rules": rules, "decoy": true }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{g}");
+    assert_eq!((g["grant"]["decoy"].as_bool(), g["grant"].get("pending")), (Some(true), None), "{g}");
+    let (id, token) = (g["grant"]["id"].as_str().unwrap().to_string(), g["token"].as_str().unwrap().to_string());
+    // Used: refused as a revoked or made-up token is, word for word.
+    let (s, used) = d.call(&token, Method::GET, "/v1/workspace/projects", None).await;
+    let (_, unknown) = d.call(&roll_access::new_secret("rlt_"), Method::GET, "/v1/workspace/projects", None).await;
+    assert_eq!((s, &used), (StatusCode::UNAUTHORIZED, &unknown));
+    // It's on the token and in the audit log; the admins and its owner are told.
+    let (_, got) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert!(got["last_used_at"].is_i64(), "{got}");
+    let (_, log) = d.call(OPERATOR, Method::GET, "/v1/access/audit?limit=50", None).await;
+    assert!(log.as_array().unwrap().iter().any(|e| e["source"] == "decoy" && e["grant_id"] == id.as_str() && e["route"] == "/v1/workspace/projects"), "{log}");
+    let mut told = Vec::new();
+    for _ in 0..100 {
+        told = d.people.1.lock().unwrap().clone();
+        if told.iter().any(|t| t.starts_with("usr_root: A decoy token was used")) && told.iter().any(|t| t.starts_with("usr_alice: A decoy token was used")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(told.iter().any(|t| t.starts_with("usr_root: A decoy token was used")) && told.iter().any(|t| t.starts_with("usr_alice: A decoy token was used")), "{told:?}");
+}
