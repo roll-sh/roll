@@ -1,6 +1,6 @@
 import { Building2, Check, Copy, Fingerprint, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { accountsApi, activityText, refreshSession, useSession, type Activity, type Invite, type Passkey, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
+import { accountsApi, activityText, refreshSession, useSession, type Activity, type Invite, type Passkey, type PasskeyPolicy, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
 import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } from "@/lib/webauthn";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { SsoSection } from "./account-sso";
@@ -48,6 +48,7 @@ export function AccountPage() {
           {user.admin && <Resets me={user.id} />}
           {user.admin && <Users me={user.id} />}
           {user.admin && <SsoSection />}
+          {user.admin && <HardwareKeys />}
         </div>
       )}
     </AppShell>
@@ -348,7 +349,7 @@ function Passkeys() {
                   <span className="block truncate text-[12.5px]">{p.name}</span>
                 )}
                 <span className="block text-[11px] text-subtle">
-                  {p.synced ? "Synced across your devices" : "On one device"} · added {when(p.created_at)}
+                  {p.model ? `${p.model} (verified)` : p.synced ? "Synced across your devices" : "On one device"} · added {when(p.created_at)}
                   {p.last_used_at ? ` · last used ${when(p.last_used_at)}` : " · not used yet"}
                 </span>
               </span>
@@ -370,6 +371,66 @@ function Passkeys() {
           <span className="text-[11.5px] text-subtle">{list?.length ? "With one, you can skip the authenticator app's code too." : "Your browser or phone keeps it, synced if you use iCloud Keychain or Google Password Manager."}</span>
         </div>
         {error && <p className="px-4 pb-3 text-[12px] text-danger">{error}</p>}
+      </div>
+    </Section>
+  );
+}
+
+/** Admins: hardware keys only (docs/accounts.md, "Passkeys"): only listed models, proved by their maker. */
+function HardwareKeys() {
+  const [policy, setPolicy] = useState<PasskeyPolicy | null>(null);
+  const [draft, setDraft] = useState({ aaguid: "", name: "", root: "" });
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    accountsApi.passkeyPolicy().then(setPolicy, () => setPolicy(null));
+  }, []);
+  if (!policy) return null;
+  const save = (p: PasskeyPolicy) =>
+    accountsApi.setPasskeyPolicy(p).then(
+      (saved) => {
+        setPolicy(saved);
+        setError(null);
+      },
+      (e) => setError(errorText(e)),
+    );
+  return (
+    <Section id="hardware-keys" title="Hardware keys only" lead="Require your people's passkeys to be on authenticator models you choose, proved by their maker's attestation. Off: any passkey works.">
+      <div className={`${card} space-y-3 p-4`}>
+        <label className="flex items-center gap-2 text-[12.5px]">
+          <input type="checkbox" checked={policy.require} onChange={(e) => void save({ ...policy, require: e.target.checked })} />
+          Only the models below (passkeys on anything else stop working for sign-in)
+        </label>
+        {policy.models.map((m) => (
+          <div key={m.aaguid} className="flex items-center gap-3 text-[12.5px]">
+            <KeyRound className="size-4 text-muted" />
+            <span className="flex-1">
+              {m.name} <span className="font-mono text-[11px] text-subtle">{m.aaguid}</span>
+            </span>
+            <button onClick={() => void save({ ...policy, models: policy.models.filter((x) => x.aaguid !== m.aaguid) })} className={`${btn} text-danger`}>
+              Remove
+            </button>
+          </div>
+        ))}
+        <div className="grid gap-2 sm:grid-cols-2">
+          <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="YubiKey 5 NFC" className={field} />
+          <input value={draft.aaguid} onChange={(e) => setDraft({ ...draft, aaguid: e.target.value })} placeholder="its AAGUID (8-4-4-4-12)" spellCheck={false} className={`${field} font-mono`} />
+          <textarea
+            value={draft.root}
+            onChange={(e) => setDraft({ ...draft, root: e.target.value })}
+            rows={3}
+            spellCheck={false}
+            placeholder="-----BEGIN CERTIFICATE----- its maker's attestation root"
+            className="rounded-lg border border-line-2 bg-canvas px-2.5 py-1.5 font-mono text-[11.5px] outline-none focus:border-accent/60 sm:col-span-2"
+          />
+        </div>
+        <button
+          disabled={!draft.name.trim() || !draft.aaguid.trim() || !draft.root.trim()}
+          onClick={() => void save({ ...policy, models: [...policy.models, { aaguid: draft.aaguid.trim(), name: draft.name.trim(), roots: [draft.root.trim()] }] }).then(() => setDraft({ aaguid: "", name: "", root: "" }))}
+          className={btn}
+        >
+          Add a model
+        </button>
+        {error && <p className="text-[12px] text-danger">{error}</p>}
       </div>
     </Section>
   );

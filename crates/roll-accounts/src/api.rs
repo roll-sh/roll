@@ -44,6 +44,7 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/signin/passkey", post(signin_passkey))
         .route("/v1/accounts/signin/reset-request", post(request_reset))
         .route("/v1/accounts/reset-requests", get(list_resets))
+        .route("/v1/accounts/passkey-policy", get(passkey_policy).put(set_passkey_policy))
         .route("/v1/accounts/reset-requests/{id}/approve", post(approve_reset))
         .route("/v1/accounts/reset-requests/{id}/deny", post(deny_reset))
         .route("/v1/accounts/me", get(me).patch(update_me))
@@ -614,6 +615,18 @@ async fn request_reset(State(a): S, owed: Owed, ip: Ip, headers: HeaderMap, b: B
     let a2 = a.clone();
     let req = blocking(&a, move |_| a2.request_reset(&owed.user, &reason, &who)).await?;
     Ok((StatusCode::ACCEPTED, Json(json!({ "id": req.id, "state": req.state, "created_at": req.created_at }))))
+}
+
+/// Hardware keys only (docs/accounts.md, "Passkeys"): which authenticator models count.
+async fn passkey_policy(State(a): S, me: Me, op: Op) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    Ok(Json(blocking(&a, |a| a.passkey_policy()).await?).into_response())
+}
+
+async fn set_passkey_policy(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response> {
+    admin_sudo(&a, &me, &op).await?;
+    let p: crate::attestation::Policy = body(&b)?;
+    Ok(Json(blocking(&a, move |a| a.set_passkey_policy(p)).await?).into_response())
 }
 
 async fn list_resets(State(a): S, me: Me, op: Op) -> Result<Response> {
