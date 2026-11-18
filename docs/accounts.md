@@ -303,6 +303,11 @@ by their email's domain, as Linear's, Vercel's and GitHub's enterprise sign-in d
   that the provider didn't answer.
 - Removing a connection deletes its people's links; their accounts stay and sign in other ways.
 
+The same provider can sign people's agents in too (enterprise sign-in, docs/permissions.md,
+"Enterprise identity providers"): an enterprise identity provider with `sso` set to the
+connection's id vouches for the connection's verified domains, as they are at each sign-in
+(`roll_auth::Sessions::sso_trust`), so a domain is proven once for both.
+
 ### SCIM (the provider manages its people)
 
 A connection's provider (Okta, Entra ID, JumpCloud) creates, updates and deactivates its people
