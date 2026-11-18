@@ -50,7 +50,9 @@ pub struct Settings {
     pub env_for: BTreeMap<String, BTreeMap<String, String>>,
     pub github: GithubRule,
     /// Who may open a preview's URLs: `link` (default) needs the preview's link, which carries
-    /// its access token once and then a cookie; `public` is anyone who can reach the domain.
+    /// its access token once and then a cookie; `team` is people signed in to roll who may open
+    /// the project (`visit.rs`), and the link's token lets nobody in; `public` is anyone who can
+    /// reach the domain. Share links and the CI bypass work under `link` and `team`.
     pub access: Access,
     /// Chromatic's UI Review, with screenshots on: `check` gives a change a visual review (the
     /// `roll/visual` commit status), pending while its pages differ from the baseline's and
@@ -155,6 +157,7 @@ pub enum VisualReviewRule {
 pub enum Access {
     #[default]
     Link,
+    Team,
     Public,
 }
 
