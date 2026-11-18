@@ -262,6 +262,11 @@ needs the person signed in (`intent: "link"`).
 Okta, Entra ID, Google Workspace, JumpCloud or any OpenID Connect provider signs people in, chosen
 by their email's domain, as Linear's, Vercel's and GitHub's enterprise sign-in do.
 
+- **Session length** (`PATCH /v1/accounts/sso/{id} {session_hours}`, 1 to 720; 0 takes it off), as
+  Okta's and Google Workspace's: a session the connection signs in lasts at most that long (kept
+  past a second factor, as `sessions.cap_ms`), then the person signs in through it again. A
+  shorter length applies at once to the sessions it already signed in; sign-ins another way keep
+  roll's 30 days. "Sessions last" on the account page.
 - **A connection** (admin): `POST /v1/accounts/sso {name?, issuer, client_id, client_secret,
   domains, enforce?, provision?}`. The issuer's discovery document must answer and name the same
   issuer before it's saved; roll keeps the issuer as the document states it (with or without a

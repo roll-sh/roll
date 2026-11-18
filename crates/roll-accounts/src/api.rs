@@ -392,7 +392,9 @@ async fn finish_redirect(a: &Arc<Accounts>, headers: &HeaderMap, done: Result<Fi
         Ok(Finished::SignIn { user, return_to, .. }) => {
             let ua = user_agent(headers);
             let (u2, m2, w2) = (user.clone(), method.to_string(), who.clone());
-            match blocking(a, move |a| if sso { a.issue_sso(&user, &ua) } else { a.issue(&user, &ua) }).await {
+            // An SSO sign-in's method is `sso:<connection>`: its session length applies.
+            let connection = method.strip_prefix("sso:").unwrap_or_default().to_string();
+            match blocking(a, move |a| if sso { a.issue_sso(&user, &ua, &connection) } else { a.issue(&user, &ua) }).await {
                 Err(e) => {
                     a.record_sign_in(Some(&u2), &m2, Some(&e), false, &w2);
                     fail("/signin", e.redirect_code())
