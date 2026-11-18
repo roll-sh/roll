@@ -698,6 +698,21 @@ async fn scim_provisions_and_deactivates_people() {
     let token2 = env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/scim"), json!({})).await.json["token"].as_str().unwrap().to_string();
     assert_eq!(scim(Method::GET, "/Users".into(), None, token.clone()).await.status, StatusCode::UNAUTHORIZED);
     assert_eq!(scim(Method::GET, "/Users".into(), None, token2.clone()).await.status, StatusCode::OK);
+
+    // A leaked token (scanners find it by its checksum) stops at once, and the connection says
+    // where it was found until a new one is made.
+    assert!(roll_auth::credentials::checksum_ok(&token2), "a SCIM token is checksummed: {}", &token2[..4]);
+    let revoked = env.accounts.revoke_leaked_scim(&token2, "found in acme/app (README.md)");
+    assert!(revoked.is_some_and(|w| w.contains("SCIM token")));
+    assert_eq!(env.accounts.revoke_leaked_scim(&token2, "again"), None, "only a live token is revoked");
+    assert_eq!(scim(Method::GET, "/Users".into(), None, token2.clone()).await.status, StatusCode::UNAUTHORIZED);
+    let listed = env.operator(Method::GET, "/v1/accounts/sso", json!({})).await.json;
+    let c = listed.as_array().unwrap().iter().find(|c| c["id"] == id.as_str()).unwrap().clone();
+    assert_eq!((c["scim"].clone(), c["scim_leaked"].clone()), (json!(false), json!("found in acme/app (README.md)")));
+    let token3 = env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/scim"), json!({})).await.json["token"].as_str().unwrap().to_string();
+    assert_eq!(scim(Method::GET, "/Users".into(), None, token3).await.status, StatusCode::OK);
+    let listed = env.operator(Method::GET, "/v1/accounts/sso", json!({})).await.json;
+    assert_eq!(listed.as_array().unwrap().iter().find(|c| c["id"] == id.as_str()).unwrap()["scim_leaked"], Value::Null);
     env.operator(Method::DELETE, &format!("/v1/accounts/sso/{id}"), json!({})).await;
     assert_eq!(scim(Method::GET, "/Users".into(), None, token2).await.status, StatusCode::UNAUTHORIZED);
 }

@@ -90,17 +90,7 @@ pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", random(16))
 }
 
-/// A secret: `prefix`, 34 random characters of lowercase base32 (170 bits) and 6 of checksum, so a
-/// scanner can tell a real roll token from look-alike text without asking roll ([`checksum_ok`],
-/// as GitHub's tokens carry a CRC32).
-pub fn new_secret(prefix: &str) -> String {
-    let body = format!("{prefix}{}", random(34));
-    let sum = checksum(&body);
-    format!("{body}{sum}")
-}
-
-use roll_auth::credentials::checksum;
-pub use roll_auth::credentials::{SECRET_PREFIXES, checksum_ok};
+pub use roll_auth::credentials::{SECRET_PREFIXES, checksum_ok, new_secret};
 
 /// Every roll grant secret in `text` whose checksum holds (in a pushed file, a paste, a log).
 pub fn find_secrets(text: &str) -> Vec<String> {
@@ -603,7 +593,11 @@ impl Access {
                         tool: None,
                         method: "-".into(),
                         route: "leaked".into(),
-                        product: s.get(..4).and_then(|p| (p == "rlk_").then(|| "apps".to_string())),
+                        product: s.get(..4).and_then(|p| match p {
+                            "rlk_" => Some("apps".to_string()),
+                            "rlp_" => Some("accounts".to_string()),
+                            _ => None,
+                        }),
                         action: Some("admin".into()),
                         resource: Some(format!("{what}, found in {found_at}").chars().take(300).collect()),
                         decision: "revoke".into(),
