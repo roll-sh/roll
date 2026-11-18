@@ -270,7 +270,7 @@ fn plain(s: &str) -> bool {
 /// Whether environment entry `pattern` covers `env` (a name, or another entry): the same name, or,
 /// for a pattern ending in `*`, any name starting with what's before it (`pv-*` covers `pv-42`, a
 /// preview's own environment).
-fn env_covers(pattern: &str, env: &str) -> bool {
+pub fn env_covers(pattern: &str, env: &str) -> bool {
     pattern == env || pattern.strip_suffix('*').is_some_and(|prefix| !prefix.is_empty() && env.starts_with(prefix))
 }
 

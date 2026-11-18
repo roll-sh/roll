@@ -511,6 +511,9 @@ async fn run() -> anyhow::Result<()> {
             };
             let p = previews::start(&args, &home, c, workspace.clone(), cluster.clone(), on_products, apps.as_ref().map(|a| a.apps.clone()))?;
             router = router.merge(roll_previews::api::router(p.engine.clone()));
+            if let Some(internal) = p.internal {
+                router = router.merge(internal);
+            }
             Some(p.runtime)
         }
         None => None,

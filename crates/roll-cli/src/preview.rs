@@ -160,6 +160,13 @@ pub enum Preview {
     },
     /// What happened to a preview, newest first.
     Activity { preview: String },
+    /// Its latest requests through roll, newest first: status, method, path (never the query),
+    /// time to headers. `--errors`: 4xx and 5xx only.
+    Requests {
+        preview: String,
+        #[arg(long)]
+        errors: bool,
+    },
     /// A project's preview rules: show them, or change them with --set.
     Settings {
         project: String,
@@ -621,6 +628,19 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             if !as_json {
                 for l in v["lines"].as_array().into_iter().flatten() {
                     println!("{}", l.as_str().unwrap_or(""));
+                }
+                return Ok(());
+            }
+            v
+        }
+        Preview::Requests { preview, errors } => {
+            let mut v = api.get(&format!("/v1/previews/{preview}/requests")).await?;
+            if let Some(list) = v["requests"].as_array_mut() {
+                list.retain(|r| !errors || r["status"].as_u64().unwrap_or(0) >= 400);
+            }
+            if !as_json {
+                for r in v["requests"].as_array().into_iter().flatten() {
+                    println!("{:>8}  {} {:<6} {}  {} ms  {}", ago(r["at"].as_i64().unwrap_or(0) / 1000), r["status"], s(&r["method"]), s(&r["path"]), r["ms"], s(&r["service"]));
                 }
                 return Ok(());
             }
