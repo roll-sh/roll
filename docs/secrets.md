@@ -1613,6 +1613,9 @@ AWS access keys, GitHub, Slack, Stripe live, Google, Anthropic and OpenAI keys, 
   ```
 
   An admin `bypass` lands over it, as over `secret_leak`, audited as `secret_unstored_bypass`.
+  Blocking fails closed: while roll secrets can't say which values it holds, every credential
+  counts as unstored (tried again at the next look), and a change whose diff can't be read is
+  blocked with "couldn't check this change for credentials".
 - **The placeholder rule** (`credentials::placeholder`). With the match's known prefix (`sk_live_`,
   `AKIA`, `ghp_`…) set aside, it's a placeholder when a part of it (split at `_` and `-`) starts or
   ends with `example`, `fake`, `dummy`, `test`, `sample`, `placeholder`, `redacted` or `changeme`

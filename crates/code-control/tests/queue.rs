@@ -684,12 +684,30 @@ async fn a_credential_roll_secrets_doesnt_hold_is_a_notice_or_by_roll_toml_a_blo
         assert!(unstored(&c, "notices").is_empty(), "{allow}: {c}");
     }
 
-    // A repo whose roll.toml blocks them: the change can't be queued.
+    // A repo whose roll.toml blocks them: the change can't be queued, even while roll secrets
+    // can't say what it holds (every credential counts as unstored until it can).
     let b = queue_app("[secrets]\nunstored_credentials = \"block\"\n", Arc::new(QueueRunner::default())).await;
+    b.code.set_secret_env(Arc::new(DownSecrets));
     let c = change(&b, "deploy", files).await;
     let (s, v) = b.req("POST", &format!("/v1/code/changes/{}/enqueue", id(&c)), None, None).await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(unstored(&v, "blockers").len() == 1 && !v.to_string().contains(&aws), "{v}");
+}
+
+/// roll secrets that can't answer: every lookup fails.
+struct DownSecrets;
+
+#[async_trait]
+impl code_control::SecretEnv for DownSecrets {
+    async fn for_repo(&self, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("roll secrets is down")
+    }
+    async fn for_owner(&self, _: &str, _: &str, _: &str, _: &str) -> anyhow::Result<Vec<(String, String)>> {
+        anyhow::bail!("roll secrets is down")
+    }
+    async fn leaks(&self, _: &str, _: Vec<String>) -> anyhow::Result<Vec<(usize, String, String, String)>> {
+        anyhow::bail!("roll secrets is down")
+    }
 }
 
 /// roll secrets in process, wired as rolld's `ForCode` wires it: the projects that have the repo on
