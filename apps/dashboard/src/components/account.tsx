@@ -904,14 +904,14 @@ function Users({ me }: { me: string }) {
       )}
       {list && list.length > 8 && (
         <div className="mb-2 flex flex-wrap items-center gap-2">
-          <input id="people-search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Find by name, handle or address" aria-label="Find people" className={`${field} min-w-48 flex-1`} />
+          <input id="people-search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Find by name, handle or address" aria-label="Find people" className={`${field} min-w-0 flex-1 basis-48`} />
           <select id="people-filter" value={filter} onChange={(e) => setFilter(e.target.value as PeopleFilter)} aria-label="Show" className={field}>
             <option value="everyone">Everyone</option>
             <option value="admins">Admins</option>
             <option value="no-second-factor">No second factor</option>
             <option value="turned-off">Turned off</option>
           </select>
-          <span className="text-[11.5px] tabular-nums text-subtle">
+          <span className="shrink-0 text-[11.5px] tabular-nums text-subtle">
             {shown.length} of {list.length}
           </span>
         </div>
