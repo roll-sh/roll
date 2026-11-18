@@ -1286,3 +1286,41 @@ async fn hardware_keys_only_takes_verified_listed_models() {
     let a = env.call(&mut d, Method::POST, "/v1/accounts/signin/passkey", Some(json!({ "id": o["id"], "credential": phone.get(&o, WEB) }))).await;
     assert!(a.json["error"].as_str().is_some_and(|e| e.contains("isn't on one")), "{}", a.json);
 }
+
+/// An SSO connection's session length (docs/accounts.md, "SSO"): what it signs in lasts at most
+/// that long, a shorter one applies at once to its running sessions, and a sign-in another way
+/// keeps roll's 30 days.
+#[tokio::test]
+async fn an_sso_connection_caps_its_sessions() {
+    let env = Env::new().await;
+    let idp = fake_idp().await;
+    let issuer = idp.base.lock().unwrap().clone();
+    let txt = Arc::new(Txt::default());
+    env.accounts.set_txt_lookup(txt.clone());
+    let mut by_code = Browser::default();
+    env.email_sign_in(&mut by_code, "ada@acme.test", Some(&env.invite("ada@acme.test").await)).await;
+    let conn = env.operator(Method::POST, "/v1/accounts/sso", json!({ "name": "Acme Okta", "issuer": issuer, "client_id": "roll-sso", "client_secret": "s3cret", "domains": ["acme.test"] })).await.json;
+    let id = conn["id"].as_str().unwrap().to_string();
+    txt.0.lock().unwrap().insert("_roll-sso.acme.test".into(), vec![conn["dns"]["value"].as_str().unwrap().to_string()]);
+    env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/verify"), json!({})).await;
+    assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/sso/{id}"), json!({ "session_hours": 721 })).await.status, StatusCode::BAD_REQUEST);
+    let set = env.operator(Method::PATCH, &format!("/v1/accounts/sso/{id}"), json!({ "session_hours": 12 })).await;
+    assert_eq!(set.json["session_hours"], 12, "{}", set.json);
+
+    let hours = |b: &mut Browser| {
+        let env = &env;
+        let mut b = b.clone();
+        async move {
+            let s = env.call(&mut b, Method::GET, "/v1/accounts/session", None).await.json;
+            (s["session"]["expires_at"].as_i64().unwrap() - s["session"]["created_at"].as_i64().unwrap()) / 3_600_000
+        }
+    };
+    let mut by_sso = Browser::default();
+    env.sso(&idp, &mut by_sso, "ada@acme.test", json!({ "sub": "00u-ada", "email": "ada@acme.test" })).await;
+    assert_eq!(hours(&mut by_sso).await, 12, "an SSO session lasts the connection's length");
+    assert_eq!(hours(&mut by_code).await, 30 * 24, "a sign-in another way keeps roll's 30 days");
+    // Shorter: its running sessions shorten now; the email-code one doesn't.
+    assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/sso/{id}"), json!({ "session_hours": 1 })).await.status, StatusCode::OK);
+    assert_eq!(hours(&mut by_sso).await, 1);
+    assert_eq!(hours(&mut by_code).await, 30 * 24);
+}
