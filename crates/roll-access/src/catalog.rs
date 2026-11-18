@@ -1384,6 +1384,9 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/previews/projects/{project}/bypass", "previews", REVEAL, one(&["project"], "project")),
     row("GET", "/v1/previews/projects/{project}/bypass", "previews", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/previews/projects/{project}/bypass", "previews", ADMIN, one(&["project"], "project")),
+    // A deploy hook's answer is its secret URL (shown once), as the bypass's is.
+    row("POST", "/v1/previews/projects/{project}/hooks", "previews", REVEAL, one(&["project"], "project")),
+    row("DELETE", "/v1/previews/projects/{project}/hooks/{hook}", "previews", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/previews/{id}", "previews", R, one(PG, "preview")).env(EnvFrom::Fixed("preview")).reveals(&["share_url"]),
     row("DELETE", "/v1/previews/{id}", "previews", D, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     row("*", "/v1/previews/{id}/", "previews", M, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
