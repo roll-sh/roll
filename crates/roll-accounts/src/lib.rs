@@ -11,6 +11,7 @@
 
 pub mod api;
 pub mod audit;
+mod deletion;
 mod email_change;
 mod mail;
 mod oauth;
@@ -510,6 +511,10 @@ impl Accounts {
         if !db.has_column("sessions", "passkey_at")? {
             db.add_column("sessions", "passkey_at", "INTEGER")?;
         }
+        // A person deleted their own account: the row is a tombstone from then on.
+        if !db.has_column("users", "deleted_at")? {
+            db.add_column("users", "deleted_at", "INTEGER")?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;
@@ -728,7 +733,7 @@ impl Accounts {
     }
 
     pub fn users(&self) -> Result<Vec<User>> {
-        let ids = self.db.read(|c| c.query("SELECT id FROM users ORDER BY created_at, id", (), |r| r.get::<_, String>(0)))?;
+        let ids = self.db.read(|c| c.query("SELECT id FROM users WHERE deleted_at IS NULL ORDER BY created_at, id", (), |r| r.get::<_, String>(0)))?;
         ids.iter().map(|id| self.user(id)).collect()
     }
 
@@ -750,7 +755,8 @@ impl Accounts {
     /// lifts only a disable of its own, never an admin's.
     pub(crate) fn update_user_by(&self, id: &str, admin: Option<bool>, disabled: Option<bool>, by: &str) -> Result<User> {
         self.db.write(|c| {
-            if c.query_row("SELECT 1 FROM users WHERE id = ?", [id], |_| Ok(())).optional()?.is_none() {
+            // A deleted account is gone for good: no admin turns it back on.
+            if c.query_row("SELECT 1 FROM users WHERE id = ? AND deleted_at IS NULL", [id], |_| Ok(())).optional()?.is_none() {
                 return Err(Error::NotFound(format!("no user {id}")));
             }
             if let Some(a) = admin {
