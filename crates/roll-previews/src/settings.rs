@@ -26,6 +26,10 @@ pub struct Settings {
     /// … that none of these match (empty: none ignored). A change's paths are everything since
     /// its merge base with the default branch.
     pub ignore_paths: Vec<String>,
+    /// Globs on a change's author (a pull request's GitHub login: `dependabot[bot]`, `*[bot]`):
+    /// a change by one gets no preview unless its title or a label asks (Netlify's and Vercel's
+    /// ignored builds for dependency bots). Empty: everyone's.
+    pub skip_authors: Vec<String>,
     /// `"<kind>:<ref>"` → `branch`, `schema` or `skip`; resources not listed get `data`.
     pub resources: BTreeMap<String, ResourceRule>,
     pub data: Mode,
@@ -332,6 +336,7 @@ impl Default for Settings {
             manual: false,
             paths: Vec::new(),
             ignore_paths: Vec::new(),
+            skip_authors: Vec::new(),
             resources: BTreeMap::new(),
             data: Mode::Branch,
             reset_every_hours: 0,
@@ -405,6 +410,9 @@ impl Settings {
         let bad = |m: String| Err(Error::BadRequest(m));
         if self.branches.is_empty() || self.branches.len() > MAX_BRANCH_GLOBS || self.branches.iter().any(|b| b.is_empty() || b.len() > 200) {
             return bad(format!("branches: 1–{MAX_BRANCH_GLOBS} globs of 1–200 characters"));
+        }
+        if self.skip_authors.len() > MAX_BRANCH_GLOBS || self.skip_authors.iter().any(|a| a.is_empty() || a.len() > 200) {
+            return bad(format!("skip_authors: at most {MAX_BRANCH_GLOBS} globs of 1–200 characters"));
         }
         for (name, list) in [("paths", &self.paths), ("ignore_paths", &self.ignore_paths)] {
             if list.len() > MAX_BRANCH_GLOBS || list.iter().any(|p| p.len() > 200 || code_control::review::pattern::Pattern::new(p).is_none()) {

@@ -135,7 +135,7 @@ pub fn start(
     let engine = roll_previews::Engine::new(
         roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), ..Default::default() },
         store.clone(),
-        workspace.clone(),
+        workspace,
         source.clone(),
         branchers,
         // roll apps' instances are screenshotted where roll apps says they run (`Apps::reachable`):
@@ -150,11 +150,13 @@ pub fn start(
         a.set_feedback_notes(Arc::new(services::Notes(Arc::downgrade(&engine))));
         // Its pushes to branches of a Git URL service: those branches' previews.
         a.set_git_pushes(Arc::new(services::GitPushes(Arc::downgrade(&engine))));
+        // And their status and pull request comment, where the code lives (roll's GitHub App).
+        let _ = engine.git_report.set(Arc::new(services::GitReport { api: api.clone(), code: code.code.clone() }));
     }
     if clustered {
         let _ = engine.cluster.set(cluster.clone());
     }
-    let backend = roll_previews::code::Backend::new(code.previews.clone(), workspace, source);
+    let backend = roll_previews::code::Backend::new(code.previews.clone(), source);
     backend.attach(&engine);
     code.code.set_preview_backend(backend);
     // The mail catcher: previews' mail is kept with them, never sent on.
