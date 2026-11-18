@@ -14,6 +14,12 @@ describe("activityText", () => {
   });
 });
 
+describe("an export in the security log", () => {
+  it("says so", () => {
+    expect(activityText({ at: 0, action: "account.export", actor: "usr_me", ok: true, status: 200 }, "usr_me")).toBe("You exported your data");
+  });
+});
+
 describe("second-factor resets in the security log", () => {
   const e = (a: Partial<Activity>): Activity => ({ at: 0, action: "sign_in", actor: "usr_me", ok: true, status: 200, ...a });
   it("say who asked and who decided", () => {
@@ -62,5 +68,11 @@ describe("sudo mode", () => {
     onReauthRequired(null);
     answers([403, { error: "confirm it's you first", code: "reauth_required" }]);
     await expect(accountsApi.removePasskey("pk_1")).rejects.toMatchObject({ code: "reauth_required" });
+  });
+});
+
+describe("a provider's logout in the security log", () => {
+  it("says the provider signed the person out", () => {
+    expect(activityText({ at: 0, action: "session.end", actor: "sso:sso_okta", ok: true, status: 200 }, "usr_me")).toBe("Your company's provider signed you out (its back-channel logout)");
   });
 });
