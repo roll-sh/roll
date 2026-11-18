@@ -50,7 +50,9 @@ pub struct Settings {
     pub env_for: BTreeMap<String, BTreeMap<String, String>>,
     pub github: GithubRule,
     /// Who may open a preview's URLs: `link` (default) needs the preview's link, which carries
-    /// its access token once and then a cookie; `public` is anyone who can reach the domain.
+    /// its access token once and then a cookie; `team` is people signed in to roll who may open
+    /// the project (`visit.rs`), and the link's token lets nobody in; `public` is anyone who can
+    /// reach the domain. Share links and the CI bypass work under `link` and `team`.
     pub access: Access,
     /// Chromatic's UI Review, with screenshots on: `check` gives a change a visual review (the
     /// `roll/visual` commit status), pending while its pages differ from the baseline's and
@@ -79,8 +81,8 @@ pub struct Settings {
     /// at most 30 days back. Products without history branch as of now and say so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_at: Option<String>,
-    /// A feedback button on the pages of people who came in through roll (link access): it pins a
-    /// note to an element and posts it on the change, from roll.
+    /// A feedback button on the pages of people who came in through roll (link access, or a team
+    /// session): it pins a note to an element and posts it on the change, from roll.
     pub feedback: bool,
     /// Wake the change's services as soon as a new head is deployed, so the first visit (often
     /// the pull request comment's link) doesn't wait for a cold start.
@@ -155,6 +157,7 @@ pub enum VisualReviewRule {
 pub enum Access {
     #[default]
     Link,
+    Team,
     Public,
 }
 

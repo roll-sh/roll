@@ -860,6 +860,80 @@ as a private address.
     link, so a reviewer who comes from the pull request's plain URL gets in, and the token is
     never public. `access: "public"` opens a project's previews to anyone who
     can reach the domain.
+  - **Signed in to roll** (`access: "team"`, the rules' "Signed in to roll"; Vercel
+    Authentication, Netlify's team access): only people signed in to roll who may open the
+    project open its previews, as roll apps' sign-in-gated environments do (`visit.rs`, the same
+    design and names; docs/apps/README.md, "Signing in to an environment"):
+    - *Sent to sign in.* A page load with no session of the preview's own goes to
+      `/dashboard/previews/visit?preview=<id>&to=<the page>` on roll's dashboard; anything else
+      is a 401. The preview's host never sees roll's session cookie (another site), so the
+      dashboard asks `POST /v1/previews/{id}/visit {to}` as the person for a one-use ticket (a
+      minute) to the page they wanted: only for a URL at one of the preview's own service
+      hosts, and only for a person's session, never a token.
+    - *A session of its own.* The ticket goes back to the preview's host (`/__roll/visit`),
+      which trades it for a host-only `HttpOnly`, `SameSite=Lax` cookie, `roll_visit_<preview>`,
+      for 12 hours, and redirects to a path on the same host (no `//`, `/\` or control
+      characters). The ticket's URL is the service's own (its scheme, host and port, as roll
+      runs it); only the path and query come from `to`, so a crafted `to` can't send the ticket
+      over plain HTTP or to another port. A ticket only opens a session on its own preview. The
+      service never sees the cookie; when a browser sends several by that name (a sibling
+      preview's host can set one on the parent domain), any live one lets them in. Tickets and
+      sessions are kept by their SHA-256, and only while the project has team access: the write
+      that keeps one reads the project's access, so a change of access can't miss it.
+    - *Who.* rolld's `AccountsVisitors` (`crates/rolld/src/previews/mod.rs`) is the one place
+      that says for services roll runs itself: an account that still signs in and is an admin or
+      owns the project now, through the same roll session that asked for the ticket. rolld's
+      gate lets only admins into `/v1/previews` today, so today it's an admin. A ticket is only
+      given to them, and each session asks again every 5 minutes (`visitor_recheck`, off the
+      async workers): a roll session signed out, revoked or expired, or an account disabled,
+      deleted or that lost the project, is turned away at its next request after that, and its
+      session is gone. Changing the project's access ends every session.
+    - *The link's token lets nobody in.* The links roll hands out (`share_url`) are the plain
+      URLs, as the change's and the pull request's are. A URL that still carries
+      `?roll_access=` is redirected to the same URL without it, and the `roll_access_<preview>`
+      cookie never reaches a service under any access. Leaving `link` gives each of the
+      project's previews a new token, so going back to `link` doesn't revive the old links.
+      Share links and the bypass header for CI still work.
+    - *Feedback.* A session holder gets the feedback button, as a link visitor does under `link`
+      ("Feedback on the preview page"): the gate marks a request it let in through roll (the
+      link's cookie, or a live session; `ThroughRoll` in `runtime.rs`), and only such a request
+      gets the script, the page's notes and the tag. Its note opens roll's dashboard, where the
+      person is signed in and posts it as themselves (`POST /v1/code/changes/{id}/reviews`, a
+      comment review roll code names by the person's handle, as every person's review). The page never holds
+      a credential, so the app's own code can't post as them. A share link's visitor and a
+      bypass request get no button (nobody to post as).
+    - *Who opened it.* Previews run on branches of production data, so a team sees who looked
+      (Vercel's deployment protection logs access too). When a ticket is traded for a session,
+      the same write adds "`<handle>` opened it (signed in to roll)" to the preview's activity
+      (the person's roll handle, as roll code names people): at most once a day per person (a
+      new device or an ended session isn't news, and the activity keeps its last 200 lines),
+      never per request. Admins who open a person's preview are listed too, as anyone who may
+      open it is. It also keeps a `visits` row per person (`first_at`, `last_at`); `last_at` moves
+      at each 5-minute recheck, not at each request. `GET /v1/previews/{id}/visitors` lists
+      the last 8, latest first, as `[{who, last_at}]` (read access, like the activity), and
+      the sheet's Activity tab shows them as "Who opened it". A share link isn't a person
+      signed in: following one (`?roll_share=`) adds "a share link opened it" to the activity,
+      at most once per link per day (`shares.opened_day`), under any access. The CI bypass
+      header records nothing. Services on roll apps sign people in through roll apps, so they
+      don't show here.
+    - *Services on roll apps.* They get `access: {signed_in: true, bypass_sha256}` on their `pv-`
+      environment, so roll apps' own sign-in flow and its own check decide (its
+      `AccountsVisitors` and `/dashboard/apps/visit`: admins only today), not previews'. roll
+      apps refuses `signed_in` on a node without roll's dashboard address (`web_url`), which
+      fails the deploy. Share links don't open services on roll apps, as under `link`. roll
+      apps adds the feedback button only for a visitor with its access cookie (`via_link` in
+      `apps-control/src/public.rs`), never for one with its sign-in session, so a team
+      preview's services on roll apps have no button yet.
+    - `visit.rs::a_signed_in_person_gets_into_a_team_preview` follows a page load to the
+      dashboard, a ticket only for a person, only to the preview's hosts and only on its own
+      preview, its URL at the service's scheme and port whatever `to` said, the ticket used
+      once, the session the app never sees (nor junk cookies by its name shutting it out), the
+      link's token taken off the URL, signing out of roll and the person losing the project each
+      ending it, and a new access ending it and replacing the link's token; the session holder
+      getting the feedback button's script (its notes to the preview in roll's dashboard) and
+      the page's notes by who left them, and nobody without a session, nor a share link or the
+      bypass, getting either. It also checks that the activity names the person once per
+      session and the visitors list names them, and that a share link followed twice is one line.
   - Never indexed: every response through a preview's host, the service's own and roll's 401
     alike, carries `X-Robots-Tag: noindex` (as Vercel's previews do), whatever the service
     sends, so a public preview, a share link or an earlier push's URL isn't what a search
@@ -902,7 +976,8 @@ as a private address.
     ```
 
     Services on roll apps get the secret's SHA-256 with the link's token (`access: {token,
-    bypass_sha256}`); their proxy checks it the same way. Rotating or removing the secret makes
+    bypass_sha256}`, or `{signed_in: true, bypass_sha256}` under team access); their proxy checks
+    it the same way. Rotating or removing the secret makes
     every preview of the project converge again, so they get the new one.
   - Services on roll apps get the same token (`PUT …/environments/pv-… {access: {token}}`), and
     roll apps' waking proxy checks it the same way: the token once, then a host-only cookie,
@@ -1031,7 +1106,8 @@ land on the change.
 
 - The preview's proxy adds `<script src="/__roll/feedback.js" defer>` before `</body>` of a
   page load (`Sec-Fetch-Dest: document`; not a fetch, a fragment or an iframe), only for a
-  visitor who came in through roll (the preview's access cookie) and when the project's
+  visitor who came in through roll (the preview's access cookie, or a team-access session: a
+  person signed in to roll, "Access") and when the project's
   `feedback` rule is on (the default). It asks the service for the page uncompressed and adds
   the tag as the page streams (streamed rendering stays streamed, memory stays one chunk);
   the page is then `Cache-Control: private` with no `ETag`. Anything compressed, not HTML or
@@ -1047,8 +1123,8 @@ land on the change.
   linked to the preview · `button.pay`", then the note), which reaches the pull request like any
   review. The page's own names are kept to one inert line each.
 - The button also lists what's been said about the page already (Vercel's comment pins): the
-  proxy answers `/__roll/feedback.json?path=…` for the same visitors only (link access, through
-  roll), from the change's feedback reviews (`roll_previews::notes` reads back the shape the
+  proxy answers `/__roll/feedback.json?path=…` for the same visitors only (link access or a
+  team session, through roll), from the change's feedback reviews (`roll_previews::notes` reads back the shape the
   dashboard posts and nothing else; dismissed ones don't show), the latest 50. Each note says
   who and when, and outlines its element on hover; all of it is text, never HTML.
 - A note is resolved from the page too (Vercel Comments): its Resolve opens roll
@@ -1080,7 +1156,8 @@ land on the change.
   naming any other review joins nothing), so it reaches the pull request as a GitHub review like
   the note did. The page lists the replies under their note, as text, and `roll preview notes`
   under each note too (live: a reply listed under its note).
-- Previews deployed on roll apps go through apps' own proxy, which doesn't add it yet.
+- Previews deployed on roll apps go through apps' own proxy, which adds it for its link
+  visitors only: under team access (apps' `signed_in` environments) they get none yet.
 - Public previews don't get it (anyone could see the button), and a branch's preview has no
   change to post on.
 
@@ -1146,6 +1223,7 @@ and admins see every project.
 | `DELETE /v1/previews/{id}/shares/{share}` | | 204: the link stops at the visitor's next request |
 | `GET`/`PUT /v1/previews/{id}/env` | `{vars: {NAME: value \| null}}` (`null` removes; at most 100, 32 KiB each) | `{vars}`: the preview's own variables; its services redeploy with them |
 | `POST /v1/previews/{id}/approve` | `{head}` (the head looked at) | `Preview`: that head of a fork's pull request on a Git URL service runs (`pull.approved_head`); the next push waits again. 409 when the preview moved on to another head or isn't a fork's pull request. Admin in the permissions catalogue, and no MCP tool: letting outside code run with the project's data is a person's call |
+| `POST /v1/previews/{id}/visit` | `{to}` (a URL at one of the preview's service hosts) | `{url}`: a one-use way into a team-access preview (`access: "team"`) at `to`, good for a minute, for a person signed in to roll (a session; a token is a 403). 400 when the project's previews aren't `team` or `to` isn't the preview's; 403 for a person who may not open the project. Operator-only in the permissions catalogue: no grant ever gives one |
 | `POST /v1/previews/{id}/keep` | `{hours}` (0–720; 0 releases) | `Preview`: kept past its TTL until then (`kept_until`); a landed or closed change still ends it |
 | `GET /v1/previews/{id}/notes` | | `{notes: [{id, path, selector, note, by, at, replies: [{id, note, by, at}], crop}]}`: the notes left on its pages that nobody has resolved, every page's (the latest 500); `crop`: a picture of its element is kept |
 | `GET /v1/previews/{id}/notes/{note}/crop` | | `image/png`: the note's element as a screenshot run cropped it from its page; 404 until one has |
@@ -1160,6 +1238,7 @@ and admins see every project.
 | `GET /v1/previews/{id}/requests` | | `{requests: [{at, service, method, path, status, ms}]}`: its latest 200 requests through roll's runtime, newest first (Vercel's request log): never the query, which can carry a token, and the path masked as its logs are (a path is its code's to choose); `ms` until the answer's headers. Kept in memory on the preview's holder (runs there) and gone with its last service; a roll apps instance's requests are roll apps' own. The sheet's Requests tab, errors at a glance; `roll preview requests <id> [--errors]` |
 | `GET /v1/previews/{id}/metrics` | | `{services: [{service, cpu, memory_bytes, memory_mb}]}`: what its running services use right now (Render's and Railway's metrics): cores of CPU and resident memory, against the memory each runs with. It comes from `docker stats` for roll's runtime. For roll apps' instances it's their last finished minute (`…/environments/pv-…/metrics`), with memory per instance. A sleeping service isn't listed. 404 for no such preview. It runs on the preview's holder, and is read again at most every 10 s, however many sheets ask. The sheet shows it on each running service, read every 15 s while it's open |
 | `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
+| `GET /v1/previews/{id}/visitors` | | `[{who, last_at}]`: the last 8 people signed in to roll who opened it (`access: "team"`), by their handle, latest first; `last_at` is as of their session's last 5-minute recheck. Share links and the CI bypass aren't people and aren't listed |
 | `GET /v1/previews/projects/{project}/settings` | | `Settings` |
 | `PUT /v1/previews/projects/{project}/settings` | `Settings` (partial) | `Settings` |
 | `GET /v1/previews/projects/{project}/mask-suggestions` | | `{suggestions: [{resource, path, rule, why}], unread: [{resource, why}]}`: columns of the project's Postgres, NoSQL and search resources (whatever their rule) that look like people's data and have no mask yet, with a rule their type and constraints take ("Masked columns", Suggestions); `resource` is `masking`'s key (`postgres:<ref>`). At most 2,000 columns read per resource, each for at most 10 s; one asleep (not woken), not read in time, unreadable or with more columns is in `unread`. As the settings are: the operator and whoever sees the project; a scoped token only sees resources its grant lets it read |
@@ -1190,7 +1269,7 @@ type Preview = {
   state: "queued" | "awaiting_approval" | "creating" | "ready" | "sleeping" | "updating" | "failed" | "deleting";
   error: string | null;
   url: string | null;                 // the first service's URL
-  share_url: string | null;           // url with its access token (link access): the one to hand out
+  share_url: string | null;           // url with its access token (link access; plain otherwise): the one to hand out
   services: Service[]; resources: Resource[];
   cost: { sleeping_usd_month: number; active_usd_hour: number; month_to_date_usd: number; bytes: number };
   schema_changes: string[] | null;    // "+ …"/"- …" against the parents, once read at `head`; null: not known
@@ -1229,7 +1308,7 @@ type Settings = {
   secrets: { base: string; allow_production: boolean };      // "development", false
   env: Record<string, string>;        // overrides every service gets
   github: { comment: boolean; status: boolean; deployment: boolean; screenshot: boolean; baseline: boolean; pages: string[]; hide: string[]; budget: { load_ms: number; bytes: number }; openapi?: string; endpoints?: string[]; states?: {name, page, steps}[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };   // all true but screenshot; pages, hide: []; budget 0s (none); openapi: the first service's OpenAPI JSON path, compared with main's; endpoints: up to 5 GET paths timed against main's
-  access: "link" | "public";          // "link": a preview's URLs need its link ("link")
+  access: "link" | "team" | "public"; // "link": a preview's URLs need its link; "team": a person signed in to roll who may open the project
   visual_review: "off" | "check" | "required";   // the roll/visual review; required also blocks landing in roll ("off")
   feedback: boolean;                  // a feedback button on its pages for people who came in through roll (true)
   egress: "open" | "roll";            // what its services' code may reach: anything ("open"), or only roll's products on a network with no route out (see "Egress")
@@ -1534,7 +1613,49 @@ type Settings = {
   Awake, Asleep with their counts; `lib/preview-filter.ts`), status, cost, logs, and open,
   sleep, wake, reset and delete actions, plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
-- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|masks|settings|usage|bypass|wait`.
+- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|visitors|settings|usage|bypass|wait|up|down|masks`.
+  - `roll preview up [--project P] [--repo owner/name] [--name N] [--no-wait] [--timeout S] [--force]`
+    previews a checkout's working tree as it is, as `netlify deploy` and `vercel deploy` do from a
+    directory: uncommitted and untracked files included, what `.gitignore` leaves out left out.
+    - **The commit.** It's made on the side: in an index of its own (`GIT_INDEX_FILE` in a
+      temporary directory) that starts as a copy of the user's (as `git stash` does, so only
+      what changed is hashed again; HEAD's tree without one), then `git add -A`, `git
+      write-tree` and `git commit-tree -p HEAD` (no parent without a HEAD) with the message `roll
+      preview up`. The user's index, HEAD, refs and files never move.
+    - **Untracked files are pushed.** Every file `.gitignore` doesn't leave out goes up, a
+      `.env.local` as much as a source file, and anyone who can read the repo can read the
+      branch. `up` lists the untracked files it adds and their total size, and refuses one over
+      50 MB unless `--force`. Submodules go as they're committed (their pointers): a submodule's
+      own uncommitted work isn't in it.
+    - **The push.** To `refs/heads/preview/<handle>/<name>` at the repo's clone URL. `<handle>`
+      is the caller's (`GET /v1/access`: the signed-in person, or a person's own token), else
+      `_operator` (no handle can be that: handles are `a-z0-9-`). `<name>` is `--name` or the
+      checked-out branch (`local` when detached), made one ref segment (`feat/login` is
+      `feat-login`). The CLI's own credential goes as the Basic password, in the push's
+      environment (`GIT_CONFIG_*`: never argv, the user's config or a remote), as
+      `http.<clone URL>.extraHeader`, so git sends it to that URL only. A git config that would
+      rewrite the clone URL (`url.<base>.insteadOf` or `pushInsteadOf`, anywhere git reads it) is
+      refused rather than pushed past. No hook runs (`core.hooksPath=/dev/null`: a hook would see
+      the credential in its environment), so git-lfs's pre-push doesn't either: LFS files go as
+      their pointers, and their objects aren't uploaded. Credential helpers and askpass programs
+      aren't asked, redirects aren't followed, and no submodule or tag goes along. The push is
+      forced and names that one ref: a run again moves the branch (roll code takes a
+      non-fast-forward push to any branch but the default one).
+    - **The repo** is `--repo`, else the one a remote of the checkout points at: a remote whose
+      URL is that repo's `clone_url`. **The project** is `--project`, else the one project whose
+      canvas has the repo.
+    - **Then** it makes the branch's preview, or reuses the one it has (`create --branch`'s),
+      waits until it's ready (unless `--no-wait`) and prints its URL, as `wait` does.
+    - **The branch's change.** A pushed branch is a roll code change, as any is, and its checks
+      run, on the uncommitted work. It gets no preview of its own: a `preview/…` branch with a
+      preview of its own (`up`'s) has the one, so the rules make none for a change of it, and one
+      they made just before (roll code nudges the engine on the push, before `up` asks for the
+      branch's preview) is deleted. Both have to hold: a team's own `preview/new-nav` keeps its
+      change's preview, and a preview made by hand of a pull request's branch never takes that pull
+      request's preview, or its reports, away.
+  - `roll preview down [--name N] [--repo owner/name]` deletes that preview and the
+    `preview/<handle>/<name>` branch: a delete push, as `up`'s, always sent (a branch already
+    gone is gone).
   For CI outside GitHub, `roll preview wait --change chg_…` (or `create … --wait`) blocks until
   the preview is ready and prints its URL (`--service` for another), exiting 1 if it fails, is
   deleted or isn't ready within `--timeout` (600 s): the next step tests that URL with the
@@ -1551,7 +1672,7 @@ Ranked by what a person notices first. Done so far:
 - rolld's adapters for every product (Postgres resets in place and goes cold after an idle
   hour), the secrets, roll apps and search adapters;
 - seeds;
-- link access;
+- link access, and team access (people signed in to roll, `visit.rs`);
 - roll code and GitHub reporting;
 - `roll preview`;
 - the dashboard's Previews tab and canvas overlay;

@@ -7,10 +7,20 @@
 //! once ([`Service::validate`]), as the model validators do.
 
 pub mod anthropic;
+pub mod azureopenai;
+pub mod bedrock;
 pub mod builtin;
 pub mod cohere;
+pub mod custom;
+pub mod deepseek;
+pub mod google;
+pub mod huggingface;
+pub mod jinaai;
+pub mod mistral;
+pub mod oai;
 pub mod openai;
 pub mod test;
+pub mod voyageai;
 
 use super::chunking::Chunking;
 use super::results::Results;
@@ -32,6 +42,16 @@ pub enum Service {
     OpenAi,
     Cohere,
     Anthropic,
+    AzureOpenAi,
+    Bedrock,
+    VertexAi,
+    AiStudio,
+    Mistral,
+    VoyageAi,
+    JinaAi,
+    DeepSeek,
+    HuggingFace,
+    Custom,
     /// The `elasticsearch` service (and its old name `elser`): models on ML nodes.
     Elasticsearch,
     Test(test::Kind),
@@ -162,6 +182,16 @@ impl Service {
             "openai" => Service::OpenAi,
             "cohere" => Service::Cohere,
             "anthropic" => Service::Anthropic,
+            "azureopenai" => Service::AzureOpenAi,
+            "amazonbedrock" => Service::Bedrock,
+            "googlevertexai" => Service::VertexAi,
+            "googleaistudio" => Service::AiStudio,
+            "mistral" => Service::Mistral,
+            "voyageai" => Service::VoyageAi,
+            "jinaai" => Service::JinaAi,
+            "deepseek" => Service::DeepSeek,
+            "hugging_face" => Service::HuggingFace,
+            "custom" => Service::Custom,
             "elasticsearch" | "elser" => Service::Elasticsearch,
             other if test_services_on(cluster) => Service::Test(test::Kind::find(other)?),
             _ => return None,
@@ -173,6 +203,16 @@ impl Service {
             Service::OpenAi => "openai",
             Service::Cohere => "cohere",
             Service::Anthropic => "anthropic",
+            Service::AzureOpenAi => "azureopenai",
+            Service::Bedrock => "amazonbedrock",
+            Service::VertexAi => "googlevertexai",
+            Service::AiStudio => "googleaistudio",
+            Service::Mistral => "mistral",
+            Service::VoyageAi => "voyageai",
+            Service::JinaAi => "jinaai",
+            Service::DeepSeek => "deepseek",
+            Service::HuggingFace => "hugging_face",
+            Service::Custom => "custom",
             Service::Elasticsearch => "elasticsearch",
             Service::Test(k) => k.name(),
         }
@@ -183,6 +223,14 @@ impl Service {
             Service::OpenAi => &[TaskType::TextEmbedding, TaskType::Completion, TaskType::ChatCompletion],
             Service::Cohere => &[TaskType::TextEmbedding, TaskType::Rerank, TaskType::Completion],
             Service::Anthropic => &[TaskType::Completion, TaskType::ChatCompletion],
+            Service::AzureOpenAi | Service::Mistral => &[TaskType::TextEmbedding, TaskType::Completion, TaskType::ChatCompletion],
+            Service::Bedrock => &[TaskType::TextEmbedding, TaskType::Completion],
+            Service::VertexAi => &[TaskType::TextEmbedding, TaskType::Rerank, TaskType::Completion, TaskType::ChatCompletion],
+            Service::AiStudio => &[TaskType::TextEmbedding, TaskType::Completion],
+            Service::VoyageAi | Service::JinaAi => &[TaskType::TextEmbedding, TaskType::Rerank],
+            Service::DeepSeek => &[TaskType::Completion, TaskType::ChatCompletion],
+            Service::HuggingFace => &[TaskType::TextEmbedding, TaskType::SparseEmbedding, TaskType::Rerank, TaskType::Completion, TaskType::ChatCompletion],
+            Service::Custom => &[TaskType::TextEmbedding, TaskType::SparseEmbedding, TaskType::Rerank, TaskType::Completion],
             Service::Elasticsearch => &[TaskType::TextEmbedding, TaskType::SparseEmbedding, TaskType::Rerank],
             Service::Test(k) => k.task_types(),
         }
@@ -202,6 +250,16 @@ impl Service {
             Service::OpenAi => openai::parse(cluster, task, &mut cfg)?,
             Service::Cohere => cohere::parse(cluster, task, &mut cfg)?,
             Service::Anthropic => anthropic::parse(cluster, task, &mut cfg)?,
+            Service::AzureOpenAi => azureopenai::parse(cluster, task, &mut cfg)?,
+            Service::Bedrock => bedrock::parse(cluster, task, &mut cfg)?,
+            Service::VertexAi => google::parse_vertex(cluster, task, &mut cfg)?,
+            Service::AiStudio => google::parse_studio(cluster, task, &mut cfg)?,
+            Service::Mistral => mistral::parse(cluster, task, &mut cfg)?,
+            Service::VoyageAi => voyageai::parse(cluster, task, &mut cfg)?,
+            Service::JinaAi => jinaai::parse(cluster, task, &mut cfg)?,
+            Service::DeepSeek => deepseek::parse(cluster, task, &mut cfg)?,
+            Service::HuggingFace => huggingface::parse(cluster, task, &mut cfg)?,
+            Service::Custom => custom::parse(cluster, task, &mut cfg)?,
             Service::Elasticsearch => builtin::parse(task, &mut cfg)?,
             Service::Test(_) => unreachable!(),
         };
@@ -220,13 +278,23 @@ impl Service {
             }
             ep.chunking = Some(Chunking::from_request(Some(&c))?);
         }
-        if let Some(k) = updated_api_key(cluster, &mut ss)? {
+        let own_secrets = matches!(self, Service::AzureOpenAi | Service::Bedrock | Service::VertexAi | Service::Custom | Service::Test(_));
+        if !own_secrets && let Some(k) = updated_api_key(cluster, &mut ss)? {
             ep.secrets.insert("api_key".into(), k.into());
         }
         match self {
             Service::OpenAi => openai::update(&mut ep, &mut ss)?,
             Service::Cohere => cohere::update(&mut ep, &mut ss)?,
             Service::Anthropic => anthropic::update(&mut ep, &mut ss)?,
+            Service::AzureOpenAi => azureopenai::update(cluster, &mut ep, &mut ss)?,
+            Service::Bedrock => bedrock::update(cluster, &mut ep, &mut ss)?,
+            Service::VertexAi => google::update_vertex(cluster, &mut ep, &mut ss)?,
+            Service::Custom => custom::update(cluster, &mut ep, &mut ss)?,
+            Service::AiStudio => update_rate(&mut ep, &mut ss, 360)?,
+            Service::Mistral => update_rate(&mut ep, &mut ss, 240)?,
+            Service::VoyageAi | Service::JinaAi => update_rate(&mut ep, &mut ss, 2000)?,
+            Service::HuggingFace => update_rate(&mut ep, &mut ss, 3000)?,
+            Service::DeepSeek => {}
             Service::Elasticsearch => return Err(EsError::status(400, "Updating the elasticsearch service's endpoints needs ML nodes, which roll doesn't run")),
             Service::Test(k) => return k.update(&mut ep, ss, ts).map(|_| ep),
         }
@@ -236,6 +304,13 @@ impl Service {
             Service::OpenAi => openai::task_settings(&mut ts_reader)?,
             Service::Cohere => cohere::task_settings(current.task, &mut ts_reader)?,
             Service::Anthropic => anthropic::task_settings(&mut ts_reader, false)?,
+            Service::AzureOpenAi => azureopenai::task_settings(&mut ts_reader)?,
+            Service::Bedrock => bedrock::task_settings(current.task, &mut ts_reader)?,
+            Service::VertexAi => google::vertex_task_settings(current.task, &mut ts_reader)?,
+            Service::VoyageAi => voyageai::task_settings(current.task, &mut ts_reader)?,
+            Service::JinaAi => jinaai::task_settings(current.task, &mut ts_reader)?,
+            Service::HuggingFace => huggingface::task_settings(current.task, &mut ts_reader)?,
+            Service::Custom => custom::task_settings(&mut ts_reader)?,
             _ => Map::new(),
         };
         check_empty(&ts_reader, self.name())?;
@@ -244,6 +319,12 @@ impl Service {
         ep.task_settings = match self {
             Service::OpenAi => openai::task_settings(&mut merged)?,
             Service::Cohere => cohere::task_settings(current.task, &mut merged)?,
+            Service::AzureOpenAi => azureopenai::task_settings(&mut merged)?,
+            Service::Bedrock => bedrock::task_settings(current.task, &mut merged)?,
+            Service::VertexAi => google::vertex_task_settings(current.task, &mut merged)?,
+            Service::VoyageAi => voyageai::task_settings(current.task, &mut merged)?,
+            Service::JinaAi => jinaai::task_settings(current.task, &mut merged)?,
+            Service::HuggingFace => huggingface::task_settings(current.task, &mut merged)?,
             _ => merged,
         };
         Ok(ep)
@@ -265,9 +346,17 @@ impl Service {
     /// (a text embedding model's dimensions and similarity).
     pub async fn validate(self, cluster: &Cluster, ep: &mut Endpoint, timeout: Duration) -> EsResult<()> {
         let mut req = Request::new(vec!["how big".into()], timeout);
+        // The services after Anthropic validate an embedding endpoint as an ingest would run it.
+        if ep.task == TaskType::TextEmbedding && !matches!(self, Service::OpenAi | Service::Cohere | Service::Anthropic | Service::Elasticsearch | Service::Test(_)) {
+            req.input_type = Some("internal_ingest".into());
+        }
         let run = match ep.task {
             TaskType::Rerank => {
                 req.query = Some("test query".into());
+                // The custom service's validator asks for the top document only.
+                if self == Service::Custom {
+                    req.top_n = Some(1);
+                }
                 self.infer(cluster, ep, &req).await
             }
             TaskType::ChatCompletion => {
@@ -307,6 +396,15 @@ impl Service {
         match self {
             Service::OpenAi => openai::embedding_details(ep, size),
             Service::Cohere => cohere::embedding_details(ep, size),
+            Service::AzureOpenAi => azureopenai::embedding_details(ep, size),
+            Service::Bedrock => bedrock::embedding_details(ep, size),
+            Service::VertexAi => google::vertex_embedding_details(ep, size),
+            Service::AiStudio => google::studio_embedding_details(ep, size),
+            Service::Mistral => mistral::embedding_details(ep, size),
+            Service::VoyageAi => voyageai::embedding_details(ep, size),
+            Service::JinaAi => jinaai::embedding_details(ep, size),
+            Service::HuggingFace => huggingface::embedding_details(ep, size),
+            Service::Custom => custom::embedding_details(ep, size),
             Service::Test(k) => k.embedding_details(ep, size),
             _ => {}
         }
@@ -318,6 +416,16 @@ impl Service {
             Service::OpenAi => openai::infer(cluster, ep, req).await,
             Service::Cohere => cohere::infer(cluster, ep, req).await,
             Service::Anthropic => anthropic::infer(cluster, ep, req).await,
+            Service::AzureOpenAi => azureopenai::infer(cluster, ep, req).await,
+            Service::Bedrock => bedrock::infer(cluster, ep, req).await,
+            Service::VertexAi => google::infer_vertex(cluster, ep, req).await,
+            Service::AiStudio => google::infer_studio(cluster, ep, req).await,
+            Service::Mistral => mistral::infer(cluster, ep, req).await,
+            Service::VoyageAi => voyageai::infer(cluster, ep, req).await,
+            Service::JinaAi => jinaai::infer(cluster, ep, req).await,
+            Service::DeepSeek => deepseek::infer(cluster, ep, req).await,
+            Service::HuggingFace => huggingface::infer(cluster, ep, req).await,
+            Service::Custom => custom::infer(cluster, ep, req).await,
             Service::Elasticsearch => Err(builtin::infer_error(ep, req)),
             Service::Test(k) => k.infer(ep, req),
         }
@@ -328,6 +436,12 @@ impl Service {
         match self {
             Service::OpenAi => openai::stream_completion(cluster, ep, req).await,
             Service::Anthropic => anthropic::stream_completion(cluster, ep, req).await,
+            Service::AzureOpenAi => azureopenai::stream_completion(cluster, ep, req).await,
+            Service::VertexAi => google::stream_completion_vertex(cluster, ep, req).await,
+            Service::AiStudio => google::stream_completion_studio(cluster, ep, req).await,
+            Service::Mistral => mistral::stream_completion(cluster, ep, req).await,
+            Service::DeepSeek => deepseek::stream_completion(cluster, ep, req).await,
+            Service::HuggingFace => huggingface::stream_completion(cluster, ep, req).await,
             Service::Test(k) => k.stream_completion(ep, req),
             _ => Err(EsError::status(400, format!("Streaming is not allowed for service [{}] and task [{}]", self.name(), ep.task.name()))),
         }
@@ -338,6 +452,11 @@ impl Service {
         match self {
             Service::OpenAi => openai::stream_chat(cluster, ep, body, timeout).await,
             Service::Anthropic => anthropic::stream_chat(cluster, ep, body, timeout).await,
+            Service::AzureOpenAi => azureopenai::stream_chat(cluster, ep, body, timeout).await,
+            Service::VertexAi => google::stream_chat_vertex(cluster, ep, body, timeout).await,
+            Service::Mistral => mistral::stream_chat(cluster, ep, body, timeout).await,
+            Service::DeepSeek => deepseek::stream_chat(cluster, ep, body, timeout).await,
+            Service::HuggingFace => huggingface::stream_chat(cluster, ep, body, timeout).await,
             Service::Test(k) => k.stream_chat(ep, body),
             _ => Err(EsError::status(400, format!("Streaming is not allowed for service [{}] and task [{}]", self.name(), ep.task.name()))),
         }
@@ -398,6 +517,163 @@ pub fn sse_data(body: &[u8]) -> Vec<(Option<String>, String)> {
             continue;
         }
         out.push((event, data));
+    }
+    out
+}
+
+/// `m`'s keys in `order` (each service's `toXContent` order), anything else after them.
+pub fn ordered(mut m: Map, order: &[&str]) -> Map {
+    let mut out = Map::new();
+    for k in order {
+        if let Some(v) = m.shift_remove(*k) {
+            out.insert((*k).to_string(), v);
+        }
+    }
+    out.extend(m);
+    out
+}
+
+/// A secret string setting (`extractRequiredSecureString`, `extractOptionalSecureString`),
+/// sealed; errors are collected.
+pub fn take_secret(cluster: &Cluster, ss: &mut Map, key: &str, scope: &str, required: bool, errors: &mut Vec<String>) -> Option<String> {
+    match ss.shift_remove(key) {
+        Some(Value::Str(k)) if !k.is_empty() => Some(crate::seal::seal_given(cluster, super::SECRET_KIND, &k)),
+        Some(Value::Str(_)) => {
+            errors.push(format!("[{scope}] Invalid value empty string. [{key}] must be a non-empty string"));
+            None
+        }
+        Some(other) => {
+            errors.push(format!("field [{key}] is not of the expected type. The value [{}] cannot be converted to a [String]", java_string(&other)));
+            None
+        }
+        None => {
+            if required {
+                errors.push(format!("[{scope}] does not contain the required setting [{key}]"));
+            }
+            None
+        }
+    }
+}
+
+/// The current `rate_limit.requests_per_minute` of an endpoint.
+pub fn current_rate(ep: &Endpoint, default: i64) -> i64 {
+    ep.requests_per_minute().unwrap_or(default)
+}
+
+/// An update that may change only the rate limit.
+pub fn update_rate(ep: &mut Endpoint, ss: &mut Map, default: i64) -> EsResult<()> {
+    let mut r = super::settings::Reader::new(std::mem::take(ss), "service_settings");
+    let rate = r.rate_limit(current_rate(ep, default));
+    *ss = r.finish()?;
+    ep.service_settings.insert("rate_limit".into(), rate);
+    Ok(())
+}
+
+/// The inputs as a JSON array of strings.
+pub fn strings(input: &[String]) -> Value {
+    Value::Arr(input.iter().map(|s| Value::from(s.as_str())).collect())
+}
+
+/// A request's `input_type` in lower case, else the task settings' one.
+pub fn input_type(req: &Request, ts: &Map) -> Option<String> {
+    req.input_type.clone().or_else(|| ts.get("input_type").and_then(Value::as_str).map(str::to_owned)).map(|s| s.to_ascii_lowercase())
+}
+
+/// Whether an input type is one roll sends itself (`internal_ingest`, `internal_search`).
+pub fn internal(it: &str) -> bool {
+    it.starts_with("internal_")
+}
+
+/// Records a text embedding model's learned dimensions and default similarity, printed in the
+/// service's order.
+pub fn learned(ep: &mut Endpoint, size: usize, similarity: &str, order: &[&str]) {
+    let mut ss = std::mem::take(&mut ep.service_settings);
+    ss.entry("similarity".to_string()).or_insert_with(|| similarity.into());
+    ss.insert("dimensions".into(), (size as i64).into());
+    ep.service_settings = ordered(ss, order);
+}
+
+/// Sends a JSON POST and checks the status the OpenAI way; the answer's JSON.
+pub async fn post_json(cluster: &Cluster, ep: &Endpoint, service: &str, url: String, headers: Vec<(String, String)>, body: &Value, timeout: Duration) -> EsResult<Value> {
+    let call = super::http::Call::json(&ep.id, url.clone(), headers, body, timeout, ep.requests_per_minute());
+    let answer = super::http::post(cluster, &call).await?;
+    super::http::check(&ep.id, &url, &answer)?;
+    answer_json(service, &answer)
+}
+
+/// `Authorization: Bearer <api_key>` after the given headers.
+pub fn bearer(cluster: &Cluster, ep: &Endpoint, mut headers: Vec<(String, String)>) -> EsResult<Vec<(String, String)>> {
+    if let Some(k) = ep.secret(cluster, "api_key")? {
+        headers.push(("Authorization".into(), format!("Bearer {k}")));
+    }
+    Ok(headers)
+}
+
+/// `Content-Type: application/json;charset=utf-8`, the API key as a bearer token, then
+/// `Request-Source: unspecified:elasticsearch` when `source`.
+pub fn json_bearer(cluster: &Cluster, ep: &Endpoint, source: bool) -> EsResult<Vec<(String, String)>> {
+    let mut h = bearer(cluster, ep, json_headers())?;
+    if source {
+        h.push(("Request-Source".into(), "unspecified:elasticsearch".into()));
+    }
+    Ok(h)
+}
+
+/// `"x only accepts 1 input"`, the completion services' check.
+pub fn one_input<'a>(req: &'a Request, what: &str) -> EsResult<&'a str> {
+    match req.input.as_slice() {
+        [one] => Ok(one),
+        _ => Err(EsError::status(400, format!("{what} only accepts 1 input"))),
+    }
+}
+
+/// The rerank results of `[{index, <score>, <text>}]`, indexes checked against the inputs.
+pub fn ranked(items: &[Value], inputs: usize, score: &str, text: impl Fn(&Value) -> Option<String>, what: &str) -> EsResult<Results> {
+    let mut out = Vec::with_capacity(items.len());
+    for r in items {
+        let index = r.get("index").and_then(Value::as_i64).filter(|i| *i >= 0 && (*i as usize) < inputs).ok_or_else(|| missing_field("index", what))?;
+        let s = r.get(score).and_then(Value::as_f64).ok_or_else(|| missing_field(score, what))?;
+        out.push(super::results::Ranked { index: index as usize, score: s as f32, text: text(r) });
+    }
+    Ok(Results::Rerank(out))
+}
+
+/// A list of numeric vectors as float embeddings, `expected` of them.
+pub fn float_vectors(list: &[Value], expected: usize, what: &str) -> EsResult<Results> {
+    if list.len() != expected {
+        return Err(EsError::java(500, "illegal_state_exception", format!("The {what} response holds [{}] embeddings for [{expected}] inputs", list.len())));
+    }
+    let mut out = Vec::with_capacity(list.len());
+    for v in list {
+        let nums = v.as_array().ok_or_else(|| missing_field("embedding", what))?;
+        out.push(nums.iter().map(|n| n.as_f64().map(|f| f as f32)).collect::<Option<Vec<f32>>>().ok_or_else(|| missing_field("embedding", what))?);
+    }
+    Ok(Results::Floats(out))
+}
+
+/// Byte (`int8`) or bit (`binary`) embeddings of numeric vectors.
+pub fn byte_vectors(list: &[Value], expected: usize, bits: bool, what: &str) -> EsResult<Results> {
+    if list.len() != expected {
+        return Err(EsError::java(500, "illegal_state_exception", format!("The {what} response holds [{}] embeddings for [{expected}] inputs", list.len())));
+    }
+    let mut out = Vec::with_capacity(list.len());
+    for v in list {
+        let nums = v.as_array().ok_or_else(|| missing_field("embedding", what))?;
+        out.push(nums.iter().map(|n| n.as_f64().map(|f| f.clamp(-128.0, 127.0) as i8)).collect::<Option<Vec<i8>>>().ok_or_else(|| missing_field("embedding", what))?);
+    }
+    Ok(if bits { Results::Bits(out) } else { Results::Bytes(out) })
+}
+
+/// A URL path segment encoded as `URIBuilder.setPathSegments` encodes it (RFC 3986 `pchar`s
+/// stay as they are).
+pub fn path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
     }
     out
 }

@@ -1492,6 +1492,33 @@ async fn a_preview_made_by_hand_is_only_of_a_repo_the_project_stands_for() {
     assert!(matches!(err, roll_previews::Error::Conflict(_)) && !err.to_string().contains(&ours.id), "{err}");
 }
 
+/// `roll preview up`'s branch (`preview/<who>/<name>`) has a preview of its own: a change of that
+/// branch gets no second, and one the rules made just before it goes. A preview made by hand of a
+/// pull request's own branch never takes that pull request's preview away.
+#[tokio::test]
+async fn a_change_of_a_branch_with_its_own_preview_gets_none() {
+    let e = env(json!({ "enabled": true }));
+    // `roll preview up`'s order: the push opens the change and nudges a pass, then the branch's
+    // preview is asked for.
+    e.code.heads.lock().insert("acme/web@preview/ana/local".into(), "cs_3a".into());
+    e.code.open(ChangeInfo { branch: Some("preview/ana/local".into()), ..change("chg_3", 3) });
+    e.engine.pass().await.unwrap();
+    let made = e.engine.store.row_by_change("chg_3").unwrap().unwrap();
+    let (branch, _) = e.engine.create(&e.project, "acme/web", Some("preview/ana/local"), None, "ana").await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row(&made.id).map(|r| r.desired).unwrap_or(Desired::Deleted), Desired::Deleted);
+    e.engine.pass().await.unwrap();
+    assert!(e.engine.store.row_by_change("chg_3").unwrap().is_none_or(|r| r.desired == Desired::Deleted), "no second one");
+    assert_eq!(e.engine.store.row(&branch.id).unwrap().desired, Desired::Active);
+    // A pull request's own branch, previewed by hand too: its own preview stays.
+    e.code.heads.lock().insert("acme/web@feat/4".into(), "cs_4a".into());
+    e.code.open(change("chg_4", 4));
+    e.engine.pass().await.unwrap();
+    e.engine.create(&e.project, "acme/web", Some("feat/4"), None, "ana").await.unwrap();
+    e.engine.pass().await.unwrap();
+    assert_eq!(e.engine.store.row_by_change("chg_4").unwrap().map(|r| r.desired), Some(Desired::Active), "the pull request keeps its preview");
+}
+
 /// A deploy hook (Vercel's and Netlify's, for a headless CMS's publish webhook) builds the
 /// project's previews of its branches again at their heads, each service with nothing cached; a
 /// second call within a minute makes no second rebuild; anything but a live hook is a 404; a

@@ -44,9 +44,9 @@ async fn repositories() {
     let (s, v) = call(&c, "PUT", "/_snapshot/r2", Some(r#"{"type":"fs","settings":{"location":"/elsewhere"}}"#)).await;
     assert_eq!(s, 500);
     assert_eq!(at(&v, "error.caused_by.reason").as_str(), Some("[r2] location [/elsewhere] doesn't match any of the locations specified by path.repo"));
-    let (s, v) = call(&c, "PUT", "/_snapshot/r2", Some(r#"{"type":"azure","settings":{"container":"b"}}"#)).await;
+    let (s, v) = call(&c, "PUT", "/_snapshot/r2", Some(r#"{"type":"hdfs","settings":{"uri":"hdfs://x"}}"#)).await;
     assert_eq!(s, 500);
-    assert_eq!(at(&v, "error.reason").as_str(), Some("[r2] repository type [azure] does not exist for project [default]"));
+    assert_eq!(at(&v, "error.reason").as_str(), Some("[r2] repository type [hdfs] does not exist for project [default]"));
     let (s, v) = call(&c, "GET", "/_snapshot", None).await;
     assert_eq!(s, 200);
     assert_eq!(at(&v, "r1.type").as_str(), Some("fs"));

@@ -149,6 +149,9 @@ pub struct Engine {
     kick: Notify,
     /// In a cluster: requests that act on running services go to the reconciler's node.
     pub cluster: std::sync::OnceLock<Arc<roll_cluster::Cluster>>,
+    /// Who may open a project's previews under team access; unset, nobody signs in.
+    pub visitors: std::sync::OnceLock<Arc<dyn crate::ports::Visitors>>,
+
     /// Where a Git URL service's previews are posted (rolld: roll apps' GitHub App connection).
     pub git_report: std::sync::OnceLock<Arc<dyn crate::ports::GitReport>>,
     usage_read: Mutex<HashMap<String, i64>>,
@@ -233,6 +236,8 @@ impl Engine {
             leader,
             kick: Notify::new(),
             cluster: std::sync::OnceLock::new(),
+            visitors: std::sync::OnceLock::new(),
+
             git_report: std::sync::OnceLock::new(),
             usage_read: Mutex::new(HashMap::new()),
             metrics_read: Mutex::new(HashMap::new()),
