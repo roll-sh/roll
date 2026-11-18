@@ -1,7 +1,8 @@
-import { Check, Copy, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
+import { Building2, Check, Copy, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { accountsApi, refreshSession, useSession, type Invite, type Provider, type Session, type User } from "@/lib/accounts-api";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
+import { SsoSection } from "./account-sso";
 import { AppShell } from "./app-shell";
 
 const card = "rounded-xl border border-line-2 bg-sheet inset-shadow-highlight";
@@ -42,6 +43,7 @@ export function AccountPage() {
           <Sessions />
           {user.admin && <Invites />}
           {user.admin && <Users me={user.id} />}
+          {user.admin && <SsoSection />}
         </div>
       )}
     </AppShell>
@@ -94,11 +96,12 @@ function Profile({ user, onChange }: { user: User; onChange: (u: User) => void }
 const PROVIDER: Record<Provider, { label: string; Mark: typeof GitHubMark }> = { github: { label: "GitHub", Mark: GitHubMark }, google: { label: "Google", Mark: GoogleMark } };
 
 function Methods({ user }: { user: User }) {
-  const [providers, setProviders] = useState<{ github: boolean; google: boolean } | null>(null);
+  const [providers, setProviders] = useState<{ github: boolean; google: boolean; sso?: boolean } | null>(null);
   const [error, setError] = useState<string | null>(new URLSearchParams(typeof window === "undefined" ? "" : window.location.search).get("error"));
   useEffect(() => {
     accountsApi.info().then((i) => setProviders(i.providers), () => setProviders({ github: false, google: false }));
   }, []);
+  const sso = user.identities.find((i) => i.provider.startsWith("sso:"));
   return (
     <Section title="Sign-in methods" lead="Codes by email always work. Link GitHub or Google to sign in with them too.">
       <div className={card}>
@@ -132,6 +135,24 @@ function Methods({ user }: { user: User }) {
               </div>
             );
           })}
+        {(providers?.sso || sso) && (
+          <div className="flex items-center gap-3 border-t border-line px-4 py-3 first:border-t-0">
+            <Building2 className="size-4 text-muted" strokeWidth={1.5} />
+            <span className="min-w-0 flex-1 text-[12.5px]">
+              Your company&apos;s sign-in
+              {sso && <span className="ml-2 text-subtle">{sso.email}</span>}
+            </span>
+            {sso ? (
+              <button onClick={() => accountsApi.unlink(sso.provider).then(() => refreshSession().then(() => window.location.reload()), (e) => setError(errorText(e)))} className={btn}>
+                Unlink
+              </button>
+            ) : (
+              <button onClick={() => accountsApi.ssoLink().then(({ url }) => window.location.assign(url), (e) => setError(errorText(e)))} className={btn}>
+                Link
+              </button>
+            )}
+          </div>
+        )}
         <div className="flex items-center gap-3 border-t border-line px-4 py-3 first:border-t-0">
           <KeyRound className="size-4 text-muted" />
           <span className="flex-1 text-[12.5px]">
@@ -139,7 +160,11 @@ function Methods({ user }: { user: User }) {
           </span>
         </div>
       </div>
-      {error && <p className="mt-2 text-[12px] text-danger">{error === "linked_elsewhere" ? "That identity belongs to another roll account." : error}</p>}
+      {error && <p className="mt-2 text-[12px] text-danger">{error === "linked_elsewhere"
+            ? "That identity belongs to another roll account."
+            : error === "link_email"
+              ? "Your company's sign-in signed in another address than this account's."
+              : error}</p>}
     </Section>
   );
 }
