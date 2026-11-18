@@ -216,6 +216,33 @@ impl roll_secrets::outside::OutsideDb for Outside {
     }
 }
 
+/// GitHub for App 1's installation 7: the live tokens, each with the repositories and
+/// permissions it was narrowed to.
+#[derive(Default)]
+struct FakeGitHub(std::sync::Mutex<BTreeMap<String, Narrowed>>);
+
+/// A token's repositories and permissions.
+type Narrowed = (Vec<String>, BTreeMap<String, String>);
+
+impl roll_secrets::github_app::GitHubApps for FakeGitHub {
+    fn token(&self, _: &str, app_id: u64, key: &roll_secrets::Value, installation: u64, repositories: &[String], permissions: &BTreeMap<String, String>) -> Result<(roll_secrets::Value, i64), String> {
+        if app_id != 1 || installation != 7 || !key.expose().contains("BEGIN RSA PRIVATE KEY") {
+            return Err("404 Not Found: Integration not found".into());
+        }
+        let mut live = self.0.lock().unwrap();
+        let token = format!("ghs_{}", live.len() + 100);
+        live.insert(token.clone(), (repositories.to_vec(), permissions.clone()));
+        Ok((roll_secrets::Value::new(token), 4_102_444_800_000))
+    }
+    fn revoke(&self, _: &str, token: &roll_secrets::Value) -> Result<(), String> {
+        self.0.lock().unwrap().remove(token.expose());
+        Ok(())
+    }
+    fn check(&self, api_base: &str) -> Result<(), String> {
+        if api_base.starts_with("https://") { Ok(()) } else { Err("api_base is an https:// URL".into()) }
+    }
+}
+
 /// An ES256 key of the fake issuer, its JWKS, and tokens it signs.
 struct Issuer(ring::signature::EcdsaKeyPair);
 
@@ -440,6 +467,7 @@ struct Api {
     sync: Arc<FakeSync>,
     clouds: Arc<FakeClouds>,
     outside: Arc<Outside>,
+    github: Arc<FakeGitHub>,
     project: String,
     _dir: tempfile::TempDir,
 }
@@ -460,15 +488,16 @@ impl Api {
         let people = Arc::new(People::default());
         let kms = Arc::new(FakeKms::default());
         let outside = Arc::new(Outside::default());
+        let github = Arc::new(FakeGitHub::default());
         let sts = Arc::new(FakeSts::default());
         ws.set_owners(people.clone());
         let clouds = Arc::new(FakeClouds::default());
         let gate = Arc::new(Gate::default());
         let granted: Arc<dyn roll_auth::Grants> = Arc::new(Granted { gate: gate.clone(), people: people.clone() });
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }) };
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), github: Some(github.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }) };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));
-        let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, outside, clouds, project: String::new(), _dir: dir };
+        let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, outside, github, clouds, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -1587,6 +1616,38 @@ async fn a_rotator_outside_roll_issues_and_rotates_a_keys_value() {
 }
 
 #[tokio::test]
+async fn a_github_app_gives_each_lease_a_narrowed_token_that_ends_with_it() {
+    let api = Api::new().await;
+    let key = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----";
+    let (s, e) = api.call(Method::POST, "/github-apps", Some(json!({ "name": "deploy", "app_id": 1, "installation_id": 8, "private_key": key, "repositories": ["web", "api"], "permissions": { "contents": "write" } }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("Integration not found") && !e.to_string().contains("MIIE"), "{e}");
+    let app = api.ok(Method::POST, "/github-apps", Some(json!({ "name": "deploy", "app_id": 1, "installation_id": 7, "private_key": key, "repositories": ["web", "api"], "permissions": { "contents": "write" } }))).await;
+    assert!(app.get("private_key").is_none() && app["api_base"] == "https://api.github.com", "{app}");
+    assert!(api.github.0.lock().unwrap().is_empty(), "the check's token is revoked at once");
+    let (s, e) = api.call(Method::POST, "/github-apps", Some(json!({ "name": "wide", "app_id": 1, "installation_id": 7, "private_key": key, "repositories": [], "permissions": {} }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "an App names the most its tokens may reach: {e}");
+
+    let link = |options: Value| json!({ "kind": "github_app", "ref": app["id"], "field": "token", "mode": "dynamic", "options": options });
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/GITHUB_TOKEN", Some(json!({ "link": link(json!({ "ttl_minutes": 120 })) }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a lease can't outlive GitHub's hour: {e}");
+    // A link narrows within the App's ceiling, never past it.
+    let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/GITHUB_TOKEN", Some(json!({ "link": link(json!({ "permissions": { "administration": "write" } })) }))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{e}");
+    let narrow = json!({ "repositories": ["web"], "permissions": { "contents": "read" } });
+    api.ok(Method::PUT, "/environments/staging/secrets/GITHUB_TOKEN", Some(json!({ "link": link(narrow) }))).await;
+    let a = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:release" }))).await;
+    let token = a["values"]["GITHUB_TOKEN"].as_str().unwrap().to_string();
+    let (repos, perms) = api.github.0.lock().unwrap()[&token].clone();
+    assert_eq!((repos, perms["contents"].as_str()), (vec!["web".to_string()], "read"));
+    let lease = a["leases"][0].as_str().unwrap();
+    api.ok(Method::DELETE, &format!("/leases/{lease}"), None).await;
+    assert!(!api.github.0.lock().unwrap().contains_key(&token), "ending the lease revoked the token");
+
+    let (s, _) = api.call(Method::DELETE, &format!("/github-apps/{}", app["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "its key keeps it");
+}
+
+#[tokio::test]
 async fn a_database_outside_roll_hands_out_logins_in_turn_and_per_lease() {
     let api = Api::new().await;
     // A password with a # unencoded: parsers disagree on where it ends, so it's refused, never
@@ -1728,7 +1789,7 @@ async fn a_cloud_account_trusts_one_projects_token() {
     // The deployment key rotates: the issuer's key is resealed with the new one (health says when
     // the previous key can go), and keeps signing once the previous key is gone.
     let reopen = |current: &str, previous: Option<&str>| {
-        let opts = Options { keyring: Ok(Keyring::new(current, previous).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: api.clouds.clone() }), kms: None, sts: None, outside: None, workloads: None };
+        let opts = Options { keyring: Ok(Keyring::new(current, previous).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: api.clouds.clone() }), kms: None, sts: None, outside: None, github: None, workloads: None };
         Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap()
     };
     let (old, new) = ("k".repeat(32), "n".repeat(32));
@@ -2286,7 +2347,7 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
     let cert = api.values("production", "/").await["values"]["TLS_CERT"].clone();
     assert!(cert.as_str().is_some_and(|c| c.starts_with("-----BEGIN CERTIFICATE-----")), "{cert}");
     let node = |keyring: Keyring| {
-        let opts = Options { keyring: Ok(keyring), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, clouds: None, workloads: None };
+        let opts = Options { keyring: Ok(keyring), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, github: None, clouds: None, workloads: None };
         Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap())
     };
     // The deployment key rotates: health counts the wrapped project as not resealed until the
@@ -2313,7 +2374,7 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
     assert_eq!(roll_secrets::router(fresh).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::LOCKED);
     // Back with roll alone: no KMS needed any more.
     *api.kms.revoked.lock().unwrap() = false;
-    let opts = Options { keyring: Ok(Keyring::new(&"n".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, clouds: None, workloads: None };
+    let opts = Options { keyring: Ok(Keyring::new(&"n".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, github: None, clouds: None, workloads: None };
     let after = Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap());
     assert!(roll_secrets::router(after.clone()).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status().is_success());
     *api.kms.revoked.lock().unwrap() = true;

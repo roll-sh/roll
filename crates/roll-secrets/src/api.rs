@@ -123,6 +123,8 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/ocsp/{id}/{*request}", get(ocsp_get))
         .route(&format!("{P}/cloud-accounts"), get(cloud_accounts).post(add_cloud_account))
         .route(&format!("{P}/cloud-accounts/{{id}}"), axum::routing::delete(delete_cloud_account))
+        .route(&format!("{P}/github-apps"), get(github_apps).post(add_github_app))
+        .route(&format!("{P}/github-apps/{{id}}"), axum::routing::delete(delete_github_app))
         .route(&format!("{P}/outside-databases"), get(outside_databases).post(add_outside_database))
         .route(&format!("{P}/outside-databases/{{id}}"), axum::routing::delete(delete_outside_database))
         .route(&format!("{P}/required"), get(required).put(set_required))
@@ -1065,6 +1067,20 @@ async fn rotate_rotator_secret(State(s): S, Who(c): Who, Path((project, id)): Pa
 
 async fn delete_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_rotator(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn github_apps(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.github_apps(&project, &c)).await?))
+}
+
+async fn add_github_app(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::github_app::NewGitHubApp = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_github_app(&project, n, &c)).await?))
+}
+
+async fn delete_github_app(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_github_app(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
