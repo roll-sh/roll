@@ -59,6 +59,10 @@ email_codes(id TEXT PRIMARY KEY,         -- chl_…
             email TEXT NOT NULL, user_id TEXT, invite_id TEXT,
             code_hash TEXT NOT NULL,     -- argon2id
             attempts INTEGER NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)
+email_changes(id TEXT PRIMARY KEY,       -- chl_…: a move to another address, one per person
+              user_id TEXT NOT NULL, email TEXT NOT NULL,  -- the new address
+              code_hash TEXT NOT NULL,   -- argon2id
+              attempts INTEGER NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)
 oauth_states(state_hash TEXT PRIMARY KEY, provider TEXT NOT NULL, intent TEXT NOT NULL,
              user_id TEXT, invite_id TEXT, verifier TEXT NOT NULL, nonce TEXT NOT NULL,
              browser_hash TEXT NOT NULL, return_to TEXT NOT NULL,
@@ -520,7 +524,7 @@ or make someone an admin.
 
 - What needs it, from a person's own session: adding a passkey (`POST /me/passkeys/options` and
   `POST /me/passkeys`), removing one, setting up an authenticator app (`POST /me/totp`), unlinking
-  a sign-in method. From an admin's session: changing a person's `admin` or `disabled`, an invite
+  a sign-in method, moving to another address. From an admin's session: changing a person's `admin` or `disabled`, an invite
   that makes an admin, and adding, changing or removing an SSO connection or its SCIM token. The
   operator's token has no session: it's exempt. Turning TOTP off and new recovery codes already
   take a code. Making a roll token from a session (`POST /v1/access/tokens`, a person's or an
@@ -536,6 +540,25 @@ or make someone an admin.
   dialog (mounted by the app shell) takes the proof, and the call runs once more (`withReauth` in
   `lib/reauth.ts`, used by the accounts client and every product's `call` in `roll-api.ts`).
 - Each confirmation, and each refused one, is in the person's security log (`reauth`).
+
+### Your address
+
+A person moves their account to another address as GitHub does: the new address proves itself,
+the old one is told.
+
+- `POST /v1/accounts/me/email {email}` (sudo mode) sends a six-digit code to the new address
+  and answers 202 `{challenge}`. `POST /me/email/confirm {challenge, code}` (sudo mode, the same
+  person's session) moves the account in one write: `users.email` is the address sign-in codes,
+  invites' matches and every mail roll sends go to, so the old address signs in no more. A code
+  works once, for 10 minutes, five tries, as a sign-in code; a new change replaces the last.
+- The old address then gets "Your roll account moved to another address", naming the new one.
+- An address that already has an account gets a note ("Someone tried to move a roll account to
+  this address") instead of a code; the answer is the same 202, so it doesn't say which.
+- An address a company manages stays with it: SCIM-provisioned people (403 `managed`: their
+  provider changes it), and a domain whose SSO connection enforces its sign-in, whether moving
+  from it or to it (403 `sso_required`). Checked again at the confirmation.
+- Five changes an hour per person (403 `throttled`), and the usual five mails an hour per address.
+- Both calls are in the person's security log (`POST /v1/accounts/me/email`, `…/confirm`).
 
 ## Routes
 
@@ -590,6 +613,8 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | --- | --- | --- |
 | `GET /v1/accounts/me` | | `User` |
 | `PATCH /v1/accounts/me` | `{name}` | `User` (1–100 characters) |
+| `POST /v1/accounts/me/email` | `{email}` | 202 `{challenge}`: a code to the new address (sudo mode; "Your address") |
+| `POST /v1/accounts/me/email/confirm` | `{challenge, code}` | `User` at the new address; 400 `{code: "bad_code"}`; 409 the address has an account now |
 | `GET /v1/accounts/me/sessions` | | `Session[]`, newest first |
 | `GET /v1/accounts/me/activity` | query `before?` (Unix ms), `limit?` (1–200, 50) | `{events: [{at, action, actor, ok, status, ip, user_agent, detail}]}`: your security log, newest first |
 | `DELETE /v1/accounts/me/sessions/{id}` | | 204; 404 if it isn't yours |

@@ -1538,3 +1538,72 @@ async fn a_company_requires_phishing_resistant_sign_in() {
     assert_eq!(env.operator(Method::PUT, "/v1/accounts/policy", json!({ "phishing_resistant": "everyone" })).await.status, StatusCode::OK);
     assert_eq!(env.call(&mut ada, Method::GET, "/v1/workspace/projects", None).await.json["code"], "passkey_required");
 }
+
+/// Mails to `to` whose subject has `about`, oldest first: (subject, text).
+async fn mails_about(outbox: &std::path::Path, to: &str, about: &str, n: usize) -> Vec<(String, String)> {
+    for _ in 0..400 {
+        let mut out: Vec<(String, String, String)> = std::fs::read_dir(outbox)
+            .map(|d| d.filter_map(|e| e.ok()).filter(|e| !e.file_name().to_string_lossy().starts_with('.')).map(|e| (e.file_name().to_string_lossy().into_owned(), serde_json::from_slice::<Value>(&std::fs::read(e.path()).unwrap()).unwrap())).filter(|(_, m)| m["to"] == to && m["subject"].as_str().unwrap().contains(about)).map(|(f, m)| (f, m["subject"].as_str().unwrap().to_string(), m["text"].as_str().unwrap().to_string())).collect())
+            .unwrap_or_default();
+        if out.len() >= n {
+            out.sort();
+            return out.into_iter().map(|(_, s, t)| (s, t)).collect();
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("no mail to {to} about {about:?}");
+}
+
+async fn change(env: &Env, b: &mut Browser, email: &str) -> Answer {
+    env.call(b, Method::POST, "/v1/accounts/me/email", Some(json!({ "email": email }))).await
+}
+
+async fn confirm(env: &Env, b: &mut Browser, challenge: &str, code: &str) -> Answer {
+    env.call(b, Method::POST, "/v1/accounts/me/email/confirm", Some(json!({ "challenge": challenge, "code": code }))).await
+}
+
+/// A person moves their account to another address (docs/accounts.md, "Your address"): from a
+/// fresh session, with the code sent there; the old address is told, and signs in no more.
+#[tokio::test]
+async fn a_person_moves_their_account_to_another_address() {
+    let env = Env::new().await;
+    let mut ada = Browser::default();
+    let id = env.email_sign_in(&mut ada, "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json["user"]["id"].as_str().unwrap().to_string();
+    let mut bob = Browser::default();
+    env.email_sign_in(&mut bob, "bob@example.com", Some(&env.invite("bob@example.com").await)).await;
+
+    // A stolen cookie alone can't move it.
+    env.accounts.set_sudo_window(0);
+    assert_eq!(change(&env, &mut ada, "ada@new.test").await.json["code"], "reauth_required");
+    env.accounts.set_sudo_window(2 * 60 * 60 * 1000);
+
+    let started = change(&env, &mut ada, "Ada@New.test").await;
+    assert_eq!(started.status, StatusCode::ACCEPTED, "{}", started.json);
+    let challenge = started.json["challenge"].as_str().unwrap().to_string();
+    let code = mails_about(&env.outbox, "ada@new.test", "is your code to move", 1).await[0].0[..6].to_string();
+    // Only Ada's session confirms Ada's change, and only with its code.
+    assert_eq!(confirm(&env, &mut bob, &challenge, &code).await.json["code"], "bad_code");
+    assert_eq!(confirm(&env, &mut ada, &challenge, "000000").await.json["code"], "bad_code");
+    let moved = confirm(&env, &mut ada, &challenge, &code).await;
+    assert_eq!((moved.status, moved.json["email"].as_str()), (StatusCode::OK, Some("ada@new.test")), "{}", moved.json);
+    assert_eq!(confirm(&env, &mut ada, &challenge, &code).await.json["code"], "bad_code", "single use");
+    let told = mails_about(&env.outbox, "ada@example.com", "moved to another address", 1).await;
+    assert!(told[0].1.contains("ada@new.test"), "{}", told[0].1);
+
+    // The new address signs Ada in; the old one gets no code.
+    let old_codes = count_codes(&env.outbox, "ada@example.com");
+    let a = env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "ada@example.com" }))).await;
+    assert_eq!(a.status, StatusCode::ACCEPTED);
+    let again = env.email_sign_in(&mut Browser::default(), "ada@new.test", None).await;
+    assert_eq!(again.json["user"]["id"].as_str(), Some(id.as_str()));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(count_codes(&env.outbox, "ada@example.com"), old_codes);
+
+    // Bob's address: the same answer, a note to Bob instead of a code, and nothing to confirm.
+    let taken = change(&env, &mut ada, "bob@example.com").await;
+    assert_eq!(taken.status, StatusCode::ACCEPTED);
+    assert!(mails_about(&env.outbox, "bob@example.com", "Someone tried to move", 1).await[0].1.contains("Nothing changed"));
+    let guess = env.call(&mut ada, Method::POST, "/v1/accounts/me/email/confirm", Some(json!({ "challenge": taken.json["challenge"], "code": "123456" }))).await;
+    assert_eq!(guess.json["code"], "bad_code");
+    assert_eq!(change(&env, &mut ada, "ada@new.test").await.status, StatusCode::BAD_REQUEST, "already hers");
+}

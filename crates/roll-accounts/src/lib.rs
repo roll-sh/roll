@@ -11,6 +11,7 @@
 
 pub mod api;
 pub mod audit;
+mod email_change;
 mod mail;
 mod oauth;
 pub mod passkeys;
@@ -182,6 +183,15 @@ CREATE TABLE IF NOT EXISTS sso_connections (
     provision INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     challenge TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS email_changes (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS scim_tokens (
     connection_id TEXT PRIMARY KEY,

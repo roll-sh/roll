@@ -62,6 +62,7 @@ function Profile({ user, onChange }: { user: User; onChange: (u: User) => void }
   const [name, setName] = useState(user.name);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [moving, setMoving] = useState(false);
   return (
     <Section title="Profile">
       <div className={`${card} flex flex-wrap items-end gap-3 p-4`}>
@@ -71,7 +72,12 @@ function Profile({ user, onChange }: { user: User; onChange: (u: User) => void }
         </label>
         <div className="text-[12px] leading-relaxed text-muted">
           <div>
-            <span className="text-subtle">Email</span> {user.email}
+            <span className="text-subtle">Email</span> {user.email}{" "}
+            {!moving && (
+              <button onClick={() => setMoving(true)} className="ml-1 text-accent hover:underline">
+                Change
+              </button>
+            )}
           </div>
           <div>
             <span className="text-subtle">Handle</span> <span className="font-mono">{user.handle}</span>
@@ -97,7 +103,66 @@ function Profile({ user, onChange }: { user: User; onChange: (u: User) => void }
         </button>
       </div>
       {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+      {moving && (
+        <EmailChange
+          onDone={(u) => {
+            setMoving(false);
+            if (u) {
+              onChange(u);
+              void refreshSession();
+            }
+          }}
+        />
+      )}
     </Section>
+  );
+}
+
+/** Move the account to another address: a code goes there, and the old address is told. */
+function EmailChange({ onDone }: { onDone: (u: User | null) => void }) {
+  const [email, setEmail] = useState("");
+  const [challenge, setChallenge] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = async (f: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await f();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <form
+      className={`${card} mt-3 p-4`}
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!challenge) void run(async () => setChallenge((await accountsApi.changeEmail(email.trim())).challenge));
+        else void run(async () => onDone(await accountsApi.confirmEmail(challenge, code.trim())));
+      }}
+    >
+      <p className="text-[12.5px] text-muted">
+        {challenge ? `We sent a code to ${email.trim()} (unless it has a roll account already). It works once, for 10 minutes.` : "Sign-in codes and roll's mail go to the new address once you confirm a code sent there. Your current address is told."}
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {challenge ? (
+          <input autoFocus inputMode="numeric" autoComplete="one-time-code" aria-label="Code from the new address" placeholder="Code from the new address" value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))} className={`${field} min-w-48 flex-1 font-mono tracking-[0.15em]`} />
+        ) : (
+          <input autoFocus type="email" required aria-label="New email address" placeholder="new@address.com" value={email} onChange={(e) => setEmail(e.target.value)} className={`${field} min-w-48 flex-1`} />
+        )}
+        <button type="submit" disabled={busy || (challenge ? code.length !== 6 : !email.includes("@"))} className={primary}>
+          {challenge ? "Confirm" : "Send code"}
+        </button>
+        <button type="button" onClick={() => onDone(null)} className="px-1 text-[12px] text-muted hover:text-fg">
+          Cancel
+        </button>
+      </div>
+      {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+    </form>
   );
 }
 
