@@ -35,6 +35,19 @@ impl Branched {
     }
 }
 
+/// What [`Brancher::columns`] fails with when the parent sleeps: reading its columns would wake
+/// it (and keep it awake), which suggestions aren't worth.
+#[derive(Debug)]
+pub struct Asleep;
+
+impl std::fmt::Display for Asleep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("asleep")
+    }
+}
+
+impl std::error::Error for Asleep {}
+
 /// One data product's branches. Every method is idempotent: the engine may call it again after
 /// a crash, a timeout or a retry.
 #[async_trait]
@@ -104,6 +117,7 @@ pub trait Brancher: Send + Sync {
 
     /// The parent's columns (or a search cluster's fields) with their types, at most `max`, for
     /// mask suggestions ([`crate::mask::suggest`]). None from products without columns to mask.
+    /// A parent that sleeps isn't woken for it: [`Asleep`].
     async fn columns(&self, _parent: &str, _max: usize) -> anyhow::Result<Vec<crate::mask::Column>> {
         Ok(Vec::new())
     }

@@ -488,9 +488,11 @@ impl Settings {
                 return bad(format!("masking: {key}: at most 200 columns"));
             }
             if search {
-                // `index.field` (a nested field's path: `users.address.city`) → a search rule.
+                // `index.field` (a nested field's path: `users.address.city`; a data stream's
+                // backing index starts with a dot: `.ds-logs-….user.email`) → a search rule.
                 for (field, rule) in cols {
-                    let ok = field.len() <= 200 && field.split('.').count() >= 2 && !field.split('.').any(str::is_empty) && !field.contains(['*', ',', '/', ' ', '\\']);
+                    let named = if field.starts_with(".ds-") { &field[1..] } else { field.as_str() };
+                    let ok = field.len() <= 200 && named.split('.').count() >= 2 && !named.split('.').any(str::is_empty) && !field.contains(['*', ',', '/', ' ', '\\']);
                     if !ok || !SEARCH_MASKS.contains(&rule.as_str()) {
                         return bad(format!("masking: {key}: {field:?} → {rule:?} isn't \"index.field\" → one of {}", SEARCH_MASKS.join(", ")));
                     }
@@ -667,8 +669,8 @@ mod tests {
         // Structure-only where a kind can't do it: refused, never a silent full copy.
         assert!(Settings::default().patched(&json!({ "resources": { "bucket:b": "schema" } })).is_err());
         assert!(Settings::default().patched(&json!({ "github": { "hide": ["time", ".clock, #ad"] } })).is_ok());
-        assert!(Settings::default().patched(&json!({ "masking": { "search:catalog": { "users.email": "email", "users.address.city": "redact" } } })).is_ok());
-        for bad in [json!({ "users": "redact" }), json!({ "users.email": "hash" }), json!({ "*.email": "redact" })] {
+        assert!(Settings::default().patched(&json!({ "masking": { "search:catalog": { "users.email": "email", "users.address.city": "redact", ".ds-logs-2026.11.18-000001.user.email": "redact" } } })).is_ok());
+        for bad in [json!({ "users": "redact" }), json!({ "users.email": "hash" }), json!({ "*.email": "redact" }), json!({ ".kibana.email": "redact" })] {
             assert!(Settings::default().patched(&json!({ "masking": { "search:catalog": bad } })).is_err(), "{bad}");
         }
         assert!(Settings::default().patched(&json!({ "github": { "hide": ["a} body {display:none"] } })).is_err());

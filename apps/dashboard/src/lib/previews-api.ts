@@ -52,8 +52,10 @@ export function unmaskedNote(kind: string, mode: "branch" | "schema" | "skip", m
   return "Previews get its data as it is (it can't be masked): a seed can replace it with made-up data, or skip it.";
 }
 
-/** A column (or search field) of a branched resource that looks like people's data and has no
- * mask yet (`GET …/mask-suggestions`), with the rule that fits its type. */
+/** A column (or search field) of a project's Postgres, NoSQL or search resource that looks like
+ * people's data and has no mask yet (`GET …/mask-suggestions`), with a rule its type and
+ * constraints take. Every such resource is read, whatever its rule; the dialog shows them under
+ * those on `branch`. */
 export interface MaskSuggestion {
   /** `"postgres:<ref>"`, `"nosql:<ref>"` or `"search:<ref>"`, as `masking` keys it. */
   resource: string;
@@ -64,7 +66,8 @@ export interface MaskSuggestion {
 
 export interface MaskSuggestions {
   suggestions: MaskSuggestion[];
-  /** Resources whose columns couldn't all be read. */
+  /** Resources whose columns weren't all read, and why: asleep (not woken for this), not read
+   * within 10 s, couldn't be read, or only the first 2,000 read. */
   unread: { resource: string; why: string }[];
 }
 

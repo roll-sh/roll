@@ -1,6 +1,6 @@
 import { AlertTriangle, Plus, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { isProduction, previewsApi, unmaskedNote, type MaskSuggestion, type PageState, type PreviewBypass, type PreviewHook, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
+import { isProduction, previewsApi, unmaskedNote, type MaskSuggestion, type MaskSuggestions, type PageState, type PreviewBypass, type PreviewHook, type PreviewJob, type PreviewSettings, type ResourceRule, type SettingsPatch } from "@/lib/previews-api";
 import { ROLL_API } from "@/lib/roll-api";
 import type { PlacedResource } from "@/lib/workspace-api";
 import { KIND_LABEL, resourceKey } from "@/lib/workspace-resources";
@@ -107,7 +107,7 @@ function Form({
   const [perBranch, setPerBranch] = useState<[string, string, string][]>(Object.entries(saved.env_for ?? {}).flatMap(([g, vars]) => Object.entries(vars).map(([k, v]) => [g, k, v] as [string, string, string])));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [suggested, setSuggested] = useState<MaskSuggestion[]>([]);
+  const [suggested, setSuggested] = useState<MaskSuggestions>({ suggestions: [], unread: [] });
   const set = <K extends keyof PreviewSettings>(k: K, v: PreviewSettings[K]) => setS((x) => ({ ...x, [k]: v }));
   // A mask added from a suggestion joins the masks being edited, saved with the rest.
   const addMasks = (resource: string, add: MaskSuggestion[]) =>
@@ -117,7 +117,7 @@ function Form({
     let live = true;
     // Only a hint: the dialog works the same without it.
     previewsApi.maskSuggestions(projectId).then(
-      (r) => live && setSuggested(r.suggestions),
+      (r) => live && setSuggested(r),
       () => {},
     );
     return () => {
@@ -215,7 +215,9 @@ function Form({
                 .join("\n");
               const mode = rule ?? (s.data === "branch" ? "branch" : schema ? "schema" : "skip");
               const unmasked = unmaskedNote(r.kind, mode, Object.keys(s.masking?.[id] ?? {}).length);
-              const suggestions = mode === "branch" ? suggested.filter((x) => x.resource === id && !s.masking?.[id]?.[x.path]) : [];
+              // Read for every resource, so one switched to "branch" here shows them at once.
+              const suggestions = mode === "branch" ? suggested.suggestions.filter((x) => x.resource === id && !s.masking?.[id]?.[x.path]) : [];
+              const unread = mode === "branch" ? suggested.unread.find((x) => x.resource === id) : undefined;
               return (
                 <div key={id} className="border-t border-line first:border-t-0">
                   <div className="flex items-center gap-2 px-2.5 py-1.5">
@@ -271,6 +273,7 @@ function Form({
                             : "Masked in previews, one column per line: keyspace.table.column = mask function. The parent is untouched."}
                       </p>
                       {suggestions.length > 0 && <MaskHints items={suggestions} onAdd={(add) => addMasks(id, add)} />}
+                      {unread && <p className="mt-1.5 text-[11px] text-subtle">Mask suggestions: {unread.why}</p>}
                     </div>
                   )}
                 </div>

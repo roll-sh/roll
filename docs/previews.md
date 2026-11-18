@@ -746,34 +746,59 @@ as a private address.
   - **Suggestions** (as Tonic's and Neon's anonymisation tools name columns that look personal):
     `GET /v1/previews/projects/{project}/mask-suggestions` reads the columns of every Postgres,
     NoSQL and search resource on the project's canvas that the project stands for
-    (`Workspace::trusts`) and that its previews branch whole (`branch`, not `schema` or `skip`),
+    (`Workspace::trusts`), whatever its rule (the rules dialog shows them under those on
+    `branch`, as the rule being edited says, so switching one to `branch` shows them at once),
     and names those that look like people's data and have no mask yet, each with a rule
-    (`mask::suggest`). At most 2,000 columns are read per resource (`SUGGEST_COLUMNS_MAX`); one
-    with more, or one that can't be read, is named in `unread`. Postgres reads the parent's
-    `main` as the superuser with only the catalog's names in reach, as the schema diff does
-    (its tables' columns, a partitioned table's once, with type, `NOT NULL` and whether a unique
-    index covers it); NoSQL the parent's `/schema`, leaving out key columns (a table's or a view's
-    of it), which can't be masked; search the parent's `_mapping`, leaves only (a multi-field is
-    masked with its field). The rules dialog lists them under each resource's masks with "Add
-    mask", which adds the rule to the masks being edited (saved with the dialog).
-    - Names are split into words (`snake_case`, `camelCase`, `IPAddress`, dots) and matched
-      case-insensitively: an email (`email`); a name, phone, postal address, date of birth, IP
-      address, bank account or card number (`redact`, or `hash` where a unique index covers the
-      column, since one value for every row would fail it); a national id, tax id or passport
-      number (`hash`: unique, and joined on); a password, secret, token or API key (`null`, or
-      `redact` on a `NOT NULL` column).
-    - A rule the column's type can take: `redact`, `hash` and `email` write text, so a Postgres
-      column of another type gets `null`, or, `NOT NULL`, a `fixed:` value of its type
-      (`1970-01-01`, `0.0.0.0`, `0`), or nothing; a search field that isn't text-like is
-      `remove`d (`redact` and `email` write strings), and a search secret is `remove`d; NoSQL gets
-      `mask_default()` (`mask_null()` for a secret), which any type takes (`mask_hash` changes the
-      type a client reads). Booleans are never suggested.
-    - Left out on purpose: usernames, logins and handles (a preview's test accounts sign in with
-      them, and they're often unique: masking them locks those accounts out), the names of things
+    (`mask::suggest`). A scoped token sees only the resources its grant lets it read
+    (`Grant::allows`, `read` on `postgres:<ref>` and the rest): column names are the product's
+    metadata. The promise: **a suggested rule never fails the masking**, since a failed mask fails
+    the whole preview and "Add all" applies every one.
+    - What's read, and what isn't. At most 2,000 columns per resource (`SUGGEST_COLUMNS_MAX`),
+      each resource for at most 10 s (`SUGGEST_READ_FOR`). A Postgres parent whose compute
+      sleeps isn't woken for it (reading would start it and reset its idle timer); it's named in
+      `unread` ("asleep: open it to read its columns"), as is one that wasn't read in time,
+      couldn't be read, or has more columns than are read. The dialog shows that under the
+      resource.
+    - Postgres reads the parent's `main` as the superuser with only the catalog's names in reach
+      and `statement_timeout` 10 s (its tables' columns, a partitioned table's once). Generated
+      columns and `GENERATED ALWAYS` identities can't be written, so they're left out. For each
+      column it reads what holds it, across the table's partitions:
+      - nothing is suggested for a column that a foreign key of another table points at, that a
+        CHECK or an exclusion constraint names, that a unique index's expression or predicate
+        uses (`UNIQUE (lower(email))`), that is a partition key, or whose domain has constraints;
+      - only `null` (on a nullable column) for a foreign key's own column, an array, a range, an
+        enum or a composite;
+      - a unique index's column is unique (`hash`, not one value for every row), and one
+        `NULLS NOT DISTINCT` can't take a null either.
+
+      NoSQL reads the parent's `/schema`, leaving out key columns (a table's or a view's of it),
+      which can't be masked. Search reads the parent's indices' mappings one index at a time,
+      leaves only (a multi-field is masked with its field), and a data stream's backing indices
+      (`.ds-…`, which a mask can name) but not system indices.
+    - Names are split into words (`snake_case`, `camelCase`, `IPAddress`, dots, and a strong word
+      glued to others in one lowercase word, as Postgres folds `EmailAddress`: `emailaddress`,
+      `homephone`, `useremail`) and matched case-insensitively: an email (`email`); a name,
+      phone, postal address, date of birth (`born_on` too), IP address, bank account or card
+      number (`redact`, or `hash` where a unique index covers the column, since one value for
+      every row would fail it); a national id, tax id or passport number (`hash`: unique, and
+      joined on; a `*_id` only when it holds text, since a number is another row's reference); a
+      secret, token or API key (`null`, or `redact` on a `NOT NULL` column).
+    - A rule the column's type can take: `redact`, `hash` and `email` write text (3, 32 and 33
+      characters), so in a `varchar(n)` or `char(n)` the first that fits (`email`, then `redact`
+      or `hash`), else `null` on a nullable column, else nothing; a Postgres column of another
+      type gets `null`, or, `NOT NULL`, a `fixed:` value of its type (`1970-01-01`, `0.0.0.0`,
+      `0`), or nothing. Types are matched by their whole name. A search field that isn't text-like
+      is `remove`d (`redact` and `email` write strings), and a search secret is `remove`d; NoSQL
+      gets `mask_default()` (`mask_null()` for a secret), which any type takes (`mask_hash`
+      changes the type a client reads). Booleans are never suggested.
+    - Left out on purpose: usernames, logins and handles, and passwords and their hashes,
+      salts and digests (a preview's test accounts sign in with them: masking them locks those
+      accounts out; a password reset token is a token, and suggested), the names of things
       (`filename`, `hostname`, `company_name`), a bare `name` on a table that isn't about people
-      (`products.name`; `users.name` and `customers.name` are suggested), times (`*_at`, `*_on`),
-      references (`*_id`, but a national or tax id), counts, kinds and flags (`is_*`, `has_*`,
-      `email_verified`).
+      (`products.name`; `users.name` and `customers.name` are suggested), machines' addresses
+      (`mac_address`, `wallet_address`), a mail server, another row's id number
+      (`order_id_number`), times (`*_at`, `*_on`), references (`*_id`, but a national or tax id),
+      counts, kinds and flags (`is_*`, `has_*`, `email_verified`).
 - **Data as of a point in time** (Neon's time-travel branches): `data_at` (`-24h`, `-30m`, `-7d`
   or an RFC 3339 time, 30 days back at most) makes each branching and reset start from the
   parent as it was then, where the product keeps history: Postgres (pg-control's point in time;
@@ -1135,7 +1160,7 @@ and admins see every project.
 | `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
 | `GET /v1/previews/projects/{project}/settings` | | `Settings` |
 | `PUT /v1/previews/projects/{project}/settings` | `Settings` (partial) | `Settings` |
-| `GET /v1/previews/projects/{project}/mask-suggestions` | | `{suggestions: [{resource, path, rule, why}], unread: [{resource, why}]}`: columns of the project's branched (`branch`) Postgres, NoSQL and search resources that look like people's data and have no mask yet, with a rule their type takes ("Masked columns", Suggestions); `resource` is `masking`'s key (`postgres:<ref>`). At most 2,000 columns read per resource; one with more, or one that couldn't be read, is in `unread`. As the settings are: the operator and whoever sees the project |
+| `GET /v1/previews/projects/{project}/mask-suggestions` | | `{suggestions: [{resource, path, rule, why}], unread: [{resource, why}]}`: columns of the project's Postgres, NoSQL and search resources (whatever their rule) that look like people's data and have no mask yet, with a rule their type and constraints take ("Masked columns", Suggestions); `resource` is `masking`'s key (`postgres:<ref>`). At most 2,000 columns read per resource, each for at most 10 s; one asleep (not woken), not read in time, unreadable or with more columns is in `unread`. As the settings are: the operator and whoever sees the project; a scoped token only sees resources its grant lets it read |
 | `GET /v1/previews/projects/{project}/usage` | | `{previews, sleeping_usd_month, active_usd_hour, month_to_date_usd, bytes, spent_usd_month, max_usd_month}` |
 | `GET /v1/previews/projects/{project}/bypass` | | `{enabled, created_at, header}` (never the secret) |
 | `POST /v1/previews/projects/{project}/bypass` | | 201 `{enabled, created_at, header, secret}`: a new secret, shown only here; the old one stops working |

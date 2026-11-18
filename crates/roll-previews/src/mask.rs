@@ -189,10 +189,28 @@ pub struct Column {
     pub path: String,
     /// The product's type (`character varying(255)`, `text`, `keyword`), when it says.
     pub r#type: Option<String>,
-    /// It can't hold a null (Postgres's `NOT NULL`): `null` would fail the masking.
+    /// A null would fail the masking: Postgres's `NOT NULL`, or a unique index `NULLS NOT
+    /// DISTINCT` covers it.
     pub not_null: bool,
     /// A unique index covers it: one value for every row (`redact`) would fail the masking.
     pub unique: bool,
+    /// What a mask may write into it, whatever its name says (Postgres's constraints and types).
+    pub takes: Takes,
+}
+
+/// What a mask may write into a column without failing the masking (and the preview with it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Takes {
+    /// A value of its type, as [`suggest`] picks it.
+    #[default]
+    Any,
+    /// Only a null: an array, a range, an enum or a composite (no text or typed value of
+    /// [`RULES`] fits one), or a column of a foreign key (another value would point nowhere).
+    Null,
+    /// Nothing: another value or a null could break what holds it (a foreign key other rows
+    /// point at, a CHECK, a domain's constraints, a unique index's expression or predicate, an
+    /// exclusion constraint, a partition key).
+    Nothing,
 }
 
 /// What kind of people's data a column's name says it holds.
@@ -208,7 +226,7 @@ pub enum Personal {
     NationalId,
     /// A bank account or a card's number.
     Financial,
-    /// A password, secret, token or key: nothing a preview needs, so emptied.
+    /// A secret, token or key: nothing a preview needs, so emptied.
     Secret,
 }
 
@@ -223,7 +241,7 @@ impl Personal {
             Personal::Ip => "an IP address",
             Personal::NationalId => "a national id, tax id or passport number",
             Personal::Financial => "a bank account or card number",
-            Personal::Secret => "a password, secret or token",
+            Personal::Secret => "a secret, token or key",
         }
     }
 }
@@ -265,6 +283,40 @@ pub fn words(name: &str) -> Vec<String> {
     out
 }
 
+/// Words that say what they are even glued to others in one lowercase word (Postgres folds an
+/// unquoted `EmailAddress` to `emailaddress`; `homephone`, `useremail`), longest first.
+const GLUED: [&str; 12] = ["firstname", "birthdate", "lastname", "fullname", "birthday", "passport", "address", "surname", "secret", "email", "phone", "token"];
+
+/// Words that hold one of [`GLUED`] and are something else.
+const GLUED_NOT: [&str; 17] = [
+    "microphone", "headphone", "earphone", "megaphone", "saxophone", "xylophone", "gramophone", "smartphone", "iphone", "phonem", "phonet", "phonic", "phonolog", "secretar", "secretion",
+    "tokeniz", "addressable",
+];
+
+/// `words` with a word glued from several split around the [`GLUED`] word in it, and a word of
+/// [`NOT_THE_VALUE`] after it split off too (`emailverifiedat` is `email verified at`).
+fn unglue(words: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for w in words {
+        let found = GLUED.iter().find_map(|g| w.find(g).map(|i| (i, *g))).filter(|(_, g)| w.len() > g.len() && !GLUED_NOT.iter().any(|n| w.contains(n)));
+        let Some((i, g)) = found else {
+            out.push(w);
+            continue;
+        };
+        let (head, tail) = (&w[..i], &w[i + g.len()..]);
+        if !head.is_empty() {
+            out.push(head.to_string());
+        }
+        out.push(g.to_string());
+        match NOT_THE_VALUE.iter().find(|n| n.len() >= 4 && tail.len() > n.len() && tail.starts_with(*n)) {
+            Some(n) => out.extend([n.to_string(), tail[n.len()..].to_string()]),
+            None if !tail.is_empty() => out.push(tail.to_string()),
+            None => {}
+        }
+    }
+    out
+}
+
 /// Whether `words` holds `phrase` as consecutive words, or (a phrase of several words) glued as
 /// one (`firstname`, `phonenumber`).
 fn has(words: &[String], phrase: &[&str]) -> bool {
@@ -281,6 +333,15 @@ const NOT_THE_VALUE: [&str; 24] = [
 /// A flag's first word (`is_email_verified`, `has_phone`).
 const FLAG: [&str; 6] = ["is", "has", "can", "should", "allow", "needs"];
 
+/// Words before `address` that make it a machine's, not a postal one (`mac_address`).
+const NOT_POSTAL: [&str; 27] = [
+    "mac", "wallet", "contract", "host", "server", "node", "peer", "bind", "listen", "proxy", "gateway", "hardware", "memory", "base", "return", "web", "url", "bitcoin", "btc", "eth",
+    "ethereum", "crypto", "deposit", "multicast", "broadcast", "token", "validator",
+];
+
+/// Words before `id number` that make it a person's (`order_id_number` isn't).
+const ID_OF_PERSON: [&str; 13] = ["national", "personal", "citizen", "government", "voter", "resident", "identity", "person", "user", "customer", "member", "employee", "patient"];
+
 /// Tables (or a field's parent object) that are about people: a bare `name` there is a person's.
 const PEOPLE: [&str; 30] = [
     "user", "customer", "person", "people", "member", "contact", "employee", "staff", "account", "profile", "author", "patient", "student", "client", "subscriber", "applicant",
@@ -290,28 +351,43 @@ const PEOPLE: [&str; 30] = [
 /// What people's data a column named `name` holds, in `within` (its table, or a search field's
 /// index and parent objects: the last part is what's looked at). Names only, case-insensitive.
 ///
-/// Left out on purpose: a username, login or handle (it's how a preview's test accounts sign in,
-/// and often unique: masking it locks them out), `filename`/`hostname`/`*_name` of things, `*_at`
-/// times, `*_id` references (but a national or tax id), counts, flags and kinds. A bare `name`
-/// counts only on a table about people (`users.name`, not `products.name`).
+/// Left out on purpose: a username, login or handle, and a password or its hash (they're how a
+/// preview's test accounts sign in: masking them locks those out), `filename`/`hostname`/`*_name`
+/// of things, `*_at` times, `*_id` references (but a national or tax id), counts, flags and
+/// kinds. A bare `name` counts only on a table about people (`users.name`, not `products.name`).
 pub fn personal(within: &str, name: &str) -> Option<Personal> {
-    let w = words(name);
+    let w = unglue(words(name));
     let (first, last) = (w.first()?.as_str(), w.last()?.as_str());
     let any = |phrases: &[&[&str]]| phrases.iter().any(|p| has(&w, p));
+    // A person's id number, not another row's (`order_id_number`).
+    let id_number = w.iter().enumerate().any(|(i, x)| {
+        let at = |j: usize, s: &str| w.get(j).is_some_and(|y| y == s);
+        (x == "idnumber" || x == "id" && at(i + 1, "number")) && (i == 0 || ID_OF_PERSON.contains(&w[i - 1].as_str()))
+    });
     // Ids that are the person's own, before `*_id` is left out.
-    if any(&[&["ssn"], &["social", "security"], &["national", "id"], &["national", "insurance"], &["tax", "id"], &["tax", "number"], &["passport"], &["driver", "license"], &["drivers", "license"], &["driving", "licence"], &["id", "number"], &["personal", "id"]])
+    if (id_number || any(&[&["ssn"], &["social", "security"], &["national", "id"], &["national", "insurance"], &["tax", "id"], &["tax", "number"], &["passport"], &["driver", "license"], &["drivers", "license"], &["driving", "licence"], &["personal", "id"]]))
         && !FLAG.contains(&first)
         && (last == "id" || !NOT_THE_VALUE.contains(&last))
     {
         return Some(Personal::NationalId);
     }
+    // When someone was born, before `*_at`/`*_on` times are left out.
+    if w.len() >= 2 && matches!(last, "at" | "on") && matches!(w[w.len() - 2].as_str(), "born" | "birth") && !FLAG.contains(&first) {
+        return Some(Personal::BirthDate);
+    }
     if FLAG.contains(&first) || NOT_THE_VALUE.contains(&last) {
         return None;
     }
-    if any(&[&["password"], &["passwd"], &["secret"], &["token"], &["api", "key"], &["private", "key"], &["secret", "key"], &["access", "key"], &["otp"], &["totp"], &["mfa", "seed"], &["recovery", "code"], &["recovery", "codes"]]) {
+    let secret = any(&[&["secret"], &["token"], &["api", "key"], &["private", "key"], &["secret", "key"], &["access", "key"], &["otp"], &["totp"], &["mfa", "seed"], &["recovery", "code"], &["recovery", "codes"]]);
+    // A password (or its hash, salt or digest) is how test accounts sign in: never suggested.
+    if !secret && any(&[&["password"], &["passwd"]]) {
+        return None;
+    }
+    if secret {
         return Some(Personal::Secret);
     }
-    if any(&[&["email"], &["mail"]]) {
+    // `mail` alone, or a mail address; not a mail server or host.
+    if any(&[&["email"], &["mail", "address"]]) || last == "mail" {
         return Some(Personal::Email);
     }
     if any(&[&["ip"], &["ipv", "4"], &["ipv", "6"], &["ip", "address"], &["remote", "addr"]]) {
@@ -323,10 +399,11 @@ pub fn personal(within: &str, name: &str) -> Option<Personal> {
     if any(&[&["phone"], &["telephone"], &["tel"], &["fax"], &["msisdn"], &["cellphone"], &["mobile", "number"], &["mobile", "no"]]) || w == ["mobile"] {
         return Some(Personal::Phone);
     }
-    if any(&[&["birth", "date"], &["date", "of", "birth"], &["birthday"], &["dob"], &["born"]]) {
+    if any(&[&["birth", "date"], &["date", "of", "birth"], &["birthdate"], &["birthday"], &["dob"], &["born"]]) {
         return Some(Personal::BirthDate);
     }
-    if any(&[&["address"], &["street"], &["city"], &["postcode"], &["postal", "code"], &["zip"], &["zip", "code"], &["house", "number"], &["addr"]]) {
+    let postal = w.iter().enumerate().any(|(i, x)| (x == "address" || x == "addr") && (i == 0 || !NOT_POSTAL.contains(&w[i - 1].as_str())));
+    if postal || any(&[&["street"], &["city"], &["postcode"], &["postal", "code"], &["zip"], &["zip", "code"], &["house", "number"]]) {
         return Some(Personal::Address);
     }
     let person = ["first", "last", "full", "given", "family", "middle", "maiden", "legal", "display", "contact", "customer", "recipient", "holder", "cardholder", "patient", "employee", "guardian", "sender", "billing", "shipping"];
@@ -344,36 +421,94 @@ pub fn personal(within: &str, name: &str) -> Option<Personal> {
     None
 }
 
-/// The rule a Postgres column holding `what` takes: what its type can hold (`redact` and `hash`
-/// write text, `null` needs a nullable column), one value per row where a unique index covers it.
+/// A Postgres type as `format_type` writes it (`character varying(11)`, `timestamp(3) with time
+/// zone`, `public.citext`, `bigint[]`): its name without the modifier or schema, the length in
+/// the modifier, and whether it's an array.
+fn pg_type(ty: &str) -> (String, Option<usize>, bool) {
+    let ty = ty.trim().to_ascii_lowercase();
+    let array = ty.ends_with("[]");
+    let ty = ty.trim_end_matches("[]");
+    let (name, len) = match (ty.find('('), ty.find(')')) {
+        (Some(a), Some(b)) if a < b => {
+            let len = ty[a + 1..b].split(',').next().and_then(|n| n.trim().parse().ok());
+            (format!("{} {}", ty[..a].trim(), ty[b + 1..].trim()).trim().to_string(), len)
+        }
+        _ => (ty.to_string(), None),
+    };
+    let name = if name.starts_with('"') { name } else { name.rsplit('.').next().unwrap_or(&name).to_string() };
+    (name, len, array)
+}
+
+/// Postgres's own types a string is written into.
+const PG_TEXT: [&str; 7] = ["text", "citext", "character varying", "varchar", "character", "char", "bpchar"];
+
+/// Postgres's built-in ranges and multiranges: no rule but `null` fits one.
+const PG_RANGES: [&str; 12] = [
+    "int4range", "int8range", "numrange", "tsrange", "tstzrange", "daterange", "int4multirange", "int8multirange", "nummultirange", "tsmultirange", "tstzmultirange", "datemultirange",
+];
+
+/// The most characters a text rule writes (`email`: `user-` + 12 + `@example.invalid`; `hash`:
+/// an md5).
+fn width(rule: &str) -> usize {
+    match rule {
+        "email" => 33,
+        "hash" => 32,
+        "redact" => 3,
+        _ => 0,
+    }
+}
+
+/// Whether a column of `kind` with type `ty` holds text (`None`: the product didn't say).
+fn is_text(kind: crate::Kind, ty: Option<&str>) -> bool {
+    let Some(ty) = ty else { return true };
+    match kind {
+        crate::Kind::Postgres => {
+            let (name, _, array) = pg_type(ty);
+            !array && PG_TEXT.contains(&name.as_str())
+        }
+        crate::Kind::Search => SEARCH_TEXT.contains(&ty),
+        crate::Kind::Nosql => ["text", "varchar", "ascii"].contains(&ty.to_ascii_lowercase().as_str()),
+        _ => false,
+    }
+}
+
+/// The rule a Postgres column holding `what` takes: what its type and constraints can hold
+/// (`redact` and `hash` write text that must fit its length, `null` needs a nullable column),
+/// one value per row where a unique index covers it, nothing where only a null fits and it
+/// can't hold one.
 fn postgres_rule(what: Personal, c: &Column) -> Option<String> {
-    let ty = c.r#type.as_deref().unwrap_or("text").to_ascii_lowercase();
-    let text = ty == "text" || ty == "citext" || ty.starts_with("character") || ty.starts_with("varchar") || ty.starts_with("char");
-    if text {
-        let rule = match what {
-            Personal::Email => "email",
-            Personal::NationalId => "hash",
-            Personal::Secret if !c.not_null => "null",
-            _ if c.unique => "hash",
-            _ => "redact",
+    let null = || (!c.not_null).then(|| "null".to_string());
+    let (name, len, array) = pg_type(c.r#type.as_deref().unwrap_or("text"));
+    match c.takes {
+        Takes::Nothing => return None,
+        Takes::Null => return null(),
+        Takes::Any if array || PG_RANGES.contains(&name.as_str()) => return null(),
+        Takes::Any => {}
+    }
+    if PG_TEXT.contains(&name.as_str()) {
+        let tried: &[&str] = match what {
+            Personal::Secret if !c.not_null => &["null"],
+            Personal::Email if c.unique => &["email", "hash"],
+            Personal::Email => &["email", "redact"],
+            _ if c.unique => &["hash"],
+            Personal::NationalId => &["hash", "redact"],
+            _ => &["redact"],
         };
-        return Some(rule.into());
+        // The first that fits the column's length; else a null where it can hold one.
+        return tried.iter().find(|r| len.is_none_or(|n| width(r) <= n)).map(|r| r.to_string()).or_else(null);
     }
     if !c.not_null {
-        return Some("null".into());
+        return null();
     }
     // A column that must keep a value of its type: one that type takes, where one per row will do.
     if c.unique {
         return None;
     }
-    let fixed = if ty.starts_with("date") || ty.starts_with("timestamp") {
-        "1970-01-01"
-    } else if ty == "inet" || ty == "cidr" {
-        "0.0.0.0"
-    } else if ["smallint", "integer", "bigint", "numeric", "real", "double precision"].iter().any(|n| ty.starts_with(n)) {
-        "0"
-    } else {
-        return None;
+    let fixed = match name.as_str() {
+        "date" | "timestamp without time zone" | "timestamp with time zone" | "timestamp" | "timestamptz" => "1970-01-01",
+        "inet" | "cidr" => "0.0.0.0",
+        "smallint" | "integer" | "bigint" | "numeric" | "decimal" | "real" | "double precision" => "0",
+        _ => return None,
     };
     Some(format!("fixed:{fixed}"))
 }
@@ -402,13 +537,17 @@ fn nosql_rule(what: Personal) -> String {
 }
 
 /// Whether column `c` of a `kind` parent looks like it holds people's data, and the rule for it
-/// (`None`: it doesn't, or no rule fits its type). Booleans never do.
+/// (`None`: it doesn't, or no rule fits its type). Booleans never do, and a `*_id` is a national
+/// or tax id only when it holds text (a number is a reference to another row).
 pub fn suggest(kind: crate::Kind, c: &Column) -> Option<Suggestion> {
     if c.r#type.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("boolean") || t.eq_ignore_ascii_case("bool")) {
         return None;
     }
     let (within, name) = c.path.rsplit_once('.')?;
     let what = personal(within, name)?;
+    if what == Personal::NationalId && unglue(words(name)).last().is_some_and(|l| l == "id") && !is_text(kind, c.r#type.as_deref()) {
+        return None;
+    }
     let rule = match kind {
         crate::Kind::Postgres => postgres_rule(what, c)?,
         crate::Kind::Search => search_rule(what, c),
@@ -446,9 +585,15 @@ pub fn nosql_columns(schema: &serde_json::Value, max: usize) -> Vec<Column> {
     out
 }
 
+/// Whether a search index's fields are offered for masks: not a system index (`.…`), but a data
+/// stream's backing index (`.ds-…`) is the stream's documents.
+pub fn search_index_offered(index: &str) -> bool {
+    !index.starts_with('.') || index.starts_with(".ds-")
+}
+
 /// A `_mapping` answer's fields (`index.a.b`), leaves only (an object's fields are walked; a
-/// multi-field such as `name.raw` is the same value, masked with it). System indices (`.…`) are
-/// left out. At most `max`.
+/// multi-field such as `name.raw` is the same value, masked with it), of the indices
+/// [`search_index_offered`] offers. At most `max`.
 pub fn search_columns(mapping: &serde_json::Value, max: usize) -> Vec<Column> {
     fn walk(props: &serde_json::Value, prefix: &str, depth: usize, max: usize, out: &mut Vec<Column>) {
         for (name, f) in props.as_object().into_iter().flatten() {
@@ -463,7 +608,7 @@ pub fn search_columns(mapping: &serde_json::Value, max: usize) -> Vec<Column> {
         }
     }
     let mut out = Vec::new();
-    for (index, m) in mapping.as_object().into_iter().flatten().filter(|(i, _)| !i.starts_with('.')) {
+    for (index, m) in mapping.as_object().into_iter().flatten().filter(|(i, _)| search_index_offered(i)) {
         walk(&m["mappings"]["properties"], index, 0, max, &mut out);
     }
     out
@@ -486,77 +631,115 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    /// Names that look like people's data get the rule their product and type take; times,
-    /// references, flags, counts, usernames and the names of things don't.
+    /// Names that look like people's data get the rule their product, type and constraints take
+    /// (one that would fail the masking is never offered); times, references, flags, counts,
+    /// usernames, passwords and the names of things don't.
     #[test]
     fn columns_that_look_like_peoples_data_get_a_rule_that_fits() {
+        use super::Takes::{Any, Nothing, Null};
         use crate::Kind::{Nosql, Postgres, Search};
-        let col = |path: &str, ty: Option<&str>, not_null: bool, unique: bool| super::Column { path: path.into(), r#type: ty.map(str::to_string), not_null, unique };
-        /// (product, path, type, not null, unique, the rule suggested).
-        type Case<'a> = (crate::Kind, &'a str, Option<&'a str>, bool, bool, Option<&'a str>);
+        /// (product, path, type, not null, unique, what it takes, the rule suggested).
+        type Case<'a> = (crate::Kind, &'a str, Option<&'a str>, bool, bool, super::Takes, Option<&'a str>);
         let cases: &[Case] = &[
             // Postgres, by name and type.
-            (Postgres, "public.users.email", Some("text"), false, false, Some("email")),
-            (Postgres, "public.users.emailAddress", Some("character varying(255)"), true, true, Some("email")),
-            (Postgres, "public.users.first_name", Some("text"), false, false, Some("redact")),
-            (Postgres, "public.users.lastName", None, false, false, Some("redact")),
-            (Postgres, "public.users.name", Some("text"), false, false, Some("redact")),
-            (Postgres, "public.customers.full_name", Some("text"), false, true, Some("hash")),
-            (Postgres, "public.users.phone_number", Some("text"), false, false, Some("redact")),
-            (Postgres, "public.users.mobile", Some("text"), false, false, Some("redact")),
-            (Postgres, "public.orders.shipping_address", Some("jsonb"), false, false, Some("null")),
-            (Postgres, "public.orders.zip_code", Some("text"), false, false, Some("redact")),
-            (Postgres, "public.users.date_of_birth", Some("date"), true, false, Some("fixed:1970-01-01")),
-            (Postgres, "public.users.dob", Some("date"), false, false, Some("null")),
-            (Postgres, "public.sessions.IPAddress", Some("inet"), true, false, Some("fixed:0.0.0.0")),
-            (Postgres, "public.logins.last_ipv4", Some("text"), false, false, Some("redact")),
-            (Postgres, "public.users.ssn", Some("text"), false, false, Some("hash")),
-            (Postgres, "public.users.national_id", Some("text"), true, true, Some("hash")),
-            (Postgres, "public.users.passport_number", Some("text"), false, false, Some("hash")),
-            (Postgres, "public.payouts.iban", Some("text"), false, false, Some("redact")),
-            (Postgres, "public.cards.cardNumber", Some("text"), false, true, Some("hash")),
-            (Postgres, "public.users.password_hash", Some("text"), false, false, Some("null")),
-            (Postgres, "public.users.encrypted_password", Some("text"), true, false, Some("redact")),
-            (Postgres, "public.integrations.api_key", Some("text"), false, false, Some("null")),
-            (Postgres, "public.users.phone", Some("bigint"), true, true, None),
+            (Postgres, "public.users.email", Some("text"), false, false, Any, Some("email")),
+            (Postgres, "public.users.emailAddress", Some("character varying(255)"), true, true, Any, Some("email")),
+            (Postgres, "public.users.first_name", Some("text"), false, false, Any, Some("redact")),
+            (Postgres, "public.users.lastName", None, false, false, Any, Some("redact")),
+            (Postgres, "public.users.name", Some("text"), false, false, Any, Some("redact")),
+            (Postgres, "public.customers.full_name", Some("text"), false, true, Any, Some("hash")),
+            (Postgres, "public.users.phone_number", Some("text"), false, false, Any, Some("redact")),
+            (Postgres, "public.users.mobile", Some("text"), false, false, Any, Some("redact")),
+            (Postgres, "public.orders.shipping_address", Some("jsonb"), false, false, Any, Some("null")),
+            (Postgres, "public.orders.zip_code", Some("text"), false, false, Any, Some("redact")),
+            (Postgres, "public.users.date_of_birth", Some("date"), true, false, Any, Some("fixed:1970-01-01")),
+            (Postgres, "public.users.birth_date", Some("timestamp(3) with time zone"), true, false, Any, Some("fixed:1970-01-01")),
+            (Postgres, "public.users.dob", Some("date"), false, false, Any, Some("null")),
+            (Postgres, "public.sessions.IPAddress", Some("inet"), true, false, Any, Some("fixed:0.0.0.0")),
+            (Postgres, "public.logins.last_ipv4", Some("text"), false, false, Any, Some("redact")),
+            (Postgres, "public.users.ssn", Some("text"), false, false, Any, Some("hash")),
+            (Postgres, "public.users.national_id", Some("text"), true, true, Any, Some("hash")),
+            (Postgres, "public.users.passport_number", Some("text"), false, false, Any, Some("hash")),
+            (Postgres, "public.users.tax_id", Some("text"), false, false, Any, Some("hash")),
+            (Postgres, "public.payouts.iban", Some("text"), false, false, Any, Some("redact")),
+            (Postgres, "public.cards.cardNumber", Some("text"), false, true, Any, Some("hash")),
+            (Postgres, "public.integrations.api_key", Some("text"), false, false, Any, Some("null")),
+            (Postgres, "public.users.reset_password_token", Some("text"), false, false, Any, Some("null")),
+            (Postgres, "public.users.phone", Some("bigint"), true, true, Any, None),
+            // Glued lowercase words (Postgres folds `EmailAddress`), and a birth date's `_on`.
+            (Postgres, "public.users.emailaddress", Some("text"), false, false, Any, Some("email")),
+            (Postgres, "public.users.useremail", Some("text"), false, false, Any, Some("email")),
+            (Postgres, "public.users.phonenumber", Some("text"), false, false, Any, Some("redact")),
+            (Postgres, "public.users.homephone", Some("text"), false, false, Any, Some("redact")),
+            (Postgres, "public.users.streetaddress", Some("text"), false, false, Any, Some("redact")),
+            (Postgres, "public.users.accesstoken", Some("text"), false, false, Any, Some("null")),
+            (Postgres, "public.users.born_on", Some("date"), false, false, Any, Some("null")),
+            // What the column's length, type and constraints take.
+            (Postgres, "public.users.ssn", Some("character varying(11)"), true, false, Any, Some("redact")),
+            (Postgres, "public.users.ssn", Some("character varying(11)"), true, true, Any, None),
+            (Postgres, "public.users.ssn", Some("character varying(11)"), false, true, Any, Some("null")),
+            (Postgres, "public.users.email", Some("character varying(20)"), true, false, Any, Some("redact")),
+            (Postgres, "public.users.email", Some("character(2)"), false, false, Any, Some("null")),
+            (Postgres, "public.products.tax_id", Some("bigint"), true, false, Any, None),
+            (Postgres, "public.users.phone_numbers", Some("character varying(20)[]"), true, false, Any, None),
+            (Postgres, "public.users.phone_numbers", Some("character varying(20)[]"), false, false, Any, Some("null")),
+            (Postgres, "public.users.phones", Some("bigint[]"), false, false, Any, Some("null")),
+            (Postgres, "public.users.phones", Some("bigint[]"), true, false, Any, None),
+            (Postgres, "public.users.birth_dates", Some("daterange"), true, false, Any, None),
+            (Postgres, "public.users.email", Some("text"), false, false, Null, Some("null")),
+            (Postgres, "public.users.email", Some("text"), true, false, Null, None),
+            (Postgres, "public.users.email", Some("text"), false, false, Nothing, None),
             // Not people's data, or not the value itself.
-            (Postgres, "public.products.name", Some("text"), false, false, None),
-            (Postgres, "public.users.username", Some("text"), false, false, None),
-            (Postgres, "public.users.user_name", Some("text"), false, false, None),
-            (Postgres, "public.uploads.filename", Some("text"), false, false, None),
-            (Postgres, "public.servers.hostname", Some("text"), false, false, None),
-            (Postgres, "public.companies.company_name", Some("text"), false, false, None),
-            (Postgres, "public.users.email_verified_at", Some("timestamp with time zone"), false, false, None),
-            (Postgres, "public.users.email_verified", Some("boolean"), false, false, None),
-            (Postgres, "public.users.is_email_verified", None, false, false, None),
-            (Postgres, "public.orders.address_id", Some("bigint"), false, false, None),
-            (Postgres, "public.users.phone_count", Some("integer"), false, false, None),
-            (Postgres, "public.users.created_at", Some("timestamp"), false, false, None),
-            (Postgres, "public.usage.token_count", Some("integer"), false, false, None),
-            (Postgres, "public.users.mobile_os", Some("text"), false, false, None),
-            (Postgres, "public.users.passport_expires", Some("date"), false, false, None),
+            (Postgres, "public.products.name", Some("text"), false, false, Any, None),
+            (Postgres, "public.users.username", Some("text"), false, false, Any, None),
+            (Postgres, "public.users.user_name", Some("text"), false, false, Any, None),
+            (Postgres, "public.users.password_hash", Some("text"), false, false, Any, None),
+            (Postgres, "public.users.encrypted_password", Some("text"), true, false, Any, None),
+            (Postgres, "public.uploads.filename", Some("text"), false, false, Any, None),
+            (Postgres, "public.servers.hostname", Some("text"), false, false, Any, None),
+            (Postgres, "public.companies.company_name", Some("text"), false, false, Any, None),
+            (Postgres, "public.users.email_verified_at", Some("timestamp with time zone"), false, false, Any, None),
+            (Postgres, "public.users.emailverifiedat", Some("timestamp with time zone"), false, false, Any, None),
+            (Postgres, "public.users.email_verified", Some("boolean"), false, false, Any, None),
+            (Postgres, "public.users.is_email_verified", None, false, false, Any, None),
+            (Postgres, "public.orders.address_id", Some("bigint"), false, false, Any, None),
+            (Postgres, "public.users.phone_count", Some("integer"), false, false, Any, None),
+            (Postgres, "public.users.created_at", Some("timestamp"), false, false, Any, None),
+            (Postgres, "public.usage.token_count", Some("integer"), false, false, Any, None),
+            (Postgres, "public.users.mobile_os", Some("text"), false, false, Any, None),
+            (Postgres, "public.users.passport_expires", Some("date"), false, false, Any, None),
+            (Postgres, "public.settings.mail_server", Some("text"), false, false, Any, None),
+            (Postgres, "public.devices.mac_address", Some("text"), false, false, Any, None),
+            (Postgres, "public.devices.macaddress", Some("text"), false, false, Any, None),
+            (Postgres, "public.payouts.wallet_address", Some("text"), false, false, Any, None),
+            (Postgres, "public.shipments.order_id_number", Some("text"), false, false, Any, None),
+            (Postgres, "public.rooms.microphone", Some("text"), false, false, Any, None),
+            (Postgres, "public.staff.secretary", Some("text"), false, false, Any, None),
             // Search: strings only into text-like fields; secrets removed.
-            (Search, "users.email", Some("keyword"), false, false, Some("email")),
-            (Search, "orders.customer.name", Some("text"), false, false, Some("redact")),
-            (Search, "orders.customer.birthdate", Some("date"), false, false, Some("remove")),
-            (Search, "logs.client_ip", Some("ip"), false, false, Some("remove")),
-            (Search, "users.auth.token", Some("keyword"), false, false, Some("remove")),
-            (Search, "products.name", Some("text"), false, false, None),
+            (Search, "users.email", Some("keyword"), false, false, Any, Some("email")),
+            (Search, "orders.customer.name", Some("text"), false, false, Any, Some("redact")),
+            (Search, "orders.customer.birthdate", Some("date"), false, false, Any, Some("remove")),
+            (Search, "logs.client_ip", Some("ip"), false, false, Any, Some("remove")),
+            (Search, "users.auth.token", Some("keyword"), false, false, Any, Some("remove")),
+            (Search, "products.tax_id", Some("long"), false, false, Any, None),
+            (Search, "products.name", Some("text"), false, false, Any, None),
             // NoSQL: Cassandra's mask functions, which any type takes.
-            (Nosql, "app.users.email", Some("text"), false, false, Some("mask_default()")),
-            (Nosql, "app.users.phone", Some("bigint"), false, false, Some("mask_default()")),
-            (Nosql, "app.users.secret", Some("text"), false, false, Some("mask_null()")),
-            (Nosql, "app.events.hostname", Some("text"), false, false, None),
+            (Nosql, "app.users.email", Some("text"), false, false, Any, Some("mask_default()")),
+            (Nosql, "app.users.phone", Some("bigint"), false, false, Any, Some("mask_default()")),
+            (Nosql, "app.users.secret", Some("text"), false, false, Any, Some("mask_null()")),
+            (Nosql, "app.events.hostname", Some("text"), false, false, Any, None),
         ];
-        for (kind, path, ty, not_null, unique, want) in cases {
-            let got = super::suggest(*kind, &col(path, *ty, *not_null, *unique));
-            assert_eq!(got.as_ref().map(|s| s.rule.as_str()), *want, "{} {path} {ty:?}: {got:?}", kind.as_str());
+        for &(kind, path, ty, not_null, unique, takes, want) in cases {
+            let c = super::Column { path: path.into(), r#type: ty.map(str::to_string), not_null, unique, takes };
+            let got = super::suggest(kind, &c);
+            assert_eq!(got.as_ref().map(|s| s.rule.as_str()), want, "{} {path} {ty:?} {takes:?}: {got:?}", kind.as_str());
         }
         assert_eq!(super::words("IPAddress_v4.zipCode"), ["ip", "address", "v", "4", "zip", "code"]);
     }
 
     /// The columns read for suggestions: a NoSQL table's and its views' key columns can't be
-    /// masked, so they aren't offered; a search mapping's leaves, through objects.
+    /// masked, so they aren't offered; a search mapping's leaves, through objects, of a data
+    /// stream's backing indices too but not of system indices.
     #[test]
     fn suggestions_read_only_columns_a_mask_can_take() {
         let schema = serde_json::json!({ "keyspaces": [
@@ -569,9 +752,10 @@ mod tests {
         let paths: Vec<String> = super::nosql_columns(&schema, 100).into_iter().map(|c| c.path).collect();
         assert_eq!(paths, ["app.users.email"]);
         let mapping = serde_json::json!({ ".kibana": { "mappings": { "properties": { "email": { "type": "keyword" } } } },
+            ".ds-logs-2026.11.18-000001": { "mappings": { "properties": { "user": { "properties": { "email": { "type": "keyword" } } } } } },
             "orders": { "mappings": { "properties": { "customer": { "properties": { "email": { "type": "keyword" } } }, "note": { "type": "text", "fields": { "raw": { "type": "keyword" } } } } } } });
         let paths: Vec<String> = super::search_columns(&mapping, 100).into_iter().map(|c| c.path).collect();
-        assert_eq!(paths, ["orders.customer.email", "orders.note"]);
+        assert_eq!(paths, [".ds-logs-2026.11.18-000001.user.email", "orders.customer.email", "orders.note"]);
         assert_eq!(super::search_columns(&mapping, 1).len(), 1, "bounded");
     }
 
