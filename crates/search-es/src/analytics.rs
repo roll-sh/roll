@@ -626,6 +626,22 @@ fn from_retriever(r: &Value, depth: usize) -> Option<&str> {
 mod tests {
     use super::*;
 
+    /// CPU time this thread has used (the cost test's rounds await, so they can't run inside
+    /// `search_test_support::cpu_time`'s closure).
+    #[cfg(unix)]
+    fn thread_cpu() -> std::time::Duration {
+        let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: clock_gettime writes only the struct it is given.
+        assert_eq!(unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) }, 0);
+        std::time::Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+    }
+
+    #[cfg(not(unix))]
+    fn thread_cpu() -> std::time::Duration {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed()
+    }
+
     fn parse(s: &str) -> Value {
         crate::json::parse(s.as_bytes()).unwrap().unwrap()
     }
@@ -724,11 +740,11 @@ mod tests {
             for _ in 0..2_000 {
                 search().await;
             }
-            let start = crate::test_support::thread_cpu();
+            let start = thread_cpu();
             for _ in 0..n {
                 assert_eq!(search().await.status, 200);
             }
-            (crate::test_support::thread_cpu() - start).as_nanos() as f64 / f64::from(n)
+            (thread_cpu() - start).as_nanos() as f64 / f64::from(n)
         };
         // Alternating rounds, so load from other tenants falls on both sides alike; medians.
         let (mut off, mut on) = (Vec::new(), Vec::new());
@@ -751,14 +767,14 @@ mod tests {
         let names = vec!["docs".to_string()];
         assert!(call("PUT", "/docs/_settings", r#"{"index.roll.analytics.enabled":true}"#.into()).await.status < 300);
         let reps = 1_000_000u32;
-        let start = crate::test_support::thread_cpu();
+        let start = thread_cpu();
         for _ in 0..reps {
             let text = query_text(Some(std::hint::black_box("running shoes")), None, None).unwrap();
             let from = std::time::Instant::now();
             let on = a.named(std::hint::black_box(&names)).unwrap_or_default();
             a.record_search(&on, &text, 3, from.elapsed());
         }
-        let alone = (crate::test_support::thread_cpu() - start).as_nanos() as f64 / f64::from(reps);
+        let alone = (thread_cpu() - start).as_nanos() as f64 / f64::from(reps);
         println!("record_cost: recording alone {alone:.0} ns per search, {:.2}% of the median search", alone / m_off * 100.0);
     }
 
