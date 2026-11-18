@@ -1165,6 +1165,10 @@ async fn a_company_can_require_a_second_factor() {
     let invite = env.invite("bob@example.com").await;
     let mut bob = Browser::default();
     env.email_sign_in(&mut bob, "bob@example.com", Some(&invite)).await;
+    // The people list says who has a second factor.
+    let people = env.operator(Method::GET, "/v1/accounts/users", json!({})).await.json;
+    let factors = |email: &str| people.as_array().unwrap().iter().find(|u| u["email"] == email).map(|u| (u["totp"].as_bool().unwrap(), u["passkeys"].as_u64().unwrap())).unwrap();
+    assert_eq!((factors("ada@example.com"), factors("bob@example.com")), ((true, 0), (false, 0)), "{people}");
     assert_eq!(env.call(&mut bob, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::FORBIDDEN);
     env.operator(Method::PUT, "/v1/accounts/policy", json!({ "require_second_factor": false })).await;
     assert_eq!(env.call(&mut bob, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::OK);

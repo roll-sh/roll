@@ -481,7 +481,7 @@ token or an admin's session.
 
 ```ts
 type User = { id: string; email: string; handle: string; name: string; admin: boolean;
-              disabled: boolean; created_at: number; totp: boolean;
+              disabled: boolean; created_at: number; totp: boolean; passkeys: number;
               identities: { provider: "github" | "google" | `sso:${string}`; login: string; email: string }[] };
 type Session = { id: string; created_at: number; seen_at: number; expires_at: number;
                  user_agent: string; current: boolean };
