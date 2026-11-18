@@ -962,9 +962,13 @@ export interface LogDrain {
   previews: boolean;
   /** The names of the headers it's sent with; their values are sealed, never shown. */
   headers: string[];
+  /** How its lines go: roll's signed NDJSON, OpenTelemetry logs (OTLP/HTTP JSON), or syslog (RFC 5424 over TLS). */
+  format: DrainFormat;
   /** Only in the answer that made it. */
   secret?: string;
 }
+
+export type DrainFormat = "ndjson" | "otlp" | "syslog";
 
 /** A project's monthly spend limits (US dollars at roll's prices, the calendar month in UTC). */
 export interface SpendLimits {
@@ -1075,7 +1079,7 @@ export const appsApi = {
   environment: (id: string, e: string) => call<Environment>("GET", env(id, e)),
   notifyTargets: (project: string) => call<NotifyTarget[]>("GET", `/v1/apps/projects/${enc(project)}/notifications`),
   drains: (project: string) => call<LogDrain[]>("GET", `/v1/apps/projects/${enc(project)}/drains`),
-  addDrain: (project: string, body: { url: string } & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
+  addDrain: (project: string, body: { url: string; format?: DrainFormat } & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
   /** Its sources, filters and headers (given ones replace; `headers` replaces them all); its URL and secret stay. */
   updateDrain: (project: string, id: string, body: DrainSettings) => call<LogDrain>("PATCH", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`, body),
   testDrain: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}/test`),

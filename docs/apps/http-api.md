@@ -55,9 +55,9 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/projects/{project}/notifications/{nid}/test` | | `{ ok, code, error }` (sent now, not retried) | write |
 | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` | | `Delivery[]`, newest first (50) | read |
 | `GET /v1/apps/projects/{project}/drains` | | `LogDrain[]` (the URL never returned, only its host) | read |
-| `POST /v1/apps/projects/{project}/drains` | `{ url, sources?, environments?, services?, previews?, headers? }` (https, a public host; `sources` some of `runtime` (default), `http`, `build`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`) | 201 `LogDrain` + `secret` once | reveal (its secret comes back) |
-| `PATCH /v1/apps/projects/{project}/drains/{did}` | `{ sources?, environments?, services?, previews?, headers? }` (given ones replace, `headers` all of them; a new URL is a new drain) | `LogDrain` | reveal (it can send more out) |
-| `POST /v1/apps/projects/{project}/drains/{did}/test` | | `{ ok, code, error }` (one line sent now, signed and with its headers, not retried) | write |
+| `POST /v1/apps/projects/{project}/drains` | `{ url, format?, sources?, environments?, services?, previews?, headers? }` (https, a public host, or `syslog+tls://host:port` for `format: "syslog"`, which takes no headers; `sources` some of `runtime` (default), `http`, `build`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`) | 201 `LogDrain` + `secret` once | reveal (its secret comes back) |
+| `PATCH /v1/apps/projects/{project}/drains/{did}` | `{ sources?, environments?, services?, previews?, headers? }` (given ones replace, `headers` all of them; a new URL or format is a new drain) | `LogDrain` | reveal (it can send more out) |
+| `POST /v1/apps/projects/{project}/drains/{did}/test` | | `{ ok, code, error }` (one line sent now, signed and with its headers, not retried; `code` null for syslog) | write |
 | `DELETE /v1/apps/projects/{project}/drains/{did}` | | 204 | write |
 | `GET /v1/apps/projects/{project}/limits` | | `SpendLimits` | read |
 | `PUT /v1/apps/projects/{project}/limits` | `{ alert_usd: number \| null, hard_usd: number \| null }` | `SpendLimits` (this month's alert and cap are decided again within 30 s) | admin (the hard limit pauses the whole project) |
@@ -640,6 +640,7 @@ type LogDrain = {
   services: string[];         // only these services' (ids; empty: every one)
   previews: boolean;          // preview environments' too (a drain made before this field: true)
   headers: string[];          // the names of the headers it's sent with (values sealed, never returned)
+  format: "ndjson" | "otlp" | "syslog"; // ndjson: signed batches of lines; otlp: an OTLP/HTTP JSON ExportLogsServiceRequest to the URL (a collector's /v1/logs); syslog: RFC 5424 over TLS (RFC 5425's octet counting), no headers
 };
 // A batch's line: { t, source, service, service_name, environment, instance, deployment, stream, text }.
 /** A request through the proxy (`stream: "http"` lines' text, JSON). The path has no query string. */
