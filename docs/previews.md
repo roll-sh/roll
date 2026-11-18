@@ -335,6 +335,15 @@ behind the `Apps` trait:
      | Tasks | `ROLL_TASKS_URL`, `ROLL_TASKS_TOKEN` |
      | Search | `ELASTICSEARCH_URL` (the branch's own login in it), and a data-only credential of the branch as production's link gets: `ELASTICSEARCH_API_KEY`, or `OPENSEARCH_USERNAME`/`OPENSEARCH_PASSWORD` on OpenSearch |
 
+     A search branch starts with its parent's IP allowlist (`ip_allowlist`, search's #243). Masking
+     a branch goes through roll search's own console route, so it works whatever the list says.
+     A preview's services reach the branch as any client does, so a cluster with a list must
+     admit the addresses roll's hosts send from: on one node, the host or the Docker bridge's
+     gateway (search's architecture.md, "Client addresses and IP allowlists"). On roll cloud there
+     are no fixed outbound addresses yet (apps' Next), so a cluster that previews' services call
+     keeps `[]` for now. roll adds no exception for its own instances: one would let every
+     tenant's app past every list.
+
      With two resources of a kind, the first one takes the plain name and the others add
      `_<NAME>` (`DATABASE_URL_ANALYTICS`).
   5. `ROLL_PREVIEW`, `ROLL_PREVIEW_URL`, and `ROLL_PREVIEW_URL_<SERVICE>` for each service, so
@@ -1698,18 +1707,14 @@ Ranked by what a person notices first. Done so far:
 6. **One GitHub voice per pull request** (draft #251; apps' #249 is on main; waits on #234's live check): every `pv-`
    environment carries `report: false`, so roll apps posts no status or Deployment next to
    previews' `roll/preview`.
-7. **Search allowlists** (after search's #243): a preview service that calls an allowlisted search
-   cluster directly needs roll's outbound addresses listed (on one node, the host or the Docker
-   bridge's gateway; roll cloud has no fixed outbound addresses yet, apps' Next). Masking goes
-   through search's console route, so it's unaffected. Say so under "Branches per product".
-8. **Deploy a preview's roll apps services at once** (measured twice and not landed; branch
+7. **Deploy a preview's roll apps services at once** (measured twice and not landed; branch
    `feature/roll-previews-deploy-at-once`). With cold builds it was within the noise, and with a
    second push's cached builds one run in two was faster. Try it on an idle host, or with more
    services.
-9. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+8. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-10. **Watch: pg-control's recovery to a time seconds old** (unowned).
-11. **Watch: a cold start on a Docker name conflict.**
+9. **Watch: pg-control's recovery to a time seconds old** (unowned).
+10. **Watch: a cold start on a Docker name conflict.**
 
 Landed in previews' lock turn of 2026-11-17 (main 42a3bbe1b, one combined gate with both live
 checks):
