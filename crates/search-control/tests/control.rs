@@ -2047,6 +2047,9 @@ async fn an_s3_repository_moves_indices_between_clusters() {
     assert!(bucket.keys("prod/roll/indices/stray/").is_empty());
 }
 
+#[path = "control/cloud_repositories.rs"]
+mod cloud_repositories;
+
 fn gzip(raw: &[u8]) -> Vec<u8> {
     use std::io::Write;
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
