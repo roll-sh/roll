@@ -1,4 +1,4 @@
-import { Check, Copy, Plus, RotateCw, Trash2 } from "lucide-react";
+import { Check, Copy, KeyRound, Pencil, Plus, RotateCw, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { Rotator } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
@@ -16,7 +16,9 @@ export function Rotators() {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [made, setMade] = useState<{ name: string; secret: string } | null>(null);
+  const [made, setMade] = useState<{ name: string; secret: string; rekeyed?: boolean } | null>(null);
+  const [rekeying, setRekeying] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ id: string; name: string; url: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const ok = /^[A-Za-z0-9_-]{1,64}$/.test(name) && /^https:\/\/[^\s/]+/.test(url.trim());
@@ -36,6 +38,24 @@ export function Rotators() {
     } finally {
       setBusy(false);
     }
+  };
+  const rekey = (r: Rotator) => {
+    setBusy(true);
+    setError(null);
+    api.rotateRotatorSecret(r.id).then(
+      (x) => (setRekeying(null), setBusy(false), setMade({ name: x.name, secret: x.secret, rekeyed: true })),
+      (e) => (setRekeying(null), setBusy(false), setError(errorText(e))),
+    );
+  };
+  const editOk = !!editing && /^[A-Za-z0-9_-]{1,64}$/.test(editing.name) && (editing.url.trim() === "" || /^https:\/\/[^\s/]+/.test(editing.url.trim()));
+  const save = (r: Rotator) => {
+    if (!editing || !editOk) return;
+    setBusy(true);
+    setError(null);
+    api.updateRotator(r.id, { ...(editing.name !== r.name && { name: editing.name }), ...(editing.url.trim() && { url: editing.url.trim() }) }).then(
+      () => (setEditing(null), setBusy(false), list.reload()),
+      (e) => (setBusy(false), setError(errorText(e))),
+    );
   };
   const del = (r: Rotator) =>
     api.deleteRotator(r.id).then(
@@ -59,7 +79,12 @@ export function Rotators() {
       {made && (
         <div className="fade-in mb-3 rounded-xl border border-accent/40 bg-panel p-3 shadow-card inset-shadow-highlight" role="status">
           <p className="text-[12.5px]">
-            <b className="font-medium">{made.name}</b> <span className="text-muted">is added. Copy its signing secret now: it isn&apos;t shown again.</span>
+            <b className="font-medium">{made.name}</b>{" "}
+            <span className="text-muted">
+              {made.rekeyed
+                ? "signs with a new secret from now on. Copy it into your endpoint now: it isn't shown again (a call your endpoint refuses meanwhile fails, changes nothing, and is retried)."
+                : "is added. Copy its signing secret now: it isn't shown again."}
+            </span>
           </p>
           <div className="mt-2 flex items-center gap-2">
             <code aria-label="Signing secret" className="min-w-0 flex-1 truncate rounded-md border border-line-2 bg-panel-2 px-2 py-1.5 font-mono text-[12px] select-all">
@@ -122,7 +147,16 @@ export function Rotators() {
                 <span className="ml-auto text-[11px] text-subtle">
                   added {ago(r.created_at)} · <ActorMark who={r.created_by} />
                 </span>
-                {deleting === r.id ? (
+                {rekeying === r.id ? (
+                  <span className="flex gap-1">
+                    <button className={primary} disabled={busy} onClick={() => rekey(r)}>
+                      {busy ? "Rotating…" : "New signing secret"}
+                    </button>
+                    <button className={ghost} onClick={() => setRekeying(null)}>
+                      Cancel
+                    </button>
+                  </span>
+                ) : deleting === r.id ? (
                   <span className="flex gap-1">
                     <button className={dangerButton} onClick={() => del(r)}>
                       Delete
@@ -132,9 +166,37 @@ export function Rotators() {
                     </button>
                   </span>
                 ) : (
-                  <button className={ghost} onClick={() => setDeleting(r.id)} aria-label={`Delete the rotator ${r.name}`}>
-                    <Trash2 className="size-3.5" />
-                  </button>
+                  <span className="flex gap-0.5">
+                    <button className={ghost} onClick={() => setRekeying(r.id)} aria-label={`Rotate ${r.name}'s signing secret`} title="Rotate the signing secret">
+                      <KeyRound className="size-3.5" />
+                    </button>
+                    <button className={ghost} onClick={() => setEditing(editing?.id === r.id ? null : { id: r.id, name: r.name, url: "" })} aria-label={`Edit the rotator ${r.name}`} title="Edit">
+                      <Pencil className="size-3.5" />
+                    </button>
+                    <button className={ghost} onClick={() => setDeleting(r.id)} aria-label={`Delete the rotator ${r.name}`}>
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  </span>
+                )}
+                {editing?.id === r.id && (
+                  <form
+                    className="rise grid w-full gap-2 pt-1 sm:grid-cols-[11rem_1fr_auto]"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      save(r);
+                    }}
+                  >
+                    <input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} aria-label="Name" spellCheck={false} className={`${field} font-mono text-[12px]`} />
+                    <input value={editing.url} onChange={(e) => setEditing({ ...editing, url: e.target.value })} placeholder="A new HTTPS endpoint; empty keeps it" aria-label="Endpoint" spellCheck={false} autoComplete="off" className={`${field} font-mono text-[12px]`} />
+                    <span className="flex gap-1">
+                      <button type="submit" className={primary} disabled={!editOk || busy}>
+                        Save
+                      </button>
+                      <button type="button" className={ghost} onClick={() => setEditing(null)}>
+                        Cancel
+                      </button>
+                    </span>
+                  </form>
                 )}
               </div>
             ))}

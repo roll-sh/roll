@@ -6,6 +6,7 @@ import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field
 import { Cas } from "./cas";
 import { SshCas } from "./ssh-cas";
 import { CloudAccounts } from "./cloud-accounts";
+import { GitHubApps } from "./github-apps";
 import { OutsideDatabases } from "./outside-databases";
 import { Directories } from "./directories";
 import { SnowflakeAccounts } from "./snowflake-accounts";
@@ -78,6 +79,7 @@ export function SyncsView() {
       <Directories />
       <SnowflakeAccounts />
       <AtlasProjects />
+      <GitHubApps />
       <Rotators />
       <TransitKeys />
       <Cas />

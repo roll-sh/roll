@@ -1,4 +1,4 @@
-import { Cloud, Database, KeyRound, Leaf, Link2, RotateCw, ShieldCheck, Snowflake, Terminal, Users, type LucideIcon } from "lucide-react";
+import { Cloud, Database, GitBranch, KeyRound, Leaf, Link2, RotateCw, ShieldCheck, Snowflake, Terminal, Users, type LucideIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { SECRET_KEY, type Batch, type Environment, type LinkField, type LinkMode, type LinkTarget, type Op } from "@/lib/secrets-api";
 import type { ResourceKind } from "@/lib/workspace-api";
@@ -21,7 +21,19 @@ const OWN_KINDS: Record<string, { icon: LucideIcon; label: string }> = {
   ssh: { icon: Terminal, label: "SSH CA" },
   gcp: { icon: Cloud, label: "GCP account" },
   azure: { icon: Cloud, label: "Azure account" },
+  github_app: { icon: GitBranch, label: "GitHub App" },
 };
+
+/** `contents:read, pull_requests:write` as GitHub's permissions map; null when a part isn't `name:level`. */
+export function parsePermissions(text: string): Record<string, string> | null {
+  const out: Record<string, string> = {};
+  for (const part of text.split(",").map((p) => p.trim()).filter(Boolean)) {
+    const m = /^([a-z_]{1,64})\s*:\s*(read|write|admin)$/.exec(part);
+    if (!m) return null;
+    out[m[1]] = m[2];
+  }
+  return out;
+}
 
 /** A link target's kind: a canvas resource's icon, roll secrets' own, or a plain link for one this dashboard doesn't know yet. */
 function kindOf(kind: string): { icon: LucideIcon; label: string } {
@@ -73,6 +85,8 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const [sfRoles, setSfRoles] = useState("");
   const [cluster, setCluster] = useState("");
   const [rotateDays, setRotateDays] = useState("30");
+  const [repos, setRepos] = useState("");
+  const [perms, setPerms] = useState("");
   const [busy, setBusy] = useState(false);
 
   const pickOf = (t: LinkTarget, f: LinkField): Pick => picks[`${t.kind}:${t.ref}:${f.field}`] ?? { on: false, key: f.suggest, mode: f.modes[0] };
@@ -89,7 +103,12 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
   const dupKey = chosen.find((c, i) => chosen.findIndex((d) => d.p.key === c.p.key) !== i);
   const ttlMinutes = Number(ttl);
   const needsTtl = chosen.some((c) => c.p.mode === "dynamic");
-  const ttlOk = !needsTtl || (Number.isInteger(ttlMinutes) && ttlMinutes >= 1 && ttlMinutes <= 7 * 24 * 60);
+  // GitHub ends an installation token after an hour: its lease can't be longer.
+  const needsGitHub = chosen.some((c) => c.t.kind === "github_app");
+  const ttlOk = !needsTtl || (Number.isInteger(ttlMinutes) && ttlMinutes >= 1 && ttlMinutes <= (needsGitHub ? 60 : 7 * 24 * 60));
+  const repositories = repos.split(",").map((r) => r.trim()).filter(Boolean);
+  const permissions = parsePermissions(perms);
+  const githubOk = !needsGitHub || (permissions !== null && repositories.every((r) => /^[A-Za-z0-9._-]{1,100}$/.test(r)));
   // A certificate names what it's for (the CA's policy decides which names it signs).
   const needsNames = chosen.some((c) => c.t.kind === "pki");
   const names = certNames.split(",").map((n) => n.trim()).filter(Boolean);
@@ -127,6 +146,10 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
             ...(c.t.kind === "ssh" && { principals: logins }),
             ...((c.t.kind === "snowflake" || c.t.kind === "mongodb_atlas") && c.p.mode === "dynamic" && roles.length > 0 && { roles }),
             ...(c.t.kind === "mongodb_atlas" && clusterName !== "" && { cluster: clusterName }),
+            ...(c.t.kind === "github_app" && {
+              ...(repositories.length > 0 && { repositories }),
+              ...(permissions && Object.keys(permissions).length > 0 && { permissions }),
+            }),
           },
         }),
       },
@@ -218,6 +241,18 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
             <input value={cluster} onChange={(e) => setCluster(e.target.value)} placeholder="Cluster0" spellCheck={false} className={`${sized} h-7 w-32 font-mono`} aria-label="Atlas cluster" />
           </label>
         )}
+        {needsGitHub && (
+          <>
+            <label className="flex items-center gap-1.5 text-[12px] text-muted">
+              Repositories
+              <input value={repos} onChange={(e) => setRepos(e.target.value)} placeholder="all the installation's" spellCheck={false} className={`${sized} h-7 w-44 font-mono`} aria-label="GitHub repositories" />
+            </label>
+            <label className="flex items-center gap-1.5 text-[12px] text-muted">
+              Permissions
+              <input value={perms} onChange={(e) => setPerms(e.target.value)} placeholder="contents:read" spellCheck={false} className={`${sized} h-7 w-52 font-mono`} aria-label="GitHub permissions" />
+            </label>
+          </>
+        )}
         {needsRotation && (
           <label className="flex items-center gap-1.5 text-[12px] text-muted">
             Rotate every
@@ -233,13 +268,13 @@ function Form({ env, path, taken, onWrite, onClose }: { env: Environment; path: 
           </label>
         )}
         <span className="text-[11.5px] text-danger">
-          {badKey ? `${badKey.p.key || "A key"} isn't a valid key` : dupKey ? `${dupKey.p.key} is picked twice` : !ttlOk ? "A lease is 1 minute to 7 days" : !namesOk ? "A certificate names what it's for" : !rotateOk ? "Rotate every 1 to 198 days" : !principalsOk ? "An SSH certificate names its logins" : !clusterOk ? "A connection string needs its Atlas cluster's name" : ""}
+          {badKey ? `${badKey.p.key || "A key"} isn't a valid key` : dupKey ? `${dupKey.p.key} is picked twice` : !ttlOk ? (needsGitHub ? "A GitHub token's lease is 1 to 60 minutes" : "A lease is 1 minute to 7 days") : !githubOk ? "Repositories are names in the installation's owner; permissions are name:read, name:write or name:admin" : !namesOk ? "A certificate names what it's for" : !rotateOk ? "Rotate every 1 to 198 days" : !principalsOk ? "An SSH certificate names its logins" : !clusterOk ? "A connection string needs its Atlas cluster's name" : ""}
         </span>
         <span className="ml-auto" />
         <button className={ghost} onClick={onClose}>
           Cancel
         </button>
-        <button className={primary} disabled={!chosen.length || !!badKey || !!dupKey || !ttlOk || !namesOk || !rotateOk || !principalsOk || !clusterOk || busy} onClick={submit}>
+        <button className={primary} disabled={!chosen.length || !!badKey || !!dupKey || !ttlOk || !namesOk || !rotateOk || !principalsOk || !clusterOk || !githubOk || busy} onClick={submit}>
           {busy ? "Linking…" : `Link ${chosen.length || ""}`.trim()}
         </button>
       </div>

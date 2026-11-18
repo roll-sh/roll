@@ -1,15 +1,25 @@
 import { HorizonMark } from "@roll/brand";
-import { ChevronRight, GitBranch, Moon, Plus } from "lucide-react";
+import { ChevronRight, GitBranch, Moon, Plus, RotateCcw } from "lucide-react";
 import { Link } from "@/components/link";
 import { useState } from "react";
 import { formatBytes } from "@/lib/roll-api";
-import { formatCount, formatDuration, NAME_HINT, NAME_RE, searchApi, type SearchCluster, type SearchInfo, type SearchSettings } from "@/lib/search-api";
+import {
+  formatCount,
+  formatDuration,
+  NAME_HINT,
+  NAME_RE,
+  searchApi,
+  type DeletedSearchCluster,
+  type SearchCluster,
+  type SearchInfo,
+  type SearchSettings,
+} from "@/lib/search-api";
 import { AppShell } from "../app-shell";
-import { btn, Connecting, EmptyPanel, ErrorNote, input, Offline, panel, primary, Stats } from "../ui";
+import { ago, btn, Connecting, EmptyPanel, ErrorNote, input, Offline, panel, primary, Stats } from "../ui";
 import { CredentialsOnce, SearchStateDot, SettingsFields, stateLabel, useAction, useSearchClusters } from "./shared";
 
 export function SearchClusters() {
-  const { info, clusters, offline, refresh } = useSearchClusters();
+  const { info, clusters, deleted, offline, refresh } = useSearchClusters();
   const { busy, error, run } = useAction(refresh);
   const [creating, setCreating] = useState(false);
   const [created, setCreated] = useState<SearchCluster | null>(null);
@@ -32,7 +42,8 @@ export function SearchClusters() {
         </div>
         {info && (
           <p className="font-mono text-[11px] text-subtle">
-            elasticsearch {info.version} · opensearch {info.opensearch_version} · {info.region} · {info.storage}
+            elasticsearch {info.version} · opensearch {info.opensearch_version} · {info.region}
+            {info.storage && ` · ${info.storage}`}
           </p>
         )}
       </div>
@@ -86,6 +97,8 @@ export function SearchClusters() {
           <ClusterList clusters={clusters} info={info} busy={busy} onUnload={(c) => run(`unload-${c.id}`, () => searchApi.unload(c.id))} />
         </>
       )}
+
+      {!offline && deleted.length > 0 && <RecentlyDeleted deleted={deleted} onRestored={refresh} />}
     </AppShell>
   );
 }
@@ -99,9 +112,17 @@ function Overview({ info, clusters }: { info: SearchInfo; clusters: SearchCluste
     <div className="mt-6">
       <Stats
         items={[
-          { label: "Clusters", value: clusters.length, hint: `${loaded.length} loaded · ${clusters.length - loaded.length} asleep` },
+          {
+            label: "Clusters",
+            value: clusters.length,
+            hint: `${info.caps?.clusters ? `of ${info.caps.clusters} · ` : ""}${loaded.length} loaded · ${clusters.length - loaded.length} asleep`,
+          },
           { label: "Indices", value: formatCount(indices), hint: `${formatCount(docs)} documents` },
-          { label: "Stored", value: formatBytes(stored), hint: `cache ${formatBytes(info.cache.used_bytes)} of ${formatBytes(info.cache.budget_bytes)}` },
+          {
+            label: "Stored",
+            value: formatBytes(stored),
+            hint: info.cache ? `cache ${formatBytes(info.cache.used_bytes)} of ${formatBytes(info.cache.budget_bytes)}` : "in object storage",
+          },
           { label: "Endpoint", value: info.domain ? `*.${info.domain}` : info.http, hint: info.tls ? "HTTPS" : "HTTP" },
         ]}
       />
@@ -188,6 +209,95 @@ function ClusterList({
         <span className="font-mono text-muted">{info.domain ? `https://<cluster>.${info.domain}` : `${info.tls ? "https" : "http"}://${info.http}`}</span>{" "}
         with the cluster name as the user.
       </p>
+    </section>
+  );
+}
+
+/** Deleted clusters still kept for restoring, each with its purge date. A restore whose name
+ * another cluster took asks for a new one. */
+function RecentlyDeleted({ deleted, onRestored }: { deleted: DeletedSearchCluster[]; onRestored: () => Promise<void> }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
+
+  const restore = async (d: DeletedSearchCluster, name?: string) => {
+    setBusy(d.id);
+    setError(null);
+    try {
+      await searchApi.restore(d.id, name);
+      setRenaming(null);
+      await onRestored();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      if (msg.includes("is taken")) setRenaming({ id: d.id, name: renaming?.id === d.id ? renaming.name : `${d.name}-restored` });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <section className={`${panel} mt-4`}>
+      <div className="flex items-center justify-between border-b border-line px-5 py-4">
+        <h2 className="text-[15px] font-medium">Recently deleted</h2>
+        <span className="font-mono text-[12px] text-subtle">{deleted.length}</span>
+      </div>
+      {error && (
+        <div className="border-b border-line px-5 py-3">
+          <ErrorNote error={error} />
+        </div>
+      )}
+      <ul>
+        {deleted.map((d) => {
+          const naming = renaming?.id === d.id ? renaming : null;
+          const valid = naming ? NAME_RE.test(naming.name) : true;
+          return (
+            <li key={d.id} className="rise border-b border-line px-5 py-3.5 last:border-0">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[13px] text-muted">{d.name}</p>
+                  <p className="truncate font-mono text-[11px] text-subtle">
+                    {d.id} · {formatBytes(d.stored_bytes)} kept · deleted {ago(d.deleted_at)} · purged{" "}
+                    {new Date(d.purge_at * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                  </p>
+                </div>
+                {!naming && (
+                  <button onClick={() => restore(d)} disabled={busy !== null} className={btn}>
+                    {busy === d.id ? <span className="shimmer">Restoring…</span> : <><RotateCcw className="size-3.5" /> Restore</>}
+                  </button>
+                )}
+              </div>
+              {naming && (
+                <form
+                  className="mt-3 flex flex-wrap items-center gap-2"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (valid) restore(d, naming.name);
+                  }}
+                >
+                  <span className="text-[12px] text-subtle">{d.name} is taken. Restore as</span>
+                  <input
+                    autoFocus
+                    value={naming.name}
+                    onChange={(e) => setRenaming({ id: d.id, name: e.target.value.toLowerCase() })}
+                    spellCheck={false}
+                    className={`${input} min-w-0 flex-1 font-mono text-[12px]`}
+                  />
+                  <button type="submit" disabled={busy !== null || !valid} className={primary}>
+                    {busy === d.id ? <span className="shimmer">Restoring…</span> : "Restore"}
+                  </button>
+                  <button type="button" onClick={() => setRenaming(null)} className={btn}>
+                    Cancel
+                  </button>
+                  <p className="w-full text-[12px] text-subtle">
+                    Same password and API keys; clients use the new name as the user and host label.
+                  </p>
+                </form>
+              )}
+            </li>
+          );
+        })}
+      </ul>
     </section>
   );
 }
