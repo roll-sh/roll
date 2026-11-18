@@ -49,7 +49,7 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/network-policy", get(network_policy).put(set_network_policy))
         .route("/v1/accounts/reset-requests/{id}/approve", post(approve_reset))
         .route("/v1/accounts/reset-requests/{id}/deny", post(deny_reset))
-        .route("/v1/accounts/me", get(me).patch(update_me))
+        .route("/v1/accounts/me", get(me).patch(update_me).delete(delete_me))
         .route("/v1/accounts/me/email", post(change_email))
         .route("/v1/accounts/me/email/confirm", post(confirm_email))
         .route("/v1/accounts/me/sessions", get(my_sessions))
@@ -869,6 +869,23 @@ async fn update_me(State(a): S, me: Me, b: Bytes) -> Result<Response> {
     let u = signed_in(me)?;
     let Name { name } = body(&b)?;
     Ok(Json(blocking(&a, move |a| a.rename(&u.user, &name)).await?).into_response())
+}
+
+#[derive(Deserialize)]
+struct Confirm {
+    confirm: String,
+}
+
+/// Delete your own account (docs/accounts.md, "Deleting your account"): signed out here too.
+async fn delete_me(State(a): S, me: Me, b: Bytes) -> Result<Response> {
+    let u = signed_in(me)?;
+    sudo(&a, &u).await?;
+    let Confirm { confirm } = body(&b)?;
+    let mail = blocking(&a, move |a| a.delete_self(&u.user, &confirm)).await?;
+    if a.mail_on() {
+        a.send_later(mail, "account deleted");
+    }
+    Ok(with_cookies(StatusCode::NO_CONTENT.into_response(), [cookie(&a, a.config.session_cookie(), "", 0)]))
 }
 
 #[derive(Deserialize)]

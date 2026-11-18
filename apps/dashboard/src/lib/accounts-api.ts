@@ -263,6 +263,8 @@ export const accountsApi = {
   /** Move your account to `email`: a code goes there (docs/accounts.md, "Your address"). */
   changeEmail: (email: string) => call<{ challenge: string }>("POST", "/me/email", { email }),
   confirmEmail: (challenge: string, code: string) => call<User>("POST", "/me/email/confirm", { challenge, code }),
+  /** Delete your own account for good, `confirm` being your handle (docs/accounts.md, "Deleting your account"). */
+  deleteMe: (confirm: string) => call<null>("DELETE", "/me", { confirm }),
   sessions: () => call<Session[]>("GET", "/me/sessions"),
   revokeSession: (id: string) => call<null>("DELETE", `/me/sessions/${encodeURIComponent(id)}`),
   unlink: (provider: Provider | `sso:${string}`) => call<null>("DELETE", `/me/identities/${encodeURIComponent(provider)}`),
