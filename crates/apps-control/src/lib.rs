@@ -279,6 +279,9 @@ pub struct Apps {
     watching: std::sync::atomic::AtomicBool,
     watching_bases: std::sync::atomic::AtomicBool,
     watching_secrets: std::sync::atomic::AtomicBool,
+    /// Environments whose project secrets are long-polled here ([`Apps::watch_secrets_of`]), by
+    /// [`env_key`]: one task each, on the owner.
+    pub(crate) secret_watches: Mutex<std::collections::HashSet<String>>,
     /// Scaling workers' backlogs are being read (on their own task).
     scaling: std::sync::atomic::AtomicBool,
     /// The App's queued events are being run on this node.
@@ -489,6 +492,7 @@ impl Apps {
             watching: std::sync::atomic::AtomicBool::new(false),
             watching_bases: std::sync::atomic::AtomicBool::new(false),
             watching_secrets: std::sync::atomic::AtomicBool::new(false),
+            secret_watches: Mutex::new(std::collections::HashSet::new()),
             scaling: std::sync::atomic::AtomicBool::new(false),
             github_running: std::sync::atomic::AtomicBool::new(false),
             responses: resp_cache::ResponseCache::default(),
@@ -1912,6 +1916,10 @@ impl Apps {
         if let Some(on) = paused {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_paused(&sid, &e, on)).await?;
+            // Resumed: its secrets are watched again (a watch ends itself while it's paused).
+            if !on {
+                self.watch_secrets_of(service).await;
+            }
             // At once on its owner: what runs stops, and the next tick keeps no floor; resumed,
             // the next tick (or request) starts what it wants again.
             let live = self.live(service, env);
@@ -2003,6 +2011,10 @@ impl Apps {
         if let Some(Value::Bool(on)) = o.get("redeploy_on_secrets") {
             let (sid, e, on) = (service.to_string(), env.to_string(), *on);
             self.db(move |s| s.set_redeploy_on_secrets(&sid, &e, on)).await?;
+            // Watched from now on (a watch already running ends itself once it's off).
+            if on {
+                self.watch_secrets_of(service).await;
+            }
         }
         // Traces: a token of the environment's own (kept sealed: it goes into every deploy's
         // variables), or none. Its variables reach instances at the next deploy.
