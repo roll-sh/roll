@@ -1133,7 +1133,7 @@ impl Store {
     }
 
     /// The name of the project that reports this preview's change (or pull request) when it's
-    /// another project's ([`crate::engine::Engine::speaker`]); `None`: this one reports it.
+    /// another project's (roll previews' `refresh_voice`); `None`: this one reports it.
     pub fn reported_by(&self, id: &str) -> Result<Option<String>> {
         Ok(self.db.read(|c| c.query_row("SELECT reported_by FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
     }

@@ -1217,10 +1217,9 @@ impl Engine {
 }
 
 impl Engine {
-    /// Which project speaks for `kind r#ref` (a repo, or a Git URL service) on its changes and
-    /// pull requests, as `(id, name)`: of the projects with previews on that stand for it
-    /// (`Workspace::trusts`), the one that has had it on its canvas longest, then by id. roll apps
-    /// puts a service on the canvas of the project it's made in, so a service's is its own.
+    /// The project roll code's `POST …/preview` makes a change's preview in, as `(id, name)`: of
+    /// the projects with previews on that stand for `kind r#ref` (`Workspace::trusts`), the one
+    /// that has had it on its canvas longest, then by id.
     pub fn speaker(&self, kind: roll_workspace::Kind, r#ref: &str) -> Option<(String, String)> {
         self.workspace
             .projects_of(kind.as_str(), r#ref)

@@ -237,7 +237,7 @@ pub struct Preview {
     pub goes_at: Option<i64>,
     /// The project that reports a Git URL service's pull request (`roll/preview`, the comment),
     /// when it's another one: the service is on two projects' canvases, each has a preview of the
-    /// branch, and only the one that has had it longest speaks for it (`Engine::speaker`). Its name on the
+    /// branch, and only the one that has had it longest speaks for it (`Engine::refresh_voice`). Its name on the
     /// operator's projects; "another project" on a person's.
     pub reported_by: Option<String>,
     /// Earlier pushes of the change's services, still reachable (newest first; the last

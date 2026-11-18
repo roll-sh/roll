@@ -1366,64 +1366,13 @@ async fn data_at_branches_from_history_where_there_is_some() {
 }
 
 
-/// A repo or service on two projects' canvases speaks through the project that has had it
-/// longest: a change's one preview is made there (not by whichever project looks first), and of a
-/// Git URL service's branch, where each project has a preview, only that one reports on GitHub;
-/// the other's says another project does (never naming another owner's). Once it leaves that
-/// canvas, the next project takes over.
+/// A Git URL service on two projects' canvases has a preview of each branch in both, but only the
+/// project that has had it longest reports on GitHub; the other's preview says another project
+/// does (never naming another owner's). A branch the first project's rules skip is the other's to
+/// report. Once the service leaves the first canvas, the next project takes over, editing the
+/// same pull request comment, and the first never says its preview went.
 #[tokio::test]
-async fn the_project_that_has_had_a_repo_or_service_longest_speaks_for_it() {
-    use roll_workspace::{Kind as Res, Scope};
-    struct Ada;
-    impl roll_workspace::Owners for Ada {
-        fn trusts(&self, user: &str, _kind: Res, r: &str) -> bool {
-            user == "usr_ada" && (r == "acme/web" || r == "svc_shop")
-        }
-    }
-    let e = env(json!({ "enabled": true }));
-    e.ws.set_owners(Arc::new(Ada));
-    e.ws.place(Scope::All, &e.project, Res::Service, "svc_shop", 0.0, 0.0).unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    let theirs = e.ws.create("usr_ada", "ada-shop", "", None).unwrap();
-    for (kind, r) in [(Res::Repo, "acme/web"), (Res::Service, "svc_shop")] {
-        e.ws.place(Scope::All, &theirs.id, kind, r, 0.0, 0.0).unwrap();
-    }
-    e.engine.store.put_settings(&theirs.id, &roll_previews::Settings::default().patched(&json!({ "enabled": true })).unwrap()).unwrap();
-    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "shop".into(), repo: Some("git:svc_shop".into()), root: String::new(), memory_mb: 256 }]);
-    let gr = Arc::new(FakeGitReport::default());
-    let _ = e.engine.git_report.set(gr.clone());
-    let pull = roll_previews::ports::GitPull { number: 3, title: "Cart".into(), url: "https://github.com/acme/shop/pull/3".into(), fork: false };
-    let push = roll_previews::ports::GitPush { service: "svc_shop".into(), url: "https://github.com/acme/shop.git".into(), branch: "feat/cart".into(), sha: Some("a1".into()), message: String::new(), pull: Some(pull) };
-    e.code.open(change("chg_1", 7));
-    e.engine.git_push(&push).await.unwrap();
-    for _ in 0..3 {
-        e.engine.pass().await.unwrap();
-    }
-    let branch_of = |project: &str| e.engine.store.rows(Some(project)).unwrap().into_iter().find(|r| r.repo == "git:svc_shop").expect("each project has the branch's preview");
-    assert_eq!(e.engine.store.row_by_change("chg_1").unwrap().unwrap().project_id, e.project, "the change's preview is the first project's");
-    assert_eq!(e.engine.store.preview(&branch_of(&e.project).id).unwrap().reported_by, None);
-    let quiet = branch_of(&theirs.id);
-    assert_eq!(e.engine.store.preview(&quiet.id).unwrap().reported_by.as_deref(), Some("another project"), "says another does, without naming another owner's project");
-    let theirs_posted = || gr.statuses.lock().iter().any(|s| s.4.as_deref().is_some_and(|u| u.contains("ada-shop")));
-    assert!(!gr.statuses.lock().is_empty() && !theirs_posted(), "only the first project's preview posts");
-
-    // They leave the first project's canvas: the next project speaks for both.
-    for (kind, r) in [(Res::Repo, "acme/web"), (Res::Service, "svc_shop")] {
-        e.ws.remove(Scope::All, &e.project, kind, r).unwrap();
-    }
-    for _ in 0..3 {
-        e.engine.pass().await.unwrap();
-    }
-    assert_eq!(e.engine.store.row_by_change("chg_1").unwrap().unwrap().project_id, theirs.id, "the change's preview moves to the next project");
-    assert_eq!(e.engine.store.preview(&quiet.id).unwrap().reported_by, None);
-    assert!(theirs_posted(), "the branch's preview there speaks");
-}
-
-/// A Git URL service on two projects' canvases keeps one comment on its pull request: when the
-/// project that speaks for it lets it go, the next one edits the same comment, and the first
-/// doesn't say its preview went (that could land after the next one's).
-#[tokio::test]
-async fn a_pull_request_keeps_one_comment_when_another_project_takes_over() {
+async fn the_project_that_has_had_a_service_longest_speaks_for_its_branches() {
     use roll_workspace::{Kind as Res, Scope};
     struct Ada;
     impl roll_workspace::Owners for Ada {
@@ -1431,30 +1380,48 @@ async fn a_pull_request_keeps_one_comment_when_another_project_takes_over() {
             user == "usr_ada" && r == "svc_shop"
         }
     }
-    let e = env(json!({ "enabled": true }));
+    let e = env(json!({ "enabled": true, "branches": ["feat/*"] }));
     e.ws.set_owners(Arc::new(Ada));
     e.ws.place(Scope::All, &e.project, Res::Service, "svc_shop", 0.0, 0.0).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let theirs = e.ws.create("usr_ada", "ada-shop", "", None).unwrap();
     e.ws.place(Scope::All, &theirs.id, Res::Service, "svc_shop", 0.0, 0.0).unwrap();
     e.engine.store.put_settings(&theirs.id, &roll_previews::Settings::default().patched(&json!({ "enabled": true })).unwrap()).unwrap();
     *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "shop".into(), repo: Some("git:svc_shop".into()), root: String::new(), memory_mb: 256 }]);
     let gr = Arc::new(FakeGitReport::default());
     let _ = e.engine.git_report.set(gr.clone());
-    let pull = roll_previews::ports::GitPull { number: 3, title: "Cart".into(), url: "https://github.com/acme/shop/pull/3".into(), fork: false };
-    let push = roll_previews::ports::GitPush { service: "svc_shop".into(), url: "https://github.com/acme/shop.git".into(), branch: "feat/cart".into(), sha: Some("a1".into()), message: String::new(), pull: Some(pull) };
-    e.engine.git_push(&push).await.unwrap();
+    let push = |branch: &str, number: u64| roll_previews::ports::GitPush {
+        service: "svc_shop".into(),
+        url: "https://github.com/acme/shop.git".into(),
+        branch: branch.into(),
+        sha: Some("a1".into()),
+        message: String::new(),
+        pull: Some(roll_previews::ports::GitPull { number, title: "Cart".into(), url: format!("https://github.com/acme/shop/pull/{number}"), fork: false }),
+    };
+    e.engine.git_push(&push("feat/cart", 3)).await.unwrap();
+    e.engine.git_push(&push("wip/x", 4)).await.unwrap();
     for _ in 0..3 {
         e.engine.pass().await.unwrap();
     }
-    assert_eq!(gr.comments.lock().first().map(|c| c.1), Some(None), "one project's preview makes the comment");
-    let made = gr.comments.lock().len();
+    let branch_of = |project: &str, branch: &str| e.engine.store.rows(Some(project)).unwrap().into_iter().find(|r| r.repo == "git:svc_shop" && r.branch.as_deref() == Some(branch));
+    let posted_by = |slug: &str, n: u64| gr.statuses.lock().iter().any(|s| s.4.as_deref().is_some_and(|u| u.contains(slug))) && gr.comments.lock().iter().any(|c| c.0 == n);
+    let ours = branch_of(&e.project, "feat/cart").expect("the first project's preview");
+    let quiet = branch_of(&theirs.id, "feat/cart").expect("the other's too");
+    assert_eq!(e.engine.store.preview(&ours.id).unwrap().reported_by, None);
+    assert_eq!(e.engine.store.preview(&quiet.id).unwrap().reported_by.as_deref(), Some("another project"), "says another does, without naming another owner's project");
+    let cart_theirs = || gr.statuses.lock().iter().any(|s| s.4.as_deref().is_some_and(|u| u.contains("cart") && u.contains("ada-shop")));
+    assert!(!cart_theirs(), "only the first project's preview of the branch posts");
+    // A branch the first project's rules skip: the other project's preview speaks for it.
+    assert!(branch_of(&e.project, "wip/x").is_none() && posted_by("ada-shop", 4), "a skipped branch is the other's to report");
 
-    // The speaking project lets the service go: the other's preview edits that comment.
+    // The service leaves the first project's canvas: the next one edits the same comment.
+    let made = gr.comments.lock().len();
     e.ws.remove(Scope::All, &e.project, Res::Service, "svc_shop").unwrap();
     for _ in 0..3 {
         e.engine.pass().await.unwrap();
     }
-    let after: Vec<_> = gr.comments.lock()[made..].to_vec();
-    assert!(!after.is_empty(), "the next project speaks");
-    assert!(after.iter().all(|c| c.1 == Some(77) && !c.2.contains("deleted")), "the same comment, never saying the preview went: {after:?}");
+    assert_eq!(e.engine.store.preview(&quiet.id).unwrap().reported_by, None);
+    assert!(cart_theirs(), "the next project's preview speaks");
+    let after: Vec<_> = gr.comments.lock()[made..].iter().filter(|c| c.0 == 3).cloned().collect();
+    assert!(!after.is_empty() && after.iter().all(|c| c.1 == Some(77) && !c.2.contains("deleted")), "the same comment, never saying the preview went: {after:?}");
 }
