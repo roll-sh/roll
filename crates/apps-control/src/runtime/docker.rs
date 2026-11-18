@@ -838,6 +838,11 @@ impl Runtime for Docker {
         docker(&["ps", "-a", "--filter", &filter, "--format", "{{.Names}}"]).await.map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()
     }
 
+    async fn list_env(&self, service: &str, env: &str) -> Vec<String> {
+        let (s, e) = (format!("label={LABEL}={service}"), format!("label={LABEL}.env={env}"));
+        docker(&["ps", "-a", "--filter", &s, "--filter", &e, "--format", "{{.Names}}"]).await.map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()
+    }
+
     async fn ensure_network(&self, name: &str, service: &str, closed: bool) -> anyhow::Result<()> {
         // One already there must be what's asked for: a closed environment never joins a network
         // with a route out (nor an open one loses its own).

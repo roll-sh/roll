@@ -2217,7 +2217,10 @@ roll and nothing else, so a fork's preview can't send its branched data anywhere
   service on the network reaches it by name and wakes it, and rolld's own connections (from the
   sandbox's loopback) are told apart (`docker.rs::a_closed_environments_private_caller_wakes_it`).
   A closed network made before this keeps its gateway until its environment's last service goes;
-  with network sandboxes off (`ROLL_APPS_NETNS=0`) closed networks keep it too.
+  with network sandboxes off (`ROLL_APPS_NETNS=0`) closed networks keep it too. Deleting an
+  environment removes everything labelled for it first (`Runtime::list_env`: an earlier
+  process's instances, sandboxes, wakers and runs too), so its network and its relays go with it
+  (a network left behind holds one of the host's address pools).
   Its links' relays are on the same network, so roll's databases are reached as before; the
   project's other closed services there by name.
 - **Listed hosts through a proxy** (`runtime/egress.rs`). `hosts` (`api.stripe.com`, or

@@ -2031,6 +2031,11 @@ impl Apps {
         self.release_domains(&domains).await;
         self.teardown_live(service, env).await;
         self.set_access_cache(service, env, None);
+        // And whatever its live state didn't know (an earlier process's instances, a sandbox or
+        // waker, a run): left on its network, the network and its relays would stay.
+        for name in self.deps.runtime.list_env(service, env).await {
+            self.deps.runtime.remove(&name).await;
+        }
         // Its last backup before the volume goes (kept a week), its instances stopped first.
         let sid = service.to_string();
         let had = self.db(move |s| s.service(&sid)).await.is_ok_and(|s| s.run.volume.is_some());
