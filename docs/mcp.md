@@ -408,8 +408,8 @@ roll implements the MCP authorization spec (2025-06-18 and 2025-11-25) with OAut
 - Requests with an `Origin` header must come from the dashboard's or the API's origin (DNS
   rebinding).
 - Results come back as `structuredContent` (the route's JSON; arrays as `{"items": […]}`) and a
-  `text` block, cut at 64 KiB (about 16k tokens: Claude Code refuses an answer over 25,000 tokens by
-  default rather than cutting it), saying so and that the tool can be asked for less. Binary content comes back base64 (`content_b64`). An image (a preview's screenshot: PNG, JPEG or WebP, up to
+  `text` block, cut at 48 KiB (inside Claude Code's default 25,000-token limit even for dense JSON;
+  it refuses a longer answer rather than cutting it), saying so and that the tool can be asked for less. Binary content comes back base64 (`content_b64`). An image (a preview's screenshot: PNG, JPEG or WebP, up to
   4 MiB) comes back as MCP image content the agent can look at.
 - Characters a person can't see but a model reads are escaped in the `text` block: tag characters
   (ASCII smuggled as U+E0000–E007F), zero-width and bidi controls, and variation selectors. They
