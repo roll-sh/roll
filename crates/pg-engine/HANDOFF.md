@@ -15379,3 +15379,174 @@ more, reads whether a key column changed from the executor (`sizing::note_update
 thread-local, instead of comparing the key columns again) and sets the new version's xmax only
 when a locker remains. A transaction that only locks rows writes its state records and commits
 without waiting for an fsync, where it wrote nothing before.
+runs, a fresh server and 100,000-row fixture each, lane A's lock held for the whole gate). Not
+settled: the host ran at load 45-70 while it ran, and no clean result exists yet.
+- A first gate compared b249 at `6d3b7e9e5` with h249 on `6913fd09c` (the head after a rebase:
+  agents 243's and 244's commits in it too, so it measured more than this change). Short
+  transactions at 8 clients, 3 unflagged pairs of 5: user instructions per transaction +0.42%
+  (pairs -1.96 .. +4.65%, the two flagged ones included), cycles -2.8%, tps +12.2%.
+- The gate again with b249 rebuilt at `6913fd09c` (h249's parent): short transactions at 8
+  clients, all 5 pairs flagged after 4 tries each (1.04-2.62 foreign cores): instructions
+  -7.6 .. +2.7% a pair, not counted. The other cells (short at 32, point reads at 8 and 32) ran
+  after this note was written (`~/.cache/a249/runs/g1-*`).
+- What the change adds to a transaction that takes no row lock: on an UPDATE, the old version's
+  xmax is 0, so the model's update takes one branch more, reads whether a key column changed
+  from the executor (`sizing::note_update_keys`, a thread-local, instead of comparing the key
+  columns again) and sets the new version's xmax only when a locker remains; a commit takes an empty list of state records and checks the first
+  write's key; `Txn` has two more empty vectors. Point reads read nothing new (the `xmax` system
+  column's value comes from the same model lookup as cmin / cmax, only when asked for).
+  Measured in-process (1 client, the bench's own thread): within the runs' noise (-0.2% and
+  +4.0% in two rounds, compaction work inline with the transactions).
+A transaction that only locks rows writes its state records and commits without waiting for an
+fsync, where it wrote nothing before.
+
+## Behaviour gaps closed by agent 254 (2026-11-18)
+
+Recorded against a private PostgreSQL 18.6 (the reference image `postgres@sha256:77f58511...`,
+`a254-pg`, default settings, autovacuum off). New golden file `a254_estimate_extremes` (recorded
+from it; its catalog plans first, while the database is as initdb left it). Probes in
+`~/.cache/a254/probe` (`inf.sql` infinite dates, `cat*.sql` catalogs, `js.sql` jsonb, `fmt*.sql`
+/ `agg.sql` EXPLAIN formats, `ds.sql` DateStyle / IntervalStyle, `cb_make.py` + `cb2.sql` COPY
+binary, `fset*.sql` FROM functions; `../cmpcat.sh` runs one in a new database on both servers,
+`../cmp2.sh` compares stdout and stderr apart).
+
+- **Infinite dates against timestamps** (agent 251's finding). `costs::cmp_as` multiplied a
+  date by microseconds a day in i64: `'infinity'::date` (i32::MAX) overflowed (a panic with
+  overflow checks, a wrapped value in release builds' estimates). Now one rule for the planner
+  and the executor, `func::ops::date_instant` (date_cmp_timestamp_internal): infinite dates are
+  infinite timestamps, a finite date past the timestamps' range sorts above every finite
+  timestamp and below infinity (the executor had it equal to infinity:
+  `'5874897-12-31'::date = 'infinity'::timestamp` was true; PostgreSQL 18: false). The histogram
+  scale (`costs::scalars`, convert_to_scalar) takes infinite dates as ±f64::MAX
+  (date2timestamp_no_overflow), and now also intervals (a month as 365.25 / 12 days), timetz
+  and oid / reg* values, which had no scale (0.5 of a bin).
+  Audit: `--profile verify-checked` (overflow checks, debug assertions) over the golden suite
+  (709 files) and over all 17,654 EXPLAINs of the regression files found no other overflow; it
+  found two assertions this round's catalog paths reached (below). costs.rs's other integer
+  arithmetic is on typmods; LIMIT / OFFSET, window offsets and generate_series rows go
+  through f64.
+- **System catalogs' estimates as a fresh database's** (`explain::sys_rel_size`,
+  `paths/syscat.rs`). A catalog's tuples were its row count now and its pages a width model;
+  now estimate_rel_size's over initdb's pg_class relpages and reltuples (`data/pg_class.tsv`,
+  `static_rows::initdb_class_sizes`): the density over its pages (initdb's, more once its rows
+  outgrow them; an empty-at-initdb catalog the width density, pg_shdepend's 0), so a fresh
+  database's are PostgreSQL's (pg_class 415 rows over 14 pages, pg_trigger 0). Its indexes have
+  initdb's pages (pg_statistic_relid_att_inh_index the 4 it has, relpages says 1), growing in
+  proportion. A lone catalog scan is planned as a table's (sequential, index, index-only or
+  bitmap, `sys_plain_scan`; it was a heuristic "Index Scan" with the sequential scan's cost and
+  rows 1), a catalog in a join group gets every path of a table (it had its alone-plan and
+  parameterized index scans only), catalogs' unique indexes prove inner-unique joins
+  (`Catalog::table_indexes` of a stand-in), and widths are the columns read by their
+  statistics' widths. On the regression files' 17,654 EXPLAINs (`~/.cache/a254/rx`, 248's
+  harness, the candidate's verify build `out-v4` against 248's last run `out-e6`): 3,205
+  differing before (1,120 over catalogs), 3,017 after (913); 212 more matching, 24 newly
+  differing: 11 sort costs in the last digit that 248's run had from its since-dropped LOG2
+  change, 8 `'today'` constants (PostgreSQL's run was a day earlier), 5 catalog plans a row or
+  0.01 off in a catalog the regression files grew (none from a changed plan shape). A catalog
+  grows past initdb's pages only once its rows outgrow what its columns' widths fit on them
+  (pg_cast's 13 regression casts stay on its 2 pages, as PostgreSQL's do: an earlier version
+  that grew it at once turned opr_sanity's Hash Anti Join into a Merge Anti Join).
+  Found by the checked build: `system::attribute_rows_of` (a hash join restricting pg_attribute
+  to some relations, now reached) put each built-in relation's rows together, where the full
+  catalog has them in the static rows' order (pg_subscription's column privileges moved its
+  rows): now row by row in that order.
+- **jsonb operators' estimates** (`costs::Est::matchingsel`, generic_restriction_selectivity):
+  `@>`, `<@`, `?`, `?|`, `?&`, `@?`, `@@` against a constant apply the operator to the column's
+  most common values and histogram (`func::json::matching_test`, no session needed; a
+  jsonpath's zone is the planner's), the default 0.010 weighed in under 100 histogram entries;
+  they were 0.010 always.
+- **EXPLAIN's structured formats**: a sample scan's `Sampling Method` / `Sampling Parameters`
+  / `Repeatable Seed` (show_tablesample; one `Sampling` was shown), grouping sets as
+  `Grouping Sets` groups of `Hash Keys` / `Group Keys` nested lists with a later rollup's
+  `Sort Key` (show_grouping_set_keys), MEMORY's `Memory Used` / `Allocated` in kB as the text
+  form; an aggregation's `Rows Removed by Filter` after its hash table's batches and memory (all
+  formats).
+- **COPY ... (FORMAT binary)**: a negative header extension length is "(missing length)", a
+  field's size and data errors name the column (CopyReadBinaryAttribute's context), and the
+  binary format's errors carry PostgreSQL's locations (ReceiveCopyBinaryHeader,
+  CopyFromBinaryOneRow, CopyReadBinaryAttribute's three sites); protocol cases
+  `copy_bin_ext_neg`, `copy_bin_cut`, `copy_bin_negsize` (recorded from 18.6, the other 218
+  cases recorded again identical).
+
+Probed and matching already: DateStyle (12 styles) and IntervalStyle (4) outputs of dates,
+times, timestamps, intervals (infinite, BC, fractional, negative parts) and their input forms;
+EXPLAIN JSON / YAML / XML field sets of 30 plan shapes (scans, joins, aggregates, windows,
+Memoize, ModifyTable, CTEs, SETTINGS, GENERIC_PLAN, SERIALIZE); COPY binary output of 21 types
+(byte for byte) and 19 malformed inputs but the three above. Large objects, LISTEN / NOTIFY,
+WITH HOLD cursors and prepared transactions were probed by agent 248 and match.
+
+Not done (still differing):
+- A FROM-list PL function over an empty table (`t0, fset(0)`): the engine plans
+  `Nested Loop (Seq Scan t0, Materialize (Function Scan))` (cheaper by its costs), which
+  PostgreSQL can't (a Function Scan materializes itself, ExecMaterializesOutput; its rescan costs
+  its run cost, cost_rescan), so PostgreSQL's plan runs the function first and raises its error.
+  The FROM call is a lateral item of the join group whose inner Materialize comes from outside
+  `JoinPath`'s material check.
+- EXPLAIN of a PL function in FROM with a WHERE or a join loses its alias (`Function Scan on
+  fset` and `fset.fset` for `fset(1) f ... where f > 0`; no `Function Call:` in VERBOSE); the
+  query's own column names are right. An inlined SQL function's equality shows `(a = 1)` for
+  PostgreSQL's `(1 = a)`.
+- EXPLAIN ANALYZE: a merge join's inner side shows all its rows (the engine builds it whole;
+  PostgreSQL stops at the outer side's end: 30 against 20,000); `Index Searches` of a
+  ScalarArrayOp bitmap index scan whose values share a leaf page (PostgreSQL 1, the engine 2);
+  sort memory (25 against 27 kB); an Incremental Sort's cost under LIMIT (15.85 against 19.17).
+- Catalogs after DDL: PostgreSQL's pages grow with every row version (dead ones, until VACUUM)
+  and lose all-visible bits; the engine's estimate follows live rows and takes catalogs all
+  visible, so plans over catalogs drift from PostgreSQL's as a session changes them. System
+  views (pg_locks, pg_stats, information_schema's) are relations of the engine's own, where
+  PostgreSQL's plans expand their definitions (about 380 of the 959).
+- Shared catalogs' statistics are the reference cluster's (`pg_statistic.tsv` keeps 7
+  pg_shdepend rows a fresh cluster of the same image doesn't have, which `catalog_static`'s
+  recorded md5 expects).
+- Item 2's other entries untouched this round: index expressions folded once per relcache
+  load, scroll cursors after page splits (233's design), pg_statio block counts of inserts,
+  q15's EXPLAIN ANALYZE of a dense bitmap scan (needs the bitmap's page model for an estimated
+  table: Heap Blocks exact / lossy and Rows Removed by Index Recheck).
+- **Never-analyzed tables holding rows: mostly the comparison's settings.** PostgreSQL 18's
+  index_update_stats leaves the table's relpages / reltuples alone unless autovacuum is running
+  (AutoVacuumingActive) and on for the table; 248's regress comparison runs both servers with
+  autovacuum off, where PostgreSQL's CREATE INDEX keeps a new table's 0 / -1 (the 10-page
+  estimate) and the engine's sets them. Honouring the global setting
+  (`~/.cache/a254/patches/create-index-autovacuum-off.patch`) made 335 more of the 17,654
+  plans match (3,055 to 2,720), but golden_wire, parallel_scan, heap_order_scan and other
+  harnesses run the engine with autovacuum off against expectations from a reference with it
+  on (9 golden files differ), so it was dropped: taking it needs those harnesses on
+  `autovacuum_naptime` instead of `autovacuum = off`. Comparisons of plans should run
+  PostgreSQL with autovacuum on (naptime long) to see the engine's own differences.
+
+Measured (plain dist builds by `tools/dist.sh`: base `c55ecbb73`, new = these two commits on it;
+the rebase onto `7e470fc3b` brought only tools and docs; pgbench 8 clients, `-S -M prepared`
+for point reads, `-N -M prepared` for short transactions, scale 1, user instructions per
+transaction from `perf stat` of the server over seconds 3..11 of a 13 s run;
+`~/.cache/a254/gate`, `run1.sh`, `pair.sh`). **Not resolved; lane A was not available.**
+- Lane A, one pair (`tools/lane.sh a`, point reads): base 41,719, new 41,761 instructions per
+  read (**+0.10%**), cycles -3.5%; foreign load on the server CPUs 0.2 / 0.09 cores by the
+  harness (lane.sh's 3.01 cores counts this harness's own pgbench and perf containers, which
+  weren't in LANE_CONTAINERS). A second lane pair later (new first): 41,323 against 42,327
+  (-2.4%), but at 5.52 foreign cores by lane.sh (client counted as own), so not counted.
+- The second pair then waited 75 minutes for the lane: `/proc/locks` showed lane-a.lock held by
+  pid 2320756, which no process of this machine's PID namespace has (a container that
+  inherited a holder's descriptor, presumably), with another agent's `flock` waiting behind it
+  as long. The fallback pairs ran off the lanes (server CPUs 2,3,20,21, clients 4,5,22,23,
+  shared with other agents' builds at load 30 to 50): every pair over 1.0 foreign core, so
+  none counts; for what they show, point reads median +0.7% (pairs -10.6..+5.6%), short
+  transactions median +1.0% (-0.1..+5.5%), both inside the spread of base against base on a
+  loaded machine (213 / 233 measured 15% swings in a binary's own instructions per short
+  transaction).
+- What runs on those paths: `Catalog::table_indexes` (each statement's index binding) compares
+  the table's `next_index_id` with the stand-in marker first, one load and branch; the
+  executor's date / timestamp comparisons call `date_instant` as before (a different constant
+  in the overflow arm). Everything else is planning of catalogs, jsonb and histogram
+  estimates, EXPLAIN, and the COPY binary error paths. TPC-H plans: no change to their paths
+  (none reads a catalog, a jsonb column or an infinite date).
+A later run should redo the pairs on lane A with `~/.cache/a254/gate/pair.sh` (one pair per
+`tools/lane.sh a` hold; set `LANE_CONTAINERS=a254-pgb` so the client counts as own work).
+
+Verification: quick-check with `QC_CHECKED=1` on these commits rebased onto `2ab7c7c54` (and
+before, onto `fec3375ea` and `7e470fc3b`): build, clippy (16 warnings, none new in changed files), tests 395
+passed in 15 binaries, the same with `--profile verify-checked` 395 passed, regress 51,148 / 51,150 with 0 newly differing, isolation
+1647/1648, pg_dump 14,609 passed. Before the rebase, golden (709 files: in-process, wire,
+shuffled) and wire (74) also passed with `--profile verify-checked`, and the regression
+files' 17,654 EXPLAINs ran on a checked build without a panic. An earlier quick-check failed
+regress (opr_sanity's row order, the catalog growth fixed above) and golden_wire (the dropped
+autovacuum rule); both are in the text.
