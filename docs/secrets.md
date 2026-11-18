@@ -130,6 +130,16 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    RollSecrets c = RollSecrets.builder().build(); // ROLL_API_URL, ROLL_TOKEN or ROLL_IDENTITY, ROLL_PROJECT
    Watch w = c.watch("production", WatchOptions.of(v -> reload(v.values())));
    ```
+
+   In .NET, `sdk/dotnet/secrets` (`Roll.Secrets`, .NET 8 and the base class library only, X25519
+   its own), with `AddRollSecrets` for `IConfiguration` in `Roll.Secrets.Configuration`:
+
+   ```csharp
+   using var c = new RollSecretsClient(); // ROLL_API_URL, ROLL_TOKEN or ROLL_IDENTITY, ROLL_PROJECT
+   await using var w = c.Watch("production", new WatchOptions { OnChange = v => Reload(v.Values) });
+   builder.Configuration.AddRollSecrets("production", s => s.ReloadOnChange = true);
+   var ct = await c.Transit("cards").EncryptAsync(cardNumber, $"order:{id}");
+   ```
 8. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
@@ -3333,10 +3343,12 @@ rotating a database's admin password and editing registrations in place (#75), s
    lives), and Terraform updating registrations in place (#72, after #75).
 8. **More dynamic credentials**: Kubernetes service account tokens, Snowflake, LDAP and Active
    Directory passwords (Vault, Infisical).
-9. **.NET client, a Pulumi provider, a Lambda extension and an Ansible lookup** (`IConfiguration`;
-   AWS's Parameters and Secrets extension; Vault's and 1Password's Ansible). Java is built
+9. **A Pulumi provider, a Lambda extension and an Ansible lookup** (AWS's Parameters and Secrets
+   extension; Vault's and 1Password's Ansible). Java is built
    (`sdk/java/secrets`, `feature/roll-secrets-java`: values, sealed resolves, long-polled watches,
-   the cache, transit); its Spring `PropertySource` adapter is next.
+   the cache, transit); its Spring `PropertySource` adapter is next. .NET
+   is built (`sdk/dotnet/secrets`, `feature/roll-secrets-dotnet`: values, sealed resolves with its
+   own X25519, long-polled watches, the cache, transit, and `AddRollSecrets` for `IConfiguration`).
 10. **A gateway into private networks** (Infisical's and Akeyless' gateways); **ACME on project
    CAs**.
 11. *Landing (approved):* #20 and #62 are on main; the follow-ups go one at a time when the merge
