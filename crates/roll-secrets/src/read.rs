@@ -1066,8 +1066,9 @@ pub(crate) fn lease_note(leases: &[String]) -> String {
     }
 }
 
-/// A dynamic credential issued during one resolve: its parts, its handle, its link.
-type IssuedDynamic = (BTreeMap<String, Value>, Json, Link, (String, String));
+/// A dynamic credential issued during one resolve: its parts, its handle, its link, its key, and
+/// its lease's id (chosen before the issue: a provider can name what it makes after it).
+type IssuedDynamic = (BTreeMap<String, Value>, Json, Link, (String, String), String);
 
 /// Resolves values: decrypts, reads live links, issues dynamic ones (once per credential), and
 /// follows references with cycle detection.
@@ -1202,17 +1203,18 @@ impl<'a> Resolver<'a> {
                 let group = (e.row.env_id.clone(), l.kind.clone(), l.r#ref.clone(), format!("{cred}:{}", json(&l.options)));
                 if !self.issued.contains_key(&group) {
                     let label = format!("roll secrets {} {} for {}", e.env, e.row.key, self.consumer);
+                    let lease = names::new_id("lse", 16);
                     let r = self
                         .s
                         .links
                         .get(&l.kind)
-                        .and_then(|p| p.issue(&l.r#ref, &cred, l, &label, Some(l.ttl_minutes())))
-                        .map(|i| (i.parts, i.handle, l.clone(), (e.row.key.clone(), e.row.path.clone())))
+                        .and_then(|p| p.issue_lease(&l.r#ref, &cred, l, &label, l.ttl_minutes(), &lease))
+                        .map(|i| (i.parts, i.handle, l.clone(), (e.row.key.clone(), e.row.path.clone()), lease))
                         .map_err(|err| format!("{} {}: {err}", l.kind, l.r#ref));
                     self.issued.insert(group.clone(), r);
                 }
                 match &self.issued[&group] {
-                    Ok((parts, _, _, _)) => parts.get(&l.field).cloned().ok_or_else(|| format!("{} didn't issue {}", l.kind, l.field)),
+                    Ok((parts, ..)) => parts.get(&l.field).cloned().ok_or_else(|| format!("{} didn't issue {}", l.kind, l.field)),
                     Err(p) => Err(p.clone()),
                 }
             }
@@ -1279,7 +1281,7 @@ impl<'a> Resolver<'a> {
     /// Record the leases of the dynamic credentials this resolve issued; revoke them if that
     /// fails. Returns their ids.
     pub fn finish(self, _slug: &str) -> Result<Vec<String>> {
-        let issued: Vec<_> = self.issued.into_iter().filter_map(|((env_id, _, _, _), r)| r.ok().map(|(_, handle, link, at)| (env_id, handle, link, at))).collect();
+        let issued: Vec<_> = self.issued.into_iter().filter_map(|((env_id, _, _, _), r)| r.ok().map(|(_, handle, link, at, id)| (env_id, handle, link, at, id))).collect();
         if issued.is_empty() {
             return Ok(vec![]);
         }
@@ -1287,10 +1289,10 @@ impl<'a> Resolver<'a> {
         let consumer = self.consumer.clone();
         let by = self.caller.principal.clone();
         let project = self.project.to_string();
-        let ids: Vec<String> = issued.iter().map(|_| names::new_id("lse", 16)).collect();
+        let ids: Vec<String> = issued.iter().map(|i| i.4.clone()).collect();
         crate::metrics::Counters::add(&self.s.counters.dynamic_issued, ids.len() as u64);
         let res = self.s.db.write(|c| {
-            for ((env_id, handle, link, (key, path)), id) in issued.iter().zip(&ids) {
+            for (env_id, handle, link, (key, path), id) in &issued {
                 c.execute(
                     "INSERT INTO leases (id, project_id, env_id, key, path, kind, link, handle, consumer, issued_at, expires_at, revoked_at, issued_by) VALUES (?, ?, ?, ?, ?, 'dynamic', ?, ?, ?, ?, ?, NULL, ?)",
                     params![id, project, env_id, key, path, json(link), json(handle), consumer, now, now + link.ttl_minutes() as i64 * 60_000, by],
@@ -1299,7 +1301,7 @@ impl<'a> Resolver<'a> {
             Ok::<_, Error>(())
         });
         if let Err(e) = res {
-            for (_, handle, link, _) in &issued {
+            for (_, handle, link, _, _) in &issued {
                 if let Ok(p) = self.s.links.get(&link.kind) {
                     let _ = p.revoke(&link.r#ref, handle);
                 }

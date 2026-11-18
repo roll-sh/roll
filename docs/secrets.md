@@ -1382,9 +1382,10 @@ engine gives, so a pod, a CI job or a person gets cluster access for minutes rat
 that never expires.
 - **Register a cluster** (`POST …/kubernetes {name, api_url, ca_pem?, token}`, `admin`; `roll
   secrets kubernetes-clusters add NAME API_URL [--ca FILE]` with the token on stdin, or the
-  dashboard's Syncs page). `token` is a service account token roll manages the cluster with: it
-  needs `create` on `serviceaccounts/token` in the namespaces links name, and nothing more (a
-  ClusterRole with that one rule, bound per namespace). `api_url` is the API server's `https://`
+  dashboard's Syncs page). `token` is a service account token roll manages the cluster with: for
+  links to existing service accounts it needs `create` on `serviceaccounts/token` in the namespaces
+  links name, and nothing more (a ClusterRole with that one rule, bound per namespace); links with
+  `role_rules` need more (["Generated roles"](#generated-roles), below). `api_url` is the API server's `https://`
   URL. It's a URL the tenant chose, so every call goes through rolld's guarded client: public
   addresses only, no redirects, a 15 s timeout, a bounded answer. `ca_pem` is the cluster's CA
   (PEM), when its API server's certificate isn't publicly trusted (most self-managed clusters,
@@ -1393,9 +1394,22 @@ that never expires.
   URL and whether there's a CA, never either. Registering calls `GET /api` with the token first:
   the address, the TLS trust and the token must all work. A cluster a key links to, or with a
   lease still live, can't be deleted (409).
-- **Link a key** to the cluster in `dynamic` mode (the only mode), naming an existing service
-  account in the options: `{kind: "kubernetes", ref: "kube_…", field: "token", mode: "dynamic",
-  options: {namespace, service_account, audiences?, ttl_minutes?}}`. Each resolve that asks for
+- **Link a key** to the cluster in `dynamic` mode (the only mode), naming in the options either an
+  existing service account or the rules of a role made per lease: `{kind: "kubernetes", ref:
+  "kube_…", field: "token", mode: "dynamic", options}`, where `options` are:
+  - `namespace`: the service account's namespace (a Kubernetes name).
+  - `service_account`: an existing service account there; or
+  - `role_rules`: Kubernetes PolicyRules (`[{apiGroups, resources, verbs, resourceNames?}]`, 1 to
+    32 rules, at most 32 entries per list, Kubernetes' name rules; `""` is the core group and `*`
+    is allowed where Kubernetes allows it; nothing else in a rule, so no `nonResourceURLs`) for a
+    service account made per lease ([below](#generated-roles)). `service_account` and
+    `role_rules` are exclusive: a link with both, or neither, is refused when it's written (400).
+  - `cluster_wide`: with `role_rules`, a ClusterRole and ClusterRoleBinding rather than a Role and
+    RoleBinding (default `false`).
+  - `audiences`: up to 10 audiences for the token (the API server's own when unset).
+  - `ttl_minutes`: the lease's TTL (15 to 1440).
+
+  Each resolve that asks for
   dynamic credentials calls the TokenRequest API (`POST
   /api/v1/namespaces/{namespace}/serviceaccounts/{service_account}/token`, `expirationSeconds` the
   lease's TTL, `audiences` when set, else the API server's own) and records a lease. The fields are
@@ -1403,15 +1417,113 @@ that never expires.
   CI job can build a kubeconfig; keys of one environment linked to the same cluster with the same
   options share one token. Code nobody vetted (checks, sandboxes, previews) never gets one, as with
   every dynamic link.
-- **A token lives until its expiry.** A bound service-account token can't be revoked on its own:
-  ending a lease (`DELETE …/leases/{id}`, or its expiry) records the revocation, and the audit row
-  says the token still works until it expires. So keep `ttl_minutes` short: 15 minutes at least
-  (roll's floor; Kubernetes' own is 10), a day at most, and leases don't renew (resolve again). roll
-  never hands out a token the API server made to outlive its lease. To cut access at once, delete
-  the service account or its RoleBinding in the cluster. Errors name the cluster's host and the
-  status (with roll's hint for 401, 403 and 404), never a token or the API server's message.
-- Not built yet: Vault's generated roles (`role_rules`: a temporary service account, Role and
-  RoleBinding per lease, deleted when it ends).
+- **An existing account's token lives until its expiry.** A bound service-account token can't be
+  revoked on its own: ending a lease (`DELETE …/leases/{id}`, or its expiry) records the
+  revocation, and the audit row says the token still works until it expires. So keep `ttl_minutes`
+  short: 15 minutes at least (roll's floor; Kubernetes' own is 10), a day at most, and leases don't
+  renew (resolve again). roll never hands out a token the API server made to outlive its lease. To
+  cut access at once, delete the service account or its RoleBinding in the cluster, or use
+  `role_rules`. Errors name the cluster's host, the step and the status (with roll's hint for 401,
+  403, 404 and 409), never a token or the API server's message.
+
+#### Generated roles
+With `role_rules`, as Vault's Kubernetes secrets engine's generated role rules, each lease gets a
+service account of its own, and **revoking the lease ends its tokens**. Each issue:
+1. creates a ServiceAccount `roll-<lease>` in `namespace` (`<lease>` is the lease id without its
+   `lse_` prefix; `automountServiceAccountToken: false`);
+2. creates a Role `roll-<lease>` there with the rules, or a ClusterRole if `cluster_wide`;
+3. creates a RoleBinding `roll-<lease>` binding it to the account, or a ClusterRoleBinding;
+4. asks TokenRequest for a token of that account, for the lease's TTL.
+
+Every object is labelled `app.kubernetes.io/managed-by: roll-secrets` and `roll.sh/lease: lse_…`,
+so leftovers can be found (`kubectl get sa,role,rolebinding,clusterrole,clusterrolebinding -A -l
+app.kubernetes.io/managed-by=roll-secrets`). If a step fails, roll deletes what that issue already
+made (outside any database transaction) and the resolve reports the step and the status
+(`kube.example answered 403 to creating the RoleBinding roll-… in ci: the admin token may not do
+this (it needs create on rolebindings)`), never a token; if a delete fails too, the error says so
+and names the label. Revoking the lease (`DELETE …/leases/{id}`, its expiry, or its secret,
+environment or project going) deletes the binding, the role and the account, in that order: the
+permissions go first, then the account, and with it every token it had. A 404 counts as already
+gone; any other failure keeps the lease due, and the sweeper retries it, as with every product.
+
+The admin token then needs to create and delete ServiceAccounts, Roles and RoleBindings in the
+namespaces links name. Kubernetes' escalation check also means it can only grant what it holds
+itself, unless it has `escalate` (to create a Role with rules it doesn't hold) and `bind` (to bind
+one) on `roles`. The minimal RBAC for roll's admin service account (here `roll-secrets` in
+`roll-system`), bound in each namespace links name:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: roll-secrets
+rules:
+  # Tokens (every kubernetes link).
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+  # Generated roles (role_rules links).
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["create", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "delete"]
+  # Grant rules roll's account doesn't hold itself. Leave this out and role_rules may only
+  # name permissions roll's account has in that namespace.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles"]
+    verbs: ["bind", "escalate"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding        # one per namespace links name
+metadata:
+  name: roll-secrets
+  namespace: ci
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: roll-secrets
+subjects:
+  - kind: ServiceAccount
+    name: roll-secrets
+    namespace: roll-system
+```
+
+Bound per namespace, `escalate` and `bind` reach only that namespace. `cluster_wide` links need
+cluster-scoped permissions too, which make roll's account able to grant anything in the cluster;
+give them only where that's intended:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: roll-secrets-cluster-wide
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["create", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    verbs: ["bind", "escalate"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: roll-secrets-cluster-wide
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: roll-secrets-cluster-wide
+subjects:
+  - kind: ServiceAccount
+    name: roll-secrets
+    namespace: roll-system
+```
+
+(The account itself still lives in `namespace`, so the namespaced ClusterRole above is bound
+there too.) roll doesn't sweep leftovers on its own yet: a lease is revoked through its handle, and
+the labels are for an operator's `kubectl delete -l roll.sh/lease=…`.
 ### Certificates
 A project's own certificate authority, as Vault's PKI engine and Infisical's PKI give: short-lived
 TLS certificates for services (mTLS between them), with no CA to run.
@@ -3487,8 +3599,9 @@ rotating a database's admin password and editing registrations in place (#75), s
    next, checking a registration's credential when it's added, and more vendors.
 7. **AWS roles and users edited in place** (a new role ARN or trust; on #68's branch, where trust
    lives), and Terraform updating registrations in place (#72, after #75).
-8. **More dynamic credentials**: Kubernetes service account tokens, Snowflake, LDAP and Active
-   Directory passwords (Vault, Infisical).
+8. **More dynamic credentials**: Snowflake, LDAP and Active Directory passwords (Vault, Infisical).
+   Kubernetes service account tokens are built (#102), with generated roles (`role_rules`: a
+   service account, Role and binding per lease, deleted when it ends).
 9. **A Pulumi provider, a Lambda extension and an Ansible lookup** (AWS's Parameters and Secrets
    extension; Vault's and 1Password's Ansible). The Lambda extension is built
    (`sdk/lambda-extension`, on `feature/roll-secrets-lambda`): values on localhost from a cache,

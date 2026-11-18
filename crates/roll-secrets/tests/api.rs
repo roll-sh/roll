@@ -137,14 +137,37 @@ impl roll_secrets::Deliver for Sent {
         self.0.lock().unwrap().push(json!({ "format": format, "token": token.map(|t| t.expose().to_string()), "events": body["events"] }));
         Ok(())
     }
-    /// A Kubernetes API server at `KUBE` taking only the admin token: discovery, and TokenRequest
-    /// for `ci/deployer` (each request kept, with the CA it trusted, as `{"kube": …}`).
+    /// A Kubernetes API server at `KUBE` taking only the admin token: discovery; creating and
+    /// deleting service accounts, roles and bindings (kept as `{"kube_obj": {"create": path,
+    /// "body"}}` and `{"kube_obj": {"delete": path}}`; RoleBindings in `flaky` are forbidden); and
+    /// TokenRequest for `ci/deployer` or an account it holds (each request kept, with the CA it
+    /// trusted, as `{"kube": …}`).
     fn request_trusting(&self, ca: Option<&str>, method: &str, url: &str, headers: &[(&str, &Secret)], body: Option<(&str, &Secret)>, _: usize) -> roll_secrets::Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
         let admin = headers.iter().any(|(h, v)| *h == "authorization" && v.expose() == "Bearer fake-admin-token");
-        let (status, answer) = match (method, url.strip_prefix(KUBE)) {
+        let path = url.strip_prefix(KUBE).unwrap_or_default();
+        let collection = ["/serviceaccounts", "/roles", "/rolebindings", "/clusterroles", "/clusterrolebindings"].iter().any(|c| path.ends_with(c));
+        let live = kube_objects(&self.0.lock().unwrap());
+        let account = path.strip_prefix("/api/v1/namespaces/").and_then(|p| p.strip_suffix("/token")).and_then(|p| p.split_once("/serviceaccounts/"));
+        let (status, answer) = match (method, path) {
             _ if !admin => (401, json!({ "kind": "Status", "reason": "Unauthorized" })),
-            ("GET", Some("/api")) => (200, json!({ "kind": "APIVersions", "versions": ["v1"] })),
-            ("POST", Some("/api/v1/namespaces/ci/serviceaccounts/deployer/token")) => {
+            ("GET", "/api") => (200, json!({ "kind": "APIVersions", "versions": ["v1"] })),
+            ("POST", _) if collection => {
+                let sent: Value = serde_json::from_str(body.unwrap().1.expose()).unwrap();
+                let at = format!("{path}/{}", sent["metadata"]["name"].as_str().unwrap());
+                if path.ends_with("/namespaces/flaky/rolebindings") {
+                    (403, json!({ "kind": "Status", "reason": "Forbidden" }))
+                } else if live.contains(&at) {
+                    (409, json!({ "kind": "Status", "reason": "AlreadyExists" }))
+                } else {
+                    self.0.lock().unwrap().push(json!({ "kube_obj": { "create": at, "body": sent } }));
+                    (201, sent)
+                }
+            }
+            ("DELETE", _) if live.contains(path) => {
+                self.0.lock().unwrap().push(json!({ "kube_obj": { "delete": path } }));
+                (200, json!({ "kind": "Status", "status": "Success" }))
+            }
+            ("POST", _) if account.is_some_and(|(ns, sa)| (ns, sa) == ("ci", "deployer") || live.contains(&format!("/api/v1/namespaces/{ns}/serviceaccounts/{sa}"))) => {
                 let sent: Value = serde_json::from_str(body.unwrap().1.expose()).unwrap();
                 let mut kept = self.0.lock().unwrap();
                 kept.push(json!({ "kube": { "ca": ca, "request": sent } }));
@@ -232,6 +255,19 @@ impl roll_secrets::Deliver for Sent {
 
 const ISSUER: &str = "https://token.actions.githubusercontent.com";
 const ISSUER_URL: &str = "https://roll.example/v1/secrets/oidc";
+/// The objects the fake Kubernetes API holds: created and not deleted since, by path.
+fn kube_objects(kept: &[Value]) -> std::collections::BTreeSet<String> {
+    let mut live = std::collections::BTreeSet::new();
+    for op in kept.iter().filter_map(|b| b.get("kube_obj")) {
+        match (op["create"].as_str(), op["delete"].as_str()) {
+            (Some(p), _) => live.insert(p.to_string()),
+            (_, Some(p)) => live.remove(p),
+            _ => false,
+        };
+    }
+    live
+}
+
 const KUBE: &str = "https://kube.example";
 const KUBE_CA: &str = "-----BEGIN CERTIFICATE-----\nfake-cluster-ca\n-----END CERTIFICATE-----";
 
@@ -2031,6 +2067,71 @@ async fn a_kubernetes_cluster_issues_short_lived_service_account_tokens() {
     }
     let (s, _) = api.call(Method::DELETE, &format!("/kubernetes/{}", k["id"].as_str().unwrap()), None).await;
     assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");
+}
+
+#[tokio::test]
+async fn a_kubernetes_link_with_role_rules_makes_a_service_account_per_lease_and_deletes_it() {
+    let api = Api::new().await;
+    let k = api.ok(Method::POST, "/kubernetes", Some(json!({ "name": "prod", "api_url": KUBE, "token": "fake-admin-token" }))).await;
+    let rules = json!([{ "apiGroups": [""], "resources": ["pods", "pods/log"], "verbs": ["get", "list"] }, { "apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["patch"], "resourceNames": ["web"] }]);
+    let link = |options: Value| json!({ "link": { "kind": "kubernetes", "ref": k["id"], "field": "token", "mode": "dynamic", "options": options } });
+
+    // One or the other: an existing account, or rules for one made per lease; rules are Kubernetes'.
+    for (options, why) in [
+        (json!({ "namespace": "ci", "service_account": "deployer", "role_rules": rules }), "exclusive"),
+        (json!({ "namespace": "ci", "service_account": "deployer", "cluster_wide": true }), "cluster_wide needs rules"),
+        (json!({ "namespace": "ci", "role_rules": [{ "apiGroups": [""], "resources": ["pods"], "verbs": ["GET"] }] }), "verbs are lowercase"),
+        (json!({ "namespace": "ci", "role_rules": [{ "apiGroups": [""], "resources": ["pods"], "verbs": ["get"], "nonResourceURLs": ["/healthz"] }] }), "only the four fields"),
+        (json!({ "namespace": "ci", "role_rules": [] }), "at least one rule"),
+    ] {
+        let (s, e) = api.call(Method::PUT, "/environments/staging/secrets/KUBE_TOKEN", Some(link(options))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{why}: {e}");
+    }
+
+    // A resolve makes the account, its Role and RoleBinding, labelled with the lease, then a token for it.
+    api.ok(Method::PUT, "/environments/staging/secrets/KUBE_TOKEN", Some(link(json!({ "namespace": "ci", "role_rules": rules, "ttl_minutes": 20 })))).await;
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:deploy" }))).await;
+    let lease = r["leases"][0].as_str().unwrap().to_string();
+    let name = format!("roll-{}", lease.strip_prefix("lse_").unwrap());
+    assert!(r["values"]["KUBE_TOKEN"].as_str().unwrap().starts_with("fake-sa-token-"), "{r}");
+    let rbac = "/apis/rbac.authorization.k8s.io/v1";
+    let made = |kept: &[Value]| kube_objects(kept).into_iter().collect::<Vec<_>>();
+    let expected = [format!("/api/v1/namespaces/ci/serviceaccounts/{name}"), format!("{rbac}/namespaces/ci/rolebindings/{name}"), format!("{rbac}/namespaces/ci/roles/{name}")];
+    assert_eq!(made(&api.sent.0.lock().unwrap()), expected);
+    let bodies: Vec<Value> = api.sent.0.lock().unwrap().iter().filter_map(|b| b["kube_obj"].get("body").cloned()).collect();
+    for b in &bodies {
+        assert_eq!(b["metadata"]["labels"], json!({ "app.kubernetes.io/managed-by": "roll-secrets", "roll.sh/lease": lease }), "{b}");
+    }
+    assert_eq!((bodies[1]["kind"].as_str(), &bodies[1]["rules"]), (Some("Role"), &rules));
+    assert_eq!(bodies[2]["roleRef"], json!({ "apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name }));
+    assert_eq!(bodies[2]["subjects"], json!([{ "kind": "ServiceAccount", "name": name, "namespace": "ci" }]));
+
+    // Revoking deletes them, binding first: the token ends with its account.
+    api.ok(Method::DELETE, &format!("/leases/{lease}"), None).await;
+    let deleted: Vec<String> = api.sent.0.lock().unwrap().iter().filter_map(|b| b["kube_obj"]["delete"].as_str().map(String::from)).collect();
+    assert_eq!(deleted, [expected[1].clone(), expected[2].clone(), expected[0].clone()]);
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    assert!(!audit.to_string().contains("works until it expires"), "{audit}");
+
+    // Cluster-wide: a ClusterRole and a ClusterRoleBinding.
+    api.ok(Method::PUT, "/environments/staging/secrets/KUBE_TOKEN", Some(link(json!({ "namespace": "ci", "role_rules": rules, "cluster_wide": true })))).await;
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:deploy" }))).await;
+    let name = format!("roll-{}", r["leases"][0].as_str().unwrap().strip_prefix("lse_").unwrap());
+    assert_eq!(made(&api.sent.0.lock().unwrap()), [format!("/api/v1/namespaces/ci/serviceaccounts/{name}"), format!("{rbac}/clusterrolebindings/{name}"), format!("{rbac}/clusterroles/{name}")]);
+    api.ok(Method::DELETE, &format!("/leases/{}", r["leases"][0].as_str().unwrap()), None).await;
+    assert!(made(&api.sent.0.lock().unwrap()).is_empty());
+
+    // A step that fails deletes what the issue made, and names the step and the status; no token.
+    api.ok(Method::PUT, "/environments/staging/secrets/KUBE_TOKEN", Some(link(json!({ "namespace": "flaky", "role_rules": rules })))).await;
+    let tokens_before = api.sent.0.lock().unwrap().iter().filter(|b| b.get("kube").is_some()).count();
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:deploy" }))).await;
+    assert!(r["values"].get("KUBE_TOKEN").is_none_or(|v| v == "") && r["leases"] == json!([]), "{r}");
+    let problem = r["problems"][0]["problem"].as_str().unwrap();
+    assert!(problem.contains("403 to creating the RoleBinding") && problem.contains("create on rolebindings") && !problem.contains("couldn't delete"), "{problem}");
+    let kept = api.sent.0.lock().unwrap();
+    assert!(kube_objects(&kept).is_empty(), "the account and the role are deleted again");
+    assert_eq!(kept.iter().filter(|b| b["kube_obj"]["delete"].as_str().is_some_and(|p| p.contains("/namespaces/flaky/"))).count(), 2);
+    assert_eq!(kept.iter().filter(|b| b.get("kube").is_some()).count(), tokens_before, "no token asked for");
 }
 
 #[tokio::test]

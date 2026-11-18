@@ -129,13 +129,22 @@ pub trait LinkProvider: Send + Sync {
         let _ = (r#ref, label, link, ttl_minutes);
         Err(Error::BadRequest(format!("{} can't issue {credential} credentials", self.kind())))
     }
+    /// A `dynamic` field's credential for the lease `lease` (its id, chosen before the issue): a
+    /// product that makes objects per lease names and labels them after it, so leftovers can be
+    /// found. Others get [`LinkProvider::issue`].
+    fn issue_lease(&self, r#ref: &str, credential: &str, link: &Link, label: &str, ttl_minutes: u64, lease: &str) -> Result<Issued> {
+        let _ = lease;
+        self.issue(r#ref, credential, link, label, Some(ttl_minutes))
+    }
     fn revoke(&self, r#ref: &str, handle: &Json) -> Result<()> {
         let _ = (r#ref, handle);
         Ok(())
     }
-    /// Whether revoking ends the credential at the product. `false`: it works until its own
-    /// expiry (a bound Kubernetes token), and revoking only ends the lease, as its audit row says.
-    fn revocable(&self) -> bool {
+    /// Whether revoking ends `link`'s credential at the product. `false`: it works until its own
+    /// expiry (a bound Kubernetes token for an existing service account), and revoking only ends
+    /// the lease, as its audit row says.
+    fn revocable(&self, link: &Link) -> bool {
+        let _ = link;
         true
     }
     /// Keep a dynamic credential working until `until` (unix ms): a lease was renewed. Only a
@@ -217,7 +226,7 @@ impl Links {
             return Err(Error::BadRequest(format!("{} {} is {}, not {}", l.kind, l.field, f.modes.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(" or "), l.mode.as_str())));
         }
         for k in l.options.keys() {
-            if !["ttl_minutes", "grace_minutes", "rotate_days", "branch", "permission", "names", "principals", "repositories", "permissions", "namespace", "service_account", "audiences"].contains(&k.as_str()) {
+            if !["ttl_minutes", "grace_minutes", "rotate_days", "branch", "permission", "names", "principals", "repositories", "permissions", "namespace", "service_account", "audiences", "role_rules", "cluster_wide"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown link option {k}")));
             }
         }

@@ -1986,7 +1986,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 if json_out {
                     return print(&v);
                 }
-                println!("Added {} ({}): link KUBE_TOKEN to it, dynamic, with options namespace and service_account (KUBE_API_URL and KUBE_CA for a kubeconfig).", s(&v["name"]), s(&v["id"]));
+                println!("Added {} ({}): link KUBE_TOKEN to it, dynamic, with options namespace and service_account, or role_rules for an account made per lease (KUBE_API_URL and KUBE_CA for a kubeconfig).", s(&v["name"]), s(&v["id"]));
             }
             KubernetesClustersCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/kubernetes/{}", c.base(), enc(&id)), None).await?;
