@@ -2999,11 +2999,11 @@ inconsistencies are fixed in #264:
   accounts/workspace and roll-access threads.
 - R2. **Cut off everything that reaches a folder** (M): reach lists it but can't act; one action to
   revoke its tokens and identities, end leases and shares, pause syncs and optionally freeze reads.
-  roll MCP adds `Access::revoke_many(ids, why)` (atomic, one audit row per grant) after its turn;
+  roll MCP's #267 adds `Access::revoke_many(ids, why, by)` (atomic, ≤500 ids, one audit row per grant);
   reach passes its own grant ids, and leases, shares and syncs stay in secrets' transaction.
 - R3. **Credentials roll doesn't hold yet** (M): landings and `roll secrets scan` match stored values
-  only. The detectors are already shared (`roll_auth::credentials`, #208); roll MCP makes `kind_in`
-  and a bounded `find_all` public after its turn. Then a landing warning and `roll secrets scan`
+  only. The detectors are already shared (`roll_auth::credentials`, #208); #267 makes `kind_in`
+  and a bounded `find_all` (byte ranges, ≤1,000 matches) public. Then a landing warning and `roll secrets scan`
   offering "store in roll, replace with `${KEY}`".
 - R4. **GCP KMS, Azure Key Vault and HSM keys** (M), next to AWS KMS: real accounts (the user's call).
 - R5. **`roll://` wherever another roll product takes a key** (M): agent endpoints (they take `op://`),
