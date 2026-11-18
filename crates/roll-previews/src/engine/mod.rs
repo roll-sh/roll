@@ -141,7 +141,12 @@ pub struct Engine {
     kick: Notify,
     /// In a cluster: requests that act on running services go to the reconciler's node.
     pub cluster: std::sync::OnceLock<Arc<roll_cluster::Cluster>>,
+    /// Where a Git URL service's previews are posted (rolld: roll apps' GitHub App connection).
+    pub git_report: std::sync::OnceLock<Arc<dyn crate::ports::GitReport>>,
     usage_read: Mutex<HashMap<String, i64>>,
+    /// What each preview's services used, read at (ms): `GET …/metrics` reads them again only after
+    /// [`METRICS_FOR`], however many sheets poll.
+    metrics_read: Mutex<HashMap<String, (i64, Vec<crate::ServiceMetrics>)>>,
     /// Previews whose screenshot a converge asked for; taken after the pass (`pass`).
     shots_wanted: Mutex<std::collections::HashSet<String>>,
     /// Previews with a screenshot task queued or running, and whether it was asked again
@@ -155,6 +160,9 @@ pub struct Engine {
     counters: Counters,
     /// The hosts each preview's egress proxy refused that its activity already says.
     egress_told: Mutex<HashMap<String, std::collections::HashSet<String>>>,
+    /// Held while a Git URL preview's report is posted: a converge's and a screenshot's at once
+    /// would each make the pull request's first comment before either kept its id.
+    git_reporting: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// What each preview's output mustn't show (`masks.rs`).
     log_masks: Mutex<HashMap<String, masks::Masks>>,
     /// Screenshots taken at once on this node ([`screenshot_slots`]).
@@ -215,7 +223,9 @@ impl Engine {
             leader,
             kick: Notify::new(),
             cluster: std::sync::OnceLock::new(),
+            git_report: std::sync::OnceLock::new(),
             usage_read: Mutex::new(HashMap::new()),
+            metrics_read: Mutex::new(HashMap::new()),
             secrets_told: Mutex::new(HashMap::new()),
             paths_seen: Mutex::new(HashMap::new()),
             shots_wanted: Mutex::new(std::collections::HashSet::new()),
@@ -224,6 +234,7 @@ impl Engine {
             counters: Counters::default(),
             shooting: Arc::new(tokio::sync::Semaphore::new(screenshot_slots())),
             egress_told: Mutex::new(HashMap::new()),
+            git_reporting: Mutex::new(HashMap::new()),
             log_masks: Mutex::new(HashMap::new()),
             warm_wanted: Mutex::new(Vec::new()),
             deploying_since: Mutex::new(HashMap::new()),
@@ -698,7 +709,7 @@ fn wants(s: &Settings, c: &ChangeInfo) -> bool {
     }
     match asks(c) {
         Some(asked) => asked,
-        None => !s.manual && (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*")),
+        None => !s.manual && (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*")) && !crate::glob::any(&s.skip_authors, &c.author),
     }
 }
 
@@ -812,6 +823,11 @@ mod tests {
         assert!(!wants(&s, &ChangeInfo { branch: Some("fix/x".into()), ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { draft: true, ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { title: "Fix typo [Skip Preview]".into(), ..ch.clone() }));
+        // A dependency bot's pull request is skipped by its author, unless a person asks.
+        let bots = Settings { skip_authors: vec!["*[bot]".into()], ..s.clone() };
+        let bump = ChangeInfo { author: "dependabot[bot]".into(), ..ch.clone() };
+        assert!(wants(&bots, &ChangeInfo { author: "ada".into(), ..ch.clone() }) && !wants(&bots, &bump));
+        assert!(wants(&bots, &ChangeInfo { labels: vec!["preview".into()], ..bump.clone() }), "a label asks");
         assert!(wants(&s, &ChangeInfo { title: "[preview] try the new nav".into(), branch: Some("fix/x".into()), draft: true, ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { title: "[preview]".into(), open: false, ..ch.clone() }));
         // Unused for 6 of a week's hours: quiet; within a day: when. A 4-hour TTL warns an hour ahead.
