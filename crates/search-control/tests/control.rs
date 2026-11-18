@@ -1202,14 +1202,45 @@ async fn a_due_slm_run_wakes_its_sleeping_cluster() {
     }
 }
 
-/// An S3-compatible bucket in memory (path-style requests): objects, `If-None-Match: *` writes,
-/// `ListObjectsV2`, and the access key each request was signed with.
+/// An S3-compatible bucket in memory (path-style requests): objects with ETags, `If-None-Match:
+/// *` and `If-Match` writes, ranged reads, `ListObjectsV2`, multipart uploads (listed by prefix),
+/// and the access key each request was signed with.
 #[derive(Clone, Default)]
 struct MockBucket {
     objects: Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
     signed_by: Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
     /// Listings never end: every page is truncated, with 1,000 keys of 1 KiB.
     endless: Arc<std::sync::atomic::AtomicBool>,
+    /// Objects a multipart upload completed, with their part counts (their ETags end `-<parts>`).
+    multipart: Arc<std::sync::Mutex<std::collections::BTreeMap<String, usize>>>,
+    /// Multipart uploads in progress: upload id → (key, parts by number).
+    uploads: Arc<std::sync::Mutex<std::collections::BTreeMap<String, MockUpload>>>,
+    /// Part uploads fail (a bucket failing mid-upload).
+    fail_parts: Arc<std::sync::atomic::AtomicBool>,
+    /// Writes of `test-blob-*` objects are acknowledged and dropped (an S3 clone that loses them).
+    drop_test_blobs: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A multipart upload in a [`MockBucket`]: its key and parts by number.
+type MockUpload = (String, std::collections::BTreeMap<u32, Vec<u8>>);
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match (b[i], b.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok())) {
+            (b'%', Some(v)) => {
+                out.push(v);
+                i += 3;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 impl MockBucket {
@@ -1217,7 +1248,8 @@ impl MockBucket {
         let m = MockBucket::default();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let router = axum::Router::new().fallback(Self::handle).with_state(m.clone());
+        // Parts and blobs are megabytes: no body limit.
+        let router = axum::Router::new().fallback(Self::handle).layer(axum::extract::DefaultBodyLimit::disable()).with_state(m.clone());
         tokio::spawn(async move { axum::serve(listener, router).await });
         (endpoint, m)
     }
@@ -1226,41 +1258,397 @@ impl MockBucket {
         self.objects.lock().unwrap().keys().filter(|k| k.starts_with(prefix)).cloned().collect()
     }
 
+    fn etag(&self, key: &str, v: &[u8]) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        v.hash(&mut h);
+        match self.multipart.lock().unwrap().get(key) {
+            Some(n) => format!("\"{:032x}-{n}\"", h.finish()),
+            None => format!("\"{:032x}\"", h.finish()),
+        }
+    }
+
     async fn handle(axum::extract::State(m): axum::extract::State<MockBucket>, method: axum::http::Method, uri: axum::http::Uri, headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
+        use axum::http::StatusCode;
         use axum::response::IntoResponse;
+        use std::sync::atomic::Ordering::Relaxed;
         let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default();
         if let Some(key) = auth.split("Credential=").nth(1).and_then(|c| c.split('/').next()) {
             m.signed_by.lock().unwrap().insert(key.to_string());
         }
         let key = uri.path().strip_prefix("/backups").unwrap_or_default().trim_start_matches('/').to_string();
-        let mut objects = m.objects.lock().unwrap();
+        let q: std::collections::BTreeMap<String, String> = uri
+            .query()
+            .unwrap_or_default()
+            .split('&')
+            .filter(|p| !p.is_empty())
+            .map(|p| p.split_once('=').map_or((p.to_string(), String::new()), |(k, v)| (k.to_string(), percent_decode(v))))
+            .collect();
+        let header = |h: &str| headers.get(h).and_then(|v| v.to_str().ok()).map(str::to_string);
+        let dropped = m.drop_test_blobs.load(Relaxed) && key.contains("/test-blob-");
+        let tagged = |status: StatusCode, etag: String, body: Vec<u8>| (status, [("etag", etag)], body).into_response();
         match method.as_str() {
-            "GET" if key.is_empty() && m.endless.load(std::sync::atomic::Ordering::Relaxed) => {
+            "GET" if key.is_empty() && q.contains_key("uploads") => {
+                let prefix = q.get("prefix").cloned().unwrap_or_default();
+                let items: String = m.uploads.lock().unwrap().iter().filter(|(_, (k, _))| k.starts_with(&prefix)).map(|(id, (k, _))| format!("<Upload><Key>{k}</Key><UploadId>{id}</UploadId></Upload>")).collect();
+                format!("<ListMultipartUploadsResult><IsTruncated>false</IsTruncated>{items}</ListMultipartUploadsResult>").into_response()
+            }
+            "GET" if key.is_empty() && m.endless.load(Relaxed) => {
                 let items: String = (0..1000).map(|i| format!("<Contents><Key>prod/roll/indices/{i}{}</Key><Size>1</Size></Contents>", "k".repeat(1024))).collect();
                 format!("<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>more</NextContinuationToken>{items}</ListBucketResult>").into_response()
             }
             "GET" if key.is_empty() => {
-                let query = uri.query().unwrap_or_default();
-                let prefix = query.split('&').find_map(|p| p.strip_prefix("prefix=")).unwrap_or_default().replace("%2F", "/");
-                let items: String = objects.iter().filter(|(k, _)| k.starts_with(&prefix)).map(|(k, v)| format!("<Contents><Key>{k}</Key><Size>{}</Size></Contents>", v.len())).collect();
+                let prefix = q.get("prefix").cloned().unwrap_or_default();
+                let items: String = m.objects.lock().unwrap().iter().filter(|(k, _)| k.starts_with(&prefix)).map(|(k, v)| format!("<Contents><Key>{k}</Key><Size>{}</Size></Contents>", v.len())).collect();
                 format!("<ListBucketResult><IsTruncated>false</IsTruncated>{items}</ListBucketResult>").into_response()
             }
-            "GET" => match objects.get(&key) {
-                Some(v) => v.clone().into_response(),
-                None => (axum::http::StatusCode::NOT_FOUND, "<Error><Code>NoSuchKey</Code><Message>no</Message></Error>").into_response(),
-            },
-            "PUT" if headers.get("if-none-match").is_some() && objects.contains_key(&key) => axum::http::StatusCode::PRECONDITION_FAILED.into_response(),
+            "GET" => {
+                let Some(v) = m.objects.lock().unwrap().get(&key).cloned() else {
+                    return (StatusCode::NOT_FOUND, "<Error><Code>NoSuchKey</Code><Message>no</Message></Error>").into_response();
+                };
+                let etag = m.etag(&key, &v);
+                let range = header("range").and_then(|r| {
+                    let (a, b) = r.strip_prefix("bytes=")?.split_once('-')?;
+                    Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))
+                });
+                match range {
+                    Some((a, b)) => tagged(StatusCode::PARTIAL_CONTENT, etag, v.get(a..=b.min(v.len().saturating_sub(1))).unwrap_or_default().to_vec()),
+                    None => tagged(StatusCode::OK, etag, v),
+                }
+            }
+            "POST" if q.contains_key("uploads") => {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                let id = format!("upload{}", NEXT.fetch_add(1, Relaxed));
+                m.uploads.lock().unwrap().insert(id.clone(), (key, Default::default()));
+                format!("<InitiateMultipartUploadResult><UploadId>{id}</UploadId></InitiateMultipartUploadResult>").into_response()
+            }
+            "POST" if q.contains_key("uploadId") => {
+                let Some((k, parts)) = m.uploads.lock().unwrap().remove(&q["uploadId"]) else {
+                    return (StatusCode::NOT_FOUND, "<Error><Code>NoSuchUpload</Code><Message>no</Message></Error>").into_response();
+                };
+                if !dropped {
+                    m.multipart.lock().unwrap().insert(k.clone(), parts.len());
+                    m.objects.lock().unwrap().insert(k, parts.into_values().flatten().collect());
+                }
+                "<CompleteMultipartUploadResult></CompleteMultipartUploadResult>".into_response()
+            }
+            "PUT" if q.contains_key("partNumber") => {
+                if m.fail_parts.load(Relaxed) {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "<Error><Code>InternalError</Code><Message>part lost</Message></Error>").into_response();
+                }
+                let mut uploads = m.uploads.lock().unwrap();
+                let Some((_, parts)) = uploads.get_mut(&q["uploadId"]) else {
+                    return (StatusCode::NOT_FOUND, "<Error><Code>NoSuchUpload</Code><Message>no</Message></Error>").into_response();
+                };
+                parts.insert(q["partNumber"].parse().unwrap_or(0), body.to_vec());
+                tagged(StatusCode::OK, m.etag("", &body), Vec::new())
+            }
+            "PUT" if dropped => tagged(StatusCode::OK, m.etag("", &body), Vec::new()),
             "PUT" => {
+                let mut objects = m.objects.lock().unwrap();
+                let current = objects.get(&key).map(|v| m.etag(&key, v));
+                let refused = match (header("if-none-match"), header("if-match")) {
+                    (Some(_), _) => current.is_some(),
+                    (_, Some(want)) => current.as_deref() != Some(want.as_str()),
+                    _ => false,
+                };
+                if refused {
+                    return StatusCode::PRECONDITION_FAILED.into_response();
+                }
+                m.multipart.lock().unwrap().remove(&key);
+                let etag = m.etag(&key, &body);
                 objects.insert(key, body.to_vec());
-                axum::http::StatusCode::OK.into_response()
+                tagged(StatusCode::OK, etag, Vec::new())
+            }
+            "DELETE" if q.contains_key("uploadId") => {
+                m.uploads.lock().unwrap().remove(&q["uploadId"]);
+                StatusCode::NO_CONTENT.into_response()
             }
             "DELETE" => {
-                objects.remove(&key);
-                axum::http::StatusCode::NO_CONTENT.into_response()
+                m.objects.lock().unwrap().remove(&key);
+                StatusCode::NO_CONTENT.into_response()
             }
-            _ => axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response(),
+            _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
         }
     }
+}
+
+/// The bucket an `s3` repository test writes to: the in-memory [`MockBucket`], or a real
+/// S3-compatible server when `ROLL_SEARCH_S3_TEST_ENDPOINT` names one (with
+/// `ROLL_SEARCH_S3_TEST_BUCKET`, `_ACCESS_KEY` and `_SECRET_KEY`; MinIO in Docker, say). Each
+/// test keeps its objects under a base path of its own.
+struct TestBucket {
+    mock: Option<MockBucket>,
+    settings: Value,
+    client: search_es::s3::Client,
+    base: String,
+}
+
+impl TestBucket {
+    async fn start(name: &str) -> TestBucket {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let base = format!("{name}-{n}");
+        let real = std::env::var("ROLL_SEARCH_S3_TEST_ENDPOINT").ok().filter(|e| !e.is_empty());
+        let (endpoint, bucket, keys, mock) = match real {
+            Some(endpoint) => {
+                let var = |k: &str| std::env::var(format!("ROLL_SEARCH_S3_TEST_{k}")).unwrap_or_else(|_| panic!("ROLL_SEARCH_S3_TEST_{k} is needed with an endpoint"));
+                (endpoint, var("BUCKET"), Some((var("ACCESS_KEY"), var("SECRET_KEY"))), None)
+            }
+            None => {
+                let (endpoint, m) = MockBucket::start().await;
+                (endpoint, "backups".to_string(), None, Some(m))
+            }
+        };
+        let mut settings = json!({"bucket": bucket, "base_path": base, "endpoint": endpoint, "path_style_access": true});
+        if let Some((a, s)) = &keys {
+            settings["access_key"] = json!(a);
+            settings["secret_key"] = json!(s);
+        }
+        let at = search_es::s3::Location { endpoint: reqwest::Url::parse(&endpoint).unwrap(), bucket, region: "us-east-1".into(), path_style: true };
+        let creds = keys.map(|(access_key, secret_key)| search_es::s3::Credentials { access_key, secret_key, session_token: None });
+        let client = search_es::s3::Client::new(at, creds, true).unwrap();
+        TestBucket { mock, settings, client, base }
+    }
+
+    /// An `s3` repository here, with `extra` settings.
+    fn repo(&self, extra: Value) -> Value {
+        let mut settings = self.settings.clone();
+        for (k, v) in extra.as_object().unwrap() {
+            settings[k] = v.clone();
+        }
+        json!({"type": "s3", "settings": settings})
+    }
+
+    /// `<base_path>/roll/`: where the repository keeps everything.
+    fn prefix(&self) -> String {
+        format!("{}/roll/", self.base)
+    }
+
+    async fn objects(&self, under: &str) -> Vec<(String, u64)> {
+        self.client.list(&format!("{}{under}", self.prefix())).await.unwrap()
+    }
+}
+
+/// Documents of random text, about `size` bytes each, gzip barely shrinks.
+fn random_docs(n: usize, size: usize, seed: u64) -> Vec<Value> {
+    let mut x = seed | 1;
+    (0..n)
+        .map(|i| {
+            let raw: Vec<u8> = (0..size * 3 / 4)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x as u8
+                })
+                .collect();
+            json!({"n": i, "blob": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw)})
+        })
+        .collect()
+}
+
+async fn index_docs(e: &Env, user: &str, pw: &str, index: &str, docs: &[Value]) {
+    for (i, d) in docs.iter().enumerate() {
+        let (s, v) = e.es(user, pw, reqwest::Method::PUT, &format!("/{index}/_doc/{i}"), Some(d.clone())).await;
+        assert_eq!(s, 201, "{v}");
+    }
+    let (s, v) = e.es(user, pw, reqwest::Method::POST, &format!("/{index}/_refresh"), None).await;
+    assert_eq!(s, 200, "{v}");
+}
+
+/// A snapshot's contents go up as `chunk_size` objects, each larger than `buffer_size` as a
+/// multipart upload (both validated as Elasticsearch does), and restore whole; a part that fails
+/// aborts its upload, and `_cleanup` aborts the uploads a crash left under the repository.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_s3_repository_uploads_in_parts() {
+    let b = TestBucket::start("parts").await;
+    let e = env_with(|c| c.node_settings.push((search_control::S3_ALLOW_PRIVATE.into(), "true".into()))).await;
+    let (u, p) = creds(&e.post("/v1/search/clusters", json!({"name": "parts"})).await);
+    for (extra, reason) in [
+        (json!({"chunk_size": "10mb", "buffer_size": "20mb"}), "[bad] chunk_size (10mb) can't be lower than buffer_size (20mb)."),
+        (json!({"chunk_size": "1kb"}), "failed to parse value [1kb] for setting [chunk_size], must be >= [5mb]"),
+        (json!({"buffer_size": "6gb"}), "failed to parse value [6gb] for setting [buffer_size], must be <= [5gb]"),
+        (json!({"max_multipart_parts": 0}), "Failed to parse value [0] for setting [max_multipart_parts] must be >= 1"),
+    ] {
+        let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_snapshot/bad", Some(b.repo(extra))).await;
+        assert_eq!((s, v["error"]["caused_by"]["reason"].as_str()), (500, Some(reason)), "{v}");
+    }
+    // ~18 MiB gzipped over a few segments: full 8 MiB chunks (5 MiB and 3 MiB parts) and smaller
+    // last ones.
+    index_docs(&e, &u, &p, "docs", &random_docs(24, 1 << 20, 7)).await;
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_snapshot/backup", Some(b.repo(json!({"buffer_size": "5mb", "chunk_size": "8mb"})))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_snapshot/backup/one?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
+    assert_eq!((s, v["snapshot"]["state"].as_str()), (200, Some("SUCCESS")), "{v}");
+    let chunks: Vec<(String, u64)> = b.objects("indices/").await.into_iter().filter(|(k, _)| k.ends_with(".gz")).collect();
+    let full: Vec<&String> = chunks.iter().filter(|(_, n)| *n == 8 << 20).map(|(k, _)| k).collect();
+    assert!(chunks.len() >= 3 && !full.is_empty() && chunks.iter().all(|(_, n)| *n <= 8 << 20), "{chunks:?}");
+    let (_, etag) = b.client.get_tagged(full[0], 16 << 20).await.unwrap().unwrap();
+    assert!(etag.trim_matches('"').ends_with("-2"), "not uploaded in two parts: {etag}");
+    let (s, v) = e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/one/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": "back"}))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = e.es(&u, &p, reqwest::Method::GET, "/back/_count", None).await;
+    assert_eq!(v["count"], 24, "{v}");
+    let (_, from) = e.es(&u, &p, reqwest::Method::GET, "/docs/_doc/23", None).await;
+    let (_, to) = e.es(&u, &p, reqwest::Method::GET, "/back/_doc/23", None).await;
+    assert_eq!(from["_source"], to["_source"]);
+
+    // A part the bucket fails aborts its upload: nothing is left in progress.
+    if let Some(m) = &b.mock {
+        index_docs(&e, &u, &p, "more", &random_docs(8, 1 << 20, 9)).await;
+        m.fail_parts.store(true, std::sync::atomic::Ordering::Relaxed);
+        let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_snapshot/backup/two?wait_for_completion=true", Some(json!({"indices": "more"}))).await;
+        m.fail_parts.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(s >= 500 || v["snapshot"]["state"] != "SUCCESS", "{v}");
+        assert!(m.uploads.lock().unwrap().is_empty(), "an upload was left in progress");
+    }
+
+    // An upload a crash left under the repository goes with `_cleanup`; one elsewhere stays.
+    let inside = format!("{}indices/gone/0/0123456789abcdef0123456789abcdef-1.0.gz", b.prefix());
+    let outside = format!("{}-other/dangling", b.base);
+    let id_in = b.client.create_multipart(&inside).await.unwrap();
+    let id_out = b.client.create_multipart(&outside).await.unwrap();
+    let (s, v) = e.es(&u, &p, reqwest::Method::POST, "/_snapshot/backup/_cleanup", None).await;
+    assert_eq!(s, 200, "{v}");
+    let listed = |prefix: String| {
+        let c = &b.client;
+        async move { c.list_uploads(&prefix, 100).await.unwrap() }
+    };
+    match b.mock.is_some() || !listed(b.prefix()).await.is_empty() || !listed(inside.clone()).await.iter().any(|(_, id)| *id == id_in) {
+        true => {
+            assert!(!listed(inside.clone()).await.iter().any(|(_, id)| *id == id_in), "the dangling upload is still there");
+            assert!(listed(outside.clone()).await.iter().any(|(_, id)| *id == id_out), "an upload outside the repository went");
+        }
+        // MinIO lists uploads by exact key only: a prefix finds none (its own expiry removes them).
+        false => eprintln!("the bucket lists multipart uploads by exact key only: dangling-upload cleanup not checked"),
+    }
+    let _ = b.client.abort_multipart(&inside, &id_in).await;
+    let _ = b.client.abort_multipart(&outside, &id_out).await;
+}
+
+/// `max_snapshot_bytes_per_sec` paces a snapshot's uploads, `max_restore_bytes_per_sec` and the
+/// cluster's `indices.recovery.max_bytes_per_sec` a restore's reads, and `_nodes/stats/repositories`
+/// counts the time throttled and what was uploaded. A throttle guarantees an upper bound: no
+/// transfer goes faster than its rate, beyond one payment of burst. A slower one is the host's
+/// load (a debug build, a busy machine), so the measured rates are printed, not asserted from
+/// below; what the limiter waited is checked against the bytes, the rate and the time spent
+/// producing them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_s3_repository_throttles_bucket_traffic() {
+    // The most bytes one payment covers: a 1 MiB drain plus the ~1 MiB record that crossed it
+    // (a restore pays per received piece, far less).
+    const BURST: f64 = (2 << 20) as f64;
+    // Timer and scheduling slack.
+    const SLACK: f64 = 0.25;
+    let b = TestBucket::start("throttle").await;
+    let e = env_with(|c| c.node_settings.push((search_control::S3_ALLOW_PRIVATE.into(), "true".into()))).await;
+    let (u, p) = creds(&e.post("/v1/search/clusters", json!({"name": "throttle"})).await);
+    index_docs(&e, &u, &p, "docs", &random_docs(6, 1 << 20, 3)).await;
+    let rate = (2u64 << 20) as f64;
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_snapshot/slow", Some(b.repo(json!({"max_snapshot_bytes_per_sec": "2mb", "max_restore_bytes_per_sec": "2mb"})))).await;
+    assert_eq!(s, 200, "{v}");
+    let stats = |human: bool| {
+        let e = &e;
+        let (u, p) = (u.clone(), p.clone());
+        async move {
+            let (_, v) = e.es(&u, &p, reqwest::Method::GET, &format!("/_nodes/stats/repositories?human={human}"), None).await;
+            v["nodes"].as_object().unwrap().values().next().unwrap()["repositories"]["slow"].clone()
+        }
+    };
+    let secs = |v: &Value, k: &str| v[k].as_f64().unwrap() / 1e9;
+    // No faster than `rate`, beyond one payment.
+    let not_faster = |what: &str, bytes: f64, took: f64, rate: f64| {
+        eprintln!("{what}: {bytes:.0} bytes in {took:.2}s, {:.0} B/s against {rate:.0} ({:.2} of it)", bytes / took, bytes / took / rate);
+        assert!(bytes <= rate * took + BURST, "{what}: {bytes:.0} bytes in {took:.2}s is faster than {rate:.0} B/s");
+    };
+
+    let started = std::time::Instant::now();
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_snapshot/slow/one?wait_for_completion=true", Some(json!({"indices": "docs"}))).await;
+    let took = started.elapsed().as_secs_f64();
+    assert_eq!((s, v["snapshot"]["state"].as_str()), (200, Some("SUCCESS")), "{v}");
+    let s1 = stats(false).await;
+    eprintln!("snapshot stats: {s1}");
+    let uploaded = s1["uploaded_size_in_bytes"].as_f64().unwrap();
+    not_faster("snapshot", uploaded, took, rate);
+    assert_eq!((s1["shard_snapshots_started"].as_i64(), s1["shard_snapshots_completed"].as_i64(), s1["shard_snapshots_in_progress"].as_i64()), (Some(1), Some(1), Some(0)), "{s1}");
+    assert!(s1["uploaded_blobs"].as_i64() >= Some(1), "{s1}");
+    // The limiter waits for what producing the bytes didn't already take, and never longer than
+    // the bytes take at the rate.
+    let (throttled, producing) = (secs(&s1, "total_write_throttled_time_nanos"), s1["total_read_time_in_millis"].as_f64().unwrap() / 1e3);
+    let owed = uploaded / rate - producing - BURST / rate - SLACK;
+    assert!(throttled <= uploaded / rate + SLACK, "throttled {throttled:.2}s for {uploaded:.0} bytes at {rate:.0} B/s: {s1}");
+    assert!(throttled >= owed, "throttled {throttled:.2}s, owed at least {owed:.2}s: {s1}");
+    if owed > 0.0 {
+        assert!(throttled > 0.0, "{s1}");
+    }
+
+    let restore = |to: &'static str| {
+        let e = &e;
+        let (u, p) = (u.clone(), p.clone());
+        async move {
+            let started = std::time::Instant::now();
+            let (s, v) = e.es(&u, &p, reqwest::Method::POST, "/_snapshot/slow/one/_restore?wait_for_completion=true", Some(json!({"rename_pattern": "docs", "rename_replacement": to}))).await;
+            assert_eq!(s, 200, "{v}");
+            started.elapsed().as_secs_f64()
+        }
+    };
+    not_faster("restore", uploaded, restore("r1").await, rate);
+    let s2 = stats(false).await;
+    let read_throttled = secs(&s2, "total_read_throttled_time_nanos");
+    assert!(read_throttled <= uploaded / rate + SLACK, "read throttled {read_throttled:.2}s for {uploaded:.0} bytes at {rate:.0} B/s: {s2}");
+    // Without a repository limit, the cluster's recovery limit paces restores.
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_snapshot/slow", Some(b.repo(json!({"max_snapshot_bytes_per_sec": "2mb"})))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_cluster/settings", Some(json!({"persistent": {"indices.recovery.max_bytes_per_sec": "4mb"}}))).await;
+    assert_eq!(s, 200, "{v}");
+    not_faster("restore under the recovery limit", uploaded, restore("r2").await, 2.0 * rate);
+    let (_, v) = e.es(&u, &p, reqwest::Method::GET, "/r2/_count", None).await;
+    assert_eq!(v["count"], 6, "{v}");
+    let s3 = stats(true).await;
+    let read_throttled = secs(&s3, "total_read_throttled_time_nanos");
+    assert!(read_throttled <= uploaded / rate + uploaded / (2.0 * rate) + 2.0 * SLACK, "read throttled {read_throttled:.2}s: {s3}");
+    assert!(s3["total_write_throttled_time"].is_string() && s3["uploaded_size"].is_string(), "{s3}");
+}
+
+/// `_analyze` really exercises a bucket: on a good one it passes with Elasticsearch's answer
+/// (registers, overwrite protection, blobs past `buffer_size` in parts, rare overwrites, aborts
+/// and early reads) and leaves nothing behind; a bucket that acknowledges writes it drops fails
+/// it as Elasticsearch fails it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_s3_repository_analysis_exercises_the_bucket() {
+    let b = TestBucket::start("analyze").await;
+    let e = env_with(|c| c.node_settings.push((search_control::S3_ALLOW_PRIVATE.into(), "true".into()))).await;
+    let (u, p) = creds(&e.post("/v1/search/clusters", json!({"name": "analyze"})).await);
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_snapshot/good", Some(b.repo(json!({"buffer_size": "5mb"})))).await;
+    assert_eq!(s, 200, "{v}");
+    let path = "/_snapshot/good/_analyze?blob_count=12&max_blob_size=6mb&max_total_data_size=24mb&seed=42&detailed=true&rare_action_probability=0.5&timeout=120s";
+    let (s, v) = e.es(&u, &p, reqwest::Method::POST, path, None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!((v["blob_count"].as_i64(), v["summary"]["write"]["count"].as_i64(), v["details"].as_array().map(Vec::len)), (Some(12), Some(12), Some(12)), "{v}");
+    assert_eq!((v["max_blob_size"].as_str(), v["rare_action_probability"].as_f64(), &v["issues_detected"]), (Some("6mb"), Some(0.5), &json!([])), "{v}");
+    let written = v["summary"]["write"]["total_size_bytes"].as_i64().unwrap();
+    assert!(written > 0 && written <= 24 << 20 && v["summary"]["read"]["count"].as_i64() >= Some(1), "{v}");
+    assert!(v["details"].as_array().unwrap().iter().any(|d| d["blob"]["overwritten"] == true || d["blob"]["read_early"] == true), "no rare action ran: {v}");
+    assert!(b.objects("temp-analysis-").await.is_empty(), "the analysis left blobs behind");
+    if b.mock.is_some() || !b.client.list_uploads(&b.prefix(), 10).await.unwrap().is_empty() {
+        assert!(b.client.list_uploads(&b.prefix(), 10).await.unwrap().is_empty(), "the analysis left uploads behind");
+    }
+
+    // A bucket that loses writes it acknowledged.
+    let (endpoint, m) = MockBucket::start().await;
+    m.drop_test_blobs.store(true, std::sync::atomic::Ordering::Relaxed);
+    let repo = json!({"type": "s3", "settings": {"bucket": "backups", "base_path": "broken", "endpoint": endpoint, "path_style_access": true}});
+    let (s, v) = e.es(&u, &p, reqwest::Method::PUT, "/_snapshot/broken", Some(repo)).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e.es(&u, &p, reqwest::Method::POST, "/_snapshot/broken/_analyze?blob_count=5&max_blob_size=64kb&seed=3", None).await;
+    let err = &v["error"];
+    assert_eq!((s, err["type"].as_str()), (500, Some("repository_verification_exception")), "{v}");
+    assert!(err["reason"].as_str().unwrap().starts_with("[broken] Elasticsearch observed the storage system underneath this repository behaved incorrectly"), "{v}");
+    assert!(err["caused_by"]["reason"].as_str().unwrap().starts_with("[broken] failure processing [blob analysis [broken:temp-analysis-"), "{v}");
+    let innermost = err["caused_by"]["caused_by"]["reason"].as_str().unwrap();
+    assert!(innermost.starts_with("[broken] node [{") && innermost.ends_with("reported blob not found after it was written"), "{v}");
+    assert_eq!(err["root_cause"][0]["reason"].as_str(), Some(innermost), "{v}");
+    assert!(m.keys("broken/roll/temp-analysis-").is_empty(), "the failed analysis left blobs behind");
 }
 
 /// An `s3` repository in a tenant's bucket: credentials sign every request and are never shown,
