@@ -829,21 +829,19 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Passkeys (WebAuthn), as GitHub, Google and Vercel have them** (now): phishing-resistant sign-in,
-   what enterprise buyers ask for after SSO. docs/accounts.md promised them as phase 2 (the
-   `passkeys` table is there, unused). A passkey is a second factor next to TOTP, and a first one
-   on its own (a discoverable credential with user verification signs a person in, never past an
-   enforced SSO domain). ES256, EdDSA and RS256 keys verified with `ring`; attestation `none`; a
-   bounded CBOR reader of our own (never sized from a peer's count); the origin and RP id are the
-   dashboard's; a sign count that goes backwards is refused (a cloned key). Account page:
-   add, rename, remove; sign-in page: "Sign in with a passkey"; the second-factor step: "Use a
-   passkey". Tested with a software authenticator in `flows.rs`.
-2. **Sudo mode** (GitHub's): turning a second factor off, removing a passkey, making tokens and
-   changing SSO need a sign-in in the last two hours, or a fresh code or passkey; refused with
-   `reauth_required`, and the dashboard asks in place.
-3. **Mail on a sign-in from a new device** (GitHub's "a new sign-in to your account"): the first
-   sign-in from a device (user agent and network) a person hasn't used mails them, with the
-   address and a link to Recent activity and their sessions.
+1. **Accounts as GitHub has them, built 2026-11-18 and stacked for the next turn:** passkeys
+   (#256: on their own or as the second factor; a bounded CBOR reader, `ring`), sudo mode (#257: a
+   proof in the last two hours before changing how an account is reached; a Confirm it's you
+   dialog) and mail on a sign-in from somewhere new (#258), on #254 (refused codes in the security
+   log). Next on it (now): roll-access's token creation from a person's session behind sudo mode
+   too (a stolen cookie minting a long-lived token is GitHub's reason for sudo), through a
+   `Sessions` hook rather than a second check; then a review screenshot pass of all three.
+2. **Accounts, after that:** account recovery an admin can see (a person locked out of their
+   second factor asks, an admin approves after checking, both in the audit log); WebAuthn
+   attestation for companies that require hardware keys (an allowlist of AAGUIDs, off by
+   default).
+3. **Enterprise:** a provider made once in the dashboard for both people and agents (#252 picks
+   an existing connection today).
 4. **People's accounts, enterprise-grade:** on main since 2026-11-18: SSO (#225), SCIM
    provisioning (#231), an audit trail of accounts in roll's audit log (#236) and a person's own
    security log (#239). Next on it, ranked:
