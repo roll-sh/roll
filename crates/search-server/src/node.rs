@@ -48,6 +48,9 @@
 //!   flight are unloaded.
 //! - **Metering** ([`Node::take_request_counts`]): requests admitted per cluster since the last
 //!   call, counted per instance and carried over when an instance unloads.
+//! - **Search analytics** ([`Node::take_analytics`]): each loaded cluster's buckets of the
+//!   indices that turned analytics on (`search_es::analytics`), and the indices whose analytics
+//!   went, handed to whoever meters and carried over the same way when an instance unloads.
 //! - **Live spec changes** ([`Node::update_spec`]): limits and credentials apply to the loaded
 //!   instance at once, and to one still waking (the wake re-reads the catalog before it
 //!   publishes, and updates made after that wait in `pending_specs` for the publishing opener).
@@ -281,6 +284,8 @@ pub struct Node {
     pending_specs: Mutex<HashMap<String, ClusterSpec>>,
     /// Requests of unloaded instances not reported yet ([`Node::take_request_counts`]).
     unmetered: Mutex<HashMap<String, u64>>,
+    /// Search analytics of unloaded instances not handed on yet ([`Node::take_analytics`]).
+    unanalysed: Mutex<HashMap<String, search_es::analytics::Taken>>,
     /// Makes a running reaper re-plan its tick (a cluster with a memory budget loaded).
     reaper_kick: Arc<tokio::sync::Notify>,
     tasks: Arc<TaskCount>,
@@ -728,6 +733,7 @@ impl Node {
             leases: OnceLock::new(),
             pending_specs: Mutex::new(HashMap::new()),
             unmetered: Mutex::new(HashMap::new()),
+            unanalysed: Mutex::new(HashMap::new()),
             reaper_kick: Arc::new(tokio::sync::Notify::new()),
             tasks: Arc::new(TaskCount::default()),
             shutting_down: AtomicBool::new(false),
@@ -1171,6 +1177,10 @@ impl Node {
         if left > 0 {
             *self.unmetered.lock().entry(name.to_string()).or_default() += left;
         }
+        let seen = loaded.cluster.analytics.take();
+        if !seen.is_empty() {
+            self.unanalysed.lock().entry(name.to_string()).or_default().extend(seen);
+        }
         drop(loaded);
         self.unloads.fetch_add(1, Ordering::Relaxed);
         self.residency.notify_waiters();
@@ -1346,6 +1356,39 @@ impl Node {
         let mut v: Vec<(String, u64)> = out.into_iter().collect();
         v.sort_unstable();
         v
+    }
+
+    /// Every cluster's search analytics since the previous call (loaded clusters and those
+    /// unloaded meanwhile), each handed on once.
+    pub fn take_analytics(&self) -> Vec<(String, search_es::analytics::Taken)> {
+        let loaded: Vec<Arc<Loaded>> = self.clusters.read().values().filter_map(|s| s.get().cloned()).collect();
+        let mut out: HashMap<String, search_es::analytics::Taken> = std::mem::take(&mut *self.unanalysed.lock());
+        for l in loaded {
+            let seen = l.cluster.analytics.take();
+            if !seen.is_empty() {
+                out.entry(l.name.to_string()).or_default().extend(seen);
+            }
+        }
+        let mut v: Vec<(String, search_es::analytics::Taken)> = out.into_iter().collect();
+        v.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
+    /// The analytics buckets [`Node::take_analytics`] would hand on for cluster `name`, left
+    /// in place (an API read between two metering passes): (index, unix hour, bucket), the
+    /// clears waiting to be handed on, and (loaded here) the indices with analytics on now.
+    pub fn peek_analytics(&self, name: &str) -> search_es::analytics::Taken {
+        let mut out = search_es::analytics::Taken::default();
+        if let Some(t) = self.unanalysed.lock().get(name) {
+            out.cleared = t.cleared.clone();
+            out.enabled = t.enabled.clone();
+            out.hours = t.hours.clone();
+        }
+        if let Some(l) = self.get_loaded(name) {
+            out.extend(search_es::analytics::Taken { hours: l.cluster.analytics.peek(), ..Default::default() });
+            out.enabled = Some(l.cluster.analytics.enabled_names());
+        }
+        out
     }
 
     /// Applies memory budgets: commits clusters over their own `max_resident_bytes` (moving

@@ -62,6 +62,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices", get(indices))
         .route("/v1/search/clusters/{id}/request", post(request))
         .route("/v1/search/clusters/{id}/usage", get(usage))
+        .route("/v1/search/clusters/{id}/analytics", get(analytics))
         .route("/v1/search/clusters/{id}/keys", post(create_key))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
@@ -595,6 +596,20 @@ struct UsageQuery {
 
 async fn usage(State(c): State<AppState>, Path(id): Path<String>, Query(q): Query<UsageQuery>) -> ApiResult<Usage> {
     Ok(Json(c.usage(&id, q.days.unwrap_or(30).clamp(1, 366)).await?))
+}
+
+#[derive(Deserialize)]
+struct AnalyticsQuery {
+    index: Option<String>,
+    range: Option<String>,
+}
+
+/// Search analytics (`?index=&range=24h|7d|30d`): top queries, queries with no results and
+/// click-through. Runs on the cluster's owner (`per_cluster`), which adds what it recorded since
+/// the last pass.
+async fn analytics(State(c): State<AppState>, Path(id): Path<String>, Query(q): Query<AnalyticsQuery>) -> ApiResult<Value> {
+    let index = q.index.as_deref().filter(|i| !i.is_empty());
+    Ok(Json(c.analytics(&id, index, q.range.as_deref().unwrap_or("24h")).await?))
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@
 
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 import { withSession } from "./code-token";
+import { analyticsQuery, type AnalyticsRange, type SearchAnalytics } from "./search-analytics";
 
 export type Flavor = "elasticsearch" | "opensearch";
 
@@ -230,6 +231,7 @@ export const searchApi = {
   request: (id: string, method: string, path: string, body?: unknown) =>
     call<ConsoleResponse>("POST", `${cl(id)}/request`, { method, path, body }),
   usage: (id: string, days = 30) => call<SearchUsage>("GET", `${cl(id)}/usage?days=${days}`),
+  analytics: (id: string, index: string | null, range: AnalyticsRange) => call<SearchAnalytics>("GET", `${cl(id)}/analytics?${analyticsQuery(index, range)}`),
   createKey: (id: string, name: string, access: KeyAccess, expiresInS?: number) =>
     call<NewSearchKey>("POST", `${cl(id)}/keys`, { name, access, expires_in_s: expiresInS }),
   revokeKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/keys/${encodeURIComponent(key)}`),

@@ -1811,6 +1811,7 @@ impl Control {
         for (name, n) in self.node.take_request_counts() {
             self.meter.count_requests(&name, n.min(i64::MAX as u64) as i64);
         }
+        self.store_analytics().await;
         let at = now_ms();
         for (name, forced) in self.meter.sample(at).await? {
             let due = forced || self.refreshed.lock().get(&name).is_none_or(|t| at - t >= self.cfg.stats_interval.as_millis() as i64);
