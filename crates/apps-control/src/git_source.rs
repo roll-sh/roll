@@ -28,7 +28,8 @@ impl crate::Apps {
             let remote = self.git_remote(&svc.id, url).await;
             let sid = svc.id.clone();
             let Ok((envs, pending)) = self.db(move |s| Ok((s.environments(&sid)?, s.pending_deployments(&sid)?))).await else { continue };
-            for env in envs.into_iter().filter(|e| !e.ephemeral && !e.paused && e.held_by.is_none()) {
+            for env in envs.into_iter().filter(|e| !e.ephemeral && !e.paused && !matches!(crate::deploy::hold_of(&svc, e), crate::deploy::Held::Skip(_))) {
+                let hold = crate::deploy::hold_of(&svc, &env);
                 // One whose first deploy failed is followed too: the fix pushed next deploys.
                 let Some(branch) = env.branch.clone() else { continue };
                 if pending.iter().any(|d| d.environment == env.name) {
@@ -68,7 +69,11 @@ impl crate::Apps {
                     continue;
                 }
                 let subject = message.lines().next().unwrap_or("").chars().take(500).collect::<String>();
-                let body = serde_json::json!({ "revision": sha, "message": if subject.is_empty() { format!("new commit on {branch}: {}", &sha[..12]) } else { subject } });
+                if env.wait_for_ci {
+                    let _ = self.wait_for_git_ci(&svc, &env.name, &sha, &subject, "git watch").await;
+                    continue;
+                }
+                let body = hold.body(serde_json::json!({ "revision": sha, "message": if subject.is_empty() { format!("new commit on {branch}: {}", &sha[..12]) } else { subject } }));
                 let by = crate::model::By { trigger: crate::model::Trigger::Push, actor: Some("git watch".into()) };
                 // Keyed by the commit: two nodes' watches (a takeover mid-pass) make one deploy.
                 match self.deploy(&svc.id, &env.name, body, by, None, Some(&format!("git:{}:{sha}", env.name))).await {
@@ -124,6 +129,11 @@ impl<'a> Remote<'a> {
         Remote { client: client(allow_private), url, auth: login.map(|(username, password)| code_git::Credentials { username, password, vouched: false }) }
     }
 
+    /// The login it fetches with (a username and a token), if it has one.
+    pub fn login(&self) -> Option<(&str, &str)> {
+        self.auth.as_ref().map(|c| (c.username.as_str(), c.password.as_str()))
+    }
+
     /// A public repository's (a plan, an import, a template): no login.
     pub fn public(allow_private: bool, url: &'a str) -> Self {
         Self::new(allow_private, url, None)
@@ -131,6 +141,12 @@ impl<'a> Remote<'a> {
 
     pub async fn ls_refs(&self) -> anyhow::Result<code_git::RefList> {
         self.client.ls_refs(self.url, self.auth.as_ref()).await
+    }
+
+    /// Where one ref is now (`refs/pull/7/head`), none when the repository hasn't it.
+    pub async fn ref_at(&self, name: &str) -> anyhow::Result<Option<String>> {
+        let refs = self.client.ls_refs_with(self.url, self.auth.as_ref(), &[name]).await?;
+        Ok(refs.get(name).map(|r| r.oid.to_string()))
     }
 
     async fn fetch(&self, args: &FetchArgs) -> anyhow::Result<code_git::Fetched> {

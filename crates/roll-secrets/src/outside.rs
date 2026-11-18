@@ -60,6 +60,8 @@ pub trait OutsideDb: Send + Sync {
     /// End `name`'s sessions and drop it (one that owns objects is left unable to log in). A role
     /// that's gone already is fine.
     fn drop_login(&self, url: &str, ca: Option<&str>, name: &str) -> std::result::Result<(), String>;
+    /// Set the password of the user `url` logs in as (rotating the admin credential itself).
+    fn set_own_password(&self, url: &str, ca: Option<&str>, password: &str) -> std::result::Result<(), String>;
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -77,6 +79,20 @@ pub struct OutsideDatabase {
     pub ca: Option<String>,
     pub created_at: i64,
     pub created_by: String,
+}
+
+/// A registration's changes (`PATCH …/outside-databases/{id}`): what's absent stays.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutsideDatabaseChange {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// A new admin URL (checked as registering checks it): after its password changed elsewhere.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// The server's CA certificates; `""` clears them.
+    #[serde(default)]
+    pub ca: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +139,59 @@ fn authority_host(url: &str) -> Result<String> {
 
 fn aad(project: &str, id: &str) -> String {
     format!("roll-secrets:outside_database:{project}:{id}:url")
+}
+
+/// A rotation's new admin URL, stored before the server's password changes.
+/// How long a rotation's claim on url_next keeps others off it: past its server call's timeouts.
+const ROTATING_MS: i64 = 5 * 60_000;
+
+fn next_aad(project: &str, id: &str) -> String {
+    format!("roll-secrets:outside_database:{project}:{id}:url_next")
+}
+
+/// `url` with `password` in place of its own (the same user; the password is letters and digits,
+/// so nothing needs encoding).
+fn with_password(url: &str, password: &str) -> Result<String> {
+    let (scheme, rest) = url.split_once("://").ok_or_else(|| Error::BadRequest("the admin URL has no scheme".into()))?;
+    let Some((userinfo, after)) = rest.rsplit_once('@') else {
+        return Err(Error::BadRequest("the admin URL has no password to rotate".into()));
+    };
+    let user = userinfo.split_once(':').map_or(userinfo, |(u, _)| u);
+    Ok(format!("{scheme}://{user}:{password}@{after}"))
+}
+
+/// A URL a registration may use: one of the engines', with a host.
+fn check_url(url: &str) -> Result<String> {
+    let host = authority_host(url)?;
+    if !["postgres://", "postgresql://", "mysql://", "sqlserver://", "clickhouse://", "rabbitmq://", "redis://", "rediss://", "mongodb://", "mongodb+srv://", "elasticsearch://", "opensearch://", "cassandra://"].iter().any(|p| url.starts_with(p)) || host.is_empty() || url.len() > 2048 {
+        return Err(Error::BadRequest("the URL is postgres://user:password@host:5432/db, mysql://…@host:3306/db, sqlserver://…@host:1433/db, clickhouse://…@host:8443/db, rabbitmq://…@host:15671/vhost, rediss://…@host:6379, mongodb+srv://…@cluster, elasticsearch://…@host:9200, opensearch://…@host:9200 or cassandra://…@host:9142/keyspace".into()));
+    }
+    Ok(host)
+}
+
+fn check_ca(ca: Option<String>) -> Result<Option<String>> {
+    let ca = ca.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
+    if ca.as_ref().is_some_and(|c| c.len() > 64 * 1024 || !c.contains("-----BEGIN CERTIFICATE-----")) {
+        return Err(Error::BadRequest("ca is the server's CA certificates, PEM (64 KiB at most)".into()));
+    }
+    Ok(ca)
+}
+
+/// How many keys link to a registration and leases of it are live (it can't move servers then).
+fn in_use(c: &code_sql::Conn<'_>, project: &str, id: &str) -> code_sql::Result<i64> {
+    let like = (format!("%\"kind\":\"{KIND}\"%"), format!("%\"ref\":\"{id}\"%"));
+    c.query_row(
+        "SELECT (SELECT COUNT(*) FROM secrets WHERE project_id = ? AND link LIKE ? AND link LIKE ?) + (SELECT COUNT(*) FROM leases WHERE project_id = ? AND revoked_at IS NULL AND link LIKE ? AND link LIKE ?)",
+        params![project, like.0, like.1, project, like.0, like.1],
+        |r| r.get(0),
+    )
+}
+
+fn check_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
+        return Err(Error::BadRequest("a database's name is letters, digits, - and _ (64 at most)".into()));
+    }
+    Ok(())
 }
 
 /// A role, user or account name: letters, digits and _ (quoted where the engine needs it).
@@ -174,19 +243,37 @@ pub(crate) struct Provider {
 
 impl Provider {
     fn open(&self, id: &str) -> Result<Opened> {
-        type Row = (String, Vec<u8>, Option<String>, String, Option<String>, String);
+        type Row = (String, Vec<u8>, Option<Vec<u8>>, Option<String>, String, Option<String>, String);
         let row: Option<Row> = self.db.read(|c| {
             Ok::<_, Error>(
-                c.query_row("SELECT o.project_id, o.url, o.ca, o.roles, o.grp, p.dek FROM outside_dbs o JOIN projects p ON p.project_id = o.project_id WHERE o.id = ?", [id], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                c.query_row("SELECT o.project_id, o.url, o.url_next, o.ca, o.roles, o.grp, p.dek FROM outside_dbs o JOIN projects p ON p.project_id = o.project_id WHERE o.id = ?", [id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
                 })
                 .optional()?,
             )
         })?;
-        let (project, url, ca, roles, group, dek) = row.ok_or_else(|| Error::Link(format!("database {id} doesn't exist any more")))?;
+        let (project, url, next, ca, roles, group, dek) = row.ok_or_else(|| Error::Link(format!("database {id} doesn't exist any more")))?;
         let inner = self.unwrap.inner(&project, &dek)?;
         let (dek, _) = self.keys.open_dek(&project, &inner)?;
-        Ok(Opened { url: dek.open(&aad(&project, id), &url)?, ca, roles: serde_json::from_str(&roles).unwrap_or_default(), group })
+        let roles: Vec<String> = serde_json::from_str(&roles).unwrap_or_default();
+        let mut url = dek.open(&aad(&project, id), &url)?;
+        // An admin rotation stopped between the server and the store: when its URL is the one that
+        // logs in, it's the admin URL from now on (only then: the stored one may be fine).
+        if let Some(sealed) = next {
+            let candidate = dek.open(&next_aad(&project, id), &sealed)?;
+            if self.outside.check(url.expose(), ca.as_deref(), &roles, group.as_deref()).is_err() && self.outside.check(candidate.expose(), ca.as_deref(), &roles, group.as_deref()).is_ok() {
+                let stored = dek.seal(&aad(&project, id), &candidate);
+                let now = self.db.now_ms()?;
+                self.db.write(|c| {
+                    if c.execute("UPDATE outside_dbs SET url = ?, url_next = NULL WHERE id = ? AND url_next = ?", params![stored, id, sealed])? > 0 {
+                        audit::record(c, &project, &Caller::consumer("roll"), "outside_db.rotate_admin", None, None, &[], "finished an interrupted admin password rotation", now)?;
+                    }
+                    Ok::<_, Error>(())
+                })?;
+                url = candidate;
+            }
+        }
+        Ok(Opened { url, ca, roles, group })
     }
 
     /// A dynamic login of its own, in the group, valid until the lease ends.
@@ -279,9 +366,7 @@ impl Secrets {
     pub fn add_outside_database(&self, project: &str, n: NewOutsideDatabase, caller: &Caller) -> Result<OutsideDatabase> {
         caller.need(Action::Admin, &Scope::project(project))?;
         let outside = self.outside.clone().ok_or_else(|| Error::BadRequest("databases outside roll aren't on this server".into()))?;
-        if n.name.is_empty() || n.name.len() > 64 || !n.name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
-            return Err(Error::BadRequest("a database's name is letters, digits, - and _ (64 at most)".into()));
-        }
+        check_name(&n.name)?;
         let group = n.group.map(|g| g.trim().to_string()).filter(|g| !g.is_empty());
         let pair = n.roles.len() == 2 && n.roles[0] != n.roles[1];
         if !(pair || n.roles.is_empty()) || !n.roles.iter().all(|r| check_role(r)) || group.as_ref().is_some_and(|g| !check_group(g)) || (n.roles.is_empty() && group.is_none()) {
@@ -290,14 +375,8 @@ impl Secrets {
         if group.as_ref().is_some_and(|g| n.roles.contains(g)) {
             return Err(Error::BadRequest("the group role isn't one of the two that take turns".into()));
         }
-        let host = authority_host(&n.url)?;
-        if !["postgres://", "postgresql://", "mysql://", "sqlserver://", "clickhouse://", "rabbitmq://", "redis://", "rediss://", "mongodb://", "mongodb+srv://", "elasticsearch://", "opensearch://", "cassandra://"].iter().any(|p| n.url.starts_with(p)) || host.is_empty() || n.url.len() > 2048 {
-            return Err(Error::BadRequest("the URL is postgres://user:password@host:5432/db, mysql://…@host:3306/db, sqlserver://…@host:1433/db, clickhouse://…@host:8443/db, rabbitmq://…@host:15671/vhost, rediss://…@host:6379, mongodb+srv://…@cluster, elasticsearch://…@host:9200, opensearch://…@host:9200 or cassandra://…@host:9142/keyspace".into()));
-        }
-        let ca = n.ca.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
-        if ca.as_ref().is_some_and(|c| c.len() > 64 * 1024 || !c.contains("-----BEGIN CERTIFICATE-----")) {
-            return Err(Error::BadRequest("ca is the server's CA certificates, PEM (64 KiB at most)".into()));
-        }
+        let host = check_url(&n.url)?;
+        let ca = check_ca(n.ca)?;
         outside.check(&n.url, ca.as_deref(), &n.roles, group.as_deref()).map_err(|why| Error::BadRequest(format!("roll couldn't use the database: {why}")))?;
         let dek = self.project(project)?;
         let id = names::new_id("odb", 16);
@@ -320,6 +399,172 @@ impl Secrets {
             audit::record(c, project, caller, "outside_db.add", None, None, &[], &format!("added database {} ({})", d.name, d.host), now)
         })?;
         Ok(d)
+    }
+
+    fn outside_database(&self, project: &str, id: &str) -> Result<OutsideDatabase> {
+        self.db
+            .read(|c| {
+                c.query_row("SELECT id, name, host, roles, grp, ca, created_at, created_by FROM outside_dbs WHERE project_id = ? AND id = ?", [project, id], |r| {
+                    Ok(OutsideDatabase { id: r.get(0)?, name: r.get(1)?, host: r.get(2)?, roles: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(), group: r.get(4)?, ca: r.get(5)?, created_at: r.get(6)?, created_by: r.get(7)? })
+                })
+                .optional()
+            })?
+            .ok_or_else(|| Error::NotFound(format!("no database {id}")))
+    }
+
+    /// Change a registration in place: its name, its CA, or its admin URL (connected to and checked
+    /// as registering checks it, before it's kept). Links and their logins carry on.
+    pub fn update_outside_database(&self, project: &str, id: &str, ch: OutsideDatabaseChange, caller: &Caller) -> Result<OutsideDatabase> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        let outside = self.outside.clone().ok_or_else(|| Error::BadRequest("databases outside roll aren't on this server".into()))?;
+        let dek = self.project(project)?;
+        let d = self.outside_database(project, id)?;
+        if let Some(n) = &ch.name {
+            check_name(n)?;
+        }
+        let ca = match ch.ca {
+            Some(c) => check_ca(Some(c))?,
+            None => d.ca.clone(),
+        };
+        let url = match ch.url.as_deref().map(str::trim) {
+            Some(u) => {
+                let host = check_url(u)?;
+                let scheme = |x: &str| x.split("://").next().unwrap_or_default().trim_end_matches("ql").to_string();
+                let current: Vec<u8> = self.db.read(|c| c.query_row("SELECT url FROM outside_dbs WHERE id = ?", [id], |r| r.get(0)))?;
+                let moved = host != d.host || scheme(u) != scheme(dek.open(&aad(project, id), &current)?.expose());
+                // Refused before the server is asked (the write checks again: it decides).
+                if moved && self.db.read(|c| in_use(c, project, id))? > 0 {
+                    return Err(Error::Conflict("in_use", format!("{} moves to another server only once no key links to it and no lease is live: its logins are on {}", d.name, d.host)));
+                }
+                outside.check(u, ca.as_deref(), &d.roles, d.group.as_deref()).map_err(|why| Error::BadRequest(format!("roll couldn't use the database: {why}")))?;
+                Some((host, dek.seal(&aad(project, id), &Value::new(u.to_string())), moved))
+            }
+            None => None,
+        };
+        let now = self.db.now_ms()?;
+        let mut changed: Vec<&str> = vec![];
+        self.db.write(|c| {
+            changed.clear();
+            if let Some(n) = ch.name.as_ref().filter(|n| **n != d.name) {
+                if c.query_row("SELECT 1 FROM outside_dbs WHERE project_id = ? AND name = ?", [project, n.as_str()], |_| Ok(())).optional()?.is_some() {
+                    return Err(Error::Conflict("exists", format!("a database named {n} exists")));
+                }
+                c.execute("UPDATE outside_dbs SET name = ? WHERE id = ?", [n.as_str(), id])?;
+                changed.push("name");
+            }
+            if ca != d.ca {
+                c.execute("UPDATE outside_dbs SET ca = ? WHERE id = ?", params![ca, id])?;
+                changed.push("CA");
+            }
+            if let Some((host, sealed, moved)) = &url {
+                // A rotation in flight may still change the server's password: not under it.
+                if c.query_row("SELECT url_next IS NOT NULL FROM outside_dbs WHERE id = ?", [id], |r| r.get::<_, bool>(0))? {
+                    return Err(Error::Conflict("conflict", format!("{} is being rotated: set its URL once that's done", d.name)));
+                }
+                // Its roles' passwords and its leases' logins live on this server: moving to another
+                // would leave them behind, never dropped (checked here, in the write).
+                if *moved && in_use(c, project, id)? > 0 {
+                    return Err(Error::Conflict("in_use", format!("{} moves to another server only once no key links to it and no lease is live: its logins are on {}", d.name, d.host)));
+                }
+                c.execute("UPDATE outside_dbs SET url = ?, host = ? WHERE id = ?", params![sealed, host, id])?;
+                changed.push("admin URL");
+            }
+            if !changed.is_empty() {
+                audit::record(c, project, caller, "outside_db.update", None, None, &[], &format!("changed database {}'s {}", d.name, changed.join(", ")), now)?;
+            }
+            Ok(())
+        })?;
+        self.outside_database(project, id)
+    }
+
+    /// Rotate the admin URL's own password, as Vault's `rotate-root`: a password nobody chose is set
+    /// on the server and kept, sealed, so nobody knows it but roll. The new URL is stored before the
+    /// server changes; a rotation interrupted after that finishes on the next one.
+    pub fn rotate_outside_admin(&self, project: &str, id: &str, caller: &Caller) -> Result<OutsideDatabase> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        let outside = self.outside.clone().ok_or_else(|| Error::BadRequest("databases outside roll aren't on this server".into()))?;
+        let dek = self.project(project)?;
+        let d = self.outside_database(project, id)?;
+        let (url, next, next_at): (Vec<u8>, Option<Vec<u8>>, Option<i64>) = self.db.read(|c| c.query_row("SELECT url, url_next, url_next_at FROM outside_dbs WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+        // Another rotation's in flight (its server call may still land): leave it alone.
+        if next.is_some() && next_at.is_some_and(|at| self.db.now_ms().is_ok_and(|now| now - at < ROTATING_MS)) {
+            return Err(Error::Conflict("conflict", format!("{} is being rotated: try again in a few minutes", d.name)));
+        }
+        let current = dek.open(&aad(project, id), &url)?;
+        let logs_in = |u: &Value| outside.check(u.expose(), d.ca.as_deref(), &d.roles, d.group.as_deref()).is_ok();
+        // Every change below is a compare-and-swap on the url_next it read, so two nodes never
+        // drop a password the other may have set.
+        let promote = |next: &Value, sealed_next: &[u8], what: &str| -> Result<bool> {
+            let sealed = dek.seal(&aad(project, id), next);
+            let now = self.db.now_ms()?;
+            self.db.write(|c| {
+                if c.execute("UPDATE outside_dbs SET url = ?, url_next = NULL, url_next_at = NULL WHERE id = ? AND url_next = ?", params![sealed, id, sealed_next])? == 0 {
+                    return Ok(false);
+                }
+                audit::record(c, project, caller, "outside_db.rotate_admin", None, None, &[], &format!("{what} database {}'s admin password", d.name), now)?;
+                Ok(true)
+            })
+        };
+        let drop_next = |sealed_next: &[u8]| self.db.write(|c| c.execute("UPDATE outside_dbs SET url_next = NULL, url_next_at = NULL WHERE id = ? AND url_next = ?", params![id, sealed_next]));
+        // A promote that found url_next changed under it: keep whichever URL logs in.
+        let keep_working = |next: &Value| -> Result<()> {
+            let stored: Vec<u8> = self.db.read(|c| c.query_row("SELECT url FROM outside_dbs WHERE id = ?", [id], |r| r.get(0)))?;
+            if !logs_in(&dek.open(&aad(project, id), &stored)?) && logs_in(next) {
+                let sealed = dek.seal(&aad(project, id), next);
+                self.db.write(|c| c.execute("UPDATE outside_dbs SET url = ? WHERE id = ? AND url = ?", params![sealed, id, stored]))?;
+            }
+            Ok(())
+        };
+        // An earlier rotation stopped between the server and the store: the URL that logs in wins,
+        // and the interrupted one is dropped only once the stored one is shown to log in.
+        if let Some(sealed_next) = next {
+            let next = dek.open(&next_aad(project, id), &sealed_next)?;
+            if logs_in(&next) {
+                if !promote(&next, &sealed_next, "finished rotating")? {
+                    keep_working(&next)?;
+                }
+                return self.outside_database(project, id);
+            }
+            if !logs_in(&current) {
+                return Err(Error::Link(format!("neither {}'s admin URL nor an interrupted rotation's logs in: nothing was changed (check the server, or set a working URL with PATCH)", d.name)));
+            }
+            drop_next(&sealed_next)?;
+        }
+        let pw = password();
+        let next = Value::new(with_password(current.expose(), &pw)?);
+        // The rebuilt URL must be the same login at the same place (a query holding `@` could
+        // move it): otherwise the server would take a password roll then can't use.
+        if authority_host(next.expose())? != authority_host(current.expose())? || with_password(next.expose(), "x")? != with_password(current.expose(), "x")? {
+            return Err(Error::BadRequest(format!("{}'s admin URL can't be rotated as it's written: set it with PATCH, the password percent-encoded and no @ after the host", d.name)));
+        }
+        let sealed = dek.seal(&next_aad(project, id), &next);
+        let now = self.db.now_ms()?;
+        let claimed = self.db.write(|c| c.execute("UPDATE outside_dbs SET url_next = ?, url_next_at = ? WHERE id = ? AND url_next IS NULL", params![sealed, now, id]))?;
+        if claimed == 0 {
+            return Err(Error::Conflict("conflict", format!("{} is being rotated: try again in a moment", d.name)));
+        }
+        if let Err(why) = outside.set_own_password(current.expose(), d.ca.as_deref(), &pw) {
+            // An error doesn't mean the server kept the old one (a reply lost after the change).
+            if logs_in(&next) {
+                if !promote(&next, &sealed, "rotated")? {
+                    keep_working(&next)?;
+                }
+                return self.outside_database(project, id);
+            }
+            if logs_in(&current) {
+                drop_next(&sealed)?;
+                return Err(Error::BadRequest(format!("the server didn't take a new admin password: {why}")));
+            }
+            return Err(Error::Link(format!("the server's answer to a new admin password was lost and neither password logs in now: roll keeps both and tries again on the next use ({why})")));
+        }
+        // The server has it now: keep it, whatever else happens.
+        if !promote(&next, &sealed, "rotated")? {
+            keep_working(&next)?;
+        }
+        outside
+            .check(next.expose(), d.ca.as_deref(), &d.roles, d.group.as_deref())
+            .map_err(|why| Error::Link(format!("the admin password was rotated and kept, but logging in with it failed: {why}")))?;
+        self.outside_database(project, id)
     }
 
     /// Delete a database no key links to.

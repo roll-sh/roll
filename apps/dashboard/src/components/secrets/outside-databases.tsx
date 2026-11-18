@@ -1,4 +1,4 @@
-import { Database, Plus, Trash2 } from "lucide-react";
+import { Database, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { OutsideDatabase } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
@@ -25,6 +25,9 @@ export function OutsideDatabases() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [rotating, setRotating] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ id: string; name: string; url: string } | null>(null);
   const pair = roles.every((r) => ROLE.test(r)) && roles[0] !== roles[1];
   const noPair = roles.every((r) => r === "");
   const groupOk = group === "" ? !noPair : ROLE.test(group) && !roles.includes(group);
@@ -48,6 +51,24 @@ export function OutsideDatabases() {
       setBusy(false);
     }
   };
+  const rotate = (d: OutsideDatabase) => {
+    setBusy(true);
+    setError(null);
+    api.rotateOutsideAdmin(d.id).then(
+      () => (setRotating(null), setBusy(false), setNotice(`${d.name}'s admin password is now one only roll knows.`)),
+      (e) => (setRotating(null), setBusy(false), setError(errorText(e))),
+    );
+  };
+  const editOk = !!editing && /^[A-Za-z0-9_-]{1,64}$/.test(editing.name) && (editing.url.trim() === "" || /^(postgres(ql)?|mysql|rediss?|sqlserver|clickhouse|rabbitmq|mongodb(\+srv)?):\/\/\S+@\S+/.test(editing.url.trim()));
+  const save = (d: OutsideDatabase) => {
+    if (!editing || !editOk) return;
+    setBusy(true);
+    setError(null);
+    api.updateOutsideDatabase(d.id, { ...(editing.name !== d.name && { name: editing.name }), ...(editing.url.trim() && { url: editing.url.trim() }) }).then(
+      () => (setEditing(null), setBusy(false), list.reload()),
+      (e) => (setBusy(false), setError(errorText(e))),
+    );
+  };
   const del = (d: OutsideDatabase) =>
     api.deleteOutsideDatabase(d.id).then(
       () => (setDeleting(null), list.reload()),
@@ -69,6 +90,14 @@ export function OutsideDatabases() {
         <span className="font-mono">DB_PASSWORD</span> to it.
       </p>
       <ErrorNote error={error ?? list.error} onDismiss={error ? () => setError(null) : undefined} className="mb-2" />
+      {notice && (
+        <p className="mb-2 rounded-lg border border-line-2 bg-panel px-3 py-2 text-[12px] text-muted" role="status">
+          {notice}{" "}
+          <button className="text-accent" onClick={() => setNotice(null)}>
+            OK
+          </button>
+        </p>
+      )}
       {adding && (
         <form
           className="rise mb-3 grid gap-2 rounded-xl border border-line-2 bg-panel p-3 sm:grid-cols-[11rem_1fr]"
@@ -99,7 +128,7 @@ export function OutsideDatabases() {
           </div>
           <details className="sm:col-start-2">
             <summary className="cursor-pointer text-[11px] text-subtle select-none">Server CA certificate (Amazon RDS and other private CAs)</summary>
-            <textarea value={ca} onChange={(e) => setCa(e.target.value)} rows={4} placeholder="-----BEGIN CERTIFICATE-----" spellCheck={false} className={`${textareaField} mt-1 font-mono text-[11px]`} />
+            <textarea value={ca} onChange={(e) => setCa(e.target.value)} rows={4} placeholder="-----BEGIN CERTIFICATE-----" spellCheck={false} className={`${textareaField} mt-1 resize-y font-mono text-[11px]`} />
           </details>
           <div className="sm:col-start-2 flex gap-2">
             <button type="submit" className={primary} disabled={!ok || busy}>
@@ -126,7 +155,16 @@ export function OutsideDatabases() {
                 <span className="ml-auto text-[11px] text-subtle">
                   added {ago(d.created_at)} · <ActorMark who={d.created_by} />
                 </span>
-                {deleting === d.id ? (
+                {rotating === d.id ? (
+                  <span className="flex gap-1">
+                    <button className={primary} disabled={busy} onClick={() => rotate(d)}>
+                      {busy ? "Rotating…" : "Rotate admin password"}
+                    </button>
+                    <button className={ghost} onClick={() => setRotating(null)}>
+                      Cancel
+                    </button>
+                  </span>
+                ) : deleting === d.id ? (
                   <span className="flex gap-1">
                     <button className={dangerButton} onClick={() => del(d)}>
                       Delete
@@ -136,9 +174,37 @@ export function OutsideDatabases() {
                     </button>
                   </span>
                 ) : (
-                  <button className={ghost} onClick={() => setDeleting(d.id)} aria-label={`Delete the database ${d.name}`}>
-                    <Trash2 className="size-3.5" />
-                  </button>
+                  <span className="flex gap-0.5">
+                    <button className={ghost} onClick={() => setRotating(d.id)} aria-label={`Rotate ${d.name}'s admin password`} title="Rotate the admin password">
+                      <KeyRound className="size-3.5" />
+                    </button>
+                    <button className={ghost} onClick={() => setEditing(editing?.id === d.id ? null : { id: d.id, name: d.name, url: "" })} aria-label={`Edit the database ${d.name}`} title="Edit">
+                      <Pencil className="size-3.5" />
+                    </button>
+                    <button className={ghost} onClick={() => setDeleting(d.id)} aria-label={`Delete the database ${d.name}`}>
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  </span>
+                )}
+                {editing?.id === d.id && (
+                  <form
+                    className="rise grid w-full gap-2 pt-1 sm:grid-cols-[11rem_1fr_auto]"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      save(d);
+                    }}
+                  >
+                    <input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} aria-label="Name" spellCheck={false} className={`${field} font-mono text-[12px]`} />
+                    <input value={editing.url} onChange={(e) => setEditing({ ...editing, url: e.target.value })} placeholder="A new admin URL (its password changed elsewhere); empty keeps it" aria-label="Admin URL" spellCheck={false} autoComplete="off" className={`${field} font-mono text-[12px]`} />
+                    <span className="flex gap-1">
+                      <button type="submit" className={primary} disabled={!editOk || busy}>
+                        {busy ? "Checking…" : "Save"}
+                      </button>
+                      <button type="button" className={ghost} onClick={() => setEditing(null)}>
+                        Cancel
+                      </button>
+                    </span>
+                  </form>
                 )}
               </div>
             ))}
