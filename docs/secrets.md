@@ -3663,7 +3663,13 @@ cache waited out. Ranked now:
    never a second one.
 5. **A sealed start for the deployment key** (building: `feature/roll-secrets-sealed-start`, on #276):
    rolld starts with products down until N of M holders post shares. The thirty-second security
-   review (running, 2026-11-18 21:50): #304's fix, #329, #330 and every fix from the thirty-first.
+   review (2026-11-18 evening): one high, two medium, four low, all being fixed. High: #304's freeze
+   let roll's own products through (every in-process reader counts as the folder's admin), so a
+   frozen folder still fed previews, checks and apps; only people, the operator and roll-access
+   grants pass now. Medium: #281's old head replayed after a cut (a permanent gap digest); #277's
+   replay refusal beaten by changing the box's `v`. Low: #330 storing an outsider's credential, #290's
+   duplicated `Signature=`, #329's source bucket choosing the reference's project (and its refusal
+   text an oracle), #248's per-reader eviction. Sound: #303's fixes, #274, #262, #281's key provenance.
 6. **R10's other decoys** (database roles, IAM users) once #270's tokens are wired to secrets' alerts;
    **R4** (GCP KMS, Azure Key Vault, HSM) and confirming #290, #284, #227, #229 on real accounts: the
    user's call.
