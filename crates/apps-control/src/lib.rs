@@ -1461,6 +1461,7 @@ impl Apps {
             },
             feedback: r.feedback,
             vitals: r.vitals,
+            report: r.report,
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             paused: r.paused,
             held_after: r.held_by.clone().filter(|h| h != crate::deploy::MANUAL_HOLD),
@@ -1544,7 +1545,7 @@ impl Apps {
                 settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
             }
         }
-        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes"] {
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes"] {
             let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
             if x != y {
                 settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: x } }));
@@ -1588,7 +1589,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "paused", "held", "hostname", "traces", "egress", "vitals"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "paused", "held", "hostname", "traces", "egress", "vitals", "report"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1808,7 +1809,7 @@ impl Apps {
                 svc.for_env(&row).map_err(|e| Error::BadRequest(e.to_string().replace("no longer fit", "don't fit")))?;
             }
         }
-        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals"] {
+        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals", "report"] {
             if !matches!(o.get(k), None | Some(Value::Null | Value::Bool(_))) {
                 return Err(Error::BadRequest(format!("{k} is a boolean")));
             }
@@ -1956,6 +1957,12 @@ impl Apps {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_rate_limit(&sid, &e, limit.as_ref())).await?;
             self.live(service, env).forget_gate();
+            self.changed(service);
+        }
+        // Its deploys' reports to the Git host, from the next one on.
+        if let Some(Value::Bool(on)) = o.get("report") {
+            let (sid, e, on) = (service.to_string(), env.to_string(), *on);
+            self.db(move |s| s.set_report(&sid, &e, on)).await?;
             self.changed(service);
         }
         // Web Vitals: the proxy tags its pages from the next request on.

@@ -1122,6 +1122,10 @@ pub struct Environment {
     pub traces: bool,
     /// Its pages measure their Web Vitals for roll (`…/vitals`).
     pub vitals: bool,
+    /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
+    /// someone else reports them (roll previews, for its `pv-` environments: one voice on a
+    /// pull request).
+    pub report: bool,
     /// A preview's pages carry roll previews' feedback button for visitors who came in through
     /// its access link.
     pub feedback: bool,
