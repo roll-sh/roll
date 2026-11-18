@@ -8,7 +8,9 @@
 
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 import { withSession } from "./code-token";
+import { analyticsQuery, type AnalyticsRange, type SearchAnalytics } from "./search-analytics";
 import type { MetricsRange, SearchMetrics, SearchSlowLog } from "./search-performance";
+import type { AuditPage } from "./search-audit";
 
 export type Flavor = "elasticsearch" | "opensearch";
 
@@ -248,6 +250,7 @@ export const searchApi = {
   usage: (id: string, days = 30) => call<SearchUsage>("GET", `${cl(id)}/usage?days=${days}`),
   metrics: (id: string, range: MetricsRange) => call<SearchMetrics>("GET", `${cl(id)}/metrics?range=${range}`),
   slowlog: (id: string) => call<SearchSlowLog>("GET", `${cl(id)}/slowlog`),
+  analytics: (id: string, index: string | null, range: AnalyticsRange) => call<SearchAnalytics>("GET", `${cl(id)}/analytics?${analyticsQuery(index, range)}`),
   createKey: (id: string, name: string, access: KeyAccess, expiresInS?: number) =>
     call<NewSearchKey>("POST", `${cl(id)}/keys`, { name, access, expires_in_s: expiresInS }),
   revokeKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/keys/${encodeURIComponent(key)}`),
@@ -256,6 +259,13 @@ export const searchApi = {
   /** An endpoint keyed by a roll secret: `config` is the `_inference` body without `api_key`. */
   createInferenceFromSecret: (id: string, e: NewInferenceFromSecret) =>
     call<{ endpoint: unknown; binding: InferenceBinding }>("POST", `${cl(id)}/inference/secrets`, e),
+  /** The cluster's security audit log, newest first (never wakes it). `from`/`to`: Unix ms. */
+  audit: (id: string, q: { from?: number; to?: number; event?: string; size?: number } = {}) => {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== "") params.set(k, String(v));
+    const qs = params.toString();
+    return call<AuditPage>("GET", `${cl(id)}/audit${qs ? `?${qs}` : ""}`);
+  },
 };
 
 /** An inference endpoint whose key follows a roll secret (a `search-inference` sync). */

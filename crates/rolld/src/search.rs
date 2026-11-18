@@ -110,6 +110,12 @@ pub struct SearchArgs {
     /// Of those, clusters that never unload (`idle_timeout_s` 0) a person may own (0: no cap).
     #[arg(long = "search-max-always-on-per-person", env = "ROLL_SEARCH_MAX_ALWAYS_ON_PER_PERSON", default_value_t = 2)]
     pub search_max_always_on_per_person: u32,
+    /// Days each search cluster's security audit log keeps its entries.
+    #[arg(long = "search-audit-retention-days", env = "ROLL_SEARCH_AUDIT_RETENTION_DAYS", default_value_t = 7)]
+    pub search_audit_retention_days: u64,
+    /// MiB of audit entries kept per search cluster (compressed); past it the oldest go.
+    #[arg(long = "search-audit-max-mb", env = "ROLL_SEARCH_AUDIT_MAX_MB", default_value_t = 32)]
+    pub search_audit_max_mb: u64,
     /// Publish Elasticsearch's test cluster features (to run the YAML REST suites against
     /// clusters created through the API). Test deployments only.
     #[arg(long = "search-test-features", env = "ROLL_SEARCH_TEST_FEATURES", value_parser = clap::builder::BoolishValueParser::new(), default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
@@ -164,6 +170,8 @@ impl Search {
         cfg.deleted_retention = Duration::from_secs(args.search_deleted_retention_days.saturating_mul(86_400));
         cfg.default_repository = Some(args.search_default_repository.trim().to_string()).filter(|n| !n.is_empty());
         cfg.person_caps = search_control::store::Caps { clusters: args.search_max_clusters_per_person.into(), always_on: args.search_max_always_on_per_person.into() };
+        cfg.audit.retention = Duration::from_secs(args.search_audit_retention_days.max(1) * 86_400);
+        cfg.audit.max_bytes = args.search_audit_max_mb.max(1) << 20;
         if args.search_repository_allow_private {
             cfg.node_settings.push((search_control::S3_ALLOW_PRIVATE.to_string(), "true".to_string()));
         }

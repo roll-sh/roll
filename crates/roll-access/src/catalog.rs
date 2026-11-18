@@ -1133,6 +1133,10 @@ static ROWS: &[Row] = &[
     // cluster's data.
     row("GET", "/v1/search/clusters/{id}/metrics", "search", R, one(PG, "cluster")),
     row("GET", "/v1/search/clusters/{id}/slowlog", "search", R, one(PG, "cluster")),
+    // The security audit log: a read, not a reveal (entries never hold a credential).
+    row("GET", "/v1/search/clusters/{id}/audit", "search", R, one(PG, "cluster")),
+    // Search analytics: the indices' query text, aggregated; a read of the cluster's data.
+    row("GET", "/v1/search/clusters/{id}/analytics", "search", R, one(PG, "cluster")),
     row("*", "/v1/search/clusters/{id}/", "search", M, one(PG, "cluster")),
     // An index's routes are about those indices (`{index}`: a name, or on reads an expression),
     // so a rule can grant some of a cluster's indices. The console (`request`) and the index list

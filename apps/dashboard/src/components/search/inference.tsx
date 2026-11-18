@@ -13,17 +13,122 @@ interface Endpoint {
   service_settings?: Record<string, unknown>;
 }
 
-type Service = "openai" | "cohere" | "anthropic";
+/** A setting the form asks for: a service setting, or a task setting when `task` is set. */
+export interface FieldSpec {
+  key: string;
+  label: string;
+  /** Sent once, sealed in the cluster, never shown again. */
+  secret?: boolean;
+  multiline?: boolean;
+  optional?: boolean;
+  numeric?: boolean;
+  task?: boolean;
+  hint?: string;
+  placeholder?: string;
+  /** The default value. */
+  value?: string;
+  /** Only for these task types. */
+  tasks?: string[];
+}
 
-/** What each service offers here, and the model it suggests per task. */
-const SERVICES: Record<Service, { label: string; tasks: Record<string, string> }> = {
-  openai: { label: "OpenAI", tasks: { text_embedding: "text-embedding-3-small", completion: "gpt-4o-mini" } },
-  cohere: { label: "Cohere", tasks: { text_embedding: "embed-english-v3.0", rerank: "rerank-english-v3.0", completion: "command-r" } },
-  anthropic: { label: "Anthropic", tasks: { completion: "claude-sonnet-5-5" } },
+export interface ServiceSpec {
+  label: string;
+  /** Task types offered, with the model each suggests. */
+  tasks: Record<string, string>;
+  /** The setting that names the model (none: the deployment or URL decides). */
+  model?: "model_id" | "model";
+  fields: FieldSpec[];
+}
+
+const apiKey: FieldSpec = { key: "api_key", label: "API key", secret: true, hint: "sent once, sealed in the cluster, never shown again" };
+
+/** What each service offers here (`GET _inference/_services` has the full schemas). */
+export const SERVICES: Record<string, ServiceSpec> = {
+  openai: {
+    label: "OpenAI",
+    tasks: { text_embedding: "text-embedding-3-small", completion: "gpt-4o-mini" },
+    model: "model_id",
+    fields: [
+      apiKey,
+      { key: "url", label: "URL", optional: true, hint: "OpenAI-compatible: vLLM, Ollama, LiteLLM (public)", placeholder: "https://api.openai.com/v1/embeddings" },
+      { key: "dimensions", label: "Dimensions", optional: true, numeric: true, tasks: ["text_embedding"] },
+    ],
+  },
+  azureopenai: {
+    label: "Azure OpenAI",
+    tasks: { text_embedding: "", completion: "" },
+    fields: [
+      { key: "resource_name", label: "Resource name", placeholder: "my-resource" },
+      { key: "deployment_id", label: "Deployment" },
+      { key: "api_version", label: "API version", value: "2024-10-21" },
+      { ...apiKey, optional: true, hint: "an API key or an Entra ID token" },
+      { key: "entra_id", label: "Entra ID token", secret: true, optional: true },
+    ],
+  },
+  amazonbedrock: {
+    label: "Amazon Bedrock",
+    tasks: { text_embedding: "amazon.titan-embed-text-v2:0", completion: "anthropic.claude-3-haiku-20240307-v1:0" },
+    model: "model",
+    fields: [
+      { key: "provider", label: "Provider", hint: "amazontitan, cohere, anthropic, ai21labs, meta, mistral", value: "amazontitan" },
+      { key: "region", label: "Region", value: "us-east-1" },
+      { key: "access_key", label: "Access key", secret: true },
+      { key: "secret_key", label: "Secret key", secret: true, hint: "sent once, sealed in the cluster, never shown again" },
+    ],
+  },
+  googlevertexai: {
+    label: "Vertex AI",
+    tasks: { text_embedding: "text-embedding-005", rerank: "", completion: "gemini-2.5-flash" },
+    model: "model_id",
+    fields: [
+      { key: "project_id", label: "Project" },
+      { key: "location", label: "Location", optional: true, value: "us-central1", tasks: ["text_embedding", "completion"] },
+      { key: "service_account_json", label: "Service account JSON", secret: true, multiline: true, hint: "sent once, sealed in the cluster, never shown again" },
+    ],
+  },
+  googleaistudio: { label: "Google AI Studio", tasks: { text_embedding: "gemini-embedding-001", completion: "gemini-2.5-flash" }, model: "model_id", fields: [apiKey] },
+  cohere: { label: "Cohere", tasks: { text_embedding: "embed-english-v3.0", rerank: "rerank-english-v3.0", completion: "command-r" }, model: "model_id", fields: [apiKey] },
+  anthropic: {
+    label: "Anthropic",
+    tasks: { completion: "claude-sonnet-5-5" },
+    model: "model_id",
+    fields: [apiKey, { key: "max_tokens", label: "Max tokens", numeric: true, task: true, value: "1024" }],
+  },
+  mistral: { label: "Mistral", tasks: { text_embedding: "mistral-embed", completion: "mistral-small-latest" }, model: "model", fields: [apiKey] },
+  voyageai: { label: "Voyage AI", tasks: { text_embedding: "voyage-3.5", rerank: "rerank-2.5" }, model: "model_id", fields: [apiKey] },
+  jinaai: { label: "Jina AI", tasks: { text_embedding: "jina-embeddings-v3", rerank: "jina-reranker-v2-base-multilingual" }, model: "model_id", fields: [apiKey] },
+  deepseek: {
+    label: "DeepSeek",
+    tasks: { completion: "deepseek-chat" },
+    model: "model_id",
+    fields: [apiKey, { key: "url", label: "URL", optional: true, placeholder: "https://api.deepseek.com/chat/completions" }],
+  },
+  hugging_face: {
+    label: "Hugging Face",
+    tasks: { text_embedding: "", sparse_embedding: "", rerank: "", completion: "" },
+    fields: [{ key: "url", label: "Endpoint URL", hint: "a public Inference Endpoint" }, apiKey],
+  },
 };
 
+/** The body of `PUT _inference/{task}/{id}` for a service, task and the form's values. */
+export function endpointBody(service: string, task: string, model: string, values: Record<string, string>): Record<string, unknown> {
+  const spec = SERVICES[service];
+  const settings: Record<string, unknown> = {};
+  const taskSettings: Record<string, unknown> = {};
+  if (spec.model && model.trim()) settings[spec.model] = model.trim();
+  for (const f of spec.fields) {
+    if (f.tasks && !f.tasks.includes(task)) continue;
+    const v = (values[f.key] ?? f.value ?? "").trim();
+    if (!v) continue;
+    (f.task ? taskSettings : settings)[f.key] = f.numeric ? Number(v) : v;
+  }
+  const body: Record<string, unknown> = { service, service_settings: settings };
+  if (Object.keys(taskSettings).length) body.task_settings = taskSettings;
+  return body;
+}
+
 /** Short labels for the task picker. */
-const TASK_LABELS: Record<string, string> = { text_embedding: "embeddings", completion: "completion", rerank: "rerank" };
+const TASK_LABELS: Record<string, string> = { text_embedding: "embeddings", sparse_embedding: "sparse", completion: "completion", rerank: "rerank" };
 
 const ID_RE = /^[a-z0-9][a-z0-9._-]{0,99}$/;
 
@@ -59,25 +164,25 @@ type KeySource = "key" | "secret";
 /** A key that can key an endpoint: shared, not sensitive (a key no person reads), not short-lived. */
 const usable = (k: Secret) => !k.tags.includes("sensitive") && k.link?.mode !== "dynamic";
 
+/** The settings a roll secret stands in for: the API key, and Azure's alternative to it. */
+const KEYED = ["api_key", "entra_id"];
+
 /**
  * A cluster's inference endpoints (`_inference`): the models `semantic_text` fields embed with,
- * rerankers and completions. A new endpoint's API key goes to the cluster once, where it's
- * sealed; it's never listed or shown again. Or the key is a roll secret of the project the
- * cluster is on (picked by name, never shown): roll secrets pushes it again whenever it changes.
- * Listing wakes the cluster (only when this tab opens).
+ * rerankers and completions. A new endpoint's credentials go to the cluster once, where they're
+ * sealed; they're never listed or shown again. Or, for a service keyed by an API key, the key is
+ * a roll secret of the project the cluster is on (picked by name, never shown): roll secrets
+ * pushes it again whenever it changes. Listing wakes the cluster (only when this tab opens).
  */
 export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluster; onOpenConsole: (text: string) => void }) {
   const [endpoints, setEndpoints] = useState<Endpoint[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [service, setService] = useState<Service>("openai");
+  const [service, setService] = useState("openai");
   const [task, setTask] = useState("text_embedding");
   const [id, setId] = useState("");
   const [model, setModel] = useState(SERVICES.openai.tasks.text_embedding);
-  const [apiKey, setApiKey] = useState("");
-  const [url, setUrl] = useState("");
-  const [dims, setDims] = useState("");
-  const [maxTokens, setMaxTokens] = useState("1024");
+  const [values, setValues] = useState<Record<string, string>>({});
   const [testing, setTesting] = useState<Endpoint | null>(null);
   const [sample, setSample] = useState("How do I reset my password?");
   const [docs, setDocs] = useState("Reset it from the sign-in page\nPasswords expire every 90 days");
@@ -149,8 +254,9 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
     }
   };
 
-  const pickService = (s: Service) => {
+  const pickService = (s: string) => {
     setService(s);
+    setValues({});
     const tasks = SERVICES[s].tasks;
     const t = task in tasks ? task : Object.keys(tasks)[0];
     setTask(t);
@@ -161,20 +267,29 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
     setModel(SERVICES[service].tasks[t]);
   };
 
+  const spec = SERVICES[service];
+  // A roll secret keys only services that take an API key (`search-inference` pushes `api_key`).
+  const keyed = spec.fields.some((f) => f.key === "api_key");
+  const fromSecret = source === "secret" && keyed;
+  const fields = spec.fields.filter((f) => (!f.tasks || f.tasks.includes(task)) && !(fromSecret && KEYED.includes(f.key)));
+  // Azure's two credentials are alternatives: one of them must be set (or the secret is it).
+  const missing =
+    fields.some((f) => !f.optional && !(values[f.key] ?? f.value ?? "").trim()) ||
+    (fromSecret ? !secretKey : service === "azureopenai" && !values.api_key?.trim() && !values.entra_id?.trim());
+  // Vertex AI's rerank picks Google's default ranker without a model.
+  const optionalModel = service === "googlevertexai" && task === "rerank";
+
   const create = () =>
     act("create", async () => {
-      const settings: Record<string, unknown> = { model_id: model };
-      if (service === "openai" && url.trim()) settings.url = url.trim();
-      if (service === "openai" && task === "text_embedding" && dims.trim()) settings.dimensions = Number(dims);
-      const body: Record<string, unknown> = { service, service_settings: settings };
-      if (service === "anthropic") body.task_settings = { max_tokens: Number(maxTokens) || 1024 };
-      if (source === "secret") {
-        await searchApi.createInferenceFromSecret(cluster.id, { inference_id: id, task_type: task, config: body, secret: { project, environment: env, key: secretKey } });
+      if (fromSecret) {
+        // The secret is the key: whatever was typed for one before switching stays here.
+        const rest = Object.fromEntries(Object.entries(values).filter(([k]) => !KEYED.includes(k)));
+        const config = endpointBody(service, task, model, rest);
+        await searchApi.createInferenceFromSecret(cluster.id, { inference_id: id, task_type: task, config, secret: { project, environment: env, key: secretKey } });
       } else {
-        settings.api_key = apiKey;
-        await esJson(cluster.id, "PUT", `/_inference/${task}/${encodeURIComponent(id)}`, body);
-        setApiKey("");
+        await esJson(cluster.id, "PUT", `/_inference/${task}/${encodeURIComponent(id)}`, endpointBody(service, task, model, values));
       }
+      setValues({});
       setId("");
       load();
     });
@@ -353,35 +468,58 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
           }}
         >
           <div className="flex flex-wrap gap-3">
-            <Segmented
-              value={source}
-              options={[
-                { label: "A key", value: "key" },
-                { label: "A roll secret", value: "secret" },
-              ]}
-              onChange={setSource}
-            />
-            <Segmented value={service} options={(Object.keys(SERVICES) as Service[]).map((s) => ({ label: SERVICES[s].label, value: s }))} onChange={pickService} />
+            <select className={`${input} text-[13px]`} aria-label="Service" value={service} onChange={(e) => pickService(e.target.value)}>
+              {Object.keys(SERVICES).map((s) => (
+                <option key={s} value={s}>
+                  {SERVICES[s].label}
+                </option>
+              ))}
+            </select>
             <Segmented value={task} options={Object.keys(SERVICES[service].tasks).map((t) => ({ label: TASK_LABELS[t] ?? t, value: t }))} onChange={pickTask} />
+            {keyed && (
+              <Segmented
+                value={source}
+                options={[
+                  { label: "A key", value: "key" },
+                  { label: "A roll secret", value: "secret" },
+                ]}
+                onChange={setSource}
+              />
+            )}
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Endpoint id" hint="lowercase letters, digits, . _ -">
               <input className={`${input} w-full font-mono text-[12px]`} value={id} onChange={(e) => setId(e.target.value.toLowerCase())} placeholder="my-embeddings" />
             </Field>
-            <Field label="Model">
-              <input className={`${input} w-full font-mono text-[12px]`} value={model} onChange={(e) => setModel(e.target.value)} />
-            </Field>
-            {source === "key" ? (
-              <Field label="API key" hint="sent once, sealed in the cluster, never shown again">
-                <input
-                  className={`${input} w-full font-mono text-[12px]`}
-                  type="password"
-                  autoComplete="off"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                />
+            {spec.model && (
+              <Field label="Model">
+                <input className={`${input} w-full font-mono text-[12px]`} value={model} onChange={(e) => setModel(e.target.value)} />
               </Field>
-            ) : (
+            )}
+            {fields.map((f) => (
+              <Field key={f.key} label={f.optional ? `${f.label} (optional)` : f.label} hint={f.hint}>
+                {f.multiline ? (
+                  <textarea
+                    className={`${input} h-20 w-full font-mono text-[12px]`}
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={values[f.key] ?? f.value ?? ""}
+                    onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+                  />
+                ) : (
+                  <input
+                    className={`${input} w-full font-mono text-[12px]`}
+                    type={f.secret ? "password" : "text"}
+                    autoComplete="off"
+                    inputMode={f.numeric ? "numeric" : undefined}
+                    placeholder={f.placeholder}
+                    value={values[f.key] ?? f.value ?? ""}
+                    onChange={(e) => setValues((v) => ({ ...v, [f.key]: f.numeric ? e.target.value.replace(/\D/g, "") : e.target.value }))}
+                  />
+                )}
+              </Field>
+            ))}
+            {fromSecret && (
               <SecretPicker
                 linked={linked}
                 project={project}
@@ -394,23 +532,8 @@ export function InferenceTab({ cluster, onOpenConsole }: { cluster: SearchCluste
                 setSecretKey={setSecretKey}
               />
             )}
-            {service === "openai" && (
-              <Field label="URL (optional)" hint="OpenAI-compatible: vLLM, Ollama, LiteLLM (public)">
-                <input className={`${input} w-full font-mono text-[12px]`} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://api.openai.com/v1/embeddings" />
-              </Field>
-            )}
-            {service === "openai" && task === "text_embedding" && (
-              <Field label="Dimensions (optional)">
-                <input className={`${input} w-full`} inputMode="numeric" value={dims} onChange={(e) => setDims(e.target.value.replace(/\D/g, ""))} />
-              </Field>
-            )}
-            {service === "anthropic" && (
-              <Field label="Max tokens">
-                <input className={`${input} w-full`} inputMode="numeric" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value.replace(/\D/g, ""))} />
-              </Field>
-            )}
           </div>
-          <button type="submit" className={primary} disabled={busy !== null || !ID_RE.test(id) || !(source === "key" ? apiKey : secretKey) || !model.trim()}>
+          <button type="submit" className={primary} disabled={busy !== null || !ID_RE.test(id) || missing || (!!spec.model && !model.trim() && !optionalModel)}>
             {busy === "create" ? (
               <span className="shimmer">Checking the model…</span>
             ) : (

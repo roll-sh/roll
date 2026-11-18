@@ -1960,6 +1960,11 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   and the sync's error say to rotate the key) rather than passing unseen. Its errors name
   the endpoint and Elasticsearch's error type, never the provider's message (it can quote part of
   a key).
+- The secret is the endpoint's `api_key`, so it keys the services that take one (OpenAI, Azure
+  OpenAI by key, Cohere, Anthropic, Google AI Studio, Mistral, Voyage AI, Jina AI, DeepSeek, Hugging
+  Face). A service with other credentials (Amazon Bedrock's access keys, Vertex AI's service
+  account) refuses an `api_key` when the endpoint is made (`unknown to the [service] service`), so
+  no sync is made; the tab offers "A roll secret" only for the others.
 - Deleting the endpoint from the tab deletes its sync; one deleted another way leaves the sync,
   whose next push says the endpoint is gone. Deleting the key leaves the endpoint its last value.
 - The sync names the cluster by its id (`srch_…`, never a name: a name has no `_`) and pushes
