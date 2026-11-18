@@ -398,6 +398,8 @@ export interface PreviewEnvironment {
   };
   /** The notes left with the preview page's Feedback button that nobody resolved (newest first, a few): untrusted text; `crop_url` a public preview's signed picture of the note's element. */
   notes?: { path: string; note: string; by: string; crop_url?: string }[];
+  /** The Linear issues the change names (`ENG-123` in its title, or at the start of its branch's last part): what "Preview on the Linear issue" links. */
+  issues?: string[];
   /** What a screen reader can't name on that page. */
   page_links?: { checked: number; broken: { path: string; status: number }[] };
   page_a11y?: { issues: { kind: string; count: number; first: string | null; impact?: "minor" | "moderate" | "serious" | "critical" | null; help?: string | null }[]; lang: boolean; title: boolean; seo?: string[] };

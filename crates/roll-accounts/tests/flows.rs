@@ -47,6 +47,7 @@ struct Seen {
 
 struct Env {
     router: Router,
+    accounts: Arc<Accounts>,
     outbox: std::path::PathBuf,
     owners: Arc<FakeOwners>,
     seen: Arc<Mutex<Seen>>,
@@ -122,6 +123,8 @@ impl Env {
             google: Some(provider(Provider::Google, "google-client", format!("{fake}/google"))),
             secret_key: Some(Secret::new("0123456789abcdef0123456789abcdef")),
             open: false,
+            // The fake SSO provider is on 127.0.0.1.
+            sso_allow_private: true,
         };
         let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("accounts.db")), "accounts").unwrap();
         let owners = Arc::new(FakeOwners::default());
@@ -132,11 +135,11 @@ impl Env {
             Rule { route: "/v1/workspace", access: Access::User("projects") },
         ];
         let gate = Gate::with_sessions(Some(AdminToken::new(OPERATOR).unwrap()), rules, accounts.sessions(), Origins::parse(WEB).unwrap(), API);
-        let router = roll_accounts::router(accounts)
+        let router = roll_accounts::router(accounts.clone())
             .route("/v1/projects", get(|| async { Json(json!([])) }).post(|| async { StatusCode::CREATED }))
             .route("/v1/workspace/projects", get(|| async { Json(json!([])) }))
             .layer(axum::middleware::from_fn_with_state(gate, roll_auth::check));
-        Env { router, outbox, owners, seen, google_issuer: format!("{fake}/google"), _dir: dir }
+        Env { router, accounts, outbox, owners, seen, google_issuer: format!("{fake}/google"), _dir: dir }
     }
 
     /// One request from `b` (its cookies, and its CSRF token on writes), keeping what it sets.
@@ -430,4 +433,334 @@ async fn csrf_is_refused() {
     assert!(a.headers.get(header::SET_COOKIE).is_none());
     let req = Request::builder().method(Method::POST).uri("/v1/accounts/email/verify").header("content-type", "application/json");
     assert_eq!(env.send(req.body(Body::from(body)).unwrap()).await.status, StatusCode::OK, "the same code as JSON");
+}
+
+/// A company's OpenID Connect provider, faked: discovery, its keys, and a token endpoint that
+/// signs an ES256 ID token for the code (a state), with the nonce its authorize URL carried and
+/// whatever `next` says about the person.
+#[derive(Clone, Default)]
+struct Idp {
+    base: Arc<Mutex<String>>,
+    /// The nonce and PKCE challenge of each authorize URL, by state.
+    seen: Arc<Mutex<HashMap<String, (String, String)>>>,
+    /// Claims for the next ID token (email, email_verified, sub, nonce…).
+    next: Arc<Mutex<Value>>,
+    key: Arc<Vec<u8>>,
+}
+
+async fn fake_idp() -> Idp {
+    use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+    let idp = Idp { key: Arc::new(pkcs8.as_ref().to_vec()), ..Idp::default() };
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    let point = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &idp.key, &rng).unwrap().public_key().as_ref().to_vec();
+    let jwks = json!({ "keys": [{ "kty": "EC", "crv": "P-256", "kid": "k1", "alg": "ES256", "x": b64(&point[1..33]), "y": b64(&point[33..]) }] });
+    async fn token(State(idp): State<Idp>, Form(f): Form<HashMap<String, String>>) -> Json<Value> {
+        use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
+        let state = f.get("code").cloned().unwrap_or_default();
+        let (nonce, challenge) = idp.seen.lock().unwrap().get(&state).cloned().unwrap_or_default();
+        let sent = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(f.get("code_verifier").cloned().unwrap_or_default().as_bytes()));
+        if sent != challenge || f.get("client_secret").map(String::as_str) != Some("s3cret") || f.get("client_id").map(String::as_str) != Some("roll-sso") {
+            return Json(json!({ "error": "invalid_grant" }));
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let mut claims = json!({ "iss": idp.base.lock().unwrap().clone(), "aud": "roll-sso", "exp": now + 300, "iat": now, "nonce": nonce, "email_verified": true });
+        for (k, v) in idp.next.lock().unwrap().as_object().cloned().unwrap_or_default() {
+            claims[k] = v;
+        }
+        let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        let input = format!("{}.{}", b64(json!({ "alg": "ES256", "kid": "k1", "typ": "JWT" }).to_string().as_bytes()), b64(claims.to_string().as_bytes()));
+        let rng = ring::rand::SystemRandom::new();
+        let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &idp.key, &rng).unwrap();
+        let sig = key.sign(&rng, input.as_bytes()).unwrap();
+        Json(json!({ "access_token": "at", "token_type": "Bearer", "id_token": format!("{input}.{}", b64(sig.as_ref())) }))
+    }
+    let base = idp.base.clone();
+    let app = Router::new()
+        .route(
+            "/.well-known/openid-configuration",
+            get(move || {
+                let b = base.lock().unwrap().clone();
+                async move { Json(json!({ "issuer": b, "authorization_endpoint": format!("{b}/authorize"), "token_endpoint": format!("{b}/token"), "jwks_uri": format!("{b}/jwks") })) }
+            }),
+        )
+        .route("/jwks", get(move || async move { Json(jwks) }))
+        .route("/token", post(token))
+        .with_state(idp.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    *idp.base.lock().unwrap() = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    idp
+}
+
+impl Env {
+    /// Sign `b` in through SSO as `email`, the provider saying `claims` about them: start,
+    /// the provider's answer, callback. The callback's answer (a redirect).
+    async fn sso(&self, idp: &Idp, b: &mut Browser, email: &str, claims: Value) -> Answer {
+        let a = self.call(b, Method::POST, "/v1/accounts/sso/start", Some(json!({ "email": email }))).await;
+        assert_eq!(a.status, StatusCode::OK, "{}", a.json);
+        let url = url::Url::parse(a.json["url"].as_str().unwrap()).unwrap();
+        let q: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        assert_eq!((q["client_id"].as_str(), q["login_hint"].as_str(), q["code_challenge_method"].as_str()), ("roll-sso", email, "S256"));
+        let state = q["state"].clone();
+        idp.seen.lock().unwrap().insert(state.clone(), (q["nonce"].clone(), q["code_challenge"].clone()));
+        *idp.next.lock().unwrap() = claims;
+        let callback = url::Url::parse(&q["redirect_uri"]).unwrap();
+        self.call(b, Method::GET, &format!("{}?code={state}&state={state}", callback.path()), None).await
+    }
+}
+
+/// TXT records from a table.
+#[derive(Default)]
+struct Txt(Mutex<HashMap<String, Vec<String>>>);
+
+impl roll_accounts::sso::TxtLookup for Txt {
+    fn txt<'a>(&'a self, host: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<String>> + Send + 'a>> {
+        let v = self.0.lock().unwrap().get(host).cloned().unwrap_or_default();
+        Box::pin(async move { v })
+    }
+}
+
+/// Enterprise SSO (docs/accounts.md, "SSO"): a connection's domains count once a TXT record
+/// proves them; the provider's ID token (signature, issuer, audience, nonce, a verified email in
+/// those domains) signs the person in, linking their account (an admin's only from their own
+/// session; never over another subject's link); new people need an invite unless it provisions
+/// them; with `enforce`, the domain signs in only that way and its other sessions end.
+#[tokio::test]
+async fn sso_signs_people_in_by_their_domain() {
+    let env = Env::new().await;
+    let idp = fake_idp().await;
+    let issuer = idp.base.lock().unwrap().clone();
+    let txt = Arc::new(Txt::default());
+    env.accounts.set_txt_lookup(txt.clone());
+    // Ada (a person) and Root (an admin) have accounts already, by email code.
+    let mut ada = Browser::default();
+    env.email_sign_in(&mut ada, "ada@acme.test", Some(&env.invite("ada@acme.test").await)).await;
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@acme.test", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let mut root = Browser::default();
+    env.email_sign_in(&mut root, "root@acme.test", Some(&root_invite)).await;
+
+    assert_eq!(env.operator(Method::POST, "/v1/accounts/sso", json!({ "issuer": issuer, "client_id": "x", "client_secret": "y", "domains": ["gmail.com"] })).await.json["code"], "public_domain");
+    let conn = env.operator(Method::POST, "/v1/accounts/sso", json!({ "name": "Acme Okta", "issuer": issuer, "client_id": "roll-sso", "client_secret": "s3cret", "domains": ["Acme.test"] })).await;
+    assert_eq!(conn.status, StatusCode::CREATED, "{}", conn.json);
+    assert!(conn.json.get("client_secret").is_none() && conn.json["redirect_uri"].as_str().unwrap().ends_with("/callback"), "{}", conn.json);
+    let id = conn.json["id"].as_str().unwrap().to_string();
+    assert_eq!(env.operator(Method::POST, "/v1/accounts/sso", json!({ "issuer": issuer, "client_id": "x", "client_secret": "y", "domains": ["acme.test"] })).await.status, StatusCode::CONFLICT, "a domain has one connection");
+    // Claimed, not proven: nothing routes to it until the TXT record is there.
+    let start = |email: &str| {
+        let (env, email) = (&env, email.to_string());
+        async move { env.call(&mut Browser::default(), Method::POST, "/v1/accounts/sso/start", Some(json!({ "email": email }))).await.json["code"].clone() }
+    };
+    assert_eq!(start("ada@acme.test").await, "no_sso");
+    assert_eq!(env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/verify"), json!({})).await.json["verified"], json!([]));
+    txt.0.lock().unwrap().insert("_roll-sso.acme.test".into(), vec![conn.json["dns"]["value"].as_str().unwrap().to_string()]);
+    assert_eq!(env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/verify"), json!({})).await.json["verified"], json!(["acme.test"]));
+    assert_eq!(start("eve@elsewhere.test").await, "no_sso");
+
+    // Ada through the provider: her account, linked.
+    let mut b = Browser::default();
+    let a = env.sso(&idp, &mut b, "ada@acme.test", json!({ "sub": "00u-ada", "email": "ada@acme.test" })).await;
+    assert_eq!(location(&a), "https://roll.test/dashboard");
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.json["email"], "ada@acme.test");
+    let refused = |claims: Value| {
+        let (env, idp) = (&env, &idp);
+        async move { location(&env.sso(idp, &mut Browser::default(), "ada@acme.test", claims).await).to_string() }
+    };
+    // What the provider doesn't vouch for: an unverified email, another domain, another sign-in's
+    // nonce; and another subject with Ada's address (reassigned there) doesn't take her account.
+    assert!(refused(json!({ "sub": "00u-ada", "email": "ada@acme.test", "email_verified": false })).await.ends_with("error=unverified_email"));
+    assert!(refused(json!({ "sub": "00u-x", "email": "mallory@evil.test" })).await.ends_with("error=domain"));
+    assert!(refused(json!({ "sub": "00u-ada", "email": "ada@acme.test", "nonce": "another" })).await.ends_with("error=provider"));
+    assert!(refused(json!({ "sub": "00u-new-ada", "email": "ada@acme.test" })).await.ends_with("error=linked_elsewhere"));
+    // An admin's account isn't linked by its email: Root links from their own session first.
+    assert!(location(&env.sso(&idp, &mut Browser::default(), "root@acme.test", json!({ "sub": "00u-root", "email": "root@acme.test" })).await).ends_with("error=link_required"));
+    let a = env.call(&mut root, Method::POST, "/v1/accounts/sso/start", Some(json!({ "intent": "link" }))).await;
+    let q: HashMap<String, String> = url::Url::parse(a.json["url"].as_str().unwrap()).unwrap().query_pairs().into_owned().collect();
+    idp.seen.lock().unwrap().insert(q["state"].clone(), (q["nonce"].clone(), q["code_challenge"].clone()));
+    *idp.next.lock().unwrap() = json!({ "sub": "00u-root", "email": "root@acme.test" });
+    let linked = env.call(&mut root, Method::GET, &format!("/v1/accounts/sso/{id}/callback?code={0}&state={0}", q["state"]), None).await;
+    assert_eq!(location(&linked), "https://roll.test/dashboard/account");
+    assert_eq!(location(&env.sso(&idp, &mut Browser::default(), "root@acme.test", json!({ "sub": "00u-root", "email": "root@acme.test" })).await), "https://roll.test/dashboard");
+    // No account: an invite, or a connection that provisions (never an admin).
+    assert!(refused(json!({ "sub": "00u-bob", "email": "bob@acme.test" })).await.ends_with("error=not_invited"));
+    assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/sso/{id}"), json!({ "provision": true })).await.status, StatusCode::OK);
+    let mut bob = Browser::default();
+    assert_eq!(location(&env.sso(&idp, &mut bob, "bob@acme.test", json!({ "sub": "00u-bob", "email": "bob@acme.test", "name": "Bob" })).await), "https://roll.test/dashboard");
+    let me = env.call(&mut bob, Method::GET, "/v1/accounts/me", None).await;
+    assert_eq!((me.json["email"].as_str(), me.json["admin"].as_bool()), (Some("bob@acme.test"), Some(false)), "{}", me.json);
+
+    // Enforced: the domain signs in only through the provider. Ada's email-code session ends;
+    // her SSO session stays; an email code is refused at once (account or not); the operator's
+    // token still works.
+    assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/sso/{id}"), json!({ "enforce": true })).await.status, StatusCode::OK);
+    assert_eq!(env.call(&mut ada, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED, "the email-code session ended");
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK, "the SSO session stays");
+    for who in ["ada@acme.test", "nobody@acme.test"] {
+        let a = env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/start", Some(json!({ "email": who }))).await;
+        assert_eq!((a.status, a.json["code"].as_str()), (StatusCode::FORBIDDEN, Some("sso_required")), "{}", a.json);
+    }
+    assert_eq!(env.operator(Method::GET, "/v1/accounts/sso", json!({})).await.status, StatusCode::OK);
+    assert_eq!(env.call(&mut Browser::default(), Method::GET, "/v1/accounts", None).await.json["providers"]["sso"], true);
+
+    // Removed: the domain is free again, and its people sign in other ways.
+    assert_eq!(env.operator(Method::DELETE, &format!("/v1/accounts/sso/{id}"), json!({})).await.status, StatusCode::NO_CONTENT);
+    let a = env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "ada@acme.test" }))).await;
+    assert_eq!(a.status, StatusCode::ACCEPTED);
+}
+
+/// SCIM (docs/accounts.md, "SCIM"): a connection's token lets its provider create people in its
+/// verified domains (never admins, never elsewhere), find them by userName, and deactivate them,
+/// which ends their sessions at once; a new token or a removed connection stops the old one.
+#[tokio::test]
+async fn scim_provisions_and_deactivates_people() {
+    let env = Env::new().await;
+    let idp = fake_idp().await;
+    let issuer = idp.base.lock().unwrap().clone();
+    let txt = Arc::new(Txt::default());
+    env.accounts.set_txt_lookup(txt.clone());
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@acme.test", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let root = env.email_sign_in(&mut Browser::default(), "root@acme.test", Some(&root_invite)).await.json["user"]["id"].as_str().unwrap().to_string();
+    let conn = env.operator(Method::POST, "/v1/accounts/sso", json!({ "issuer": issuer, "client_id": "roll-sso", "client_secret": "s3cret", "domains": ["acme.test"] })).await.json;
+    let id = conn["id"].as_str().unwrap().to_string();
+    txt.0.lock().unwrap().insert("_roll-sso.acme.test".into(), vec![conn["dns"]["value"].as_str().unwrap().to_string()]);
+    env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/verify"), json!({})).await;
+    let made = env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/scim"), json!({})).await;
+    assert_eq!(made.status, StatusCode::CREATED, "{}", made.json);
+    let token = made.json["token"].as_str().unwrap().to_string();
+    assert!(made.json["base_url"].as_str().unwrap().ends_with("/v1/accounts/scim/v2"));
+
+    let scim = |method: Method, path: String, body: Option<Value>, token: String| {
+        let env = &env;
+        async move {
+            let req = Request::builder().method(method).uri(format!("/v1/accounts/scim/v2{path}")).header("authorization", format!("Bearer {token}")).header("content-type", "application/scim+json");
+            env.send(req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).unwrap()).await
+        }
+    };
+    assert_eq!(scim(Method::GET, "/ServiceProviderConfig".into(), None, token.clone()).await.status, StatusCode::OK);
+    assert_eq!(scim(Method::GET, "/Users".into(), None, "rlp_wrong".into()).await.status, StatusCode::UNAUTHORIZED);
+
+    // Carol, made by the provider: not an admin, active, found by her userName.
+    let carol = scim(Method::POST, "/Users".into(), Some(json!({ "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "carol@acme.test", "name": { "givenName": "Carol", "familyName": "Shaw" }, "externalId": "00u-carol", "active": true })), token.clone()).await;
+    assert_eq!(carol.status, StatusCode::CREATED, "{}", carol.json);
+    assert_eq!(carol.headers.get(header::CONTENT_TYPE).unwrap(), "application/scim+json");
+    let carol_id = carol.json["id"].as_str().unwrap().to_string();
+    assert_eq!((carol.json["active"].as_bool(), carol.json["displayName"].as_str(), carol.json["externalId"].as_str()), (Some(true), Some("Carol Shaw"), Some("00u-carol")));
+    assert_eq!(scim(Method::POST, "/Users".into(), Some(json!({ "userName": "carol@acme.test" })), token.clone()).await.json["scimType"], "uniqueness");
+    assert_eq!(scim(Method::POST, "/Users".into(), Some(json!({ "userName": "eve@elsewhere.test" })), token.clone()).await.status, StatusCode::BAD_REQUEST, "outside its domains");
+    let found = scim(Method::GET, "/Users?filter=userName%20eq%20%22carol@acme.test%22".into(), None, token.clone()).await;
+    assert_eq!((found.json["totalResults"].as_u64(), found.json["Resources"][0]["id"].as_str()), (Some(1), Some(carol_id.as_str())), "{}", found.json);
+    // The admin is roll's to manage: invisible to SCIM.
+    assert_eq!(scim(Method::GET, format!("/Users/{root}"), None, token.clone()).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(scim(Method::GET, "/Users".into(), None, token.clone()).await.json["totalResults"], 1, "Carol only");
+
+    // Carol signs in; deactivated by the provider (Entra's string), her session ends at once.
+    let mut b = Browser::default();
+    env.email_sign_in(&mut b, "carol@acme.test", None).await;
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
+    let off = scim(Method::PATCH, format!("/Users/{carol_id}"), Some(json!({ "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{ "op": "Replace", "path": "active", "value": "False" }] })), token.clone()).await;
+    assert_eq!((off.status, off.json["active"].as_bool()), (StatusCode::OK, Some(false)), "{}", off.json);
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED, "her session ended");
+    let on = scim(Method::PATCH, format!("/Users/{carol_id}"), Some(json!({ "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{ "op": "replace", "value": { "active": true } }] })), token.clone()).await;
+    assert_eq!(on.json["active"], true);
+    assert_eq!(scim(Method::DELETE, format!("/Users/{carol_id}"), None, token.clone()).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(scim(Method::GET, format!("/Users/{carol_id}"), None, token.clone()).await.json["active"], false, "DELETE deactivates");
+
+    // Entra's userName is often a UPN, not the address: roll's address is the primary email,
+    // and the UPN finds the person.
+    let dave = scim(Method::POST, "/Users".into(), Some(json!({ "userName": "d.ruiz@acme.onmicrosoft.example", "emails": [{ "value": "dave@acme.test", "primary": true, "type": "work" }], "displayName": "Dave Ruiz" })), token.clone()).await;
+    assert_eq!((dave.status, dave.json["emails"][0]["value"].as_str()), (StatusCode::CREATED, Some("dave@acme.test")), "{}", dave.json);
+    assert!(dave.headers.get(header::LOCATION).is_some(), "201 says where");
+    let dave_id = dave.json["id"].as_str().unwrap().to_string();
+    let by_upn = scim(Method::GET, "/Users?filter=userName%20eq%20%22d.ruiz@acme.onmicrosoft.example%22".into(), None, token.clone()).await;
+    assert_eq!(by_upn.json["Resources"][0]["id"].as_str(), Some(dave_id.as_str()), "{}", by_upn.json);
+    // A deactivation roll can't read is refused, never silently nothing; a remove of what roll
+    // keeps nothing of goes through with the rest.
+    let patch = |ops: Value| json!({ "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": ops });
+    assert_eq!(scim(Method::PATCH, format!("/Users/{dave_id}"), Some(patch(json!([{ "op": "replace", "path": "active", "value": "no" }]))), token.clone()).await.status, StatusCode::BAD_REQUEST);
+    let mixed = scim(Method::PATCH, format!("/Users/{dave_id}"), Some(patch(json!([{ "op": "Remove", "path": "title" }, { "op": "Replace", "path": "active", "value": "False" }]))), token.clone()).await;
+    assert_eq!((mixed.status, mixed.json["active"].as_bool()), (StatusCode::OK, Some(false)), "{}", mixed.json);
+    // An admin's disable is roll's: SCIM can't lift it.
+    let ruth = scim(Method::POST, "/Users".into(), Some(json!({ "userName": "ruth@acme.test" })), token.clone()).await.json["id"].as_str().unwrap().to_string();
+    assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/users/{ruth}"), json!({ "disabled": true })).await.status, StatusCode::OK);
+    assert_eq!(scim(Method::PATCH, format!("/Users/{ruth}"), Some(patch(json!([{ "op": "replace", "path": "active", "value": true }]))), token.clone()).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(scim(Method::GET, format!("/Users/{ruth}"), None, token.clone()).await.json["active"], false);
+    // What roll's SCIM doesn't serve is a SCIM 404 to the token (a 401 would read as a bad token).
+    assert_eq!(scim(Method::GET, "/Groups".into(), None, token.clone()).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(scim(Method::GET, "/Groups".into(), None, "rlp_wrong".into()).await.status, StatusCode::UNAUTHORIZED);
+
+    // A new token stops the old one; removing the connection stops SCIM.
+    let token2 = env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/scim"), json!({})).await.json["token"].as_str().unwrap().to_string();
+    assert_eq!(scim(Method::GET, "/Users".into(), None, token.clone()).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(scim(Method::GET, "/Users".into(), None, token2.clone()).await.status, StatusCode::OK);
+    env.operator(Method::DELETE, &format!("/v1/accounts/sso/{id}"), json!({})).await;
+    assert_eq!(scim(Method::GET, "/Users".into(), None, token2).await.status, StatusCode::UNAUTHORIZED);
+}
+
+/// Account events, as rolld's audit log gets them (docs/accounts.md, "Audit").
+#[derive(Default)]
+struct Events(Mutex<Vec<roll_accounts::audit::AccountEvent>>);
+
+impl roll_accounts::audit::Audit for Events {
+    fn record(&self, e: roll_accounts::audit::AccountEvent) {
+        self.0.lock().unwrap().push(e);
+    }
+    fn client_ip(&self, _req: &Request<Body>) -> Option<std::net::IpAddr> {
+        Some("203.0.113.7".parse().unwrap())
+    }
+    // As rolld answers it: the events about the person, newest first.
+    fn activity(&self, user: &str, _before: Option<i64>, limit: usize) -> Vec<roll_accounts::audit::Activity> {
+        let all = self.0.lock().unwrap();
+        all.iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, e)| e.target.as_deref() == Some(user))
+            .take(limit)
+            .map(|(i, e)| roll_accounts::audit::Activity { at: i as i64, action: e.action.clone(), actor: e.actor.clone(), ok: e.ok, status: e.status, ip: e.ip.map(|i| i.to_string()), user_agent: e.user_agent.clone(), detail: e.detail.clone() })
+            .collect()
+    }
+}
+
+/// Who signed in and how, who failed to, and every change to accounts go to the audit log, with
+/// the client's address and the actor; never a code or a token.
+#[tokio::test]
+async fn account_events_are_audited() {
+    let env = Env::new().await;
+    let events = Arc::new(Events::default());
+    env.accounts.set_audit(events.clone());
+    let invite = env.invite("ada@example.com").await;
+    let mut adab = Browser::default();
+    let ada = env.email_sign_in(&mut adab, "ada@example.com", Some(&invite)).await.json["user"]["id"].as_str().unwrap().to_string();
+    // A wrong code: a refused sign-in, by nobody yet.
+    let mut b = Browser::default();
+    let started = env.call(&mut b, Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "ada@example.com" }))).await;
+    let wrong = env.call(&mut b, Method::POST, "/v1/accounts/email/verify", Some(json!({ "challenge": started.json["challenge"], "code": "000000" }))).await;
+    assert_eq!(wrong.status, StatusCode::BAD_REQUEST);
+    // Her own security log: her account made, her sign-in, and her own change, newest first.
+    assert_eq!(env.call(&mut adab, Method::PATCH, "/v1/accounts/me", Some(json!({ "name": "Ada L." }))).await.status, StatusCode::OK);
+    let log = env.call(&mut adab, Method::GET, "/v1/accounts/me/activity", None).await;
+    let actions: Vec<&str> = log.json["events"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
+    assert_eq!(actions, ["PATCH /v1/accounts/me", "sign_in", "user.create"], "{}", log.json);
+    assert_eq!((log.json["events"][1]["detail"]["method"].as_str(), log.json["events"][1]["ip"].as_str()), (Some("email"), Some("203.0.113.7")));
+    assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/users/{ada}"), json!({ "disabled": true })).await.status, StatusCode::OK);
+
+    let got = events.0.lock().unwrap().clone();
+    let find = |f: &dyn Fn(&roll_accounts::audit::AccountEvent) -> bool| got.iter().find(|e| f(e)).cloned().unwrap_or_else(|| panic!("{got:#?}"));
+    // The invite: who, from where, the address it's for and the invite it made.
+    let made = find(&|e| e.action == "POST /v1/accounts/invites");
+    assert_eq!((made.actor.as_str(), made.ok, made.ip.map(|i| i.to_string())), ("operator", true, Some("203.0.113.7".into())));
+    assert_eq!(made.detail["set"]["email"], "ada@example.com");
+    assert!(made.target.as_deref().is_some_and(|t| t.starts_with("inv_")), "{made:?}");
+    // Its use made an account, then signed her in.
+    let created = find(&|e| e.action == "user.create");
+    assert_eq!((created.target.as_deref(), created.detail["via"].as_str()), (Some(ada.as_str()), Some("invite")));
+    let signed = find(&|e| e.action == "sign_in" && e.ok);
+    assert_eq!((signed.actor.as_str(), signed.detail["method"].as_str()), (ada.as_str(), Some("email")));
+    let refused = find(&|e| e.action == "sign_in" && !e.ok);
+    assert_eq!((refused.actor.as_str(), refused.detail["refused"].as_str(), refused.status), ("anonymous", Some("bad_code"), 400));
+    // The disable says what it set.
+    let off = find(&|e| e.action == "PATCH /v1/accounts/users/{id}");
+    assert_eq!((off.actor.as_str(), off.target.as_deref(), off.detail["set"]["disabled"].as_bool()), ("operator", Some(ada.as_str()), Some(true)));
+    let all = serde_json::to_string(&got).unwrap();
+    assert!(!all.contains(&invite) && !all.contains(&newest_code(&env.outbox, "ada@example.com")), "never a token or a code");
 }

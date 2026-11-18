@@ -114,7 +114,7 @@ function Form({
     branches: words(branches),
     paths: words(paths),
     ignore_paths: words(ignorePaths),
-    egress_hosts: s.egress === "roll" ? words(egressHosts) : [],
+    egress_hosts: s.egress === "roll" || (s.egress_forks ?? "roll") === "roll" ? words(egressHosts) : [],
     github: {
       ...s.github,
       pages: words(pages),
@@ -411,8 +411,13 @@ function Form({
         <Field group label="Reaches" note="What a preview's code may call. Roll only: its services run on a network of their own that reaches roll's products (its branches) and nothing on the internet, so a webhook or a live payment API can't be called from a change.">
           <Choice value={s.egress ?? "open"} options={["open", "roll"]} onChange={(v) => set("egress", v)} labels={{ open: "Anything", roll: "Roll only" }} />
         </Field>
-        {s.egress === "roll" && (
-          <Field group label="Allowed outside hosts" note="With roll only, the hosts outside roll its code may still reach, through a proxy that refuses anything else (api.stripe.com, or *.sentry.io for its subdomains). What it refused is in the preview's activity.">
+        {(s.egress ?? "open") === "open" && (
+          <Field group label="A fork's preview reaches" note="A pull request from a fork runs only once a writer approves its head, but an approval is to run the code, not a read of what it sends out. Roll only by default: it can't post the preview's values anywhere unless you open it.">
+            <Choice value={s.egress_forks ?? "roll"} options={["roll", "open"]} onChange={(v) => set("egress_forks", v)} labels={{ roll: "Roll only", open: "Anything" }} />
+          </Field>
+        )}
+        {(s.egress === "roll" || (s.egress_forks ?? "roll") === "roll") && (
+          <Field group label="Allowed outside hosts" note="With roll only (for every preview, or a fork's), the hosts outside roll its code may still reach, through a proxy that refuses anything else (api.stripe.com, or *.sentry.io for its subdomains). What it refused is in the preview's activity.">
             <input value={egressHosts} onChange={(e) => setEgressHosts(e.target.value)} placeholder="api.stripe.com, *.sentry.io" className={`${field} h-8 w-full font-mono text-[12px]`} spellCheck={false} />
           </Field>
         )}

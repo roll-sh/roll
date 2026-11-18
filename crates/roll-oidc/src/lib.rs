@@ -179,6 +179,8 @@ fn invalid(m: impl Into<String>) -> Error {
 pub struct Jwt<'a> {
     alg: Alg,
     kid: Option<String>,
+    /// The header's `typ` (`oauth-id-jag+jwt` for an identity assertion grant), as given.
+    pub typ: Option<String>,
     pub claims: Map<String, Json>,
     signed: &'a str,
     signature: Vec<u8>,
@@ -205,13 +207,14 @@ impl<'a> Jwt<'a> {
             return Err(invalid("the identity token has critical header parameters"));
         }
         let kid = header.get("kid").and_then(Json::as_str).map(str::to_string);
+        let typ = header.get("typ").and_then(Json::as_str).map(str::to_string);
         let claims = match b64(p).and_then(|b| serde_json::from_slice::<Json>(&b).ok()) {
             Some(Json::Object(m)) => m,
             _ => return Err(invalid("the identity token's claims aren't valid")),
         };
         let signature = b64(s).ok_or_else(|| invalid("the identity token's signature isn't valid"))?;
         let signed = &token[..h.len() + 1 + p.len()];
-        Ok(Self { alg, kid, claims, signed, signature })
+        Ok(Self { alg, kid, typ, claims, signed, signature })
     }
 
     pub fn str(&self, name: &str) -> Option<&str> {

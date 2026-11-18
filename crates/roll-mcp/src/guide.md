@@ -29,11 +29,26 @@ Some actions ask a person first. The call waits up to a minute, then returns
 `status: "approval_pending"` with an approval id and a link. Tell the user, then call the same tool
 again with the same arguments (adding `"approval": "apr_…"` is fine): it waits for the decision and
 runs once approved. Asking again never makes a second approval for the same call.
-`access_wait_approval` waits on an approval without running anything.
+`access_wait_approval` waits on an approval without running anything. Some actions need two
+people: the approval says how many more (`gates`); keep waiting the same way.
+
+## Asking for more, for a while
+
+If you know you'll need something your connection can't do (deleting the scratch database you
+made, deploying once), ask for it up front with `access_request_access`: one action on one
+product (and one resource or environment when you can name it) for `15m`, `1h`, `8h` or `1d`,
+with a `reason` the person reads. Then `access_wait_approval`. Once it's approved your tools may
+change: list them again. A refused call says when you may ask, with the arguments filled in.
+Ask for the least you need; never ask for access to tokens or approvals.
 
 ## When a call fails
 
 - `not allowed`: your connection's rules refuse it. Don't retry or try another tool for the same
-  thing: ask the user to widen the token, or to approve it if the token asks for anything else.
+  thing: ask the user to widen the token (the refusal links where), or ask for it for a while
+  (above) if the refusal says you may.
+- `not sent: … looks like a credential`: the call would have written a token, key or secret
+  where people and other agents read it (code, issues, comments, previews' notes, project
+  descriptions). Don't paste credentials anywhere; keep them in roll secrets (`secrets_set`) and
+  refer to them by name. Never try another way to write the same value.
 - `429`: too many requests for this token. Wait for `Retry-After` seconds.
 - `the token isn't valid any more`: it expired or was revoked. Ask the user to reconnect.
