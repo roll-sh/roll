@@ -13,6 +13,7 @@
 //! runs its deploys, instances, cron and meter; other nodes forward to it.
 
 pub mod api;
+pub mod challenge;
 pub mod backups;
 pub mod hooks;
 pub mod tags;
@@ -70,6 +71,8 @@ use std::time::{Duration, Instant};
 
 /// How long a host's answer is kept on a node that didn't change it ([`Apps::env_for_host`]).
 const HOST_TTL: Duration = Duration::from_secs(1);
+/// How long a deleted service is kept, stopped, for a restore (Railway's 48 hours).
+pub const DELETED_KEPT_MS: i64 = 48 * 3600 * 1000;
 use store::{EnvRow, ServiceRow, Store};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -271,6 +274,7 @@ pub struct Apps {
     backing_up: std::sync::atomic::AtomicBool,
     /// Watched tags are being checked (on their own task).
     watching: std::sync::atomic::AtomicBool,
+    watching_bases: std::sync::atomic::AtomicBool,
     watching_secrets: std::sync::atomic::AtomicBool,
     /// Scaling workers' backlogs are being read (on their own task).
     scaling: std::sync::atomic::AtomicBool,
@@ -397,18 +401,41 @@ impl ResolvedVars {
     pub fn secret_values(&self) -> Vec<String> {
         let mut out = Vec::new();
         for (k, v) in &self.vars {
-            let credential = ["PASSWORD", "SECRET", "TOKEN", "API_KEY", "PRIVATE_KEY", "ACCESS_KEY"].iter().any(|w| k.to_ascii_uppercase().contains(w));
-            let source = self.sources.get(k).copied();
-            // What roll secrets gave, unless the service's own variable took the name since.
-            let secret = source == Some("secret") && self.from_secrets.contains(k);
-            if self.sealed.contains(k) || (secret && !self.plain_secrets.contains(k)) || (credential && source == Some("link")) {
+            if self.is_secret(k) {
                 out.push(v.clone());
             }
-            if let Some(p) = url::Url::parse(v).ok().and_then(|u| u.password().map(|p| percent_encoding::percent_decode_str(p).decode_utf8_lossy().into_owned())) {
+            // A URL's password, as it's written in the URL (percent-encoded) and as it reads.
+            if let Some(p) = url::Url::parse(v).ok().and_then(|u| u.password().map(str::to_string)) {
+                let decoded = percent_encoding::percent_decode_str(&p).decode_utf8_lossy().into_owned();
+                if decoded != p {
+                    out.push(decoded);
+                }
                 out.push(p);
             }
         }
         out
+    }
+
+    /// Whether a variable is a secret by what it is: sealed, a roll secrets value that isn't
+    /// plain, a link's credential by name, or a URL that carries a password.
+    pub fn is_secret(&self, k: &str) -> bool {
+        let credential = ["PASSWORD", "SECRET", "TOKEN", "API_KEY", "PRIVATE_KEY", "ACCESS_KEY"].iter().any(|w| k.to_ascii_uppercase().contains(w));
+        let source = self.sources.get(k).copied();
+        // What roll secrets gave, unless the service's own variable took the name since.
+        let secret = source == Some("secret") && self.from_secrets.contains(k);
+        self.sealed.contains(k) || (secret && !self.plain_secrets.contains(k)) || (credential && source == Some("link"))
+    }
+
+    /// The variables a closed environment's build may have: none that is a secret
+    /// ([`Self::is_secret`]), none that carries a URL password, and none that holds a secret
+    /// value of eight characters or more (a reference that copied one).
+    pub fn without_secrets(&self) -> Vec<(String, String)> {
+        let long: Vec<String> = self.vars.iter().filter(|(k, _)| self.is_secret(k)).map(|(_, v)| v.clone()).filter(|v| v.len() >= 8).collect();
+        self.vars
+            .iter()
+            .filter(|(k, v)| !self.is_secret(k) && url::Url::parse(v).ok().and_then(|u| u.password().map(|_| ())).is_none() && !long.iter().any(|s| v.contains(s.as_str())))
+            .cloned()
+            .collect()
     }
 }
 
@@ -450,6 +477,7 @@ impl Apps {
             changes: tokio::sync::broadcast::channel(256).0,
             backing_up: std::sync::atomic::AtomicBool::new(false),
             watching: std::sync::atomic::AtomicBool::new(false),
+            watching_bases: std::sync::atomic::AtomicBool::new(false),
             watching_secrets: std::sync::atomic::AtomicBool::new(false),
             scaling: std::sync::atomic::AtomicBool::new(false),
             github_running: std::sync::atomic::AtomicBool::new(false),
@@ -641,21 +669,21 @@ impl Apps {
         for (kind, r, body) in links {
             // A link that doesn't check out makes no service: nothing to clean up by hand.
             if let Err(e) = self.put_link(&row.id, &kind, &r, body).await {
-                let _ = self.delete_service(&row.id).await;
+                let _ = self.purge_service(&row.id).await;
                 return Err(e);
             }
         }
         if let Some((g, _)) = git_login
             && let Err(e) = self.put_git_login(&row.id, g).await
         {
-            let _ = self.delete_service(&row.id).await;
+            let _ = self.purge_service(&row.id).await;
             return Err(e);
         }
         if let Some(r) = registry
             && let Err(e) = self.put_registry(&row.id, r).await
         {
             // A login that doesn't check out makes no service: nothing to clean up by hand.
-            let _ = self.delete_service(&row.id).await;
+            let _ = self.purge_service(&row.id).await;
             return Err(e);
         }
         // The project's owner hears what needs someone from its first service on.
@@ -1098,11 +1126,96 @@ impl Apps {
         self.service(id).await
     }
 
-    pub async fn delete_service(self: &Arc<Self>, id: &str) -> Result<()> {
+    /// `DELETE …/services/{id}`: the service stops and is hidden, kept for
+    /// [`DELETED_KEPT_MS`] (its environments, volumes, images, backups, domains and name) for
+    /// [`Apps::restore_service`]; the prune sweep deletes it for good after that. A deleted
+    /// service's delete deletes it for good now.
+    pub async fn delete_service(self: &Arc<Self>, id: &str, actor: Option<String>) -> Result<()> {
+        let sid = id.to_string();
+        let (_, deleted) = self.db(move |s| s.service_any(&sid)).await?;
+        if deleted.is_some() {
+            return self.purge_service(id).await;
+        }
+        // Nothing it queued builds or goes live behind the delete.
+        let sid = id.to_string();
+        for d in self.db(move |s| s.pending_deployments(&sid)).await? {
+            self.cancel(id, &d.environment, &d.id).await.ok();
+        }
+        let (sid, now) = (id.to_string(), self.store.now()?);
+        if !self.db(move |s| s.set_deleted(&sid, Some(now))).await? {
+            return Ok(());
+        }
+        // From here no request, hostname, hook or sweep finds it: what runs stops.
+        self.hosts_changed();
+        let sid = id.to_string();
+        for e in self.db(move |s| s.environments(&sid)).await? {
+            self.teardown_live(id, &e.name).await;
+        }
+        for name in self.deps.runtime.list(Some(id)).await {
+            self.deps.runtime.remove(&name).await;
+        }
+        self.settings_changed();
+        self.audit("deleted", id, "", actor, json!({})).await;
+        self.unplace(id).await;
+        Ok(())
+    }
+
+    /// `POST …/services/{id}/restore`: a deleted service back as it was, its environments'
+    /// live deployments loaded again (each wakes or starts as it would after a restart).
+    pub async fn restore_service(self: &Arc<Self>, id: &str, actor: Option<String>) -> Result<Service> {
+        let sid = id.to_string();
+        let (row, deleted) = self.db(move |s| s.service_any(&sid)).await?;
+        if deleted.is_none() {
+            return Err(Error::Conflict(format!("{} isn't deleted", row.name)));
+        }
+        let sid = id.to_string();
+        if !self.db(move |s| s.set_deleted(&sid, None)).await? {
+            return Err(Error::Conflict(format!("{} isn't deleted", row.name)));
+        }
+        self.hosts_changed();
+        self.settings_changed();
+        if let Some(ws) = self.deps.workspace.clone() {
+            let (sid, project) = (id.to_string(), row.project.clone());
+            let _ = tokio::task::spawn_blocking(move || {
+                let (x, y) = free_spot(&ws, &project);
+                ws.place(roll_workspace::Scope::All, &project, roll_workspace::Kind::Service, &sid, x, y)
+            })
+            .await;
+        }
+        self.audit("restored", id, "", actor, json!({})).await;
+        self.resume_service(id).await;
+        self.service(id).await
+    }
+
+    /// The deleted services (of a project, or all), newest first: when each was deleted and
+    /// when it goes for good.
+    pub async fn deleted_services(self: &Arc<Self>, project: Option<String>) -> Result<Value> {
+        let rows = self.db(move |s| s.deleted_services(project.as_deref())).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(r, at)| json!({ "id": r.id, "project": r.project, "name": r.name, "deleted_at": at, "purge_at": at + DELETED_KEPT_MS }))
+            .collect())
+    }
+
+    /// The service's place on its project's canvas goes (a restore places it again).
+    async fn unplace(self: &Arc<Self>, id: &str) {
+        if let Some(ws) = self.deps.workspace.clone() {
+            let sid = id.to_string();
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Some(p) = ws.list(roll_workspace::Scope::All).ok().and_then(|ps| ps.into_iter().find(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Service && r.r#ref == sid))) {
+                    let _ = ws.remove(roll_workspace::Scope::All, &p.id, roll_workspace::Kind::Service, &sid);
+                }
+            })
+            .await;
+        }
+    }
+
+    /// Delete a service for good, and everything that belongs to it.
+    pub async fn purge_service(self: &Arc<Self>, id: &str) -> Result<()> {
         let sid = id.to_string();
         let envs = self.db(move |s| s.environments(&sid)).await?;
         let sid = id.to_string();
-        let row = self.db(move |s| s.service(&sid)).await?;
+        let (row, _) = self.db(move |s| s.service_any(&sid)).await?;
         let project = row.project.clone();
         for e in &envs {
             self.teardown_live(id, &e.name).await;
@@ -1155,15 +1268,12 @@ impl Apps {
             self.drop_network_if_unused(&project, &e.name, id).await;
         }
         self.release_domains(&domains).await;
-        if let Some(ws) = self.deps.workspace.clone() {
-            let sid = id.to_string();
-            let _ = tokio::task::spawn_blocking(move || {
-                if let Some(p) = ws.list(roll_workspace::Scope::All).ok().and_then(|ps| ps.into_iter().find(|p| p.resources.iter().any(|r| r.kind == roll_workspace::Kind::Service && r.r#ref == sid))) {
-                    let _ = ws.remove(roll_workspace::Scope::All, &p.id, roll_workspace::Kind::Service, &sid);
-                }
-            })
-            .await;
+        // The project's closed builds' builder, with its last service (a deleted one counts).
+        let p = project.clone();
+        if self.db(move |s| Ok(s.services(Some(&p))?.is_empty() && s.deleted_services(Some(&p))?.is_empty())).await.unwrap_or(false) {
+            self.deps.runtime.remove_build_egress(&project).await;
         }
+        self.unplace(id).await;
         self.deps.cluster.retire(&lease_key(id));
         Ok(())
     }
@@ -1351,6 +1461,7 @@ impl Apps {
             },
             feedback: r.feedback,
             vitals: r.vitals,
+            report: r.report,
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             paused: r.paused,
             held_after: r.held_by.clone().filter(|h| h != crate::deploy::MANUAL_HOLD),
@@ -1366,6 +1477,16 @@ impl Apps {
             scaling,
             wait_for_ci: r.wait_for_ci,
             waiting_for_ci,
+            build_closed: r.egress.closed(),
+            base_updated: match r.active.clone() {
+                // What the watch found for the live deployment (a newer one starts with nothing).
+                Some(a) => {
+                    let k = format!("base_moved:{}/{}", r.service, r.name);
+                    let v: Option<Value> = self.db(move |s| s.get_state(&k)).await.ok().flatten().and_then(|v| serde_json::from_str(&v).ok());
+                    v.filter(|v| v["deployment"] == a.as_str()).and_then(|v| serde_json::from_value(v["images"].clone()).ok()).unwrap_or_default()
+                }
+                None => Vec::new(),
+            },
             created_at: r.created_at,
         })
     }
@@ -1390,10 +1511,85 @@ impl Apps {
         Ok(())
     }
 
+    /// `GET …/environments/{env}/diff?from=`: how `env` differs from `from` (Railway's
+    /// environment sync): its own variables' names missing here, extra here, or with another
+    /// value (never a value; sealed ones can't be compared), and each setting that differs, with
+    /// the `PUT …/environments/{env}` body that makes it `from`'s. A grant reads `from` too, and
+    /// sees which values differ only with reveal on both (a value set here and compared would
+    /// tell `from`'s).
+    pub async fn environment_diff(self: &Arc<Self>, service: &str, env: &str, from: &str, grant: Option<&roll_auth::Grant>) -> Result<Value> {
+        if from == env {
+            return Err(Error::BadRequest("from is another environment".into()));
+        }
+        let (to_env, from_env) = (self.environment(service, env).await?, self.environment(service, from).await?);
+        let mut values = true;
+        if let Some(g) = grant {
+            let sid = service.to_string();
+            let project = self.db(move |s| s.service(&sid)).await?.project;
+            let on = |e: &str| roll_auth::scope::Resource { product: "apps".into(), id: Some(service.to_string()), project: Some(project.clone()), environment: Some(e.to_string()), ..Default::default() };
+            if g.allows(&on(from), roll_auth::scope::Action::Read) != roll_auth::scope::Outcome::Allow {
+                return Err(Error::Forbidden(format!("comparing with {from} needs read on {from}")));
+            }
+            values = [from, env].iter().all(|e| g.allows(&on(e), roll_auth::scope::Action::Reveal) == roll_auth::scope::Outcome::Allow);
+        }
+        let (sid, e, f) = (service.to_string(), env.to_string(), from.to_string());
+        let (here, there, sealed_here, sealed_there) = self.db(move |s| Ok((s.variables(&sid, &e)?, s.variables(&sid, &f)?, s.sealed_variables(&sid, &e)?, s.sealed_variables(&sid, &f)?))).await?;
+        let missing: Vec<Value> = there.keys().filter(|k| !here.contains_key(*k)).map(|k| json!({ "name": k, "sealed": sealed_there.contains(k) })).collect();
+        let extra: Vec<&String> = here.keys().filter(|k| !there.contains_key(*k)).collect();
+        let differ: Vec<&String> = here.iter().filter(|(k, v)| !sealed_here.contains(*k) && !sealed_there.contains(*k) && there.get(*k).is_some_and(|t| t != *v)).map(|(k, _)| k).collect();
+        let (a, b) = (serde_json::to_value(&from_env).expect("JSON"), serde_json::to_value(&to_env).expect("JSON"));
+        let mut settings = Vec::new();
+        for k in crate::model::ENV_RUN_FIELDS {
+            let (x, y) = (from_env.run.get(k).cloned().unwrap_or(Value::Null), to_env.run.get(k).cloned().unwrap_or(Value::Null));
+            if x != y {
+                settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
+            }
+        }
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes"] {
+            let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
+            if x != y {
+                settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: x } }));
+            }
+        }
+        for (k, x, y) in [("error", &from_env.pages.error, &to_env.pages.error), ("maintenance", &from_env.pages.maintenance, &to_env.pages.maintenance)] {
+            if x != y {
+                // Whether each has its own page (its HTML only in the body that copies it).
+                settings.push(json!({ "field": format!("pages.{k}"), "from": x.is_some(), "to": y.is_some(), "put": { "pages": { k: x } } }));
+            }
+        }
+        Ok(json!({
+            "from": from,
+            "to": env,
+            "variables": { "missing": missing, "extra": extra, "differ": if values { json!(differ) } else { Value::Null } },
+            "settings": settings,
+        }))
+    }
+
+    /// The values of `names` in `from` for `PATCH …/variables {copy_from, copy}`: its own
+    /// variables, never a sealed one (deploying the copy would read it, and that can take less
+    /// than reading it where it is).
+    pub async fn copied_variables(self: &Arc<Self>, service: &str, from: &str, names: &[String]) -> Result<BTreeMap<String, String>> {
+        let (sid, f) = (service.to_string(), from.to_string());
+        let (have, sealed) = self.db(move |s| {
+            s.environment(&sid, &f)?;
+            Ok((s.variables(&sid, &f)?, s.sealed_variables(&sid, &f)?))
+        })
+        .await?;
+        let mut out = BTreeMap::new();
+        for n in names {
+            if sealed.contains(n) {
+                return Err(Error::BadRequest(format!("{n} is sealed in {from}: set it here by hand")));
+            }
+            let v = have.get(n).ok_or_else(|| Error::BadRequest(format!("{n} isn't one of {from}'s own variables")))?;
+            out.insert(n.clone(), v.clone());
+        }
+        Ok(out)
+    }
+
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "paused", "held", "hostname", "traces", "egress", "vitals"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "paused", "held", "hostname", "traces", "egress", "vitals", "report"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1613,7 +1809,7 @@ impl Apps {
                 svc.for_env(&row).map_err(|e| Error::BadRequest(e.to_string().replace("no longer fit", "don't fit")))?;
             }
         }
-        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals"] {
+        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals", "report"] {
             if !matches!(o.get(k), None | Some(Value::Null | Value::Bool(_))) {
                 return Err(Error::BadRequest(format!("{k} is a boolean")));
             }
@@ -1763,6 +1959,12 @@ impl Apps {
             self.live(service, env).forget_gate();
             self.changed(service);
         }
+        // Its deploys' reports to the Git host, from the next one on.
+        if let Some(Value::Bool(on)) = o.get("report") {
+            let (sid, e, on) = (service.to_string(), env.to_string(), *on);
+            self.db(move |s| s.set_report(&sid, &e, on)).await?;
+            self.changed(service);
+        }
         // Web Vitals: the proxy tags its pages from the next request on.
         if let Some(Value::Bool(on)) = o.get("vitals") {
             let (sid, e, on) = (service.to_string(), env.to_string(), *on);
@@ -1836,6 +2038,11 @@ impl Apps {
         self.release_domains(&domains).await;
         self.teardown_live(service, env).await;
         self.set_access_cache(service, env, None);
+        // And whatever its live state didn't know (an earlier process's instances, a sandbox or
+        // waker, a run): left on its network, the network and its relays would stay.
+        for name in self.deps.runtime.list_env(service, env).await {
+            self.deps.runtime.remove(&name).await;
+        }
         // Its last backup before the volume goes (kept a week), its instances stopped first.
         let sid = service.to_string();
         let had = self.db(move |s| s.service(&sid)).await.is_ok_and(|s| s.run.volume.is_some());
@@ -2707,11 +2914,11 @@ impl Apps {
     /// The active custom domain a hostname is: its own, else the wildcard one label above it.
     async fn active_domain(self: &Arc<Self>, host: &str) -> Option<(String, String, Domain)> {
         let exact = host.to_string();
-        if let Some(d) = self.db(move |s| s.domain_owner(&exact)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active) {
+        if let Some(d) = self.db(move |s| s.serving_domain(&exact)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active) {
             return Some(d);
         }
         let wild = crate::model::covering_wildcard(host)?;
-        self.db(move |s| s.domain_owner(&wild)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active)
+        self.db(move |s| s.serving_domain(&wild)).await.ok().flatten().filter(|(_, _, d)| d.status == DomainStatus::Active)
     }
 
     /// Write the audit trail's entry for a change someone made (`audit.<what>`): who, and what
@@ -2801,7 +3008,15 @@ impl Apps {
         let (sid, e) = (live.service.clone(), live.env.clone());
         let (row, traces) = self.db(move |s| Ok((s.environment(&sid, &e)?, s.traces_on(&sid, &e)?))).await?;
         let allow = row.allow_ips.iter().filter_map(|r| r.cidr.parse::<ipnet::IpNet>().ok()).collect();
-        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals });
+        // The environment's challenge key, made the first time a rule needs it (every node reads the same).
+        let challenge_key = match row.firewall.iter().any(|r| r.action == crate::model::FirewallAction::Challenge) {
+            true => {
+                let (k, v) = (format!("challenge_key:{}/{}", live.service, live.env), crate::model::random(32));
+                Some(self.db(move |s| s.state_or(&k, &v)).await?.into_bytes())
+            }
+            false => None,
+        };
+        let g = Arc::new(live::Gate { maintenance: row.maintenance, allow, rate: row.rate_limit, firewall: row.firewall, pages: row.pages, preview: row.ephemeral, headers: row.headers, routes: row.routes, traces, vitals: row.vitals, challenge_key });
         live.set_gate(g.clone(), seen);
         Ok(g)
     }
@@ -2967,6 +3182,10 @@ impl Apps {
             out.entry("over_capacity").or_default().push(r.over_capacity.into());
         }
         out.extend(series.into_iter().map(|(k, v)| (k, Value::Array(v))));
+        // Each instance's own last hour (on its owner, from the reaper's samples).
+        let live = self.lives.lock().get(&env_key(service, env)).cloned();
+        let by_instance = live.map(|l| l.by_instance()).unwrap_or_default();
+        out.insert("by_instance", serde_json::to_value(by_instance).expect("JSON"));
         Ok(serde_json::to_value(out).expect("JSON"))
     }
 

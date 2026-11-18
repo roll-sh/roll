@@ -184,6 +184,13 @@ async fn clusters_and_requests() {
     assert!(out.contains("idle      always loaded"), "{out}");
     let out = e.roll_with(&["search", "clusters", "set", "app", "--flavor", "solr"], None).await;
     assert!(!out.status.success());
+    // An IP allowlist through `update`, shown, then cleared.
+    let out = e.roll(&["search", "clusters", "update", "app", "--allow", "203.0.113.9/24=office", "--allow", "2001:db8::/32"]).await;
+    assert!(out.contains("allowed   203.0.113.0/24  office") && out.contains("2001:db8::/32"), "{out}");
+    let c = e.control.get("app").await.unwrap();
+    assert_eq!(c.ip_allowlist.iter().map(|r| r.cidr.as_str()).collect::<Vec<_>>(), ["203.0.113.0/24", "2001:db8::/32"]);
+    e.roll(&["search", "clusters", "update", "app", "--allow-any"]).await;
+    assert!(e.control.get("app").await.unwrap().ip_allowlist.is_empty());
     // Over the cluster's body limit (now 5 MiB): the API's reason, not a JSON parse error.
     std::fs::write(&big, lines.repeat(5)).unwrap();
     let out = e.roll_with(&["search", "request", "app", "POST", "/_bulk", &format!("@{}", big.display())], None).await;

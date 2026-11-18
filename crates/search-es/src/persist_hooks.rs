@@ -111,6 +111,8 @@ impl Engine {
                 id: i,
                 shard,
                 counters: ShardCounters::default(),
+                slow: Default::default(),
+                slowlog: self.slowlog.clone(),
                 dirty_since: AtomicI64::new(0),
                 last_search: AtomicI64::new(epoch_ms()),
                 request_cache: Default::default(),

@@ -441,6 +441,15 @@ impl Engine {
         let mut still_deploying = false;
         let mut checks: Vec<(String, String, String)> = Vec::new();
         let mut deployed: Vec<String> = Vec::new();
+        // Rebuilds a deploy hook asked for: each one is a deploy of every service, built afresh.
+        let rebuilds = self.store.rebuilds(&r.id)?;
+        let rebuilt = if rebuilds > 0 { format!("#r{rebuilds}") } else { String::new() };
+
+        // (what's sent, its fingerprint, the revision, whether it's the change's own repo)
+        let mut to_deploy: Vec<(Target, String, String, bool)> = Vec::new();
+
+        // The project's own preview domain, when it has one (`Store::set_project_domain`).
+        let domain = self.store.project_domain(&r.project_id)?;
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             if let Some(path) = &spec.health {
@@ -448,7 +457,7 @@ impl Engine {
             }
             // What it costs is what it runs with: a backend's preview size when it has one.
             let memory_mb = if on_apps { self.apps.memory_mb(&r.id, &spec.name).await.unwrap_or(spec.memory_mb) } else { spec.memory_mb };
-            let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, memory_mb, &|h| self.cfg.url(h))?;
+            let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, memory_mb, &|h| self.cfg.url_in(domain.as_ref(), h))?;
             // A redeploy when the revision moved, or what it's deployed with did (its variables:
             // a reset's new URLs, changed overrides; on roll apps its access): the runtime
             // restarts it on its next request, roll apps redeploys it.
@@ -459,8 +468,12 @@ impl Engine {
             let feedback = s.feedback && r.change_id.is_some() && access_token.is_some();
             // Egress too: a service moves onto (or off) the preview's own network by restarting.
             let fingerprint = config_fingerprint(&vars, access_token.is_some() && on_apps, bypass.as_deref().filter(|_| on_apps), trusted, feedback && on_apps)
-                + &if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() };
-            let config_moved = self.store.service_config(&r.id, &spec.name)?.as_deref() != Some(fingerprint.as_str());
+                + &if s.egress_for(r.trusted) == crate::settings::EgressRule::Roll { format!("e{}", s.egress_hosts.join(",")) } else { String::new() }
+                + &rebuilt;
+            let was = self.store.service_config(&r.id, &spec.name)?;
+            let config_moved = was.as_deref() != Some(fingerprint.as_str());
+            // Moved only by a rebuild (or with one): the same head built again, nothing cached.
+            let fresh = rebuilds > 0 && was.as_deref().and_then(|w| w.rsplit_once("#r")).is_none_or(|(_, n)| n != rebuilds.to_string());
             // The head it ran stays reachable at a URL of its own (Vercel's per-push URLs): the
             // change's own services on the runtime, a trusted change's.
             if !on_apps
@@ -468,7 +481,7 @@ impl Engine {
                 && r.trusted
                 && let Some(old) = svc.deployed.as_deref().filter(|d| *d != rev && !d.is_empty())
             {
-                for gone in self.store.pin(&r.id, &spec.name, old, &|h| self.cfg.url(h))? {
+                for gone in self.store.pin(&r.id, &spec.name, old, &|h| self.cfg.url_in(domain.as_ref(), h))? {
                     self.apps.remove(&r.id, &gone).await.map_err(|e| anyhow::anyhow!("removing {gone}: {e:#}"))?;
                 }
             }
@@ -501,47 +514,61 @@ impl Engine {
                     feedback,
                     egress: s.egress_for(r.trusted),
                     egress_hosts: s.egress_hosts.clone(),
+                    rebuild: fresh.then_some(rebuilds),
                 };
                 self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
-                match self.apps.deploy(&t).await {
-                    Ok(url) => {
-                        self.deploying_since.lock().remove(&(r.id.clone(), spec.name.clone()));
-                        if let Some(url) = url {
-                            self.store.set_service_url(&r.id, &spec.name, &url)?;
-                        }
-                        let state = self.apps.status(&r.id, &spec.name).unwrap_or(ServiceState::Sleeping);
-                        self.store.set_service(&r.id, &spec.name, state, Some(&rev), None)?;
-                        self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
-                        // A new deploy is checked again, even at the same revision.
-                        self.store.set_healthy(&r.id, &spec.name, "")?;
-                        self.store.log(&r.id, &format!("deployed {} at {}", spec.name, short(&rev)))?;
-                        if repo == r.repo {
-                            deployed.push(spec.name.clone());
-                        }
+                to_deploy.push((t, fingerprint, rev.clone(), repo == r.repo));
+            }
+        }
+        // Every deploy at once (on roll apps each waits for its rollout), their outcomes in order.
+        let mut failed: Option<String> = None;
+        let outcomes = futures::future::join_all(to_deploy.iter().map(|(t, ..)| self.apps.deploy(t))).await;
+        for ((t, fingerprint, rev, own), outcome) in to_deploy.into_iter().zip(outcomes) {
+            let spec = &t.spec;
+            match outcome {
+                Ok(url) => {
+                    self.deploying_since.lock().remove(&(r.id.clone(), spec.name.clone()));
+                    if let Some(url) = url {
+                        self.store.set_service_url(&r.id, &spec.name, &url)?;
                     }
-                    // Accepted, not live yet: no slot waits on a build; come back and ask again.
-                    Err(e) if e.downcast_ref::<crate::ports::StillDeploying>().is_some() => {
-                        let now = self.store.now_ms()?;
-                        let since = *self.deploying_since.lock().entry((r.id.clone(), spec.name.clone())).or_insert(now);
-                        if now - since > DEPLOY_WAIT_MS {
-                            self.deploying_since.lock().remove(&(r.id.clone(), spec.name.clone()));
-                            let msg = format!("{e:#}, for over {} minutes", DEPLOY_WAIT_MS / 60_000);
-                            self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
-                            anyhow::bail!("deploying {}: {msg}", spec.name);
-                        }
-                        self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
-                        // The backend has what this deploy sent (its variables): a change made
-                        // meanwhile, even one back to how it was before, is sent again.
-                        self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
-                        still_deploying = true;
-                    }
-                    Err(e) => {
-                        let msg = format!("{e:#}");
-                        self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
-                        anyhow::bail!("deploying {}: {msg}", spec.name);
+                    let state = self.apps.status(&r.id, &spec.name).unwrap_or(ServiceState::Sleeping);
+                    self.store.set_service(&r.id, &spec.name, state, Some(&rev), None)?;
+                    self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
+                    // A new deploy is checked again, even at the same revision.
+                    self.store.set_healthy(&r.id, &spec.name, "")?;
+                    self.store.log(&r.id, &format!("deployed {} at {}", spec.name, short(&rev)))?;
+                    if own {
+                        deployed.push(spec.name.clone());
                     }
                 }
+                // Accepted, not live yet: no slot waits on a build; come back and ask again.
+                Err(e) if e.downcast_ref::<crate::ports::StillDeploying>().is_some() => {
+                    let now = self.store.now_ms()?;
+                    let since = *self.deploying_since.lock().entry((r.id.clone(), spec.name.clone())).or_insert(now);
+                    if now - since > DEPLOY_WAIT_MS {
+                        self.deploying_since.lock().remove(&(r.id.clone(), spec.name.clone()));
+                        let msg = format!("{e:#}, for over {} minutes", DEPLOY_WAIT_MS / 60_000);
+                        self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
+                        failed.get_or_insert(format!("deploying {}: {msg}", spec.name));
+                        continue;
+                    }
+                    self.store.set_service(&r.id, &spec.name, ServiceState::Deploying, None, None)?;
+                    // The backend has what this deploy sent (its variables): a change made
+                    // meanwhile, even one back to how it was before, is sent again.
+                    self.store.set_service_config(&r.id, &spec.name, &fingerprint)?;
+                    still_deploying = true;
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    self.store.set_service(&r.id, &spec.name, ServiceState::Failed, None, Some(&msg))?;
+                    failed.get_or_insert(format!("deploying {}: {msg}", spec.name));
+                }
             }
+        }
+        // Every outcome is kept first: a failed deploy doesn't lose the others' (which would be
+        // deployed again for nothing).
+        if let Some(e) = failed {
+            anyhow::bail!(e);
         }
         if still_deploying {
             let again = self.store.now_ms()? + DEPLOY_POLL_MS;
@@ -1105,7 +1132,14 @@ impl Engine {
         }
         let view = self.store.preview(&r.id)?;
         // The change hears it went, and how its teardown failed if it did.
-        self.source.forget(&view, self.store.teardown_error(&r.id)?.as_deref()).await;
+        let teardown = self.store.teardown_error(&r.id)?;
+        self.source.forget(&view, teardown.as_deref()).await;
+        // A Git URL service's pull request too, unless another project's preview of it speaks
+        // now (it carries the comment on; saying this one went could land after it).
+        let hands_over = matches!(self.refresh_voice(r), Ok((_, false)));
+        if !hands_over && let Ok(s) = self.store.settings(&r.project_id) {
+            self.report_on_git(&view, &s, Some(teardown.as_deref())).await;
+        }
         // What it cost this month stays counted against the project's budget.
         self.store.add_spend(&r.project_id, crate::store::month_start(self.store.now_ms()?), view.cost.month_to_date_usd)?;
         self.store.remove(&r.id)?;
@@ -1115,6 +1149,7 @@ impl Engine {
         self.usage_read.lock().remove(&r.id);
         self.secrets_told.lock().remove(&r.id);
         self.egress_told.lock().remove(&r.id);
+        self.git_reporting.lock().remove(&r.id);
         self.forget_masks(&r.id);
         info!(preview = %r.id, "previews: deleted");
         Ok(())
@@ -1122,6 +1157,9 @@ impl Engine {
 
     pub(super) async fn report(&self, row: Row) {
         let Ok(s) = self.store.settings(&row.project_id) else { return };
+        // Who speaks for a Git URL service's branch as of now: another project's preview of it
+        // stays on its own sheet (`report_on_git`).
+        let _ = self.refresh_voice(&row);
         if let Ok(mut p) = self.store.view(row) {
             // The open notes, newest first (a few), for the pull request's comment.
             if p.change.is_some() {
@@ -1134,7 +1172,127 @@ impl Engine {
                 }).collect();
             }
             self.source.report(&p, &s).await;
+            self.report_on_git(&p, &s, None).await;
         }
     }
 
+    /// A Git URL service's preview on its repository (Vercel's status and comment): the
+    /// `roll/preview` status on its head and, for a pull request's, the comment edited in place,
+    /// each posted only when it changed (what was posted is kept, so a restart posts nothing new).
+    /// `deleted`: the preview went (its comment says so). Best effort: a failure is logged and
+    /// tried at the next report.
+    pub(super) async fn report_on_git(&self, p: &Preview, s: &crate::Settings, deleted: Option<Option<&str>>) {
+        let (Some(gr), Some(service)) = (self.git_report.get(), p.repo.strip_prefix("git:")) else { return };
+        // Another project speaks for the service: its own preview posts (and says it went).
+        if p.reported_by.is_some() {
+            return;
+        }
+        // One report at a time per preview (what's posted, and the comment's id, read and kept
+        // in turn).
+        let turn = self.git_reporting.lock().entry(p.id.clone()).or_default().clone();
+        let _turn = turn.lock().await;
+        // Only a project that stands for the service speaks for it on its repository (anyone may
+        // put any service on their own canvas: `Workspace::trusts`).
+        let stands = self.workspace.get(roll_workspace::Scope::All, &p.project).is_ok_and(|project| self.workspace.trusts(&project, roll_workspace::Kind::Service, service));
+        if !stands {
+            return;
+        }
+        let Some(mut body) = self.source.git_report_body(p, s, deleted) else { return };
+        // A fork's pull request waits for a writer in roll's sheet (not roll code's
+        // `approve-run`), and nothing of it is linked: it hasn't run.
+        if deleted.is_none() && p.state == State::AwaitingApproval {
+            body.description = "Waiting for a writer to approve running this fork (Approve and run, in roll)".into();
+            body.target_url = None;
+        }
+        let Ok((last_status, comment_id, last_hash)) = self.store.git_report(&p.id) else { return };
+        // The project's own switches, as for a roll code change's (`github.status`, `.comment`).
+        if let Some(state) = body.state.as_ref().filter(|_| s.github.status) {
+            let key = format!("{}:{state}:{}", p.head, body.description);
+            if last_status.as_deref() != Some(key.as_str()) {
+                match gr.status(service, &p.head, state, &body.description, body.target_url.as_deref()).await {
+                    Ok(true) => {
+                        let _ = self.store.set_git_report(&p.id, Some(&key), None);
+                    }
+                    Ok(false) => return,
+                    Err(e) => tracing::warn!(preview = %p.id, error = %e, "previews: a Git URL preview's status"),
+                }
+            }
+        }
+        let Ok(Some(pull)) = self.store.git_pull(&p.id) else { return };
+        if !s.github.comment {
+            return;
+        }
+        // Its repository, as roll apps named it in the pull request's page: the comment's number
+        // and id are that repository's, whatever the service is connected to later.
+        let Some(repo) = pull_repo(&pull.url) else { return };
+        let hash = format!("{:016x}", body.comment.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, x| (h ^ x as u64).wrapping_mul(0x0100_0000_01b3)));
+        if last_hash.as_deref() == Some(hash.as_str()) {
+            return;
+        }
+        // The pull request's comment, whichever project's preview posted it: one per pull request.
+        let comment_id = comment_id.or_else(|| self.store.pull_comment(service, &repo, pull.number).ok().flatten());
+        match gr.comment(service, &repo, pull.number as u64, &body.comment, comment_id.map(|i| i as u64)).await {
+            Ok(Some(id)) => {
+                let _ = self.store.set_git_report(&p.id, None, Some((id as i64, &hash)));
+                let _ = self.store.set_pull_comment(service, &repo, pull.number, id as i64);
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(preview = %p.id, error = %e, "previews: a Git URL preview's pull request comment"),
+        }
+    }
+
+}
+
+impl Engine {
+    /// The project roll code's `POST …/preview` makes a change's preview in, as `(id, name)`: of
+    /// the projects with previews on that stand for `kind r#ref` (`Workspace::trusts`), the one
+    /// that has had it on its canvas longest, then by id.
+    pub fn speaker(&self, kind: roll_workspace::Kind, r#ref: &str) -> Option<(String, String)> {
+        self.workspace
+            .projects_of(kind.as_str(), r#ref)
+            .ok()?
+            .iter()
+            .filter_map(|id| self.workspace.get(roll_workspace::Scope::All, id).ok())
+            .filter(|p| self.workspace.trusts(p, kind, r#ref) && self.store.settings(&p.id).is_ok_and(|s| s.enabled))
+            .filter_map(|p| p.resources.iter().find(|x| x.kind == kind && x.r#ref == r#ref).map(|x| (x.added_at, p.id.clone(), p.name.clone())))
+            .min()
+            .map(|(_, id, name)| (id, name))
+    }
+
+    /// Keeps `row`'s [`crate::Preview::reported_by`] up to date: `(changed, it speaks)`. With no
+    /// speaker at all (its project's previews just turned off) it speaks for itself. Only a Git
+    /// URL service's previews can be quiet: each project with the service on its canvas has its
+    /// own preview of a branch, where a change has one preview (made by its repo's speaker).
+    /// An error (the workspace or the store unread) changes nothing: the voice stored stays.
+    pub(super) fn refresh_voice(&self, row: &Row) -> anyhow::Result<(bool, bool)> {
+        let Some(svc) = row.repo.strip_prefix("git:") else { return Ok((false, true)) };
+        // Of the projects with an active preview of this branch (each stands for the service, or
+        // its preview would be gone), the one that has had the service on its canvas longest:
+        // a project whose rules skip the branch has no preview, so it never silences one that does.
+        let mut speaker: Option<(i64, String, String)> = None;
+        let mut operators = false;
+        for r in self.store.branch_rows(&row.repo, row.branch.as_deref())? {
+            let p = self.workspace.get(roll_workspace::Scope::All, &r.project_id)?;
+            if r.id == row.id {
+                operators = p.owner.is_empty();
+            }
+            let Some(added) = p.resources.iter().find(|x| x.kind == roll_workspace::Kind::Service && x.r#ref == svc).map(|x| x.added_at) else { continue };
+            let key = (added, p.id.clone(), p.name.clone());
+            if speaker.as_ref().is_none_or(|s| key < *s) {
+                speaker = Some(key);
+            }
+        }
+        // Named only on the operator's projects, which see every project: a person's project
+        // never learns another owner's project's name (they're 404s to them).
+        let by = speaker.filter(|(_, id, _)| *id != row.project_id).map(|(_, _, name)| if operators { name } else { "another project".into() });
+        Ok((self.store.set_reported_by(&row.id, by.as_deref())?, by.is_none()))
+    }
+}
+
+/// `owner/name` of a pull request's page (`https://<host>/<owner>/<name>/pull/<n>`).
+fn pull_repo(url: &str) -> Option<String> {
+    let path = url.split_once("://")?.1.split_once('/')?.1;
+    let mut parts = path.split('/');
+    let (owner, name, kind) = (parts.next()?, parts.next()?, parts.next()?);
+    (kind == "pull" && !owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}"))
 }
