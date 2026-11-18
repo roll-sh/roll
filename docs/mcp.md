@@ -834,16 +834,19 @@ waits on a sibling PR reaching main is last.
    security log (#239). Next on it, ranked:
    - **Checksummed `rlp_` SCIM tokens, revoked on a leak** (now; this PR): found by leak scanning
      like roll's other secrets, stopped at once, the connection says where it was found.
-   - One place for identity providers: SSO connections (people) and enterprise sign-in's `idps`
-     (#210, ID-JAG for agents) both name an issuer and its keys; one list, each provider used for
-     either or both, so an admin configures Okta once.
+   - **One place for identity providers** (#252, open): an enterprise identity provider with `sso`
+     is people's SSO connection, vouching for the domains its DNS records proved (read at each
+     sign-in), instead of domains the operator typed. Left: a provider made once in the dashboard
+     for both (today the enterprise form picks an existing connection).
    - SAML for providers without OIDC: its signature checks are s3-server's (`s3-proto`'s xmldsig,
      storage's STS); reuse means a shared crate, so the storage thread agrees first.
    - Provider groups to roles over SCIM: **blocked.** roll has no org or team membership for people
      yet (docs/accounts.md phase 2, "Orgs"), and its one role, admin, is never SCIM's to grant.
      Groups map to org membership once orgs exist.
 2. **Tools for sibling routes as they reach main** (each a row in tools.rs and the table above).
-   Waiting on open PRs: `secrets_totp` (secrets #194), apps #230 (`apps_restore_service`, deploy,
+   `secrets_list_github_apps` (secrets #73) is #253; secrets' other routes after batch 1 are admin,
+   a credential, a person's review, or an existing tool's (`tool-gaps.py`, 2026-11-18). Waiting on
+   open PRs: `secrets_totp` (secrets #194), apps #230 (`apps_restore_service`, deploy,
    its own row as agreed; `deleted` on `apps_list_services`; delete keeps a service 48 h), apps
    #219/#221/#222 (`rebuild_on_base`, firewall `challenge`, `build_closed`), apps #235 (`GET …/diff`,
    and `PATCH …/variables` `copy_from` on its own row with `copies_from`). Apps tells this thread
