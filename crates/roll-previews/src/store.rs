@@ -1979,7 +1979,7 @@ impl Store {
 
     /// Every project's own preview domain's base.
     pub fn domain_bases(&self) -> Result<Vec<String>> {
-        Ok(self.db.read(|c| c.query("SELECT base FROM project_domains", [], |r| r.get::<_, String>(0)))?)
+        Ok(self.db.read(|c| c.query("SELECT base FROM project_domains", (), |r| r.get(0)))?)
     }
 
     /// The preview and service `<label>.<base>` names under a project's own preview domain: only
