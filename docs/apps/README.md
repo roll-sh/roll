@@ -1918,8 +1918,8 @@ names; strings, numbers or booleans as text of at most 200), kept as a line of t
 `events:` log with its route and the edge's country, nothing about the visitor; anything else is a
 400, more than 1,200 a minute an environment a 429. It goes through the environment's gates (allow
 list, firewall, rate limit, access) as a page does. `events` lists the 20 most counted names, each
-with its properties' five most common values (500 names and 500 values a property counted apart
-at most). The Metrics tab's Visitors panel and `roll apps analytics` show them.
+with its properties' five most common values (500 names, 20 properties a name and 500 values
+a property counted apart at most, so beacons that invent keys can't make a read hold millions). The Metrics tab's Visitors panel and `roll apps analytics` show them.
 `analytics_count_page_views_and_visitors`, `track::tests`.
 
 ## Caching answers
