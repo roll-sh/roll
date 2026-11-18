@@ -12,7 +12,7 @@
 
 import { Table2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary, type Vital, type VitalName, type Vitals, type AppMetrics, type AppSeries, type ErrorGroup, type SplitStat } from "@/lib/apps-api";
+import { appsApi, formatMs, type Analytics, type Deployment, type Metrics as MetricsData, type RouteStat, type RouteStats, type Span, type TraceSummary, type Vital, type VitalName, type Vitals, type AppMetrics, type AppSeries, type ErrorGroup, type SplitStat, type InstanceSeries } from "@/lib/apps-api";
 import { formatBytes } from "@/lib/roll-api";
 import { btn, CopyButton, panel, useCopy } from "../ui";
 import { usePageVisible } from "./live";
@@ -502,6 +502,51 @@ function Routes({ stats }: { stats: RouteStats }) {
   );
 }
 
+/** Each instance's own CPU and memory over the last hour (Railway's per replica): now, the
+ *  hour's peak, and its line. Against its limits when they're known. */
+function Instances({ rows, cpus, memoryMb }: { rows: InstanceSeries[]; cpus?: number; memoryMb?: number }) {
+  const last = <T,>(v: T[]) => v[v.length - 1];
+  return (
+    <section className={`${panel} overflow-hidden`} aria-label="By instance">
+      <p className="border-b border-line px-4 py-2.5 text-[12px] text-muted">CPU and memory by instance, the last hour</p>
+      <table className="w-full font-mono text-[11.5px] tabular-nums">
+        <thead className="text-left text-subtle">
+          <tr>
+            {["", "CPU", "peak", "", "memory", "peak", ""].map((h, i) => (
+              <th key={i} className={`px-4 py-1.5 font-normal ${i ? "text-right" : ""}`}>
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.slice(0, 20).map((r) => {
+            const pct = (c: number) => (cpus ? `${Math.round((c / cpus) * 100)}%` : cores(c));
+            const mem = (b: number) => (memoryMb ? `${formatBytes(b)} (${Math.round((b / (memoryMb * 1048576)) * 100)}%)` : formatBytes(b));
+            return (
+              <tr key={r.instance} className="border-t border-line">
+                <td className="truncate px-4 py-1" title={`${r.instance} (${r.deployment})`}>
+                  {r.instance.split("-").slice(-2).join("-")}
+                </td>
+                <td className="px-4 py-1 text-right">{pct(last(r.cpu) ?? 0)}</td>
+                <td className="px-4 py-1 text-right text-muted">{pct(Math.max(...r.cpu))}</td>
+                <td className="px-2 py-1">
+                  <Sparkline points={r.minutes.map((m, i) => [m, r.cpu[i]] as [number, number])} />
+                </td>
+                <td className="px-4 py-1 text-right">{mem(last(r.memory_bytes) ?? 0)}</td>
+                <td className="px-4 py-1 text-right text-muted">{formatBytes(Math.max(...r.memory_bytes))}</td>
+                <td className="px-2 py-1">
+                  <Sparkline points={r.minutes.map((m, i) => [m, r.memory_bytes[i]] as [number, number])} />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
 /** The last hour's requests by the deployment, and the instance, that answered (shown when more than one did). */
 function Splits({ stats }: { stats: RouteStats }) {
   const parts = [
@@ -545,7 +590,22 @@ function Splits({ stats }: { stats: RouteStats }) {
 }
 
 /** Requests, errors, latency, CPU, memory, instances and cold starts over the last hour, day or week. */
-export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: string; env: string; /** Its memory limit, MB. */ memoryMb?: number; /** The most instances it scales to. */ maxInstances?: number }) {
+export function MetricsTab({
+  service,
+  env,
+  memoryMb,
+  maxInstances,
+  cpus,
+}: {
+  service: string;
+  env: string;
+  /** Its memory limit, MB. */
+  memoryMb?: number;
+  /** The most instances it scales to. */
+  maxInstances?: number;
+  /** The cores each instance gets. */
+  cpus?: number;
+}) {
   const [range, setRange] = useState<Range>(RANGES[0]);
   const [raw, setM] = useState<MetricsData | null>(null);
   const [deploys, setDeploys] = useState<Deployment[]>([]);
@@ -734,6 +794,7 @@ export function MetricsTab({ service, env, memoryMb, maxInstances }: { service: 
       )}
       {routes && <Routes stats={routes} />}
       {routes && <Splits stats={routes} />}
+      {(raw?.by_instance?.length ?? 0) > 0 && <Instances rows={raw!.by_instance!} cpus={cpus} memoryMb={memoryMb} />}
       {errorGroups.length > 0 && <Errors groups={errorGroups} />}
       {speed && speed.samples > 0 && <Speed v={speed} />}
       {appMetrics && appMetrics.series.length > 0 && <AppMetricsPanel m={appMetrics} />}
