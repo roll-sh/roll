@@ -47,6 +47,13 @@ CREATE TABLE IF NOT EXISTS identity_logins (
     expires_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS identity_logins_identity ON identity_logins (identity);
+-- AWS logins' signatures (a SHA-256 of each), kept while the signed request could still be taken
+-- (aws_identity.rs): a signed GetCallerIdentity logs in once, on any node.
+CREATE TABLE IF NOT EXISTS aws_logins (
+    signature TEXT PRIMARY KEY,
+    at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS aws_logins_at ON aws_logins (at);
 ";
 
 const IDENTITIES_MAX: i64 = 50;
@@ -188,14 +195,17 @@ fn bad(m: impl Into<String>) -> Error {
 }
 
 impl Secrets {
-    /// What AWS identities' signed requests must name in `X-Roll-Server-ID`: the configured ID,
-    /// else the URL clients reach the API at.
+    /// What AWS identities' signed requests must name in `X-Roll-Server-ID`, when rolld was given
+    /// one (`ROLL_SECRETS_AWS_SERVER_ID`, or its configured public URL).
     pub fn set_aws_server_id(&self, id: String) {
         let _ = self.aws_server_id.set(id.trim().trim_end_matches('/').to_string());
     }
 
+    /// The ID set, else one derived from the deployment key. Never a URL made up from a host and
+    /// port: two deployments can share one, and each would take the other's signed requests.
     fn aws_server_id(&self) -> Option<String> {
-        self.aws_server_id.get().or(self.public_api.get()).map(|s| s.trim_end_matches('/').to_string()).filter(|s| !s.is_empty())
+        let set = self.aws_server_id.get().map(|s| s.trim_end_matches('/').to_string()).filter(|s| !s.is_empty());
+        set.or_else(|| self.keys.as_ref().ok().map(|k| k.aws_server_id().to_string()))
     }
 
     /// An identity as answered: an AWS one with the server ID its requests name.
@@ -460,6 +470,13 @@ impl Secrets {
         if !pattern.matches(&caller) {
             return Err(Error::Forbidden(format!("{} doesn't match identity {}'s ARN", caller.arn, i.name)));
         }
+        // Once: the signed request is a credential for as long as its date is in the window, so its
+        // signature is kept (in the database every node shares) until it's out of it.
+        let now_ms = self.db.now_ms()?;
+        let first = self.db.write(|c| c.execute("INSERT INTO aws_logins (signature, at) VALUES (?, ?) ON CONFLICT (signature) DO NOTHING", params![call.replay_key, now_ms]))? == 1;
+        if !first {
+            return Err(Error::Unauthorized("this signed request has already logged in: sign a new one".into()));
+        }
         Ok(caller.arn)
     }
 
@@ -471,8 +488,14 @@ impl Secrets {
 
     /// The sweeper: forget logins a day after they ended.
     pub(crate) fn sweep_identity_logins(&self) -> Result<usize> {
-        let old = self.db.now_ms()? - 86_400_000;
-        Ok(self.db.write(|c| c.execute("DELETE FROM identity_logins WHERE expires_at < ?", [old]))?)
+        let now = self.db.now_ms()?;
+        let old = now - 86_400_000;
+        // A signature is out of the ±SKEW_SECS window at most 2 × SKEW_SECS after it was taken.
+        let stale = now - 2 * crate::aws_identity::SKEW_SECS * 1000;
+        Ok(self.db.write(|c| {
+            c.execute("DELETE FROM aws_logins WHERE at < ?", [stale])?;
+            c.execute("DELETE FROM identity_logins WHERE expires_at < ?", [old])
+        })?)
     }
 
 }

@@ -362,8 +362,8 @@ pub struct Secrets {
     code_refs: std::sync::OnceLock<Arc<dyn health::CodeRefs>>,
     /// Where clients reach rolld's API, once rolld says (certificates' CRL distribution point).
     public_api: Arc<std::sync::OnceLock<String>>,
-    /// What AWS identities' logins must name in `X-Roll-Server-ID` (`ROLL_SECRETS_AWS_SERVER_ID`);
-    /// unset, the public API's URL.
+    /// What AWS identities' logins must name in `X-Roll-Server-ID` (`ROLL_SECRETS_AWS_SERVER_ID`,
+    /// or the configured public URL); unset, one derived from the deployment key.
     aws_server_id: std::sync::OnceLock<String>,
     /// Signed CRLs by CA, with when they were made (pki.rs): the public route signs one a minute.
     crls: pki::Crls,

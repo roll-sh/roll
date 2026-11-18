@@ -91,6 +91,8 @@ pub struct Keyring {
     /// What tells the current key from others without revealing it (a customer-wrapped data key
     /// records which deployment key sealed it inside: kms.rs).
     current_id: String,
+    /// This deployment's AWS login server ID, when no other is configured (identities.rs).
+    aws_server_id: String,
 }
 
 impl std::fmt::Debug for Keyring {
@@ -101,8 +103,13 @@ impl std::fmt::Debug for Keyring {
 
 /// A deployment key's id: 12 hex characters derived from it (it reveals nothing of the key).
 fn kek_id(secret: &str) -> String {
-    let mut id = [0u8; 6];
-    hkdf::Hkdf::<Sha256>::new(Some(b"roll-secrets"), secret.trim().as_bytes()).expand(b"kek:id:v1", &mut id).expect("6 bytes");
+    derived_hex::<6>(secret, b"kek:id:v1")
+}
+
+/// `N` bytes derived from a deployment key under `label`, as hex.
+fn derived_hex<const N: usize>(secret: &str, label: &[u8]) -> String {
+    let mut id = [0u8; N];
+    hkdf::Hkdf::<Sha256>::new(Some(b"roll-secrets"), secret.trim().as_bytes()).expand(label, &mut id).expect("at most 8160 bytes");
     id.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -118,12 +125,18 @@ fn kek(secret: &str) -> Result<Aes256Gcm, CryptoError> {
 
 impl Keyring {
     pub fn new(current: &str, previous: Option<&str>) -> Result<Keyring, CryptoError> {
-        Ok(Keyring { current: kek(current)?, previous: previous.filter(|p| !p.trim().is_empty()).map(kek).transpose()?, current_id: kek_id(current) })
+        Ok(Keyring { current: kek(current)?, previous: previous.filter(|p| !p.trim().is_empty()).map(kek).transpose()?, current_id: kek_id(current), aws_server_id: derived_hex::<16>(current, b"aws:server-id:v1") })
     }
 
     /// The current deployment key's id.
     pub fn current_id(&self) -> &str {
         &self.current_id
+    }
+
+    /// An AWS login server ID unique to this deployment: 32 hex characters derived from the
+    /// current deployment key under its own label (it reveals nothing of the key).
+    pub fn aws_server_id(&self) -> &str {
+        &self.aws_server_id
     }
 
     /// A fresh data key for `project`, and its sealed form to store.

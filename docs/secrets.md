@@ -2383,7 +2383,10 @@ roll holds no AWS credential.
     profile's, a task's or a pod's. A role's path may be given; it isn't compared, since role
     names are unique in an account and a session's ARN drops the path.
   - `arn:aws:sts::123456789012:assumed-role/web/i-*`: only sessions whose name starts with
-    `i-` (EC2 instances), or one session exactly without the `*`.
+    `i-` (EC2 instances), or one session exactly without the `*`. A session name isn't a security
+    boundary: whoever may call `sts:AssumeRole` on the role picks the session name, so anything
+    that can assume `web` can name its session `i-…`. Only the role is the boundary; use a
+    session prefix to tell your own workloads apart, never to keep someone out.
   - `arn:aws:iam::123456789012:user/ci`: one IAM user.
 
   A `*` anywhere but the end of a session name is refused, as is the account's root and a
@@ -2399,18 +2402,27 @@ roll holds no AWS credential.
     send. Only `Authorization`, `Content-Type`, `X-Amz-Date`, `X-Amz-Security-Token`,
     `X-Amz-Content-SHA256` and `X-Roll-Server-ID` go on to STS.
   - `X-Roll-Server-ID` names this server, as Vault's `iam_server_id_header_value` does. A request
-    signed for another roll or a Vault can't be replayed here. The ID is
-    `ROLL_SECRETS_AWS_SERVER_ID` on rolld, or else its public URL (`ROLL_CODE_PUBLIC_URL`).
-    Clients send `ROLL_AWS_SERVER_ID`, or else their `ROLL_API_URL`. A wrong one is refused with
-    the ID to use, and the identity shows it as `server_id`.
+    signed for another roll or a Vault can't be replayed here, so the ID has to be unique to the
+    deployment. It's `ROLL_SECRETS_AWS_SERVER_ID` on rolld, or else its configured public URL
+    (`ROLL_CODE_PUBLIC_URL`), or else 32 hex characters derived from the deployment key
+    (`ROLL_SECRET_KEY`, HKDF under its own label; it reveals nothing of the key). Never a URL made
+    up from the host and port: two deployments can share one. Clients send `ROLL_AWS_SERVER_ID`,
+    or else their `ROLL_API_URL`, so **when the ID is derived, clients must set
+    `ROLL_AWS_SERVER_ID`** to it (rotating the deployment key changes it; set
+    `ROLL_SECRETS_AWS_SERVER_ID` to keep one across rotations). A wrong one is refused with the ID
+    to use, and the identity shows it as `server_id` (the dashboard's and `roll secrets identities
+    add`'s instructions include it when it isn't the API's URL).
   - `X-Amz-Date` is within 5 minutes of roll's clock.
 
   roll then sends the request through rolld's guarded client: no redirects, a 15 s timeout, and
   at most 64 KiB of the answer read. STS's refusal (a bad signature, an expired session) is a 401
   with STS's error code. An assumed role's session ARN
   (`arn:aws:sts::123456789012:assumed-role/web/i-0abc…`) matches its role.
-- **What's left of a signed request.** A signed request is a credential for its 5 minutes (STS
-  takes it for 15). Clients send it to roll over HTTPS only. Logins share OIDC's rate limits
+- **A signed request logs in once.** roll keeps a SHA-256 of each accepted request's signature
+  (`aws_logins`, in the database every node shares, inserted with `ON CONFLICT DO NOTHING`) and
+  refuses the same signature again with a 401, on any node. Rows go after 10 minutes, once the
+  request's date is out of the ±5-minute window. A signed request is still a credential until it's
+  used (STS takes it for 15 minutes, roll for 5). Clients send it to roll over HTTPS only. Logins share OIDC's rate limits
   (120 a minute per identity, 240 per client address).
 - **The clients.** With `ROLL_IDENTITY=idn_…`, `roll run`, `roll secrets …`, the Go client
   (`FromEnv`, `LoginAWS`) and the Python client (`from_env`, `login_aws`) sign and log in by

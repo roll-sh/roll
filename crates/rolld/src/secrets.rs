@@ -385,8 +385,10 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
     // Where clients reach rolld: a CA's certificates name its CRL there.
     secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
-    // What AWS identities' signed requests name (X-Roll-Server-ID); unset, the public URL above.
-    if let Some(id) = std::env::var("ROLL_SECRETS_AWS_SERVER_ID").ok().filter(|v| !v.trim().is_empty()) {
+    // What AWS identities' signed requests name (X-Roll-Server-ID): ROLL_SECRETS_AWS_SERVER_ID, or
+    // the configured public URL. Never the host and port made up above, which two deployments can
+    // share: unset, roll-secrets derives one from the deployment key.
+    if let Some(id) = std::env::var("ROLL_SECRETS_AWS_SERVER_ID").ok().filter(|v| !v.trim().is_empty()).or_else(|| args.code_public_url.clone()) {
         secrets.set_aws_server_id(id);
     }
     // A deleted project's secrets go with it.

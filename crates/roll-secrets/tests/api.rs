@@ -2660,15 +2660,17 @@ async fn a_workload_logs_in_with_its_oidc_token_for_a_short_lived_scoped_token()
 }
 
 /// A signed GetCallerIdentity as roll's clients send one (STS checks the signature; roll checks the
-/// rest), dated `age` seconds ago, naming `server` in X-Roll-Server-ID.
+/// rest), dated `age` seconds ago, naming `server` in X-Roll-Server-ID. Each has its own signature.
 fn signed_caller_identity(url: &str, body: &str, server: Option<&str>, age: i64) -> Value {
+    static SIGNED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let signature = format!("{:064x}", SIGNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let t = time::OffsetDateTime::now_utc() - time::Duration::seconds(age);
     let date = format!("{:04}{:02}{:02}T{:02}{:02}{:02}Z", t.year(), u8::from(t.month()), t.day(), t.hour(), t.minute(), t.second());
     let mut headers = json!({
         "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
         "X-Amz-Date": date,
         "X-Amz-Security-Token": "FwoGZXIvYXdzEXAMPLETOKEN",
-        "Authorization": format!("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/{}/us-east-1/sts/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-roll-server-id, Signature={}", &date[..8], "a".repeat(64)),
+        "Authorization": format!("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/{}/us-east-1/sts/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-roll-server-id, Signature={signature}", &date[..8]),
     });
     if let Some(s) = server {
         headers["X-Roll-Server-ID"] = json!(s);
@@ -2679,7 +2681,6 @@ fn signed_caller_identity(url: &str, body: &str, server: Option<&str>, age: i64)
 #[tokio::test]
 async fn a_machine_on_aws_logs_in_with_its_iam_role_through_sts() {
     let api = Api::new().await;
-    api.secrets.set_aws_server_id("https://roll.test/".into());
     api.set("staging", "API_KEY", "staging-key").await;
     api.set("production", "API_KEY", "prod-key").await;
     let identity = |arn: &str| json!({ "name": "web", "kind": "aws", "arn": arn, "environments": ["staging"], "actions": ["read", "reveal"] });
@@ -2687,6 +2688,11 @@ async fn a_machine_on_aws_logs_in_with_its_iam_role_through_sts() {
     for open in ["arn:aws:iam::*:role/app", "arn:aws:iam::123456789012:role/*", "arn:aws:iam::123456789012:root"] {
         assert_eq!(api.call(Method::POST, "/identities", Some(identity(open))).await.0, StatusCode::BAD_REQUEST, "{open}");
     }
+    // Unset, the server ID is derived from the deployment key: never a host and port two
+    // deployments could share.
+    let derived = api.ok(Method::POST, "/identities", Some(json!({ "name": "other", "kind": "aws", "arn": "arn:aws:iam::123456789012:role/other", "actions": ["read"] }))).await;
+    assert!(derived["server_id"].as_str().is_some_and(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())), "{derived}");
+    api.secrets.set_aws_server_id("https://roll.test/".into());
     let i = api.ok(Method::POST, "/identities", Some(identity("arn:aws:iam::123456789012:role/app"))).await;
     assert_eq!((i["kind"].as_str(), i["server_id"].as_str()), (Some("aws"), Some("https://roll.test")));
     let id = i["id"].as_str().unwrap().to_string();
@@ -2698,8 +2704,12 @@ async fn a_machine_on_aws_logs_in_with_its_iam_role_through_sts() {
 
     // An instance profile's session is its role's.
     answers(Some("arn:aws:sts::123456789012:assumed-role/app/i-0abcd1234efgh5678"));
-    let (s, l) = login(signed_caller_identity(sts, BODY, Some("https://roll.test"), 0)).await;
+    let signed = signed_caller_identity(sts, BODY, Some("https://roll.test"), 0);
+    let (s, l) = login(signed.clone()).await;
     assert_eq!(s, StatusCode::OK, "{l}");
+    // A signed request logs in once: replayed while its date is still in the window, it's refused.
+    let (s, e) = login(signed).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{e}");
     let token = l["token"].as_str().unwrap();
     let (s, v) = api.req(Method::GET, "/environments/staging/values", None, Some(token)).await;
     assert_eq!((s, v["values"]["API_KEY"].as_str()), (StatusCode::OK, Some("staging-key")));
@@ -2710,7 +2720,8 @@ async fn a_machine_on_aws_logs_in_with_its_iam_role_through_sts() {
     let names: Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
     assert_eq!(names, ["authorization", "content-type", "x-amz-date", "x-amz-security-token", "x-roll-server-id"]);
     let listed = api.ok(Method::GET, "/identities", None).await;
-    assert_eq!(listed[0]["last_subject"], "arn:aws:sts::123456789012:assumed-role/app/i-0abcd1234efgh5678");
+    let web = listed.as_array().unwrap().iter().find(|x| x["id"] == id.as_str()).unwrap();
+    assert_eq!(web["last_subject"], "arn:aws:sts::123456789012:assumed-role/app/i-0abcd1234efgh5678");
     let audit = api.ok(Method::GET, &format!("/audit?actor=identity:{id}"), None).await;
     assert_eq!(audit[1]["action"], "identity.login");
 

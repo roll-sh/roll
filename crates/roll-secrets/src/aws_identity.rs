@@ -4,7 +4,8 @@
 //! user's keys) without sending it, and hands the signed request to roll. roll checks it's exactly
 //! that request to an STS endpoint, with this server's `X-Roll-Server-ID` among its signed headers
 //! and dated within minutes, sends it to STS itself, and reads back who signed it. Nothing has to
-//! be turned on in the account, and roll holds no AWS credential.
+//! be turned on in the account, and roll holds no AWS credential. A signed request logs in once:
+//! its signature is kept (`aws_logins`, shared by every node) until its date is out of the window.
 //!
 //! An identity takes one role (every session of it, or sessions whose name starts with a prefix)
 //! or one user, in one account: an ARN with a wildcard anywhere else is refused, as a shared OIDC
@@ -12,6 +13,7 @@
 
 use crate::{Error, Result};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 /// The one request a login may carry.
@@ -45,6 +47,8 @@ pub struct SignedRequest {
 pub struct StsCall {
     pub host: String,
     pub headers: Vec<(String, String)>,
+    /// The signature's SHA-256 (hex): what makes a signed request log in only once.
+    pub replay_key: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,7 +257,8 @@ pub fn check(r: &SignedRequest, server_id: &str, now: i64) -> Result<StsCall> {
     let field = |name: &str| auth.split(',').map(str::trim).find_map(|p| p.strip_prefix(name).and_then(|p| p.strip_prefix('=')));
     let signed: Vec<&str> = field("SignedHeaders").map(|s| s.split(';').collect()).unwrap_or_default();
     let scope_ok = field("Credential").is_some_and(|c| c.split('/').nth(3) == Some("sts"));
-    if !scope_ok || field("Signature").is_none() {
+    let signature = field("Signature").filter(|s| !s.is_empty()).ok_or_else(|| Error::Unauthorized("the request isn't signed for STS".into()))?;
+    if !scope_ok {
         return Err(Error::Unauthorized("the request isn't signed for STS".into()));
     }
     if let Some(h) = signed.iter().find(|h| !SIGNABLE.contains(h)) {
@@ -268,14 +273,15 @@ pub fn check(r: &SignedRequest, server_id: &str, now: i64) -> Result<StsCall> {
     let named = headers.get(SERVER_ID_HEADER).map(|v| v.trim().trim_end_matches('/'));
     let ours = server_id.trim_end_matches('/');
     if named != Some(ours) {
-        return Err(Error::Unauthorized(format!("the signed request names {}, not this server: sign it with X-Roll-Server-ID: {ours} (ROLL_AWS_SERVER_ID)", named.map_or_else(|| "no server".to_string(), |n| format!("server {n}")))));
+        return Err(Error::Unauthorized(format!("the signed request names {}, not this server: sign it with X-Roll-Server-ID: {ours} (the client's ROLL_AWS_SERVER_ID; this server's is ROLL_SECRETS_AWS_SERVER_ID)", named.map_or_else(|| "no server".to_string(), |n| format!("server {n}")))));
     }
     let at = headers.get("x-amz-date").and_then(|d| amz_date(d)).ok_or_else(|| Error::Unauthorized("the signed request has no X-Amz-Date".into()))?;
     if (now - at).abs() > SKEW_SECS {
         return Err(Error::Unauthorized(format!("the signed request is dated {}s from roll's clock (at most {SKEW_SECS}s): sign a new one", now - at)));
     }
     let headers = FORWARDED.iter().filter_map(|h| headers.get(*h).map(|v| (h.to_string(), v.to_string()))).collect();
-    Ok(StsCall { host: host.to_ascii_lowercase(), headers })
+    let replay_key = Sha256::digest(signature.to_ascii_lowercase().as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+    Ok(StsCall { host: host.to_ascii_lowercase(), headers, replay_key })
 }
 
 /// The element `tag`'s text, when the document has exactly one.
