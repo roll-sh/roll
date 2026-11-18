@@ -306,6 +306,12 @@ behind the `Apps` trait:
     apps services are checked by roll apps.
 - The tree is copied into the container, never bind-mounted.
 - Each service answers at `<service>-<slug>.<domain>`.
+  - `<slug>` is `pr<number>` for a GitHub PR, `c<number>` for a roll code change, or the branch
+    name for a branch preview, then `-<project name>`.
+  - Example: `web-pr482-shop.preview.roll.site`.
+  - Labels are cut to 63 characters, and a clash gets the preview id's last 4 characters.
+  - The domain is rolld's preview domain (`--code-preview-domain`), served on the API port like
+    roll code's own previews.
 - A project with its own preview domain (roll apps' project preview domain: a verified wildcard
   custom domain, `*.preview.acme.dev`) has its previews answer at `<service>-<slug>.preview.acme.dev`
   instead (Vercel's preview deployment suffix), so cookies scoped to the team's domain and OAuth
@@ -318,12 +324,6 @@ behind the `Apps` trait:
     again, so the pull request's links follow.
   - **TLS:** plain HTTP for now, on a local node or behind the user's own TLS proxy. TLS waits on
     wildcard certificates over DNS-01 (roll apps' "Wildcard certificates", on the edge).
-  - `<slug>` is `pr<number>` for a GitHub PR, `c<number>` for a roll code change, or the branch
-    name for a branch preview, then `-<project name>`.
-  - Example: `web-pr482-shop.preview.roll.site`.
-  - Labels are cut to 63 characters, and a clash gets the preview id's last 4 characters.
-  - The domain is rolld's preview domain (`--code-preview-domain`), served on the API port like
-    roll code's own previews.
 - A service gets this environment, later entries winning:
   1. its `roll.toml` `[preview] env`;
   2. the resolved secrets environment (`pv-<preview id>`, inheriting its base);
