@@ -3648,7 +3648,9 @@ cache waited out. Ranked now:
    project's runtime (an untrusted ephemeral environment never reaches a protected one; dynamic
    credentials refused), audited as the resource; `digest_for` to notice a rotation. Storage's
    replication targets take references first (resolved per client, rebuilt when the digest moves;
-   operator-only to set, for now). Next: let whoever may `reveal` the key set the reference, then
+   operator-only to set, for now); `ResourceRef::untrusted()` (04b3e7ddb) narrows a branch or copy to
+   an untrusted read (no protected environment, no sensitive key; the digest refuses the same).
+   Next: let whoever may `reveal` the key set the reference, then
    search's snapshot repositories, the reviewer's provider keys and the gateway's upstreams, each
    with its thread.
 4b. **roll's issuer for the other products** (asked by roll apps, 2026-11-18): an in-process
