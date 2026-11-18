@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
 import { accessApi, auditWho, describeRule, productName, proposedRule, RISKY, statusOf, type AgentSees, type Approval, type AuditEvent, type Grant, type Tightened } from "@/lib/access-api";
-import { loadInventory, resourcesByProduct } from "@/lib/workspace-resources";
-import { useWorkspace } from "@/lib/workspace-store";
 import { Link } from "../link";
+import { useResourceNames } from "./use-names";
 import { btn, Connecting, ErrorNote, Panel, primary } from "../ui";
 import { GrantRow } from "./overview";
 import { AccessShell, relative } from "./shell";
@@ -24,15 +23,7 @@ function Token({ id }: { id: string }) {
   const { data: approvals } = usePoll(() => accessApi.approvals(undefined, id), 15_000);
   const { data: networks } = usePoll(() => accessApi.networks(id), 30_000);
   const { data: sees } = usePoll(() => accessApi.agentSees(id), 60_000);
-  const ws = useWorkspace();
-  const [inventory, setInventory] = useState<Record<string, { id: string; name: string }[]>>({});
-  useEffect(() => {
-    loadInventory()
-      .then((inv) => setInventory(resourcesByProduct(inv)))
-      .catch(() => {});
-  }, []);
-  const projectName = (p: string) => ws.projects.find((x) => x.id === p)?.name ?? p;
-  const resourceName = (product: string, r: string) => inventory[product]?.find((x) => x.id === r)?.name ?? (product === "workspace" ? projectName(r) : r);
+  const { projectName, resourceName } = useResourceNames();
 
   return (
     <AccessShell tab="overview">
