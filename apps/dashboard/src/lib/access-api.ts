@@ -174,8 +174,43 @@ export function approvalWhere(a: Pick<Approval, "environment" | "scope_path">): 
   return [a.environment, a.scope_path && a.scope_path !== "/" ? `folder ${a.scope_path}` : null].filter(Boolean).join(" · ");
 }
 
-/** Whether an approval is about one resource, so approving it can be remembered. */
-export const rememberable = (a: Pick<Approval, "resource">) => Boolean(a.resource && !a.resource.startsWith("new in "));
+/** Whether approving it can be remembered: it's about one resource, and roll's policy doesn't ask several people for it. */
+export const rememberable = (a: Pick<Approval, "resource" | "gates"> & { method?: string; args?: unknown }) => Boolean(a.resource && !a.resource.startsWith("new in ")) && !a.gates?.length && !accessRequest(a);
+
+/** An access request (a token asking for one more rule for a while): how long and why, or null for a request waiting to run. */
+export function accessRequest(a: { method?: string; args?: unknown }): { for: string; reason: string } | null {
+  if (a.method !== "GRANT") return null;
+  const args = (a.args ?? {}) as { for?: unknown; reason?: unknown };
+  return { for: String(args.for ?? ""), reason: String(args.reason ?? "") };
+}
+
+const FOR_LABEL: Record<string, string> = { "15m": "15 minutes", "1h": "an hour", "8h": "8 hours", "1d": "a day" };
+export const forLabel = (f: string) => FOR_LABEL[f] ?? f;
+
+/** The name an approval records for whoever is looking (`operator`, or a person's `usr_…`). */
+export function deciderName(me: Me | null): string | null {
+  if (!me) return null;
+  if (me.kind === "operator") return me.user?.id ?? "operator";
+  return me.kind === "user" ? me.user.id : null;
+}
+
+/** One rule of roll's policy a pending approval must pass: so many approvals from whom, so many so far. */
+export interface Gate {
+  approvals: number;
+  approvers?: string[];
+  approved: number;
+}
+
+/** What a pending approval still needs under roll's policy ("approved by usr_bob · 1 more needed"), or null. */
+export function gateProgress(a: Pick<Approval, "gates" | "approved_by">): string | null {
+  const gates = a.gates ?? [];
+  if (!gates.length) return null;
+  const more = gates.reduce((n, g) => n + Math.max(0, g.approvals - g.approved), 0);
+  const from = [...new Set(gates.flatMap((g) => g.approvers ?? []))];
+  const by = a.approved_by?.length ? `approved by ${a.approved_by.join(", ")} · ` : "";
+  const needs = more === 1 ? "1 more approval needed" : `${more} more approvals needed`;
+  return `${by}${needs}${from.length ? ` (from ${from.join(", ")})` : ""}`;
+}
 
 export type ApprovalState = "pending" | "approved" | "denied" | "expired" | "used";
 
@@ -199,6 +234,10 @@ export interface Approval {
   decided_at: number | null;
   decided_by: string | null;
   expires_at: number;
+  /** Who approved it so far, in order (several when roll's policy asks for more than one). */
+  approved_by?: string[];
+  /** While pending: what roll's policy asks of it. */
+  gates?: Gate[];
   /** The environment and path the request is about (what remembering it keeps to). */
   environment?: string | null;
   scope_path?: string | null;
@@ -269,7 +308,8 @@ export interface Catalog {
 }
 
 export type Me =
-  | { kind: "operator"; locked: boolean }
+  /** The operator's token, or a signed-in admin (`user`), who acts as the operator. */
+  | { kind: "operator"; user?: { id: string; handle: string }; locked: boolean }
   | { kind: "token" | "oauth"; grant: Grant; locked: boolean }
   /** A signed-in user who isn't an admin: their tokens act as them and reach only `reach`. */
   | { kind: "user"; user: { id: string; handle: string }; reach: string[]; approve_people?: Action[]; locked: boolean };
@@ -301,6 +341,27 @@ export interface Policy {
   max_idle_days?: number | null;
   /** A person's token reaching any of these waits for an admin's approval (GitHub's organizations' rule). */
   approve_people?: Action[];
+  /** What needs more than one approver, and whose (each rule covering a request is a gate). */
+  approval_rules?: ApprovalRule[];
+}
+
+/** A rule of the policy: requests it covers need `approvals` approvals from `approvers` (anyone who may decide when left out), never from the token's own person. */
+export interface ApprovalRule {
+  /** A product, or "*". */
+  product: string;
+  /** Every action when left out. */
+  actions?: Action[];
+  /** Every environment when left out (pv-* covers pv-42). */
+  environments?: string[];
+  approvals: number;
+  approvers?: string[];
+}
+
+/** "Postgres · delete · production: 2 approvals (from usr_a, usr_b)". */
+export function describeApprovalRule(r: ApprovalRule): string {
+  const what = [productName(r.product), r.actions?.length ? r.actions.join(", ") : "anything", r.environments?.join(", ")].filter(Boolean).join(" · ");
+  const n = r.approvals === 1 ? "1 approval" : `${r.approvals} approvals`;
+  return `${what}: ${n}${r.approvers?.length ? ` from ${r.approvers.join(", ")}` : ""}`;
 }
 
 /** The actions an admin may require approval for in people's tokens, strongest first. */
@@ -379,7 +440,24 @@ export interface ChatTarget {
   install: string;
   channel: string;
   approvers: string[];
+  /** An approver's roll account: they decide as that person (they count toward the policy's approval rules). */
+  people?: Record<string, string>;
 }
+
+/** Approvers as typed (`U0123=usr_ana, U0456`): the chat ids, and the accounts some are linked to. */
+export function parseApprovers(text: string): { approvers: string[]; people: Record<string, string> } {
+  const approvers: string[] = [];
+  const people: Record<string, string> = {};
+  for (const raw of text.split(/[\s,]+/).map((s) => s.trim().replace(/^@/, "")).filter(Boolean)) {
+    const [id, user] = raw.split("=");
+    if (!approvers.includes(id)) approvers.push(id);
+    if (user) people[id] = user;
+  }
+  return { approvers, people };
+}
+
+/** The approvers as the form shows them (`U0123=usr_ana`). */
+export const approversText = (c: Pick<ChatTarget, "approvers" | "people">) => c.approvers.map((a) => (c.people?.[a] ? `${a}=${c.people[a]}` : a)).join(", ");
 
 /**
  * A machine client (docs/permissions.md, "Machine clients"): automation with no person that trades
@@ -629,6 +707,9 @@ const PRODUCT_NAMES: Record<string, string> = {
 };
 
 export const productName = (p: string) => PRODUCT_NAMES[p] ?? p;
+
+/** Every product a rule can name ("*" first). */
+export const PRODUCTS = Object.keys(PRODUCT_NAMES);
 
 export const ACTION_HELP: Record<Action, string> = {
   read: "See metadata and data",

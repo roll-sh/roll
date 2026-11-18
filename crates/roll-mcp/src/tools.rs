@@ -415,6 +415,23 @@ static TOOLS: &[Tool] = &[
         "/v1/access/check",
         &[breq("method", Ty::Str, "HTTP method, e.g. DELETE"), breq("path", Ty::Str, "The API path, e.g. /v1/projects/prj_x"), b("body", Ty::Obj, "The JSON body, for SQL, Redis or CQL")],
     ),
+    t(
+        "access_request_access",
+        "Ask for access for a while",
+        "Ask a person to let this connection do one more thing for a while, saying why: one action on one product (one resource, environment or folder if named) for 15m, 1h, 8h or 1d. Answers the pending approval; wait for it with access_wait_approval, then go on.",
+        "access",
+        "POST",
+        "/v1/access/requests",
+        &[
+            breq("product", Ty::Str, "The product, e.g. postgres, apps, secrets"),
+            breq("action", Ty::Str, "read, write, delete, reveal, deploy or admin"),
+            b("resource", Ty::Str, "One resource's id (every resource of the product when left out)"),
+            b("environment", Ty::Str, "Only in this environment"),
+            b("path", Ty::Str, "Only under this folder"),
+            breq("for", Ty::Str, "15m, 1h, 8h or 1d"),
+            breq("reason", Ty::Str, "Why: the person deciding reads it"),
+        ],
+    ),
     t("access_list_approvals", "List approvals", "Approvals, newest first: pending ones wait for the operator.", "access", "GET", "/v1/access/approvals", &[q("state", Ty::Str, "pending, approved, denied, used")]),
     t("access_audit_log", "Audit log", "Every request made with a token and every MCP tool call, newest first.", "access", "GET", "/v1/access/audit", &[q("grant", Ty::Str, "Only this token (tok_…)"), q("product", Ty::Str, "Only this product"), q("decision", Ty::Str, "allow, deny or ask"), q("limit", Ty::Int, "At most (default 100)")]),
     // ── workspace ──

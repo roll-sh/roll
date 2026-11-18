@@ -241,6 +241,9 @@ pub struct Grant {
     /// OAuth connection's tokens change every hour.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// Narrowed to reading for this request (`scope=read-only`): never asks.
+    #[serde(skip)]
+    pub read_only: bool,
 }
 
 /// Why a live token isn't honoured yet.
@@ -261,14 +264,31 @@ pub struct TempRule {
     /// The approval that allowed it (it can be taken back by this id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<String>,
+    /// Its approval met roll's policy's approval rules (an access request two people approved):
+    /// those gates don't make it ask again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gated: bool,
 }
 
 impl Grant {
     /// What it may do now: its rules, and the temporary ones still live. Decisions use this; making
     /// tokens (`check_within`) uses `rules` alone, so a while never becomes for good.
-    pub fn effective_rules(&self, now: i64) -> Scope {
+    ///
+    /// `asks_again`: a rule for a while that roll's policy now asks several people for (a gate
+    /// covers it) asks again instead of allowing, so a gate added later isn't skipped.
+    pub fn effective_rules(&self, now: i64, asks_again: impl Fn(&roll_auth::scope::Rule) -> bool) -> Scope {
         let mut s = self.rules.clone();
-        s.0.extend(self.temporary.iter().filter(|t| t.until > now).map(|t| t.rule.clone()));
+        s.0.extend(self.temporary.iter().filter(|t| t.until > now).filter_map(|t| {
+            let mut r = t.rule.clone();
+            if !t.gated && asks_again(&r) {
+                // A read-only token never asks: the rule just doesn't apply.
+                if self.read_only {
+                    return None;
+                }
+                r.actions.values_mut().for_each(|e| *e = roll_auth::scope::Effect::Ask);
+            }
+            Some(r)
+        }));
         s
     }
 
@@ -290,6 +310,7 @@ impl Grant {
         self.temporary.iter_mut().for_each(|t| narrow(&mut t.rule));
         self.temporary.retain(|t| !t.rule.actions.is_empty());
         self.ask_otherwise = false;
+        self.read_only = true;
     }
 
     /// Honoured now: live, and past its `not_before`.
@@ -408,7 +429,7 @@ fn some<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> std::res
     T::deserialize(d).map(Some)
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Approval {
     pub id: String,
     pub grant_id: String,
@@ -435,6 +456,23 @@ pub struct Approval {
     pub scope_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_index: Option<String>,
+    /// Who approved it so far, in order: one name once it's approved, more when roll's policy asks
+    /// for several people ("Two-person approvals"; it stays pending until they're enough).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub approved_by: Vec<String>,
+    /// While it's pending: what roll's policy asks of it, one gate per rule covering it (filled
+    /// when it's answered, from the policy as it is then; not stored).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<Gate>,
+}
+
+/// One rule an approval must pass: how many approvals from whom, and how many it has.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Gate {
+    pub approvals: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approvers: Option<Vec<String>>,
+    pub approved: usize,
 }
 
 /// A new approval, before it's stored.
@@ -661,6 +699,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         None => None,
     };
     Ok(Grant {
+        read_only: false,
         id: r.get(0)?,
         name: r.get(1)?,
         kind: match r.get::<_, String>(2)?.as_str() {
@@ -716,8 +755,18 @@ pub(crate) fn audit_row(r: &code_sql::Row<'_>) -> code_sql::Result<AuditEvent> {
     })
 }
 
+/// A rule for a while added to a grant's temporary ones (the lapsed ones, and an older copy of the
+/// same rule, dropped), inside a write.
+fn push_temp(c: &code_sql::Conn<'_>, grant: &str, temp: Option<String>, add: TempRule, now: i64) -> code_sql::Result<()> {
+    let mut list: Vec<TempRule> = temp.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    list.retain(|t| t.until > now && t.rule != add.rule);
+    list.push(add);
+    c.execute("UPDATE grants SET temp_rules = ? WHERE id = ?", params![serde_json::to_string(&list).unwrap_or_default(), grant])?;
+    Ok(())
+}
+
 const APPROVAL_COLUMNS: &str =
-    "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash, environment, scope_path, scope_index";
+    "id, grant_id, grant_name, product, action, resource, method, route, path, summary, args, tool, state, reason, created_at, decided_at, decided_by, expires_at, request_hash, environment, scope_path, scope_index, approved_by";
 
 fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
     let args: Option<String> = r.get(10)?;
@@ -744,6 +793,8 @@ fn approval_row(r: &code_sql::Row<'_>) -> code_sql::Result<Approval> {
         environment: r.get(19)?,
         scope_path: r.get(20)?,
         scope_index: r.get(21)?,
+        approved_by: r.get::<_, Option<String>>(22)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+        gates: Vec::new(),
     })
 }
 
@@ -816,8 +867,9 @@ impl Store {
         if !db.has_column("audit", "client")? {
             db.add_column("audit", "client", "TEXT")?;
         }
-        // What environment and path a request was about (a remembered approval keeps to them).
-        for col in ["environment", "scope_path", "scope_index"] {
+        // What environment and path a request was about (a remembered approval keeps to them), and
+        // who approved it so far (a policy can ask for several people).
+        for col in ["environment", "scope_path", "scope_index", "approved_by"] {
             if !db.has_column("approvals", col)? {
                 db.add_column("approvals", col, "TEXT")?;
             }
@@ -1197,12 +1249,7 @@ impl Store {
                     }
                     c.execute("UPDATE grants SET rules = ? WHERE id = ?", params![serde_json::to_string(&rules).unwrap_or_default(), id])?;
                 }
-                Some(until) => {
-                    let mut temp: Vec<TempRule> = temp.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-                    temp.retain(|t| t.until > now && t.rule != *rule);
-                    temp.push(TempRule { rule: rule.clone(), until, approval: Some(approval.to_string()) });
-                    c.execute("UPDATE grants SET temp_rules = ? WHERE id = ?", params![serde_json::to_string(&temp).unwrap_or_default(), id])?;
-                }
+                Some(until) => push_temp(c, id, temp, TempRule { rule: rule.clone(), until, approval: Some(approval.to_string()), gated: false }, now)?,
             }
             Ok(())
         })?;
@@ -1375,7 +1422,7 @@ impl Store {
                 return Err(Error::TooMany("this token has 50 approvals waiting: decide some first".into()));
             }
             c.execute(
-                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?, ?, ?, ?)"),
+                &format!("INSERT INTO approvals ({APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL)"),
                 params![
                     id,
                     a.grant.id,
@@ -1471,20 +1518,55 @@ impl Store {
             .collect())
     }
 
-    /// Approve or deny a pending approval (once).
-    pub fn decide(&self, id: &str, approve: bool, by: &str, reason: Option<&str>) -> Result<Approval> {
+    /// Decide a pending approval. Approving adds `by` to who approved it; it's approved once
+    /// `enough` says they are (one person when no policy rule covers it), and stays pending until
+    /// then. A person approves once. Denying decides at once.
+    ///
+    /// `grants`: an access request's rule, for how long, and whether gates covered it: added to the
+    /// token's rules for a while in the same write that approves it, however it was decided.
+    pub fn decide(&self, id: &str, approve: bool, by: &str, reason: Option<&str>, enough: &dyn Fn(&[String]) -> bool, grants: Option<(&roll_auth::scope::Rule, i64, bool)>) -> Result<Approval> {
         let now = code_sql::now_ms();
-        let state = if approve { "approved" } else { "denied" };
-        // An approved request may run within the next ten minutes, once.
-        let n = self.db.write(|c| {
-            c.execute(
-                "UPDATE approvals SET state = ?, decided_at = ?, decided_by = ?, reason = ?, expires_at = ? WHERE id = ? AND state = 'pending' AND expires_at > ?",
-                params![state, now, by, reason, now + APPROVAL_TTL_MS, id, now],
-            )
+        let changed = self.db.write(|c| {
+            let row: Option<(String, i64, Option<String>, String)> = c
+                .query_row("SELECT state, expires_at, approved_by, grant_id FROM approvals WHERE id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .optional()?;
+            let Some((state, expires_at, so_far, grant_id)) = row else { return Err(Error::NotFound(format!("no approval {id}"))) };
+            if state != "pending" || expires_at <= now {
+                return Ok(false);
+            }
+            if !approve {
+                c.execute(
+                    "UPDATE approvals SET state = 'denied', decided_at = ?, decided_by = ?, reason = ?, expires_at = ? WHERE id = ?",
+                    params![now, by, reason, now + APPROVAL_TTL_MS, id],
+                )?;
+                return Ok(true);
+            }
+            let mut who: Vec<String> = so_far.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            if who.iter().any(|w| w == by) {
+                return Err(Error::Conflict("you've approved this already: it needs someone else too".into()));
+            }
+            who.push(by.to_string());
+            let list = serde_json::to_string(&who).unwrap_or_default();
+            if enough(&who) {
+                // An approved request may run within the next ten minutes, once.
+                c.execute(
+                    "UPDATE approvals SET state = 'approved', decided_at = ?, decided_by = ?, approved_by = ?, expires_at = ? WHERE id = ?",
+                    params![now, by, list, now + APPROVAL_TTL_MS, id],
+                )?;
+                if let Some((rule, for_ms, gated)) = grants {
+                    let temp: Option<Option<String>> = c.query_row("SELECT temp_rules FROM grants WHERE id = ? AND revoked_at IS NULL", [&grant_id], |r| r.get(0)).optional()?;
+                    if let Some(temp) = temp {
+                        push_temp(c, &grant_id, temp, TempRule { rule: rule.clone(), until: now + for_ms, approval: Some(id.to_string()), gated }, now)?;
+                    }
+                }
+            } else {
+                c.execute("UPDATE approvals SET approved_by = ? WHERE id = ?", params![list, id])?;
+            }
+            Ok(true)
         })?;
         self.db.notify_after_commit(crate::APPROVALS_CHANNEL);
         let a = self.approval(id)?;
-        if n == 0 {
+        if !changed {
             return Err(Error::Conflict(format!("the approval is {}", a.state)));
         }
         Ok(a)
