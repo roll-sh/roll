@@ -910,6 +910,18 @@ fn body_of(args: &Value, drop: &[&str]) -> Value {
 }
 
 async fn call_tool(m: &Mcp, headers: &HeaderMap, name: &str, args: &Value) -> Value {
+    // A credential headed where people and agents read it isn't sent (roll_auth::credentials, as
+    // roll's own `/v1/mcp` does before it fronts these tools): a write's arguments only.
+    let writes = tools().iter().find(|t| t["name"] == name).is_some_and(|t| t["annotations"]["readOnlyHint"] != true);
+    let product = if name.contains("agent") { "agents" } else { "code" };
+    if let Some(found) = roll_auth::credentials::check(product, writes, args) {
+        tracing::warn!(tool = %name, kind = %found.kind, at = %found.at, "an MCP call carrying a credential wasn't sent");
+        let text = format!(
+            "not sent: {} holds what looks like {}. Written where people and agents read it, a credential leaks: keep it in roll secrets and refer to it by name.",
+            found.at, found.kind
+        );
+        return json!({ "content": [{ "type": "text", "text": text }], "structuredContent": { "refused": "credential", "at": found.at, "kind": found.kind, "error": text }, "isError": true });
+    }
     call(&m.api, headers, None, name, args).await
 }
 

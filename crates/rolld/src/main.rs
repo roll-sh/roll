@@ -511,6 +511,9 @@ async fn run() -> anyhow::Result<()> {
             };
             let p = previews::start(&args, &home, c, workspace.clone(), cluster.clone(), on_products, apps.as_ref().map(|a| a.apps.clone()))?;
             router = router.merge(roll_previews::api::router(p.engine.clone()));
+            if let Some(internal) = p.internal {
+                router = router.merge(internal);
+            }
             Some(p.runtime)
         }
         None => None,
@@ -557,6 +560,8 @@ async fn run() -> anyhow::Result<()> {
         },
         workspace.clone(),
     )?;
+    // People's accounts in the audit log (sign-ins, invites, SSO and SCIM changes).
+    accounts.set_audit(std::sync::Arc::new(accounts::AccessAudit(access.clone())));
     router = router.merge(roll_access::api::router(access.clone()));
     // Users' own tokens act as them, as they are now (docs/permissions.md, "Users' own tokens").
     let _ = access.people.set(sessions);
