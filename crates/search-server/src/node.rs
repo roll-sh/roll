@@ -1901,7 +1901,9 @@ mod tests {
         let mut spec = ClusterSpec::new("c");
         spec.max_in_flight = max;
         catalog.insert(spec);
-        Node::new(catalog, Arc::new(MemoryStores::new()), NodeConfig { default_cluster: Some("c".into()), ..NodeConfig::default() })
+        // The node-wide cap defaults to twice the CPUs: on one CPU it would queue a third request
+        // that these tests of the cluster's own limit hold at once.
+        Node::new(catalog, Arc::new(MemoryStores::new()), NodeConfig { default_cluster: Some("c".into()), max_running: 64, ..NodeConfig::default() })
     }
 
     #[tokio::test]
@@ -2026,13 +2028,14 @@ mod tests {
         let n = Node::new(catalog.clone(), stores, NodeConfig::default());
         let n2 = n.clone();
         let first = tokio::spawn(async move { n2.handle(req("/", Some(basic("c1", "old")))).await.status });
-        started.notified().await;
+        let within = Duration::from_secs(30);
+        tokio::time::timeout(within, started.notified()).await.expect("the wake reaches the store");
         // The wake read the catalog already; the password changes now.
         catalog.insert(ClusterSpec::new("c1").with_password("new"));
         n.update_spec(ClusterSpec::new("c1").with_password("new"));
         gate.notify_one();
         // The request that started the wake was checked against the old password.
-        assert_eq!(first.await.unwrap(), 200);
+        assert_eq!(tokio::time::timeout(within, first).await.expect("the released wake answers").unwrap(), 200);
         assert_eq!(n.handle(req("/", Some(basic("c1", "old")))).await.status, 401);
         assert_eq!(n.handle(req("/", Some(basic("c1", "new")))).await.status, 200);
         assert!(n.pending_specs.lock().is_empty());
@@ -2044,12 +2047,12 @@ mod tests {
         assert!(n.unload("c1").await);
         let n2 = n.clone();
         let first = tokio::spawn(async move { n2.handle(req("/", Some(basic("c1", "new")))).await.status });
-        started.notified().await;
+        tokio::time::timeout(within, started.notified()).await.expect("the second wake reaches the store");
         let mut changed = ClusterSpec::new("c1").with_password("newer");
         changed.max_requests_per_second = Some(1000.0);
         catalog.insert(changed);
         gate.notify_one();
-        assert_eq!(first.await.unwrap(), 200);
+        assert_eq!(tokio::time::timeout(within, first).await.expect("the second released wake answers").unwrap(), 200);
         assert_eq!(n.handle(req("/", Some(basic("c1", "new")))).await.status, 401);
         assert_eq!(n.handle(req("/", Some(basic("c1", "newer")))).await.status, 200);
         assert_eq!(n.get_loaded("c1").unwrap().spec().max_requests_per_second, Some(1000.0));

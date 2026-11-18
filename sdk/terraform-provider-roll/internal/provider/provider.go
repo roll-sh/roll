@@ -67,7 +67,7 @@ func (p *rollProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 }
 
 func (p *rollProvider) Resources(context.Context) []func() resource.Resource {
-	return []func() resource.Resource{newEnvironmentResource, newSecretResource, newIdentityResource, newSyncResource, newTokenResource,
+	return []func() resource.Resource{newEnvironmentResource, newSecretResource, newIdentityResource, newSyncResource, newTokenResource, newCaResource, newSshCaResource, newTransitKeyResource, newOutsideDatabaseResource,
 		newAppServiceResource, newAppVariableResource, newAppDomainResource, newAppEnvironmentResource, newAppLinkResource, newAppNotificationResource}
 }
 

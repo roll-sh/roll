@@ -917,6 +917,10 @@ struct TopFieldLeaf<'a> {
     pruner: Option<Pruner>,
     /// `TopFieldCollector::needs_scores`, computed once.
     scores: bool,
+    /// The pruner is a nested key's and the total is not exact: hits counted before the
+    /// threshold passes only read their children when they can compete (see
+    /// [`TopFieldLeaf::prune`], [`Pruner::budget`]).
+    screen: bool,
     /// A `_script` key reads `_score` (`TopFieldCollector::script_scores`).
     script_score: bool,
     /// The sort is one single-valued field key (numbers or keyword ordinals): compare natives
@@ -1070,6 +1074,14 @@ struct Pruner {
     force: bool,
     /// The segment has no value of the field: every doc sorts as missing, last.
     absent: bool,
+    /// A nested key: the points are the children's, and a competitive child makes its parent
+    /// competitive (see [`NestedRangeDocs`]).
+    nested: Option<NestedBits>,
+    /// The most competitive points worth deriving docs from: before the count passes its
+    /// threshold the docs only spare hits a walk over their children, and visiting a child costs
+    /// about what that walk does, so a set is derived only when it holds fewer children than
+    /// there are hits still to count (`u64::MAX` once the count passed).
+    budget: u64,
     /// Keyword pruners: doc frequencies of the terms from ordinal `freq_base` on, read by the
     /// first estimate. Bottoms only narrow the competitive range, so later estimates sum
     /// these instead of decoding up to [`MAX_COMPETITIVE_TERMS`] term entries again.
@@ -1096,8 +1108,11 @@ impl Pruner {
             return None;
         }
         let SortKey::Field(fs) = c.keys.first()? else { return None };
-        if fs.nested.is_some() || !matches!(fs.mode, SortMode::Min | SortMode::Max) {
+        if !matches!(fs.mode, SortMode::Min | SortMode::Max) {
             return None;
+        }
+        if fs.nested.is_some() {
+            return Pruner::nested(fs, seg, keys, after);
         }
         // No value of the field in this segment (absent, or unmapped): every doc sorts as
         // missing, after any value. Once the queue is full nothing here can enter: a missing
@@ -1128,6 +1143,8 @@ impl Pruner {
                 absent: true,
                 freq_base: 0,
                 freqs: Vec::new(),
+                nested: None,
+                budget: u64::MAX,
             });
         }
         let width = match fs.kind {
@@ -1177,6 +1194,58 @@ impl Pruner {
             absent: false,
             freq_base: 0,
             freqs: Vec::new(),
+            nested: None,
+            budget: u64::MAX,
+        })
+    }
+
+    /// A pruner for a numeric nested key (`ToParentBlockJoinSortField` prunes nothing): a parent
+    /// sorts by one of its children's values (`min` or `max` select one), so only a parent with a
+    /// child whose value beats the queue's worst entry can compete, and the children's points
+    /// name those children. Parents without a value sort last, or they would have to be visited.
+    fn nested(fs: &FieldSort, seg: &SegmentContext, keys: &[LeafKeyKind], after: Option<&[Native]>) -> Option<Pruner> {
+        let Some(LeafKeyKind::Field(lk, _)) = keys.first() else { return None };
+        let n = lk.nested.as_ref()?;
+        if !matches!(fs.missing, Missing::Last) {
+            return None;
+        }
+        let width = match fs.kind {
+            SortType::Long | SortType::Double => 8,
+            SortType::Int | SortType::Float => 4,
+            _ => return None,
+        };
+        let points = seg.reader.points(fs.field)?;
+        if points.spec().dims != 1 || points.spec().bytes_per_dim as usize != width {
+            return None;
+        }
+        let after = match after {
+            Some(a) => Some(native_int(fs.kind, a[0])?),
+            None => None,
+        };
+        Some(Pruner {
+            field: fs.field,
+            reader: seg.reader.clone(),
+            width,
+            reverse: fs.reverse,
+            after,
+            cap: None,
+            banded: false,
+            missing_competitive: false,
+            all_valued: false,
+            set: None,
+            cost: seg.reader.max_doc() as u64,
+            last: None,
+            calls: 0,
+            interval: MIN_SKIP_INTERVAL,
+            fails: 0,
+            pending: false,
+            retry_at: 0,
+            force: false,
+            absent: false,
+            freq_base: 0,
+            freqs: Vec::new(),
+            nested: Some(NestedBits { parents: n.parents.clone(), children: n.children.clone() }),
+            budget: u64::MAX,
         })
     }
 
@@ -1225,6 +1294,8 @@ impl Pruner {
             absent: false,
             freq_base: 0,
             freqs: Vec::new(),
+            nested: None,
+            budget: u64::MAX,
         })
     }
 
@@ -1367,12 +1438,22 @@ impl Pruner {
         }
         let Some(points) = self.reader.points(self.field) else { return };
         let mut v = RangeDocs { lo, hi, width: self.width, from, b: crate::util::bitset::DocIdSetBuilder::new(self.reader.max_doc()) };
-        if points.estimate_point_count(&mut v) >= self.cost >> 3 {
+        let estimate = points.estimate_point_count(&mut v);
+        if estimate >= self.cost >> 3 || estimate > self.budget {
             self.update_interval(false);
             return;
         }
-        points.intersect(&mut v);
-        let set = v.b.build();
+        let set = match &self.nested {
+            Some(n) => {
+                let mut nv = NestedRangeDocs { range: v, bits: n };
+                points.intersect(&mut nv);
+                nv.range.b.build()
+            }
+            None => {
+                points.intersect(&mut v);
+                v.b.build()
+            }
+        };
         self.cost = set.cost();
         self.set = Some(crate::query::basic::SetScorer::new(Arc::new(set), 0.0));
         self.update_interval(true);
@@ -1407,6 +1488,12 @@ impl Pruner {
         let mut c = CountRange { lo, hi, width: self.width, n: 0 };
         let inside = points.count_inside(&mut c);
         inside + c.n
+    }
+
+    /// Whether `doc` (no lower than any doc asked before) is among the competitive docs.
+    #[inline]
+    fn competitive(&mut self, doc: u32) -> bool {
+        self.set.is_none() || self.next_from(doc) == doc
     }
 
     #[inline]
@@ -1508,6 +1595,53 @@ impl search_codec::PointVisitor for RangeDocs {
     }
     fn grow(&mut self, n: usize) {
         self.b.grow(n);
+    }
+}
+
+/// The parent and child docs of a nested key (its [`NestedLeaf`]'s).
+struct NestedBits {
+    parents: Arc<FixedBitSet>,
+    children: Arc<FixedBitSet>,
+}
+
+/// [`RangeDocs`] over a nested key's points: a child in the range (one the key reads) adds the
+/// parent whose value it counts toward, the next parent doc ([`LeafKey::native`] reads a
+/// parent's children from the previous parent on).
+struct NestedRangeDocs<'a> {
+    range: RangeDocs,
+    bits: &'a NestedBits,
+}
+
+impl NestedRangeDocs<'_> {
+    #[inline]
+    fn add(&mut self, child: u32) {
+        if !self.bits.children.get(child) {
+            return;
+        }
+        let parent = self.bits.parents.next_set_bit(child);
+        if parent != search_codec::NO_MORE_DOCS && parent >= self.range.from {
+            self.range.b.add(parent);
+        }
+    }
+}
+
+impl search_codec::PointVisitor for NestedRangeDocs<'_> {
+    fn compare(&mut self, min: &[u8], max: &[u8]) -> search_codec::Relation {
+        self.range.compare(min, max)
+    }
+    fn visit(&mut self, doc: u32) {
+        self.add(doc);
+    }
+    fn visit_value(&mut self, doc: u32, packed: &[u8]) {
+        let v = self.range.value(packed);
+        if v >= self.range.lo && v <= self.range.hi {
+            self.add(doc);
+        }
+    }
+    fn visit_doc_range(&mut self, start: u32, end: u32) {
+        for d in start..end {
+            self.add(d);
+        }
     }
 }
 
@@ -1653,11 +1787,14 @@ impl TopFieldLeaf<'_> {
     /// Narrows the competitive docs to the queue's worst value (after `doc`).
     /// Re-derives the competitive docs; `from` is the first doc still to be collected.
     fn prune(&mut self, from: u32) {
-        // Later passes count nothing: they may skip from the start.
-        if !self.c.passed && self.counting {
+        // Later passes count nothing: they may skip from the start. A nested key's competitive
+        // docs are derived before the count passes too: none is skipped then, but `collect` reads
+        // children only for the hits among them (a walk over each hit's children otherwise).
+        if !self.c.passed && self.counting && !self.screen {
             return;
         }
         let Some(p) = self.pruner.as_mut() else { return };
+        p.budget = if self.c.passed || !self.counting { u64::MAX } else { self.c.threshold.saturating_sub(self.c.total) };
         let edge = self.band.as_ref().and_then(|b| b.lo).map(|(v, _)| v);
         let Some(b) = self.bottom.as_ref() else {
             if let Some(v) = edge {
@@ -1716,7 +1853,7 @@ impl TopFieldLeaf<'_> {
         }
         self.band_tried = true;
         let Some(p) = self.pruner.as_ref() else { return };
-        if p.absent || p.width == 0 || p.missing_competitive {
+        if p.absent || p.width == 0 || p.missing_competitive || p.nested.is_some() {
             return;
         }
         let Some(points) = p.reader.points(p.field) else { return };
@@ -1989,7 +2126,7 @@ impl LeafCollector for TopFieldLeaf<'_> {
 
     fn allow_passes(&mut self) {
         self.passes = true;
-        let numeric = self.pruner.as_ref().is_some_and(|p| p.width > 0 && !p.absent && !p.missing_competitive);
+        let numeric = self.pruner.as_ref().is_some_and(|p| p.width > 0 && !p.absent && !p.missing_competitive && p.nested.is_none());
         if numeric && !self.scripted && !self.doc_first && !self.c.early_terminate && self.c.n > 0 {
             self.band_start = BAND_START_HITS.max(4 * self.c.n as u64);
             self.next_stat = self.seg_base + 1;
@@ -2089,9 +2226,12 @@ impl LeafCollector for TopFieldLeaf<'_> {
                 p.force = false;
             }
         }
+        // Nothing is skipped while the count is short of its threshold (a nested key's pruner
+        // already has competitive docs then, see `prune`).
+        let skipping = self.c.passed || !self.counting;
         match self.pruner.as_mut() {
-            Some(p) => p.next_from(doc),
-            None => doc,
+            Some(p) if skipping => p.next_from(doc),
+            _ => doc,
         }
     }
 
@@ -2123,6 +2263,13 @@ impl LeafCollector for TopFieldLeaf<'_> {
             self.passed(doc);
         }
         if self.band.is_some() && self.outside_band(doc, score) {
+            return Ok(());
+        }
+        if self.screen
+            && let Some(p) = self.pruner.as_mut()
+            && !p.competitive(doc)
+        {
+            self.collected += 1;
             return Ok(());
         }
         if self.doc_first {
@@ -2322,6 +2469,7 @@ impl Collector for TopFieldCollector {
             collected: 0,
             pruner: None,
             scores,
+            screen: false,
             script_score,
             single_numeric,
             scripted,
@@ -2354,6 +2502,7 @@ impl Collector for TopFieldCollector {
         }
         leaf.doc_first = matches!(leaf.keys.first(), Some(LeafKeyKind::Doc(false))) && leaf.c.n > 0;
         leaf.pruner = Pruner::new(leaf.c, seg, &leaf.keys, leaf.after.as_deref());
+        leaf.screen = leaf.c.threshold != u64::MAX && leaf.pruner.as_ref().is_some_and(|p| p.nested.is_some());
         // A segment sorted by the request's sort (what early termination needs): the docs
         // sorting before `search_after` are a prefix of it, found by a binary search over their
         // sort values instead of read one by one (deep `search_after` pages of an index-sorted

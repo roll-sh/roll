@@ -722,6 +722,7 @@ async fn connect_import_webhooks_and_mirror() {
             speed_budget: None,
             visual_review: None,
             notes: Vec::new(),
+            issues: Vec::new(),
         }),
     };
     let preview_calls = |path: &str| g.mock.calls.lock().iter().filter(|(_, p, _)| p.contains(path)).cloned().collect::<Vec<_>>();

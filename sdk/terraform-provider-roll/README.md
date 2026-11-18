@@ -116,7 +116,10 @@ data "roll_app_service" "api" {
 - An app's variable isn't read back (a sealed one never shows again): a change made outside
   Terraform is put back only when the value in the file changes. Its value lands in the state.
 
-- Identities, syncs and tokens don't change in place: every attribute replaces them.
+- Identities, syncs and tokens don't change in place: every attribute replaces them, and so do
+  `roll_secrets_ca`, `roll_secrets_ssh_ca`, `roll_secrets_transit_key` and
+  `roll_secrets_outside_database` (whose `admin_url_wo` is write-only: bump
+  `admin_url_wo_version` to register it again).
 
 - A notification target's URL is never read back, and a new URL is a new target. A webhook's
   signing secret is in `.secret` from when it's made. Filters left out are the defaults.
