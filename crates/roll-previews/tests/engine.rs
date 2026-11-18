@@ -1310,3 +1310,35 @@ async fn data_at_branches_from_history_where_there_is_some() {
     assert!(said.iter().any(|m| m.contains("keeps no history: branched as of now")), "{said:?}");
 }
 
+
+/// A preview made by hand (`POST /v1/previews`, `roll preview create`) is only of a repo the
+/// project stands for, as the ones it makes itself: anyone may put any repo on their own canvas,
+/// and a preview builds and runs it. And a change's preview in another project is never answered.
+#[tokio::test]
+async fn a_preview_made_by_hand_is_only_of_a_repo_the_project_stands_for() {
+    use roll_workspace::{Kind as Res, Scope};
+    struct Ada;
+    impl roll_workspace::Owners for Ada {
+        fn trusts(&self, user: &str, _kind: Res, r: &str) -> bool {
+            user == "usr_ada" && r == "acme/api"
+        }
+    }
+    let e = env(json!({ "enabled": true }));
+    e.ws.set_owners(Arc::new(Ada));
+    // A change of the repo Ada owns, previewed in the operator's project before it's on her canvas.
+    e.code.open(roll_previews::ports::ChangeInfo { repo: "acme/api".into(), ..change("chg_a", 5) });
+    e.engine.pass().await.unwrap();
+    let ours = e.engine.store.row_by_change("chg_a").unwrap().unwrap();
+    let theirs = e.ws.create("usr_ada", "ada-shop", "", None).unwrap();
+    // Ada's canvas has a repo she doesn't own, and the one she does.
+    for r in ["acme/web", "acme/api"] {
+        e.ws.place(Scope::All, &theirs.id, Res::Repo, r, 0.0, 0.0).unwrap();
+    }
+    e.engine.store.put_settings(&theirs.id, &roll_previews::Settings::default().patched(&json!({ "enabled": true })).unwrap()).unwrap();
+    e.code.heads.lock().insert("acme/web@feat/x".into(), "cs_x".into());
+    let err = e.engine.create(&theirs.id, "acme/web", Some("feat/x"), None, "ada").await.unwrap_err();
+    assert!(matches!(err, roll_previews::Error::NotFound(_)), "a repo she doesn't stand for: {err}");
+    // The change's preview is the operator's project's: never handed to her.
+    let err = e.engine.create(&theirs.id, "acme/api", None, Some("chg_a"), "ada").await.unwrap_err();
+    assert!(matches!(err, roll_previews::Error::Conflict(_)) && !err.to_string().contains(&ours.id), "{err}");
+}

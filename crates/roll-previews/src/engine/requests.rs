@@ -66,7 +66,9 @@ impl Engine {
     /// A preview for `branch` of `repo` (or for change `change`), made by hand.
     pub async fn create(&self, project_id: &str, repo: &str, branch: Option<&str>, change: Option<&str>, by: &str) -> Result<(Preview, bool)> {
         let project = self.workspace.get(roll_workspace::Scope::All, project_id)?;
-        if !project.resources.iter().any(|r| r.kind == roll_workspace::Kind::Repo && r.r#ref == repo) {
+        // Only a repo the project stands for (`Workspace::trusts`), as for the previews it makes
+        // itself: anyone may put any repo on their own canvas, and a preview builds and runs it.
+        if !project.resources.iter().any(|r| r.kind == roll_workspace::Kind::Repo && r.r#ref == repo) || !self.workspace.trusts(&project, roll_workspace::Kind::Repo, repo) {
             return Err(Error::NotFound(format!("{repo} isn't in project {}", project.name)));
         }
         let s = self.store.settings(project_id)?;
@@ -83,7 +85,12 @@ impl Engine {
                 if !c.open {
                     return Err(Error::Conflict(format!("change {id} has landed or closed")));
                 }
+                // A change has one preview: this project's is answered, another's never (it's
+                // another project's, perhaps another owner's).
                 if let Some(existing) = self.store.row_by_change(id)? {
+                    if existing.project_id != project_id {
+                        return Err(Error::Conflict(format!("change {id} already has a preview in another project")));
+                    }
                     return Ok((self.store.view(existing)?, false));
                 }
                 self.store.undismiss(id)?;
