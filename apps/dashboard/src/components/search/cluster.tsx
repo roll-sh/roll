@@ -3,6 +3,7 @@ import { ArrowLeft, FileUp, GitBranch, KeyRound, Moon, Plus, RefreshCw, Trash2 }
 import { Link } from "@/components/link";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
+import { parseAllowList } from "@/lib/apps-api";
 import { formatBytes, formatUsd } from "@/lib/roll-api";
 import {
   formatCount,
@@ -30,11 +31,12 @@ import { ApiKeys } from "./api-keys";
 import { AuditLog } from "./audit-log";
 import { SearchConsole } from "./console";
 import { IndexBrowser } from "./index-browser";
+import { PerformanceTab } from "./performance";
 import { Playground } from "./playground";
 import { RelevanceTab } from "./relevance";
 import { CredentialsOnce, SearchStateDot, settingsOf, SettingsFields, stateLabel, useAction, useSearchClusters, type Run } from "./shared";
 
-const TABS = ["overview", "indices", "console", "playground", "analyze", "relevance", "inference", "branches", "usage", "settings"] as const;
+const TABS = ["overview", "indices", "console", "playground", "analyze", "relevance", "inference", "branches", "performance", "usage", "settings"] as const;
 type Tab = (typeof TABS)[number];
 
 /** Placeholder while the route's params resolve. */
@@ -220,6 +222,16 @@ export function SearchClusterPage({ id }: { id: string }) {
             busy={busy}
             run={run}
             onCreated={setRevealed}
+          />
+        )}
+        {tab === "performance" && (
+          <PerformanceTab
+            key={cluster.id}
+            cluster={cluster}
+            onOpenConsole={(text) => {
+              setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 }));
+              setTab("console");
+            }}
           />
         )}
         {tab === "usage" && <UsageTab cluster={cluster} info={info} />}
@@ -901,6 +913,48 @@ function CompareBars({ rows }: { rows: { label: string; usd: number; accent?: bo
 
 // --- Settings, credentials, danger zone ----------------------------------------------------------
 
+/** The cluster's IP allowlist, one network a line (as roll apps' allowed networks are edited). */
+function AllowedNetworks({ cluster, busy, run }: { cluster: SearchCluster; busy: string | null; run: Run }) {
+  const saved = (cluster.ip_allowlist ?? []).map((r) => (r.description ? `${r.cidr} ${r.description}` : r.cidr)).join("\n");
+  const [text, setText] = useState(saved);
+  useEffect(() => setText(saved), [saved]);
+  const n = cluster.ip_allowlist?.length ?? 0;
+  return (
+    <Panel title="Network access" aside={<span className="text-[12px] text-subtle">checked before credentials</span>}>
+      <div className="space-y-3 px-5 py-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <p className="max-w-[60ch] text-[13px] text-muted">
+            {n
+              ? `Only ${n === 1 ? "this network reaches" : `these ${n} networks reach`} the cluster's endpoint; everyone else gets a 403, whatever their credentials. This dashboard, the console and roll's API aren't filtered.`
+              : "Any address with valid credentials reaches the cluster's endpoint. List networks to let only them in; this dashboard, the console and roll's API aren't filtered."}
+          </p>
+          <button
+            type="button"
+            className={btn}
+            disabled={busy !== null || text === saved}
+            onClick={() => run("allow", () => searchApi.update(cluster.id, { ip_allowlist: parseAllowList(text) }))}
+          >
+            {busy === "allow" ? <span className="shimmer">Saving…</span> : "Save"}
+          </button>
+        </div>
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={Math.min(8, Math.max(2, text.split("\n").length))}
+          placeholder={"203.0.113.0/24 office\n2001:db8::/32"}
+          spellCheck={false}
+          aria-label="Allowed networks, one per line"
+          className={`${input} w-full font-mono text-[12.5px]`}
+        />
+        <p className="text-[12px] text-subtle">
+          A CIDR or an address a line, then an optional description; at most 64. Apps and previews hosted by roll connect from roll&apos;s
+          own addresses: list those too if they use this cluster.
+        </p>
+      </div>
+    </Panel>
+  );
+}
+
 function SettingsTab({
   cluster,
   busy,
@@ -956,6 +1010,8 @@ function SettingsTab({
           </div>
         </form>
       </Panel>
+
+      <AllowedNetworks cluster={cluster} busy={busy} run={run} />
 
       <ApiKeys cluster={cluster} />
 

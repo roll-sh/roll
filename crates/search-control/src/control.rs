@@ -27,7 +27,7 @@
 
 use crate::meter::{Meter, MeterHooks, engine_figures, index_figures, now_ms};
 use crate::pricing::{Cost, Pricing};
-use crate::store::{Caps, DeletedCluster, Inserted, Over, Recorded, SearchCluster, Store, UsageTotals};
+use crate::store::{Caps, DeletedCluster, Inserted, IpRule, Over, Recorded, SearchCluster, Store, UsageTotals};
 pub use crate::wake::SqlCatalog;
 use crate::wake::{ControlHooks, GuardedStores, LOAD_WAIT, Wakes};
 use base64::Engine;
@@ -195,6 +195,50 @@ pub struct ClusterOptions {
     pub max_in_flight: Option<i64>,
     pub max_body_mb: Option<i64>,
     pub destructive_requires_name: Option<bool>,
+    /// Who may reach the data plane: CIDRs or addresses, each a string or `{cidr, description?}`
+    /// (at most [`search_server::allow::MAX_ENTRIES`]); `[]` opens the cluster to anyone again.
+    pub ip_allowlist: Option<Vec<IpRuleInput>>,
+}
+
+/// An allowlist entry as given (roll apps' `allow_ips` take the same).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum IpRuleInput {
+    Cidr(String),
+    Rule(IpRuleFields),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IpRuleFields {
+    pub cidr: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// The most characters an allowlist entry's description may have.
+const DESCRIPTION_CHARS: usize = 200;
+
+/// An allowlist as given, checked and made canonical.
+fn ip_rules(given: Vec<IpRuleInput>) -> Result<Vec<IpRule>> {
+    if given.len() > search_server::allow::MAX_ENTRIES {
+        return Err(ControlError::Invalid(format!("ip_allowlist: at most {} entries", search_server::allow::MAX_ENTRIES)));
+    }
+    given
+        .into_iter()
+        .map(|g| {
+            let (cidr, description) = match g {
+                IpRuleInput::Cidr(c) => (c, None),
+                IpRuleInput::Rule(r) => (r.cidr, r.description),
+            };
+            let net = search_server::allow::parse_cidr(&cidr).map_err(|e| ControlError::Invalid(format!("ip_allowlist: {e}")))?;
+            let description = description.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+            if description.as_ref().is_some_and(|d| d.chars().count() > DESCRIPTION_CHARS || d.chars().any(char::is_control)) {
+                return Err(ControlError::Invalid(format!("ip_allowlist: a description is one line of at most {DESCRIPTION_CHARS} characters")));
+            }
+            Ok(IpRule { cidr: net.to_string(), description })
+        })
+        .collect()
 }
 
 /// One REST request through the console.
@@ -301,7 +345,25 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.max_in_flight = c.max_in_flight.max(1) as usize;
     spec.max_body_bytes = Some((c.max_body_mb.max(1) as usize) << 20);
     spec.destructive_requires_name = c.destructive_requires_name;
+    spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
     spec
+}
+
+/// The node's allowlist for the catalog's rules. They were checked when written; one that no
+/// longer parses (a hand-edited catalog) is logged and closes the list rather than opening it.
+fn allowlist_of(rules: &[IpRule]) -> search_server::IpAllowlist {
+    let mut nets = Vec::with_capacity(rules.len());
+    for r in rules {
+        match search_server::allow::parse_cidr(&r.cidr) {
+            Ok(n) => nets.push(n),
+            Err(e) => tracing::error!(cidr = r.cidr, error = e, "an IP allowlist entry in the catalog doesn't parse: it admits nobody"),
+        }
+    }
+    if nets.is_empty() && !rules.is_empty() {
+        // 0.0.0.0 is never a client's address.
+        nets.push(std::net::IpAddr::from([0, 0, 0, 0]).into());
+    }
+    search_server::IpAllowlist::new(nets)
 }
 
 /// `target` as a loaded instance can take it now, and whether it needs a reload: the dialect
@@ -387,6 +449,50 @@ pub struct Usage {
     pub cost: Cost,
 }
 
+/// A metrics range: which ring it reads (`res`), the step of its points and how many.
+struct MetricsRange {
+    res: i64,
+    step: i64,
+    points: i64,
+}
+
+impl MetricsRange {
+    fn parse(range: &str) -> Option<MetricsRange> {
+        match range {
+            // A minute a point.
+            "1h" => Some(MetricsRange { res: 60, step: 60, points: 60 }),
+            // 15 minutes a point, from the minute ring.
+            "24h" => Some(MetricsRange { res: 60, step: 900, points: 96 }),
+            // 2 hours a point, from the hour ring.
+            "14d" => Some(MetricsRange { res: 3600, step: 7200, points: 168 }),
+            _ => None,
+        }
+    }
+}
+
+/// One kind's (or every kind's) requests over `seconds`, as the metrics route answers them.
+fn summary_json(k: &search_server::metrics::KindStats, seconds: i64) -> Value {
+    let ms = |q: f64| k.latency.quantile(q).map(|us| (us / 1000.0 * 1000.0).round() / 1000.0);
+    json!({
+        "requests": k.requests(),
+        "rate": k.requests() as f64 / seconds.max(1) as f64,
+        "2xx": k.ok,
+        "4xx": k.client_errors,
+        "5xx": k.server_errors,
+        "rejected": k.rejected,
+        "p50_ms": ms(0.5),
+        "p95_ms": ms(0.95),
+        "p99_ms": ms(0.99),
+    })
+}
+
+fn point_json(at: i64, s: &search_server::metrics::Stats, seconds: i64) -> Value {
+    let mut v = json!({ "at": at, "all": summary_json(&s.all(), seconds) });
+    for k in search_server::metrics::KINDS {
+        v[k.name()] = summary_json(s.kind(k), seconds);
+    }
+    v
+}
 
 pub struct Control {
     pub cfg: SearchConfig,
@@ -636,7 +742,10 @@ impl Control {
         Ok(())
     }
 
-    fn apply(mut c: SearchCluster, o: ClusterOptions) -> SearchCluster {
+    fn apply(mut c: SearchCluster, o: ClusterOptions) -> Result<SearchCluster> {
+        if let Some(v) = o.ip_allowlist {
+            c.ip_allowlist = ip_rules(v)?;
+        }
         if let Some(v) = o.flavor {
             c.flavor = v.to_ascii_lowercase();
         }
@@ -652,7 +761,7 @@ impl Control {
         if let Some(v) = o.destructive_requires_name {
             c.destructive_requires_name = v;
         }
-        c
+        Ok(c)
     }
 
     /// Fails when the name is taken, by a cluster or by data left in object storage.
@@ -703,6 +812,7 @@ impl Control {
             wake_at: None,
             owner: None,
             restored_at: None,
+            ip_allowlist: Vec::new(),
         }
     }
 
@@ -710,7 +820,7 @@ impl Control {
     /// Past one of `caps` for the owner it is refused (409). Nothing is written to object storage
     /// until it is first used.
     pub async fn create(&self, name: &str, o: ClusterOptions, owner: Option<&str>, caps: Caps) -> Result<SearchCluster> {
-        let c = Self::apply(SearchCluster { owner: owner.map(str::to_string), ..self.fresh(name) }, o);
+        let c = Self::apply(SearchCluster { owner: owner.map(str::to_string), ..self.fresh(name) }, o)?;
         self.check(&c)?;
         self.check_free(name).await?;
         self.insert(&c, caps).await?;
@@ -788,7 +898,7 @@ impl Control {
                 ..p.clone()
             },
             o,
-        );
+        )?;
         self.check(&c)?;
         self.check_free(name).await?;
         // Refused by a cap before anything is copied (the insert's count, in its transaction,
@@ -863,7 +973,7 @@ impl Control {
     pub async fn update(&self, id: &str, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
         let c = {
             let _g = self.specs.lock().await;
-            let c = Self::apply(self.get(id).await?, o);
+            let c = Self::apply(self.get(id).await?, o)?;
             self.check(&c)?;
             self.save(&c, caps).await?;
             self.apply_spec(&c.name).await;
@@ -1839,6 +1949,12 @@ impl Control {
         for (name, n) in self.node.take_request_counts() {
             self.meter.count_requests(&name, n.min(i64::MAX as u64) as i64);
         }
+        for (name, o) in self.node.take_observations() {
+            // Lost if the catalog can't take them now: they are a picture, not a bill.
+            if let Err(e) = self.meter.observe(&name, o).await {
+                tracing::warn!(cluster = name, error = %e, "storing search metrics failed");
+            }
+        }
         let at = now_ms();
         for (name, forced) in self.meter.sample(at).await? {
             let due = forced || self.refreshed.lock().get(&name).is_none_or(|t| at - t >= self.cfg.stats_interval.as_millis() as i64);
@@ -1851,6 +1967,66 @@ impl Control {
             }
         }
         Ok(())
+    }
+
+    /// Request metrics of a cluster over `range` (`1h`, `24h` or `14d`): its buckets in the
+    /// catalog plus what this node recorded since the last metering pass, in points of the
+    /// range's step (only points with requests), and totals. See `docs/search/architecture.md`,
+    /// "Observability".
+    pub async fn metrics(&self, id: &str, range: &str) -> Result<Value> {
+        let c = self.get(id).await?;
+        let Some(r) = MetricsRange::parse(range) else {
+            return Err(ControlError::Invalid(format!("range must be 1h, 24h or 14d, not {range}")));
+        };
+        let now = now();
+        let to = now - now.rem_euclid(r.step);
+        let from = to - (r.points - 1) * r.step;
+        let mut buckets: std::collections::BTreeMap<i64, search_server::metrics::Stats> = std::collections::BTreeMap::new();
+        let mut add = |at: i64, s: &search_server::metrics::Stats| {
+            if at >= from {
+                buckets.entry(at - at.rem_euclid(r.step)).or_default().merge(s);
+            }
+        };
+        for (at, s) in self.store.metrics_since(&c.id, r.res, from).await? {
+            add(at, &s);
+        }
+        // Not flushed yet: what the cluster's owner (here) recorded since the last pass.
+        for (minute, s) in self.node.peek_observations(&c.name).minutes {
+            add(minute.min(i64::MAX as u64 / 60) as i64 * 60, &s);
+        }
+        let mut total = search_server::metrics::Stats::default();
+        let points: Vec<Value> = buckets
+            .iter()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(at, s)| {
+                total.merge(s);
+                point_json(*at, s, r.step)
+            })
+            .collect();
+        Ok(json!({
+            "range": range,
+            "step_s": r.step,
+            "from": from,
+            "to": to + r.step,
+            "points": points,
+            "totals": point_json(from, &total, r.points * r.step),
+        }))
+    }
+
+    /// A cluster's slow log, newest first: the catalog's entries and those this node hasn't
+    /// handed on yet, at most [`search_es::slowlog::MAX_ENTRIES`].
+    pub async fn slowlog(&self, id: &str) -> Result<Value> {
+        let c = self.get(id).await?;
+        let mut entries: Vec<Value> = self.node.peek_observations(&c.name).slow.iter().rev().map(search_es::slowlog::Entry::to_json).collect();
+        for row in self.store.slowlog(&c.id).await? {
+            if entries.len() >= search_es::slowlog::MAX_ENTRIES {
+                break;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(&row) {
+                entries.push(v);
+            }
+        }
+        Ok(json!({ "entries": entries, "max_entries": search_es::slowlog::MAX_ENTRIES }))
     }
 
     /// Re-reads a cluster's docs and stored bytes from its commit points.
@@ -1994,8 +2170,10 @@ mod tests {
             wake_at: None,
             owner: None,
             restored_at: None,
+            ip_allowlist: vec![IpRule { cidr: "203.0.113.0/24".into(), description: None }],
         };
         let s = spec_for(&c);
+        assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());
         assert_eq!(s.name, "app");
         assert_eq!(s.dialect, Dialect::OpenSearch);
         assert_eq!(s.credentials.len(), 1);
