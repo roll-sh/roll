@@ -3002,10 +3002,13 @@ inconsistencies are fixed in #264:
   roll MCP's #267 (on main) has `Access::revoke_many(ids, why, by)` (atomic, ≤500 ids, one audit row
   per grant). Building: `feature/roll-secrets-cut-off`;
   reach passes its own grant ids, and leases, shares and syncs stay in secrets' transaction.
-- R3. **Credentials roll doesn't hold yet** (M): landings and `roll secrets scan` match stored values
-  only. The detectors are shared (`roll_auth::credentials`; #267 on main made `kind_in` and a bounded
-  `find_all` public). Building: `feature/roll-secrets-unstored-credentials`. Then a landing warning and `roll secrets scan`
-  offering "store in roll, replace with `${KEY}`".
+- R3. **Credentials roll doesn't hold yet** (#303): a landing's added lines run through
+  `roll_auth::credentials` with the stored-value check; a match roll doesn't hold is a `secret_unstored`
+  notice naming kind, `path:line` and the `roll secrets scan --store` command (never the value), or a
+  blocker with `roll.toml` `[secrets] unstored_credentials = "block"` (admin bypass audited);
+  placeholders (`example`, `fake`, `test`… parts, runs of one character) and `.roll/secrets-allow`
+  (fingerprints, path globs) are skipped. `scan --store` moves one into roll and prints the env read.
+  Next: the dashboard's "Store in roll" (roll reads the value from the change's blob).
 - R4. **GCP KMS, Azure Key Vault and HSM keys** (M), next to AWS KMS: real accounts (the user's call).
 - R5. **`roll://` wherever another roll product takes a key** (M): agent endpoints (they take `op://`),
   the gateway's upstreams, review provider keys, storage replication and search snapshot credentials.
