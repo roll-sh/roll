@@ -46,3 +46,80 @@ pub async fn open(args: &crate::Args, home: &Path, code: Option<Arc<code_control
     let accounts = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(roll_accounts::Accounts::open(&target, pg, config, owners)))?;
     Ok(Arc::new(accounts))
 }
+
+/// People's accounts in roll-access's audit log (its page, filters and SIEM sinks): what
+/// roll-accounts says happened (docs/accounts.md, "Audit"), and each request's client address
+/// read as the gate reads it (its trusted proxies).
+pub struct AccessAudit(pub Arc<roll_access::Access>);
+
+impl roll_accounts::audit::Audit for AccessAudit {
+    fn record(&self, e: roll_accounts::audit::AccountEvent) {
+        let mut args = serde_json::json!({ "actor": e.actor });
+        if !e.detail.is_null() {
+            args["detail"] = e.detail;
+        }
+        let row = roll_access::store::AuditEvent {
+            id: roll_access::new_id("aud"),
+            at: code_sql::now_ms(),
+            grant_id: None,
+            // Who did it, where the audit page shows a token's name.
+            grant_name: Some(e.actor),
+            source: "accounts".into(),
+            tool: None,
+            method: e.method,
+            route: e.action,
+            product: Some("accounts".into()),
+            action: None,
+            resource: e.target,
+            decision: if e.ok { "allow".into() } else { "deny".into() },
+            approval: None,
+            status: e.status,
+            args: Some(args),
+            ip: e.ip.map(|ip| ip.to_string()),
+            duration_ms: 0,
+            client: e.user_agent,
+        };
+        // The batching writer; when its queue is full, a write of its own (off the runtime).
+        if let Some(row) = self.0.store.queue_audit(row) {
+            let access = self.0.clone();
+            match tokio::runtime::Handle::try_current() {
+                Ok(rt) => drop(rt.spawn_blocking(move || access.store.audit(&row))),
+                Err(_) => access.store.audit(&row),
+            }
+        }
+    }
+
+    fn client_ip(&self, req: &axum::extract::Request) -> Option<std::net::IpAddr> {
+        roll_access::evaluate::client_ip(req, &self.0.config)
+    }
+
+    fn activity(&self, user: &str, before: Option<i64>, limit: usize) -> Vec<roll_accounts::audit::Activity> {
+        // Rows written in the last moment may still be in the batching writer's queue.
+        self.0.store.flush_audit(std::time::Duration::from_millis(200));
+        let q = roll_access::store::AuditQuery { product: Some("accounts".into()), resource: Some(user.to_string()), before, limit: Some(limit), ..Default::default() };
+        let rows = match self.0.store.audit_log(&q) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "accounts: reading a person's activity failed");
+                return Vec::new();
+            }
+        };
+        rows.into_iter()
+            // Only what's about them exactly (the query also matches ids under theirs).
+            .filter(|r| r.resource.as_deref() == Some(user))
+            .map(|r| {
+                let args = r.args.unwrap_or(serde_json::Value::Null);
+                roll_accounts::audit::Activity {
+                    at: r.at,
+                    action: r.route,
+                    actor: args["actor"].as_str().map(str::to_string).or(r.grant_name).unwrap_or_else(|| "operator".into()),
+                    ok: r.decision == "allow",
+                    status: r.status,
+                    ip: r.ip,
+                    user_agent: r.client,
+                    detail: args.get("detail").cloned().unwrap_or(serde_json::Value::Null),
+                }
+            })
+            .collect()
+    }
+}
