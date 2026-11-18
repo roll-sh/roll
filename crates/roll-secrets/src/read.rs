@@ -148,6 +148,11 @@ pub struct Values {
     /// Keys whose value comes from a link to a resource (any mode): a consumer that reaches
     /// resources another way (a container on a private network) knows which addresses to rewrite.
     pub linked: Vec<String>,
+    /// Of `linked`, the keys whose link field isn't a credential (a host, a port, a user name, a
+    /// database): a consumer that hides secret values in logs (roll apps) may show these. Every
+    /// other value here is a secret, whatever its name or tags.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub plain: Vec<String>,
     /// Keys linked to a resource the ephemeral environment's preview branched: left out of
     /// `values` (no value of the parent's leaves roll secrets), for roll previews to set from its
     /// branch by `field`.
@@ -164,6 +169,14 @@ pub struct Followed {
     pub parent: String,
     /// The provider field the key is linked to (`url`, `password`, `role_url`…).
     pub field: String,
+}
+
+impl Secrets {
+    /// Whether a link's field is plain connection detail (its provider says it isn't a
+    /// credential). A kind or field roll doesn't know counts as a credential.
+    fn plain_field(&self, l: &Link) -> bool {
+        self.links.get(&l.kind).ok().and_then(|p| p.fields().iter().find(|f| f.field == l.field).map(|f| !f.secret)).unwrap_or(false)
+    }
 }
 
 /// Whether `l` names one of `branches`' parents: its value is the parent's, never the preview's.
@@ -333,7 +346,9 @@ impl Secrets {
             c.execute(
                 "INSERT INTO source_generations (kind, ref, generation) VALUES (?, ?, 1) ON CONFLICT (kind, ref) DO UPDATE SET generation = source_generations.generation + 1",
                 [kind, r#ref],
-            )
+            )?;
+            // The syncs of projects that link it check their digests next.
+            crate::syncs::due_for_source(c, kind, r#ref)
         })?;
         Ok(())
     }
@@ -543,7 +558,8 @@ impl Secrets {
         let ours = |e: &&Entry| !followed.iter().any(|f| f.name == e.row.key);
         let dynamic = entries.iter().filter(ours).filter(|e| e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic)).map(|e| e.row.key.clone()).collect();
         let linked = entries.iter().filter(ours).filter(|e| e.row.link.is_some()).map(|e| e.row.key.clone()).collect();
-        Ok(Values { values, problems, leases, dynamic, linked, withheld, sensitive, followed })
+        let plain = entries.iter().filter(ours).filter(|e| e.row.link.as_ref().is_some_and(|l| self.plain_field(l))).map(|e| e.row.key.clone()).collect();
+        Ok(Values { values, problems, leases, dynamic, linked, plain, withheld, sensitive, followed })
     }
 
     /// A folder's own values as they were after change `seq` (or at time `at`): what was stored
@@ -566,6 +582,7 @@ impl Secrets {
         let mut values = BTreeMap::new();
         let mut problems = vec![];
         let mut linked = vec![];
+        let mut plain = vec![];
         let mut withheld = vec![];
         let mut followed = vec![];
         // Keys sensitive now: none of their versions shows, however old.
@@ -586,8 +603,11 @@ impl Secrets {
                 followed.push(Followed { name: v.key, kind: l.kind.clone(), parent: l.r#ref.clone(), field: l.field.clone() });
                 continue;
             }
-            if link.is_some() {
+            if let Some(l) = &link {
                 linked.push(v.key.clone());
+                if self.plain_field(l) {
+                    plain.push(v.key.clone());
+                }
             }
             match (&v.value, &link) {
                 (Some(ct), _) => {
@@ -604,7 +624,7 @@ impl Secrets {
         }
         let keys: Vec<String> = values.keys().cloned().collect();
         self.audit_now(project, caller, "secrets.export", Some(slug), Some(&path), &keys, &format!("exported {} as of change #{seq}", crate::write::plural(keys.len(), "value")));
-        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, withheld, sensitive: vec![], followed }))
+        Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, plain, withheld, sensitive: vec![], followed }))
     }
 
     /// A digest of a folder's effective secrets (keys, where they come from, versions,

@@ -166,6 +166,11 @@ pub const PREPARE_TIMEOUT: Duration = Duration::from_secs(600);
 /// run, not preparing: a timeout that cut `docker create` (or `RunTask`) short could let the
 /// container appear after it was removed, so it's removed again once it could have.
 pub async fn run_check(isolation: &Arc<dyn Isolation>, spec: &CheckSpec, dir: &Path, env: &[(String, String)]) -> RunOutput {
+    run_check_on(isolation, spec, dir, env, None).await
+}
+
+/// [`run_check`] on `network` (a preview's own, with no route out) when one is given.
+pub async fn run_check_on(isolation: &Arc<dyn Isolation>, spec: &CheckSpec, dir: &Path, env: &[(String, String)], network: Option<crate::isolation::Network>) -> RunOutput {
     let job = Job {
         kind: Kind::Check,
         name: format!("roll-check-{}", docker::random_suffix()),
@@ -178,7 +183,7 @@ pub async fn run_check(isolation: &Arc<dyn Isolation>, spec: &CheckSpec, dir: &P
         change: None,
         deadline: PREPARE_TIMEOUT + spec.timeout + Duration::from_secs(60),
         cache: None,
-        network: None,
+        network,
     };
     let name = job.name.clone();
     let tail = Arc::new(Mutex::new(Tail::new(SUMMARY_BYTES)));

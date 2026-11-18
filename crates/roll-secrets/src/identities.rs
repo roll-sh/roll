@@ -46,28 +46,6 @@ CREATE TABLE IF NOT EXISTS identity_logins (
 CREATE INDEX IF NOT EXISTS identity_logins_identity ON identity_logins (identity);
 ";
 
-/// Issuers every tenant of theirs shares (every GitHub repo's Actions sign with GitHub's): an
-/// identity of theirs names one tenant in its subject, literally, or anyone's job could log in as
-/// it. (issuer, subject prefix, whether the tenant is `owner/name`, the shape to show.) A prefix of
-/// "" means the whole subject is literal (Google's `sub` is an account's number).
-const SHARED: &[(&str, &str, bool, &str)] = &[
-    ("https://token.actions.githubusercontent.com", "repo:", true, "repo:<owner>/<repo>:… (GitHub Actions' sub)"),
-    ("https://gitlab.com", "project_path:", true, "project_path:<group>/<project>:… (GitLab CI's sub)"),
-    ("https://app.terraform.io", "organization:", false, "organization:<org>:… (Terraform Cloud's sub)"),
-    ("https://agent.buildkite.com", "organization:", false, "organization:<org>:… (Buildkite's sub)"),
-    ("https://accounts.google.com", "", false, "the service account's numeric id, exactly (Google's sub)"),
-];
-
-/// Whether `subject` names one tenant of a shared issuer literally.
-fn pinned(subject: &str, prefix: &str, owner_name: bool) -> bool {
-    if prefix.is_empty() {
-        return !subject.contains('*');
-    }
-    let Some((tenant, _)) = subject.strip_prefix(prefix).and_then(|r| r.split_once(':')) else { return false };
-    let shaped = if owner_name { tenant.split_once('/').is_some_and(|(o, n)| !o.is_empty() && !n.is_empty()) } else { !tenant.is_empty() };
-    shaped && !tenant.contains('*')
-}
-
 const IDENTITIES_MAX: i64 = 50;
 const CLAIMS_MAX: usize = 10;
 pub const TTL_MIN: i64 = 5;
@@ -207,9 +185,8 @@ impl Secrets {
         if subject.is_empty() || subject.len() > 512 || subject.chars().all(|c| c == '*') {
             return Err(bad("subject is the token's sub, or a pattern of it with * (never * alone)"));
         }
-        if let Some((_, prefix, owner_name, shape)) = SHARED.iter().find(|(i, ..)| *i == issuer)
-            && !pinned(&subject, prefix, *owner_name)
-        {
+        // Shared issuers' rule (roll-oidc's, as roll-access's trusted clients have it).
+        if let Some(shape) = roll_oidc::open_to_others(&issuer, &subject) {
             return Err(bad(format!("{issuer} signs for everyone: the subject names one of its tenants, {shape}")));
         }
         if n.claims.len() > CLAIMS_MAX || n.claims.iter().any(|(k, v)| k.is_empty() || k.len() > 64 || v.is_empty() || v.len() > 256 || ["iss", "aud", "sub", "exp", "nbf", "iat"].contains(&k.as_str())) {
@@ -322,7 +299,8 @@ impl Secrets {
         }
         let jwt = Jwt::parse(token)?;
         let now = self.db.now_ms()?;
-        self.oidc.verify(self.deliver.as_deref(), jwks.as_deref(), &jwt, &i.issuer, &i.audience, now / 1000)?;
+        let via = self.deliver.as_deref().map(crate::oidc::Via);
+        self.oidc.verify(via.as_ref().map(|v| v as &dyn roll_oidc::Fetch), jwks.as_deref(), &jwt, &i.issuer, &i.audience, now / 1000)?;
         let sub = jwt.str("sub").unwrap_or_default().to_string();
         if !wildcard(&i.subject, &sub) {
             return Err(Error::Forbidden(format!("{sub} doesn't match identity {}'s subject", i.name)));
@@ -342,7 +320,7 @@ impl Secrets {
             crate::caller::Maker::Gone => return Err(denied()),
         };
         let m = workloads.mint(&i.name, rule, i.allowed_ips.clone(), i.ttl_minutes as u32, owner.as_deref())?;
-        let caller = Caller { principal: format!("identity:{}", i.id), grants: std::sync::Arc::new(crate::access::Everything), ip, runtime: false };
+        let caller = Caller { principal: format!("identity:{}", i.id), grants: std::sync::Arc::new(crate::access::Everything), ip, runtime: false, approval: None };
         let kept = self.db.write(|c| {
             // Deleted meanwhile, or its keys replaced (and so its maker changed): the token goes
             // too. A login verified against the old keys mustn't keep one after the replacement

@@ -21,6 +21,9 @@ pub struct AuditEntry {
     pub keys: Vec<String>,
     pub summary: String,
     pub ip: Option<String>,
+    /// The approval that let the request through roll-access's gate, if one did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval: Option<crate::access::Approval>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -41,8 +44,8 @@ pub struct AuditFilter {
 pub(crate) fn record(c: &Conn<'_>, project: &str, caller: &Caller, action: &str, env: Option<&str>, path: Option<&str>, keys: &[String], summary: &str, now: i64) -> Result<()> {
     let keys: Vec<&String> = keys.iter().take(200).collect();
     c.execute(
-        "INSERT INTO audit (project_id, at, actor, action, env, path, keys, summary, ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        params![project, now, caller.principal, action, env, path, json(&keys), summary, caller.ip],
+        "INSERT INTO audit (project_id, at, actor, action, env, path, keys, summary, ip, approval) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![project, now, caller.principal, action, env, path, json(&keys), summary, caller.ip, caller.approval.as_ref().map(json)],
     )?;
     Ok(())
 }
@@ -66,7 +69,7 @@ impl Secrets {
         self.project(project)?;
         let limit = f.limit.unwrap_or(if f.format.is_some() { 10_000 } else { 100 }).clamp(1, 10_000);
         // Conditions only for the filters given: Postgres can't type `? IS NULL` parameters.
-        let mut sql = String::from("SELECT id, at, actor, action, env, path, keys, summary, ip FROM audit WHERE project_id = ? AND id < ?");
+        let mut sql = String::from("SELECT id, at, actor, action, env, path, keys, summary, ip, approval FROM audit WHERE project_id = ? AND id < ?");
         let mut args: Vec<code_sql::Value> = vec![code_sql::Value::Text(project.into()), code_sql::Value::Int(f.before.unwrap_or(i64::MAX))];
         let mut cond = |clause: &str, v: Option<String>| {
             if let Some(v) = v {
@@ -96,6 +99,7 @@ impl Secrets {
                     keys: from_json(&r.get::<_, String>(6)?),
                     summary: r.get(7)?,
                     ip: r.get(8)?,
+                    approval: r.get::<_, Option<String>>(9)?.and_then(|a| serde_json::from_str(&a).ok()),
                 })
             })
         })?;
