@@ -4,7 +4,7 @@
 # tools/quick-check.sh and don't start it themselves. By hand, as one heavy job:
 #
 #   tools/heavy-bg.sh ~/.cache/aNNN/train.log env TRAIN_DIR=~/.cache/aNNN/train TRAIN_PREFIX=aNNN \
-#     TRAIN_PORTS=53252,53253,53255 TRAIN_ISO_REF=127.0.0.1:53250 tools/verification-train.sh
+#     tools/verification-train.sh
 #
 # (under `sg docker`). Each build is made once and its test binaries run directly by every stage
 # that needs them, three lanes side by side (each lane's stages in order):
@@ -18,10 +18,21 @@
 #   lane 3   regress: the full regression suite on a private reference (0 newly differing);
 #            iso: isolation (1,647 / 1,648); dump: pg_dump_tap (14,609 passed)
 # Results in $TRAIN_DIR/status, one line a stage: "<stage> <exit> <detail> <time>" (then
-# "done 0"); logs in $TRAIN_DIR/<stage>.log, the tests' per binary in $TRAIN_DIR/tests/.
+# "done 0"); the detail of a failed stage says why (the failing tests, the newly differing units,
+# "engine did not start", a panic's message). Logs in $TRAIN_DIR/<stage>.log, the tests' per
+# binary in $TRAIN_DIR/tests/; each failing test, one "<name>\t<message>" line, in
+# $TRAIN_DIR/<stage>.fails (tools/train-why.py; the batch train's flake ledger reads them). A
+# train clears the last one's logs first. A reference suite whose engine did not start (a port
+# taken for a moment) runs again on a fresh port within the train (tools/ref-suites.sh): a line
+# per such run in $TRAIN_DIR/infra.
 # Containers: the train makes or starts them with tools/ref-containers.sh (<prefix>-rref, -iref
 # on $TRAIN_ISO_REF's port, -psql, -dclient; $TRAIN_DIR/pgr/src-repo).
 #
+#   TRAIN_PORTS    preferred engine ports for regress, isolation, pg_dump; TRAIN_ISO_REF the
+#                  isolation reference's (127.0.0.1:<port>). From tools/ports.sh (below the
+#                  ephemeral range, free, held while the train runs): a preferred port that isn't
+#                  is replaced; unset, the last train's ($TRAIN_DIR/ports) or any. $TRAIN_DIR/ports
+#                  has the ones used.
 #   TRAIN_STAGES   the stages to run (default all: build,clippy,tests,checked,crash,power,regress,iso,dump);
 #                  build always runs for what the others need
 #   TRAIN_TESTS    test binaries for tests and checked (default all; space-separated names)
@@ -36,17 +47,29 @@
 set -u
 D=${TRAIN_DIR:?TRAIN_DIR: a scratch directory on disk}
 P=${TRAIN_PREFIX:?TRAIN_PREFIX: the prefix of your containers}
-PORTS=${TRAIN_PORTS:?TRAIN_PORTS: three free ports of yours, regress,isolation,pg_dump}
-RPORT=${PORTS%%,*}; DPORT=${PORTS##*,}; IPORT=${PORTS#*,}; IPORT=${IPORT%%,*}
-ISO_REF=${TRAIN_ISO_REF:-127.0.0.1:53250}
 STAGES=",${TRAIN_STAGES:-build,clippy,tests,checked,crash,power,regress,iso,dump},"
 THREADS=${TRAIN_THREADS:-${RUST_TEST_THREADS:-6}}
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
+TOOLS=$ROOT/crates/pg-engine/tools
 cd "$ROOT" || exit 1
+mkdir -p "$D"
+# Ports, held while this train runs (tools/ports.sh); the isolation reference keeps the port its
+# container runs on when that one is safe.
+pick() { "$TOOLS/ports.sh" take $$ 1 "$@"; }
+set -- $(echo "${TRAIN_PORTS:-$(cut -d, -f1-3 "$D/ports" 2>/dev/null)}" | tr , ' ') '' '' ''
+RPORT=$(pick $1) IPORT=$(pick $2) DPORT=$(pick $3)
+IRUN=$("$TOOLS/ref-containers.sh" port "$P" 2>/dev/null)
+IREF=$(pick ${IRUN:+=$IRUN} ${TRAIN_ISO_REF:+${TRAIN_ISO_REF##*:}} $(cut -d, -f4 "$D/ports" 2>/dev/null))
+echo "$RPORT,$IPORT,$DPORT,$IREF" >"$D/ports"
 export PATH="$HOME/.cargo/bin:$PATH"
 # A fresh build each train: incremental caches would only cost time and disk.
 export CARGO_INCREMENTAL=0 CARGO_PROFILE_VERIFY_CODEGEN_UNITS=16 CARGO_PROFILE_VERIFY_CHECKED_CODEGEN_UNITS=16
 mkdir -p "$D/bin" "$D/pgr" "$D/iso" "$D/pgdump" "$D/tests"; : >"$D/status"
+# The last train's logs go: a stage this one doesn't run leaves no stale log behind.
+rm -rf "$D"/*.log "$D"/*.fails "$D/infra" "$D/tests" "$D/pgr/report" "$D/iso/report" "$D/pgdump/report" \
+  "$D"/pgdump/tap-*.out "$D"/pgdump/*.log "$D/pgr/out/engine.log" "$D/iso/out/engine.log"
+mkdir -p "$D/tests"
+echo "ports: regress $RPORT, isolation $IPORT, pg_dump $DPORT, isolation reference $IREF"
 st() { echo "$1 $2 $(date +%T)" >>"$D/status"; }
 want() { case $STAGES in *",$1,"*) return 0 ;; esac; return 1; }
 if [ -n "${TRAIN_ENGINE_BIN:-}" ]; then
@@ -129,8 +152,10 @@ crate_tests() {
   stage=$1 bins=$2 t=$(date +%s) bad=
   for s in $SEL; do
     b=$(bin "$s" "$bins"); [ -n "$b" ] || { bad="$bad $s:not-built"; continue; }
-    (cd crates/pg-engine && RUST_TEST_THREADS=$THREADS "$b") >"$D/tests/$stage-$s.log" 2>&1 ||
+    (cd crates/pg-engine && RUST_TEST_THREADS=$THREADS "$b") >"$D/tests/$stage-$s.log" 2>&1 || {
+      python3 -I "$TOOLS/train-why.py" libtest "$s" "$D/tests/$stage-$s.log" "$D/$stage.fails"
       bad="$bad $(grep -E '^test .* FAILED$' "$D/tests/$stage-$s.log" | awk -v s="$s" '{printf "%s::%s ", s, $2}')$(grep -q '^test .* FAILED$' "$D/tests/$stage-$s.log" || echo "$s:exit")"
+    }
   done
   cat "$D/tests/$stage"-*.log >"$D/$stage.log" 2>/dev/null
   st "$stage" "$([ -z "$bad" ] && echo 0 || echo 101) $(( $(date +%s) - t ))s$bad"
@@ -140,34 +165,28 @@ run() { b=$(bin "$1" "$D/bins"); shift; [ -n "$b" ] || { echo "not built"; retur
 # --- lane 3: the reference suites --------------------------------------------------------------
 lane3() {
   { want regress || want iso || want dump; } || return 0
-  "$ROOT/crates/pg-engine/tools/ref-containers.sh" up "$P" "$D" "${ISO_REF##*:}" >"$D/containers.log" 2>&1 ||
-    echo "containers: $(tail -1 "$D/containers.log")" >>"$D/status"
+  "$TOOLS/ref-containers.sh" up "$P" "$D" "$IREF" >"$D/containers.log" 2>&1
+  rc=$?
+  if [ $rc = 3 ] && new=$(pick); then
+    # The isolation reference's port was taken: another one.
+    echo "containers: $(tail -1 "$D/containers.log"); the isolation reference on port $new" >>"$D/infra"
+    IREF=$new; echo "$RPORT,$IPORT,$DPORT,$IREF" >"$D/ports"
+    "$TOOLS/ref-containers.sh" up "$P" "$D" "$IREF" >>"$D/containers.log" 2>&1; rc=$?
+  fi
+  [ $rc = 0 ] || echo "containers: $(tail -1 "$D/containers.log")" >>"$D/status"
+  . "$TOOLS/ref-suites.sh"
   if want regress; then
     [ -d "$D/pgr/src-repo" ] || echo "no $D/pgr/src-repo: the regress harness clones it" >>"$D/status"
-    rm -rf "$D/pgr/report"
-    PGREGRESS_DIR=$D/pgr PGREGRESS_DB=regression_$P PGREGRESS_PORT=$RPORT PGREGRESS_CONTAINER=$P-rref \
-      PGREGRESS_ENGINE_CONTAINER=$P-psql PGREGRESS_REPORT_DIR=$D/pgr/report \
-      run pg_regress pg_regress --exact --ignored --nocapture >"$D/regress.log" 2>&1
-    rc=$?
-    nd=$(grep -o 'Newly differing units: [0-9]*' "$D/pgr/report/REPORT.md" 2>/dev/null | grep -o '[0-9]*$')
-    [ "${nd:-x}" = 0 ] || [ $rc != 0 ] || rc=1
-    st regress "$rc Newly differing units: ${nd:-?} $(grep -o '[0-9]*/[0-9]* units match' "$D/regress.log" | tail -1)"
+    ref_suite regress "$RPORT" "$IREF"
+    st regress "$([ $REF_OK = 1 ] && echo 0 || echo "$REF_RC") $REF_DETAIL"
   fi
   if want iso; then
-    PGISOLATION_DIR=$D/iso PGISOLATION_PORT=$IPORT PGISOLATION_REF=$ISO_REF PGISOLATION_MAX_PREPARED=5 \
-      PGISOLATION_REPORT_DIR=$D/iso/report run pg_isolation --ignored --nocapture >"$D/iso.log" 2>&1
-    rc=$?
-    m=$(grep -o '[0-9]*/[0-9]* permutations' "$D/iso.log" | tail -1)
-    [ "${m%%/*}" -ge 1647 ] 2>/dev/null || [ $rc != 0 ] || rc=1
-    st isolation "$rc $m"
+    ref_suite iso "$IPORT" "$IREF"
+    st isolation "$([ $REF_OK = 1 ] && echo 0 || echo "$REF_RC") $REF_DETAIL"
   fi
   if want dump; then
-    PGDUMP_DIR=$D/pgdump PGDUMP_CLIENT=$P-dclient PGDUMP_PORT=$DPORT PGDUMP_REPORT_DIR=$D/pgdump/report \
-      PGDUMP_SRC=$D/pgr/src-repo run pg_dump --ignored --nocapture --exact pg_dump_tap >"$D/dump.log" 2>&1
-    rc=$?
-    m=$(grep -o '002_pg_dump.pl: [0-9]* passed, [0-9]* failed' "$D/dump.log" | tail -1)
-    [ "$(echo "$m" | awk '{print ($2 >= 14609 && $4 == 0)}')" = 1 ] || [ $rc != 0 ] || rc=1
-    st dump "$rc $m"
+    ref_suite dump "$DPORT" "$IREF"
+    st dump "$([ $REF_OK = 1 ] && echo 0 || echo "$REF_RC") $REF_DETAIL"
   fi
 }
 
@@ -176,15 +195,17 @@ lane1() {
   want tests && crate_tests tests "$D/bins"
   SEEDS=$(seq -s, 1 30)
   if want crash; then
-    CRASH_SEEDS=$SEEDS CRASH_ROUNDS=4 run crash_random >"$D/crash.log" 2>&1; st crash $?
+    CRASH_SEEDS=$SEEDS CRASH_ROUNDS=4 run crash_random >"$D/crash.log" 2>&1; rc=$?
+    st crash "$rc$([ $rc = 0 ] || echo " $(python3 -I "$TOOLS/train-why.py" panic "$D/crash.log" crash_random "$D/crash.fails")")"
   fi
   if [ $POWER = 1 ]; then
-    run crash_random@power power_cut >"$D/power-cut.log" 2>&1
-    st power-cut "$? $(grep -o '[0-9]* passed' "$D/power-cut.log" | tail -1)"
-    CRASH_POWER=1 CRASH_SEEDS=$SEEDS CRASH_ROUNDS=4 run crash_random@power --exact random_crashes >"$D/crash-power.log" 2>&1
-    st crash-power $?
-    CRASH_POWER=1 CRASH_ASYNC=1 CRASH_SEEDS=$SEEDS CRASH_ROUNDS=4 run crash_random@power --exact random_crashes >"$D/crash-power-async.log" 2>&1
-    st crash-power-async $?
+    run crash_random@power power_cut >"$D/power-cut.log" 2>&1; rc=$?
+    [ $rc = 0 ] || python3 -I "$TOOLS/train-why.py" libtest crash_random@power "$D/power-cut.log" "$D/power-cut.fails"
+    st power-cut "$rc $(grep -o '[0-9]* passed' "$D/power-cut.log" | tail -1)$([ $rc = 0 ] || echo "; $(cut -f1 "$D/power-cut.fails" | paste -sd' ' -)")"
+    CRASH_POWER=1 CRASH_SEEDS=$SEEDS CRASH_ROUNDS=4 run crash_random@power --exact random_crashes >"$D/crash-power.log" 2>&1; rc=$?
+    st crash-power "$rc$([ $rc = 0 ] || echo " $(python3 -I "$TOOLS/train-why.py" panic "$D/crash-power.log" crash-power "$D/crash-power.fails")")"
+    CRASH_POWER=1 CRASH_ASYNC=1 CRASH_SEEDS=$SEEDS CRASH_ROUNDS=4 run crash_random@power --exact random_crashes >"$D/crash-power-async.log" 2>&1; rc=$?
+    st crash-power-async "$rc$([ $rc = 0 ] || echo " $(python3 -I "$TOOLS/train-why.py" panic "$D/crash-power-async.log" crash-power-async "$D/crash-power-async.fails")")"
   fi
 }
 

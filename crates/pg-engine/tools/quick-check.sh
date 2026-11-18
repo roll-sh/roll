@@ -4,8 +4,7 @@
 # incremental build, in about 20 minutes. Green here, the change goes to the batch train as a
 # cand/<agent> branch (tools/batch-train.sh); agents don't run the full train themselves.
 #
-#   QC_PREFIX=a242 QC_PORTS=54850,54851,54852,54853 crates/pg-engine/tools/heavy.sh \
-#     crates/pg-engine/tools/quick-check.sh
+#   QC_PREFIX=a242 crates/pg-engine/tools/heavy.sh crates/pg-engine/tools/quick-check.sh
 #
 # One line per step ("qc <step> ok|FAIL <seconds>s <detail>"); the first failure stops it with a
 # non-zero exit, and its log is $QC_DIR/<step>.log. Steps:
@@ -19,15 +18,27 @@
 #            a changed source file has some
 #   crash    when storage, WAL or commit paths changed: crash_random seeds 1-3 x 2 rounds, then
 #            one power cut case (power_cut_at_every_point, built `--features powerloss`)
+#   checked  with QC_CHECKED=1: the tests step's binaries again, built `--profile verify-checked`
+#            (debug assertions and overflow checks, as the train's checked stage). Use it when the
+#            change touches code with debug_assert!/assert!s, arithmetic that may overflow, or
+#            catalog row counts and sizes (the train's checked stage rejected a candidate quick-check
+#            had passed); it costs a second engine build (~15-25 min cold, incremental after)
 #   regress  the full regression suite on the reference: 0 newly differing units
 #   iso      isolation: at least 1,647 of 1,648 permutations
 #   dump     pg_dump_tap: at least 14,609 passed, 0 failed
 # regress, iso and dump run one after another alongside the crate tests (they wait on the
-# reference more than on CPU). Test binaries run directly (cargo would hold the build lock).
+# reference more than on CPU). Test binaries run directly (cargo would hold the build lock). A
+# reference suite whose engine did not start (its port taken for a moment, os error 98) runs again
+# on a fresh port (tools/ref-suites.sh): its line says so, and $QC_DIR/infra has each such run.
 #
 # Environment:
 #   QC_PREFIX  your containers' prefix (tools/ref-containers.sh makes them here when missing)
-#   QC_PORTS   four free ports: regress engine, isolation engine, pg_dump engine, isolation reference
+#   QC_PORTS   preferred ports: regress engine, isolation engine, pg_dump engine, isolation
+#              reference. Each comes from tools/ports.sh: a preferred one is kept when it is below
+#              the kernel's ephemeral range (32768-60999) and free, others are replaced (the agents'
+#              blocks sit in that range, where a client socket can take a port: os error 98).
+#              Unset: the last run's ($QC_DIR/ports), else any free ones. The "ports" line says
+#              which ports it used.
 #   QC_DIR     scratch (default ~/.cache/qc-$QC_PREFIX); QC_BASE (default origin's branch)
 #   QC_PROFILE cargo profile (default verify: release without LTO, as the train builds)
 #   QC_SKIP    steps to skip, comma-separated (regress,iso,dump without containers; clippy; crash)
@@ -54,37 +65,14 @@ run() { b=$(bin "$1"); shift; [ -n "$b" ] || { echo "no binary built"; return 1;
 # The reference suites, in their own process group (re-run of this script with QC_REF_CHAIN=1):
 # one status line each to $D/ref.status.
 if [ "${QC_REF_CHAIN:-}" = 1 ]; then
-  RPORT=$(echo "$QC_PORTS" | cut -d, -f1); IPORT=$(echo "$QC_PORTS" | cut -d, -f2)
-  DPORT=$(echo "$QC_PORTS" | cut -d, -f3); IREF=$(echo "$QC_PORTS" | cut -d, -f4)
-  if ! skip regress; then
-    t=$(now); rm -rf "$D/pgr/report"
-    PGREGRESS_DIR=$D/pgr PGREGRESS_DB=regression_$P PGREGRESS_PORT=$RPORT PGREGRESS_CONTAINER=$P-rref \
-      PGREGRESS_ENGINE_CONTAINER=$P-psql PGREGRESS_REPORT_DIR=$D/pgr/report \
-      run pg_regress pg_regress --exact --ignored --nocapture >"$D/regress.log" 2>&1
-    rc=$?
-    nd=$(grep -o 'Newly differing units: [0-9]*' "$D/pgr/report/REPORT.md" 2>/dev/null | grep -o '[0-9]*$')
-    m=$(grep -o '[0-9]*/[0-9]* units match' "$D/regress.log" | tail -1)
-    if [ $rc = 0 ] && [ "${nd:-x}" = 0 ]; then echo "regress ok $(( $(now) - t )) $m, 0 newly differing"
-    else echo "regress FAIL $(( $(now) - t )) exit $rc, newly differing ${nd:-?} (report: $D/pgr/report/REPORT.md)"; fi >>"$D/ref.status"
-  fi
-  if ! skip iso; then
-    t=$(now)
-    PGISOLATION_DIR=$D/iso PGISOLATION_PORT=$IPORT PGISOLATION_REF=127.0.0.1:$IREF PGISOLATION_MAX_PREPARED=5 \
-      PGISOLATION_REPORT_DIR=$D/iso/report run pg_isolation --ignored --nocapture >"$D/iso.log" 2>&1
-    rc=$?
-    m=$(grep -o '[0-9]*/[0-9]* permutations' "$D/iso.log" | tail -1)
-    if [ $rc = 0 ] && [ "${m%%/*}" -ge 1647 ] 2>/dev/null; then echo "iso ok $(( $(now) - t )) $m"
-    else echo "iso FAIL $(( $(now) - t )) exit $rc, ${m:-no count} (1,647 needed)"; fi >>"$D/ref.status"
-  fi
-  if ! skip dump; then
-    t=$(now)
-    PGDUMP_DIR=$D/pgdump PGDUMP_CLIENT=$P-dclient PGDUMP_PORT=$DPORT PGDUMP_REPORT_DIR=$D/pgdump/report \
-      PGDUMP_SRC=$D/pgr/src-repo run pg_dump --ignored --nocapture --exact pg_dump_tap >"$D/dump.log" 2>&1
-    rc=$?
-    m=$(grep -o '002_pg_dump.pl: [0-9]* passed, [0-9]* failed' "$D/dump.log" | tail -1)
-    if [ $rc = 0 ] && [ "$(echo "$m" | awk '{print ($2 >= 14609 && $4 == 0)}')" = 1 ]; then echo "dump ok $(( $(now) - t )) ${m#002_pg_dump.pl: }"
-    else echo "dump FAIL $(( $(now) - t )) exit $rc, ${m:-no count} (14,609 passed, 0 failed needed)"; fi >>"$D/ref.status"
-  fi
+  . "$TOOLS/ref-suites.sh"
+  set -- $(echo "$QC_PORTS" | tr , ' ')
+  for suite in regress iso dump; do
+    skip $suite && continue
+    case $suite in regress) port=$1 ;; iso) port=$2 ;; dump) port=$3 ;; esac
+    if ref_suite $suite "$port" "$4"; then echo "$suite ok $REF_SECS $REF_DETAIL"
+    else echo "$suite FAIL $REF_SECS exit $REF_RC, $REF_DETAIL$([ $suite = regress ] && echo " (report: $D/pgr/report/REPORT.md)")"; fi >>"$D/ref.status"
+  done
   echo done >>"$D/ref.status"
   exit 0
 fi
@@ -92,7 +80,7 @@ fi
 T0=$(now)
 line() { echo "qc $1 $2 $(( $(now) - $3 ))s ${4:-}"; }
 KILLGRPS=
-cleanup() { for g in $KILLGRPS; do kill -TERM -- "-$g" 2>/dev/null; done; KILLGRPS=; }
+cleanup() { for g in $KILLGRPS; do kill -TERM "-$g" 2>/dev/null; done; KILLGRPS=; }
 fail() { line "$1" FAIL "$2" "${3:-} (log: $D/$1.log)"; cleanup; exit 1; }
 trap 'cleanup; exit 130' INT TERM
 
@@ -169,7 +157,19 @@ line diff ok "$t" "$(wc -l <"$D/changed") files against ${BASE%"${BASE#?????????
 REF=1
 if skip regress && skip iso && skip dump; then REF=0; fi
 if [ $REF = 1 ]; then
-  [ -n "$P" ] && [ -n "${QC_PORTS:-}" ] || fail diff "$T0" "QC_PREFIX and QC_PORTS (four ports) needed, or QC_SKIP=regress,iso,dump"
+  [ -n "$P" ] || fail diff "$T0" "QC_PREFIX needed, or QC_SKIP=regress,iso,dump"
+  t=$(now)
+  # Held for this run (tools/ports.sh); the isolation reference keeps the port it runs on when
+  # that one is safe.
+  pick() { "$TOOLS/ports.sh" take $$ 1 "$@" 2>>"$D/ports.log"; }
+  set -- $(echo "${QC_PORTS:-$(cat "$D/ports" 2>/dev/null)}" | tr , ' ') '' '' '' ''
+  IRUN=$("$TOOLS/ref-containers.sh" port "$P" 2>/dev/null)
+  PORTS="$(pick $1),$(pick $2),$(pick $3),$(pick ${IRUN:+=$IRUN} $4)"
+  case ",$PORTS," in *,,*) fail ports "$t" "no free ports ($D/ports.log)" ;; esac
+  [ -z "${QC_PORTS:-}" ] || [ "$QC_PORTS" = "$PORTS" ] || REPLACED=" (QC_PORTS $QC_PORTS: ports in the ephemeral range or in use replaced)"
+  QC_PORTS=$PORTS; echo "$QC_PORTS" >"$D/ports"
+  line ports ok "$t" "regress $(echo "$QC_PORTS" | cut -d, -f1), isolation $(echo "$QC_PORTS" | cut -d, -f2), pg_dump $(echo "$QC_PORTS" | cut -d, -f3), isolation reference $(echo "$QC_PORTS" | cut -d, -f4)${REPLACED:-}"
+  : >"$D/infra"
   "$TOOLS/ref-containers.sh" up "$P" "$D" "$(echo "$QC_PORTS" | cut -d, -f4)" >"$D/containers.log" 2>&1 &
   CONT=$!
 fi
@@ -194,7 +194,14 @@ build() { cargo test --profile "$PROF" -p pg-engine --no-run --message-format=js
 if [ $REF = 1 ]; then
   build --test pg_regress --test pg_isolation --test pg_dump | artifacts "" >>"$D/bins"
   [ -n "$(bin pg_dump)" ] || fail build "$t" "$(grep -m1 -E '^error' "$D/build.log")"
-  wait "$CONT" || fail containers "$T0" "$(tail -1 "$D/containers.log")"
+  wait "$CONT"; rc=$?
+  if [ $rc = 3 ]; then
+    # The isolation reference's port was taken: another one.
+    IR=$(pick) && QC_PORTS=$(echo "$QC_PORTS" | cut -d, -f1-3),$IR && echo "$QC_PORTS" >"$D/ports" &&
+      echo "containers: $(tail -1 "$D/containers.log"); the isolation reference on port $IR" >>"$D/infra" &&
+      "$TOOLS/ref-containers.sh" up "$P" "$D" "$IR" >>"$D/containers.log" 2>&1; rc=$?
+  fi
+  [ $rc = 0 ] || fail containers "$T0" "$(tail -1 "$D/containers.log")"
   : >"$D/ref.status"
   export QC_REF_CHAIN=1 QC_PREFIX QC_PORTS QC_DIR="$D" QC_PROFILE="$PROF" QC_SKIP="${QC_SKIP:-}"
   setsid "$TOOLS/quick-check.sh" </dev/null >"$D/ref-chain.log" 2>&1 &
@@ -211,6 +218,11 @@ if [ $CRASH = 1 ]; then
   POWERB=$!; KILLGRPS="$KILLGRPS $POWERB"
 fi
 line build ok "$t" "profile $PROF, $(wc -l <"$D/bins") test binaries"
+if [ -n "${QC_CHECKED:-}" ]; then
+  setsid cargo test --profile verify-checked -p pg-engine --no-run --message-format=json-render-diagnostics \
+    $ARGS >"$D/build-checked.json" 2>"$D/build-checked.log" &
+  CHECKB=$!; KILLGRPS="$KILLGRPS $CHECKB"
+fi
 
 if ! skip clippy; then
   wait "$CLIPPY"; rc=$?
@@ -275,6 +287,18 @@ if [ $CRASH = 1 ]; then
   run crash_random@power --exact power_cut_at_every_point >>"$D/crash.log" 2>&1 ||
     fail crash "$t" "power_cut_at_every_point: $(grep 'panicked' "$D/crash.log" | tail -1)"
   line crash ok "$t" "seeds 1-3 x 2 rounds, power_cut_at_every_point"
+fi
+if [ -n "${QC_CHECKED:-}" ]; then
+  t=$(now); : >"$D/checked.log"
+  wait "$CHECKB"; artifacts @checked <"$D/build-checked.json" >>"$D/bins"
+  for s in $SEL; do
+    [ -n "$(bin "$s@checked")" ] || fail checked "$t" "verify-checked build of $s: $(grep -m1 -E '^error' "$D/build-checked.log")"
+    echo "=== $s" >>"$D/checked.log"
+    run "$s@checked" >>"$D/checked.log" 2>&1 ||
+      fail checked "$t" "$s: $(sed -n "/^=== $s\$/,\$p" "$D/checked.log" | grep -E '^test .* FAILED$' | head -3 | tr '\n' ' ')"
+    ref_failed
+  done
+  line checked ok "$t" "$(grep -o '[0-9]* passed' "$D/checked.log" | awk '{s += $1} END {print s}') passed in $(echo $SEL | wc -w) binaries (verify-checked)"
 fi
 
 # --- the reference suites' results, as they come -------------------------------------------

@@ -18,20 +18,34 @@
 #      (a failure that doesn't come back is a flake: everything lands); otherwise on prefixes of
 #      it, halving, to find the first candidate at fault; that one is left out, the rest run the
 #      failing stages again and land when green (repeated for a second culprit)
-# <run>/result: "candidate <branch> landed|conflict|empty|failed <stage> <detail>", then "pushed
-# <sha>" or "pushed nothing", then "exit 0" (something landed or nothing to land) or "exit 1".
+# <run>/result: for each red pass "train <head> + <candidates> (pass N): failing <stages>" and the
+# failing stages' status lines and first failing tests with their messages (why: N newly
+# differing units and which, the tests' names and panics, "engine did not start"); "infra (pass
+# N): ..." for each reference suite run again because its engine did not start (a port taken for
+# a moment: infrastructure, retried within the pass, not a failure); "flake <stage> <test>: <message>
+# (<k> in the ledger)" for each test that failed and then passed on the same combination;
+# "candidate <branch> landed|conflict|empty|failed <stage> <detail>|held"; then "pushed <sha>" or
+# "pushed nothing", then "exit 0" (something landed or nothing to land) or "exit 1".
+# Every pass keeps its logs in <run>/pass.<N>/ (status, stage logs, *.fails, the reports and
+# engine logs of regress, isolation and pg_dump_tap).
 #
-# Environment: BT_HOME (default ~/.cache/pg-engine-train: worktree, lock, runs, train directory),
-# BT_PREFIX (containers, default bt; made with tools/ref-containers.sh), BT_PORTS (four ports:
-# regress, isolation, pg_dump, isolation reference; default 54860-54863), BT_CPUS (default the
-# build CPUs 0-5,18-23), BT_DRY=1 (train and judge, push nothing), BT_KEEP_TARGET=1 (keep the
-# worktree's build for the next batch; it is deleted after each batch otherwise), BT_TRAIN_SCRIPT
-# (another train script, to test this one).
+# The flake ledger, $BT_HOME/flakes.tsv: one line per flake ("<date>\t<head>\t<stage>\t<test>\t
+# <message>"), so a test that flakes again and again shows. When a flake brings one test to
+# BT_FLAKE_LIMIT (default 3) uncommented lines, the batch lands nothing ("candidate ... held") until
+# someone has looked at it: fix the test or the bug, then comment its lines out with "#".
+#
+# Environment: BT_HOME (default ~/.cache/pg-engine-train: worktree, lock, runs, train directory,
+# flake ledger), BT_PREFIX (containers, default bt; made with tools/ref-containers.sh), BT_PORTS
+# (preferred ports: regress, isolation, pg_dump, isolation reference; default none: the train takes
+# free ones below the ephemeral range, tools/ports.sh), BT_CPUS (default the build CPUs
+# 0-5,18-23), BT_DRY=1 (train and judge, push nothing), BT_KEEP_TARGET=1 (keep the worktree's
+# build for the next batch; it is deleted after each batch otherwise), BT_TRAIN_SCRIPT (another
+# train script, to test this one).
 set -u
 BRANCH=docs/postgres-architecture-strategy
 H=${BT_HOME:-$HOME/.cache/pg-engine-train}
 P=${BT_PREFIX:-bt}
-PORTS=${BT_PORTS:-54860,54861,54862,54863}
+PORTS=${BT_PORTS:-}
 CPUS=${BT_CPUS:-0-5,18-23}
 SELF=$(cd "$(dirname "$0")" && pwd)/batch-train.sh
 REPO=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -69,7 +83,8 @@ echo $$ >"$LOCK/pid"; echo "$RUN" >"$LOCK/run"
 WT=$H/wt TD=$H/train
 trap 'rm -rf "$LOCK"; [ -n "${BT_KEEP_TARGET:-}" ] || rm -rf "$WT/target"' EXIT
 : >"$RUN/result.part"
-RP=$(echo "$PORTS" | cut -d, -f1-3); IREF=$(echo "$PORTS" | cut -d, -f4)
+RP=$(echo "$PORTS" | cut -d, -f1-3); IREF=$(echo "$PORTS" | cut -s -d, -f4)
+LEDGER=$H/flakes.tsv LIMIT=${BT_FLAKE_LIMIT:-3} PASS=0 HELD=
 git -C "$REPO" fetch -q origin || { res "exit 1 fetch failed"; mv "$RUN/result.part" "$RUN/result"; exit 1; }
 [ -d "$WT" ] || git -C "$REPO" worktree add -q --detach "$WT" "origin/$BRANCH"
 ORIGIN=$(git -C "$WT" rev-parse "origin/$BRANCH")
@@ -98,21 +113,59 @@ apply() {
     fi
   done
 }
-# Run the train on the worktree as it is: train <stages> [test binaries]; status in $TD/status.
+# Run the train on the worktree as it is: train <stages> [test binaries]; status in $TD/status,
+# and the pass's logs kept in $RUN/pass.<N> ($PD).
 train() {
-  log "train: stages ${1:-all}${2:+, tests $2}"
+  PD=$RUN/pass.$PASS
+  log "train pass $PASS: stages ${1:-all}${2:+, tests $2}"
+  echo "=== pass $PASS" >>"$RUN/train.log"
   taskset -c "$CPUS" "$WT/crates/pg-engine/tools/heavy.sh" env TRAIN_DIR="$TD" TRAIN_PREFIX="$P" \
-    TRAIN_PORTS="$RP" TRAIN_ISO_REF="127.0.0.1:$IREF" TRAIN_NO_CHECKOUT=1 CARGO_TARGET_DIR="$WT/target" \
+    ${RP:+TRAIN_PORTS="$RP"} ${IREF:+TRAIN_ISO_REF="127.0.0.1:$IREF"} TRAIN_NO_CHECKOUT=1 CARGO_TARGET_DIR="$WT/target" \
     TRAIN_STAGES="${1:-build,clippy,tests,checked,crash,power,regress,iso,dump}" TRAIN_TESTS="${2:-}" \
     "${BT_TRAIN_SCRIPT:-$WT/crates/pg-engine/tools/verification-train.sh}" >>"$RUN/train.log" 2>&1
-  n=$(ls "$RUN" | grep -c '^status')
-  cp "$TD/status" "$RUN/status.$n"
+  mkdir -p "$PD"
+  (cd "$TD" && for f in status ports infra ./*.log ./*.fails tests pgr/report iso/report pgdump/report \
+    pgr/out/engine.log iso/out/engine.log pgdump/engine.log pgdump/tap-engine.log pgdump/tap-*.out; do
+    [ -e "$f" ] && mkdir -p "$PD/$(dirname "$f")" && cp -rp "$f" "$PD/$(dirname "$f")/"; done)
+  [ -s "$TD/infra" ] && sed "s/^/infra (pass $PASS): /" "$TD/infra" >>"$RUN/result.part"
+  PASS=$((PASS + 1))
   log "train: $(awk '$1 != "head" && $1 != "done" && $2 != 0 {printf "%s ", $1}' "$TD/status")"
+}
+# Why the last pass failed, into the result: its failing stages' status lines and each stage's
+# first failing tests.
+why() {
+  awk '$2 ~ /^[0-9]+$/ && $2 != 0 && $1 != "head" && $1 != "done" && $1 != "engine-bin" {print "  " $0}' "$TD/status" >>"$RUN/result.part"
+  grep -q '^done ' "$TD/status" || res "  (the train did not finish: $RUN/train.log)"
+  for f in "$TD"/*.fails; do
+    [ -s "$f" ] && head -5 "$f" | sed "s/^/    $(basename "$f" .fails): /; s/\t/: /" >>"$RUN/result.part"
+  done
+}
+# The status name of a .fails file's stage.
+stage_of() { case $1 in iso) echo isolation ;; *) echo "$1" ;; esac; }
+# Tests that failed in pass $1 and passed in pass $2 (the stages run again there): flakes. Each
+# goes to the ledger and the result; one at the limit holds the batch ($HELD).
+flakes() {
+  a=$RUN/pass.$1 b=$RUN/pass.$2 head=$(git -C "$WT" rev-parse --short=9 HEAD)
+  for st in $(awk '$2 ~ /^[0-9]+$/ && $2 != 0 && $1 != "head" && $1 != "done" && $1 != "engine-bin" {print $1}' "$a/status"); do
+    line=$(awk -v s="$st" '$1 == s' "$b/status")
+    [ -n "$line" ] || continue
+    f=$(echo "$st" | sed 's/^isolation$/iso/')
+    if [ -s "$a/$f.fails" ]; then cat "$a/$f.fails"; else printf '%s\t%s\n' "$st" "$(awk -v s="$st" '$1 == s' "$a/status" | cut -d' ' -f2-)"; fi |
+    while IFS=$(printf '\t') read -r name msg; do
+      case $name in "(engine did not start)") continue ;; esac
+      if [ -s "$b/$f.fails" ]; then cut -f1 "$b/$f.fails" | grep -qxF "$name" && continue
+      elif [ "$(echo "$line" | cut -d' ' -f2)" != 0 ]; then continue; fi
+      printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%MZ)" "$head" "$st" "$name" "$msg" >>"$LEDGER"
+      k=$(grep -v '^#' "$LEDGER" | awk -F'\t' -v s="$st" -v t="$name" '$3 == s && $4 == t' | wc -l)
+      res "flake $st $name: $msg ($k in the ledger)"
+      [ "$k" -lt "$LIMIT" ] || { res "flake limit: $st $name failed and passed again $k times ($LEDGER): look at it, then comment its lines out with #"; : >"$RUN/held"; }
+    done
+  done
 }
 # The failing stages of the last train, as TRAIN_STAGES names ("" when green), and the failing
 # test binaries.
 failing() {
-  f=$(awk '$1 != "head" && $1 != "done" && $1 != "engine-bin" && $2 != 0 {print $1}' "$TD/status" |
+  f=$(awk '$2 ~ /^[0-9]+$/ && $2 != 0 && $1 != "head" && $1 != "done" && $1 != "engine-bin" {print $1}' "$TD/status" |
     sed 's/^power-cut$/power/; s/^crash-power.*/power/; s/^isolation$/iso/' | sort -u | paste -sd, -)
   grep -q '^done ' "$TD/status" || f="${f:+$f,}unfinished"
   echo "$f"
@@ -132,12 +185,13 @@ if [ -n "$CANDS" ]; then
     FINAL=$CANDS
   else
     S=$(failing); B=$(fail_bins)
-    res "train $ORIGIN + all: failing $S${B:+ ($B)}"
+    res "train $ORIGIN + all (pass 0): failing $S${B:+ ($B)}"; why
     case ",$S," in *,build,*|*,unfinished,*) S=clippy,tests,checked,crash,power,regress,iso,dump B= ;; esac
     # A failure that doesn't come back is a flake.
     train "build,$S" "$B"
+    flakes 0 1
     if green; then
-      res "flake: $S passed on the same combination again"
+      res "flakes: $S passed on the same combination again"
       FINAL=$CANDS
     else
       S=$(failing); B=$(fail_bins)
@@ -150,7 +204,7 @@ if [ -n "$CANDS" ]; then
           mid=$(( (lo + hi) / 2 ))
           apply $(echo $REST | cut -d' ' -f1-$mid) >/dev/null
           train "build,$S" "$B"
-          if green; then lo=$mid; else hi=$mid; fi
+          if green; then lo=$mid; else hi=$mid; res "train $ORIGIN + $(echo $REST | cut -d' ' -f1-$mid) (pass $((PASS - 1))): failing $(failing)"; why; fi
         done
         BAD=$(echo $REST | cut -d' ' -f$hi)
         res "candidate $BAD failed $S${B:+ ($B)}"
@@ -160,6 +214,7 @@ if [ -n "$CANDS" ]; then
         train "build,$S" "$B"
         if green; then FINAL=$REST; break; fi
         S=$(failing); B=$(fail_bins)
+        res "train $ORIGIN + $(echo $REST) (pass $((PASS - 1))): failing $S${B:+ ($B)}"; why
         case ",$S," in *,build,*|*,unfinished,*) S=clippy,tests,checked,crash,power,regress,iso,dump B= ;; esac
       done
     fi
@@ -167,6 +222,10 @@ if [ -n "$CANDS" ]; then
 fi
 cat "$RUN/apply.log" 2>/dev/null | grep '^candidate' >>"$RUN/result.part"
 PUSHED=
+if [ -n "$FINAL" ] && [ -f "$RUN/held" ]; then
+  for c in $FINAL; do res "candidate $c held (flake limit)"; done
+  FINAL=
+fi
 if [ -n "$FINAL" ]; then
   [ "$(apply $FINAL | paste -sd' ' -)" = "$(echo $FINAL)" ] || res "re-applying the green set failed"
   HEAD=$(git -C "$WT" rev-parse HEAD)
