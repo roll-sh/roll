@@ -737,6 +737,41 @@ fn elixir_is_built_as_a_release_and_phoenix_serves() {
 }
 
 #[test]
+fn scala_clojure_gleam_and_a_start_script_build_and_run() {
+    // sbt with sbt-native-packager: `stage`, its script named by `name`.
+    let p = detect(&[("build.sbt", "name := \"Shop API\"\nscalaVersion := \"3.6.2\"\n"), ("project/plugins.sbt", "addSbtPlugin(\"com.github.sbt\" % \"sbt-native-packager\" % \"1.10.4\")\n")]);
+    assert_eq!((p.provider, p.build.as_deref(), p.start.as_deref()), (Provider::Scala, Some("sbt -batch stage"), Some("/app/bin/shop-api")));
+    has(&p, &["AS build", "COPY build.sbt ./", "COPY project ./project", "--mount=type=cache,target=/root/.cache/coursier", "sbt -batch update", "cp -r target/universal/stage/. /out/", "FROM eclipse-temurin:21-jre", "USER app"]);
+    // Play: its port from $PORT, and the note on its secret.
+    let p = detect(&[("build.sbt", "name := \"web\"\nlazy val root = (project in file(\".\")).enablePlugins(PlayScala)\n"), ("project/plugins.sbt", "addSbtPlugin(\"org.playframework\" % \"sbt-plugin\" % \"3.0.6\")\n")]);
+    assert_eq!((p.framework.as_deref(), p.start.as_deref()), (Some("play"), Some("/app/bin/web -Dhttp.port=$PORT -Dplay.server.pidfile.path=/dev/null")));
+    // sbt-assembly: one jar.
+    let p = detect(&[("build.sbt", "name := \"x\"\n"), ("project/plugins.sbt", "addSbtPlugin(\"com.eed3si9n\" % \"sbt-assembly\" % \"2.3.0\")\n")]);
+    assert_eq!((p.build.as_deref(), p.start.as_deref()), (Some("sbt -batch assembly"), Some("java $JAVA_OPTS -jar /app/app.jar")));
+    // Neither: how to package it is the person's to say.
+    assert!(plan(&tree(&[("build.sbt", "name := \"x\"\n")]), &Overrides::default()).is_err());
+    // Leiningen: its uberjar.
+    let p = detect(&[("project.clj", "(defproject shop \"0.1.0\" :main shop.core :profiles {:uberjar {:aot :all}})\n")]);
+    assert_eq!((p.provider, p.build.as_deref()), (Provider::Clojure, Some("lein uberjar")));
+    has(&p, &["FROM clojure:temurin-21-lein AS build", "COPY project.clj ./", "lein deps", "find target -maxdepth 2 -name '*-standalone.jar'", "FROM eclipse-temurin:21-jre"]);
+    // tools.build: needs its build.clj and :build alias.
+    let p = detect(&[("deps.edn", "{:deps {} :aliases {:build {:deps {io.github.clojure/tools.build {:mvn/version \"0.10.5\"}} :ns-default build}}}"), ("build.clj", "(ns build)")]);
+    assert_eq!(p.build.as_deref(), Some("clojure -T:build uber"));
+    assert!(plan(&tree(&[("deps.edn", "{:deps {}}")]), &Overrides::default()).is_err(), "no build.clj");
+    // Gleam: an Erlang shipment; a JavaScript target isn't built here.
+    let p = detect(&[("gleam.toml", "name = \"shop\"\nversion = \"1.0.0\"\n"), ("manifest.toml", "")]);
+    assert_eq!((p.provider, p.build.as_deref(), p.start.as_deref()), (Provider::Gleam, Some("gleam export erlang-shipment"), Some("/app/entrypoint.sh run")));
+    has(&p, &["COPY gleam.toml manifest.toml ./", "gleam deps download", "COPY --from=build --chown=app /src/build/erlang-shipment /app"]);
+    assert!(plan(&tree(&[("gleam.toml", "name = \"x\"\ntarget = \"javascript\"\n")]), &Overrides::default()).is_err());
+    // A start.sh and nothing else: bash on Debian; with a package.json beside it, Node wins.
+    let p = detect(&[("start.sh", "#!/bin/bash\nexec python3 -m http.server $PORT\n")]);
+    assert_eq!((p.provider, p.start.as_deref()), (Provider::Shell, Some("bash /app/start.sh")));
+    has(&p, &["FROM debian:bookworm-slim", "COPY --chown=app . .", "USER app"]);
+    assert_eq!(detect(&[("start.sh", ""), ("package.json", "{\"scripts\":{\"start\":\"node a.js\"}}")]).provider, Provider::Node);
+    assert_eq!(detect(&[("start.sh", ""), ("index.html", "<h1>hi</h1>")]).provider, Provider::Shell, "it says what runs");
+}
+
+#[test]
 fn nothing_detected_says_what_it_did_find() {
     let err = plan(&tree(&[("pubspec.yaml", "name: shop")]), &Overrides::default()).unwrap_err();
     assert!(err.to_string().contains("found pubspec.yaml: Dart"), "{err}");

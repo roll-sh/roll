@@ -9,12 +9,14 @@
 pub mod app;
 mod caches;
 mod cargo;
+mod clojure;
 mod deno;
 mod df;
 mod docker;
 mod dotnet;
 mod elixir;
 pub mod functions;
+mod gleam;
 mod golang;
 mod java;
 mod node;
@@ -25,6 +27,8 @@ pub mod project;
 mod python;
 pub mod site_configs;
 mod ruby;
+mod scala;
+mod shell;
 mod static_site;
 #[cfg(test)]
 mod tests;
@@ -182,6 +186,12 @@ pub enum Provider {
     Java,
     Dotnet,
     Elixir,
+    /// sbt ([`scala`]).
+    Scala,
+    Clojure,
+    Gleam,
+    /// A root `start.sh` ([`shell`]).
+    Shell,
     Static,
     /// A static site's functions ([`functions`]).
     Functions,
@@ -192,7 +202,8 @@ pub enum Error {
     #[error(
         "couldn't tell how to build this: found no Dockerfile, package.json, deno.json, \
          requirements.txt, pyproject.toml, go.mod, Cargo.toml, Gemfile, composer.json, index.php, \
-         pom.xml, build.gradle, a .csproj, mix.exs or index.html at the root{0}; add a Dockerfile or set the \
+         pom.xml, build.gradle, a .csproj, mix.exs, build.sbt, project.clj, deps.edn, gleam.toml, \
+         index.html or start.sh at the root{0}; add a Dockerfile or set the \
          root directory"
     )]
     NothingDetected(String),
@@ -335,7 +346,7 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         return docker::plan(tree, &o);
     }
     type Detect = fn(&dyn Tree, &Overrides) -> Result<Option<Draft>, Error>;
-    const PROVIDERS: [Detect; 11] = [
+    const PROVIDERS: [Detect; 15] = [
         // Before Node: a Deno project's deno.json decides, a package.json beside it notwithstanding.
         deno::detect,
         node::detect,
@@ -347,6 +358,12 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
         java::detect,
         dotnet::detect,
         elixir::detect,
+        scala::detect,
+        clojure::detect,
+        gleam::detect,
+        // After every language (a start.sh beside a package.json is Node's), before a static
+        // site: a start.sh beside an index.html says what to run.
+        shell::detect,
         static_site::detect,
     ];
     for detect in PROVIDERS {
@@ -376,14 +393,12 @@ fn detect(tree: &dyn Tree, overrides: &Overrides) -> Result<Plan, Error> {
 /// What the root holds that roll doesn't build yet, said with the error: `" (found mix.exs:
 /// Elixir)"`, or nothing.
 fn found(tree: &dyn Tree) -> String {
-    const KNOWN: [(&str, &str); 8] = [
+    const KNOWN: [(&str, &str); 6] = [
         ("pubspec.yaml", "Dart"),
         ("Package.swift", "Swift"),
-        ("build.sbt", "Scala (sbt)"),
         ("stack.yaml", "Haskell"),
         ("CMakeLists.txt", "C or C++ (CMake)"),
         ("Makefile", "make"),
-        ("deps.edn", "Clojure"),
         ("dune-project", "OCaml"),
     ];
     let mut seen: Vec<String> = KNOWN.iter().filter(|(f, _)| tree.exists(f)).map(|(f, what)| format!("{f}: {what}")).collect();
