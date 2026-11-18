@@ -1,8 +1,8 @@
-import { AtSign, Braces, Check, Clock, Copy, CornerDownRight, Eye, EyeOff, Import as ImportIcon, Link2, MessageSquare, Timer, User } from "lucide-react";
+import { AtSign, BadgeCheck, Braces, Check, Clock, Copy, CornerDownRight, Eye, EyeOff, Import as ImportIcon, Link2, MessageSquare, Timer, User } from "lucide-react";
 import { useReducedMotion } from "@roll/brand";
 import { useWorkspace } from "@/lib/workspace-store";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import type { Cell, Link, Problem, Secret, Totp } from "@/lib/secrets-api";
+import type { AuditEntry, Cell, Link, Problem, Secret, Totp } from "@/lib/secrets-api";
 import { KIND_ICON } from "../workspace/kind";
 import type { ResourceKind } from "@/lib/workspace-api";
 
@@ -216,6 +216,17 @@ export const ActorMark = ({ who }: { who: string }) => (
     <span className="truncate">{who}</span>
   </span>
 );
+
+/** The approval that let a request through roll-access's gate (an `ask` approved, or a rule remembered for a while). */
+export function ApprovalMark({ approval }: { approval: NonNullable<AuditEntry["approval"]> }) {
+  const until = approval.until ? `, allowed until ${new Date(approval.until).toLocaleString()}` : ", this request only";
+  return (
+    <span className="inline-flex shrink-0 items-center gap-0.5 text-[10.5px] text-subtle" title={`Approved in ${approval.id}${until}`}>
+      <BadgeCheck className="size-3" />
+      approved{approval.by?.length ? ` by ${approval.by.join(", ")}` : ""}
+    </span>
+  );
+}
 
 /** How long a revealed value stays on screen. */
 export const REVEAL_MS = 20_000;

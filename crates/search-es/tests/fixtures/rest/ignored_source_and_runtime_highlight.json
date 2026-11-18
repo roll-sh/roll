@@ -1,0 +1,650 @@
+{
+  "description" : "_ignored_source entries (both layouts, document order, a HashMap's order of coalesced names, YAML objects) and highlighting runtime keyword fields",
+  "steps" : [
+    {
+      "req" : "PUT /esm-isc",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "number_of_shards" : 1,
+            "mapping.source.mode" : "synthetic"
+          }
+        },
+        "mappings" : {
+          "dynamic" : false,
+          "properties" : {
+            "o" : {
+              "type" : "object",
+              "enabled" : false
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-isc"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-isc/_doc/1?refresh=true",
+      "body" : {
+        "k1" : 1,
+        "k2" : 2,
+        "k3" : 3,
+        "k4" : 4,
+        "k5" : 5,
+        "k6" : 6,
+        "k7" : 7,
+        "k8" : 8,
+        "k9" : 9,
+        "k10" : 10,
+        "k11" : 11,
+        "k12" : 12,
+        "k13" : 13,
+        "k14" : 14,
+        "o" : [
+          {
+            "x" : 1
+          },
+          {
+            "y" : 2
+          }
+        ],
+        "r" : [
+          {
+            "s" : "a"
+          },
+          {
+            "s" : "b"
+          }
+        ],
+        "nul" : null,
+        "f" : 1.5E300,
+        "neg" : -1,
+        "big" : 123456789012345678901234567890,
+        "l" : 5000000000,
+        "t" : true
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-isc",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-isc/_search",
+      "mask" : [ "took" ],
+      "body" : {
+        "fields" : [
+          "_ignored_source"
+        ],
+        "_source" : false
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "esm-isc",
+              "_id" : "1",
+              "_score" : 1.0,
+              "_ignored_source" : [
+                "AQNiaWcADmkBjukP9sNz4O5OPwrS",
+                "AQFmAAlENVgAZi3rQX4=",
+                "AQJrMQAFSQEAAAA=",
+                "AQJrMgAFSQIAAAA=",
+                "AQJrMwAFSQMAAAA=",
+                "AQJrNAAFSQQAAAA=",
+                "AQNrMTEABUkLAAAA",
+                "AQJrNQAFSQUAAAA=",
+                "AQNrMTAABUkKAAAA",
+                "AQJrNgAFSQYAAAA=",
+                "AQFsAAlMAPIFKgEAAAA=",
+                "AQNrMTMABUkNAAAA",
+                "AQJrNwAFSQcAAAA=",
+                "AQNrMTIABUkMAAAA",
+                "AQJrOAAFSQgAAAA=",
+                "AQJrOQAFSQkAAAA=",
+                "AQFvABJqW3sieCI6MX0seyJ5IjoyfV0=",
+                "AQNrMTQABUkOAAAA",
+                "AQNuZWcABUn/////",
+                "AQFyABZqW3sicyI6ImEifSx7InMiOiJiIn1d",
+                "AQF0AAF0"
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-isc/_search",
+      "mask" : [ "took" ],
+      "body" : {
+        "stored_fields" : [
+          "*"
+        ],
+        "fields" : [
+          "*"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "esm-isc",
+              "_id" : "1",
+              "_score" : 1.0
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-isl",
+      "body" : {
+        "settings" : {
+          "index" : {
+            "number_of_shards" : 1,
+            "use_time_series_doc_values_format" : true,
+            "mapping.source.mode" : "synthetic"
+          }
+        },
+        "mappings" : {
+          "properties" : {
+            "p" : {
+              "properties" : {
+                "b" : {
+                  "type" : "object",
+                  "enabled" : false
+                }
+              }
+            },
+            "d" : {
+              "type" : "object",
+              "dynamic" : false
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-isl"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-isl/_doc/1?refresh=true",
+      "body" : {
+        "p" : [
+          {
+            "b" : {
+              "x" : 1
+            }
+          },
+          {
+            "b" : {
+              "x" : 2
+            }
+          },
+          {
+            "b" : "s"
+          }
+        ],
+        "d" : {
+          "z" : "q",
+          "a" : [
+            1,
+            "two",
+            null
+          ]
+        }
+      },
+      "status" : 201,
+      "response" : {
+        "_index" : "esm-isl",
+        "_id" : "1",
+        "_version" : 1,
+        "result" : "created",
+        "forced_refresh" : true,
+        "_shards" : {
+          "total" : 2,
+          "successful" : 1,
+          "failed" : 0
+        },
+        "_seq_no" : 0,
+        "_primary_term" : 1
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-isl/_doc/2?refresh=true",
+      "headers" : {
+        "Content-Type" : "application/yaml"
+      },
+      "raw" : "p:\n  b:\n    x: 1.5\n    y: [1, \"a\", null, true]\n    z:\n      q: ~\n",
+      "status" : 201,
+      "text" : "---\n_index: \"esm-isl\"\n_id: \"2\"\n_version: 1\nresult: \"created\"\nforced_refresh: true\n_shards:\n  total: 2\n  successful: 1\n  failed: 0\n_seq_no: 1\n_primary_term: 1\n",
+      "response_headers" : {
+        "content-type" : "application/yaml"
+      }
+    },
+    {
+      "req" : "GET /esm-isl/_search",
+      "mask" : [ "took" ],
+      "body" : {
+        "stored_fields" : [
+          "_ignored_source"
+        ],
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 3,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "esm-isl",
+              "_id" : "1",
+              "_score" : null,
+              "_ignored_source" : [
+                "AwACAHAuYmp7IngiOjF9",
+                "AwACAHAuYmp7IngiOjJ9",
+                "AwACAHAuYlNz",
+                "AwACAGQuelNx",
+                "AwACAGQuYWpbMSwidHdvIixudWxsXQ=="
+              ],
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "esm-isl",
+              "_id" : "2",
+              "_score" : null,
+              "_ignored_source" : [
+                "AwACAHAuYnktLS0KeDogMS41CiJ5IjoKLSAxCi0gImEiCi0gbnVsbAotIHRydWUKejoKICBxOiBudWxsCg=="
+              ],
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "PUT /esm-rth",
+      "body" : {
+        "settings" : {
+          "number_of_shards" : 1
+        },
+        "mappings" : {
+          "runtime" : {
+            "letters" : {
+              "type" : "keyword",
+              "script" : "for (String s : doc['node']) { emit(s); emit(s + s); }"
+            }
+          },
+          "properties" : {
+            "node" : {
+              "type" : "keyword"
+            },
+            "msg" : {
+              "type" : "text"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true,
+        "shards_acknowledged" : true,
+        "index" : "esm-rth"
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "POST /esm-rth/_bulk?refresh=true",
+      "mask" : [ "took" ],
+      "raw" : "{\"index\":{\"_id\":\"1\"}}\n{\"node\":\"a\",\"msg\":\"a b\"}\n{\"index\":{\"_id\":\"2\"}}\n{\"node\":\"b\",\"msg\":\"b c\"}\n",
+      "headers" : {
+        "Content-Type" : "application/x-ndjson"
+      },
+      "status" : 200,
+      "response" : {
+        "errors" : false,
+        "took" : 200,
+        "items" : [
+          {
+            "index" : {
+              "_index" : "esm-rth",
+              "_id" : "1",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 0,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          },
+          {
+            "index" : {
+              "_index" : "esm-rth",
+              "_id" : "2",
+              "_version" : 1,
+              "result" : "created",
+              "forced_refresh" : true,
+              "_shards" : {
+                "total" : 2,
+                "successful" : 1,
+                "failed" : 0
+              },
+              "_seq_no" : 1,
+              "_primary_term" : 1,
+              "status" : 201
+            }
+          }
+        ]
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rth/_search",
+      "mask" : [ "took" ],
+      "body" : {
+        "query" : {
+          "bool" : {
+            "should" : [
+              {
+                "prefix" : {
+                  "letters" : "bb"
+                }
+              },
+              {
+                "match" : {
+                  "msg" : "b"
+                }
+              }
+            ]
+          }
+        },
+        "highlight" : {
+          "fields" : {
+            "*" : { }
+          }
+        },
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 8,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "esm-rth",
+              "_id" : "1",
+              "_score" : null,
+              "_source" : {
+                "node" : "a",
+                "msg" : "a b"
+              },
+              "highlight" : {
+                "msg" : [
+                  "a <em>b</em>"
+                ]
+              },
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "esm-rth",
+              "_id" : "2",
+              "_score" : null,
+              "_source" : {
+                "node" : "b",
+                "msg" : "b c"
+              },
+              "highlight" : {
+                "msg" : [
+                  "<em>b</em> c"
+                ],
+                "letters" : [
+                  "<em>bb</em>"
+                ]
+              },
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rth/_search",
+      "mask" : [ "took" ],
+      "body" : {
+        "query" : {
+          "wildcard" : {
+            "letters" : "a*"
+          }
+        },
+        "highlight" : {
+          "require_field_match" : false,
+          "fields" : {
+            "letters" : { },
+            "msg" : { }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 4,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 1,
+            "relation" : "eq"
+          },
+          "max_score" : 1.0,
+          "hits" : [
+            {
+              "_index" : "esm-rth",
+              "_id" : "1",
+              "_score" : 1.0,
+              "_source" : {
+                "node" : "a",
+                "msg" : "a b"
+              },
+              "highlight" : {
+                "msg" : [
+                  "<em>a</em> b"
+                ],
+                "letters" : [
+                  "<em>a</em>",
+                  "<em>aa</em>"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    },
+    {
+      "req" : "GET /esm-rth/_search",
+      "mask" : [ "took" ],
+      "body" : {
+        "query" : {
+          "exists" : {
+            "field" : "letters"
+          }
+        },
+        "highlight" : {
+          "fields" : {
+            "letters" : { }
+          }
+        },
+        "sort" : [
+          "_doc"
+        ]
+      },
+      "status" : 200,
+      "response" : {
+        "took" : 7,
+        "timed_out" : false,
+        "_shards" : {
+          "total" : 1,
+          "successful" : 1,
+          "skipped" : 0,
+          "failed" : 0
+        },
+        "hits" : {
+          "total" : {
+            "value" : 2,
+            "relation" : "eq"
+          },
+          "max_score" : null,
+          "hits" : [
+            {
+              "_index" : "esm-rth",
+              "_id" : "1",
+              "_score" : null,
+              "_source" : {
+                "node" : "a",
+                "msg" : "a b"
+              },
+              "sort" : [
+                0
+              ]
+            },
+            {
+              "_index" : "esm-rth",
+              "_id" : "2",
+              "_score" : null,
+              "_source" : {
+                "node" : "b",
+                "msg" : "b c"
+              },
+              "sort" : [
+                1
+              ]
+            }
+          ]
+        }
+      },
+      "response_headers" : {
+        "content-type" : "application/json"
+      }
+    }
+  ]
+}

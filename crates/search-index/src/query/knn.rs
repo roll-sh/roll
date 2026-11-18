@@ -7,7 +7,9 @@
 //! docs" (Elasticsearch's top-level `knn` section uses `KnnScoreDocQuery` instead: "within top
 //! k documents"; see [`ScoreDocQuery`]). Filters follow Lucene's strategy: a filter matching at most `k`
 //! docs of a segment is searched exactly; otherwise the graph search visits at most as many
-//! vectors as the filter accepts and falls back to exact search when that limit is hit.
+//! vectors as the filter accepts and falls back to exact search when that limit is hit. Unlike
+//! Lucene, a filter too small for the graph to find its docs cheaply (`VectorsReader::search_filtered`)
+//! is also searched exactly, and exact searches score only the filter's docs.
 //! Quantized fields are rescored with exact float similarities by the codec.
 
 use std::any::Any;
@@ -173,10 +175,10 @@ impl KnnQuery {
         // few docs, else the graph, falling back to exact when the visit limit hits.
         let run = |kk: usize, nc: usize| -> search_codec::vectors::KnnResult {
             match &t.ords {
-                Some(f) if self.exact || f.count() as usize <= kk => vr.exact_search(q, kk, accept_opt),
+                Some(f) if self.exact || f.count() as usize <= kk => vr.exact_search_filtered(q, kk, f),
                 Some(f) => {
                     let r = vr.search_filtered(q, kk, nc, f, f.count() as usize + 1);
-                    if r.complete { r } else { vr.exact_search(q, kk, accept_opt) }
+                    if r.complete { r } else { vr.exact_search_filtered(q, kk, f) }
                 }
                 None if self.exact => vr.exact_search(q, kk, accept_opt),
                 None => {
