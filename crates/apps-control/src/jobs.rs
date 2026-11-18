@@ -71,6 +71,7 @@ impl Apps {
             running.insert(job.id.clone(), key);
             job
         };
+        self.logs.redact_like(&format!("env:{service}/{env}"), &format!("job:{}", job.id));
         let log = self.logs.sink(format!("job:{}", job.id), Stream::Stdout);
         log.stream(Stream::System).line(format!("$ {command}"));
         let cancel = CancellationToken::new();

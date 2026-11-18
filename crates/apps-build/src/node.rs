@@ -153,12 +153,14 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
                 notes.push(format!("no build script: {} won't exist", s.dir));
             }
             notes.push(format!("{}/ is served by busybox httpd", s.dir));
+            let rules = static_site::config_rules(tree, &mut notes);
             return Ok(Some(static_build_draft(
                 node,
                 notes,
                 s.framework,
                 s.dir,
                 build,
+                rules,
             )));
         }
         Some(Framework::Server {
@@ -194,7 +196,8 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
             if start.is_none() && build.is_some() && o.start.is_none() {
                 notes.push("a build script and no start script: a static site in dist".into());
                 notes.push("dist/ is served by busybox httpd".into());
-                return Ok(Some(static_build_draft(node, notes, "", "dist", build)));
+                let rules = static_site::config_rules(tree, &mut notes);
+                return Ok(Some(static_build_draft(node, notes, "", "dist", build, rules)));
             }
             if start.is_none() && o.start.is_none() && static_site::index(tree).is_some() {
                 return Ok(None);
@@ -433,6 +436,7 @@ fn static_build_draft(
     framework: &'static str,
     dir: &'static str,
     build: Option<String>,
+    rules: Option<String>,
 ) -> Draft {
     let version = node.version.to_string();
     let install = Some(node.install());
@@ -449,6 +453,9 @@ fn static_build_draft(
             "COPY --from=build /app/{dir} {}",
             static_site::ROOT
         ));
+        if let Some(r) = &rules {
+            df.line(&format!("RUN {r}"));
+        }
         df.serve(Some(static_site::USER), c.start);
         df.finish()
     });

@@ -74,6 +74,10 @@ impl Secrets {
     pub fn caller(&self, parts: &axum::http::request::Parts) -> Result<Caller> {
         let mut caller = self.caller_of(roll_auth::Operator::on(&parts.extensions), parts.extensions.get::<roll_auth::SignedIn>(), roll_auth::Grant::on(&parts.extensions))?;
         caller.ip = self.client_ip(parts);
+        // Only with a grant: the gate sets it beside the grant whose request an approval let through.
+        if roll_auth::Grant::on(&parts.extensions).is_some() {
+            caller.approval = roll_auth::Approved::on(&parts.extensions).map(Into::into);
+        }
         Ok(caller)
     }
 
@@ -90,7 +94,7 @@ impl Secrets {
                 Some(identity) => format!("identity:{identity}"),
                 None => format!("token:{}", g.id),
             };
-            return Ok(Caller { principal, grants: self.grant_grants(g)?, ip: None, runtime: false });
+            return Ok(Caller { principal, grants: self.grant_grants(g)?, ip: None, runtime: false, approval: None });
         }
         // A signed-in person (the gate resolved the session on this request): their own projects.
         // An admin's session is the operator, as their token would be.
@@ -136,7 +140,7 @@ impl Secrets {
         if admin {
             return Ok(Caller::operator());
         }
-        Ok(Caller { principal: user.to_string(), grants: Arc::new(self.own_projects(user)?), ip: None, runtime: false })
+        Ok(Caller { principal: user.to_string(), grants: Arc::new(self.own_projects(user)?), ip: None, runtime: false, approval: None })
     }
 
     /// The projects `user` owns, as the workspace has them now, and their roll code owner.

@@ -137,6 +137,134 @@ impl Code {
     pub(crate) fn github_hub(&self) -> Option<&Arc<Hub>> {
         self.github.get()
     }
+
+    /// Hear the App's verified `push` and `pull_request` deliveries (roll apps' Git URL services
+    /// connected to the App), for repositories roll code has or not. Set once; it must only queue
+    /// work (the webhook's answer waits on it).
+    pub fn on_github_event(&self, listener: crate::GitHubListener) {
+        let _ = self.github_listener.set(listener);
+    }
+
+    /// The App's GitHub host (`github.com`, or a GitHub Enterprise Server's), lowercase; None
+    /// without the App. Other products (roll apps' Git URL services) connect through it.
+    pub fn github_host(&self) -> Option<String> {
+        let hub = self.github_hub()?;
+        let u = url::Url::parse(&hub.config.web_base).ok()?;
+        let host = u.host_str()?.to_ascii_lowercase();
+        Some(match u.port() {
+            Some(p) => format!("{host}:{p}"),
+            None => host,
+        })
+    }
+
+    /// The App's installation (not suspended) that can see `owner/repo`, if any. Installations
+    /// span tenants: only an operator's call may connect one (as connecting a repo is here).
+    pub async fn github_installation_for(&self, owner: &str, repo: &str) -> Result<Option<u64>> {
+        let Some(hub) = self.github_hub() else { return Ok(None) };
+        let gh = |e: code_github::Error| Error::Internal(e.into());
+        let full = format!("{owner}/{repo}");
+        for inst in hub.client.list_installations().await.map_err(gh)? {
+            if inst.suspended_at.is_some() {
+                continue;
+            }
+            if hub.client.installation_repositories(inst.id).await.map_err(gh)?.iter().any(|r| r.full_name.eq_ignore_ascii_case(&full)) {
+                return Ok(Some(inst.id));
+            }
+        }
+        Ok(None)
+    }
+
+    /// HTTPS git credentials for `owner/repo` through `installation` (a short-lived installation
+    /// token as the password): never stored by the caller.
+    pub async fn github_git_login(&self, installation: u64, owner: &str, repo: &str) -> Result<(String, String)> {
+        let hub = self.github_hub().ok_or_else(|| Error::Invalid("roll's GitHub App isn't configured".into()))?;
+        let c = hub.client.git_credentials(installation, owner, repo).await.map_err(|e| Error::Internal(e.into()))?;
+        Ok((c.username, c.password))
+    }
+
+    /// A pull request's comment through `installation`, edited in place: `existing` is patched,
+    /// or, when it's gone (404) or none was given, a new one is made. Its id. A body over
+    /// GitHub's 65,536 characters is cut (at a character boundary) with a note.
+    pub async fn github_comment(&self, installation: u64, owner: &str, repo: &str, number: u64, body: &str, existing: Option<u64>) -> Result<u64> {
+        let hub = self.github_hub().ok_or_else(|| Error::Invalid("roll's GitHub App isn't configured".into()))?;
+        const MAX: usize = 65_536;
+        let body = if body.chars().count() > MAX {
+            let note = "\n\n…(cut: longer than GitHub takes)";
+            format!("{}{note}", body.chars().take(MAX - note.chars().count()).collect::<String>())
+        } else {
+            body.to_string()
+        };
+        if let Some(id) = existing {
+            match hub.client.update_comment(installation, owner, repo, id, &body).await {
+                Ok(c) => return Ok(c.id),
+                Err(code_github::Error::Status { status: 404, .. }) => {}
+                Err(e) => return Err(Error::Internal(e.into())),
+            }
+        }
+        let c = hub.client.create_comment(installation, owner, repo, number, &body).await.map_err(|e| Error::Internal(e.into()))?;
+        Ok(c.id)
+    }
+
+    /// A GitHub Deployment of `sha` to `environment` through `installation` (production or not;
+    /// transient for a preview's, which GitHub lets go). Its id.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn github_deployment(&self, installation: u64, owner: &str, repo: &str, sha: &str, environment: &str, description: &str, production: bool, transient: bool) -> Result<u64> {
+        let hub = self.github_hub().ok_or_else(|| Error::Invalid("roll's GitHub App isn't configured".into()))?;
+        hub.client.create_deployment_in(installation, owner, repo, sha, environment, description, transient, production).await.map_err(|e| Error::Internal(e.into()))
+    }
+
+    /// A GitHub Deployment's state (`in_progress`, `success`, `failure`), with where it answers.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn github_deployment_status(&self, installation: u64, owner: &str, repo: &str, deployment: u64, state: &str, environment_url: Option<&str>, description: &str) -> Result<()> {
+        let hub = self.github_hub().ok_or_else(|| Error::Invalid("roll's GitHub App isn't configured".into()))?;
+        hub.client.create_deployment_status(installation, owner, repo, deployment, state, environment_url, None, description).await.map_err(|e| Error::Internal(e.into()))?;
+        Ok(())
+    }
+
+    /// A commit status on `owner/repo` at `sha` through `installation`.
+    /// What a commit's checks say on GitHub (its check runs and commit statuses, roll's own left
+    /// out: roll waits on others' checks, never on itself): `Ok(None)` when there are none,
+    /// `Some(Err(name))` when one failed, `Some(Ok(false))` while any is running, `Some(Ok(true))`
+    /// when all passed.
+    pub async fn github_ci(&self, installation: u64, owner: &str, repo: &str, sha: &str) -> Result<Option<std::result::Result<bool, String>>> {
+        let hub = self.github_hub().ok_or_else(|| Error::Invalid("roll's GitHub App isn't configured".into()))?;
+        let runs = hub.client.commit_check_runs(installation, owner, repo, sha).await.map_err(|e| Error::Internal(e.into()))?;
+        let status = hub.client.commit_status(installation, owner, repo, sha).await.map_err(|e| Error::Internal(e.into()))?;
+        let ours = hub.config.slug.clone();
+        let (mut any, mut running) = (false, false);
+        for r in runs["check_runs"].as_array().into_iter().flatten() {
+            if r["app"]["slug"].as_str().is_some_and(|s| !ours.is_empty() && s == ours) {
+                continue;
+            }
+            any = true;
+            let name = r["name"].as_str().unwrap_or("a check").to_string();
+            match (r["status"].as_str(), r["conclusion"].as_str()) {
+                (Some("completed"), Some("success" | "neutral" | "skipped")) => {}
+                (Some("completed"), _) => return Ok(Some(Err(name))),
+                _ => running = true,
+            }
+        }
+        for s in status["statuses"].as_array().into_iter().flatten() {
+            let context = s["context"].as_str().unwrap_or("a status");
+            if context.starts_with("roll/") {
+                continue;
+            }
+            any = true;
+            match s["state"].as_str() {
+                Some("success") => {}
+                Some("pending") => running = true,
+                _ => return Ok(Some(Err(context.to_string()))),
+            }
+        }
+        Ok(any.then_some(Ok(!running)))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn github_commit_status(&self, installation: u64, owner: &str, repo: &str, sha: &str, state: &str, context: &str, description: &str, target_url: Option<&str>) -> Result<()> {
+        let hub = self.github_hub().ok_or_else(|| Error::Invalid("roll's GitHub App isn't configured".into()))?;
+        hub.client.create_status(installation, owner, repo, sha, state, context, Some(description), target_url).await.map_err(|e| Error::Internal(e.into()))?;
+        Ok(())
+    }
 }
 
 /// Turn the GitHub App on: webhooks, connecting repos, mirrors and notifications.

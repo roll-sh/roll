@@ -448,16 +448,15 @@ mod chunker_tests {
         assert_eq!(Chunking::None.chunk("é😀"), vec![Span { start: 0, end: 3 }]);
     }
 
-    /// A long text (here 512 KiB, tens of thousands of chunks) chunks in time linear in its
-    /// length: `semantic_text` chunks writers' documents on a shared node.
+    /// A long text (up to 256 KiB, thousands of chunks) chunks in time linear in its length:
+    /// `semantic_text` chunks writers' documents on a shared node.
     #[test]
     fn long_texts_chunk_in_linear_time() {
-        let text = "Ab cd é😀 gh. ".repeat(32_000);
-        let started = std::time::Instant::now();
-        let pieces = Chunking::Sentence { max_chunk_size: 20, sentence_overlap: 1 }.pieces(&text);
-        assert!(pieces.len() > 5_000, "{}", pieces.len());
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
-        let (span, piece) = pieces[1];
-        assert_eq!(substring(&text, span), piece);
+        crate::test_support::assert_linear("sentence chunking", 2_000, |n| "Ab cd é😀 gh. ".repeat(n), |text| {
+            let pieces = Chunking::Sentence { max_chunk_size: 20, sentence_overlap: 1 }.pieces(&text);
+            assert!(pieces.len() > 300, "{}", pieces.len());
+            let (span, piece) = pieces[1];
+            assert_eq!(substring(&text, span), piece);
+        });
     }
 }
