@@ -1790,13 +1790,13 @@ Ranked by what a person notices first. Done so far:
    made without touching the user's index or HEAD is pushed to a branch of their own
    (`preview/<user>/<name>`) and previewed, the URL printed once it's ready; again moves it,
    `roll preview down` deletes the branch and the preview.
-3. **Mask suggestions, in review** (#324, review findings fixed: never a suggestion that fails masking, checked on real Postgres; Tonic's and Neon's anonymisation). Then: read columns only when asked (a "Suggest masks" disclosure), so opening the dialog never resets a running parent's idle timer: previews read production's data, and
+3. **Mask suggestions, in review** (#324, review findings fixed: never a suggestion that fails masking, checked on real Postgres; Tonic's and Neon's anonymisation). The dialog reads columns only when asked, so opening it never resets a running parent's idle timer: previews read production's data, and
    today the rules dialog only says "mask what holds people's data" when a resource has no masks
    at all. Name the columns and fields that look like personal data (email, phone, name, address,
    birth date, IP, national ids, tokens) in each branched Postgres, NoSQL and search parent and
    aren't masked, each with a one-click rule (`email`, `redact`, `hash`, `null`), on the rules
    dialog and the sheet.
-4. **A preview's errors on its sheet, in review** (#326; Vercel's runtime logs, Sentry's grouping): the sheet shows
+4. **A preview's errors on its sheet, in review** (#326, review findings fixed: masked whole before any cut, bounded log reads, a count route that reads no secrets; Vercel's runtime logs, Sentry's grouping): the sheet shows
    raw logs only. Group a preview's errors by fingerprint: roll apps' `…/environments/pv-…/errors`
    for its instances, the same grouping over roll's runtime's logs (stack traces joined, ids and
    numbers taken out), masked as logs are; the count on the row and the pull request comment's
