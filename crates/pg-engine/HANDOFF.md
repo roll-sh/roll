@@ -15071,3 +15071,127 @@ passed a whole quick-check (`ce6665920`). `--profile verify-checked` (debug asse
 `stat_counts` (agent 240's case) warms the statistics and lock views in its setup, its recorded
 output unchanged: their first expansion outlasted a step's 400 ms quiet window on a loaded
 machine (80 to 340 ms on an idle one, base build too).
+## MultiXact (agent 249, 2026-11-18)
+
+PostgreSQL leaves a row lock in the locked version's xmax: the locker's xid with
+HEAP_XMAX_LOCK_ONLY and the lock's strength, or a MultiXactId once another transaction (or
+another subtransaction of the same one) locks or updates the version while a locker runs. It
+stays after the lockers end, until the version is locked, updated or frozen again. Before this,
+the engine's row locks lived only in its lock manager and `xmax` read 0 for every row. Now the
+heap model keeps the xmax PostgreSQL would have, and every value below was matched against a
+private PostgreSQL 18.6 (`a249-pg`, `select version()` 18.6 on Alpine) with a probe that runs the
+same multi-session scenarios on both servers and compares them with xids renamed by first
+appearance (`~/.cache/a249/probe/cmp.py`: 243 lines, identical; `durable.py` for restart and
+crash).
+
+- **Tuple state** (`txn::multixact`, `catalog::heapsim::Tup::flags`). `Tup` keeps its 32 bytes:
+  `hot_updated` became a flags byte holding HEAP_HOT_UPDATED and the xmax bits (LOCK_ONLY,
+  KEYSHR / SHR / EXCL, IS_MULTI, KEYS_UPDATED). `multixact::new_xmax` is
+  compute_new_xmax_infomask (the locker alone; MultiXactIdCreate when another locker or an
+  updater runs, or the old xmax is a committed update; MultiXactIdExpand keeping running members
+  and a committed update; the stronger of two locks of one xid), `already_locked` heap_lock_tuple's
+  early exit (a lock as strong held by the transaction or a subtransaction of it),
+  `carried_xmax` heap_update's xmax for the new version (the old one's lockers still running:
+  our own lock, KEY SHARE lockers the update didn't wait for). Members sort by (xid, status), as
+  mXactCacheGetBySet leaves them; each transaction has its MultiXact cache
+  (`Txn::multi_for` / `multi_members`, 256 entries, made and read multis), so one member set
+  locked over many rows is one multi. Offsets follow GetNewMultiXactId (offset 0 skipped).
+- **Where it is set** (`exec::sizing::row_locked`, `replaced`): LockRows (a scan's marks and the
+  LockRows node), foreign key checks' FOR KEY SHARE (the three RI paths), ON CONFLICT DO UPDATE's
+  lock; UPDATE and DELETE compute the old version's xmax from what is there (one branch when it
+  is 0) and the new version's. A FOR KEY SHARE lock past a running update that left the key
+  alone locks the later versions too (heap_lock_updated_tuple_rec). Pruning, VACUUM and the
+  size models read the update xid through a multi (`Tup::update_xid`): a lock-only xmax is
+  live, as HeapTupleSatisfiesVacuum has it. A locked version keeps a page from all-frozen.
+- **What reads it**: `xmax` (the scan's system columns read the model's raw xmax: also a running
+  deleter's or an aborted updater's, which read 0 before), pgrowlocks (TM_BeingModified from the
+  xmax; members with their statuses; pids from the lock manager for top-level xids, 0 for a
+  subtransaction or a prepared or ended member, as BackendXidGetPid), `pg_get_multixact_members`
+  (its errors too), `mxid_age`, pg_class.relminmxid, VACUUM VERBOSE's "new relminmxid".
+- **Per database, durable with the rows** (`Database::multis`, `multixact::MULTI_PREFIX` 0x26,
+  `XMAX_PREFIX` 0x27). PostgreSQL's multis are the cluster's; here each database has its own
+  counter, kept in its own store with the rows whose xmax names them, so a single database's ids
+  are PostgreSQL's (and golden_wire's parallel files don't see each other's). A new multi's
+  members, and a version's xmax that outlives its writer (a lock's, or the lockers an update
+  kept), are state records the transaction writes beside its rows (`Txn::put_state`): kept out
+  of REPEATABLE READ's write-conflict check, committed with its writes, and, as PostgreSQL's WAL
+  records of them are, also when it rolls back or prepares (a commit of their own that doesn't
+  wait for an fsync; so does a transaction that only locked rows). An update, a delete, VACUUM's
+  freezing and TRUNCATE delete them. A model laid out afresh (`ensure`, the kept models'
+  background builder) applies each record whose row still has its version at the recorded TID.
+  The next multi and offset come from the last record when the database opens; members of older
+  multis are read as asked. Recorded on PostgreSQL: after a clean restart every xmax is as it was,
+  a rolled-back locker's too; after kill -9 a locker that was still running is gone (its WAL
+  record was never written) and the others stay; the multi's members resolve and the next multi
+  is the one after it. The engine gives the same (`tests/crash_ctids.rs`
+  `multixact_survives_a_restart` / `_a_crash`).
+- **Prepared transactions**: PREPARE writes its state records (as its WAL records are flushed
+  then): after a restart the prepared locker's xmax is there, pgrowlocks shows it with pid 0, a
+  new locker makes a multi with it, ROLLBACK PREPARED leaves no lock (matched on PostgreSQL).
+- **VACUUM** (`multixact::freeze_xmax`, `Heap::vacuum_frz`, `sizing::freeze_cutoffs`,
+  `Ddl::advance_min_mxid`). FreezeMultiXactId and heap_prepare_freeze_tuple's xmax half: a multi
+  before OldestMxact makes the page's freezing mandatory (a lock goes; an update stays as its xid
+  alone), one with a member before FreezeLimit or itself before MultiXactCutoff is replaced
+  (running lockers and the updater, as a new multi or a single xid), an xid xmax before OldestXmin
+  goes when the page freezes. A frozen page freezes its xmins too (VERBOSE's "frozen" line counts
+  them), and its rows no longer hold relfrozenxid back. FreezeLimit and MultiXactCutoff follow
+  vacuum_freeze_min_age / vacuum_multixact_freeze_min_age (capped at half the autovacuum max
+  ages; 0 for FREEZE). OldestMxact is the first multi made after the oldest running transaction
+  got its id (each multi keeps the next xid when it was made), else the next multi. relminmxid
+  (`Catalog::min_mxids`, record tag 52, a VACUUM/ANALYZE stats tag) becomes the oldest multi left
+  in a read page's xmax, else OldestMxact, when no all-visible page was skipped; new storage gets
+  GetOldestMultiXactId. pg_database.datminmxid reads 1 (initdb's) instead of 0.
+- **Aggressive VACUUM by table age** (`Ddl::aged`): a relfrozenxid at or before the next xid
+  less vacuum_freeze_table_age, or a relminmxid at or before the next multi less
+  vacuum_multixact_freeze_table_age (each at most 0.95 of its autovacuum max age), makes the
+  relation's VACUUM aggressive ("aggressively vacuuming", only all-frozen pages skipped), as
+  vacuum_get_cutoffs does; before, only FREEZE and DISABLE_PAGE_SKIPPING did.
+
+Not done: datminmxid's advance (it needs every relation of the database, its catalogs included,
+vacuumed: the catalogs' relminmxid isn't modelled); multixact truncation (members of multis
+before every table's relminmxid aren't dropped; the records are 12 + 9 bytes a member); a table
+too big to model (over 400,000 versions) keeps no xmax (reads 0, as before), and its VACUUM
+moves relminmxid to OldestMxact; a clean lane A gate (below). Found on the way:
+`count(DISTINCT xmax)` runs here, PostgreSQL rejects it ("could not identify an ordering
+operator for type xid", 42883): not fixed.
+
+These supersede agent 229's "MultiXact: not done" note and agent 222's note on `new relminmxid`
+(their sections are left as they were).
+
+Tests: golden `a249_multixact` (single-session cases, ids shown relative to the session's own:
+lock strengths, weaker and stronger relocks, a subtransaction's multi and its members, a
+rollback to a savepoint, lock then update, the stale xmax after commit, a prepared locker, a
+foreign key check, ON CONFLICT DO UPDATE, the member function's errors); isolation spec
+`roll-multixact` (two and three lockers, a locker and an updater, FOR KEY SHARE past a running
+update, one multi for a member set over many rows; with PGISOLATION_EXTRA=1); `crash_ctids`
+`multixact_survives_a_restart` / `_a_crash`; `multixact` unit tests (the rules against values
+PostgreSQL gave).
+
+Verification (agent 249): golden (in-process, wire, shuffled: every file), the isolation specs
+around row locks (multixact-no-deadlock, multixact-no-forget, freeze-the-dead,
+lock-update-delete, lock-update-traversal, the tuplelock-*, fk-*, nowait-*, skip-locked-*,
+insert-conflict-do-update-*, eval-plan-qual, delete-abort-savept*, aborted-keyrevoke and others:
+53 of 53 specs and every permutation as before), lib, crash_ctids and golden again with
+`--profile verify-checked`, quick-check.
+
+Performance (lane A, agent 243's harness copied to `~/.cache/a249/bench`, plain dist builds, 10 s
+runs, a fresh server and 100,000-row fixture each, lane A's lock held for the whole gate). Not
+settled: the host ran at load 45-70 while it ran, and no clean result exists yet.
+- A first gate compared b249 at `6d3b7e9e5` with h249 on `6913fd09c` (the head after a rebase:
+  agents 243's and 244's commits in it too, so it measured more than this change). Short
+  transactions at 8 clients, 3 unflagged pairs of 5: user instructions per transaction +0.42%
+  (pairs -1.96 .. +4.65%, the two flagged ones included), cycles -2.8%, tps +12.2%.
+- The gate again with b249 rebuilt at `6913fd09c` (h249's parent): short transactions at 8
+  clients, all 5 pairs flagged after 4 tries each (1.04-2.62 foreign cores): instructions
+  -7.6 .. +2.7% a pair, not counted. The other cells (short at 32, point reads at 8 and 32) ran
+  after this note was written (`~/.cache/a249/runs/g1-*`).
+- What the change adds to a transaction that takes no row lock: on an UPDATE, the old version's
+  xmax is 0, so the model's update takes one branch more, reads whether a key column changed
+  from the executor (`sizing::note_update_keys`, a thread-local, instead of comparing the key
+  columns again) and sets the new version's xmax only when a locker remains; a commit takes an empty list of state records and checks the first
+  write's key; `Txn` has two more empty vectors. Point reads read nothing new (the `xmax` system
+  column's value comes from the same model lookup as cmin / cmax, only when asked for).
+  Measured in-process (1 client, the bench's own thread): within the runs' noise (-0.2% and
+  +4.0% in two rounds, compaction work inline with the transactions).
+A transaction that only locks rows writes its state records and commits without waiting for an
+fsync, where it wrote nothing before.

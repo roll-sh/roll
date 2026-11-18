@@ -285,6 +285,17 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## MultiXact (2026-11-18, agent 249)
+
+Lane A, short transactions at 8 clients (agent 243's harness, plain dist builds, 10 s runs, a fresh
+server and 100,000-row fixture each, alternating pairs, user instructions per transaction; host
+load 45-70 throughout: HANDOFF "MultiXact").
+
+| baseline | pairs | unflagged | instr/txn (median of unflagged; all pairs) | cycles/txn | tps |
+|---|---:|---:|---|---:|---:|
+| `6d3b7e9e5` (h249 on `6913fd09c`: others' commits too) | 5 | 3 | +0.42% (-1.96 .. +4.65%) | -2.8% | +12.2% |
+| `6913fd09c` (h249's parent) | 5 | 0 (1.04-2.62 foreign cores after 4 tries each) | none (-7.6 .. +2.7%) | | |
+
 ## Bulk writes, round 15, part 2: integer filter kernels, kept index measures (2026-11-18, agent 246)
 
 HANDOFF "Bulk writes, round 15, part 2" has what changed. Harness, lane and settings as in part 1
