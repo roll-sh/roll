@@ -3107,8 +3107,10 @@ inconsistencies are fixed in #264:
    credentials cache let a dropped role in for ~1.6 s, so a lease's end sets a password nobody knows
    first. All four go through a gateway too (#166, checked against the real servers), and their admin's
    own password rotates (`rotate-admin`, #165: it fell through to Postgres's statement), waiting out
-   Cassandra's ~2 s credentials cache; other schemes are refused by name. Building: the same wait on
-   managed rotations, so a turn never hands out a password Cassandra still refuses.
+   Cassandra's ~2 s credentials cache; other schemes are refused by name. Managed rotations wait
+   the same way (with an app logged in, Cassandra refused the handed-out password 12 of 12 times
+   before, 0 after). Known: the cache is per node, and an ended lease's password can still log in
+   for up to `credentials_validity` (documented; the servers' setting shortens it).
    Next: OpenSearch's narrower permission set, and Couchbase and Oracle (Vault has both).
 4c. **MongoDB Atlas through its Admin API** (#173, on #136): Atlas refuses the user commands on
    every tier and rolls back changes made another way, so the MongoDB engine never could rotate an
