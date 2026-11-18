@@ -10,6 +10,7 @@
 //! audit log, and deleting the identity revokes them.
 
 use crate::access::{Action, Caller, Scope};
+use crate::issuer::Subject;
 use crate::oidc::{Jwt, wildcard};
 use crate::{Error, Result, Secrets, audit, from_json, json, names};
 use code_sql::{OptionalExtension, params};
@@ -163,7 +164,11 @@ impl Secrets {
         }
         let issuer = n.issuer.trim().trim_end_matches('/').to_string();
         let jwks = n.jwks.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+        let ours = self.is_rolls_issuer(&issuer);
         let pinned_keys = match &jwks {
+            // roll's own tokens are checked against roll's keys, in process.
+            Some(_) if ours => return Err(bad("roll's own issuer needs no keys: its tokens are checked against roll's")),
+            None if ours => None,
             // Never fetched: the issuer is only the `iss` a token must carry.
             Some(doc) => {
                 if issuer.is_empty() || issuer.len() > 512 {
@@ -188,6 +193,10 @@ impl Secrets {
         // Shared issuers' rule (roll-oidc's, as roll-access's trusted clients have it).
         if let Some(shape) = roll_oidc::open_to_others(&issuer, &subject) {
             return Err(bad(format!("{issuer} signs for everyone: the subject names one of its tenants, {shape}")));
+        }
+        // roll signs for every project: an identity of its names one apps environment of this one.
+        if ours && Subject::parse(&subject).is_none_or(|s| s.project() != project) {
+            return Err(bad(format!("an identity for roll's own issuer names one environment of a service of this project: roll-apps:{project}:<service>:<environment>")));
         }
         if n.claims.len() > CLAIMS_MAX || n.claims.iter().any(|(k, v)| k.is_empty() || k.len() > 64 || v.is_empty() || v.len() > 256 || ["iss", "aud", "sub", "exp", "nbf", "iat"].contains(&k.as_str())) {
             return Err(bad(format!("claims are at most {CLAIMS_MAX} other string claims (not iss, aud, sub or the times), each a value or a pattern")));
@@ -299,8 +308,19 @@ impl Secrets {
         }
         let jwt = Jwt::parse(token)?;
         let now = self.db.now_ms()?;
-        let via = self.deliver.as_deref().map(crate::oidc::Via);
-        self.oidc.verify(via.as_ref().map(|v| v as &dyn roll_oidc::Fetch), jwks.as_deref(), &jwt, &i.issuer, &i.audience, now / 1000)?;
+        if self.is_rolls_issuer(&i.issuer) {
+            // roll's own keys, in process: its JWKS is never fetched over HTTP.
+            let doc = crate::issuer::jwks(&self.db, self.keys()?, &self.issuer_keys)?.to_string();
+            self.oidc.verify(None, Some(&doc), &jwt, &i.issuer, &i.audience, now / 1000)?;
+            // The token, and the identity, are this project's: never another's subject.
+            let named = |sub: Option<&str>| sub.and_then(Subject::parse).is_some_and(|s| s.project() == project);
+            if !named(jwt.str("sub")) || !named(Some(&i.subject)) || jwt.str("project") != Some(project.as_str()) {
+                return Err(Error::Forbidden(format!("roll's token isn't for identity {}'s project", i.name)));
+            }
+        } else {
+            let via = self.deliver.as_deref().map(crate::oidc::Via);
+            self.oidc.verify(via.as_ref().map(|v| v as &dyn roll_oidc::Fetch), jwks.as_deref(), &jwt, &i.issuer, &i.audience, now / 1000)?;
+        }
         let sub = jwt.str("sub").unwrap_or_default().to_string();
         if !wildcard(&i.subject, &sub) {
             return Err(Error::Forbidden(format!("{sub} doesn't match identity {}'s subject", i.name)));
@@ -341,6 +361,11 @@ impl Secrets {
             return Err(denied());
         }
         Ok(Login { token: m.secret, expires_at: m.expires_at, project, identity: i.id })
+    }
+
+    /// Whether `issuer` is roll's own (`<public URL>/v1/secrets/oidc`).
+    fn is_rolls_issuer(&self, issuer: &str) -> bool {
+        self.clouds.as_ref().is_some_and(|c| c.issuer.trim_end_matches('/') == issuer)
     }
 
     /// The identity a workload token came from, when it did: requests made with it are the

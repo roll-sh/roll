@@ -82,6 +82,7 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/login", post(login))
         .route("/v1/secrets/oidc/.well-known/openid-configuration", get(oidc_discovery))
         .route("/v1/secrets/oidc/jwks", get(oidc_jwks))
+        .route("/v1/secrets/issuer/rotate", post(rotate_issuer))
         .route(&format!("{P}/audit"), get(audit))
         .route(&format!("{P}/audit/verify"), get(verify_audit))
         .route(&format!("{P}/audit/sinks"), get(sinks).post(create_sink))
@@ -874,6 +875,11 @@ async fn oidc_discovery(State(s): S) -> crate::Result<Response> {
 
 async fn oidc_jwks(State(s): S) -> crate::Result<Response> {
     Ok(ok(blocking(s, |s| s.oidc_jwks()).await?))
+}
+
+/// Start a rotation of roll's issuer key now (the operator's).
+async fn rotate_issuer(State(s): S, Who(c): Who) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.rotate_issuer(&c)).await?))
 }
 
 async fn cloud_accounts(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {

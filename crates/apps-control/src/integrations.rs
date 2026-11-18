@@ -129,6 +129,14 @@ pub trait SecretSource: Send + Sync {
     async fn ensure(&self, _project: &str, _env: &str) -> anyhow::Result<()> {
         Ok(())
     }
+    /// A token of roll's OIDC issuer for one instance of `service` in `env` (`sub =
+    /// roll-apps:<project>:<service>:<env>`), for `aud`, living `ttl` (an hour at most): what
+    /// clouds' federation and roll secrets' workload logins trust (docs/secrets.md, "roll's tokens
+    /// for other products"). An error when the project doesn't stand for the service. None: no
+    /// issuer here.
+    async fn issue(&self, _project: &str, _service: &str, _env: &str, _aud: &str, _ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// What's been said about a preview's page (roll previews' notes: docs/previews.md, "Feedback on

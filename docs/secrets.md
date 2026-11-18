@@ -1082,7 +1082,9 @@ cloud trusts roll's token for one project the way it trusts GitHub Actions' toke
   `sub = roll-secrets:<project>` (and `project`). The signing key (RSA 2048) is made at startup,
   sealed with the deployment key, and shared by every node; every published key verifies, and the
   public routes read only public halves. After a deployment-key rotation it's resealed like
-  projects' keys (health's `resealed` counts it).
+  projects' keys (health's `resealed` counts it). The signing key itself rotates too (below,
+  "Rotating the issuer's key"), and roll's other products get tokens of their own from it (below,
+  "roll's tokens for other products").
 - **GCP**: a workload identity pool provider for roll's issuer whose attribute condition pins
   `assertion.sub == "roll-secrets:<project>"`, and a service account that lets that principal
   impersonate it (`roles/iam.workloadIdentityUser`). Register it with `POST …/cloud-accounts {name,
@@ -1103,6 +1105,57 @@ cloud trusts roll's token for one project the way it trusts GitHub Actions' toke
   early or extended: a lease that ends leaves it valid until it expires, an hour at most; resolve again for a
   new one. An account a key links to can't be deleted. `roll secrets clouds ls` prints the issuer and
   subject to trust; `roll secrets clouds add-gcp` / `add-azure` register one.
+#### roll's tokens for other products
+Other roll products get tokens from the same issuer, in process only (no route signs one):
+`Secrets::issue(subject, aud, ttl)`. The first is roll apps: each instance of a service gets one
+(as Vercel's OIDC federation gives each deployment), so an app logs in to a cloud, or to roll
+secrets, with no key of its own (docs/apps/README.md; apps delivers the token to its instances).
+- **Subjects.** `Subject::App {project, service, env}` is `sub =
+  roll-apps:<project>:<service>:<env>`, plus the claims `project`, `service` and `environment` for
+  clouds' attribute mapping (GCP's `attribute.service = assertion.service`; AWS and Azure match
+  `sub`). The project and the service are ids (a-z, 0-9,
+  `_`, `-`), the environment a slug, so no part holds a `:` and a trust on one `sub` names one
+  environment of one service. Other claims are `iss`, `aud`, `iat`, `nbf`, `exp` and a random
+  `jti`.
+- **Lifetime and audience.** A token lives the `ttl` asked for, an hour at most (a longer one is
+  cut to an hour). The audience is the caller's choice (`sts.amazonaws.com`, a GCP pool provider,
+  `roll`), 1–256 characters.
+- **Only for a service its project stands for.** rolld's `ForApps::issue` (roll apps'
+  `SecretSource::issue`) asks the workspace's trust, as a deploy's secrets do
+  (`Workspace::trusts`): the operator's projects stand for their services, a person's only for
+  their own. Otherwise it's an error, and no token.
+- **Audit.** An app refreshes its token often, from every instance, so a row per token would bury
+  the log: the first token per subject, audience and hour is an `oidc.issue` row in the project's
+  log (actor `app:<service>`, the environment, the audience and the lifetime), and the rest of the
+  hour only count (`oidc_issued`: subject, audience, hour, tokens; kept two days). The token is
+  never logged.
+- **Logging in to roll secrets with one.** A workload identity whose `issuer` is roll's own
+  (`<public URL>/v1/secrets/oidc`) and whose `subject` is exactly one
+  `roll-apps:<this project>:<service>:<env>` takes an instance's token: an app reads its project's
+  secrets with no roll token in its settings. Its tokens are checked against roll's keys in
+  process (roll's JWKS is never fetched over HTTP, and no `jwks` is pinned); the token's subject
+  and its `project` claim must name the identity's project, so a subject of another project is
+  refused when the identity is made and again at login.
+#### Rotating the issuer's key
+The signing key rotates every 90 days (`ROLL_SECRETS_OIDC_ROTATE_DAYS`, at least 3), run by the
+sweeper:
+- **Published before it signs.** When a rotation is due (the current key has signed for the
+  period less two days), the next key is made, published in the JWKS at once, and signs from two
+  days later (`issuer::PUBLISH_AHEAD_MS`): clouds cache JWKS (Azure for a day), and a token
+  signed by a key they haven't fetched yet would be refused. The insert is the claim: it happens
+  in a write that finds no key of roll's waiting, so one node makes it.
+- **The old key stays until its tokens expire.** From then on the new key signs. The one it
+  replaced stays in the JWKS for two hours more (`issuer::RETIRE_AFTER_MS`: the longest token, an
+  hour, and an hour's margin), then leaves it (`retired_at`) and never signs again.
+- **Retired keys still check digests.** The audit log's digests are signed with the same key, so
+  a retired key stays (sealed, as before) and `GET …/audit/verify` still checks the digests it
+  signed. For `audit verify --file`, keep the JWKS saved before each rotation's old key retired
+  (save it again when a new key appears, as below).
+- **Only roll's keys.** As before, only a row whose sealed private key opens with the deployment
+  key and matches its public half signs, is published, or holds a rotation back.
+- **Now.** `POST /v1/secrets/issuer/rotate` (the operator's) starts a rotation at once: the next
+  key is published now and signs two days later, as a scheduled one. With a key already waiting,
+  it answers that one. `{kid, signs_from}`.
 ### Certificates
 A project's own certificate authority, as Vault's PKI engine and Infisical's PKI give: short-lived
 TLS certificates for services (mTLS between them), with no CA to run.
@@ -2290,6 +2343,10 @@ minutes.
   Checked on k3s 1.33: a pod running as `shop/web` with a projected token for audience `roll`
   (`ROLL_OIDC_TOKEN_FILE`) ran `roll run` with production's values, and the audit log names
   `system:serviceaccount:shop:web`.
+- **roll's own issuer.** An identity for roll's own issuer (`<public URL>/v1/secrets/oidc`) takes
+  roll apps' instance tokens: its subject is one `roll-apps:<this project>:<service>:<env>`, no
+  pattern and no other project's, and its tokens are checked against roll's keys in process
+  ("roll's tokens for other products", above).
 - **Who makes them.** Identities are made by people (or the operator), never by a token or a
   login; a login can't create tokens either, so nothing it makes outlives it.
 - **Login.** `POST /v1/secrets/login {identity, token}` (public: the token is the credential)
@@ -2510,7 +2567,7 @@ with signed digests, so such a change shows:
   `--jwks` is required: roll's public keys as saved earlier from `/v1/secrets/oidc/jwks` (served
   whether or not clouds are set up) and kept apart from roll, since keys fetched from the server
   being checked would vouch for themselves. Save it once, and again only after a key you expected
-  is added. A file whose digests name another project than `-p`, or more than one, is refused (a
+  is added (each key rotation adds one). A file whose digests name another project than `-p`, or more than one, is refused (a
   `prj_…` id needs no server; a name is looked up). An export of the newest 10,000 rows starts
   checking at its first digest, and a row without a `seq` after the chain began is `unchained`.
   Staleness isn't checked offline: an export is a copy from some time.
@@ -2650,7 +2707,8 @@ isn't in the workspace is 404.
 | `POST /github-apps` | `{name, app_id, installation_id, private_key, repositories, permissions, api_base?}` | 201 `GitHubApp` (`admin`; gets and revokes a token first: 400 with GitHub's reason) |
 | `DELETE /github-apps/{id}` | | 204; 409 while a key links to it or a lease holds a token (`admin`) |
 | `GET /v1/secrets/oidc/.well-known/openid-configuration` | | roll's issuer's discovery document (public) |
-| `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public; they verify the audit log's digests, so served without clouds too) |
+| `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public; they verify the audit log's digests, so served without clouds too): the key signing, the next one before it signs, the one it replaced until that one's tokens expire |
+| `POST /v1/secrets/issuer/rotate` | | `{kid, signs_from}` (the operator's): the next issuer key, published now, signing two days later; the one already waiting, if any |
 | `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
 | `POST /cas` | `{name, domains, allow_ip?, max_days?}` | 201 `Ca` (`admin`) |
 | `DELETE /cas/{id}` | | 204; 409 while a key links to it (`admin`) |

@@ -385,6 +385,13 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
     // Where clients reach rolld: a CA's certificates name its CRL there.
     secrets.set_public_api(args.code_public_url.clone().unwrap_or_else(|| format!("http://{}:{}", args.public_host, args.api.port())));
+    // How often roll's issuer key rotates (90 days unless set).
+    if let Ok(days) = std::env::var("ROLL_SECRETS_OIDC_ROTATE_DAYS") {
+        match days.trim().parse::<u32>() {
+            Ok(d) => secrets.set_issuer_rotation_days(d),
+            Err(_) => tracing::warn!("ROLL_SECRETS_OIDC_ROTATE_DAYS isn't a number of days: rotating every {}", roll_secrets::issuer::ROTATE_DAYS),
+        }
+    }
     // A deleted project's secrets go with it.
     let s = secrets.clone();
     workspace.on_delete(Box::new(move |id| {
@@ -1120,6 +1127,26 @@ impl apps_control::integrations::SecretSource for ForApps {
         .await?
     }
 
+    /// An instance's token from roll's issuer, only for a service its project stands for (the
+    /// same check as `resolve`). None where the issuer isn't (no public URL).
+    async fn issue(&self, project: &str, service: &str, env: &str, aud: &str, ttl: std::time::Duration) -> anyhow::Result<Option<String>> {
+        let (secrets, ws) = self.0.get().cloned().ok_or_else(|| anyhow::anyhow!("roll secrets is starting: try again in a moment"))?;
+        let subject = roll_secrets::Subject::App { project: project.to_string(), service: service.to_string(), env: env.to_string() };
+        let aud = aud.to_string();
+        tokio::task::spawn_blocking(move || {
+            let roll_secrets::Subject::App { project, service, .. } = &subject;
+            let p = ws.get(roll_workspace::Scope::All, project).map_err(|e| anyhow::anyhow!("{e}"))?;
+            if !ws.trusts(&p, roll_workspace::Kind::Service, service) {
+                anyhow::bail!("project {project} doesn't stand for {service}, so roll signs no token for it");
+            }
+            if !secrets.issues() {
+                return Ok(None);
+            }
+            Ok(Some(secrets.issue(subject, &aud, ttl)?))
+        })
+        .await?
+    }
+
     async fn may_reveal(&self, who: apps_control::integrations::Asker<'_>, project: &str, env: &str) -> bool {
         let Some((secrets, _)) = self.0.get().cloned() else { return false };
         match secrets.caller_of(who.operator, who.user, who.grant) {
@@ -1345,6 +1372,35 @@ mod tests {
         assert!(roll_secrets::router(secrets.clone()).oneshot(set).await.unwrap().status().is_success());
         assert_ne!(apps.digest(&project, "production").await.unwrap(), Some(before));
         assert_eq!(apps.digest(&project, "pr-9").await.unwrap(), None);
+    }
+
+    /// An instance's token from roll's issuer goes only to a service its project stands for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_service_gets_an_issuer_token_only_from_a_project_that_stands_for_it() {
+        use apps_control::integrations::SecretSource;
+        struct Nobody;
+        impl roll_workspace::Owners for Nobody {
+            fn trusts(&self, _: &str, _: roll_workspace::Kind, _: &str) -> bool {
+                false
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
+        let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
+        ws.set_owners(Arc::new(Nobody));
+        let (operators, adas) = (ws.create("", "shop", "", None).unwrap().id, ws.create("usr_ada", "mine", "", None).unwrap().id);
+        let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("secrets.db")), "secrets").unwrap();
+        let clouds = roll_secrets::clouds::Clouds { issuer: "https://roll.example/v1/secrets/oidc".into(), tokens: Arc::new(super::clouds::RollClouds::new()) };
+        let opts = roll_secrets::Options { keyring: Ok(roll_secrets::Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: None, sts: None, outside: None, github: None, clouds: Some(clouds), workloads: None };
+        let apps = super::ForApps::default();
+        apps.set(Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap()), ws);
+        let ttl = std::time::Duration::from_secs(900);
+        let token = apps.issue(&operators, "svc_web", "production", "sts.amazonaws.com", ttl).await.unwrap().expect("a token");
+        use base64::Engine as _;
+        let claims: Json = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token.split('.').nth(1).unwrap()).unwrap()).unwrap();
+        assert_eq!(claims["sub"], json!(format!("roll-apps:{operators}:svc_web:production")));
+        // A person's project stands only for their own services.
+        assert!(apps.issue(&adas, "svc_theirs", "production", "sts.amazonaws.com", ttl).await.is_err());
     }
 
     /// A customer's key wraps a project's data key: Encrypt and Decrypt name the key and carry the
