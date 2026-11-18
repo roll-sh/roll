@@ -3243,6 +3243,97 @@ mod tests {
     /// is never held while a page isn't all-visible, and hints never claim nothing to prune
     /// for a page that would be pruned. The writers' operations, replayed one at a time on
     /// the same session threads in the order they took the lock, make the same heap.
+    /// Heap-only updates through a shared heap by a model lock group's writers
+    /// (`update_hot_shared`, threads updating rows of their own, some on one page) leave the
+    /// heap exactly as `update_cid` leaves it given the same updates one at a time in the
+    /// order they took their pages' latches, while readers come and go.
+    #[test]
+    fn hot_updates_in_a_group_match_one_at_a_time() {
+        use crate::exec::sizing::modellock::{self, ModelLock};
+        const WRITERS: u64 = 4;
+        let key = |k: u64| k.to_be_bytes();
+        let build = || {
+            let mut h = Heap::new(50);
+            let mut mode = InsertMode::single();
+            for k in 0..400u64 {
+                h.insert(&key(k), 60, 2, 0, &mut mode);
+            }
+            h
+        };
+        let xids = Xids::new(10, |_| {});
+        let txns: Vec<u64> = (0..WRITERS).map(|_| xids.assign()).collect();
+        let lock = ModelLock::new(build());
+        let log = parking_lot::Mutex::new(Vec::<(u64, u64, usize)>::new());
+        let fallbacks = std::sync::atomic::AtomicUsize::new(0);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|s| {
+            let (lock, log, xids, done) = (&lock, &log, &xids, &done);
+            s.spawn(move || {
+                let v = Vis::new(xids);
+                let mut n = 0u64;
+                while !done.load(std::sync::atomic::Ordering::Acquire) {
+                    n = (n + 7) % 400;
+                    assert!(lock.read().locate(&key(n), &v).is_some());
+                }
+            });
+            let writers: Vec<_> = (0..WRITERS)
+                .map(|w| {
+                    let (fallbacks, xid) = (&fallbacks, txns[w as usize]);
+                    s.spawn(move || {
+                        let v = Vis::new(xids);
+                        for i in 0..40u64 {
+                            let k = (i * 37 + w * 101) % 100 * WRITERS + w;
+                            let len = 50 + (i as usize * 13 + w as usize) % 30;
+                            let mut replace = |_: Tid, t: &Tup| {
+                                log.lock().push((k, xid, len));
+                                Replace::plain(t, xid, false)
+                            };
+                            let g = modellock::group(lock);
+                            if g.update_hot_shared(&key(k), len, (xid, i as u32), &v, &mut replace).is_none() {
+                                drop(g);
+                                fallbacks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                lock.write().update_cid(&key(k), &key(k), len, (xid, i as u32), true, &v, &mut replace);
+                            }
+                        }
+                    })
+                })
+                .collect();
+            for w in writers {
+                w.join().unwrap();
+            }
+            done.store(true, std::sync::atomic::Ordering::Release);
+        });
+        assert_eq!(fallbacks.into_inner(), 0, "every update fit its page");
+        let v = Vis::new(&xids);
+        let mut one = build();
+        let mut cids = std::collections::HashMap::<u64, u32>::new();
+        for &(k, xid, len) in log.lock().iter() {
+            let cid = cids.entry(xid).or_default();
+            one.update_cid(&key(k), &key(k), len, (xid, *cid), true, &v, &mut |_, t| Replace::plain(t, xid, false));
+            *cid += 1;
+        }
+        let group = lock.into_inner();
+        assert_eq!(format!("{:?}", &*group.pages), format!("{:?}", &*one.pages));
+        assert_eq!(group.versions(), one.versions());
+        assert_eq!(group.writes(), one.writes());
+        assert_eq!(group.all_visible_pages(), one.all_visible_pages());
+        assert_eq!(group.in_key_order(), one.in_key_order());
+        for k in 0..400u64 {
+            assert_eq!(group.tid_of(&key(k)), one.tid_of(&key(k)));
+        }
+        let mut pending = |h: &mut Heap| {
+            let mut p: Vec<_> = h.pending.get_mut().iter().map(|(x, l)| (*x, l.clone())).collect();
+            p.sort();
+            p
+        };
+        let mut group = group;
+        assert_eq!(pending(&mut group), pending(&mut one));
+        for b in 0..one.nblocks() as usize {
+            let at = |h: &Heap| h.hints.0.slots[b].load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(at(&group), at(&one));
+        }
+    }
+
     #[test]
     fn read_side_under_concurrent_writers() {
         #[derive(Clone, Copy)]
