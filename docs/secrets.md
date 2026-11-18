@@ -2817,9 +2817,10 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
    GET has no CSRF check, and the session was checked once) — now only the gateway's own token or
    login opens it (#166). One low: an Atlas user named `.` or `..` turned the API path into the
    collection's (#173, refused now). One to confirm: ScyllaDB's audit log with a password in a CQL
-   statement (Cassandra's obfuscates it; Snowflake's key pairs avoid it). Building: CQL logins set
-   by `HASHED PASSWORD` (bcrypt made in rolld) where the server takes it, so no password is in a
-   statement at all (#165).
+   statement: answered (#165, d8d21b7c7). ScyllaDB's audit log masks a plain password, but tracing
+   keeps the whole statement on both servers, so rolld now sends `HASHED PASSWORD` (bcrypt, made in
+   rolld) wherever the server takes it: always on Cassandra, and for a superuser's `CREATE ROLE` on
+   ScyllaDB, whose `ALTER ROLE … HASHED PASSWORD` is a server error. Checked live on both.
 0c. **Azure DevOps** (#227): a sync to variable groups as secret variables, and Azure Pipelines
    logging in with its own OIDC token (one pipeline or service connection per identity), as Vault,
    Infisical and Doppler integrate. Azure never returns a secret variable's value and its update
