@@ -17,19 +17,34 @@ enum Package {
     Stage,
     /// sbt-assembly: one jar.
     Assembly,
+    /// Neither: the compiled tree on the sbt image, the service's start run in it.
+    Tree,
 }
 
-/// sbt-native-packager's `normalizedName`: lowercase, runs of other characters as `-`.
+/// sbt's `normalizedName` (`normalizeModuleID`): lowercase, each run of characters other than
+/// letters, digits and `_` as one `-`, nothing trimmed (what native-packager names the script).
 fn normalized(name: &str) -> String {
     let mut out = String::new();
+    let mut run = false;
     for c in name.chars() {
-        if c.is_ascii_alphanumeric() {
+        if c.is_ascii_alphanumeric() || c == '_' {
             out.push(c.to_ascii_lowercase());
-        } else if !out.ends_with('-') {
+            run = false;
+        } else if !run {
             out.push('-');
+            run = true;
         }
     }
-    out.trim_matches('-').to_string()
+    out
+}
+
+/// `name := "shop"` (or `"""shop"""`, Play's seed's): the name as written.
+fn sbt_name(build: &str) -> Option<String> {
+    build.lines().find_map(|l| {
+        let v = l.trim().strip_prefix("name")?.trim_start().strip_prefix(":=")?.trim();
+        let v = v.strip_prefix("\"\"\"").and_then(|v| v.split("\"\"\"").next()).or_else(|| v.strip_prefix('"').and_then(|v| v.split('"').next()))?;
+        Some(v.to_string())
+    })
 }
 
 pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Error> {
@@ -44,18 +59,13 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
     } else if plugins.contains("sbt-assembly") {
         Package::Assembly
     } else if o.start.is_some() {
-        notes.push("neither sbt-native-packager nor sbt-assembly in project/plugins.sbt: the start set in the service runs in the build's tree".into());
-        Package::Stage
+        notes.push("neither sbt-native-packager nor sbt-assembly in project/plugins.sbt: compiled (sbt compile), and the start set in the service runs in the tree, on the sbt image".into());
+        Package::Tree
     } else {
         return Err(Error::NoBinary("build.sbt: add sbt-native-packager (stage) or sbt-assembly (one jar) to project/plugins.sbt, or set start".into()));
     };
-    // `name := "shop"` names the stage's start script.
-    let name = build
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("name").map(str::trim_start).and_then(|r| r.strip_prefix(":=")).map(str::trim))
-        .and_then(|v| v.strip_prefix('"').and_then(|v| v.split('"').next()))
-        .map(normalized)
-        .filter(|n| !n.is_empty());
+    // `name := "shop"` names the stage's start script; only a safe one is put in a command.
+    let name = sbt_name(&build).map(|n| normalized(&n)).filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
     let (build_cmd, start) = match package {
         Package::Stage => {
             let Some(name) = name.clone().or_else(|| o.start.is_some().then(String::new)) else {
@@ -73,6 +83,8 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
             notes.push("sbt-assembly: built as one jar (sbt assembly)".into());
             ("sbt -batch assembly", "java $JAVA_OPTS -jar /app/app.jar".to_string())
         }
+        // The service's own start (checked above): none detected.
+        Package::Tree => ("sbt -batch compile", String::new()),
     };
     if play {
         notes.push("Play needs its secret: set PLAY_HTTP_SECRET_KEY (play.http.secret.key = ${?PLAY_HTTP_SECRET_KEY})".into());
@@ -106,13 +118,15 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
         let pick = match package {
             Package::Stage => "mkdir -p /out && cp -r target/universal/stage/. /out/",
             Package::Assembly => "mkdir -p /out && jar=$(ls target/scala-*/*.jar 2>/dev/null | head -n 1) && test -n \"$jar\" && cp \"$jar\" /out/app.jar",
+            Package::Tree => "mkdir -p /out && cp -r /src/. /out/",
         };
         match c.build {
             Some(build) => df.run(&CACHES, &format!("{build} && {pick}")),
             None => df.run(&[], pick),
         }
-        df.from(JRE, None);
-        df.line("RUN useradd --system --uid 10001 app");
+        // The tree's start may run sbt itself: it stays on the sbt image.
+        df.from(if package == Package::Tree { SBT } else { JRE }, None);
+        df.line("RUN useradd --system --uid 10001 --create-home app");
         df.line("WORKDIR /app");
         df.line("COPY --from=build --chown=app /out/ /app/");
         df.env(&[("JAVA_OPTS", "-XX:MaxRAMPercentage=75")]);
@@ -125,7 +139,7 @@ pub(crate) fn detect(tree: &dyn Tree, o: &Overrides) -> Result<Option<Draft>, Er
         language_version: Some("21".into()),
         install: Some("sbt -batch update".into()),
         build: Some(build_cmd.into()),
-        start: Some(start),
+        start: (!start.is_empty()).then_some(start),
         notes,
         render,
     }))
