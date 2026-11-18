@@ -2652,10 +2652,11 @@ put items 1–11 first. A second review that day (after #78, against the same si
    doesn't follow and every pull request (`GitPush`, `GitPull`), each checked against the
    repository's refs; previews builds the environments, comments and gates forks behind a
    writer's approval (its side is the previews thread's, stacked on this).
-2. **Base image updates and end-of-life runtimes** (Railway's automatic security patches, Heroku's
-   stack updates): each build keeps its base images' digests; a moved base says "base image
-   updated" (the tag watch's `remote_digest`), `rebuild_on_base` rebuilds the same revision, and
-   the plan warns about a runtime past its end of life.
+2. **Base image updates** (Railway's automatic security patches, Heroku's stack updates): each
+   build keeps its base images' digests; a moved base says "base image updated" (the tag watch's
+   `remote_digest`), and `rebuild_on_base` rebuilds the same revision. Done: a plan names a
+   runtime past its end of life, or within 90 days of it (Node, Python, Ruby and PHP, by their
+   projects' schedules; `version::end_of_life`), and where to set a newer one.
 3. **Challenge mode** (Vercel's Attack Challenge Mode): a `challenge` firewall action and an
    environment switch serving a small proof-of-work page and an HMAC cookie, verified bots let
    through.
