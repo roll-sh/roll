@@ -1761,6 +1761,44 @@ would go, so it carries the shape of the configuration and no value.
 - A dotenv file is one `KEY=value` per line (quoted values on one line; a quote that runs past its
   line is refused), and its errors name the line, never its text.
 
+### Other roll products
+
+A roll product that needs an outside credential takes a `roll://ENV[/folder]/KEY` reference
+where it would otherwise keep its own sealed copy, so the value lives once, in roll secrets, and
+a rotation reaches the product without anyone pasting it again (as 1Password's `op://` and Vault
+Agent's templates do).
+
+- **Which products.** roll storage's replication targets to buckets outside roll: the access key
+  id and the secret (`POST /v1/storage/replication-targets` with
+  `"secret_access_key": "roll://production/AWS_SECRET_ACCESS_KEY"`). Search snapshot
+  repositories, roll code's reviewer provider keys and the agents' gateway upstreams still keep
+  sealed copies.
+- **Who reads it.** The product asks rolld in process (`Secrets::resolve_for(resource,
+  reference)`), naming the workspace resource that needs the value: a replication target
+  resolves for the source bucket that replicates through it. The project is the one whose canvas
+  holds that resource *and* that stands for it (`Workspace::trusts`): a person's canvas only
+  for what's theirs, never membership alone. A reference names a project
+  (`roll://PROJECT@ENV/KEY`) only if it's that one, and several such projects need it named.
+- **Protected environments.** As a roll apps service reads its own environment: a resource its
+  project stands for reads as that project's runtime, protected environments and sensitive keys
+  included. An ephemeral environment that isn't trusted never reaches a protected one (its base,
+  an import or a reference), and what only comes from there is refused as protected. A dynamic
+  credential is refused: a product keeps its connection past any lease.
+- **Audit.** Every read is `secrets.resolve` by the resource, named `<product>:<kind>:<ref>`
+  (`storage:bucket:photos`), with the one key read.
+- **Refusals** say which part failed, never the value: no project, not trusted, no such key,
+  protected, or can't be used (a dynamic credential, a reference inside the value that doesn't
+  resolve).
+- **Rotation.** Nothing is cached across calls in roll secrets. A product keeps what it built
+  (storage: one client per target and source bucket) while the folder's digest
+  (`Secrets::digest_for`, no value, not audited) stays the same, and resolves again when it
+  moves, so the next connection after a change in roll uses the new value. A reference that stops
+  resolving fails visibly where the product works (storage: replication waits and retries, with
+  why in its log), and nothing is dropped.
+- **Who may write one.** Storage takes references in a replication target only from the operator
+  (its token, an admin's session): a scoped token that manages targets could otherwise point a
+  reference at any key the bucket's project holds and send it to an endpoint it chose.
+
 ### Templates
 
 For a tool that reads a config file rather than its environment, `roll secrets render

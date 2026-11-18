@@ -480,6 +480,41 @@ impl Secrets {
         Ok((v, problem.into_iter().map(|p| Problem { key: key.into(), problem: p }).collect()))
     }
 
+    /// One key's value for another roll product (`consumers.rs`), as `caller` (a runtime consumer)
+    /// reads it: audited as `secrets.resolve` by `consumer`, no dynamic credential, and what an
+    /// untrusted ephemeral environment only reaches through a protected one refused as protected.
+    pub(crate) fn resolve_one(&self, project: &str, slug: &str, path: &str, key: &str, consumer: &str, caller: &Caller) -> std::result::Result<crate::consumers::Resolved, crate::consumers::Refusal> {
+        use crate::consumers::{Refusal, Resolved};
+        let missing = |e: Error| match e {
+            Error::NotFound(m) => Refusal::NoSuchKey(m),
+            e => Refusal::Failed(e),
+        };
+        let narrowed = self.caller_for(project, slug, caller).map_err(missing)?;
+        let dek = self.project(project)?;
+        let entries = self.view(project, slug, path, &narrowed, false, Action::Reveal).map_err(missing)?;
+        let Some(e) = entries.iter().find(|e| e.row.key == key) else {
+            // Set, but only through a protected environment this one may not read.
+            let through_protected = self.view(project, slug, path, caller, false, Action::Reveal).is_ok_and(|all| all.iter().any(|e| e.row.key == key));
+            return Err(if through_protected {
+                Refusal::Protected(format!("{key} in {slug} comes from a protected environment, and {slug} is an ephemeral environment that isn't trusted"))
+            } else {
+                Refusal::NoSuchKey(format!("no secret {key} in {slug}:{path}"))
+            });
+        };
+        if e.row.link.as_ref().is_some_and(|l| l.mode == Mode::Dynamic) {
+            return Err(Refusal::Unusable(format!("{key} is a dynamic credential, which ends with its lease: link it as managed or live for another product")));
+        }
+        let mut r = Resolver::new(self, project, slug, &dek, &narrowed, true, consumer)?;
+        r.no_dynamic = true;
+        let (value, problem) = r.entry(e);
+        r.finish(slug)?;
+        if let Some(p) = problem {
+            return Err(Refusal::Unusable(format!("{key} doesn't resolve: {p}")));
+        }
+        self.audit_now(project, &narrowed, "secrets.resolve", Some(slug), Some(path), &[key.to_string()], &format!("resolved {key} for {consumer}"));
+        Ok(Resolved { value, version: e.row.version, expires_at: e.row.expires_at })
+    }
+
     /// Every effective value of a folder (`…/values`, `roll run`, an app's start). Audited as
     /// `action` by `consumer`.
     pub fn values(&self, project: &str, slug: &str, path: &str, resolve: bool, consumer: Option<&str>, caller: &Caller) -> Result<Values> {

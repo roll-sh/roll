@@ -187,7 +187,7 @@ access_points (account TEXT /* 12 digits */, kind TEXT /* ap | olap */, name TEX
          PRIMARY KEY (account, kind, name)) WITHOUT ROWID       -- migration 7
 replication_targets (name TEXT PRIMARY KEY, endpoint /* NULL = AWS S3 */, region,
          access_key_id /* NULL = the deployment's AWS credentials */,
-         secret TEXT /* AES-256-GCM-sealed under state.replication_target_key */,
+         secret TEXT /* AES-256-GCM-sealed under state.replication_target_key, or a roll:// reference */,
          path_style, buckets TEXT /* JSON */, created_at, updated_at)   -- migration 7
 replica_versions (bucket_id, key, version_id /* the source version */, dest /* <bucket>@<target> */,
          target_version_id /* the version the target made of it */, replicated_at,
@@ -602,7 +602,14 @@ deployment's credentials. See [compatibility](compatibility.md#event-notificatio
 a dedicated 32-byte key in `state` (`replication_target_key`, created once and never rotated
 away, so a sealed secret stays readable as long as the metadata exists). They're opened only to
 build the target's S3 client, never returned by the API, and never printed (`Secret`'s `Debug`
-is redacted).
+is redacted). Either credential may instead be a `roll://ENV[/folder]/KEY` reference to a roll
+secret (docs/secrets.md, "Other roll products"): the reference is stored as written, and the
+value is resolved through rolld's `TargetCredentials` (roll secrets, audited as
+`storage:bucket:<source bucket>`) each time the target's client is built for a source bucket.
+That client is kept while the references' digests stay the same, so a rotation in roll reaches
+the next connection; a reference that doesn't resolve leaves the row queued and retried (logged
+with why, never a value) until the row's retention fails it. Only the operator sets references
+or changes a target that has them.
 
 **Inventory reports** (`s3-server/src/inventory.rs`) are checked hourly: each enabled inventory
 configuration whose last run (`state` `job:inventory:<bucket id>:<id>`) is a day (or week) old
@@ -1431,7 +1438,8 @@ POST   /v1/storage/session-keys/rotate           → { key_id }
 
 GET    /v1/storage/replication-targets           → [Target]
 POST   /v1/storage/replication-targets  { name, endpoint? /* none: AWS S3 */, region? (us-east-1),
-                                          access_key_id?, secret_access_key? /* with the key; write-only */,
+                                          access_key_id?, secret_access_key? /* with the key; write-only */
+                                          /* either may be roll://ENV[/folder]/KEY (both, if the key id is): operator only */,
                                           path_style? (true), buckets?: [string] } → Target
 GET    /v1/storage/replication-targets/{name}    → Target
 PUT    /v1/storage/replication-targets/{name}  { same, without name; no secret_access_key keeps it } → Target
@@ -1464,8 +1472,9 @@ ReplicationRule = { id, priority: number | null, enabled, prefix /* "" = every k
                                replicated, operations_failed, replicated_after_threshold } /* S3's replication metrics, since start */ }
 ReplicationRuleInput = { destination, target? /* default: the target listing the bucket, else a roll bucket */, id?, priority?,
                          enabled? (default true), prefix?, tags?, delete_markers?, existing_objects?, storage_class?, owner_override? }
-Target = { name, endpoint: string | null, region, access_key_id: string | null,
-           credentials: "access_key" | "deployment", path_style, buckets: [string], created_at, updated_at }
+Target = { name, endpoint: string | null, region, access_key_id: string | null /* or its roll:// reference */,
+           secret_ref: string | null /* the secret's roll:// reference */,
+           credentials: "access_key" | "deployment" | "reference", path_style, buckets: [string], created_at, updated_at }
 PublicAccessBlock = { block_public_acls, ignore_public_acls, block_public_policy, restrict_public_buckets }
 NotificationConfig = { id /* generated when empty */, type: "queue" | "topic" | "function" /* from the ARN when omitted */,
                        destination /* arn:roll:queues:<vhost>:<queue> | arn:roll:streams:<stream>:<topic> |

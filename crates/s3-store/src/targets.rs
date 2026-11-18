@@ -11,6 +11,11 @@
 //! (`replication_target_key`, created once and never rotated away, so a sealed secret stays
 //! readable for as long as the metadata exists). A target without an access key uses the
 //! deployment's own AWS credentials (the default chain, as the backing bucket does).
+//!
+//! Either credential may instead be a `roll://ENV[/folder]/KEY` reference to a roll secret
+//! (docs/secrets.md, "Other roll products"): the reference is stored as written, in place of a
+//! sealed copy, and replication resolves it through rolld each time it builds the target's client.
+//! A reference names a value; it isn't one.
 
 use crate::error::{Result, StoreError};
 use crate::rows;
@@ -49,6 +54,18 @@ impl std::fmt::Debug for Secret {
     }
 }
 
+/// Whether a credential is a `roll://` reference to a roll secret rather than the value.
+pub fn is_reference(s: &str) -> bool {
+    s.starts_with("roll://")
+}
+
+/// A reference's shape (roll secrets checks the rest when it resolves it): `roll://` then
+/// letters, digits and `-_./@`, at most 512 characters.
+fn check_reference(field: &str, s: &str) -> Result<()> {
+    let ok = s.len() <= 512 && s.len() > "roll://".len() && s["roll://".len()..].bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./@".contains(&b));
+    if ok { Ok(()) } else { Err(invalid(format!("{field}: a reference is roll://ENV/KEY, roll://ENV/folder/KEY or roll://PROJECT@ENV/KEY"))) }
+}
+
 /// A replication target as stored (its secret only when asked for).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ReplicationTarget {
@@ -57,16 +74,26 @@ pub struct ReplicationTarget {
     /// `https://s3.example.com`; `None`: AWS S3.
     pub endpoint: Option<String>,
     pub region: String,
-    /// `None`: the deployment's own AWS credentials.
+    /// `None`: the deployment's own AWS credentials. May be a `roll://` reference.
     pub access_key_id: Option<String>,
+    /// The sealed secret, opened (`replication_target`), when it isn't a reference.
     #[serde(skip)]
     pub secret: Option<Secret>,
+    /// The secret's `roll://` reference, when it is one (stored instead of a sealed copy).
+    pub secret_ref: Option<String>,
     /// Path-style requests (most S3-compatible services want them).
     pub path_style: bool,
     /// Destination buckets of this target that replication rules may name by bucket ARN.
     pub buckets: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+impl ReplicationTarget {
+    /// The `roll://` references among its credentials (the access key id's first).
+    pub fn references(&self) -> Vec<&str> {
+        self.access_key_id.as_deref().filter(|k| is_reference(k)).into_iter().chain(self.secret_ref.as_deref()).collect()
+    }
 }
 
 /// What a target is made of (create, or replace on update).
@@ -79,7 +106,8 @@ pub struct TargetSpec {
     pub region: Option<String>,
     #[serde(default)]
     pub access_key_id: Option<String>,
-    /// Required with `access_key_id` on create; on update, omitted keeps the stored one.
+    /// Required with `access_key_id` on create; on update, omitted keeps the stored one. A
+    /// `roll://` reference is kept as written instead of sealed.
     #[serde(default)]
     pub secret_access_key: Option<Secret>,
     #[serde(default)]
@@ -106,9 +134,14 @@ pub fn validate_target_name(name: &str) -> std::result::Result<(), String> {
 
 const COLS: &str = "name, endpoint, region, access_key_id, secret, path_style, buckets, created_at, updated_at";
 
-/// A row, with the sealed secret.
+/// A row, with the sealed secret (a reference goes in `secret_ref` instead).
 fn target_row(r: &rusqlite::Row) -> rusqlite::Result<(ReplicationTarget, Option<String>)> {
     let buckets: String = r.get(6)?;
+    let stored: Option<String> = r.get(4)?;
+    let (secret_ref, sealed) = match stored {
+        Some(s) if is_reference(&s) => (Some(s), None),
+        s => (None, s),
+    };
     Ok((
         ReplicationTarget {
             name: r.get(0)?,
@@ -116,12 +149,13 @@ fn target_row(r: &rusqlite::Row) -> rusqlite::Result<(ReplicationTarget, Option<
             region: r.get(2)?,
             access_key_id: r.get(3)?,
             secret: None,
+            secret_ref,
             path_style: r.get::<_, i64>(5)? != 0,
             buckets: serde_json::from_str(&buckets).unwrap_or_default(),
             created_at: r.get(7)?,
             updated_at: r.get(8)?,
         },
-        r.get(4)?,
+        sealed,
     ))
 }
 
@@ -163,11 +197,15 @@ impl TargetSpec {
             return Err(invalid(format!("invalid region {region:?}")));
         }
         let key = self.access_key_id.clone().filter(|k| !k.is_empty());
-        if key.as_ref().is_some_and(|k| k.len() > 128 || !k.bytes().all(|b| b.is_ascii_graphic())) {
-            return Err(invalid("invalid access_key_id"));
+        match key.as_deref() {
+            Some(k) if is_reference(k) => check_reference("access_key_id", k)?,
+            Some(k) if k.len() > 128 || !k.bytes().all(|b| b.is_ascii_graphic()) => return Err(invalid("invalid access_key_id")),
+            _ => {}
         }
-        if self.secret_access_key.as_ref().is_some_and(|s| s.0.is_empty() || s.0.len() > 256) {
-            return Err(invalid("secret_access_key must be 1-256 characters"));
+        match self.secret_access_key.as_ref().map(Secret::expose) {
+            Some(s) if is_reference(s) => check_reference("secret_access_key", s)?,
+            Some(s) if s.is_empty() || s.len() > 256 => return Err(invalid("secret_access_key must be 1-256 characters")),
+            _ => {}
         }
         if self.buckets.len() > 100 {
             return Err(invalid("a target serves at most 100 buckets"));
@@ -245,8 +283,12 @@ impl Store {
     pub async fn put_replication_target(&self, name: &str, spec: &TargetSpec, create: bool) -> Result<ReplicationTarget> {
         validate_target_name(name).map_err(invalid)?;
         let (endpoint, region, key, path_style, buckets) = spec.check()?;
-        let master = self.ensure_target_key().await?;
-        let sealed = spec.secret_access_key.as_ref().map(|s| crate::sts::seal(KEY_ID, &master, s.0.as_bytes()));
+        // A reference is stored as written; a value only sealed.
+        let sealed = match spec.secret_access_key.as_ref() {
+            Some(s) if is_reference(&s.0) => Some(s.0.clone()),
+            Some(s) => Some(crate::sts::seal(KEY_ID, &self.ensure_target_key().await?, s.0.as_bytes())),
+            None => None,
+        };
         let now = self.now();
         let buckets_json = rows::json(&buckets)?;
         self.write(|c| {
@@ -256,12 +298,17 @@ impl Store {
                 (None, false) => return Err(StoreError::NotFound(format!("no replication target {name}"))),
                 _ => {}
             }
+            let kept = |o: &ReplicationTarget, s: &Option<String>| s.clone().or_else(|| o.secret_ref.clone());
             let secret = match (&key, &sealed, &old) {
                 (None, _, _) => None,
                 (Some(_), Some(s), _) => Some(s.clone()),
-                (Some(k), None, Some((o, s))) if o.access_key_id.as_ref() == Some(k) && s.is_some() => s.clone(),
+                (Some(k), None, Some((o, s))) if o.access_key_id.as_ref() == Some(k) && kept(o, s).is_some() => kept(o, s),
                 (Some(_), None, _) => return Err(invalid("secret_access_key is required with access_key_id")),
             };
+            // A key id that rotates in roll secrets needs its secret from there too.
+            if key.as_deref().is_some_and(is_reference) && !secret.as_deref().is_some_and(is_reference) {
+                return Err(invalid("with a roll:// access_key_id, secret_access_key must be a roll:// reference too (they rotate together)"));
+            }
             let created = old.as_ref().map_or(now, |(o, _)| o.created_at);
             c.execute(
                 &format!("INSERT INTO replication_targets ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -317,5 +364,9 @@ mod tests {
         let s = TargetSpec { secret_access_key: Some(Secret::new("supersecret")), ..Default::default() };
         assert!(!format!("{s:?}").contains("supersecret"));
         assert_eq!(format!("{:?}", Secret::new("supersecret")), "Secret(REDACTED)");
+        let refs = |k: &str, s: &str| TargetSpec { access_key_id: Some(k.into()), secret_access_key: Some(Secret::new(s)), ..Default::default() }.check();
+        assert!(refs("roll://production/AWS_ACCESS_KEY_ID", "roll://shop@production/aws/AWS_SECRET_ACCESS_KEY").is_ok());
+        assert!(refs("AKIAFAKE", "roll://production/has space").is_err());
+        assert!(refs("roll://", "roll://production/K").is_err());
     }
 }

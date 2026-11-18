@@ -53,6 +53,7 @@ pub mod suggestions;
 mod sweep;
 pub mod syncs;
 mod caller;
+pub mod consumers;
 pub mod kms;
 mod write;
 
@@ -60,6 +61,7 @@ pub use access::{Action, Approval, Caller, Minted, People, Person, Scope, Worklo
 pub use api::router;
 pub use crypto::{Keyring, Value};
 pub use audit::{AuditEntry, AuditFilter};
+pub use consumers::{Reference, Refusal, Resolved, ResourceRef};
 pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
 pub use links::{Link, LinkProvider, Links, Mode};

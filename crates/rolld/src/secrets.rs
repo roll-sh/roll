@@ -1129,6 +1129,35 @@ impl apps_control::integrations::SecretSource for ForApps {
     }
 }
 
+/// roll secrets for roll storage's replication targets (`s3_server::TargetCredentials`): a
+/// target's `roll://` references resolve for the source bucket, the canvas resource asking
+/// (`Secrets::resolve_for`: its project must stand for it; audited as `storage:bucket:<name>`).
+/// Set once the store is open (it opens after storage starts).
+#[derive(Clone, Default)]
+pub struct ForStorage(Arc<OnceLock<Arc<Secrets>>>);
+
+impl ForStorage {
+    pub fn set(&self, secrets: Arc<Secrets>) {
+        let _ = self.0.set(secrets);
+    }
+
+    async fn run<T: Send + 'static>(&self, bucket: &str, reference: &str, f: fn(&Secrets, &roll_secrets::ResourceRef, &str) -> Result<T, roll_secrets::Refusal>) -> Result<T, String> {
+        let secrets = self.0.get().cloned().ok_or("roll secrets is starting")?;
+        let (resource, reference) = (roll_secrets::ResourceRef::new(roll_workspace::Kind::Bucket, bucket), reference.to_string());
+        tokio::task::spawn_blocking(move || f(&secrets, &resource, &reference).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
+    }
+}
+
+impl s3_server::TargetCredentials for ForStorage {
+    fn resolve<'a>(&'a self, bucket: &'a str, reference: &'a str) -> futures::future::BoxFuture<'a, Result<s3_store::Secret, String>> {
+        Box::pin(async move { self.run(bucket, reference, |s, r, x| s.resolve_for(r, x).map(|v| s3_store::Secret::new(v.value.expose()))).await })
+    }
+
+    fn digest<'a>(&'a self, bucket: &'a str, reference: &'a str) -> futures::future::BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move { self.run(bucket, reference, |s, r, x| s.digest_for(r, x)).await })
+    }
+}
+
 /// Workload identities' logins get roll-access workload tokens (`Access::mint_workload`): the
 /// identity's scope, its addresses, for its minutes, owned by whoever made it.
 pub struct Workloads(pub Arc<roll_access::Access>);
