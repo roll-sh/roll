@@ -55,15 +55,80 @@ resource "roll_secrets_sync" "vercel" {
 data "roll_secrets_values" "production" {
   environment = "production"
 }
+
+# Without values in the state (Terraform 1.11+): read for this run only, write write-only.
+ephemeral "roll_secrets_values" "production" {
+  environment = "production"
+  dynamic     = true # a dynamic credential for the run, revoked when it closes
+}
+
+resource "roll_secret" "staging_db" {
+  environment      = "staging"
+  key              = "DB_URL"
+  value_wo         = ephemeral.roll_secrets_values.production.values["DB_URL"]
+  value_wo_version = 1 # bump to write it again
+}
+
+# roll apps: a service, a variable, a custom domain, an environment, a link and a notification
+# target (docs/apps/http-api.md).
+resource "roll_app_service" "web" {
+  name          = "web"
+  git_url       = "https://github.com/acme/web"   # or image, or repo (roll code); none: roll up
+  # git_username = "deploy"; git_token = var.gitlab_token   # a private repository's login
+  max_instances = 3
+}
+
+resource "roll_app_variable" "level" {
+  service = roll_app_service.web.id
+  name    = "LOG_LEVEL"
+  value   = "info"
+}
+
+resource "roll_app_domain" "www" {
+  service  = roll_app_service.web.id
+  hostname = "www.example.com"   # point its CNAME at .target
+}
+
+resource "roll_app_environment" "staging" {
+  service = roll_app_service.web.id
+  name    = "staging"
+  branch  = "develop"            # none: it deploys only when asked
+}
+
+resource "roll_app_link" "orders" {
+  service = roll_app_service.web.id
+  kind    = "postgres"           # redis, bucket, stream, nosql, search, service
+  ref     = "orders"
+  prefix  = "ORDERS"             # ORDERS_DATABASE_URL; .vars names them
+}
+
+resource "roll_app_notification" "failures" {
+  kind   = "slack"
+  url    = var.slack_webhook
+  events = ["deploy.failed", "crash_loop"]
+}
+
+data "roll_app_service" "api" {
+  name = "api"                   # made elsewhere: .url, .environments
+}
 ```
 
-- Identities, syncs and tokens don't change in place: every attribute replaces them.
+- An app's variable isn't read back (a sealed one never shows again): a change made outside
+  Terraform is put back only when the value in the file changes. Its value lands in the state.
+
+- Identities, syncs and tokens don't change in place: every attribute replaces them, and so do
+  `roll_secrets_ca`, `roll_secrets_ssh_ca`, `roll_secrets_transit_key` and
+  `roll_secrets_outside_database` (whose `admin_url_wo` is write-only: bump
+  `admin_url_wo_version` to register it again).
+
+- A notification target's URL is never read back, and a new URL is a new target. A webhook's
+  signing secret is in `.secret` from when it's made. Filters left out are the defaults.
 
 - A key's value is read back on refresh, references as written, so a change made outside
   Terraform shows in the plan (the token needs `reveal`).
 - In a protected environment a write opens a change request for someone else to approve, and
   Terraform reports it as an error.
-- Values in `roll_secret` and the data source land in Terraform's state: keep the state as
-  private as the values.
+- Values in `roll_secret`'s `value` and the data source land in Terraform's state: keep the state as
+  private as the values, or use `ephemeral "roll_secrets_values"` and `value_wo`, which never do.
 
 Tests: `TF_ACC=1 go test ./...` with `terraform` on `PATH` (CI's `terraform` job).

@@ -13,6 +13,7 @@ POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel
 GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/commits
 GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs
 POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback
+POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollout
 GET /v1/apps/services/{id}/environments/{env}/domains
 POST /v1/apps/services/{id}/environments/{env}/domains
 PATCH /v1/apps/services/{id}/environments/{env}/domains/{host}
@@ -29,8 +30,15 @@ GET /v1/apps/services/{id}/environments/{env}/metrics
 POST /v1/apps/services/{id}/environments/{env}/promote
 POST /v1/apps/services/{id}/environments/{env}/redeploy
 POST /v1/apps/services/{id}/environments/{env}/restart
+POST /v1/apps/services/{id}/environments/{env}/cache/purge
 POST /v1/apps/services/{id}/environments/{env}/rollback
 GET /v1/apps/services/{id}/environments/{env}/routes
+GET /v1/apps/services/{id}/environments/{env}/analytics
+GET /v1/apps/services/{id}/environments/{env}/vitals
+GET /v1/apps/services/{id}/environments/{env}/app-metrics
+GET /v1/apps/services/{id}/environments/{env}/errors
+GET /v1/apps/services/{id}/environments/{env}/traces
+GET /v1/apps/services/{id}/environments/{env}/traces/{trace}
 GET /v1/apps/services/{id}/environments/{env}/runs
 POST /v1/apps/services/{id}/environments/{env}/runs
 POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize
@@ -76,7 +84,6 @@ GET /v1/code/agents/{owner}/login/{user_code}
 GET /v1/code/agents/{owner}/lookup/{source}/{kind}
 POST /v1/code/agents/{owner}/lookup/{source}/{kind}
 GET /v1/code/agents/{owner}/machines
-POST /v1/code/agents/{owner}/machines
 DELETE /v1/code/agents/{owner}/machines/{machine}
 PATCH /v1/code/agents/{owner}/machines/{machine}
 POST /v1/code/agents/{owner}/machines/{machine}/projects
@@ -87,10 +94,8 @@ DELETE /v1/code/agents/{owner}/sandboxes/{id}
 POST /v1/code/agents/{owner}/sandboxes/{id}/start
 POST /v1/code/agents/{owner}/sandboxes/{id}/stop
 GET /v1/code/agents/{owner}/settings
-GET /v1/code/agents/{owner}/shares
 DELETE /v1/code/agents/{owner}/shares/{id}
 GET /v1/code/agents/{owner}/state
-POST /v1/code/agents/{owner}/threads/{thread}/shares
 DELETE /v1/code/agents/{owner}/threads/{thread}/work
 POST /v1/code/agents/{owner}/threads/{thread}/work
 GET /v1/code/changes/{id}/ai-jobs
@@ -165,7 +170,6 @@ POST /v1/code/threads/{id}/unresolve
 POST /v1/code/work/{id}/complete
 POST /v1/code/work/{id}/heartbeat
 POST /v1/code/work/{id}/release
-GET /v1/previews/projects/{project}/settings
 PUT /v1/previews/projects/{project}/settings
 GET /v1/previews/projects/{project}/usage
 GET /v1/previews/{id}/activity
@@ -173,8 +177,10 @@ PUT /v1/previews/{id}/env
 POST /v1/previews/{id}/keep
 GET /v1/previews/{id}/notes
 POST /v1/previews/{id}/notes/{note}/resolve
+GET /v1/previews/{id}/notes/{note}/crop
 GET /v1/previews/{id}/logs
 POST /v1/previews/{id}/refresh
+GET /v1/previews/{id}/requests
 GET /v1/previews/{id}/screenshot
 GET /v1/previews/{id}/shares
 DELETE /v1/previews/{id}/shares/{share}
@@ -252,4 +258,3 @@ GET /v1/secrets/projects/{project}/suggestions
 POST /v1/secrets/projects/{project}/syncs/preview
 DELETE /v1/secrets/projects/{project}/syncs/{id}
 POST /v1/secrets/projects/{project}/syncs/{id}/run
-DELETE /v1/secrets/projects/{project}/tokens/{id}

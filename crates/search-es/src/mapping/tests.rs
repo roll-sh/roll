@@ -19,10 +19,9 @@ fn ctx_for(settings: Option<&Value>) -> MappingCtx {
     MappingCtx::from_settings(&s)
 }
 
-/// Types roll search rejects on purpose.
-fn skipped(case: &Value) -> bool {
-    let s = case.to_json();
-    s.contains("semantic_text")
+/// Types roll search rejects on purpose (none now).
+fn skipped(_case: &Value) -> bool {
+    false
 }
 
 fn check_error(label: &str, got: EsError, expected: &Value) {
@@ -176,4 +175,46 @@ fn composing_templates_replaces_all_but_object_definitions() {
         compose(r#"{"properties":{"a":{"dynamic":"strict","properties":{"k":{"type":"keyword"}}}}}"#, r#"{"properties":{"a.k2":{"type":"keyword"}}}"#),
         r#"{"properties":{"a":{"dynamic":"strict","properties":{"k":{"type":"keyword"},"k2":{"type":"keyword"}}}}}"#
     );
+}
+
+#[test]
+fn an_updateable_synonym_analyzer_only_searches() {
+    // An `updateable` synonym filter makes an analyzer search-time only: Elasticsearch 9.5.5
+    // refuses it as a field's `analyzer`, on create and on a mapping update, and takes it as the
+    // `search_analyzer`.
+    let settings = parse(
+        br#"{"analysis":{"filter":{"s":{"type":"synonym_graph","synonyms_set":"products","updateable":true},"plain":{"type":"synonym_graph","synonyms":["a, b"]}},
+             "analyzer":{"a":{"tokenizer":"standard","filter":["lowercase","s"]},"b":{"tokenizer":"standard","filter":["plain"]}}}}"#,
+    )
+    .unwrap()
+    .unwrap();
+    let ctx = ctx_for(Some(&settings));
+    let refused = parse(
+        br#"{"error":{"root_cause":[{"type":"mapper_exception","reason":"analyzer [a] contains filters [s] that are not allowed to run in index time mode."}],"type":"mapper_parsing_exception","reason":"Failed to parse mapping: analyzer [a] contains filters [s] that are not allowed to run in index time mode.","caused_by":{"type":"mapper_exception","reason":"analyzer [a] contains filters [s] that are not allowed to run in index time mode."}},"status":400}"#,
+    )
+    .unwrap()
+    .unwrap();
+    let mapping = |field: &str| parse(format!(r#"{{"properties":{{"t":{field}}}}}"#).as_bytes()).unwrap().unwrap().as_object().unwrap().clone();
+    let e = for_create(&mapping(r#"{"type":"text","analyzer":"a"}"#), &ctx).expect_err("index-time use is refused");
+    check_error("create", e, &refused);
+    let existing = for_create(&mapping(r#"{"type":"text","search_analyzer":"a"}"#), &ctx).expect("search-time use is fine");
+    for_create(&mapping(r#"{"type":"text","analyzer":"b"}"#), &ctx).expect("a filter that isn't updateable indexes");
+    let update = parse(br#"{"properties":{"u":{"type":"text","analyzer":"a"}}}"#).unwrap().unwrap().as_object().unwrap().clone();
+    let e = for_update(&existing, &update, &ctx).expect_err("a mapping update is refused too");
+    check_error("update", e, &refused);
+}
+
+#[test]
+fn a_stored_index_time_updateable_analyzer_still_loads() {
+    // roll accepted such mappings before it refused them as Elasticsearch does: an index stored
+    // with one must still load (with its cluster), only new and changed mappings are refused.
+    let stored = parse(
+        br#"{"settings":{"index":{"analysis":{"filter":{"s":{"type":"synonym_graph","synonyms_set":"products","updateable":"true"}},
+             "analyzer":{"a":{"tokenizer":"standard","filter":["lowercase","s"]}}}}},
+             "mappings":{"properties":{"t":{"type":"text","analyzer":"a"}}}}"#,
+    )
+    .unwrap()
+    .unwrap();
+    let m = crate::meta::IndexMeta::from_json("old", &stored).expect("a stored mapping loads");
+    assert!(!m.mapping.is_empty());
 }

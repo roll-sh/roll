@@ -1,20 +1,27 @@
 //! Control-plane HTTP API for roll search (`/v1/search/...`), merged into rolld's API.
 //!
 //! Errors are `{"error": "..."}` with 400 (invalid), 404 (no such cluster), 409 (name taken,
-//! busy), 413 (a console request over the cluster's body limit) or 500, like the other control
+//! busy, past a person's cap), 413 (a console request over the cluster's body limit) or 500, like the other control
 //! planes. A cluster's password appears only in the
 //! responses that create it (create, branch) or change it (rotate). Creating a cluster answers
 //! in the shape `search-yaml run --cluster-hook` expects (`url`, `username`, `password`, `id`).
 //!
-//! rolld puts the API behind its operator gate (roll-auth), like every product's. On a fleet,
-//! calls about one cluster run on its owner (`crate::cluster::on_owner`), and so does creating a
-//! branch (on its parent's owner).
+//! rolld's gate (roll-auth) lets the operator and signed-in people in (`Access::User`), and
+//! search scopes them ([`Caller`], docs/accounts.md "Phase 2"): the operator and admins see every
+//! cluster; anyone else sees, creates and branches only their own (`SearchCluster::owner`), and
+//! every `/v1/search/clusters/{id}/…` call about another's answers 404, as for a cluster that
+//! doesn't exist. A person's creates, branches and switches to always-on are held to the node's
+//! per-person caps (`SearchConfig::person_caps`), counted in the write's own transaction. A person's own token reaches search as them (roll-access hands it on with
+//! `SignedIn`, without `Operator`). On a fleet, calls about one cluster run on its owner
+//! (`crate::cluster::on_owner`), and so does creating a branch (on its parent's owner); the
+//! check is made from the catalog before the call is forwarded and again on the owner, behind
+//! its own gate.
 
 use crate::control::{ClusterOptions, ConsoleRequest, ConsoleResponse, Control, ControlError, Usage};
-use crate::store::SearchCluster;
+use crate::store::{Caps, SearchCluster};
 use axum::body::Body;
-use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::extract::{FromRequestParts, Path, Query, Request, State};
+use axum::http::{Extensions, HeaderMap, Method, StatusCode, request::Parts};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -51,26 +58,128 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/branches", get(branches).post(branch))
         .route("/v1/search/clusters/{id}/password", post(rotate))
         .route("/v1/search/clusters/{id}/unload", post(unload))
+        .route("/v1/search/clusters/{id}/restore", post(restore))
         .route("/v1/search/clusters/{id}/indices", get(indices))
         .route("/v1/search/clusters/{id}/request", post(request))
         .route("/v1/search/clusters/{id}/usage", get(usage))
         .route("/v1/search/clusters/{id}/keys", post(create_key))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
-        .route("/v1/search/clusters/{id}/indices/{index}/mapping", axum::routing::put(index_mapping))
+        .route("/v1/search/clusters/{id}/indices/{index}/mapping", axum::routing::put(index_mapping).get(index_mapping_get))
+        .route("/v1/search/clusters/{id}/indices/{index}/settings", get(index_settings))
+        .route("/v1/search/clusters/{id}/indices/{index}/refresh", post(index_refresh))
+        .route("/v1/search/clusters/{id}/indices/{index}/analyze", post(index_analyze))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(index_search))
         .route("/v1/search/clusters/{id}/indices/{index}/docs", post(doc_create))
         .route("/v1/search/clusters/{id}/indices/{index}/docs/{doc}", get(doc_get).put(doc_put).delete(doc_delete))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(index_bulk))
         .route("/v1/search/clusters/{id}/indices/{index}/delete_by_query", post(index_delete_by_query))
-        // On a fleet, calls about one cluster run on its owner.
-        .layer(axum::middleware::from_fn({
-            let c = control.clone();
-            move |req: Request, next: Next| crate::cluster::on_owner(c.clone(), req, next)
-        }))
+        // Calls about one cluster: the caller's own, then on its owner.
+        .layer(axum::middleware::from_fn_with_state(control.clone(), per_cluster))
         // The dashboard calls it from the browser, like the other control planes.
         .layer(CorsLayer::permissive())
         .with_state(control)
+}
+
+/// Who is asking. The gate lets the operator, admins and signed-in people through; a request with
+/// neither `Operator` nor `SignedIn` comes from an open daemon (no `ROLL_ADMIN_TOKEN`, loopback
+/// only) or from rolld's own in-process calls, and sees everything, as before owners.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Caller {
+    /// The operator, an admin, or an open daemon: every cluster; what it creates has no owner.
+    All,
+    /// A signed-in person who isn't an admin (`usr_…`), or their own token: their clusters only.
+    Person(String),
+}
+
+impl Caller {
+    pub fn of(ext: &Extensions) -> Caller {
+        if ext.get::<roll_auth::Operator>().is_some() {
+            return Caller::All;
+        }
+        match ext.get::<roll_auth::SignedIn>() {
+            Some(s) if !s.admin => Caller::Person(s.user.clone()),
+            _ => Caller::All,
+        }
+    }
+
+    /// Whether `c` is one the caller may see (anyone else's answers 404).
+    pub fn sees(&self, c: &SearchCluster) -> bool {
+        match self {
+            Caller::All => true,
+            Caller::Person(u) => c.owner.as_deref() == Some(u.as_str()),
+        }
+    }
+
+    /// The caps the caller's creates, branches and settings are held to: the node's per-person
+    /// ones for a person (counted toward the cluster's owner), none for the operator and admins.
+    fn caps(&self, c: &Control) -> Caps {
+        match self {
+            Caller::All => Caps::NONE,
+            Caller::Person(_) => c.cfg.person_caps,
+        }
+    }
+
+    /// The owner a cluster the caller creates gets.
+    fn owner(&self) -> Option<&str> {
+        match self {
+            Caller::All => None,
+            Caller::Person(u) => Some(u),
+        }
+    }
+
+    /// `id_or_name`, if the caller may see it: another's is "no such cluster".
+    async fn get(&self, c: &Control, id_or_name: &str) -> Result<SearchCluster, ControlError> {
+        let d = c.get(id_or_name).await?;
+        if self.sees(&d) { Ok(d) } else { Err(no_such(id_or_name)) }
+    }
+}
+
+fn no_deleted(id: &str) -> ControlError {
+    ControlError::NotFound(format!("no deleted search cluster {id}"))
+}
+
+fn no_such(id_or_name: &str) -> ControlError {
+    ControlError::NotFound(format!("no search cluster {id_or_name}"))
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for Caller {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        Ok(Caller::of(&parts.extensions))
+    }
+}
+
+/// Every `/v1/search/clusters/{id}/…` call: the cluster is resolved from the catalog and must be
+/// the caller's (else 404), then the call runs on the cluster's owner. Each node a call reaches
+/// checks it, so the check holds wherever it lands.
+async fn per_cluster(State(c): State<AppState>, req: Request, next: Next) -> Response {
+    let rest = req.uri().path().strip_prefix("/v1/search/clusters/").map(|r| r.split_once('/').unwrap_or((r, "")));
+    let id = rest.map(|(id, _)| id).filter(|s| !s.is_empty());
+    let Some(id) = id.and_then(|id| urlencoding::decode(id).ok().map(|s| s.into_owned())) else { return next.run(req).await };
+    // A deleted cluster has no owner node: its restore runs where it lands, once the caller
+    // may see it (theirs, or the operator's and admins').
+    if rest.is_some_and(|(_, r)| r == "restore") {
+        return match c.get_deleted(&id).await {
+            Ok(d) if Caller::of(req.extensions()).sees(&d.cluster) => next.run(req).await,
+            Ok(_) => no_deleted(&id).into_response(),
+            Err(e) => e.into_response(),
+        };
+    }
+    let d = match Caller::of(req.extensions()).get(&c, &id).await {
+        Ok(d) => d,
+        // A key revoked while its cluster is deleted is kept for the restore
+        // (`Control::delete_key`): it too runs where it lands, for whoever may see the cluster.
+        Err(ControlError::NotFound(_)) if req.method() == Method::DELETE && rest.is_some_and(|(_, r)| r.starts_with("keys/")) => {
+            return match c.get_deleted(&id).await {
+                Ok(d) if Caller::of(req.extensions()).sees(&d.cluster) => next.run(req).await,
+                _ => no_such(&id).into_response(),
+            };
+        }
+        Err(e) => return e.into_response(),
+    };
+    crate::cluster::on_owner(&c, &d.name, req, next).await
 }
 
 /// Forwards an API call to the owner of cluster `name` when that is another node of the fleet
@@ -89,9 +198,10 @@ async fn forward(c: &Control, name: &str, method: Method, path: &str, headers: &
     Some(cluster.forward(&node, req, 0).await)
 }
 
-async fn info(State(c): State<AppState>) -> Json<Value> {
-    let stats = c.data.stats();
-    Json(json!({
+/// The node's versions, endpoint, defaults and pricing, and for the operator where its data is
+/// and its node-wide figures (clusters loaded, the cache), which a person doesn't get.
+async fn info(State(c): State<AppState>, caller: Caller) -> Json<Value> {
+    let mut v = json!({
         "version": search_es::version::ES_VERSION,
         "opensearch_version": search_es::version::OPENSEARCH_VERSION,
         "lucene_version": search_es::version::LUCENE_VERSION,
@@ -99,13 +209,23 @@ async fn info(State(c): State<AppState>) -> Json<Value> {
         "http": format!("{}:{}", c.cfg.public_host, c.cfg.http_port),
         "tls": c.cfg.tls,
         "domain": c.cfg.domain,
-        "storage": c.objects().description,
         "history_retention_s": c.cfg.history_retention.as_secs(),
+        "deleted_retention_s": c.cfg.deleted_retention.as_secs(),
         "defaults": c.cfg.defaults,
         "pricing": c.cfg.pricing,
-        "loaded": c.node.loaded().len(),
-        "cache": { "used_bytes": stats.cache.used, "budget_bytes": stats.cache.budget },
-    }))
+    });
+    let caps = caller.caps(&c);
+    if caps != Caps::NONE {
+        // What the person may own (0: no cap), for "3 of 50 clusters".
+        v["caps"] = json!({ "clusters": caps.clusters, "always_on": caps.always_on });
+    }
+    if caller == Caller::All {
+        let stats = c.data.stats();
+        v["storage"] = json!(c.objects().description);
+        v["loaded"] = json!(c.node.loaded().len());
+        v["cache"] = json!({ "used_bytes": stats.cache.used, "budget_bytes": stats.cache.budget });
+    }
+    Json(v)
 }
 
 #[derive(Serialize)]
@@ -171,9 +291,39 @@ async fn views(c: &Control, list: Vec<SearchCluster>) -> Result<Vec<ClusterView>
     Ok(out)
 }
 
-async fn list(State(c): State<AppState>) -> ApiResult<Vec<ClusterView>> {
-    let list = c.list().await?;
-    Ok(Json(views(&c, list).await?))
+#[derive(Deserialize)]
+struct ListQuery {
+    /// Recently deleted clusters instead, kept for restoring.
+    #[serde(default)]
+    deleted: bool,
+}
+
+async fn list(State(c): State<AppState>, caller: Caller, Query(q): Query<ListQuery>) -> Result<Response, ControlError> {
+    if q.deleted {
+        return Ok(Json(c.list_deleted(caller.owner()).await?).into_response());
+    }
+    let list = match &caller {
+        Caller::All => c.list().await?,
+        Caller::Person(u) => c.store.list_owned(u).await?,
+    };
+    Ok(Json(views(&c, list).await?).into_response())
+}
+
+#[derive(Deserialize, Default)]
+struct RestoreReq {
+    /// Restore under this name instead of the one it had (that one is taken).
+    name: Option<String>,
+}
+
+/// `POST /v1/search/clusters/{id}/restore`: a deleted cluster back as it was, within its window.
+async fn restore(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, body: bytes::Bytes) -> ApiResult<ClusterView> {
+    let r: RestoreReq = if body.iter().all(u8::is_ascii_whitespace) {
+        RestoreReq::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?
+    };
+    let d = c.restore(&id, r.name.as_deref(), caller.caps(&c)).await?;
+    Ok(Json(view(&c, d, false).await?))
 }
 
 #[derive(Deserialize)]
@@ -187,19 +337,20 @@ struct CreateReq {
     opts: ClusterOptions,
 }
 
-async fn create(State(c): State<AppState>, method: Method, headers: HeaderMap, body: bytes::Bytes) -> Result<Response, ControlError> {
+async fn create(State(c): State<AppState>, caller: Caller, method: Method, headers: HeaderMap, body: bytes::Bytes) -> Result<Response, ControlError> {
     let r: CreateReq = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
     let d = match &r.parent {
         Some(p) => {
-            // A branch is cut on the node holding the parent, which commits it first.
-            let parent = c.get(p).await?;
+            // A branch is cut on the node holding the parent, which commits it first. It is the
+            // parent owner's.
+            let parent = caller.get(&c, p).await?;
             if let Some(resp) = forward(&c, &parent.name, method, "/v1/search/clusters", &headers, body.clone()).await {
                 return Ok(resp);
             }
-            c.branch(p, &r.name, r.at, r.opts).await?
+            c.branch(p, &r.name, r.at, r.opts, caller.caps(&c)).await?
         }
         None if r.at.is_some() => return Err(ControlError::Invalid("at needs a parent".into())),
-        None => c.create(&r.name, r.opts).await?,
+        None => c.create(&r.name, r.opts, caller.owner(), caller.caps(&c)).await?,
     };
     Ok(Json(view(&c, d, true).await?).into_response())
 }
@@ -209,8 +360,8 @@ async fn show(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Cl
     Ok(Json(view(&c, d, false).await?))
 }
 
-async fn update(State(c): State<AppState>, Path(id): Path<String>, Json(o): Json<ClusterOptions>) -> ApiResult<ClusterView> {
-    let d = c.update(&id, o).await?;
+async fn update(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, Json(o): Json<ClusterOptions>) -> ApiResult<ClusterView> {
+    let d = c.update(&id, o, caller.caps(&c)).await?;
     Ok(Json(view(&c, d, false).await?))
 }
 
@@ -229,19 +380,19 @@ struct BranchReq {
     opts: ClusterOptions,
 }
 
-async fn branch(State(c): State<AppState>, Path(id): Path<String>, method: Method, headers: HeaderMap, body: bytes::Bytes) -> Result<Response, ControlError> {
+async fn branch(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, method: Method, headers: HeaderMap, body: bytes::Bytes) -> Result<Response, ControlError> {
     let r: BranchReq = serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?;
     let parent = c.get(&id).await?;
     if let Some(resp) = forward(&c, &parent.name, method, &format!("/v1/search/clusters/{id}/branches"), &headers, body.clone()).await {
         return Ok(resp);
     }
-    let d = c.branch(&id, &r.name, r.at, r.opts).await?;
+    let d = c.branch(&id, &r.name, r.at, r.opts, caller.caps(&c)).await?;
     Ok(Json(view(&c, d, true).await?).into_response())
 }
 
-async fn branches(State(c): State<AppState>, Path(id): Path<String>) -> ApiResult<Vec<ClusterView>> {
+async fn branches(State(c): State<AppState>, caller: Caller, Path(id): Path<String>) -> ApiResult<Vec<ClusterView>> {
     let p = c.get(&id).await?;
-    let list = c.store.children(&p.id).await?;
+    let list = c.store.children(&p.id).await?.into_iter().filter(|b| caller.sees(b)).collect();
     Ok(Json(views(&c, list).await?))
 }
 
@@ -398,6 +549,10 @@ index_route!(index_get, "GET", "", "", true, EsBody::None);
 index_route!(index_create, "PUT", "", "", false, EsBody::Json);
 index_route!(index_delete, "DELETE", "", "", false, EsBody::None);
 index_route!(index_mapping, "PUT", "/mapping", "/_mapping", false, EsBody::Json);
+index_route!(index_mapping_get, "GET", "/mapping", "/_mapping", true, EsBody::None);
+index_route!(index_settings, "GET", "/settings", "/_settings", true, EsBody::None);
+index_route!(index_refresh, "POST", "/refresh", "/_refresh", true, EsBody::None);
+index_route!(index_analyze, "POST", "/analyze", "/_analyze", false, EsBody::Json);
 index_route!(index_search, "POST", "/search", "/_search", true, EsBody::Json);
 index_route!(doc_create, "POST", "/docs", "/_doc", false, EsBody::Json);
 index_route!(index_bulk, "POST", "/bulk", "/_bulk", false, EsBody::Ndjson);
@@ -421,10 +576,11 @@ doc_route!(doc_delete, "DELETE", EsBody::None);
 struct NewKey {
     name: String,
     expires_in_s: Option<i64>,
+    access: Option<String>,
 }
 
 async fn create_key(State(c): State<AppState>, Path(id): Path<String>, Json(k): Json<NewKey>) -> ApiResult<Value> {
-    Ok(Json(c.create_key(&id, &k.name, k.expires_in_s).await?))
+    Ok(Json(c.create_key(&id, &k.name, k.expires_in_s, k.access.as_deref()).await?))
 }
 
 async fn delete_key(State(c): State<AppState>, Path((id, key)): Path<(String, String)>) -> Result<StatusCode, ControlError> {

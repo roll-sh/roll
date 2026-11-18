@@ -196,6 +196,10 @@ impl Ctx<'_> {
 
     pub fn indices_options(&self, defaults: IndicesOptions) -> EsResult<IndicesOptions> {
         let mut o = defaults.with_params(|k| self.query(k).map(str::to_string))?;
+        // `IndicesOptions.fromParameters` warns whenever the parameter is given.
+        if self.has_query("ignore_throttled") {
+            self.warn(IGNORE_THROTTLED_DEPRECATED);
+        }
         // OpenSearch still expands wildcards under `expand_wildcards=none`, to nothing;
         // Elasticsearch takes them literally.
         if self.cluster.dialect == crate::cluster::Dialect::OpenSearch && self.has_query("expand_wildcards") {
@@ -208,6 +212,10 @@ impl Ctx<'_> {
         self.bool_param("flat_settings", false)
     }
 }
+
+/// `IndicesOptions`' deprecation of the `ignore_throttled` request parameter.
+pub const IGNORE_THROTTLED_DEPRECATED: &str =
+    "[ignore_throttled] parameter is deprecated because frozen indices have been deprecated. Consider cold or frozen tiers in place of frozen indices.";
 
 /// `HeaderWarning.escapeAndEncode`: escape `\` and `"`, percent-encode control characters,
 /// `%` and characters beyond Latin-1.

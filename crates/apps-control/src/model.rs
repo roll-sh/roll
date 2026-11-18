@@ -34,6 +34,13 @@ pub enum Source {
     Image { image: String },
     /// `roll up`: each deploy carries its own tree.
     Upload,
+    /// A public Git repository by URL (GitHub, GitLab, any smart-HTTP host), with no app
+    /// installed: each deploy fetches its branch's head (`git_source`).
+    Git {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+    },
 }
 
 impl Source {
@@ -64,6 +71,14 @@ impl Source {
                 Ok(())
             }
             Source::Upload => Ok(()),
+            // Its address is checked again where private ones may be allowed (`Apps::check_source`).
+            Source::Git { url, root } => {
+                crate::git_source::check_url(url, true).map_err(Error::BadRequest)?;
+                if let Some(r) = root {
+                    check_rel_path("source.root", r)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -249,12 +264,14 @@ pub struct Delivery {
     pub at: i64,
 }
 
-/// A private environment's gate: the visitors' token and an automation bypass (CI), as SHA-256
-/// hex digests; neither secret is kept.
+/// A private environment's gate: the visitors' token, people signed in to roll who may open the
+/// project (`signed_in`), or both, and an automation bypass (CI). Secrets as SHA-256 hex
+/// digests; none is kept.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Access {
-    pub token_hash: String,
+    pub token_hash: Option<String>,
     pub bypass_hash: Option<String>,
+    pub signed_in: bool,
 }
 
 /// A private registry's login for a service's image (`PUT …/registry`); the password is sealed
@@ -263,6 +280,25 @@ pub struct Access {
 pub struct Registry {
     pub server: String,
     pub username: String,
+}
+
+/// A private Git repository's login for a Git URL service (`PUT …/git-login`): sent only to
+/// `host`, the source URL's; the password (a token) is sealed and never returned.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GitLogin {
+    pub host: String,
+    pub username: String,
+    /// The project's secret its password is read from at each use (roll secrets), if not sealed here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+}
+
+/// A Git URL service connected to roll's GitHub App (`PUT …/github`): the installation that sees
+/// `repo` (`owner/name`). Fetches and commit statuses go through it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GitHubLink {
+    pub installation: u64,
+    pub repo: String,
 }
 
 /// A relative path inside a tree: no `..`, not absolute, plain characters.
@@ -372,6 +408,7 @@ impl Build {
             spa: self.spa,
             packages: self.packages.clone().unwrap_or_default(),
             build_env: Vec::new(),
+            build_files: Vec::new(),
             process: None,
         }
     }
@@ -425,6 +462,18 @@ pub struct Run {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health_path: Option<String>,
     pub health_timeout_s: u32,
+    /// Seconds between two health checks of a running instance (its `health_path`, or a
+    /// worker's `health_command`); none: the node's (10).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_every_s: Option<u32>,
+    /// Failed health checks in a row that replace an instance; none: the node's (3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_failures: Option<u32>,
+    /// A worker's health check (Docker's `HEALTHCHECK CMD`, Kubernetes' exec probe): a shell
+    /// command run in its instance (`sh -c`), healthy on exit 0, so a consumer that hangs with
+    /// its process up is replaced. It runs code in production, so changing it is a deploy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_command: Option<String>,
     pub suspend_after_s: u32,
     pub sleep_after_s: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -456,6 +505,12 @@ pub struct Run {
     /// `max_instances`), and fewer stay once they'd be under it. 10–100; unset, requests only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_target: Option<u32>,
+    /// And on memory (Render's target memory): while its awake instances average over this
+    /// percent of their memory limit for a minute another starts, and fewer stay once they'd be
+    /// under it. 10–100; unset, not on memory. Where both are set, the one that asks for more
+    /// instances decides.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_target: Option<u32>,
     /// A worker that stops (Railway's restart policy): started again `always`, only when it
     /// failed (`on_failure`, up to `restart_tries` in a row), or `never`. A deploy or a restart
     /// starts fresh ones whatever it says.
@@ -483,6 +538,38 @@ pub struct Run {
     pub schedules: Vec<Scheduled>,
 }
 
+/// A schedule's state in an environment ([`Environment::schedules`]).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ScheduleState {
+    pub name: String,
+    /// The next due time (unix ms); none without a deployment or in a paused environment.
+    pub next_run_at: Option<i64>,
+    /// The job it last started, and how that went.
+    pub last: Option<ScheduleRun>,
+    /// A path schedule's last call, and how it answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_call: Option<ScheduleCall>,
+}
+
+/// A path schedule's call: when, its status (none: it never answered, `error` says why) and how
+/// long it took.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScheduleCall {
+    pub at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    pub ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ScheduleRun {
+    pub job: String,
+    pub status: RunStatus,
+    pub started_at: i64,
+}
+
 /// A volume's measured size ([`Environment::volume_used`]).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct VolumeUsed {
@@ -500,7 +587,13 @@ pub struct Scheduled {
     pub name: String,
     /// Five fields or `@hourly`, `@daily` … ([`crate::cron::Schedule`]).
     pub schedule: String,
+    /// A command, each due time a job; or (empty) `path`'s.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
+    /// A web service's path each due time GETs instead (Vercel's crons): through its own proxy
+    /// on the owner, `Authorization: Bearer $CRON_SECRET` when the environment has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// The schedule's time zone (IANA; default UTC).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
@@ -577,12 +670,29 @@ pub struct Rollout {
     pub steps: Vec<u8>,
     pub step_s: u32,
     pub error_pct: u8,
+    /// After each step passes, its split stays until a person says (Vercel's manual rolling
+    /// releases, Cloud Run's held traffic split): `POST …/deploys/{dep}/rollout`, still judged
+    /// for errors meanwhile.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub manual: bool,
 }
 
 impl Default for Rollout {
     fn default() -> Self {
-        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5 }
+        Rollout { steps: Vec::new(), step_s: 120, error_pct: 5, manual: false }
     }
+}
+
+/// What a person says to a rollout that waits for them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RolloutAction {
+    /// To the next step (or all requests after the last).
+    Advance,
+    /// To all requests now.
+    All,
+    /// Back to the deployment that was live.
+    Abort,
 }
 
 impl Rollout {
@@ -601,6 +711,10 @@ pub struct Alerts {
     pub error_pct: u8,
     /// p95 latency at or above this in three of the five minutes.
     pub p95_ms: u32,
+    /// Requests that found every instance busy at `max_instances`, at or above this share of
+    /// the five minutes' requests (at least 20 of them): `alert.capacity` (Cloud Run's
+    /// max-instances warning, Heroku's queue time).
+    pub capacity_pct: u8,
     /// Text its output (stdout and stderr, any case) holds at least `log_count` times in the
     /// five minutes: `alert.log` (the pattern and the count, never a line).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -610,7 +724,7 @@ pub struct Alerts {
 
 impl Default for Alerts {
     fn default() -> Self {
-        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, log_match: None, log_count: 10 }
+        Alerts { memory_pct: 90, error_pct: 5, p95_ms: 0, capacity_pct: 10, log_match: None, log_count: 10 }
     }
 }
 
@@ -632,6 +746,9 @@ impl Default for Run {
             memory_mb: 512,
             health_path: None,
             health_timeout_s: 60,
+            health_every_s: None,
+            health_failures: None,
+            health_command: None,
             suspend_after_s: 30,
             sleep_after_s: 600,
             volume: None,
@@ -642,6 +759,7 @@ impl Default for Run {
             public: true,
             drain_s: None,
             cpu_target: None,
+            memory_target: None,
             restart: Restart::Always,
             restart_tries: None,
             affinity: false,
@@ -656,8 +774,8 @@ impl Run {
     /// The checked settings, with what the type implies filled in (a worker runs at least one
     /// instance; a volume allows one).
     pub fn normalized(mut self) -> Result<Run> {
-        if self.alerts.memory_pct > 100 || self.alerts.error_pct > 100 {
-            return Err(Error::BadRequest("alerts.memory_pct and alerts.error_pct are 0–100 (0 is off)".into()));
+        if self.alerts.memory_pct > 100 || self.alerts.error_pct > 100 || self.alerts.capacity_pct > 100 {
+            return Err(Error::BadRequest("alerts.memory_pct, alerts.error_pct and alerts.capacity_pct are 0–100 (0 is off)".into()));
         }
         if self.alerts.log_match.as_ref().is_some_and(|m| m.trim().is_empty() || m.len() > 200) || !(1..=10_000).contains(&self.alerts.log_count) {
             return Err(Error::BadRequest("alerts.log_match is 1–200 characters, alerts.log_count 1–10000".into()));
@@ -671,8 +789,20 @@ impl Run {
                 return bad("schedules' names are unique: a-z, 0-9 and -, at most 32");
             }
             crate::cron::Schedule::parse(&sc.schedule, sc.timezone.as_deref()).map_err(|e| Error::BadRequest(format!("run.schedules.{}: {e}", sc.name)))?;
-            if sc.command.trim().is_empty() || sc.command.len() > 2000 || sc.command.contains('\0') {
-                return bad("schedules' commands are 1–2000 characters");
+            match &sc.path {
+                Some(p) => {
+                    if !sc.command.is_empty() {
+                        return bad("a schedule runs a command or calls a path, not both");
+                    }
+                    if self.kind != RunType::Web || self.tcp {
+                        return bad("a schedule's path is for a web service (it's called over HTTP)");
+                    }
+                    if !p.starts_with('/') || p.len() > 2000 || !p.bytes().all(|b| b.is_ascii_graphic()) {
+                        return bad("a schedule's path is an absolute path, like /api/cron");
+                    }
+                }
+                None if sc.command.trim().is_empty() || sc.command.len() > 2000 || sc.command.contains('\0') => return bad("schedules' commands are 1–2000 characters"),
+                None => {}
             }
             if sc.timeout_s.is_some_and(|t| !(1..=86_400).contains(&t)) {
                 return bad("schedules' timeout_s is 1–86400");
@@ -719,6 +849,20 @@ impl Run {
         if !(1..=900).contains(&self.health_timeout_s) {
             return bad("health_timeout_s is 1–900");
         }
+        if self.health_every_s.is_some_and(|s| !(2..=300).contains(&s)) {
+            return bad("health_every_s is 2–300");
+        }
+        if self.health_failures.is_some_and(|n| !(1..=10).contains(&n)) {
+            return bad("health_failures is 1–10");
+        }
+        if let Some(c) = &self.health_command {
+            if self.kind != RunType::Worker {
+                return bad("health_command is for a worker (a web service's health is its health_path)");
+            }
+            if c.trim().is_empty() || c.len() > 1000 || c.contains('\0') {
+                return bad("health_command is a command of at most 1000 characters");
+            }
+        }
         if self.drain_s.is_some_and(|d| !(1..=300).contains(&d)) {
             return bad("drain_s is 1–300");
         }
@@ -750,6 +894,14 @@ impl Run {
             }
             if self.kind != RunType::Web {
                 return bad("cpu_target is for a web service (a worker follows its work with scale)");
+            }
+        }
+        if let Some(t) = self.memory_target {
+            if !(10..=100).contains(&t) {
+                return bad("memory_target is 10–100 (percent of an instance's memory)");
+            }
+            if self.kind != RunType::Web {
+                return bad("memory_target is for a web service (a worker follows its work with scale)");
             }
         }
         if self.port == Some(0) {
@@ -847,6 +999,9 @@ pub struct Scaling {
 pub struct Canary {
     pub deployment: String,
     pub share: u8,
+    /// Its step passed and it waits for a person (`rollout.manual`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub waiting: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -859,6 +1014,10 @@ pub struct Service {
     pub run: Run,
     /// The private registry login its image pulls with (never the password).
     pub registry: Option<Registry>,
+    /// The private Git repository login its source fetches with (never the password).
+    pub git_login: Option<GitLogin>,
+    /// roll's GitHub App, when the service is connected to it.
+    pub github: Option<GitHubLink>,
     /// What it links (the canvas draws them), without their variables.
     pub links: Vec<LinkRef>,
     pub created_at: i64,
@@ -923,10 +1082,17 @@ pub struct Environment {
     /// A TCP service's address (`host:port`), once it has its port.
     pub tcp: Option<String>,
     pub needs_deploy: bool,
-    /// Visitors need the environment's access token (`PUT … {access: {token}}`).
+    /// Visitors need the environment's access token (`PUT … {access: {token}}`), or to sign in.
     pub private: bool,
+    /// People signed in to roll who may open the project get in (`access.signed_in`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub signed_in: bool,
     /// A cron service's next scheduled run (unix ms), once it has a deployment.
     pub next_run_at: Option<i64>,
+    /// Its schedules (`run.schedules`) as they stand: the next due time and the job each last
+    /// started (Heroku Scheduler's "Next due", Vercel's last run).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub schedules: Vec<ScheduleState>,
     /// How full its volume was when last measured (hourly), when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume_used: Option<VolumeUsed>,
@@ -943,6 +1109,10 @@ pub struct Environment {
     pub follow_tag: bool,
     /// Redeploys (the same image, the new values) when the project's secrets change.
     pub redeploy_on_secrets: bool,
+    /// Its instances send OpenTelemetry traces to roll (`OTEL_*` set at each deploy).
+    pub traces: bool,
+    /// Its pages measure their Web Vitals for roll (`…/vitals`).
+    pub vitals: bool,
     /// A preview's pages carry roll previews' feedback button for visitors who came in through
     /// its access link.
     pub feedback: bool,
@@ -956,6 +1126,10 @@ pub struct Environment {
     /// person deploys, redeploys or promotes, or resumes them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub held_after: Option<String>,
+    /// A person holds its deploys (`PUT … {held: true}`): pushes, hooks and tag moves build to
+    /// `ready` (a web service without a volume) for them to put live, or wait.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
     /// Its own pages for what roll would otherwise answer (Heroku's error and maintenance pages).
     #[serde(skip_serializing_if = "Pages::is_empty")]
     pub pages: Pages,
@@ -968,6 +1142,14 @@ pub struct Environment {
     /// Headers its answers carry ([]: none).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<HeaderRule>,
+    /// Paths another service of the project answers ([]: none).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<Route>,
+    /// What its code may reach: anything (`open`), or roll and the listed hosts (`roll`).
+    pub egress: Egress,
+    /// Hosts its egress proxy refused lately (its code tried them; they aren't listed).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub egress_refused: Vec<crate::runtime::egress::Refused>,
     /// A worker that follows its work: the backlog it last read (null before the first read)
     /// and the instances that wants.
     pub scaling: Option<Scaling>,
@@ -1002,6 +1184,12 @@ pub struct FirewallRule {
     /// Text the `User-Agent` contains (case aside).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// `limit`'s: each client's requests a minute through this rule, and how many at once
+    /// (default: a minute's worth).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_minute: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1009,6 +1197,8 @@ pub struct FirewallRule {
 pub enum FirewallAction {
     Allow,
     Deny,
+    /// Let in at `per_minute` a client (Vercel's rate-limit rules), a 429 past it.
+    Limit,
 }
 
 /// The most rules an environment has.
@@ -1059,6 +1249,12 @@ impl FirewallRule {
         if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() {
             return bad("a rule matches on a path, methods or a user agent");
         }
+        match (self.action, self.per_minute) {
+            (FirewallAction::Limit, Some(n)) => RateLimit { per_minute: n, burst: self.burst }.check().map_err(|_| Error::BadRequest("firewall: a limit is 1–100000 a minute, its burst 1–100000".into()))?,
+            (FirewallAction::Limit, None) => return bad("a limit rule says per_minute"),
+            _ if self.per_minute.is_some() || self.burst.is_some() => return bad("per_minute and burst are a limit rule's"),
+            _ => {}
+        }
         Ok(self)
     }
 
@@ -1103,6 +1299,105 @@ pub struct HeaderRule {
 
 /// The most header rules an environment has.
 pub const MAX_HEADER_RULES: usize = 20;
+
+/// A path on an environment's domains answered by another service of its project (Vercel's
+/// rewrites to another project, Cloud Run's URL maps): that service's environment of the same
+/// name, the path and query as they came.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Route {
+    /// A path, or a prefix ending in `*` (`/api/*`).
+    pub path: String,
+    /// The other service, by its name in the project.
+    pub service: String,
+}
+
+/// The most routes an environment has.
+pub const MAX_ROUTES: usize = 20;
+
+impl Route {
+    pub fn check(self) -> Result<Route> {
+        let p = &self.path;
+        if !p.starts_with('/') || p.len() > 512 || p.strip_suffix('*').unwrap_or(p).contains('*') || !p.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(Error::BadRequest(format!("routes: {p:?} is a path or a prefix ending in * (/api/*)")));
+        }
+        if self.service.is_empty() || self.service.len() > 64 {
+            return Err(Error::BadRequest("routes: service is another service's name in the project".into()));
+        }
+        Ok(self)
+    }
+
+    /// Whether it takes `path`.
+    pub fn takes(&self, path: &str) -> bool {
+        match self.path.strip_suffix('*') {
+            Some(prefix) => path.starts_with(prefix),
+            None => path == self.path,
+        }
+    }
+}
+
+/// What an environment's code may reach (docs/apps/README.md, "Egress"; roll previews'
+/// `egress`): anything, or only roll (its links, the project's other services there) and
+/// `hosts`, through its egress proxy.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Egress {
+    pub mode: EgressMode,
+    /// With `roll`: hosts outside roll it may still reach on 443 and 80 (`api.stripe.com`, or
+    /// `*.sentry.io` for its subdomains).
+    #[serde(default)]
+    pub hosts: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EgressMode {
+    #[default]
+    Open,
+    Roll,
+}
+
+/// The most hosts an environment's egress lists.
+pub const MAX_EGRESS_HOSTS: usize = 20;
+
+impl Egress {
+    /// No route out but roll's.
+    pub fn closed(&self) -> bool {
+        self.mode == EgressMode::Roll
+    }
+
+    /// Checked as given: host names (lower case, no IP addresses), `*.` only as a prefix, only
+    /// with `roll`.
+    pub fn check(mut self) -> Result<Egress> {
+        let bad = |m: String| Err(Error::BadRequest(format!("egress: {m}")));
+        if self.hosts.len() > MAX_EGRESS_HOSTS {
+            return bad(format!("at most {MAX_EGRESS_HOSTS} hosts"));
+        }
+        for h in &mut self.hosts {
+            *h = h.trim().trim_end_matches('.').to_ascii_lowercase();
+        }
+        if let Some(h) = self.hosts.iter().find(|h| !egress_host_ok(h)) {
+            return bad(format!("{h:?} isn't a host name (api.stripe.com, or *.sentry.io for its subdomains)"));
+        }
+        if !self.hosts.is_empty() && !self.closed() {
+            return bad("hosts are for mode \"roll\" (with \"open\" everything is reachable)".into());
+        }
+        self.hosts.sort();
+        self.hosts.dedup();
+        Ok(self)
+    }
+}
+
+/// A host an egress may list: a DNS name of two labels or more (never an address), or `*.` and
+/// one (its subdomains). roll previews' `egress_hosts` take the same.
+pub fn egress_host_ok(h: &str) -> bool {
+    let name = h.strip_prefix("*.").unwrap_or(h);
+    let labels: Vec<&str> = name.split('.').collect();
+    name.len() <= 253
+        && labels.len() >= 2
+        && labels.iter().all(|l| !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-') && l.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
+        && !labels.last().is_some_and(|tld| tld.bytes().all(|b| b.is_ascii_digit()))
+}
 
 impl HeaderRule {
     /// Checked as given, names kept lower case. Never one that frames the answer or is roll's
@@ -1323,6 +1618,10 @@ pub struct Deployment {
     /// owner, never in a commit status or a notification.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_detail: Option<String>,
+    /// How to fix a known failure (a private image's login, more memory, a lockfile): read from
+    /// its error, never stored ([`fix_for`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
     /// When it was pruned (unix ms): out of what's kept, its image gone; history only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pruned_at: Option<i64>,
@@ -1434,6 +1733,27 @@ pub struct Domain {
 /// A hostname a user may add: lowercase labels of `[a-z0-9-]`, at least two, at most 253
 /// characters, not an IP address and not under roll's own domains; or `*.` and one (a wildcard:
 /// every name one label under it).
+/// Generated names nobody takes: they'd read as roll's own on its shared domain.
+const RESERVED_LABELS: [&str; 12] = ["www", "api", "app", "admin", "dashboard", "status", "mail", "roll", "edge", "cdn", "docs", "help"];
+
+/// An environment's generated name (`<name>.<domain>`, Railway's editable domain): 3–56 of
+/// a–z, 0–9 and `-`, not starting or ending with one, never `--` (a deployment's own name is
+/// `<id>--<name>`), and not one of roll's.
+pub fn check_slug(s: &str) -> Result<()> {
+    let ok = (3..=56).contains(&s.len())
+        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && !s.contains("--");
+    if !ok {
+        return Err(Error::BadRequest("hostname is 3–56 of a-z, 0-9 and -, not starting or ending with -, without --".into()));
+    }
+    if RESERVED_LABELS.contains(&s) {
+        return Err(Error::BadRequest(format!("{s} is roll's own")));
+    }
+    Ok(())
+}
+
 pub fn check_hostname(h: &str, reserved: &[&str]) -> Result<String> {
     let h = h.trim().trim_end_matches('.').to_ascii_lowercase();
     if let Some(base) = h.strip_prefix("*.") {
@@ -1504,13 +1824,15 @@ pub enum LinkKind {
     Stream,
     Queue,
     Nosql,
+    /// A roll search cluster: an API key of its own per link ([`crate::integrations::Resources::link`]).
+    Search,
     /// Another web service of the project: its private and public URLs (apps' own, not a
     /// [`crate::integrations::Resources`] kind).
     Service,
 }
 
 impl LinkKind {
-    pub const ALL: [LinkKind; 7] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Service];
+    pub const ALL: [LinkKind; 8] = [LinkKind::Postgres, LinkKind::Redis, LinkKind::Bucket, LinkKind::Stream, LinkKind::Queue, LinkKind::Nosql, LinkKind::Search, LinkKind::Service];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -1520,6 +1842,7 @@ impl LinkKind {
             LinkKind::Stream => "stream",
             LinkKind::Queue => "queue",
             LinkKind::Nosql => "nosql",
+            LinkKind::Search => "search",
             LinkKind::Service => "service",
         }
     }
@@ -1555,6 +1878,9 @@ pub struct VarView {
     /// Set and run with, never shown again: not by `…/variables/values`, nor its length here.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub sealed: bool,
+    /// Kept as a file at this path in its instances (not in their environment).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 /// An environment's own HTML for roll's pages (Heroku's `ERROR_PAGE_URL` and
@@ -1690,6 +2016,10 @@ mod tests {
         assert!(check_hostname("www.example.com", &["roll.site"]).is_ok());
         assert!(check_hostname("x.up.roll.site", &["roll.site"]).is_err());
         assert!(check_hostname("localhost", &[]).is_err());
+        assert!(check_slug("shop-eu").is_ok());
+        for bad in ["ab", "Shop", "-shop", "shop-", "dep--shop", "www", "shop.eu"] {
+            assert!(check_slug(bad).is_err(), "{bad}");
+        }
         assert!(check_hostname("1.2.3.4", &[]).is_err());
         assert!(check_name("service", "My-App").is_err());
         assert!(check_var_name("DATABASE_URL").is_ok() && check_var_name("1X").is_err());
@@ -1765,3 +2095,43 @@ mod domain_diagnosis_tests {
     }
 }
 
+
+/// What to change for a failure roll knows (Heroku's error codes, Render's pointers): one line
+/// naming the setting and its command. None for anything else: the error and its detail say it.
+pub fn fix_for(error: &str, detail: Option<&str>) -> Option<String> {
+    let all = format!("{error}\n{}", detail.unwrap_or("")).to_lowercase();
+    let has = |w: &str| all.contains(w);
+    let fix = if has("docker pull") && (has("denied") || has("unauthorized") || has("not found") || has("manifest unknown") || has("failed")) {
+        "The registry wouldn't give the image: check its name and tag; a private image needs its registry login (Settings → Source, `roll apps registry`)."
+    } else if has("exit 137") || has("out of memory") || has("oomkilled") || has("javascript heap out of memory") {
+        "It ran out of memory: give it more (Settings → Size, `roll apps set --memory 1024`)."
+    } else if has("the build took longer than") {
+        "The build passed its time limit: make it lighter (a lockfile for cached installs, fewer steps), or build an image elsewhere and deploy that."
+    } else if has("npm ci") && (has("package-lock") || has("lockfile") || has("in sync")) {
+        "`npm ci` needs a package-lock.json that matches package.json: commit one (`npm install`), or set the install command to `npm install` (Settings → Build)."
+    } else if has("frozen-lockfile") || has("lockfile needs to be updated") {
+        "The lockfile doesn't match package.json: run the install locally and commit the lockfile, or drop `--frozen-lockfile` from the install command (Settings → Build)."
+    } else if has("health check didn't pass") || has("didn't answer in time") || has("health check") && has("failed") {
+        "It never answered its health check: it must listen on 0.0.0.0 at $PORT; if it boots slowly, raise the health timeout (Settings → Health, `roll apps set --health-timeout 120`)."
+    } else if has("no start command") || has("nothing says how to start") || has("doesn't know how to start") {
+        "Nothing says how to start it: set a start command (Settings → Run, `roll apps set --start \"…\"`) or a Procfile's `web:`."
+    } else if has("couldn't tell how to build this") {
+        "roll couldn't tell how to build it: add a Dockerfile, set the root directory to the app's, or set the build and start commands (Settings → Build)."
+    } else {
+        return None;
+    };
+    Some(fix.to_string())
+}
+
+#[cfg(test)]
+mod fix_tests {
+    #[test]
+    fn known_failures_say_what_to_change() {
+        let f = |e: &str, d: Option<&str>| super::fix_for(e, d).unwrap_or_default();
+        assert!(f("docker pull ghcr.io/acme/app:1 failed", Some("error from registry: denied")).contains("registry login"));
+        assert!(f("it was killed (exit 137: out of memory, or a SIGKILL)", None).contains("--memory"));
+        assert!(f("the health check didn't pass within 60 s", None).contains("$PORT"));
+        assert!(f("the build failed (docker build exited with 1)", Some("npm ci can only install packages when your package.json and package-lock.json are in sync")).contains("package-lock.json"));
+        assert_eq!(super::fix_for("a reason nobody wrote down", None), None);
+    }
+}

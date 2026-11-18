@@ -125,6 +125,107 @@ Data planes keep their own credentials (Postgres passwords, Redis users, S3 keys
 token never opens a data plane. It can be allowed to **reveal** those credentials, which is then
 an explicit action of its own.
 
+### Machine clients
+
+Automation with no person (CI, a scheduled agent) uses OAuth client credentials
+(`io.modelcontextprotocol/oauth-client-credentials`): it trades a credential at the token
+endpoint for an hour's access token, rather than holding a long-lived token in a header.
+
+- **Making one:** the operator, or a person signed in, calls `POST /v1/access/clients {name,
+  rules, expires_at?, public_jwk?}`. The rules are exactly a token's, and so is the token policy (maximum life, an
+  expiry it must have).
+- **What it is:** a confidential OAuth client plus one OAuth grant holding those rules. Each token
+  it gets is one more access secret on that grant, so revoking the client
+  (`DELETE /v1/access/clients/{id}`) ends them all, and grants are looked up per request as
+  always.
+- **How it proves itself:**
+  - **`private_key_jwt`** (preferred: nothing secret is stored): a JWT signed with the key whose
+    public half (`public_jwk`: Ed25519, P-256 or RSA of 2048 bits or more) was registered. It
+    needs `iss` = `sub` = the client id, `aud` the token endpoint or the issuer, at most five
+    minutes to live, and a `jti` never used before (a replay is refused). A JWK carrying private
+    material is refused.
+  - **`client_secret_basic` or `client_secret_post`:** a secret roll makes (`rlc_…`, shown once,
+    stored as its hash, with a checksum, so a leaked one is found and revokes its client, as a
+    leaked token does).
+  - **A trusted identity** (trusted publishing, as PyPI's and npm's; AWS's and GCP's workload
+    federation): CI's own OIDC token, so nothing is stored or held anywhere.
+    - **Making one:** `oidc: {issuer, audience?, subject, claims?, jwks?}` in place of a key or a
+      secret. The audience defaults to roll's API. `subject` is the token's `sub` or a pattern with
+      `*`. A shared issuer (GitHub Actions, GitLab.com, Terraform Cloud, Buildkite, Google) must
+      name one tenant literally (`repo:acme/web:…`), or anyone's job could sign in, and that rule is
+      never optional. `claims` are up to ten others that must match (`repository_owner_id`, `ref`).
+      `jwks` pins the issuer's keys for one roll can't reach.
+    - **Signing in:** RFC 7523's grant,
+      `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&client_id=mcl_…&assertion=<the OIDC token>`.
+      The client id is named because a shared issuer's token says nothing about which roll client
+      it's for.
+    - **What's checked:** `crates/roll-oidc`, the same code roll secrets' workload identities use
+      (moved there with the secrets thread's review): RS256 or ES256, `iss` exactly, `aud`, `exp`
+      and `nbf` with 60 s of leeway, a lifetime of at most a day, then the subject and the claims.
+      Keys are fetched only from the issuer named, through rolld's guarded client (public
+      addresses, no redirects, bounded reads), cached an hour, and refetched early for a new key
+      id at most every 30 s. Sign-ins are capped at 120 a minute per client. A refusal is
+      `invalid_grant`, and its text never holds the token.
+    - **From the CLI:** `roll token client create ci --product apps --allow read,deploy --github
+      acme/web [--ref refs/heads/main | --environment production]` prints the workflow step that
+      trades the job's token and exports a masked `ROLL_TOKEN`; `--gitlab group/project [--ref main
+      | --environment production]` prints the `.gitlab-ci.yml` lines (`id_tokens` for roll's
+      audience). The panel's "GitHub Actions" choice does the same for GitHub. Any other CI:
+      `--issuer URL --subject PATTERN [--claim name=value]… [--audience A] [--jwks file]`
+      (Buildkite, CircleCI, Terraform Cloud, a cluster's own with its keys pinned).
+- **The request:** `grant_type=client_credentials`; its `resource`, if any, must be roll's API or
+  MCP server. `scope=read-only` narrows that token to its rules' reads (no asks either), checked
+  wherever the token is looked up; no scope (or `granted`) is the client's rules, and any other
+  scope is `invalid_scope`: never wider. The answer has no refresh token: the client trades its credential again for the
+  next one. Every failure to authenticate is the same `invalid_client`, so an unknown client and a
+  wrong credential look alike. A client gets at most 120 tokens a minute per node, counted once its
+  credential checks out, so junk naming it can't lock it out and a leaked credential can't mint
+  without end.
+- **The metadata** lists `client_secret_basic`, `client_secret_post` and `private_key_jwt`, the
+  signature algorithms (`EdDSA`, `ES256`, `RS256`) and the grant type.
+- **In the audit log** (source `access`, on the client's grant): `create_client`, `rotate_client`,
+  `revoke_client` with who did it, and a `sign_in` row for every token a client gets. That row
+  holds the client, the kind of credential (`secret`, `key`, or `oidc` with the CI token's issuer
+  and subject, such as `repo:acme/web:ref:refs/heads/main`), whether it was read-only, and the
+  address it came from. It never holds a secret or a token.
+- **In the checkup:** a client that signs in with a secret is `secret_client`, with the fix to
+  rotate to a key or to CI's own identity, as GitHub nudges secrets toward OIDC. Its sign-ins count
+  as use, so one that only holds its token for later steps isn't `unused`.
+- **Rotating one:** `POST /v1/access/clients/{id}/rotate {public_jwk? | oidc?, keep_old_for_s?}` (or
+  `roll token client rotate <id> [--public-key f | --github owner/repo … | --gitlab … |
+  --issuer …] [--keep-old 1h]`, which moves a client on a secret to CI's own identity, the
+  checkup's fix) gives it a new key, or a new
+  secret shown once, keeping its id and rules. The old credential stops at once, and so do the
+  tokens it got, unless `keep_old_for_s` (at most a week) keeps it working while the automation
+  moves over. A leaked old secret still revokes the client while it works.
+- **From the CLI:** `roll token client create <name> [rules] [--public-key ci.pub.pem]` (rules
+  as `roll token create` takes them; the key an openssl PEM, Ed25519 or P-256, or a JWK; without
+  one, roll makes a secret and shows it once), `roll token client list` and
+  `roll token client revoke <id>`.
+- **Who:** the operator makes, lists and revokes every machine client. A person signed in makes,
+  lists and revokes their own, which act as them, as their tokens do:
+  - within their account's reach;
+  - past the policy's `approve_people`, only once an admin approves (no token until then);
+  - stopping when they can't sign in.
+
+  They're mailed when one is added. A token never reaches these routes, so a credential can't
+  mint another kind of credential.
+- **Tests:** `roll-access/tests/access.rs::a_machine_client_trades_its_credential_for_a_token_its_rules_bound`
+  (secret and key, rules bounding the token, a replayed assertion, a leaked secret, a revoked
+  client); `a_persons_machine_client_acts_as_them`; `a_ci_job_signs_in_with_its_own_oidc_token`
+  (the right repository and branch sign in, within the rules; another repository, branch, audience,
+  key or an expired token is `invalid_grant`; a shared issuer's wildcard tenant is refused); `roll-cli/tests/token.rs::a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules`.
+
+### When a token is refused
+
+A refused request's answer says what it needed (`needs: {product, action, resource}`) and where a
+person can allow it: `widen`, the token's own page with that one rule proposed
+(`/dashboard/access/tokens/{id}?add=postgres:delete&id=prj_a`). MCP's refusal text carries the
+link, so the agent can hand it to the person. The page shows the rule and asks: "Allow", "Ask me
+each time" or "Not now". Nothing widens until they choose, the edit is theirs (the same route as
+any change to the token, audited as one), and a link never proposes a wildcard product. A workload's
+token, which is fixed, gets no link.
+
 ## The grant
 
 ```ts
@@ -192,6 +293,18 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   category (`ACL`, `CONFIG`, `MONITOR` and `SYNC`, which stream everyone's commands and data,
   `CLIENT`, `SLOWLOG`, `BGSAVE`, `CLUSTER`, `RESTORE` and the like), are `admin`; the rest `write`.
 - NoSQL CQL: `SELECT` is `read`, `DROP` and `TRUNCATE` are `delete`, the rest `write`.
+- roll code: creating a repo is `write`, but connecting a GitHub repository (`source: {github}`)
+  is `admin` (GitHub installations span tenants, so listing them is admin too). Landing is
+  `deploy`; `bypass: true` (over the required reviews, the merge queue and a secret-leak
+  blocker) is `admin`.
+- Streams: changing a stream's `retention_ms`, or a topic's `retention.*`, `cleanup.policy` or
+  `delete.retention.ms`, is `delete` (a shorter retention drops records at once); other settings
+  are `write`.
+- Agents: adding a machine mints its machine token (`admin`, as approving a login is); sharing a
+  thread makes an anonymous link to a copy of it (`reveal`, as other shares are).
+- NoSQL settings (`PATCH /v1/nosql/databases/{id}`): changing the masking policy (applied at read
+  time for every role, so dropping it shows a reader raw values) or turning `read_only` off is
+  `admin`, as roll previews' project settings are; its other settings are `write`.
 - Storage IAM: `Get…`, `List…`, `Simulate…` are `read`, the rest `admin`.
 - git pushes (`POST /git/{owner}/{repo}/git-receive-pack`): from the ref updates at the start
   of the body (read without buffering the pack). Each update is one action: moving the repo's
@@ -258,6 +371,10 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   is about the environment and folder copied from, so remembering it allows exactly that. A query
   parameter the gate decides from (`?path=`, `?from=`) must appear once: a repeated one is
   `400 repeated_parameter`, since the product could read another copy of it.
+- A search cluster created with a `parent` (`POST /v1/search/clusters`) is a branch of that
+  cluster, a copy of its indices: it also needs `write` on the parent, as
+  `POST /v1/search/clusters/{id}/branches` does there, so a token whose rules name one project
+  can't branch a cluster outside it.
 - Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
   threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
   thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,
@@ -523,6 +640,16 @@ page's "Once ▾", `roll mcp approve --remember 1h`):
   (`DELETE /v1/access/tokens/{id}/temporary/{approval}`), and with it
   the approval when its request hasn't used it (the rule may have run that request instead).
 
+### What a product is told about an approval
+
+A request that runs because of an approval carries `roll_auth::Approved {id, by, until}` beside its
+`Grant` (`by`: who approved it, in order), so the product's own audit can say "revealed by token X, approved by Y" (roll secrets'
+audit and timeline do). `until` is `None` when the approval let this one request run, and when a
+rule remembered for a while allowed it, it's when that rule lapses (the longest-lasting one that
+covers it). A rule remembered for good is one of the grant's rules, so it names no approval; its
+change is in the access audit. The gate's own audit row names the approval either way. Only the
+node that decided sets it: a request forwarded to an owner after the decision doesn't carry it.
+
 ### Approvals in chat
 
 Approvals can also go to a Slack or Discord channel, through roll code's chat ops
@@ -663,8 +790,8 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
   would: only routes their session may call (the gate's `User`, `Product` and `Public` rules, which
   it hands the evaluator as `roll_auth::RouteAccess`), as them (`roll_auth::SignedIn`, no
   `Operator`), then narrowed again by its rules. So roll code sees their own owner (git checks the
-  repo as them before it takes the gate's word), projects are their own, and every other product
-  answers `403 operator_only`, whatever the rules say.
+  repo as them before it takes the gate's word), projects and search clusters are their own, and
+  every other product answers `403 operator_only`, whatever the rules say.
 - They see and manage only their own tokens, connections, approvals and audit rows, and **they
   decide their own token's approvals** (a token never decides one). The operator sees everyone's.
 - A token or connection made from an admin's session is that admin's too: it acts as the operator
@@ -673,7 +800,7 @@ MCP clients for themselves, as GitHub's fine-grained tokens act for the person w
 - A person holds at most 100 live tokens and connections (`USER_MAX_GRANTS`), so nobody signed in
   can fill everyone's room (10,000 live grants in all).
 - The builder and the consent screen offer only what they reach (`GET /v1/access` answers
-  `{kind: "user", reach: ["code", "agents", "workspace"]}`).
+  `{kind: "user", reach: ["code", "agents", "workspace", "search"]}`).
 - **Their tokens' news is mailed to them** (GitHub mails a token's owner), as well as posted
   where approvals go: a token, MCP client or device added to their account (at once, as GitHub
   mails "a new personal access token was added": what it may do, the network it came from and
@@ -902,8 +1029,17 @@ the list below. It also fails on a method decided only by a prefix row (`/v1/pre
 method: no row of the route's own names that method; rolld logs each route's methods) that isn't
 in `crates/roll-access/src/prefix-reviewed.txt` as `METHOD route`: such a route takes the prefix's
 action whatever it answers (a preview's variables, with their values, were a read until they got
-a row of their own), so each new one is either given its own row or looked at and listed. The
-operator's routes (public routes, which anyone may call without a token, aren't a grant's to
+a row of their own), so each new one is either given its own row or looked at and listed.
+
+A scoped token reaches a product as its operator (roll code's `Caller::Admin`), because the gate
+has decided already. So a product's own admin-only check passes for whatever the catalogue lets
+through. An admin-only refusal says "needs the admin token", and
+`crates/roll-access/tests/admin_only.rs` finds every such message in the products' sources. It
+fails unless `crates/roll-access/src/admin-only.txt` lists a request that reaches the message
+and the catalogue classifies that request `admin`. Connecting a GitHub repository and landing
+with `bypass` were write and deploy before this test existed.
+
+The operator's routes (public routes, which anyone may call without a token, aren't a grant's to
 classify, so the check skips them):
 
 | routes | why |

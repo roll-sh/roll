@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+aho-corasick.workspace = true
 aes-gcm.workspace = true
 anyhow.workspace = true
 apps-build.workspace = true
@@ -39,6 +40,7 @@ ipnet.workspace = true
 chrono-tz.workspace = true
 pg-storage.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
+code-git.workspace = true
 roll-cluster.workspace = true
 roll-auth.workspace = true
 roll-fetch.workspace = true

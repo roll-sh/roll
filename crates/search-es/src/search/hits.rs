@@ -532,6 +532,17 @@ pub fn render_doc_stored(
             m.insert("_ignored".into(), Value::Arr(ig.into_iter().map(Value::Str).collect()));
         }
     }
+    // `_ignored_source` shows when `stored_fields` or `fields` name it (no pattern matches it),
+    // as base64 like any binary value in JSON.
+    let named = |l: &[String]| l.iter().any(|f| f == "_ignored_source");
+    if matches!(&o.stored_fields, Some(Some(l)) if named(l)) || o.fields.iter().any(|f| f.field == "_ignored_source") {
+        use base64::Engine as _;
+        let entries = crate::fetch::ignored_source(stored);
+        if !entries.is_empty() {
+            let b64 = |b: &[u8]| Value::Str(base64::engine::general_purpose::STANDARD.encode(b));
+            m.insert("_ignored_source".into(), Value::Arr(entries.into_iter().map(b64).collect()));
+        }
+    }
     let fs = wants_source(o);
     let fls = o.security.as_ref().zip(idx).and_then(|(s, i)| s.fields(crate::xpack::security::dls::READ, &i.name));
     // The stored bytes, as they are or filtered straight from the text, when nothing else
@@ -558,12 +569,21 @@ pub fn render_doc_stored(
         None
     };
     let mut source = if raw_source.is_none() && (fs.fetch || !o.fields.is_empty()) { crate::fetch::source_bytes(stored).map(crate::fetch::parse_source).transpose()? } else { None };
-    // Vectors kept out of `_source` read back as the index holds them (floats).
+    // Vectors kept out of `_source` read back as the index holds them (floats), once: the
+    // fetch below only keeps or drops them (`SourceView::search`).
     if let (Some(idx), Some(Value::Obj(sm))) = (idx, source.as_mut())
         && table.has_vectors
         && idx.settings.get("index.mapping.exclude_source_vectors") != Some("false")
     {
         crate::engine::synthetic::vectors(table, "", sm, false);
+    }
+    // Vectors kept out of the stored source come back from the segment, already as shown,
+    // when the hit shows them or `fields` reads them.
+    if let Some(Value::Obj(sm)) = source.as_mut()
+        && !table.stripped_vectors.is_empty()
+        && crate::engine::source_vectors::wanted(table, &fs, o.force_synthetic, o.fields.iter().map(|f| f.field.as_str()))
+    {
+        crate::engine::source_vectors::patch(&table.stripped_vectors, sm, &mut crate::engine::source_vectors::InSegment(seg, local));
     }
     if let Some(raw) = raw_source {
         m.insert("_source".into(), raw);

@@ -15,7 +15,7 @@ pub const HEADER_MISMATCH: i64 = -32020;
 /// A protocol version this server doesn't speak.
 pub const UNSUPPORTED_VERSION: i64 = -32022;
 const VERSION: &str = "io.modelcontextprotocol/protocolVersion";
-const CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+pub(crate) const CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 const CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
 const SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 /// How long a client may keep a list (`ttlMs`): tools follow the token's rules, which can change,
@@ -25,6 +25,13 @@ const LIST_TTL_MS: u64 = 60_000;
 /// The version a modern request names in its `_meta`, if it's one.
 pub fn version(msg: &Value) -> Option<&str> {
     msg["params"]["_meta"][VERSION].as_str()
+}
+
+/// Whether the request's client fills in forms for elicitation (`elicitation.form`, or an empty
+/// `elicitation`, which is forms).
+pub fn form_elicitation(msg: &Value) -> bool {
+    let e = &msg["params"]["_meta"][CAPABILITIES]["elicitation"];
+    e.get("form").is_some() || e.as_object().is_some_and(|o| o.is_empty())
 }
 
 /// What the client declared on this request: whether it opens URLs for elicitation, and its name.
@@ -80,6 +87,8 @@ pub fn check(h: &HeaderMap, msg: &Value, legacy: &[&str]) -> Result<(), (StatusC
     let named = match method {
         "tools/call" | "prompts/get" => msg["params"]["name"].as_str(),
         "resources/read" => msg["params"]["uri"].as_str(),
+        // The tasks extension's methods name their task (SEP-2663, over Streamable HTTP).
+        "tasks/get" | "tasks/update" | "tasks/cancel" => msg["params"]["taskId"].as_str(),
         _ => None,
     };
     if let Some(name) = named {

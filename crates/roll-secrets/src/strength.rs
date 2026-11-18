@@ -90,7 +90,8 @@ const SERVER_ONLY: &[(&str, &str)] = &[
     ("SG.", "a SendGrid key"),
     ("npm_", "an npm token"),
     ("shpat_", "a Shopify admin token"),
-    ("rlst_", "a roll secrets token"),
+    ("rlt_", "a roll token"),
+    ("rlo_", "a roll OAuth token"),
 ];
 
 /// Words in a name that say it's a server's secret (broader words like `API_KEY` also name

@@ -313,7 +313,7 @@ pub enum Secrets {
     /// Change requests: list, approve, reject, apply, close.
     #[command(subcommand)]
     Requests(Requests),
-    /// Scoped tokens for CI and services: list, create, revoke.
+    /// Tokens for CI and services on this project (roll-access's `rlt_…`): list, create, revoke.
     #[command(subcommand)]
     Tokens(Tokens),
     /// Where a key is set, in every project you can read (`STRIPE_*` for a prefix). Never values.
@@ -335,6 +335,10 @@ pub enum Secrets {
     /// list, add, remove.
     #[command(subcommand)]
     Databases(DatabasesCmd),
+    /// The project's GitHub Apps, for an installation token per lease (narrowed by the link's
+    /// options.repositories and options.permissions): list, add, remove.
+    #[command(subcommand, name = "github-apps")]
+    GithubApps(GithubAppsCmd),
     /// AWS roles for dynamic AWS credentials: list, add (roll assumes it to check), remove.
     #[command(subcommand, name = "aws-roles")]
     AwsRoles(AwsRolesCmd),
@@ -358,8 +362,8 @@ pub enum Secrets {
     /// Back the project up, sealed to a public key (`keygen`): every environment, folder, value,
     /// link, import, policy and required key. Written to stdout or --out.
     Backup {
-        /// The recipient's public key (base64url X25519).
-        #[arg(long)]
+        /// The recipient's public key (base64url X25519). It may start with `-`.
+        #[arg(long, allow_hyphen_values = true)]
         to: String,
         #[arg(long)]
         out: Option<std::path::PathBuf>,
@@ -498,12 +502,17 @@ pub enum Syncs {
 pub enum Sinks {
     #[command(alias = "list")]
     Ls,
-    /// Stream the audit log to an HTTPS URL (its signing secret is printed once).
+    /// Stream the audit log to an HTTPS URL (its signing secret is printed once). `--format splunk`,
+    /// `datadog` or `bearer` sends the SIEM's own format with its token, read from stdin.
     Add {
         url: String,
         /// Send the rows the project already has first.
         #[arg(long)]
         from_start: bool,
+        /// roll (signed JSON, the default), splunk (HTTP Event Collector), datadog (Logs intake)
+        /// or bearer (roll's JSON with Authorization: Bearer).
+        #[arg(long, default_value = "roll")]
+        format: String,
     },
     #[command(alias = "remove")]
     Rm { id: String },
@@ -620,8 +629,14 @@ pub enum AwsRolesCmd {
     #[command(alias = "list")]
     Ls,
     /// Register a role: its trust policy lets roll's role assume it with
-    /// `sts:ExternalId = roll-secrets:<project>`.
-    Add { name: String, role_arn: String },
+    /// `sts:ExternalId = roll-secrets:<project>`, or (`--oidc`) trusts roll's issuer with
+    /// `aud = sts.amazonaws.com` and `sub = roll-secrets:<project>` (no AWS credential of roll's).
+    Add {
+        name: String,
+        role_arn: String,
+        #[arg(long)]
+        oidc: bool,
+    },
     Rm { id: String },
 }
 
@@ -641,6 +656,48 @@ pub enum DatabasesCmd {
         /// The server's CA certificates (PEM file), when the system's don't cover it (Amazon RDS).
         #[arg(long)]
         ca: Option<std::path::PathBuf>,
+    },
+    /// Change a registration in place: its name, its CA, or (--url) its admin URL from stdin,
+    /// checked before it's kept.
+    Set {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// The server's CA certificates (PEM file); --no-ca clears them.
+        #[arg(long, conflicts_with = "no_ca")]
+        ca: Option<std::path::PathBuf>,
+        #[arg(long)]
+        no_ca: bool,
+        /// Read a new admin URL from stdin (after its password changed elsewhere).
+        #[arg(long)]
+        url: bool,
+    },
+    /// Rotate the admin URL's own password to one only roll knows, as Vault's rotate-root.
+    RotateAdmin { id: String },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum GithubAppsCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register an App's installation: the App's private key (the PEM GitHub gave) on stdin.
+    /// roll gets a token once (and revokes it) to check.
+    Add {
+        name: String,
+        #[arg(long)]
+        app_id: u64,
+        #[arg(long)]
+        installation: u64,
+        /// GitHub Enterprise Server's API (https://github.example.com/api/v3).
+        #[arg(long)]
+        api_base: Option<String>,
+        /// A repository tokens may reach at most (repeat it).
+        #[arg(long = "repo", required = true)]
+        repositories: Vec<String>,
+        /// A permission tokens may have at most, `name:level` (`contents:read`; repeat it).
+        #[arg(long = "permission", required = true)]
+        permissions: Vec<String>,
     },
     Rm { id: String },
 }
@@ -1508,14 +1565,18 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             {
                 eprintln!("note: {server} is this machine's own address; pass --url with one the cluster reaches");
             }
-            let mut body = json!({ "name": format!("k8s-{name}"), "actions": ["read", "reveal"], "environments": [c.at.env] });
+            // A roll-access token with one rule: read and reveal this environment (and folder).
+            let mut rule = json!({ "product": "secrets", "resources": [{ "project": c.project }], "environments": [c.at.env], "actions": { "read": "allow", "reveal": "allow" } });
             if c.at.path != "/" {
-                body["paths"] = json!([c.at.path]);
+                rule["paths"] = json!([c.at.path]);
             }
+            let mut body = json!({ "name": format!("k8s-{name}"), "rules": [rule] });
             if let Some(d) = ttl_days {
-                body["ttl_days"] = json!(d);
+                anyhow::ensure!(d > 0, "--ttl-days is positive");
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+                body["expires_at"] = json!(now + d * 86_400_000);
             }
-            let token = c.call(Method::POST, &format!("{}/tokens", c.base()), Some(body)).await?;
+            let token = c.call(Method::POST, "/v1/access/tokens", Some(body)).await?;
             let mut query = "dynamic=false&strict=1".to_string();
             if c.at.path != "/" {
                 query.push_str(&format!("&path={}", enc(&c.at.path)));
@@ -1541,7 +1602,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 q(&store),
                 q(&c.at.env),
             );
-            eprintln!("Made token {} for {}:{}; it's only in the output above. Apply it with: | kubectl apply -f -", s(&token["id"]), c.at.env, c.at.path);
+            eprintln!("Made token {} for {}:{}; it's only in the output above. Apply it with: | kubectl apply -f -", s(&token["grant"]["id"]), c.at.env, c.at.path);
         }
         Secrets::Reach { key } => {
             let mut url = format!("{}/reach?{}", c.env(&c.at.env), c.q());
@@ -1724,8 +1785,72 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 println!("Added {} ({}): link DB_USER and DB_PASSWORD to it, managed (the roles take turns) or dynamic (a login per lease).", s(&v["name"]), s(&v["id"]));
             }
+            DatabasesCmd::Set { id, name, ca, no_ca, url } => {
+                let mut body = json!({});
+                if let Some(n) = name {
+                    body["name"] = json!(n);
+                }
+                if let Some(p) = ca {
+                    body["ca"] = json!(std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?);
+                } else if no_ca {
+                    body["ca"] = json!("");
+                }
+                if url {
+                    // The admin URL holds a password: never an argument.
+                    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                        eprint!("New admin URL, then Enter and Ctrl-D: ");
+                    }
+                    let mut u = String::new();
+                    std::io::stdin().read_to_string(&mut u).context("reading the admin URL from stdin")?;
+                    body["url"] = json!(u.trim());
+                }
+                let v = c.call(Method::PATCH, &format!("{}/outside-databases/{}", c.base(), enc(&id)), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Changed {} ({})", s(&v["name"]), s(&v["host"]));
+            }
+            DatabasesCmd::RotateAdmin { id } => {
+                let v = c.call(Method::POST, &format!("{}/outside-databases/{}/rotate-admin", c.base(), enc(&id)), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Rotated {}'s admin password: only roll knows it now.", s(&v["name"]));
+            }
             DatabasesCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/outside-databases/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::GithubApps(g) => match g {
+            GithubAppsCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/github-apps", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for a in v.as_array().into_iter().flatten() {
+                    println!("{}  {:<16} app {}  installation {}  {}", s(&a["id"]), s(&a["name"]), a["app_id"], a["installation_id"], s(&a["api_base"]));
+                }
+            }
+            GithubAppsCmd::Add { name, app_id, installation, api_base, repositories, permissions } => {
+                let permissions: serde_json::Map<String, Value> = permissions
+                    .iter()
+                    .map(|p| p.split_once(':').map(|(k, v)| (k.trim().to_string(), json!(v.trim()))).ok_or_else(|| anyhow::anyhow!("--permission is name:level (contents:read)")))
+                    .collect::<anyhow::Result<_>>()?;
+                // The private key: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("The App's private key (PEM), then Enter and Ctrl-D: ");
+                }
+                let mut key = String::new();
+                std::io::stdin().read_to_string(&mut key).context("reading the private key from stdin")?;
+                let v = c.call(Method::POST, &format!("{}/github-apps", c.base()), Some(json!({ "name": name, "app_id": app_id, "installation_id": installation, "private_key": key.trim(), "api_base": api_base, "repositories": repositories, "permissions": permissions }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link GITHUB_TOKEN to it, dynamic, for a token per lease.", s(&v["name"]), s(&v["id"]));
+            }
+            GithubAppsCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/github-apps/{}", c.base(), enc(&id)), None).await?;
                 println!("Removed {id}");
             }
         },
@@ -1750,12 +1875,13 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     return print(&v);
                 }
                 for r in v.as_array().into_iter().flatten() {
-                    println!("{}  {:<16} {}", s(&r["id"]), s(&r["name"]), s(&r["role_arn"]));
+                    println!("{}  {:<16} {:<11} {}", s(&r["id"]), s(&r["name"]), s(&r["trust"]), s(&r["role_arn"]));
                 }
-                eprintln!("Trust policies need sts:ExternalId = roll-secrets:{}", c.project);
+                eprintln!("Trust policies pin roll-secrets:{} (sts:ExternalId, or sub for roll's issuer)", c.project);
             }
-            AwsRolesCmd::Add { name, role_arn } => {
-                let v = c.call(Method::POST, &format!("{}/aws-roles", c.base()), Some(json!({ "name": name, "role_arn": role_arn }))).await?;
+            AwsRolesCmd::Add { name, role_arn, oidc } => {
+                let trust = if oidc { "oidc" } else { "external_id" };
+                let v = c.call(Method::POST, &format!("{}/aws-roles", c.base()), Some(json!({ "name": name, "role_arn": role_arn, "trust": trust }))).await?;
                 if json_out {
                     return print(&v);
                 }
@@ -2039,41 +2165,49 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("Deleted {name}");
             }
         },
+        // A project's tokens are roll-access's (docs/permissions.md): one rule on this project's
+        // secrets, listed by what they're for, revoked one at a time.
         Secrets::Tokens(t) => match t {
             Tokens::Ls => {
-                let v = c.call(Method::GET, &format!("{}/tokens", c.base()), None).await?;
+                let v = c.call(Method::GET, &format!("/v1/access/tokens?product=secrets&resource={}", enc(&c.project)), None).await?;
                 if json_out {
                     return print(&v);
                 }
                 for t in v.as_array().into_iter().flatten() {
                     let list = |x: &Value| x.as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_else(|| "all".into());
-                    println!("{}  {:<20} envs {}  paths {}  {}  used {}", s(&t["id"]), s(&t["name"]), list(&t["environments"]), list(&t["paths"]), list(&t["actions"]), t["last_used_at"].as_i64().map(ago).unwrap_or_else(|| "never".into()));
+                    let rule = t["rules"].as_array().and_then(|r| r.iter().find(|r| r["product"] == "secrets")).cloned().unwrap_or_default();
+                    let actions = rule["actions"].as_object().map(|a| a.iter().map(|(k, v)| if v == "ask" { format!("{k}?") } else { k.clone() }).collect::<Vec<_>>().join(",")).unwrap_or_default();
+                    let state = if t["revoked_at"].is_null() { t["last_used_at"].as_i64().map(|at| format!("used {}", ago(at))).unwrap_or_else(|| "never used".into()) } else { "revoked".into() };
+                    println!("{}  {:<20} envs {}  paths {}  {}  {}", s(&t["id"]), s(&t["name"]), list(&rule["environments"]), list(&rule["paths"]), actions, state);
                 }
             }
             Tokens::Create { name, envs, paths, actions, ttl_days, allow_ips } => {
                 let actions = if actions.is_empty() { vec!["read".to_string(), "reveal".to_string()] } else { actions };
-                let mut body = json!({ "name": name, "actions": actions });
+                let mut rule = json!({ "product": "secrets", "resources": [{ "project": c.project }], "actions": actions.iter().map(|a| (a.clone(), json!("allow"))).collect::<serde_json::Map<_, _>>() });
                 if !envs.is_empty() {
-                    body["environments"] = json!(envs);
+                    rule["environments"] = json!(envs);
                 }
                 if !paths.is_empty() {
-                    body["paths"] = json!(paths);
+                    rule["paths"] = json!(paths);
                 }
+                let mut body = json!({ "name": name, "rules": [rule] });
                 if let Some(d) = ttl_days {
-                    body["ttl_days"] = json!(d);
+                    anyhow::ensure!(d > 0, "--ttl-days is positive");
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+                    body["expires_at"] = json!(now + d * 86_400_000);
                 }
                 if !allow_ips.is_empty() {
-                    body["allowed_ips"] = json!(allow_ips);
+                    body["ip_allow"] = json!(allow_ips);
                 }
-                let v = c.call(Method::POST, &format!("{}/tokens", c.base()), Some(body)).await?;
+                let v = c.call(Method::POST, "/v1/access/tokens", Some(body)).await?;
                 if json_out {
                     return print(&v);
                 }
                 println!("{}", s(&v["token"]));
-                eprintln!("Created {} ({}). This is the only time it's shown: use it as ROLL_TOKEN.", s(&v["name"]), s(&v["id"]));
+                eprintln!("Created {} ({}). This is the only time it's shown: use it as ROLL_TOKEN.", s(&v["grant"]["name"]), s(&v["grant"]["id"]));
             }
             Tokens::Revoke { id } => {
-                c.call(Method::DELETE, &format!("{}/tokens/{}", c.base(), enc(&id)), None).await?;
+                c.call(Method::DELETE, &format!("/v1/access/tokens/{}", enc(&id)), None).await?;
                 println!("Revoked {id}");
             }
         },
@@ -2772,10 +2906,26 @@ async fn sinks(c: &Client<'_>, cmd: Sinks, json_out: bool) -> anyhow::Result<()>
                 println!("{}  {:<6} {}  delivered {when}{}", s(&x["id"]), s(&x["status"]), s(&x["url"]), x["error"].as_str().map(|e| format!("  ({e})")).unwrap_or_default());
             }
         }
-        Sinks::Add { url, from_start } => {
-            let v = c.call(Method::POST, &base, Some(json!({ "url": url, "from_start": from_start }))).await?;
-            println!("{}", s(&v["secret"]));
-            eprintln!("Streaming the audit log to {url} ({}). That's its signing secret, shown this once.", s(&v["id"]));
+        Sinks::Add { url, from_start, format } => {
+            let mut body = json!({ "url": url, "from_start": from_start });
+            if format != "roll" {
+                // The SIEM's token: never an argument (it would sit in the shell's history).
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("The {format} token, then Enter and Ctrl-D: ");
+                }
+                let mut token = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut token).context("reading the token from stdin")?;
+                body["format"] = json!(format);
+                body["token"] = json!(token.trim());
+            }
+            let v = c.call(Method::POST, &base, Some(body)).await?;
+            if format == "roll" {
+                println!("{}", s(&v["secret"]));
+                eprintln!("Streaming the audit log to {url} ({}). That's its signing secret, shown this once.", s(&v["id"]));
+            } else {
+                // Its batches carry the SIEM's token, not roll's signature: nothing to keep.
+                eprintln!("Streaming the audit log to {url} as {format} ({}); the token is sealed in roll.", s(&v["id"]));
+            }
         }
         Sinks::Rm { id } => {
             c.call(Method::DELETE, &format!("{base}/{}", enc(&id)), None).await?;
@@ -4092,7 +4242,7 @@ mod relogin_tests {
                     }
                     let mut s = s.lock().unwrap();
                     s.push(b["token"].as_str().unwrap_or_default().to_string());
-                    (axum::http::StatusCode::OK, axum::Json(json!({ "token": format!("rlst_{}", s.len()), "expires_at": now_ms() + 3_600_000 })))
+                    (axum::http::StatusCode::OK, axum::Json(json!({ "token": format!("rlt_{}", s.len()), "expires_at": now_ms() + 3_600_000 })))
                 }),
             )
             .route(
@@ -4120,24 +4270,24 @@ mod relogin_tests {
         let auth = |v: Value| v["auth"].as_str().unwrap().to_string();
         let due = || async { login.held.lock().await.renew = std::time::Instant::now() };
 
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_1");
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_1", "not yet");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_1");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_1", "not yet");
         std::fs::write(&file, "jwt-2\n").unwrap();
         due().await;
         // Renewed in the background: this request goes on with the current token, the next has the new one.
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_1");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_1");
         login.settle().await;
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_2");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_2");
         // roll is down when it's time to renew: the current token goes on.
         down.store(true, Ordering::SeqCst);
         due().await;
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_2");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_2");
         login.settle().await;
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_2");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_2");
         // A 401 (its clock ran ahead): logs in again and the request goes through.
         down.store(false, Ordering::SeqCst);
-        *refuse.lock().unwrap() = "Bearer rlst_2".into();
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_3");
+        *refuse.lock().unwrap() = "Bearer rlt_2".into();
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_3");
         assert_eq!(*seen.lock().unwrap(), ["jwt-1", "jwt-2", "jwt-2"]);
         // Started through an outage (`roll run --fallback`): no login yet. While roll is down a
         // request is no answer (so the fallback is used), and the first one it answers logs in.
@@ -4146,6 +4296,6 @@ mod relogin_tests {
         down.store(true, Ordering::SeqCst);
         assert!(no_answer(&api.get("/v1/echo").await.unwrap_err()));
         down.store(false, Ordering::SeqCst);
-        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlst_4");
+        assert_eq!(auth(api.get("/v1/echo").await.unwrap()), "Bearer rlt_4");
     }
 }

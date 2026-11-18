@@ -73,6 +73,8 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route("/v1/apps/projects/{project}/notifications/{nid}/test", post(test_target))
         .route("/v1/apps/projects/{project}/notifications/{nid}/deliveries", get(deliveries))
         .route("/v1/apps/services/{id}/registry", put(put_registry).delete(delete_registry))
+        .route("/v1/apps/services/{id}/git-login", put(put_git_login).delete(delete_git_login))
+        .route("/v1/apps/services/{id}/github", put(put_github).delete(delete_github))
         .route("/v1/apps/services/{id}/environments", get(environments))
         .route(env, get(get_env).put(put_env).delete(delete_env))
         .route(&format!("{env}/deploys"), get(deploys).post(create_deploy).layer(DefaultBodyLimit::max(apps.cfg.upload_max)))
@@ -80,6 +82,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/deploys/{{dep}}/logs"), get(deploy_logs))
         .route(&format!("{env}/deploys/{{dep}}/commits"), get(deploy_commits))
         .route(&format!("{env}/deploys/{{dep}}/rollback"), post(rollback))
+        .route(&format!("{env}/deploys/{{dep}}/rollout"), post(rollout_action))
         .route(&format!("{env}/rollback"), post(rollback_previous))
         .route(&format!("{env}/deploys/{{dep}}/cancel"), post(cancel))
         .route(&format!("{env}/redeploy"), post(redeploy))
@@ -88,6 +91,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/volume/backups"), get(backups).post(backup_volume))
         .route(&format!("{env}/volume/backups/{{bid}}/restore"), post(restore_volume))
         .route(&format!("{env}/restart"), post(restart))
+        .route(&format!("{env}/cache/purge"), post(purge_cache))
         .route(&format!("{env}/instances/{{name}}/restart"), post(restart_instance))
         .route(&format!("{env}/files"), get(read_files).put(write_files).layer(DefaultBodyLimit::max(crate::shell::FILES_MAX)))
         .route(&format!("{env}/sleep"), post(sleep))
@@ -98,6 +102,13 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/logs"), get(env_logs))
         .route(&format!("{env}/metrics"), get(metrics))
         .route(&format!("{env}/routes"), get(routes))
+        .route(&format!("{env}/analytics"), get(analytics))
+        .route(&format!("{env}/visit"), post(visit))
+        .route(&format!("{env}/vitals"), get(vitals))
+        .route(&format!("{env}/app-metrics"), get(app_metrics))
+        .route(&format!("{env}/errors"), get(errors))
+        .route(&format!("{env}/traces"), get(traces))
+        .route(&format!("{env}/traces/{{trace}}"), get(trace))
         .route(&format!("{env}/usage"), get(usage))
         .route(&format!("{env}/runs"), get(runs).post(run_now))
         .route(&format!("{env}/runs/{{run}}"), get(get_run))
@@ -152,7 +163,7 @@ async fn import(State(apps): S, b: Bytes) -> R {
     use apps_build::project::{VarSpec, compose_to_toml, entry_kind, entry_run, parse_project};
     let v = body(&b)?;
     let text = |k: &str| v.get(k).and_then(Value::as_str);
-    if [text("roll_toml"), text("compose")].into_iter().flatten().any(|t| t.len() > 1 << 20) {
+    if [text("roll_toml"), text("compose"), text("render"), text("fly"), text("railway"), text("heroku"), text("procfile")].into_iter().flatten().any(|t| t.len() > 1 << 20) {
         return Err(Error::BadRequest("the file is at most 1 MiB".into()));
     }
     // A repo's own roll.toml (a "deploy to roll" link): its root's, at a revision or its head.
@@ -173,15 +184,51 @@ async fn import(State(apps): S, b: Bytes) -> R {
             Some(String::from_utf8(bytes).map_err(|_| Error::BadRequest(format!("{repo}'s roll.toml isn't UTF-8")))?)
         }
     };
-    let (toml_text, notes) = match (from_repo, text("roll_toml"), text("compose")) {
-        (Some(t), None, None) => (t, Vec::new()),
-        (None, Some(t), None) => (t.to_string(), Vec::new()),
+    // A public Git repository's (a "deploy to roll" link for GitHub, GitLab…): its branch's head,
+    // or the default one's; the file's folders become services built from the repository.
+    let from_git = match text("git") {
+        None => None,
+        Some(url) => {
+            if from_repo.is_some() {
+                return Err(Error::BadRequest("give one of repo or git".into()));
+            }
+            crate::git_source::check_url(url, apps.cfg.allow_private).map_err(Error::BadRequest)?;
+            let remote = crate::git_source::Remote::public(apps.cfg.allow_private, url);
+            let (sha, branch) = crate::git_source::head(&remote, text("branch")).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
+            let bytes = crate::git_source::read_file(&remote, &sha, "roll.toml").await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
+            let bytes = bytes.ok_or_else(|| Error::BadRequest(format!("{url} has no roll.toml at its root to deploy from")))?;
+            Some((url.to_string(), branch, String::from_utf8(bytes).map_err(|_| Error::BadRequest(format!("{url}'s roll.toml isn't UTF-8")))?))
+        }
+    };
+    let (git_url, git_branch) = from_git.as_ref().map(|(u, b, _)| (Some(u.clone()), Some(b.clone()))).unwrap_or_default();
+    let repo = text("repo").map(str::to_string);
+    let from_repo = from_repo.or(from_git.map(|(_, _, t)| t));
+    // Another platform's file (Render's Blueprint, fly.toml, railway.json, Heroku's app.json and
+    // Procfile), read as roll.toml with notes on what isn't carried over.
+    let platform: Vec<(&str, String)> = ["render", "fly", "railway", "heroku"].into_iter().filter_map(|k| Some((k, text(k)?.to_string()))).collect();
+    let procfile = text("procfile").map(str::to_string);
+    let given = [from_repo.is_some(), text("roll_toml").is_some(), text("compose").is_some()].into_iter().filter(|b| *b).count() + platform.len();
+    if given != 1 {
+        return Err(Error::BadRequest("give one of roll_toml, compose, render, fly, railway, heroku (with procfile), repo or git".into()));
+    }
+    let (toml_text, notes) = match (from_repo, text("roll_toml"), text("compose"), platform.into_iter().next()) {
+        (Some(t), _, _, _) => (t, Vec::new()),
+        (_, Some(t), _, _) => (t.to_string(), Vec::new()),
         // Off the runtime's threads: a large file is a few hundred milliseconds of parsing.
-        (None, None, Some(c)) => {
+        (_, _, Some(c), _) => {
             let c = c.to_string();
             tokio::task::spawn_blocking(move || compose_to_toml(&c)).await.map_err(|e| Error::Internal(e.to_string()))?.map_err(|e| Error::BadRequest(e.to_string()))?
         }
-        _ => return Err(Error::BadRequest("give one of roll_toml, compose or repo".into())),
+        (_, _, _, Some((kind, t))) => tokio::task::spawn_blocking(move || match kind {
+            "render" => apps_build::imports::render_to_toml(&t),
+            "fly" => apps_build::imports::fly_to_toml(&t),
+            "railway" => apps_build::imports::railway_to_toml(&t),
+            _ => apps_build::imports::heroku_to_toml(&t, procfile.as_deref()),
+        })
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?
+        .map_err(|e| Error::BadRequest(e.to_string()))?,
+        _ => return Err(Error::BadRequest("give one of roll_toml, compose, render, fly, railway, heroku, repo or git".into())),
     };
     let f = parse_project(&toml_text).map_err(|e| Error::BadRequest(e.to_string()))?;
     let apps: serde_json::Map<String, Value> = f
@@ -190,10 +237,17 @@ async fn import(State(apps): S, b: Bytes) -> R {
         .map(|(n, a)| {
             let source = match entry_kind(a) {
                 "repo" => json!({ "kind": "repo", "repo": a.repo, "root": a.root }),
+                "git" => json!({ "kind": "git", "url": a.git, "root": a.root }),
                 "image" => json!({ "kind": "image", "image": a.image }),
+                // A folder of the repository the file came from: built from it, at that folder
+                // (an upload would need `roll up`, and a link has no checkout to run it in).
+                _ if repo.is_some() => json!({ "kind": "repo", "repo": repo, "root": a.root.as_deref().filter(|r| *r != ".") }),
+                _ if git_url.is_some() => json!({ "kind": "git", "url": git_url, "root": a.root.as_deref().filter(|r| *r != ".") }),
                 _ => json!({ "kind": "upload", "root": a.root.as_deref().unwrap_or(".") }),
             };
-            let links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "name": l })).collect();
+            // A folder of a Git URL follows the branch the file was read from.
+            let branch = a.branch.clone().or_else(|| (entry_kind(a) == "upload").then(|| git_branch.clone()).flatten());
+            let links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": apps_build::project::link_kind(&f, l), "name": l })).collect();
             // What to set as it is, what to make (a secret, once), and what to ask whoever makes it.
             let mut fixed = serde_json::Map::new();
             let (mut generate, mut ask) = (Vec::new(), Vec::new());
@@ -206,7 +260,13 @@ async fn import(State(apps): S, b: Bytes) -> R {
                     VarSpec::Ask(q) => ask.push(json!({ "name": k, "ask": q.ask, "default": q.default })),
                 }
             }
-            (n.clone(), json!({ "source": source, "branch": a.branch, "run": entry_run(a), "links": links, "variables": fixed, "generate": generate, "ask": ask }))
+            // Its other environments: a branch, its own run settings, variables as they are.
+            let environments: serde_json::Map<String, Value> = a
+                .environments
+                .iter()
+                .map(|(e, env)| (e.clone(), json!({ "branch": env.branch, "run": env.run.as_ref().map(|t| serde_json::to_value(t).unwrap_or_default()).unwrap_or_else(|| json!({})), "variables": env.variables })))
+                .collect();
+            (n.clone(), json!({ "environments": environments, "source": source, "branch": branch, "run": entry_run(a), "links": links, "variables": fixed, "generate": generate, "ask": ask }))
         })
         .collect();
     ok(json!({ "roll_toml": toml_text, "notes": notes, "apps": apps, "databases": f.databases }))
@@ -226,17 +286,50 @@ async fn plan(State(apps): S, b: Bytes) -> R {
         let p = apps_build::plan(&apps_build::MapTree(map), &o).map_err(|e| Error::BadRequest(e.to_string()))?;
         return ok(p);
     }
-    let repo = v.get("repo").and_then(Value::as_str).ok_or_else(|| Error::BadRequest("repo or files is required".into()))?.to_string();
-    let sources = apps.deps.sources.clone().ok_or_else(|| Error::BadRequest("roll code isn't on this node".into()))?;
-    let rev = match v.get("revision").and_then(Value::as_str) {
-        Some(r) => sources.revision(&repo, r).await,
-        None => sources.resolve(&repo, None).await,
+    // A roll code repo at a revision, or a public Git URL at its branch's head (fetched as its
+    // deploy would fetch it), before anything is made.
+    enum From<'a> {
+        Repo(Arc<dyn crate::integrations::Sources>, String, String),
+        Git(crate::git_source::Remote<'a>, String),
     }
-    .map_err(|e| Error::BadRequest(format!("{repo}: {e}")))?;
+    let from = match (v.get("repo").and_then(Value::as_str), v.get("git").and_then(Value::as_str)) {
+        (Some(repo), None) => {
+            let sources = apps.deps.sources.clone().ok_or_else(|| Error::BadRequest("roll code isn't on this node".into()))?;
+            let rev = match v.get("revision").and_then(Value::as_str) {
+                Some(r) => sources.revision(repo, r).await,
+                None => sources.resolve(repo, None).await,
+            }
+            .map_err(|e| Error::BadRequest(format!("{repo}: {e}")))?;
+            From::Repo(sources, repo.to_string(), rev.sha)
+        }
+        (None, Some(url)) => {
+            crate::git_source::check_url(url, apps.cfg.allow_private).map_err(Error::BadRequest)?;
+            // A private repository's: the login the service would be made with.
+            let login = match (v["git_login"]["username"].as_str(), v["git_login"]["password"].as_str()) {
+                (Some(u), Some(p)) => Some((u.to_string(), p.to_string())),
+                _ => None,
+            };
+            let remote = crate::git_source::Remote::new(apps.cfg.allow_private, url, login);
+            let (sha, _) = crate::git_source::head(&remote, v.get("branch").and_then(Value::as_str)).await.map_err(|e| Error::BadRequest(format!("{url}: {e:#}")))?;
+            From::Git(remote, sha)
+        }
+        _ => return Err(Error::BadRequest("one of repo, git or files is required".into())),
+    };
     let dir = apps.cfg.home.join("apps").join("plans").join(crate::model::random(12));
     tokio::fs::create_dir_all(&dir).await.map_err(anyhow::Error::from)?;
     let result = async {
-        sources.materialize(&repo, &rev.sha, &dir).await?;
+        match &from {
+            From::Repo(sources, repo, sha) => sources.materialize(repo, sha, &dir).await?,
+            From::Git(remote, sha) => {
+                crate::git_source::materialize(remote, sha, &dir).await?;
+            }
+        }
+        // `roots`: the tree's folders that build on their own, to choose one from (a monorepo).
+        if v.get("roots") == Some(&Value::Bool(true)) {
+            let d = dir.clone();
+            let roots = tokio::task::spawn_blocking(move || apps_build::candidates(&apps_build::DirTree::new(d))).await.map_err(|e| Error::Internal(e.to_string()))?;
+            return Ok(json!({ "roots": roots }));
+        }
         let root = match v.get("root").and_then(Value::as_str) {
             Some(r) => crate::model::in_tree(&dir, "root", r, true)?,
             None => dir.clone(),
@@ -269,17 +362,13 @@ async fn plan(State(apps): S, b: Bytes) -> R {
         let p = tokio::task::spawn_blocking(move || apps_build::plan(&apps_build::DirTree::new(context), &o)).await.map_err(|e| Error::Internal(e.to_string()))?;
         p.map(|mut p| {
             p.notes.splice(0..0, said);
-            p
+            serde_json::to_value(p).expect("JSON")
         })
         .map_err(|e| Error::BadRequest(e.to_string()))
     }
     .await;
     let _ = tokio::fs::remove_dir_all(&dir).await;
-    let p: apps_build::Plan = match result {
-        Ok(p) => p,
-        Err(e) => return Err(e),
-    };
-    ok(p)
+    ok(result?)
 }
 
 #[derive(Deserialize)]
@@ -304,7 +393,15 @@ async fn create_service(State(apps): S, ext: Extensions, b: Bytes) -> R {
         apps.check_references(project, name, crate::model::PRODUCTION, &values, asker(&ext)).await?;
     }
     let s = apps.create_service(b, actor(&ext)).await?;
+    created_audit(&apps, &s, &ext).await;
     Ok((StatusCode::CREATED, Json(s)).into_response())
+}
+
+/// A service made with a private repository's login: the login's audit entry, as `PUT …/git-login`'s.
+async fn created_audit(apps: &Arc<Apps>, s: &crate::model::Service, ext: &Extensions) {
+    if let Some(l) = &s.git_login {
+        apps.audit("git_login.set", &s.id, "", actor(ext), json!({ "host": l.host })).await;
+    }
 }
 
 async fn create_project_service(State(apps): S, Path(project): Path<String>, ext: Extensions, b: Bytes) -> R {
@@ -316,6 +413,7 @@ async fn create_project_service(State(apps): S, Path(project): Path<String>, ext
     }
     v["project"] = Value::String(project);
     let s = apps.create_service(v, actor(&ext)).await?;
+    created_audit(&apps, &s, &ext).await;
     Ok((StatusCode::CREATED, Json(s)).into_response())
 }
 
@@ -491,6 +589,30 @@ async fn changes(State(apps): S, Path(id): Path<String>) -> R {
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response())
 }
 
+async fn put_git_login(State(apps): S, Path(id): Path<String>, ext: Extensions, b: Bytes) -> R {
+    let s = apps.put_git_login(&id, body(&b)?).await?;
+    apps.audit("git_login.set", &id, "", actor(&ext), json!({ "host": s.git_login.as_ref().map(|l| l.host.clone()) })).await;
+    ok(s)
+}
+
+async fn delete_git_login(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    let s = apps.delete_git_login(&id).await?;
+    apps.audit("git_login.removed", &id, "", actor(&ext), json!({})).await;
+    ok(s)
+}
+
+async fn put_github(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    let s = apps.put_github(&id).await?;
+    apps.audit("github.connected", &id, "", actor(&ext), json!({ "repo": s.github.as_ref().map(|g| g.repo.clone()), "installation": s.github.as_ref().map(|g| g.installation) })).await;
+    ok(s)
+}
+
+async fn delete_github(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    let s = apps.delete_github(&id).await?;
+    apps.audit("github.disconnected", &id, "", actor(&ext), json!({})).await;
+    ok(s)
+}
+
 async fn put_registry(State(apps): S, Path(id): Path<String>, ext: Extensions, b: Bytes) -> R {
     let s = apps.put_registry(&id, body(&b)?).await?;
     apps.audit("registry.set", &id, "", actor(&ext), json!({ "server": s.registry.as_ref().map(|r| r.server.clone()) })).await;
@@ -550,6 +672,10 @@ async fn create_deploy(State(apps): S, Path((id, env)): Path<(String, String)>, 
         let revision = headers.get("x-roll-revision").and_then(|v| v.to_str().ok()).filter(|r| (7..=64).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_hexdigit()));
         let no_cache = headers.get("x-roll-no-cache").is_some_and(|v| v == "1");
         apps.deploy(&id, &env, json!({ "message": message, "revision": revision, "no_cache": no_cache }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
+    } else if ct.starts_with("application/x-docker-image") {
+        // An image built elsewhere (`docker save`'s archive, `roll apps deploy --image-file`).
+        let message = headers.get("x-roll-message").and_then(|v| v.to_str().ok()).map(|m| percent_encoding::percent_decode_str(m).decode_utf8_lossy().into_owned()).unwrap_or_default();
+        apps.deploy(&id, &env, json!({ "message": message, "image_upload": true }), By { trigger: Trigger::Upload, actor }, Some(b), key).await?
     } else {
         apps.deploy(&id, &env, body(&b)?, By { trigger: Trigger::Manual, actor }, None, key).await?
     };
@@ -852,6 +978,7 @@ struct HookQuery {
 fn hooks_router(apps: Arc<Apps>) -> Router {
     Router::new()
         .route("/v1/apps/hooks/{id}/{env}/{token}", post(run_hook))
+
         .route_layer(axum::middleware::from_fn_with_state(apps.clone(), hook_on_owner))
         .with_state(apps)
 }
@@ -870,8 +997,26 @@ async fn hook_on_owner(State(apps): S, req: Request, next: Next) -> Response {
     cluster.dispatch(&lease_key(&id), req, |req, _guard| next.run(req)).await
 }
 
-async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, String)>, Query(q): Query<HookQuery>, ext: Extensions) -> R {
-    let d = apps.run_hook(&id, &env, &token, q.image).await?;
+async fn run_hook(State(apps): S, Path((id, env, token)): Path<(String, String, String)>, Query(q): Query<HookQuery>, ext: Extensions, headers: HeaderMap, b: Bytes) -> R {
+    // A repository's webhook: JSON, or GitHub's default form encoding (`payload=<JSON>`), and
+    // the event its platform names. Anything else is a plain deploy.
+    let event = ["x-github-event", "x-gitlab-event", "x-event-key"].iter().find_map(|h| headers.get(*h)).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let form = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("application/x-www-form-urlencoded"));
+    let json = if form {
+        url::form_urlencoded::parse(&b).find(|(k, _)| k == "payload").and_then(|(_, v)| serde_json::from_str::<Value>(&v).ok())
+    } else {
+        serde_json::from_slice::<Value>(&b).ok()
+    };
+    let payload = match (json.filter(Value::is_object), event) {
+        (Some(body), event) => Some(crate::hooks::Webhook { body, event }),
+        (None, Some(event)) => Some(crate::hooks::Webhook { body: json!({ "event": event }), event: Some(event) }),
+        (None, None) => None,
+    };
+    let d = match apps.run_hook(&id, &env, &token, q.image, payload).await? {
+        crate::hooks::HookOutcome::Deployed(d) => *d,
+        crate::hooks::HookOutcome::Ignored(why) => return ok(json!({ "ignored": why })),
+        crate::hooks::HookOutcome::Plain => unreachable!("run_hook deploys a plain call"),
+    };
     // The gate never saw it: who called is in the service's activity.
     let address = ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|c| c.0.ip().to_string());
     apps.audit("hook.deployed", &id, &env, Some("deploy hook".into()), json!({ "deployment": d.id, "address": address })).await;
@@ -890,6 +1035,18 @@ async fn rollback(State(apps): S, Path((id, env, dep)): Path<(String, String, St
     Ok((StatusCode::ACCEPTED, Json(d)).into_response())
 }
 
+#[derive(Deserialize)]
+struct RolloutBody {
+    action: crate::model::RolloutAction,
+}
+
+async fn rollout_action(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>, ext: Extensions, Json(b): Json<RolloutBody>) -> R {
+    apps.deployment(&id, &env, &dep).await?;
+    apps.rollout_action(&dep, b.action)?;
+    apps.audit("rollout.decided", &id, &env, actor(&ext), json!({ "deployment": dep, "action": format!("{:?}", b.action).to_ascii_lowercase() })).await;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "deployment": dep }))).into_response())
+}
+
 async fn rollback_previous(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
     let keep = body(&b)?.get("keep_variables").and_then(Value::as_bool).unwrap_or(false);
     let d = apps.rollback_previous(&id, &env, actor(&ext), keep).await?;
@@ -898,6 +1055,12 @@ async fn rollback_previous(State(apps): S, Path((id, env)): Path<(String, String
 
 async fn cancel(State(apps): S, Path((id, env, dep)): Path<(String, String, String)>) -> R {
     ok(apps.cancel(&id, &env, &dep).await?)
+}
+
+async fn purge_cache(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
+    let v = apps.purge_cache(&id, &env, if b.is_empty() { json!({}) } else { body(&b)? }).await?;
+    apps.audit("cache.purged", &id, &env, actor(&ext), v.clone()).await;
+    ok(v)
 }
 
 async fn restart(State(apps): S, Path((id, env)): Path<(String, String)>) -> R {
@@ -968,6 +1131,55 @@ async fn metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(
 }
 
 /// `GET …/routes?minutes=`: errors and latency by route, from the access log (`crate::traffic`).
+#[derive(serde::Deserialize)]
+struct TraceQuery {
+    minutes: Option<i64>,
+    min_ms: Option<u64>,
+}
+
+async fn traces(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<TraceQuery>) -> R {
+    ok(apps.traces(&id, &env, q.minutes.unwrap_or(60), q.min_ms.unwrap_or(0)).await?)
+}
+
+#[derive(Deserialize)]
+struct VitalsQuery {
+    minutes: Option<i64>,
+}
+
+async fn errors(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
+    ok(apps.errors(&id, &env, q.minutes.unwrap_or(1440)).await?)
+}
+
+async fn app_metrics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
+    ok(apps.app_metrics(&id, &env, q.minutes.unwrap_or(60)).await?)
+}
+
+async fn vitals(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<VitalsQuery>) -> R {
+    ok(apps.vitals(&id, &env, q.minutes.unwrap_or(1440)).await?)
+}
+
+#[derive(Deserialize)]
+struct VisitBody {
+    to: String,
+}
+
+/// A signed-in person's one-use way into a sign-in-gated environment (roll's dashboard asks
+/// for it as them, then sends the browser there). A token isn't a person: only a session gets one.
+async fn visit(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, Json(b): Json<VisitBody>) -> R {
+    let Some(user) = ext.get::<roll_auth::SignedIn>() else {
+        return Err(Error::Forbidden("signing in to an environment is for a person signed in to roll, not a token".into()));
+    };
+    ok(json!({ "url": apps.visit_ticket(&id, &env, &user.user, &b.to).await? }))
+}
+
+async fn trace(State(apps): S, Path((id, env, trace)): Path<(String, String, String)>) -> R {
+    ok(apps.trace(&id, &env, &trace).await?)
+}
+
+async fn analytics(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
+    ok(apps.analytics(&id, &env, w.minutes.unwrap_or(1_440)).await?)
+}
+
 async fn routes(State(apps): S, Path((id, env)): Path<(String, String)>, Query(w): Query<Window>) -> R {
     ok(apps.routes(&id, &env, w.minutes.unwrap_or(60)).await?)
 }

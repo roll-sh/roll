@@ -73,6 +73,7 @@ impl CodeSource {
             labels: c.labels.clone(),
             trusted: c.trusted,
             approved: c.run_approved,
+            author: c.author.clone(),
             github_pr: c.github_pr.map(|n| n as i64),
         }
     }
@@ -105,7 +106,16 @@ impl CodeSource {
                     .iter()
                     .map(|x| PreviewServiceLink { name: x.name.clone(), url: x.url.clone(), state: x.state.as_str().to_string() })
                     .collect(),
-                resources: p.resources.iter().map(|x| PreviewResourceLink { kind: x.kind.as_str().to_string(), parent: x.parent.clone(), r#ref: x.r#ref.clone() }).collect(),
+                resources: p.resources.iter().map(|x| PreviewResourceLink {
+                        kind: x.kind.as_str().to_string(),
+                        parent: x.parent.clone(),
+                        r#ref: x.r#ref.clone(),
+                        data: Some(match x.data {
+                            crate::Data::None => "none",
+                            crate::Data::Masked => "masked",
+                            crate::Data::Real => "real",
+                        }.into()),
+                    }).collect(),
                 // As precise as the comment shows: a usage reading that moves a cost by a hair
                 // doesn't make a new event for every webhook and the pull request.
                 sleeping_usd_month: (p.cost.sleeping_usd_month * 100.0).round() / 100.0,
@@ -114,13 +124,97 @@ impl CodeSource {
                 github: PreviewGithub { comment: s.github.comment, status: s.github.status, deployment: s.github.deployment },
                 head: Some(p.head.clone()),
                 schema_changes: p.schema_changes.clone(),
+                schema_risks: p.schema_risks.clone(),
+                release_ms: p.release.as_ref().map(|x| x.ms),
+                release_before_ms: p.release.as_ref().and_then(|x| x.before_ms),
                 expires_at: p.goes_at,
+                base_change: p.base_change.as_ref().map(|b| code_control::model::PreviewBaseChange { branch: b.branch.clone(), percent: b.percent, phone_percent: b.phone_percent, load_ms: b.load_ms, lcp_ms: b.lcp_ms, a11y_added: b.a11y_added, errors_added: b.errors_added,
+                    text: b.text.as_ref().map(|t| code_control::model::PreviewTextDiff { added: t.added.clone(), removed: t.removed.clone(), added_n: t.added_n, removed_n: t.removed_n }),
+                    links_added: b.links_added,
+                    api: b.api.as_ref().map(|t| code_control::model::PreviewTextDiff { added: t.added.clone(), removed: t.removed.clone(), added_n: t.added_n, removed_n: t.removed_n }),
+                    api_breaking: b.api_breaking.clone(),
+                    api_unread: b.api_unread,
+                    endpoints: b.endpoints.iter().map(|x| code_control::model::PreviewEndpoint { path: x.path.clone(), ms: x.ms, status: x.status, main_ms: x.main_ms, slower: x.slower() }).collect(),
+                    seo_added: b.seo_added }),
+                speed_budget: Some(code_control::model::PreviewSpeedBudget { load_ms: s.github.budget.load_ms, bytes: s.github.budget.bytes, lcp_ms: s.github.budget.lcp_ms, cls: s.github.budget.cls })
+                    .filter(|b| b.load_ms > 0 || b.bytes > 0 || b.lcp_ms > 0 || b.cls > 0.0),
+                pages: p
+                    .pages
+                    .iter()
+                    .map(|x| code_control::model::PreviewPageCheck {
+                        path: x.path.clone(),
+                        errors: x.errors,
+                        percent: x.percent,
+                        base_percent: x.base_percent,
+                        a11y_problems: x.a11y.as_ref().map(|a| a.problems()),
+                        seo: x.a11y.as_ref().and_then(|a| a.seo.as_ref()).map(|s| s.problems().into_iter().map(String::from).collect()).unwrap_or_default(),
+                        broken_links: x.links.as_ref().map(|l| l.broken.iter().map(|b| code_control::model::PreviewBrokenLink { path: b.path.clone(), status: b.status }).collect()).unwrap_or_default(),
+                        a11y_added: x.against.as_ref().and_then(|a| a.a11y_added),
+                        links_added: x.against.as_ref().and_then(|a| a.links_added),
+                        step: x.step.clone(),
+                    })
+                    .collect(),
+                visual_review: p.visual_review.as_ref().map(|v| code_control::model::PreviewVisualReview {
+                    state: match v.state {
+                        crate::VisualState::Unchanged => "unchanged",
+                        crate::VisualState::Changed => "changed",
+                        crate::VisualState::Accepted => "accepted",
+                    }
+                    .into(),
+                    branch: v.branch.clone(),
+                    // As precise as the status says.
+                    percent: (v.percent * 10.0).round() / 10.0,
+                    by: v.by.clone(),
+                    required: v.required,
+                    head: Some(v.head.clone()).filter(|h| !h.is_empty()),
+                    pages: v.pages.iter().map(|p| code_control::model::PreviewPageReview { path: p.path.clone(), percent: (p.percent * 10.0).round() / 10.0, by: p.by.clone(), unstable: p.unstable }).collect(),
+                }),
+                page_a11y: p.page_a11y.as_ref().map(|a| code_control::model::PreviewPageA11y {
+                    issues: a.issues.iter().map(|i| code_control::model::PreviewA11yIssue { kind: i.kind.clone(), count: i.count, first: i.first.clone(), impact: i.impact.clone(), help: i.help.clone() }).collect(),
+                    lang: a.lang,
+                    title: a.title,
+                    seo: a.seo.as_ref().map(|s| s.problems().into_iter().map(String::from).collect()).unwrap_or_default(),
+                }),
+                page_links: p.page_links.as_ref().map(|l| code_control::model::PreviewPageLinks {
+                    checked: l.checked,
+                    broken: l.broken.iter().map(|b| code_control::model::PreviewBrokenLink { path: b.path.clone(), status: b.status }).collect(),
+                }),
+                page_health: p.page_health.as_ref().map(|h| code_control::model::PreviewPageHealth { errors: h.errors, first_error: h.first_error.clone(), failed: h.failed, first_failed: h.first_failed.clone() }),
+                page_speed: p.page_speed.as_ref().map(|v| code_control::model::PreviewPageSpeed {
+                    ttfb_ms: v.now.ttfb_ms,
+                    fcp_ms: v.now.fcp_ms,
+                    load_ms: v.now.load_ms,
+                    bytes: v.now.bytes,
+                    before_load_ms: v.before.as_ref().map(|b| b.load_ms),
+                    lcp_ms: v.now.lcp_ms,
+                    cls: v.now.cls,
+                }),
+                visual_change: p.visual_change.as_ref().map(|v| code_control::model::PreviewVisualChange { since: v.since.clone(), percent: v.percent, phone_percent: v.phone_percent }),
                 earlier: p.earlier.iter().map(|x| code_control::model::PreviewEarlier { service: x.service.clone(), head: x.revision.clone(), url: x.url.clone() }).collect(),
                 // Only a public preview's: the comment is readable by whoever reads the pull request.
                 screenshot_url: (s.access == crate::settings::Access::Public)
                     .then(|| p.screenshot_link.clone())
                     .flatten()
                     .map(|(exp, sig)| format!("{}/v1/previews/{}/screenshot.png?exp={exp}&sig={sig}", self.code.config.api_url.trim_end_matches('/'), p.id)),
+                diff_url: (s.access == crate::settings::Access::Public)
+                    .then(|| p.diff_link.clone())
+                    .flatten()
+                    .map(|(exp, sig)| format!("{}/v1/previews/{}/screenshot.png?diff=base&exp={exp}&sig={sig}", self.code.config.api_url.trim_end_matches('/'), p.id)),
+                issues: linear_issues(&p.title, p.branch.as_deref()),
+                notes: p
+                    .notes
+                    .iter()
+                    .map(|(n, link)| code_control::model::PreviewNoteLink {
+                        path: n.path.clone(),
+                        note: n.note.clone(),
+                        by: n.by.clone(),
+                        // A public preview's only, as the screenshot's.
+                        crop_url: (s.access == crate::settings::Access::Public)
+                            .then(|| link.clone())
+                            .flatten()
+                            .map(|(exp, sig)| format!("{}/v1/previews/{}/screenshot.png?note={}&exp={exp}&sig={sig}", self.code.config.api_url.trim_end_matches('/'), p.id, n.id)),
+                    })
+                    .collect(),
             }),
         }
     }
@@ -141,6 +235,9 @@ pub fn service_of(repo: &str, p: &PreviewSpec) -> ServiceSpec {
         cpus: p.cpus,
         env: p.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         health: p.health.clone(),
+        states: p.states.clone(),
+        pages: p.pages.clone(),
+        hide: p.hide.clone(),
     }
 }
 
@@ -195,6 +292,17 @@ impl Source for CodeSource {
         Ok(specs)
     }
 
+    async fn screenshots(&self, repo: &str, revision: &str, root: &str) -> anyhow::Result<Option<code_preview::config::Screenshots>> {
+        // A root inside the repo only (`apps/web`), never out of it.
+        let root = root.trim_matches('/');
+        anyhow::ensure!(!root.split('/').any(|p| p == ".." || p == "."), "a service's root stays in its repo: {root:?}");
+        let r = self.repo(repo)?;
+        let cs = self.code.store.resolve_or_404(&r.id, revision)?;
+        let tree = self.code.checkout(&r.id, &cs).await?;
+        let dir = if root.is_empty() { tree.path().to_path_buf() } else { tree.path().join(root) };
+        Ok(RollToml::load(&dir).map_err(anyhow::Error::msg)?.and_then(|t| t.app_screenshots))
+    }
+
     async fn paths(&self, repo: &str, head: &str) -> anyhow::Result<Option<Vec<String>>> {
         let r = self.repo(repo)?;
         let Some(cs) = self.code.store.resolve(&r.id, head)? else { return Ok(None) };
@@ -205,6 +313,27 @@ impl Source for CodeSource {
         let r = self.repo(repo)?;
         let (Some(a), Some(b)) = (self.code.store.resolve(&r.id, from)?, self.code.store.resolve(&r.id, to)?) else { return Ok(None) };
         Ok(Some(self.code.store.compare(&r.id, &a, &b)?.into_iter().map(|d| d.path.as_str().to_string()).collect()))
+    }
+
+    async fn merge_base(&self, repo: &str, head: &str) -> anyhow::Result<Option<String>> {
+        let r = self.repo(repo)?;
+        let Some(cs) = self.code.store.resolve(&r.id, head)? else { return Ok(None) };
+        Ok(self.code.merge_base(&r, &cs)?.map(|id| id.to_string()))
+    }
+
+    async fn default_branch(&self, repo: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.repo(repo).ok().map(|r| r.default_branch))
+    }
+
+    async fn feedback(&self, change: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
+        let comments = self
+            .code
+            .db
+            .reviews(change)?
+            .into_iter()
+            .filter(|r| !r.dismissed && r.verdict == code_control::review::Verdict::Comment)
+            .map(|r| crate::notes::Comment { id: r.id, body: r.body, by: r.reviewer.name, at: r.created_at });
+        Ok(crate::notes::thread(comments))
     }
 
     async fn git_commit(&self, repo: &str, revision: &str) -> anyhow::Result<Option<String>> {
@@ -236,11 +365,11 @@ impl Source for CodeSource {
         Ok(())
     }
 
-    async fn forget(&self, p: &Preview) {
+    async fn forget(&self, p: &Preview, teardown: Option<&str>) {
         let Some(change) = &p.change else { return };
         // Only the change's preview environment, never roll code's own preview of it.
         let ours = self.code.db.change(change).ok().flatten().and_then(|c| c.preview).and_then(|x| x.environment).is_some_and(|e| e.id == p.id);
-        if ours && let Err(e) = self.code.report_environment(change, None) {
+        if ours && let Err(e) = self.code.report_environment_gone(change, teardown) {
             tracing::warn!(preview = %p.id, error = %e, "previews: clearing the change's preview");
         }
     }
@@ -260,11 +389,11 @@ impl Trees for CodeSource {
         iso.prepare(job, tree.path()).await
     }
 
-    async fn run(&self, iso: &Arc<dyn Isolation>, spec: &code_preview::config::CheckSpec, repo: &str, revision: &str, env: &[(String, String)]) -> anyhow::Result<code_preview::runner::RunOutput> {
+    async fn run(&self, iso: &Arc<dyn Isolation>, spec: &code_preview::config::CheckSpec, repo: &str, revision: &str, env: &[(String, String)], network: Option<code_preview::isolation::Network>) -> anyhow::Result<code_preview::runner::RunOutput> {
         let r = self.repo(repo)?;
         let cs = self.code.store.resolve_or_404(&r.id, revision)?;
         let tree = self.code.checkout(&r.id, &cs).await?;
-        Ok(code_preview::runner::run_check(iso, spec, tree.path(), env).await)
+        Ok(code_preview::runner::run_check_on(iso, spec, tree.path(), env, network).await)
     }
 }
 
@@ -307,6 +436,12 @@ impl PreviewBackend for Backend {
         Ok(self.source.summary(&p, &s))
     }
 
+    async fn accept_visual(&self, change: &code_control::model::Change, by: &str, head: &str) -> anyhow::Result<()> {
+        let engine = self.engine.get().and_then(Weak::upgrade).ok_or_else(|| anyhow::anyhow!("previews aren't running"))?;
+        let row = engine.store.row_by_change(&change.id)?.ok_or_else(|| anyhow::anyhow!("the change has no preview"))?;
+        engine.accept_visual(&row.id, by, None, true, Some(head), None).await.map(|_| ()).map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
     async fn delete(&self, repo: &RepoRow, change: &code_control::model::Change) -> anyhow::Result<()> {
         let env = change.preview.as_ref().and_then(|p| p.environment.as_ref());
         match (env, self.engine.get().and_then(Weak::upgrade)) {
@@ -316,5 +451,52 @@ impl PreviewBackend for Backend {
             },
             _ => self.inner.delete(repo, change).await,
         }
+    }
+}
+
+/// The Linear issues a change names: `ENG-123` (a team key of 1 to 7 capital letters or digits,
+/// starting with a letter, a dash, a number) anywhere in its title, and one at the start of its
+/// branch's last part in any case (`ada/eng-123-fix-cart`, Linear's own branch names), given in
+/// capitals. At most 3, once each, the title's first.
+pub fn linear_issues(title: &str, branch: Option<&str>) -> Vec<String> {
+    fn issue(key: &str, n: &str) -> Option<String> {
+        let key_ok = (1..=7).contains(&key.len()) && key.starts_with(|c: char| c.is_ascii_alphabetic()) && key.bytes().all(|b| b.is_ascii_alphanumeric());
+        let n_ok = (1..=7).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_digit()) && !n.starts_with('0');
+        (key_ok && n_ok).then(|| format!("{}-{n}", key.to_ascii_uppercase()))
+    }
+    let mut out: Vec<String> = Vec::new();
+    for word in title.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')) {
+        let parts: Vec<&str> = word.split('-').collect();
+        for w in parts.windows(2) {
+            if w[0].bytes().all(|b| !b.is_ascii_lowercase())
+                && let Some(i) = issue(w[0], w[1])
+                && !out.contains(&i)
+            {
+                out.push(i);
+            }
+        }
+    }
+    if let Some(last) = branch.and_then(|b| b.rsplit('/').next()) {
+        let mut parts = last.split('-');
+        if let (Some(k), Some(n)) = (parts.next(), parts.next())
+            && let Some(i) = issue(k, n)
+            && !out.contains(&i)
+        {
+            out.push(i);
+        }
+    }
+    out.truncate(3);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_changes_linear_issues_from_its_title_and_branch() {
+        let i = super::linear_issues;
+        assert_eq!(i("ENG-123: Fix the cart", None), ["ENG-123"], "roll's Linear agent's changes");
+        assert_eq!(i("Fix the cart (fixes ENG-12, WEB-7)", Some("ada/eng-123-fix-cart")), ["ENG-12", "WEB-7", "ENG-123"], "Linear's branch names, in any case");
+        assert_eq!(i("bump covid-19 data, ENG-0", Some("feat/cart-badge")), Vec::<String>::new(), "lowercase in a title, a zero, a branch without one");
+        assert_eq!(i("A-1 B-2 C-3 D-4", None).len(), 3, "at most 3");
     }
 }

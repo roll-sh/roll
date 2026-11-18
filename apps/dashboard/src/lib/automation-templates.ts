@@ -186,6 +186,26 @@ export const CHATOPS_TEMPLATES: AutomationTemplate[] = [
         step("status", "slack.status", { ...started, channel: "{{ event.data.channel }}", thread_ts: "{{ event.data.thread_ts }}" }),
       ]),
   },
+  {
+    id: "slack-preview-ready",
+    title: "Post a change's preview to Slack when it's ready",
+    description: "A message in a channel each time a change's preview is ready at a new push (roll previews), with a link to open it. Waking up or a new screenshot doesn't post again.",
+    trigger: "code",
+    steps: ["slack.post"],
+    integration: "slack",
+    build: (ctx) => {
+      const p = ctx.projects.find((x) => x.repo) ?? ctx.projects[0];
+      return spec(
+        "Previews in Slack",
+        "A message once a push, when its preview is ready.",
+        { type: "code", events: ["preview"], repos: p?.repo ? [p.repo] : [] },
+        // The channel is the owner's pick: left empty, so the builder asks for it.
+        [step("post", "slack.post", { channel: "", text: "The preview of {{ event.data.change }} in {{ event.data.repo }} is ready: {{ event.data.preview.url }}" })],
+        // `became` names what an update reached that the preview wasn't already at.
+        { filters: [{ field: "event.data.became", op: "contains", value: "ready" }] },
+      );
+    },
+  },
 ];
 
 export const TEMPLATES: AutomationTemplate[] = [
@@ -346,6 +366,56 @@ export const TEMPLATES: AutomationTemplate[] = [
           }),
         ),
       ]);
+    },
+  },
+  {
+    id: "visual-review-waits",
+    title: "Tell me when a visual change waits for a review",
+    description: "A notice when a change's preview looks different from main and nobody has accepted it yet (roll previews' visual review), with a link to its screenshots.",
+    trigger: "code",
+    steps: ["notify"],
+    build: (ctx) => {
+      const p = ctx.projects.find((x) => x.repo) ?? ctx.projects[0];
+      return spec(
+        "Visual changes to review",
+        "A notice for every change whose pages differ from main's.",
+        { type: "code", events: ["preview"], repos: p?.repo ? [p.repo] : [] },
+        [
+          step("tell", "notify", {
+            title: "A visual change waits for a review",
+            body: "Its pages differ from {{ event.data.preview.environment.visual_review.branch }} by {{ event.data.preview.environment.visual_review.percent }}%.",
+            level: "info",
+            link: "{{ event.data.preview.environment.dashboard_url }}",
+          }),
+        ],
+        // Once a head: `became` names what an update reached that the preview wasn't already at.
+        { filters: [{ field: "event.data.became", op: "contains", value: "visual_change" }] },
+      );
+    },
+  },
+  {
+    id: "preview-failed",
+    title: "Tell me when a change's preview fails",
+    description: "A notice once a push when a change's preview fails (a build, its seed or release, a health check), with what went wrong and a link to the preview.",
+    trigger: "code",
+    steps: ["notify"],
+    build: (ctx) => {
+      const p = ctx.projects.find((x) => x.repo) ?? ctx.projects[0];
+      return spec(
+        "Failed previews",
+        "A notice once a push when a change's preview fails.",
+        { type: "code", events: ["preview"], repos: p?.repo ? [p.repo] : [] },
+        [
+          step("tell", "notify", {
+            title: "The preview of {{ event.data.change }} failed",
+            body: '{{ event.data.preview.error | default:"See its activity." | truncate:200 }}',
+            level: "error",
+            link: "{{ event.data.preview.environment.dashboard_url }}",
+          }),
+        ],
+        // `became` names what an update reached that the preview wasn't already at: once a push.
+        { filters: [{ field: "event.data.became", op: "contains", value: "failed" }] },
+      );
     },
   },
   {

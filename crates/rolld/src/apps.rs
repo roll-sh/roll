@@ -134,6 +134,41 @@ fn parse_ports(s: &str) -> anyhow::Result<(u16, u16)> {
     Ok((a, b))
 }
 
+/// roll code's GitHub App for roll apps' Git URL services on its host: which installation sees a
+/// repository, short-lived installation tokens, commit statuses.
+struct CodeGitHub(Arc<code_control::Code>);
+
+#[async_trait]
+impl apps_control::integrations::GitHubApp for CodeGitHub {
+    fn host(&self) -> Option<String> {
+        self.0.github_host()
+    }
+    async fn installation_for(&self, owner: &str, repo: &str) -> anyhow::Result<Option<u64>> {
+        Ok(self.0.github_installation_for(owner, repo).await?)
+    }
+    async fn git_login(&self, installation: u64, owner: &str, repo: &str) -> anyhow::Result<(String, String)> {
+        Ok(self.0.github_git_login(installation, owner, repo).await?)
+    }
+    async fn status(&self, installation: u64, owner: &str, repo: &str, sha: &str, s: &apps_control::integrations::CommitStatus) -> anyhow::Result<()> {
+        Ok(self.0.github_commit_status(installation, owner, repo, sha, s.state, &s.context, &s.description, s.target_url.as_deref()).await?)
+    }
+    async fn deployment(&self, installation: u64, owner: &str, repo: &str, sha: &str, environment: &str, production: bool, transient: bool) -> anyhow::Result<u64> {
+        Ok(self.0.github_deployment(installation, owner, repo, sha, environment, "roll apps", production, transient).await?)
+    }
+    async fn deployment_status(&self, installation: u64, owner: &str, repo: &str, deployment: u64, state: &str, url: Option<&str>, description: &str) -> anyhow::Result<()> {
+        Ok(self.0.github_deployment_status(installation, owner, repo, deployment, state, url, description).await?)
+    }
+    async fn ci(&self, installation: u64, owner: &str, repo: &str, sha: &str) -> anyhow::Result<apps_control::integrations::Ci> {
+        use apps_control::integrations::Ci;
+        Ok(match self.0.github_ci(installation, owner, repo, sha).await? {
+            None => Ci::None,
+            Some(Ok(true)) => Ci::Passed,
+            Some(Ok(false)) => Ci::Pending,
+            Some(Err(which)) => Ci::Failed(which),
+        })
+    }
+}
+
 /// roll code as roll apps' source of trees and landings.
 #[derive(Clone)]
 struct CodeSources(Arc<code_control::Code>);
@@ -239,6 +274,11 @@ impl Sources for CodeSources {
         Ok(f.filter(|f| f.mode.is_file() && f.data.len() <= 64 << 10).map(|f| f.data.to_vec()))
     }
 
+    fn any_path_matches(&self, patterns: &[String], paths: &[String]) -> bool {
+        let patterns: Vec<code_control::review::pattern::Pattern> = patterns.iter().filter_map(|p| code_control::review::pattern::Pattern::new(p)).collect();
+        paths.iter().any(|p| code_control::review::pattern::any_match(&patterns, p))
+    }
+
     async fn touches(&self, repo: &str, from: &str, to: &str, patterns: &[String]) -> anyhow::Result<bool> {
         let (this, repo, from, to) = (self.clone(), repo.to_string(), from.to_string(), to.to_string());
         let patterns: Vec<code_control::review::pattern::Pattern> = patterns.iter().filter_map(|p| code_control::review::pattern::Pattern::new(p)).collect();
@@ -323,6 +363,69 @@ struct RollResources {
     /// rolld's own API (its address and the operator's token): a stream's routes answer there
     /// on any node, forwarded to the stream's owner on a fleet.
     api: (String, Option<String>, reqwest::Client),
+    /// The products' routes in process, for links that issue credentials of their own (a
+    /// bucket's key, a stream's, a NoSQL database's): roll secrets' providers, as its managed
+    /// links use them.
+    products: crate::secrets::Api,
+}
+
+impl RollResources {
+    /// What a link to `kind` sets through roll secrets' provider for it: each live field read
+    /// now, and (`label`: the credential's name in the product) each credential issued once,
+    /// its handles kept to revoke, and which variables those are. None: a kind that has no
+    /// provider.
+    async fn provided(&self, kind: LinkKind, r#ref: &str, label: Option<String>) -> anyhow::Result<Option<Provided>> {
+        use roll_secrets::links::{Link, Mode};
+        let Some(p) = crate::secrets::link_provider(&self.products, kind.as_str()) else { return Ok(None) };
+        let r = r#ref.to_string();
+        blocking(move || {
+            let fields = p.fields_for(&r);
+            let mut vars = Vec::new();
+            let mut issued_vars = Vec::new();
+            let mut issued: Vec<(String, roll_secrets::links::Issued)> = Vec::new();
+            let mut made = || -> anyhow::Result<()> {
+                for (field, mode) in p.suggested_for(&r) {
+                    let Some(f) = fields.iter().find(|f| f.field == field) else { continue };
+                    let link = Link { kind: kind.as_str().to_string(), r#ref: r.clone(), field: field.to_string(), mode, options: Default::default() };
+                    let value = match (mode, &label) {
+                        (Mode::Live, _) => p.read(&r, field, &link)?,
+                        // Listing what a link sets: only what's read, never a credential made.
+                        (_, None) => continue,
+                        (_, Some(label)) => {
+                            let cred = f.credential.unwrap_or(field);
+                            if !issued.iter().any(|(c, _)| c == cred) {
+                                issued.push((cred.to_string(), p.issue(&r, cred, &link, label, None)?));
+                            }
+                            let parts = &issued.iter().find(|(c, _)| c == cred).expect("issued").1.parts;
+                            issued_vars.push(f.suggest.to_string());
+                            parts.get(field).cloned().ok_or_else(|| anyhow::anyhow!("{} issued no {field}", kind.as_str()))?
+                        }
+                    };
+                    vars.push((f.suggest.to_string(), value.expose().to_string()));
+                }
+                Ok(())
+            };
+            let result = made();
+            let handles = serde_json::Value::Array(issued.iter().map(|(_, i)| i.handle.clone()).collect());
+            if let Err(e) = result {
+                // What was issued before the failure goes again: nothing is left behind.
+                for (_, i) in &issued {
+                    let _ = p.revoke(&r, &i.handle);
+                }
+                return Err(e);
+            }
+            Ok(Some(Provided { vars, handles, issued: issued_vars }))
+        })
+        .await
+    }
+}
+
+/// What a provider gave a link: every variable, the handles to revoke what it issued, and
+/// which variables those issued credentials are.
+struct Provided {
+    vars: Vec<(String, String)>,
+    handles: serde_json::Value,
+    issued: Vec<String>,
 }
 
 #[async_trait]
@@ -372,8 +475,44 @@ impl Resources for RollResources {
                 })
                 .await
             }
+            LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search => match self.provided(kind, r#ref, None).await? {
+                Some(p) => Ok(p.vars),
+                None => anyhow::bail!("links to {} aren't wired on this node yet", kind.as_str()),
+            },
             other => anyhow::bail!("links to {} aren't wired on this node yet", other.as_str()),
         }
+    }
+
+    /// A bucket's, a stream's or a search cluster's link gets credentials of its own (a key named
+    /// for the service; a search key has data access only, never the cluster's password), made once, revoked when the link goes; only those are kept with the link, and
+    /// what's read (an endpoint, NoSQL's login, a database's URL) is read again at each deploy.
+    async fn link(&self, kind: LinkKind, r#ref: &str, service: &str) -> anyhow::Result<Option<apps_control::integrations::Minted>> {
+        if !matches!(kind, LinkKind::Bucket | LinkKind::Stream | LinkKind::Nosql | LinkKind::Search) {
+            return Ok(None);
+        }
+        let Some(p) = self.provided(kind, r#ref, Some(format!("roll apps {service}"))).await? else { return Ok(None) };
+        if p.issued.is_empty() {
+            return Ok(None);
+        }
+        let vars = p.vars.into_iter().filter(|(k, _)| p.issued.contains(k)).collect();
+        Ok(Some(apps_control::integrations::Minted { vars, kept: p.handles.to_string() }))
+    }
+
+    async fn unlink(&self, kind: LinkKind, r#ref: &str, kept: &str) -> anyhow::Result<()> {
+        let Some(p) = crate::secrets::link_provider(&self.products, kind.as_str()) else { return Ok(()) };
+        let handles: Vec<serde_json::Value> = serde_json::from_str(kept).unwrap_or_default();
+        let r = r#ref.to_string();
+        // Each is tried: one that fails doesn't leave the rest alive.
+        blocking(move || {
+            let mut first = None;
+            for h in &handles {
+                if let Err(e) = p.revoke(&r, h) {
+                    first.get_or_insert(e);
+                }
+            }
+            first.map_or(Ok(()), |e| Err(e.into()))
+        })
+        .await
     }
 }
 
@@ -413,6 +552,7 @@ pub async fn start(
     postgres: Option<Arc<pg_control::Control>>,
     redis: Option<Arc<redis_control::Control>>,
     secrets: crate::secrets::ForApps,
+    products: crate::secrets::Api,
 ) -> anyhow::Result<AppsNode> {
     let a = &args.apps;
     let single = cluster.backend_name() == "memory";
@@ -430,6 +570,13 @@ pub async fn start(
     let store = tokio::task::block_in_place(|| Store::new(db, sealer(home)?).map_err(|e| anyhow::anyhow!("{e}")))?;
     let mut cfg = AppsConfig::new(home.to_path_buf());
     cfg.web_url = Some(args.web_url.trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
+    // Traces' address: `ROLL_APPS_OTLP_URL` (a fleet's public apps address), else the apps
+    // listener on loopback, which the runtime makes reachable from instances. Never the API:
+    // what an instance reaches through a relay is the node's, and the API's loopback is open.
+    cfg.otlp_base = std::env::var("ROLL_APPS_OTLP_URL").ok().filter(|u| !u.trim().is_empty()).or_else(|| {
+        let ip = if a.listen.ip().is_unspecified() { std::net::IpAddr::from([127, 0, 0, 1]) } else { a.listen.ip() };
+        Some(format!("http://{}", std::net::SocketAddr::new(ip, a.listen.port())))
+    });
     // Local development only: notification targets on this machine or a private network.
     cfg.allow_private = std::env::var("ROLL_APPS_ALLOW_PRIVATE").is_ok_and(|v| v == "1" || v == "true");
     // Built deployments each environment keeps to roll back to (older ones' images go).
@@ -494,7 +641,7 @@ pub async fn start(
     let deps = Deps {
         runtime,
         builder,
-        sources: code.map(|c| Arc::new(CodeSources(c)) as Arc<dyn Sources>),
+        sources: code.clone().map(|c| Arc::new(CodeSources(c)) as Arc<dyn Sources>),
         // The project's secrets, once roll secrets is open (main.rs sets it).
         secrets: Arc::new(secrets),
         resources: Arc::new(RollResources {
@@ -505,6 +652,7 @@ pub async fn start(
                 let token = std::env::var("ROLL_ADMIN_TOKEN").ok().filter(|t| !t.trim().is_empty());
                 (format!("http://{}", std::net::SocketAddr::new(ip, args.api.port())), token, reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).no_proxy().build()?)
             },
+            products,
         }),
         resolver: Arc::new(Doh::new(&a.doh)),
         tls: domain_tls(args, single)?,
@@ -513,6 +661,13 @@ pub async fn start(
         workspace: Some(workspace),
     };
     let apps = Apps::new(cfg, store, deps);
+    if let Some(c) = code {
+        apps.set_github_app(Arc::new(CodeGitHub(c.clone())));
+        // The App's verified pushes and pull requests reach the services connected to them
+        // (queued here, run on each service's owner).
+        let a = apps.clone();
+        c.on_github_event(Arc::new(move |event: &str, body: &[u8]| a.github_event(event, body)));
+    }
     apps.start();
     if on_docker && !apps_control::runtime::docker::available().await {
         warn!("apps: docker isn't reachable, so services can't build or run on this node");
@@ -599,5 +754,62 @@ impl apps_control::integrations::Mailbox for AccountsMail {
 
     async fn send(&self, user: &str, subject: &str, text: &str) -> anyhow::Result<()> {
         self.0.mail_user(user, subject, text).await
+    }
+}
+
+/// Who may still open a sign-in-gated environment: an account that still signs in and may use
+/// roll apps, which rolld's gate gives admins today (a disabled or deleted one is a no at once).
+pub struct AccountsVisitors(pub Arc<roll_accounts::Accounts>);
+
+impl apps_control::integrations::Visitors for AccountsVisitors {
+    fn may_open(&self, user: &str, _project: &str) -> bool {
+        matches!(self.0.user(user), Ok(u) if !u.disabled && u.admin)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::{delete, get, post};
+
+    /// A bucket's link gets a key of its own, named for the service and for that bucket only,
+    /// with the storage's endpoint and region read as they are; unlinking revokes the key.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_buckets_link_gets_a_key_of_its_own_and_unlinking_revokes_it() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (s1, s2) = (seen.clone(), seen.clone());
+        let router = axum::Router::new()
+            .route("/v1/storage", get(|| async { axum::Json(serde_json::json!({ "endpoint": "http://s3.roll.test", "region": "eu-central-1" })) }))
+            .route(
+                "/v1/storage/keys",
+                post(move |axum::Json(b): axum::Json<serde_json::Value>| async move {
+                    s1.lock().unwrap().push(format!("key {} {} {}", b["name"].as_str().unwrap_or(""), b["permission"], b["buckets"]));
+                    axum::Json(serde_json::json!({ "id": "AKIA1", "secret_access_key": "s3cr3t" }))
+                }),
+            )
+            .route(
+                "/v1/storage/keys/{id}",
+                delete(move |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                    s2.lock().unwrap().push(format!("revoked {id}"));
+                    axum::http::StatusCode::NO_CONTENT
+                }),
+            );
+        let products = crate::secrets::Api::default();
+        products.set(router);
+        let r = RollResources { postgres: None, redis: None, api: (String::new(), None, reqwest::Client::new()), products };
+        let m = r.link(LinkKind::Bucket, "photos", "svc_a").await.unwrap().expect("credentials of its own");
+        // Only what it issued is kept with the link: the rest is read at each deploy.
+        assert_eq!(m.vars.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]);
+        let mut vars: std::collections::BTreeMap<String, String> = r.link_vars(LinkKind::Bucket, "photos").await.unwrap().into_iter().collect();
+        vars.extend(m.vars.iter().cloned());
+        assert_eq!(vars.get("S3_BUCKET").map(String::as_str), Some("photos"));
+        assert_eq!(vars.get("AWS_ENDPOINT_URL").map(String::as_str), Some("http://s3.roll.test"));
+        assert_eq!(vars.get("AWS_REGION").map(String::as_str), Some("eu-central-1"));
+        assert_eq!((vars.get("AWS_ACCESS_KEY_ID").map(String::as_str), vars.get("AWS_SECRET_ACCESS_KEY").map(String::as_str)), (Some("AKIA1"), Some("s3cr3t")));
+        // Listing what a link sets reads; it never makes a credential.
+        let listed = r.link_vars(LinkKind::Bucket, "photos").await.unwrap();
+        assert!(listed.iter().all(|(k, _)| !k.starts_with("AWS_ACCESS")), "{listed:?}");
+        r.unlink(LinkKind::Bucket, "photos", &m.kept).await.unwrap();
+        assert_eq!(*seen.lock().unwrap(), [r#"key roll apps svc_a "write" ["photos"]"#.to_string(), "revoked AKIA1".to_string()]);
     }
 }

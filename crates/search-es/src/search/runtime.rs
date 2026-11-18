@@ -905,6 +905,16 @@ impl search_index::query::FilterScript for RuntimeQuery {
     fn runtime_field(&self) -> bool {
         true
     }
+    /// Keyword queries report the terms they match (`StringScriptFieldTermQuery.visit` and its
+    /// siblings' `consumeTermsMatching`), which highlighting reads; `exists` and the other
+    /// types report none.
+    fn visit(&self, v: &mut dyn search_index::search::QueryVisitor) {
+        if self.ev.field.ty != RtType::Keyword || matches!(*self.pred, Predicate::Exists) {
+            return;
+        }
+        let pred = self.pred.clone();
+        v.runtime_field(&self.ev.field.name, Arc::new(move |t: &[u8]| pred.matches(&[RtValue::Str(String::from_utf8_lossy(t).into_owned())])));
+    }
 }
 
 /// A runtime field's sort `missing`: `_last`, `_first`, or a value (bytes for keywords and ips,
@@ -1074,7 +1084,8 @@ pub const AGG_MARKER: &str = "__roll_runtime_field";
 /// field's values have), for search-aggs' script values sources.
 pub fn agg_script(f: &RtField, def: &Value) -> Value {
     let value_type = match f.ty {
-        RtType::Keyword | RtType::Ip => "string",
+        RtType::Keyword => "string",
+        RtType::Ip => "ip",
         RtType::Long => "long",
         RtType::Double => "double",
         RtType::Date => "date",

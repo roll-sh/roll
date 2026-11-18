@@ -1046,8 +1046,7 @@ impl Code {
         let tree = self.checkout(&r.id, &head).await?;
         let preview = backend.create(r, c, tree.path()).await?;
         drop(tree);
-        self.db.set_change_preview(&c.id, Some(&preview))?;
-        self.emit(&r.id, "preview", json!({ "change": c.id, "preview": preview }));
+        self.report_environment(&c.id, Some(&preview))?;
         let c = self.change_or_404(&c.id)?;
         self.emit_change(&c);
         Ok(c)
@@ -1057,8 +1056,18 @@ impl Code {
     /// or clear it (`None`), and tell the feed, webhooks and GitHub with a `preview` event
     /// promised in the same write. Nothing happens when it's unchanged, so it's cheap to repeat.
     pub fn report_environment(&self, change_id: &str, preview: Option<&Preview>) -> Result<()> {
-        let Some((repo, mut promised)) = self.db.set_change_preview_promised(change_id, preview)? else { return Ok(()) };
-        self.emit_kept(&mut promised, &repo, "preview", json!({ "change": change_id, "preview": preview }));
+        self.report_environment_with(change_id, preview, None)
+    }
+
+    /// The change's preview environment went, and its teardown (roll previews' `teardown`) failed
+    /// with `teardown`: the pull request's comment and the `preview` event say so.
+    pub fn report_environment_gone(&self, change_id: &str, teardown: Option<&str>) -> Result<()> {
+        self.report_environment_with(change_id, None, teardown)
+    }
+
+    fn report_environment_with(&self, change_id: &str, preview: Option<&Preview>, teardown: Option<&str>) -> Result<()> {
+        let Some((repo, mut promised, data)) = self.db.set_change_preview_promised(change_id, preview, teardown)? else { return Ok(()) };
+        self.emit_kept(&mut promised, &repo, "preview", data);
         Ok(())
     }
 
@@ -1141,6 +1150,7 @@ impl Code {
                 source: "native",
                 github_url: None,
                 state: WorkState::Open,
+                outside: false,
             },
         )?;
         let w = self.work_or_404(&id)?;

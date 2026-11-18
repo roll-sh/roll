@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -62,14 +63,21 @@ func (p *rollProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 	c := newClient(api, token, pick(m.Project, "ROLL_PROJECT"))
 	resp.ResourceData = c
 	resp.DataSourceData = c
+	resp.EphemeralResourceData = c
 }
 
 func (p *rollProvider) Resources(context.Context) []func() resource.Resource {
-	return []func() resource.Resource{newEnvironmentResource, newSecretResource, newIdentityResource, newSyncResource, newTokenResource}
+	return []func() resource.Resource{newEnvironmentResource, newSecretResource, newIdentityResource, newSyncResource, newTokenResource, newCaResource, newSshCaResource, newTransitKeyResource, newOutsideDatabaseResource,
+		newAppServiceResource, newAppVariableResource, newAppDomainResource, newAppEnvironmentResource, newAppLinkResource, newAppNotificationResource}
 }
 
 func (p *rollProvider) DataSources(context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{newValuesDataSource}
+	return []func() datasource.DataSource{newValuesDataSource, newAppServiceDataSource}
+}
+
+// EphemeralResources are read for one run and never written to the plan or the state.
+func (p *rollProvider) EphemeralResources(context.Context) []func() ephemeral.EphemeralResource {
+	return []func() ephemeral.EphemeralResource{newValuesEphemeral}
 }
 
 // project is a resource's own project, or the provider's.

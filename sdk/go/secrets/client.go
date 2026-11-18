@@ -32,11 +32,28 @@ type Client struct {
 	Project string
 	// HTTP is the client requests go through; http.DefaultClient when nil.
 	HTTP *http.Client
+	// CacheTTL keeps Values answers this long and answers from memory meanwhile; after that it asks
+	// again with the digest they were read against, and an unchanged folder costs a 304 that reads,
+	// issues and audits nothing. A folder holding dynamic credentials is never kept (they end with
+	// their lease). Zero: off.
+	CacheTTL time.Duration
+	// Now is the clock CacheTTL is measured with (for tests); time.Now when nil.
+	Now func() time.Time
 
 	once    sync.Mutex
 	project string
 	// login renews the token of a client a workload identity's login made.
 	login *relogin
+
+	cacheMu sync.Mutex
+	cache   map[string]cached
+}
+
+// cached is a Values answer kept by CacheTTL, with the digest it was read against.
+type cached struct {
+	values *Values
+	etag   string
+	at     time.Time
 }
 
 // Problem is a key that didn't resolve (a reference to nothing, a cycle, a link that failed).
@@ -47,13 +64,23 @@ type Problem struct {
 
 // Values are an environment's values. Dynamic keys hold a short-lived credential that ends with
 // its lease (Leases; Renew keeps it); Linked keys come from a link to a resource, whose address a
-// container network may need rewritten.
+// container network may need rewritten. Followed keys link a resource a preview branched: they
+// aren't in Values, and roll previews sets them from its branch.
 type Values struct {
 	Values   map[string]string `json:"values"`
 	Problems []Problem         `json:"problems"`
 	Leases   []string          `json:"leases"`
 	Dynamic  []string          `json:"dynamic"`
 	Linked   []string          `json:"linked"`
+	Followed []Followed        `json:"followed,omitempty"`
+}
+
+// Followed is a key left out because it links a resource the environment's preview branched.
+type Followed struct {
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	Parent string `json:"parent"`
+	Field  string `json:"field"`
 }
 
 // Lease is a dynamic credential's lease.
@@ -85,21 +112,26 @@ func New(api, token string) *Client {
 }
 
 func (c *Client) call(ctx context.Context, method, path string, body, out any) error {
+	return c.authed(ctx, func(token string) error { return c.send(ctx, token, method, path, body, out) })
+}
+
+// authed runs do with the client's token. A logged-in client's is renewed first when it's ending,
+// and when the server refuses it (revoked, ended early): one new login, then once more.
+func (c *Client) authed(ctx context.Context, do func(token string) error) error {
 	if c.login == nil {
-		return c.send(ctx, c.Token, method, path, body, out)
+		return do(c.Token)
 	}
 	token, err := c.login.token(ctx, c, "")
 	if err != nil {
 		return err
 	}
-	err = c.send(ctx, token, method, path, body, out)
-	// Refused: revoked, or ended early. One new login, then once more.
+	err = do(token)
 	var e *Error
 	if errors.As(err, &e) && e.Status == http.StatusUnauthorized {
 		if token, err = c.login.token(ctx, c, token); err != nil {
 			return err
 		}
-		return c.send(ctx, token, method, path, body, out)
+		return do(token)
 	}
 	return err
 }
@@ -204,8 +236,135 @@ func (c *Client) Values(ctx context.Context, env, path string) (*Values, error) 
 	if err != nil {
 		return nil, err
 	}
+	if c.CacheTTL > 0 {
+		v, err := c.cachedValues(ctx, e+"/values"+query(path))
+		if err != nil {
+			return nil, err
+		}
+		return v.clone(), nil
+	}
 	var v Values
 	return &v, c.call(ctx, http.MethodGet, e+"/values"+query(path), nil, &v)
+}
+
+// freshValues is Values without CacheTTL (a watch that saw the digest move reads anew); a kept
+// answer for the folder goes.
+func (c *Client) freshValues(ctx context.Context, env, path string) (*Values, error) {
+	e, err := c.env(ctx, env)
+	if err != nil {
+		return nil, err
+	}
+	var v Values
+	if err := c.call(ctx, http.MethodGet, e+"/values"+query(path), nil, &v); err != nil {
+		return nil, err
+	}
+	c.cacheMu.Lock()
+	delete(c.cache, e+"/values"+query(path))
+	c.cacheMu.Unlock()
+	return &v, nil
+}
+
+// clone is a copy the caller may change without changing what CacheTTL keeps.
+func (v *Values) clone() *Values {
+	out := *v
+	out.Values = make(map[string]string, len(v.Values))
+	for k, x := range v.Values {
+		out.Values[k] = x
+	}
+	out.Problems = append([]Problem(nil), v.Problems...)
+	out.Leases = append([]string(nil), v.Leases...)
+	out.Dynamic = append([]string(nil), v.Dynamic...)
+	out.Linked = append([]string(nil), v.Linked...)
+	out.Followed = append([]Followed(nil), v.Followed...)
+	return &out
+}
+
+// cachedValues answers from memory within CacheTTL, else revalidates with the digest (a 304
+// keeps the values) or reads them again.
+func (c *Client) cachedValues(ctx context.Context, path string) (*Values, error) {
+	now := time.Now
+	if c.Now != nil {
+		now = c.Now
+	}
+	c.cacheMu.Lock()
+	hit, ok := c.cache[path]
+	c.cacheMu.Unlock()
+	if ok && now().Sub(hit.at) < c.CacheTTL {
+		return hit.values, nil
+	}
+	var out *Values
+	err := c.authed(ctx, func(token string) (err error) {
+		out, err = c.revalidate(ctx, token, path, hit, ok, now)
+		return err
+	})
+	return out, err
+}
+
+// revalidate is one conditional read of path with token: a 304 keeps hit's values.
+func (c *Client) revalidate(ctx context.Context, token, path string, hit cached, ok bool, now func() time.Time) (*Values, error) {
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.API, "/")+path+sep+"digest=1", nil)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if ok && hit.etag != "" {
+		req.Header.Set("If-None-Match", `"`+hit.etag+`"`)
+	}
+	h := c.HTTP
+	if h == nil {
+		h = http.DefaultClient
+	}
+	res, err := h.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusNotModified && ok {
+		c.cacheMu.Lock()
+		hit.at = now()
+		c.cache[path] = hit
+		c.cacheMu.Unlock()
+		return hit.values, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(res.Body, 16<<20))
+	if err != nil {
+		return nil, err
+	}
+	if res.StatusCode >= 300 {
+		var e struct {
+			Error string `json:"error"`
+			Code  string `json:"code"`
+		}
+		_ = json.Unmarshal(data, &e)
+		if e.Error == "" {
+			e.Error = res.Status
+		}
+		return nil, &Error{Status: res.StatusCode, Code: e.Code, Message: e.Error}
+	}
+	var v Values
+	if err := json.Unmarshal(data, &v); err != nil {
+		return nil, err
+	}
+	etag := strings.Trim(strings.TrimPrefix(res.Header.Get("ETag"), "W/"), `"`)
+	c.cacheMu.Lock()
+	// Never kept: dynamic credentials (they end with their lease) or a key that didn't resolve (the
+	// digest may not move when the link recovers).
+	if len(v.Dynamic) > 0 || len(v.Problems) > 0 {
+		delete(c.cache, path)
+	} else {
+		if c.cache == nil {
+			c.cache = map[string]cached{}
+		}
+		c.cache[path] = cached{values: &v, etag: etag, at: now()}
+	}
+	c.cacheMu.Unlock()
+	return &v, nil
 }
 
 // Resolve is env's values as consumer (`app:web`), what a running service gets: dynamic
@@ -227,12 +386,13 @@ func (c *Client) ResolveSealed(ctx context.Context, env, path, consumer string, 
 		return nil, err
 	}
 	var s struct {
-		Sealed   Sealed    `json:"sealed"`
-		Context  string    `json:"context"`
-		Problems []Problem `json:"problems"`
-		Leases   []string  `json:"leases"`
-		Dynamic  []string  `json:"dynamic"`
-		Linked   []string  `json:"linked"`
+		Sealed   Sealed     `json:"sealed"`
+		Context  string     `json:"context"`
+		Problems []Problem  `json:"problems"`
+		Leases   []string   `json:"leases"`
+		Dynamic  []string   `json:"dynamic"`
+		Linked   []string   `json:"linked"`
+		Followed []Followed `json:"followed"`
 	}
 	if err := c.call(ctx, http.MethodPost, e+"/resolve", map[string]any{"consumer": consumer, "path": orRoot(path), "seal_to": PublicKey(key)}, &s); err != nil {
 		return nil, err
@@ -241,7 +401,7 @@ func (c *Client) ResolveSealed(ctx context.Context, env, path, consumer string, 
 	if err != nil {
 		return nil, err
 	}
-	v := Values{Problems: s.Problems, Leases: s.Leases, Dynamic: s.Dynamic, Linked: s.Linked}
+	v := Values{Problems: s.Problems, Leases: s.Leases, Dynamic: s.Dynamic, Linked: s.Linked, Followed: s.Followed}
 	if err := json.Unmarshal(plain, &v.Values); err != nil {
 		return nil, errors.New("the sealed values aren't a map")
 	}
@@ -319,7 +479,7 @@ func (c *Client) Watch(ctx context.Context, env string, w Watch) error {
 		if w.Consumer != "" {
 			v, err = c.Resolve(ctx, env, w.Path, w.Consumer)
 		} else {
-			v, err = c.Values(ctx, env, w.Path)
+			v, err = c.freshValues(ctx, env, w.Path)
 		}
 		if err != nil {
 			fail(err) // the next tick tries again

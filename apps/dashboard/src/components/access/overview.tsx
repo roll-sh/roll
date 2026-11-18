@@ -6,6 +6,7 @@ import {
   CLIENT_TOOL_LIMIT,
   CLIENT_WHERE,
   CLIENTS,
+  installLink,
   describeRule,
   expiringSoon,
   grantMatches,
@@ -19,7 +20,7 @@ import {
   KEEP_OLD,
   startsLater,
   toolsetCost,
-  type ToolsetCost,
+  type ToolsetCosts,
   mcpUrl,
   reach,
   statusOf,
@@ -33,6 +34,7 @@ import { useWorkspace } from "@/lib/workspace-store";
 import { Link } from "../link";
 import { btn, Connecting, CopyButton, danger, EmptyPanel, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 import { Builder } from "./builder";
+import { MachineClients } from "./machine-clients";
 import { AccessShell, relative, usePoll } from "./shell";
 
 /** `/dashboard/access`: how to connect a client, and every token and connection with what it may do. */
@@ -40,6 +42,10 @@ export function AccessOverview() {
   const { data: grants, error, refresh } = usePoll(() => accessApi.tokens(), 10_000);
   const { data: me } = usePoll(() => accessApi.me(), 60_000);
   const { data: checkup, refresh: recheck } = usePoll(() => accessApi.checkup(), 60_000);
+  // Machine clients: every one for the operator, a person's own for them (a token is refused: the
+  // panel stays hidden). Their grants are listed with them, not among the tokens.
+  const { data: machines, refresh: remachine } = usePoll(() => accessApi.machineClients().catch(() => null), 30_000);
+  const machineGrants = new Set((machines ?? []).map((c) => c.grant.id));
   return (
     <AccessShell tab="overview">
       <div className="space-y-6">
@@ -54,7 +60,7 @@ export function AccessOverview() {
         {me?.kind === "operator" && <PolicyPanel />}
         {me?.kind === "user" && (
           <p className="text-[12px] text-muted">
-            Your tokens and connections act as you: they reach what your account does (roll code, agents and your projects), never
+            Your tokens and connections act as you: they reach what your account does (roll code, agents, your projects and your search clusters), never
             more, and their approvals come to you.
           </p>
         )}
@@ -67,7 +73,15 @@ export function AccessOverview() {
             }}
           />
         )}
-        {grants === null && !error ? <Connecting /> : <Grants grants={grants ?? []} refresh={refresh} />}
+        {grants === null && !error ? <Connecting /> : <Grants grants={(grants ?? []).filter((g) => !machineGrants.has(g.id))} refresh={refresh} />}
+        {machines && (
+          <MachineClients
+            clients={machines}
+            refresh={async () => {
+              await Promise.all([refresh(), remachine()]);
+            }}
+          />
+        )}
         <Workloads />
       </div>
     </AccessShell>
@@ -82,7 +96,9 @@ export function ConnectPanel({ token }: { token?: string }) {
   const [products, setProducts] = useState<string[]>([]);
   const [picked, setPicked] = useState<string[]>([]);
   const [readonly, setReadonly] = useState(false);
-  const [costs, setCosts] = useState<ToolsetCost[]>([]);
+  const [search, setSearch] = useState(false);
+  const [lockdown, setLockdown] = useState(false);
+  const [costs, setCosts] = useState<ToolsetCosts>({ products: [] });
   useEffect(() => {
     accessApi
       .catalog()
@@ -93,11 +109,21 @@ export function ConnectPanel({ token }: { token?: string }) {
       .then(setCosts)
       .catch(() => {});
   }, []);
-  const cost = toolsetCost(costs, picked, readonly);
+  const cost = toolsetCost(costs.products, picked, readonly, search ? costs.search : undefined);
   const limit = CLIENT_TOOL_LIMIT[client];
+  // A client that can't take the whole list (VS Code, Cursor) gets search mode to start with,
+  // whenever the client is picked or the counts arrive; the checkbox still turns it off.
+  const whole = toolsetCost(costs.products, picked, readonly).tools;
+  useEffect(() => {
+    if (costs.search) setSearch(Boolean(limit && whole > limit.tools));
+    // Only on a new client or new counts: a person's own choice of products stays theirs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, costs]);
   const over = limit && cost.tools > limit.tools;
-  const url = withToolsets(mcpUrl(), picked, readonly);
+  const url = withToolsets(mcpUrl(), picked, { readonly, search, lockdown });
   const cfg = mcpConfig(client, url, token);
+  // One click for the clients that take a link, only without a token (OAuth signs it in).
+  const install = token ? null : installLink(client, url);
   return (
     <Panel
       title={
@@ -131,8 +157,9 @@ export function ConnectPanel({ token }: { token?: string }) {
         {products.length > 0 && (
           <div className="space-y-1.5">
             <p className="text-[12px] text-subtle">
-              Tools for {picked.length ? "these products only" : "every product"}: each product's tools take part of the agent's context, so
-              pick the ones it needs.
+              {search
+                ? `Search finds ${picked.length ? "these products' tools only" : "every product's tools"}.`
+                : `Tools for ${picked.length ? "these products only" : "every product"}: each product's tools take part of the agent's context, so pick the ones it needs.`}
             </p>
             <div className="flex flex-wrap gap-1.5">
               {products.map((p) => {
@@ -152,15 +179,25 @@ export function ConnectPanel({ token }: { token?: string }) {
             </div>
           </div>
         )}
-        {costs.length > 0 && (
+        {costs.products.length > 0 && (
           <p className={`text-[12px] ${over ? "text-danger" : "text-subtle"}`} role={over ? "alert" : undefined}>
             {cost.tools} tools · ~{cost.tokens.toLocaleString("en")} tokens of the agent's context before it does anything
-            {over && limit ? `. ${limit.note}: pick the products it needs.` : ""}
+            {over && limit ? `. ${limit.note}: pick the products it needs${costs.search && !search ? ", or turn on search" : ""}.` : ""}
           </p>
+        )}
+        {costs.search && (
+          <label className="flex items-center gap-2 text-[12px] text-muted">
+            <input type="checkbox" checked={search} onChange={(e) => setSearch(e.target.checked)} className="accent-accent" />
+            Search: the client gets a tool that finds the others and tools that run them, instead of every tool
+          </label>
         )}
         <label className="flex items-center gap-2 text-[12px] text-muted">
           <input type="checkbox" checked={readonly} onChange={(e) => setReadonly(e.target.checked)} className="accent-accent" />
           Read-only: the client sees and runs only tools that read, whatever its token allows
+        </label>
+        <label className="flex items-center gap-2 text-[12px] text-muted">
+          <input type="checkbox" checked={lockdown} onChange={(e) => setLockdown(e.target.checked)} className="accent-accent" />
+          Lockdown: what people who can't push to a repo wrote (issues anyone opened, pull requests from forks) never reaches the agent
         </label>
         <p className="text-[13px] text-muted">{CLIENT_WHERE[client]}</p>
         <div className="relative rounded-lg border border-line bg-bg">
@@ -169,6 +206,11 @@ export function ConnectPanel({ token }: { token?: string }) {
             <CopyButton id={`cfg-${client}`} text={cfg.text} copied={copied} onCopy={copy} />
           </span>
         </div>
+        {install && (
+          <a href={install.href} className={`${primary} inline-flex`}>
+            {install.label}
+          </a>
+        )}
         {!token && (
           <p className="text-[12px] text-subtle">
             With OAuth you choose what the client may do when it connects, and can narrow or revoke it here. For CI or a client
@@ -343,7 +385,7 @@ const REACH_TONE: Record<ReturnType<typeof reach>, string> = {
 let me: Promise<{ kind: string }> | null = null;
 const meOnce = () => (me ??= accessApi.me().catch(() => ({ kind: "unknown" })));
 
-export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () => Promise<void>; linked?: boolean }) {
+export function GrantRow({ g, refresh, linked = true, kindLabel }: { g: Grant; refresh: () => Promise<void>; linked?: boolean; kindLabel?: string }) {
   const ws = useWorkspace();
   const projectName = (id: string) => ws.projects.find((p) => p.id === id)?.name ?? id;
   const [open, setOpen] = useState(false);
@@ -417,7 +459,7 @@ export function GrantRow({ g, refresh, linked = true }: { g: Grant; refresh: () 
             ) : (
               <span className="truncate text-[14px] font-medium">{g.name}</span>
             )}
-            <span className="rounded border border-line px-1.5 text-[11px] text-subtle">{g.kind === "oauth" ? (g.client?.name ?? "OAuth") : g.kind}</span>
+            <span className="rounded border border-line px-1.5 text-[11px] text-subtle">{kindLabel ?? (g.kind === "oauth" ? (g.client?.name ?? "OAuth") : g.kind)}</span>
             {g.pending && status === "active" && <span className="rounded border border-accent/50 px-1.5 text-[11px] text-accent">waits for an admin</span>}
             {g.pending && admin && status === "active" && (
               <span className="flex items-center gap-1.5">

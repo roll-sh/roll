@@ -39,6 +39,10 @@ pub const BUILT_IN_ANALYZERS: &[&str] = &[
     "indonesian", "irish", "italian", "keyword", "latvian", "lithuanian", "norwegian", "pattern", "persian", "portuguese",
     "romanian", "russian", "serbian", "simple", "snowball", "sorani", "spanish", "standard", "stop", "swedish", "thai", "turkish",
     "whitespace",
+    // The analysis-kuromoji, analysis-nori and analysis-smartcn plugins'.
+    "kuromoji", "kuromoji_completion", "nori", "smartcn",
+    // The analysis-stempel, analysis-ukrainian and analysis-icu plugins'.
+    "polish", "ukrainian", "icu_analyzer",
 ];
 
 /// Settings and analysis names a mapping is parsed against.
@@ -49,6 +53,10 @@ pub struct MappingCtx {
     pub ignore_malformed: bool,
     pub ignore_above: i64,
     pub analyzers: HashSet<String>,
+    /// Custom analyzers that may only run at search time, with the filters that make them so
+    /// (an `updateable` synonym filter): Elasticsearch refuses them as a field's index-time
+    /// `analyzer`.
+    pub search_time_analyzers: BTreeMap<String, Vec<String>>,
     pub normalizers: HashSet<String>,
     pub similarities: HashSet<String>,
     pub total_fields_limit: i64,
@@ -97,6 +105,25 @@ pub struct MappingCtx {
     pub knn: bool,
 }
 
+/// `AnalysisMode.SEARCH_TIME` analyzers of the index's settings: those whose `filter` chain holds an
+/// `updateable` `synonym` or `synonym_graph` filter, with those filters, in chain order.
+fn search_time_analyzers(s: &Settings) -> BTreeMap<String, Vec<String>> {
+    let filters = s.by_prefix("index.analysis.filter.");
+    let updateable = |f: &str| {
+        matches!(filters.get(&format!("{f}.type")), Some("synonym" | "synonym_graph")) && filters.get(&format!("{f}.updateable")) == Some("true")
+    };
+    let analyzers = s.by_prefix("index.analysis.analyzer.");
+    let names: std::collections::BTreeSet<&str> = analyzers.keys().filter_map(|k| k.split('.').next()).collect();
+    names
+        .into_iter()
+        .filter_map(|a| {
+            let chain = analyzers.get_list(&format!("{a}.filter")).unwrap_or_default();
+            let offending: Vec<String> = chain.into_iter().filter(|f| updateable(f)).collect();
+            (!offending.is_empty()).then(|| (a.to_string(), offending))
+        })
+        .collect()
+}
+
 impl MappingCtx {
     pub fn from_settings(s: &Settings) -> MappingCtx {
         MappingCtx::from_settings_in(Dialect::Elasticsearch, s)
@@ -115,6 +142,7 @@ impl MappingCtx {
             ignore_malformed: b("index.mapping.ignore_malformed", logs),
             ignore_above: n("index.mapping.ignore_above", if logs { 8191 } else { i32::MAX as i64 }),
             analyzers: names("index.analysis.analyzer."),
+            search_time_analyzers: search_time_analyzers(s),
             normalizers: names("index.analysis.normalizer."),
             similarities: names("index.similarity."),
             total_fields_limit: n("index.mapping.total_fields.limit", 1000),
@@ -243,6 +271,10 @@ pub struct FieldMapper {
     date_format: std::sync::OnceLock<Result<Arc<crate::time::DateFormatter>, String>>,
     /// The full path documents reach this field by, shared by every value parsed into it.
     pub(crate) full_name: std::sync::OnceLock<Arc<str>>,
+    /// `semantic_text` only: the hidden mappers of its chunks (`inference.chunks`, nested, with
+    /// their `embeddings`), built from its model settings on first use and reset whenever a
+    /// parameter changes (`crate::xpack::inference::semantic::hidden_mapper`).
+    hidden: std::sync::OnceLock<Option<Arc<ObjectMapper>>>,
 }
 
 impl PartialEq for FieldMapper {
@@ -273,6 +305,7 @@ impl FieldMapper {
             props: BTreeMap::new(),
             boost: None,
             date_format: std::sync::OnceLock::new(),
+            hidden: std::sync::OnceLock::new(),
             full_name: std::sync::OnceLock::new(),
         }
     }
@@ -319,10 +352,19 @@ impl FieldMapper {
         self.def.param_index(name).and_then(|i| self.values[i].as_ref())
     }
 
+    /// A `semantic_text` field's hidden chunk mappers (`None` until it has model settings).
+    pub fn semantic_hidden(&self) -> Option<&ObjectMapper> {
+        if self.ty != "semantic_text" {
+            return None;
+        }
+        self.hidden.get_or_init(|| crate::xpack::inference::semantic::hidden_mapper(self).map(Arc::new)).as_deref()
+    }
+
     pub fn set(&mut self, name: &str, v: Value) {
         if let Some(i) = self.def.param_index(name) {
             self.values[i] = Some(v);
             self.date_format = std::sync::OnceLock::new();
+            self.hidden = std::sync::OnceLock::new();
         }
     }
 
@@ -596,6 +638,7 @@ impl FieldMapper {
             return Err(EsError::illegal_argument(format!("mapper [{full_path}] cannot be changed from type [{}] to [{}]", self.ty, incoming.ty)));
         }
         let mut out = self.clone();
+        out.hidden = std::sync::OnceLock::new();
         let mut conflicts = Vec::new();
         for (i, pd) in self.def.params.iter().enumerate() {
             let cur = self.effective(pd.name, ctx);
@@ -2636,6 +2679,13 @@ impl Mapping {
         if total > ctx.total_fields_limit {
             return Err(EsError::illegal_argument(format!("Limit of total fields [{}] has been exceeded", ctx.total_fields_limit)));
         }
+        // `SemanticFieldMapper`: its chunks are nested documents, which can't nest further.
+        for (path, m, scope) in &fields {
+            if matches!(m, Mapper::Field(f) if f.ty == "semantic_text") && scope.is_some() {
+                let msg = format!("semantic_text field [{path}] cannot be nested");
+                return Err(EsError::mapper_parsing(format!("Failed to parse mapping: {msg}")).caused_by(EsError::illegal_argument(msg)));
+            }
+        }
         // `ParentJoinFieldMapper.doValidate`.
         if !ctx.opensearch() {
             let joins: Vec<&str> = fields.iter().filter(|(_, m, _)| matches!(m, Mapper::Field(f) if f.ty == "join")).map(|(p, _, _)| p.as_str()).collect();
@@ -3031,6 +3081,11 @@ pub(crate) fn lookup_in<'a>(o: &'a ObjectMapper, path: &str) -> Option<MapperRef
                 }
                 if tail == "template_id" && f.templated() {
                     return Some(MapperRef::Field(template_id_mapper()));
+                }
+                if let Some(h) = f.semantic_hidden()
+                    && let Some(r) = crate::stack::maybe_grow(|| lookup_in(h, tail))
+                {
+                    return Some(r);
                 }
             }
             _ => {}

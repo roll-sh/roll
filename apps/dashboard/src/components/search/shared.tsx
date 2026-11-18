@@ -2,11 +2,13 @@ import { KeyRound } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import {
   BODY_MB_STEPS,
+  envPrefix,
   formatDuration,
   IDLE_OPTIONS,
   IN_FLIGHT_STEPS,
   searchApi,
   urlWithPassword,
+  type DeletedSearchCluster,
   type SearchCluster,
   type SearchInfo,
   type SearchSettings,
@@ -21,13 +23,15 @@ export { useAction, type Run } from "../redis/shared";
 export function useSearchClusters() {
   const [info, setInfo] = useState<SearchInfo | null>(null);
   const [clusters, setClusters] = useState<SearchCluster[] | null>(null);
+  const [deleted, setDeleted] = useState<DeletedSearchCluster[]>([]);
   const [offline, setOffline] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      const [i, c] = await Promise.all([searchApi.info(), searchApi.list()]);
+      const [i, c, d] = await Promise.all([searchApi.info(), searchApi.list(), searchApi.deleted().catch(() => [])]);
       setInfo(i);
       setClusters(c);
+      setDeleted(d);
       setOffline(false);
     } catch {
       setOffline(true);
@@ -48,7 +52,7 @@ export function useSearchClusters() {
     };
   }, [refresh]);
 
-  return { info, clusters, offline, refresh };
+  return { info, clusters, deleted, offline, refresh };
 }
 
 /** Loaded (filled) or asleep (hollow). */
@@ -156,7 +160,8 @@ export function CredentialsOnce({ cluster, onDone, title = "Save the password" }
   const { copied, copy } = useCopy();
   const password = cluster.password ?? "";
   const full = urlWithPassword(cluster.url, cluster.username, password);
-  const env = `ELASTICSEARCH_URL=${cluster.url}\nELASTICSEARCH_USERNAME=${cluster.username}\nELASTICSEARCH_PASSWORD=${password}\n`;
+  const v = envPrefix(cluster.flavor);
+  const env = `${v}_URL=${cluster.url}\n${v}_USERNAME=${cluster.username}\n${v}_PASSWORD=${password}\n`;
   return (
     <Panel
       title={

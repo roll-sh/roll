@@ -47,6 +47,9 @@ pub struct Spec {
     /// (`CustomUnifiedHighlighter.weightMatchesUnsupported`): not with knn, nested or join
     /// queries. Set by the caller from the search source ([`weight_matches_supported`]).
     pub weight_matches: bool,
+    /// The query embeddings of `semantic_text` fields, for the `semantic` highlighter (set by
+    /// the caller from the rewritten query, `xpack::inference::highlight::probes`).
+    pub semantic: Vec<(String, crate::xpack::inference::highlight::Probe)>,
 }
 
 /// Whether a search's queries support Lucene's matches API, which weight matches need:
@@ -119,7 +122,7 @@ impl Spec {
                 global.insert(k.clone(), v.clone());
             }
         }
-        Ok(Spec { global, fields, weight_matches: true })
+        Ok(Spec { global, fields, weight_matches: true, semantic: Vec::new() })
     }
 }
 
@@ -138,10 +141,32 @@ fn usize_of(v: Option<&Value>, d: usize) -> usize {
     v.and_then(|x| x.as_i64().or_else(|| x.as_str().and_then(|s| s.parse().ok()))).map(|n| n.max(0) as usize).unwrap_or(d)
 }
 
+/// What the options of a highlighted field depend on.
+struct HlField<'a> {
+    name: &'a str,
+    /// Term vectors with offsets (`term_vector: *offsets`).
+    tv_offsets: bool,
+    /// Postings with offsets (`index_options: offsets`).
+    postings_offsets: bool,
+    /// Analyzed into several tokens (text fields).
+    tokenized: bool,
+}
+
+impl<'a> HlField<'a> {
+    fn of(f: &'a FieldInfo) -> HlField<'a> {
+        HlField {
+            name: &f.name,
+            tv_offsets: f.mapper.raw("term_vector").and_then(Value::as_str).is_some_and(|t| t.contains("offsets")),
+            postings_offsets: f.index_options == search_codec::IndexOptions::DocsAndFreqsAndPositionsAndOffsets,
+            tokenized: f.kind.is_text(),
+        }
+    }
+}
+
 /// Options for one field.
-fn options(f: &FieldInfo, field: &Map, global: &Map, index: &crate::meta::IndexMeta) -> EsResult<HighlightOptions> {
+fn options(f: &HlField<'_>, field: &Map, global: &Map, index: &crate::meta::IndexMeta) -> EsResult<HighlightOptions> {
     let mut o = HighlightOptions::default();
-    let tv_offsets = f.mapper.raw("term_vector").and_then(Value::as_str).is_some_and(|t| t.contains("offsets"));
+    let tv_offsets = f.tv_offsets;
     o.kind = match get(field, global, "type").and_then(Value::as_str) {
         Some("plain") => HighlighterType::Plain,
         Some("fvh") => HighlighterType::Fvh,
@@ -155,7 +180,7 @@ fn options(f: &FieldInfo, field: &Map, global: &Map, index: &crate::meta::IndexM
         )));
     }
     o.term_vectors_with_offsets = tv_offsets;
-    o.offsets_indexed = tv_offsets || f.index_options == search_codec::IndexOptions::DocsAndFreqsAndPositionsAndOffsets;
+    o.offsets_indexed = tv_offsets || f.postings_offsets;
     if get(field, global, "tags_schema").and_then(Value::as_str) == Some("styled") {
         let (pre, post) = HighlightOptions::styled_tags();
         o.pre_tags = pre;
@@ -225,15 +250,14 @@ fn options(f: &FieldInfo, field: &Map, global: &Map, index: &crate::meta::IndexM
             }
         };
     }
-    o.tokenized = f.kind.is_text();
+    o.tokenized = f.tokenized;
     // The unified highlighter reads offsets from postings or term vectors when the field has
     // them: nothing is re-analyzed, so the index limit doesn't apply.
-    let offsets = f.index_options == search_codec::IndexOptions::DocsAndFreqsAndPositionsAndOffsets
-        || f.mapper.raw("term_vector").and_then(Value::as_str).is_some_and(|t| t.contains("offsets"));
+    let offsets = f.postings_offsets || f.tv_offsets;
     if offsets && o.kind == search_index::highlight::HighlighterType::Unified {
         o.index_max_analyzed_offset = usize::MAX;
     }
-    o.field_name = f.name.clone();
+    o.field_name = f.name.to_string();
     o.index_name = index.name.clone();
     Ok(o)
 }
@@ -270,13 +294,55 @@ pub fn highlight_hit(
         _ => return Ok(out),
     };
     for fs in &spec.fields {
-        let names: Vec<String> = if fs.pattern.contains('*') { qctx.table.matching(&fs.pattern) } else { vec![fs.pattern.clone()] };
+        let names: Vec<String> = if fs.pattern.contains('*') {
+            // Runtime keyword fields match wildcards too (`HighlightPhase` keeps keyword types).
+            let mut n = qctx.table.matching(&fs.pattern);
+            n.extend(qctx.runtime_matching(&fs.pattern).into_iter().filter(|r| qctx.runtime_field(r).is_some_and(|f| f.ty == super::runtime::RtType::Keyword)));
+            n.sort();
+            n.dedup();
+            n
+        } else {
+            vec![fs.pattern.clone()]
+        };
         for name in names {
+            // A runtime field (it shadows a concrete field of its name).
+            if let Some(rt) = qctx.runtime_field(&name) {
+                if rt.ty == super::runtime::RtType::Keyword
+                    && let Some(frags) = runtime_highlight(qctx, spec, fs, query, rt, searcher, doc)?
+                {
+                    out.insert(name.clone(), frags);
+                }
+                continue;
+            }
+            // `semantic_text`: the `semantic` highlighter (its default).
+            if let Some(crate::mapping::MapperRef::Field(sf)) = qctx.idx.mapping.lookup(&name)
+                && sf.ty == "semantic_text"
+            {
+                let ty = get(&fs.opts, &spec.global, "type").and_then(Value::as_str);
+                if ty.is_none_or(|t| t == "semantic")
+                    && let Some(settings) = crate::xpack::inference::semantic::model_settings(sf)
+                {
+                    let probe = spec.semantic.iter().find(|(f, _)| *f == name).map(|(_, p)| p);
+                    let fragments = usize_of(get(&fs.opts, &spec.global, "number_of_fragments"), 5);
+                    let by_score = get(&fs.opts, &spec.global, "order").and_then(Value::as_str) == Some("score");
+                    let similarity = settings.similarity.as_deref().unwrap_or("dot_product");
+                    if let Some(snippets) = crate::xpack::inference::highlight::highlight(src, &name, probe, similarity, fragments, by_score, &|f| {
+                        qctx.table.source_filter.as_ref().is_none_or(|fls| fls.searchable(f))
+                    }) {
+                        out.insert(name.clone(), Value::Arr(snippets.into_iter().map(Value::from).collect()));
+                    }
+                }
+                continue;
+            }
             let Some(f) = qctx.field(&name) else { continue };
             if !highlightable(&f) || (fs.pattern.contains('*') && f.name.rsplit('.').next().is_some_and(|l| l.starts_with('_'))) {
                 continue;
             }
-            let mut o = options(&f, &fs.opts, &spec.global, qctx.idx)?;
+            // The `semantic` highlighter leaves other fields alone.
+            if get(&fs.opts, &spec.global, "type").and_then(Value::as_str) == Some("semantic") {
+                continue;
+            }
+            let mut o = options(&HlField::of(&f), &fs.opts, &spec.global, qctx.idx)?;
             o.weight_matches = spec.weight_matches && o.require_field_match && qctx.idx.settings.get("index.highlight.weight_matches_mode.enabled") != Some("false");
             // The unified highlighter names the Lucene doc in its errors, the others the `_id`.
             o.doc_id = match (o.kind, doc.and_then(|d| searcher.segment_of(d))) {
@@ -366,8 +432,99 @@ pub fn highlight_hit(
             }
         }
     }
-    let _ = Arc::<()>::new(());
-    Ok(out)
+    // `HighlightPhase` collects the fields in a `HashMap`.
+    Ok(crate::json::java_hash_map(out, 16))
+}
+
+/// Highlights runtime keyword field `rt` in global doc `doc`: its values come from its script
+/// (`AbstractScriptFieldType.valueFetcher`), the terms from the runtime field queries on it
+/// (they report them by name, [`QueryVisitor::runtime_field`]), analyzed as keywords.
+fn runtime_highlight(
+    qctx: &QueryCtx,
+    spec: &Spec,
+    fs: &FieldSpec,
+    query: &QueryRef,
+    rt: Arc<super::runtime::RtField>,
+    searcher: &search_index::Searcher,
+    doc: Option<u32>,
+) -> EsResult<Option<Value>> {
+    use search_index::search::{QueryVisitor, TermMatcher};
+    let Some((seg, local)) = doc.and_then(|d| searcher.segment_of(d)) else { return Ok(None) };
+    // The matchers live in a query of their own, on a field number nothing else has.
+    const FIELD: u32 = u32::MAX >> 1;
+    let o = options(&HlField { name: &rt.name, tv_offsets: false, postings_offsets: false, tokenized: false }, &fs.opts, &spec.global, qctx.idx)?;
+    let q: QueryRef = match get(&fs.opts, &spec.global, "highlight_query") {
+        Some(hq) => {
+            let (parsed, _) = crate::query::parse_query(hq, None, &[])?;
+            qctx.to_query(&parsed)?
+        }
+        None => query.clone(),
+    };
+    struct Terms<'a> {
+        name: &'a str,
+        any_field: bool,
+        out: Vec<TermMatcher>,
+    }
+    impl QueryVisitor for Terms<'_> {
+        fn term(&mut self, _field: u32, term: &[u8]) {
+            if self.any_field {
+                let t = term.to_vec();
+                self.out.push(Arc::new(move |x: &[u8]| x == t.as_slice()));
+            }
+        }
+        fn multi_term(&mut self, _field: u32, m: TermMatcher) {
+            if self.any_field {
+                self.out.push(m);
+            }
+        }
+        fn runtime_field(&mut self, name: &str, m: TermMatcher) {
+            if self.any_field || name == self.name {
+                self.out.push(m);
+            }
+        }
+    }
+    let mut terms = Terms { name: &rt.name, any_field: !o.require_field_match, out: Vec::new() };
+    q.visit(&mut terms);
+    let ev = super::runtime::Evaluator::new(&qctx.cluster.scripts, qctx.st, qctx.table, qctx.shard as i32, &qctx.idx.name, rt.clone())?.counted();
+    let values: Vec<String> =
+        super::index_time::fetch_values(&ev, seg, local)?.into_iter().filter_map(|v| if let super::runtime::RtValue::Str(s) = v { Some(s) } else { None }).collect();
+    if values.is_empty() {
+        return Ok(None);
+    }
+    let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+    let matchers: QueryRef = Arc::new(Matchers { field: FIELD, matchers: terms.out });
+    let analyzer = qctx.table.analysis.analyzer("keyword");
+    let frags = search_index::highlight::highlight(&matchers, &refs, analyzer.as_ref(), FIELD, &o).map_err(crate::engine::convert::index_error)?;
+    Ok((!frags.is_empty()).then(|| Value::Arr(frags.into_iter().map(Value::Str).collect())))
+}
+
+/// Term matchers as a query, for the highlighter's term extraction only.
+struct Matchers {
+    field: u32,
+    matchers: Vec<search_index::search::TermMatcher>,
+}
+
+impl std::fmt::Debug for Matchers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Matchers({})", self.matchers.len())
+    }
+}
+
+impl search_index::search::Query for Matchers {
+    fn weight(&self, _s: &search_index::Searcher, _mode: search_index::ScoreMode, _boost: f32) -> search_index::Result<Box<dyn search_index::Weight>> {
+        Err(search_index::Error::illegal("highlight matchers don't search"))
+    }
+    fn lucene_string(&self, _schema: &search_index::Schema) -> String {
+        format!("{self:?}")
+    }
+    fn visit(&self, v: &mut dyn search_index::search::QueryVisitor) {
+        for m in &self.matchers {
+            v.multi_term(self.field, m.clone());
+        }
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// The values of index-time script field `name` for global doc `doc` (`None`: not one).

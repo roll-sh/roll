@@ -23,7 +23,6 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::Mutex;
-use serde_json::json;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -207,8 +206,8 @@ impl Previews {
         let Ok(c) = code.change_or_404(change_id) else { return };
         let Some(mut p) = c.preview else { return };
         f(&mut p);
-        if code.db.set_change_preview(change_id, Some(&p)).is_ok() {
-            code.emit(&c.repo_id, "preview", json!({ "change": change_id, "preview": p }));
+        if let Err(e) = code.report_environment(change_id, Some(&p)) {
+            warn!(change = change_id, error = %e, "recording a preview");
         }
     }
 
@@ -366,6 +365,7 @@ impl Previews {
             // `idle` without a byte, if this node is gone and can't stop it.
             deadline: self.cfg.idle + Duration::from_secs(120),
             cache: None,
+            network: None,
         };
         {
             let tree = code.checkout(&repo.id, &head).await?;
@@ -656,6 +656,7 @@ impl PreviewBackend for Previews {
 mod tests {
     use super::*;
     use crate::config::RollToml;
+    use serde_json::json;
 
     fn previews() -> Arc<Previews> {
         Previews::new(PreviewConfig { port: Some(7070), ..PreviewConfig::default() }, None, Arc::new(crate::docker::Docker))
@@ -699,6 +700,7 @@ mod tests {
             github_url: None,
             trusted: true,
             run_approved: false,
+            outside: false,
             draft: false,
             labels: Vec::new(),
             checks: Vec::new(),

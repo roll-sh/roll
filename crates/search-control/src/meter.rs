@@ -278,26 +278,32 @@ mod tests {
     async fn meter() -> (Arc<Meter>, Arc<Store>) {
         let store = Arc::new(Store::memory().unwrap());
         store
-            .insert(&SearchCluster {
-                id: "srch_a".into(),
-                name: "app".into(),
-                region: "local".into(),
-                flavor: "elasticsearch".into(),
-                password: "pw".into(),
-                idle_timeout_s: 300,
-                max_in_flight: 64,
-                max_body_mb: 100,
-                destructive_requires_name: true,
-                parent_id: None,
-                parent_at: None,
-                created_at: 0,
-                password_rotated_at: None,
-                indices: 0,
-                docs: 0,
-                stored_bytes: 1000,
-                own_bytes: 1000,
-                loaded_on: None,
-            })
+            .insert(
+                &SearchCluster {
+                    id: "srch_a".into(),
+                    name: "app".into(),
+                    region: "local".into(),
+                    flavor: "elasticsearch".into(),
+                    password: "pw".into(),
+                    idle_timeout_s: 300,
+                    max_in_flight: 64,
+                    max_body_mb: 100,
+                    destructive_requires_name: true,
+                    parent_id: None,
+                    parent_at: None,
+                    created_at: 0,
+                    password_rotated_at: None,
+                    indices: 0,
+                    docs: 0,
+                    stored_bytes: 1000,
+                    own_bytes: 1000,
+                    loaded_on: None,
+                    wake_at: None,
+                    owner: None,
+                    restored_at: None,
+                },
+                crate::store::Caps::NONE,
+            )
             .await
             .unwrap();
         (Meter::new(store.clone()), store)

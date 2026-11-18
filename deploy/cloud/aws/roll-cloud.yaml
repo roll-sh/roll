@@ -175,11 +175,11 @@ Parameters:
   GitHubOAuthClientId:
     Type: String
     Default: ""
-    Description: ROLL_ACCOUNTS_GITHUB_CLIENT_ID, a GitHub OAuth app whose callback is https://api.<Domain>/v1/accounts/oauth/github/callback. Empty: no GitHub sign-in.
+    Description: "ROLL_ACCOUNTS_GITHUB_CLIENT_ID, a GitHub OAuth app whose callback is https://api.<Domain>/v1/accounts/oauth/github/callback. Empty: no GitHub sign-in."
   GoogleOAuthClientId:
     Type: String
     Default: ""
-    Description: ROLL_ACCOUNTS_GOOGLE_CLIENT_ID, a Google OAuth web client whose callback is https://api.<Domain>/v1/accounts/oauth/google/callback. Empty: no Google sign-in.
+    Description: "ROLL_ACCOUNTS_GOOGLE_CLIENT_ID, a Google OAuth web client whose callback is https://api.<Domain>/v1/accounts/oauth/google/callback. Empty: no Google sign-in."
   EcsAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id
@@ -1770,6 +1770,43 @@ Resources:
       EvaluationPeriods: 5
       DatapointsToAlarm: 1
       Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+  # roll previews (docs/previews.md): most of a quarter-hour's converges or screenshots failing,
+  # fleet-wide. One project's broken roll.toml or seed fails its own previews' converges, so it's a
+  # share of enough runs, never a single failure, and it never rolls a deploy back.
+  PreviewConvergeFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-preview-converge-failures
+      AlarmDescription: Over half of roll previews' converges failed (at least 10 in each of three 5-minute periods).
+      Metrics:
+        - { Id: failed, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: PreviewConvergeFailures, Dimensions: [{ Name: service, Value: rolld }] }, Period: 300, Stat: Sum } }
+        - { Id: runs, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: PreviewConverges, Dimensions: [{ Name: service, Value: rolld }] }, Period: 300, Stat: Sum } }
+        - Id: share
+          Expression: IF(runs >= 10, failed / runs, 0)
+          Label: share of converges that failed
+          ReturnData: true
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 0.5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+  PreviewScreenshotFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-preview-screenshot-failures
+      AlarmDescription: Over half of roll previews' screenshots failed (at least 4 in each of three 5-minute periods).
+      Metrics:
+        - { Id: failed, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: PreviewScreenshotFailures, Dimensions: [{ Name: service, Value: rolld }] }, Period: 300, Stat: Sum } }
+        - { Id: runs, ReturnData: false, MetricStat: { Metric: { Namespace: RollCloud, MetricName: PreviewScreenshots, Dimensions: [{ Name: service, Value: rolld }] }, Period: 300, Stat: Sum } }
+        - Id: share
+          Expression: IF(runs >= 4, failed / runs, 0)
+          Label: share of screenshots that failed
+          ReturnData: true
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 0.5
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 

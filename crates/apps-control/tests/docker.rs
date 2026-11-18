@@ -5,7 +5,7 @@
 //! Everything it makes is named `roll-apps-…` and removed at the end (the service's delete
 //! removes its containers and images; the network is removed by its exact name).
 
-use apps_control::integrations::{NoResources, NoSecrets, StaticDns};
+use apps_control::integrations::{NoSecrets, StaticDns};
 use apps_control::runtime::docker::{Docker, DockerBuilder};
 use apps_control::store::{Sealer, Store};
 use apps_control::{Apps, AppsConfig, Deps};
@@ -37,6 +37,21 @@ async fn get(public: &axum::Router, host: &str) -> (StatusCode, Duration) {
     (status, t.elapsed())
 }
 
+/// A roll database on this host's loopback, as rolld's Postgres proxy is (`127.0.0.1:55432`):
+/// `postgres/main`'s `DATABASE_URL` is whatever [`LOOPBACK_DB`] says, when a test sets it.
+struct LoopbackDb;
+static LOOPBACK_DB: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[async_trait::async_trait]
+impl apps_control::integrations::Resources for LoopbackDb {
+    async fn link_vars(&self, kind: apps_control::model::LinkKind, r#ref: &str) -> anyhow::Result<Vec<(String, String)>> {
+        match (kind.as_str(), r#ref, LOOPBACK_DB.lock().unwrap().clone()) {
+            ("postgres", "main", Some(url)) => Ok(vec![("DATABASE_URL".into(), url)]),
+            _ => anyhow::bail!("no {} {ref}", kind.as_str()),
+        }
+    }
+}
+
 fn median(mut v: Vec<Duration>) -> Duration {
     v.sort();
     v[v.len() / 2]
@@ -66,7 +81,7 @@ impl World {
             builder: Arc::new(DockerBuilder::new(2)),
             sources: None,
             secrets: Arc::new(NoSecrets),
-            resources: Arc::new(NoResources),
+            resources: Arc::new(LoopbackDb),
             resolver: Arc::new(StaticDns::default()),
             tls: Arc::new(apps_control::integrations::NoTls),
             objects: None,
@@ -114,7 +129,7 @@ async fn docker_world_with(netns: Option<bool>, setup: impl FnOnce(&mut AppsConf
         builder: Arc::new(DockerBuilder::new(2)),
         sources: None,
         secrets: Arc::new(NoSecrets),
-        resources: Arc::new(NoResources),
+        resources: Arc::new(LoopbackDb),
         resolver: Arc::new(StaticDns::default()),
         tls: Arc::new(apps_control::integrations::NoTls),
         objects: None,
@@ -270,6 +285,35 @@ async fn a_static_sites_files_answer_without_a_container() {
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
     let _ = apps_control::runtime::docker::docker(&["network", "rm", &apps_control::network_name(&w.project, "production")]).await;
     w.apps.shutdown().await;
+}
+
+/// A site moved from Vercel or Netlify keeps its rules: `vercel.json`'s redirect and headers and
+/// `netlify.toml`'s rewrite answer from its files, and neither config is served (one holds a
+/// build setting).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sites_vercel_json_and_netlify_toml_rules_answer() {
+    let Some(w) = docker_world().await else { return };
+    let vercel = r#"{ "redirects": [{ "source": "/old/:slug", "destination": "/new/:slug" }], "headers": [{ "source": "/(.*)", "headers": [{ "key": "X-Moved-From", "value": "vercel" }] }] }"#;
+    let netlify = "[build.environment]\nAPI_SECRET = \"s3cr3t\"\n\n[[redirects]]\nfrom = \"/app/*\"\nto = \"/index.html\"\nstatus = 200\n";
+    let (id, host) = deploy_tree(&w, "moved", &[("index.html", "<!doctype html><h1>moved</h1>"), ("vercel.json", vercel), ("netlify.toml", netlify)]).await;
+    let get = |path: &'static str| {
+        let (public, host) = (w.public.clone(), host.clone());
+        async move {
+            let resp = public.oneshot(Request::get(path).header("host", host.as_str()).body(Body::empty()).unwrap()).await.unwrap();
+            let (st, h) = (resp.status(), resp.headers().clone());
+            (st, h, String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string())
+        }
+    };
+    let (st, h, _) = get("/old/hello").await;
+    assert_eq!((st, h.get("location").and_then(|v| v.to_str().ok())), (StatusCode::PERMANENT_REDIRECT, Some("/new/hello")));
+    let (st, h, body) = get("/app/settings").await;
+    assert_eq!((st, body.as_str()), (StatusCode::OK, "<!doctype html><h1>moved</h1>"), "netlify.toml's rewrite");
+    assert_eq!(h.get("x-moved-from").and_then(|v| v.to_str().ok()), Some("vercel"));
+    for config in ["/netlify.toml", "/vercel.json"] {
+        let (st, _, body) = get(config).await;
+        assert!(st != StatusCode::OK && !body.contains("s3cr3t"), "{config} isn't served: {st} {body}");
+    }
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
 }
 
 /// A service from an upload of `files`, built from its generated Dockerfile and live: its id and host.
@@ -883,4 +927,223 @@ async fn deno_dotnet_and_elixir_trees_build_and_answer() {
         assert!(body.contains(want), "{name}: {body}");
         assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await.0, StatusCode::NO_CONTENT);
     }
+}
+
+/// A link to a database on this host's loopback reaches it from the container, through the
+/// network's relay and a unix socket (a loopback listener answers nothing on the bridge, and a
+/// host firewall may drop container-to-host traffic): the app fetches the URL it was given at
+/// start and serves what came back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_linked_database_on_loopback_is_reached_from_the_container() {
+    let Some(w) = docker_world().await else { return };
+    let db = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = db.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (mut c, _) = db.accept().await.unwrap();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 1024];
+                let _ = c.read(&mut buf).await;
+                let _ = c.write_all(b"HTTP/1.0 200 OK\r\ncontent-length: 13\r\n\r\nfrom-the-host").await;
+            });
+        }
+    });
+    *LOOPBACK_DB.lock().unwrap() = Some(format!("http://u:pw@127.0.0.1:{port}/main"));
+    let start = "wget -qO /tmp/got \"$DATABASE_URL\" || echo unreachable > /tmp/got; mkdir -p /tmp/w; cp /tmp/got /tmp/w/index.html; httpd -f -p $PORT -h /tmp/w";
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "linked", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"port": 8080, "start": start, "memory_mb": 256, "cpu": 0.5}, "links": [{"kind": "postgres", "ref": "main"}] })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let dep = svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string();
+    let mut d = Value::Null;
+    for _ in 0..1200 {
+        let (_, x) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None, "application/json", None).await;
+        if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
+            d = x;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(d["status"], "active", "{d}");
+    let host = svc["environments"][0]["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
+    let resp = w.public.clone().oneshot(Request::get("/").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(String::from_utf8_lossy(&body).trim(), "from-the-host");
+    use apps_control::runtime::docker::docker;
+    let relay = apps_control::runtime::links::relay_name(&apps_control::network_name(&w.project, "production"), port);
+    assert!(docker(&["inspect", &relay]).await.is_ok(), "the relay is on the project's network");
+    // Deleting the service removes its network, and the relay with it.
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    for _ in 0..100 {
+        if docker(&["inspect", &relay]).await.is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(docker(&["inspect", &relay]).await.is_err(), "the relay went with the network");
+    *LOOPBACK_DB.lock().unwrap() = None;
+}
+
+/// An image built elsewhere deploys from its `docker save` archive, and the names inside the
+/// archive are never applied on the host: one can't retag a base image or another service's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_uploaded_image_runs_and_names_nothing_on_the_host() {
+    let Some(w) = docker_world().await else { return };
+    use apps_control::runtime::docker::docker;
+    // A tag only this test makes, saved into the archive, then removed here: if the load
+    // applied the archive's names it would exist again afterwards.
+    let tag = format!("roll-apps-test-upload-{}:1", w.project[4..].to_ascii_lowercase());
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Dockerfile"), "FROM busybox:1.37\nRUN mkdir -p /www && echo uploaded > /www/index.html\n").unwrap();
+    let out = std::process::Command::new("docker").args(["build", "-q", "-t", &tag, &dir.path().to_string_lossy()]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let saved = std::process::Command::new("docker").args(["save", &tag]).output().unwrap();
+    assert!(saved.status.success());
+    docker(&["image", "rm", &tag]).await.unwrap();
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "uploaded", "source": {"kind": "upload"}, "run": {"port": 8080, "start": "httpd -f -p $PORT -h /www", "memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let (st, d) = call(&w.api, "POST", &format!("/v1/apps/services/{id}/environments/production/deploys"), None, "application/x-docker-image", Some(saved.stdout)).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    let dep = d["id"].as_str().unwrap().to_string();
+    let mut d = Value::Null;
+    for _ in 0..1200 {
+        let (_, x) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/deploys/{dep}"), None, "application/json", None).await;
+        if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
+            d = x;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(d["status"], "active", "{d}");
+    let host = svc["environments"][0]["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
+    let resp = w.public.clone().oneshot(Request::get("/").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(String::from_utf8_lossy(&body).trim(), "uploaded");
+    assert!(docker(&["image", "inspect", &tag]).await.is_err(), "the archive's name was applied on the host");
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+}
+
+/// Egress `roll` on real Docker: the instance runs on a network with no route out and is still
+/// served (at its address there); a direct connection out fails, and its proxy (through the
+/// relay on that network) refuses a host the environment doesn't list, which then shows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_environment_reaches_nothing_but_its_listed_hosts() {
+    let Some(w) = docker_world().await else { return };
+    use apps_control::runtime::docker::docker;
+    let start = "(env -u http_proxy -u HTTP_PROXY wget -q -T 3 -O /dev/null http://1.1.1.1/ && echo out:open || echo out:closed; wget -T 5 -O /dev/null http://unlisted.example.com/ 2>&1 | grep -o '403' | head -1 | sed 's/^/proxy:/') > /tmp/got; mkdir -p /tmp/w; cp /tmp/got /tmp/w/index.html; httpd -f -p $PORT -h /tmp/w";
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "closed", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"port": 8080, "start": start, "memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let settled = |dep: String| {
+        let (api, env) = (w.api.clone(), env.clone());
+        async move {
+            for _ in 0..1200 {
+                let (_, x) = call(&api, "GET", &format!("{env}/deploys/{dep}"), None, "application/json", None).await;
+                if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
+                    return x;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Value::Null
+        }
+    };
+    let first = settled(svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string()).await;
+    assert_eq!(first["status"], "active", "{first}");
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll", "hosts": ["api.example.com"]}})), "application/json", None).await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({})), "application/json", None).await;
+    let d = settled(r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string()).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let host = svc["environments"][0]["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
+    let resp = w.public.clone().oneshot(Request::get("/").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
+    let body = String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
+    assert_eq!(body.split_whitespace().collect::<Vec<_>>(), ["out:closed", "proxy:403"], "{body}");
+    let (_, e) = call(&w.api, "GET", &env, None, "application/json", None).await;
+    assert_eq!(e["egress_refused"], json!([{"host": "unlisted.example.com"}]), "{e}");
+    let closed = apps_control::closed_network_name(&w.project, "production");
+    assert_eq!(docker(&["network", "inspect", "-f", "{{.Internal}}", &closed]).await.unwrap(), "true");
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    for _ in 0..100 {
+        if docker(&["network", "inspect", &closed]).await.is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(docker(&["network", "inspect", &closed]).await.is_err(), "the closed network and its proxy's relay went with the service");
+}
+
+/// A closed environment (egress `roll`) keeps its network sandbox: asleep, another service on its
+/// network reaches it by name and the waker hands the call to the app, at the sandbox's address;
+/// a public request wakes it too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_environments_private_caller_wakes_it() {
+    use apps_control::runtime::docker::docker;
+    let Some(w) = docker_world_netns(Some(true)).await else { return };
+    let (id, host) = deploy_container(&w, "shut").await;
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    assert_eq!(call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll"}})), "application/json", None).await.0, StatusCode::OK);
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({})), "application/json", None).await;
+    let dep = r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+    for _ in 0..1200 {
+        let (_, x) = call(&w.api, "GET", &format!("{env}/deploys/{dep}"), None, "application/json", None).await;
+        if x["status"] == "active" {
+            break;
+        }
+        assert!(!["failed", "canceled"].contains(&x["status"].as_str().unwrap_or("")), "{x}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, svc) = call(&w.api, "GET", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    let port = svc["run"]["port"].as_u64().unwrap_or(8080);
+    let net = apps_control::closed_network_name(&w.project, "production");
+    assert_eq!(get(&w.public, &host).await.0, StatusCode::OK, "served at its sandbox's address");
+    let live = w.apps.live(&id, "production");
+    live.sleep().await;
+    let caller = format!("roll-apps-test-caller-{}", &id[4..]);
+    docker(&["run", "-d", "--name", &caller, "--network", &net, "busybox:1.37", "sleep", "600"]).await.unwrap();
+    let body = docker(&["exec", &caller, "wget", "-q", "-O-", "-T", "30", &format!("http://shut:{port}/")]).await;
+    let _ = docker(&["rm", "-f", &caller]).await;
+    assert!(body.as_deref().is_ok_and(|b| b.contains("<h1>cold</h1>")), "the waker took the call: {body:?}");
+    live.sleep().await;
+    assert_eq!(get(&w.public, &host).await.0, StatusCode::OK, "a public request wakes it too");
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
+    let _ = docker(&["network", "rm", &net]).await;
+    w.apps.shutdown().await;
+}
+
+/// A variable kept as a file is in the container at its path, readable by the app, before it
+/// starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_variable_kept_as_a_file_is_in_the_container() {
+    let Some(w) = docker_world().await else { return };
+    let start = "mkdir -p /tmp/w; cat /etc/secrets/app.conf > /tmp/w/index.html; httpd -f -p $PORT -h /tmp/w";
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "filed", "source": {"kind": "image", "image": "busybox:1.37"}, "run": {"port": 8080, "start": start, "memory_mb": 256, "cpu": 0.5} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let settled = |dep: String| {
+        let (api, env) = (w.api.clone(), env.clone());
+        async move {
+            for _ in 0..1200 {
+                let (_, x) = call(&api, "GET", &format!("{env}/deploys/{dep}"), None, "application/json", None).await;
+                if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
+                    return x;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Value::Null
+        }
+    };
+    settled(svc["environments"][0]["latest"]["id"].as_str().unwrap().to_string()).await;
+    let (st, v) = call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"set": {"APP_CONF": "from-a-file\nline two"}, "files": {"APP_CONF": "/etc/secrets/app.conf"}})), "application/json", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({})), "application/json", None).await;
+    let d = settled(r["id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string()).await;
+    assert_eq!(d["status"], "active", "{d}");
+    let host = svc["environments"][0]["url"].as_str().unwrap().trim_start_matches("http://").split(':').next().unwrap().to_string();
+    let resp = w.public.clone().oneshot(Request::get("/").header("host", &host).body(Body::empty()).unwrap()).await.unwrap();
+    let body = String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string();
+    assert_eq!(body, "from-a-file\nline two");
+    call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None, "application/json", None).await;
 }

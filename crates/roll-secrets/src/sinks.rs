@@ -48,6 +48,17 @@ pub trait Deliver: Send + Sync {
     fn check(&self, url: &str) -> Result<()>;
     /// POST `body` to `url`, signed with `secret`, `X-Roll-Sink: <id>`.
     fn post(&self, url: &str, id: &str, secret: &Value, body: &Json) -> Result<()>;
+    /// A batch in a SIEM's own format ([`FORMATS`]) with its `token` (Splunk's HEC token,
+    /// Datadog's API key, a bearer token); `roll` is [`Deliver::post`].
+    fn post_format(&self, url: &str, id: &str, secret: &Value, format: &str, token: Option<&Value>, body: &Json) -> Result<()> {
+        match format {
+            "roll" => self.post(url, id, secret, body),
+            f => {
+                let _ = token;
+                Err(Error::BadRequest(format!("{f} sinks aren't on this server")))
+            }
+        }
+    }
     /// GET `url` (https, public, no redirects), at most `limit` bytes: an OIDC issuer's discovery
     /// document and keys (identities.rs).
     fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>> {
@@ -81,10 +92,17 @@ pub trait Deliver: Send + Sync {
     }
 }
 
+/// How a batch is sent: `roll` (signed JSON), `splunk` (HTTP Event Collector events,
+/// `Authorization: Splunk <token>`), `datadog` (Logs intake, `DD-API-KEY`), `bearer` (roll's JSON
+/// with `Authorization: Bearer <token>`, for other collectors).
+pub const FORMATS: &[&str] = &["roll", "splunk", "datadog", "bearer"];
+
 #[derive(Debug, Serialize)]
 pub struct Sink {
     pub id: String,
     pub url: String,
+    /// One of [`FORMATS`]; the token it carries is never shown.
+    pub format: String,
     pub status: String,
     pub error: Option<String>,
     /// The last audit row delivered.
@@ -101,16 +119,27 @@ pub struct NewSink {
     /// Deliver the rows from now on (default) or every row the project still has.
     #[serde(default)]
     pub from_start: bool,
+    /// One of [`FORMATS`] (default `roll`).
+    #[serde(default)]
+    pub format: Option<String>,
+    /// The SIEM's credential (Splunk's HEC token, Datadog's API key, a bearer token): sealed,
+    /// never shown again.
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 fn sink_aad(project: &str, id: &str) -> String {
     format!("roll-secrets:sink:{project}:{id}")
 }
 
-const COLUMNS: &str = "id, url, status, error, cursor, delivered_at, created_at, created_by";
+fn token_aad(project: &str, id: &str) -> String {
+    format!("roll-secrets:sink-token:{project}:{id}")
+}
+
+const COLUMNS: &str = "id, url, status, error, cursor, delivered_at, created_at, created_by, COALESCE(format, 'roll')";
 
 fn sink_row(r: &code_sql::Row<'_>) -> code_sql::Result<Sink> {
-    Ok(Sink { id: r.get(0)?, url: r.get(1)?, status: r.get(2)?, error: r.get(3)?, cursor: r.get(4)?, delivered_at: r.get(5)?, created_at: r.get(6)?, created_by: r.get(7)? })
+    Ok(Sink { id: r.get(0)?, url: r.get(1)?, status: r.get(2)?, error: r.get(3)?, cursor: r.get(4)?, delivered_at: r.get(5)?, created_at: r.get(6)?, created_by: r.get(7)?, format: r.get(8)? })
 }
 
 /// A sink URL naming a roll bucket instead of an endpoint: `bucket:<name>`. Each batch becomes an
@@ -120,12 +149,28 @@ pub const BUCKET: &str = "bucket:";
 /// becomes one record there, keyed by its audit id.
 pub const STREAM: &str = "stream:";
 
+/// A sink URL naming an index of a roll search cluster: `search:<cluster id>/<index>`. Each audit
+/// event becomes a document there, its id the audit id (a retried batch writes the same ones).
+pub const SEARCH: &str = "search:";
+
 /// The roll resource (kind, ref) a sink URL names, if it names one.
 pub fn roll_target(url: &str) -> Option<(&'static str, &str)> {
     if let Some(b) = url.strip_prefix(BUCKET) {
         return Some(("bucket", b));
     }
+    if let Some(s) = url.strip_prefix(SEARCH) {
+        return Some(("search", s.split('/').next().unwrap_or_default()));
+    }
     url.strip_prefix(STREAM).map(|s| ("stream", s.split('/').next().unwrap_or_default()))
+}
+
+/// An index name Elasticsearch takes, and not a hidden or system one: lowercase, not starting with
+/// `-`, `_`, `+` or `.`, no `\/*?"<>| ,#:`.
+fn index_ok(index: &str) -> bool {
+    !index.is_empty()
+        && index.len() <= 255
+        && !index.starts_with(['-', '_', '+', '.'])
+        && index.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
 }
 
 impl Secrets {
@@ -142,6 +187,19 @@ impl Secrets {
     /// A new sink; the second value is its signing secret, shown once.
     pub fn create_sink(&self, project: &str, n: NewSink, caller: &Caller) -> Result<(Sink, String)> {
         caller.need(Action::Admin, &Scope::project(project))?;
+        let format = n.format.clone().unwrap_or_else(|| "roll".into());
+        if !FORMATS.contains(&format.as_str()) {
+            return Err(Error::BadRequest(format!("format is one of {}", FORMATS.join(", "))));
+        }
+        let token = n.token.as_deref().map(str::trim).filter(|t| !t.is_empty());
+        match (format.as_str(), token) {
+            ("roll", Some(_)) => return Err(Error::BadRequest("a roll sink is signed: it takes no token".into())),
+            ("roll", None) => {}
+            (_, None) => return Err(Error::BadRequest(format!("a {format} sink needs its token"))),
+            (_, Some(t)) if t.len() > 512 || t.chars().any(char::is_control) => return Err(Error::BadRequest("the token is one line of at most 512 characters".into())),
+            _ if roll_target(&n.url).is_some() => return Err(Error::BadRequest(format!("a {format} sink is an HTTPS endpoint"))),
+            _ => {}
+        }
         // A roll bucket of the project's own canvas (an archive with the bucket's retention and
         // Object Lock), or an HTTPS endpoint.
         match roll_target(&n.url) {
@@ -151,6 +209,11 @@ impl Secrets {
                     if topic.is_empty() || topic.len() > 249 || !topic.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
                         return Err(Error::BadRequest("a stream sink is stream:<stream id>/<topic>".into()));
                     }
+                }
+                if let Some(rest) = n.url.strip_prefix(SEARCH)
+                    && !rest.split_once('/').is_some_and(|(_, index)| index_ok(index))
+                {
+                    return Err(Error::BadRequest("a search sink is search:<cluster id>/<index> (lowercase letters, digits, ., _ and -)".into()));
                 }
                 if !self.members(project)?.contains(&(kind.to_string(), name.to_string())) {
                     return Err(Error::BadRequest(self.not_linkable(project, kind, name)));
@@ -164,6 +227,7 @@ impl Secrets {
         let id = names::new_id("snk", 12);
         let secret = names::new_id("whsec", 32);
         let sealed = dek.seal(&sink_aad(project, &id), &Value::new(secret.clone()));
+        let sealed_token = token.map(|t| dek.seal(&token_aad(project, &id), &Value::new(t.to_string())));
         let sink = self.db.write(|c| {
             let n_sinks: i64 = c.query_row("SELECT COUNT(*) FROM audit_sinks WHERE project_id = ?", [project], |r| r.get(0))?;
             if n_sinks >= SINKS_MAX {
@@ -171,11 +235,11 @@ impl Secrets {
             }
             let cursor: i64 = if n.from_start { 0 } else { c.query_row("SELECT COALESCE(MAX(id), 0) FROM audit WHERE project_id = ?", [project], |r| r.get(0))? };
             c.execute(
-                "INSERT INTO audit_sinks (id, project_id, url, secret, cursor, status, error, delivered_at, running_until, retry_at, created_at, created_by)
-                 VALUES (?, ?, ?, ?, ?, 'new', NULL, NULL, 0, 0, ?, ?)",
-                params![id, project, n.url.trim(), sealed, cursor, now, caller.principal],
+                "INSERT INTO audit_sinks (id, project_id, url, secret, cursor, status, error, delivered_at, running_until, retry_at, created_at, created_by, format, token)
+                 VALUES (?, ?, ?, ?, ?, 'new', NULL, NULL, 0, 0, ?, ?, ?, ?)",
+                params![id, project, n.url.trim(), sealed, cursor, now, caller.principal, format, sealed_token],
             )?;
-            audit::record(c, project, caller, "sink.create", None, None, &[], &format!("audit stream to {}", host(&n.url)), now)?;
+            audit::record(c, project, caller, "sink.create", None, None, &[], &format!("audit stream to {} ({format})", host(&n.url)), now)?;
             Ok(c.query_row(&format!("SELECT {COLUMNS} FROM audit_sinks WHERE id = ?"), [&id], sink_row)?)
         })?;
         Ok((sink, secret))
@@ -200,23 +264,24 @@ impl Secrets {
         // Only rows older than SETTLE_MS: ids are given out when a row is written, so on Postgres a
         // row can commit after a higher one is already visible, and a cursor past it would skip it.
         let settled = now - SETTLE_MS;
-        let due: Vec<(String, String, String, Vec<u8>, i64)> = self.db.read(|c| {
+        type Due = (String, String, String, Vec<u8>, i64, String, Option<Vec<u8>>);
+        let due: Vec<Due> = self.db.read(|c| {
             c.query(
-                "SELECT s.id, s.project_id, s.url, s.secret, s.cursor FROM audit_sinks s WHERE s.running_until <= ? AND s.retry_at <= ?
+                "SELECT s.id, s.project_id, s.url, s.secret, s.cursor, COALESCE(s.format, 'roll'), s.token FROM audit_sinks s WHERE s.running_until <= ? AND s.retry_at <= ?
                  AND EXISTS (SELECT 1 FROM audit a WHERE a.project_id = s.project_id AND a.id > s.cursor AND a.at <= ?) LIMIT 100",
                 params![now, now, settled],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
             )
         })?;
         let (mut ok, mut failed) = (0, 0);
-        for (id, project, url, sealed, cursor) in due {
+        for (id, project, url, sealed, cursor, format, sealed_token) in due {
             let hold = now + HOLD_MS;
             if self.db.write(|c| c.execute("UPDATE audit_sinks SET running_until = ? WHERE id = ? AND running_until <= ? AND cursor = ?", params![hold, id, now, cursor]))? != 1 {
                 continue;
             }
             let mut rows = self.db.read(|c| {
                 c.query(
-                    "SELECT id, at, actor, action, env, path, keys, summary, ip FROM audit WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?",
+                    "SELECT id, at, actor, action, env, path, keys, summary, ip, approval FROM audit WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?",
                     params![project, cursor, BATCH],
                     |r| {
                         Ok(AuditEntry {
@@ -229,6 +294,7 @@ impl Secrets {
                             keys: from_json(&r.get::<_, String>(6)?),
                             summary: r.get(7)?,
                             ip: r.get(8)?,
+                            approval: r.get::<_, Option<String>>(9)?.and_then(|a| serde_json::from_str(&a).ok()),
                         })
                     },
                 )
@@ -246,9 +312,11 @@ impl Secrets {
             // removed, gets nothing more.
             let gone = roll_target(&url).is_some_and(|(kind, name)| !self.members(&project).map(|m| m.contains(&(kind.to_string(), name.to_string()))).unwrap_or(false));
             let sent = if gone { Err(Error::BadRequest(format!("{url} isn't on this project's canvas any more"))) } else { Ok(()) };
-            let sent = sent.and_then(|_| self.project(&project)).and_then(|dek| dek.open(&sink_aad(&project, &id), &sealed).map_err(Error::from)).and_then(|secret| {
+            let sent = sent.and_then(|_| self.project(&project)).and_then(|dek| {
+                let secret = dek.open(&sink_aad(&project, &id), &sealed)?;
+                let token = sealed_token.as_ref().map(|t| dek.open(&token_aad(&project, &id), t)).transpose()?;
                 let body = json!({ "sink": id, "project": project, "events": rows });
-                deliver.post(&url, &id, &secret, &body)
+                deliver.post_format(&url, &id, &secret, &format, token.as_ref(), &body)
             });
             let at = self.db.now_ms()?;
             match sent {
@@ -276,9 +344,10 @@ fn host(url: &str) -> String {
 /// Rows as CSV: one header line, every field quoted.
 pub(crate) fn csv(rows: &[AuditEntry]) -> String {
     let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-    let mut out = String::from("id,at,actor,action,environment,path,keys,summary,ip\n");
+    let mut out = String::from("id,at,actor,action,environment,path,keys,summary,ip,approval,approved_by\n");
     for r in rows {
-        let fields = [r.id.to_string(), r.at.to_string(), q(&r.actor), q(&r.action), q(r.environment.as_deref().unwrap_or("")), q(r.path.as_deref().unwrap_or("")), q(&r.keys.join(" ")), q(&r.summary), q(r.ip.as_deref().unwrap_or(""))];
+        let (approval, by) = r.approval.as_ref().map_or((String::new(), String::new()), |a| (a.id.clone(), a.by.join(", ")));
+        let fields = [r.id.to_string(), r.at.to_string(), q(&r.actor), q(&r.action), q(r.environment.as_deref().unwrap_or("")), q(r.path.as_deref().unwrap_or("")), q(&r.keys.join(" ")), q(&r.summary), q(r.ip.as_deref().unwrap_or("")), q(&approval), q(&by)];
         out.push_str(&fields.join(","));
         out.push('\n');
     }

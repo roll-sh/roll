@@ -36,6 +36,21 @@ export interface Rule {
   actions: Partial<Record<Action, Effect>>;
 }
 
+/**
+ * The rule a refusal proposed (`?add=product:action&id=…&index=…`: the `widen` link roll answers a
+ * refused request with), as `effect` (allow, or ask each time): one action, on that resource (or
+ * the product's every resource when none was named). `null` for anything that isn't one.
+ */
+export function proposedRule(search: string, effect: Effect): Rule | null {
+  const q = new URLSearchParams(search);
+  const [product, action] = (q.get("add") ?? "").split(":");
+  if (!product || !/^[a-z][a-z0-9_-]{0,31}$/.test(product) || !(ACTIONS as readonly string[]).includes(action)) return null;
+  const id = q.get("id");
+  const index = q.get("index");
+  const resources: Rule["resources"] = id ? [index ? { id, index } : { id }] : "*";
+  return { product, resources, actions: { [action as Action]: effect } };
+}
+
 export interface OAuthClient {
   id: string;
   name: string;
@@ -105,11 +120,15 @@ export interface NewGrant {
 export interface Checkup {
   grant: { id: string; name: string; kind: Grant["kind"]; last_used_at: number | null; expires_at: number | null; created_at: number };
   /** Most serious first. */
-  findings: { kind: "pending" | "unapproved" | "everything" | "never_expires" | "unused" | "narrower" | "roams"; why: string; fix: "approve" | "tighten" | "expire" | "revoke" | "limit_addresses" }[];
+  findings: {
+    kind: "pending" | "unapproved" | "everything" | "never_expires" | "secret_client" | "unused" | "narrower" | "roams";
+    why: string;
+    fix: "approve" | "tighten" | "expire" | "revoke" | "limit_addresses" | "rotate_client";
+  }[];
 }
 
 /** Checkup findings, most serious first. */
-const FINDING_ORDER: Checkup["findings"][number]["kind"][] = ["pending", "unapproved", "everything", "never_expires", "unused", "roams", "narrower"];
+const FINDING_ORDER: Checkup["findings"][number]["kind"][] = ["pending", "unapproved", "everything", "never_expires", "secret_client", "unused", "roams", "narrower"];
 
 /** The checkup's tokens, the most serious first (by each one's worst finding, then how many). */
 export function byConcern(list: Checkup[]): Checkup[] {
@@ -124,6 +143,7 @@ export const FIX_LABEL: Record<Checkup["findings"][number]["fix"], string> = {
   expire: "Give it an expiry",
   revoke: "Revoke",
   limit_addresses: "Limit addresses",
+  rotate_client: "Rotate to a key",
 };
 
 /** A token's rules narrowed to what it used (`GET /v1/access/tokens/{id}/tighten`). */
@@ -361,8 +381,122 @@ export interface ChatTarget {
   approvers: string[];
 }
 
+/**
+ * A machine client (docs/permissions.md, "Machine clients"): automation with no person that trades
+ * a JWT its key signed, or a secret, for an hour's token held to its grant's rules.
+ */
+export interface MachineClient {
+  client_id: string;
+  signs_with_key: boolean;
+  /** The identity it trusts (CI's own OIDC tokens), when that's its credential. */
+  trusts?: TrustedIdentity | null;
+  /** When it last got a token (Unix ms). */
+  last_sign_in?: number | null;
+  grant: Grant;
+}
+
+/** OIDC tokens a machine client trusts: from `issuer`, for `audience`, `sub` matching `subject`. */
+export interface TrustedIdentity {
+  issuer: string;
+  audience?: string;
+  subject: string;
+  claims?: Record<string, string>;
+  /** How many keys it pins (an issuer roll can't reach), in a listing. */
+  pinned_keys?: number | null;
+}
+
+export const GITHUB_ISSUER = "https://token.actions.githubusercontent.com";
+
+/**
+ * GitHub Actions as a trusted identity: a repository's jobs, on one ref or in one environment
+ * (GitHub's `sub`: `repo:<owner>/<repo>:ref:<ref>`, `…:environment:<name>`), or any of its jobs.
+ */
+export function githubIdentity(repo: string, ref = "", environment = ""): { identity: TrustedIdentity } | { problem: string } {
+  const m = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(repo.trim());
+  if (!m) return { problem: "The repository is owner/name" };
+  const base = `repo:${m[1]}/${m[2]}`;
+  const subject = environment.trim() ? `${base}:environment:${environment.trim()}` : ref.trim() ? `${base}:ref:${ref.trim()}` : `${base}:*`;
+  return { identity: { issuer: GITHUB_ISSUER, subject } };
+}
+
+/** What a trusted identity is, in words: GitHub's repository and ref or environment, or its issuer. */
+export function trustedLabel(t: TrustedIdentity): string {
+  const gh = t.issuer === GITHUB_ISSUER && /^repo:([^:]+)(?::(ref|environment):(.+)|:\*)?$/.exec(t.subject);
+  if (gh) return `GitHub Actions in ${gh[1]}${gh[2] === "ref" ? ` on ${gh[3]}` : gh[2] === "environment" ? ` (${gh[3]})` : ""}`;
+  return `${t.issuer.replace(/^https:\/\//, "")}: ${t.subject}`;
+}
+
+/** The workflow step that trades a job's OIDC token for a roll token, masked, as `ROLL_TOKEN`. */
+export function githubStep(clientId: string, tokenEndpoint: string): string {
+  const audience = tokenEndpoint.replace(/\/v1\/access\/oauth\/token$/, "");
+  return [
+    "# the job needs: permissions: { id-token: write }",
+    "- name: Sign in to roll",
+    "  run: |",
+    `    oidc=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=${audience}" | jq -r .value)`,
+    `    token=$(curl -sSf ${tokenEndpoint} -d grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer -d client_id=${clientId} --data-urlencode "assertion=$oidc" | jq -r .access_token)`,
+    '    echo "::add-mask::$token"',
+    '    echo "ROLL_TOKEN=$token" >> "$GITHUB_ENV"',
+  ].join("\n");
+}
+
+export interface NewMachineClient extends Omit<NewGrant, "not_before" | "ask_otherwise"> {
+  /** Its public key: none (and no identity), and roll makes a secret (shown once). */
+  public_jwk?: Record<string, string> | null;
+  /** The identity it trusts instead (CI's own OIDC tokens). */
+  oidc?: TrustedIdentity | null;
+}
+
+/** A new machine client: its secret is in the answer this once, when it has no key. */
+export interface MadeMachineClient {
+  client_id: string;
+  grant: Grant;
+  token_endpoint: string;
+  client_secret?: string;
+  /** Set here, not by the API: it trusts GitHub Actions, so the panel shows the workflow step. */
+  github?: boolean;
+}
+
+/**
+ * A pasted public key as a JWK: a JWK as it is, or a PEM `PUBLIC KEY` (what `openssl pkey -pubout`
+ * writes) for Ed25519 or P-256, whose encodings are a fixed prefix and then the key's bytes. The
+ * API checks the key for real; this only turns a PEM into what it takes. RSA keys go as JWKs.
+ */
+export function publicJwk(text: string): { jwk: Record<string, string> } | { problem: string } {
+  const t = text.trim();
+  if (t.startsWith("{")) {
+    try {
+      const jwk = JSON.parse(t);
+      return jwk && typeof jwk === "object" && !Array.isArray(jwk) ? { jwk } : { problem: "A JWK is a JSON object" };
+    } catch {
+      return { problem: "That JWK isn't valid JSON" };
+    }
+  }
+  if (t.includes("PRIVATE KEY")) return { problem: "That's a private key: paste only its public part (openssl pkey -in key.pem -pubout)" };
+  let der: Uint8Array;
+  try {
+    der = Uint8Array.from(atob(t.split("\n").filter((l) => !l.startsWith("-----")).join("").trim()), (c) => c.charCodeAt(0));
+  } catch {
+    return { problem: "Paste a PEM public key or a JWK" };
+  }
+  const url = (b: Uint8Array) => btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const after = (prefix: number[], len: number) =>
+    der.length === prefix.length + len && prefix.every((b, i) => der[i] === b) ? der.slice(prefix.length) : null;
+  const ed = after([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00], 32);
+  if (ed) return { jwk: { kty: "OKP", crv: "Ed25519", x: url(ed) } };
+  const ec = after([0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04], 64);
+  if (ec) return { jwk: { kty: "EC", crv: "P-256", x: url(ec.slice(0, 32)), y: url(ec.slice(32)) } };
+  return { problem: "An Ed25519 or P-256 PEM public key (for RSA, paste its JWK)" };
+}
+
 export const accessApi = {
   me: () => call<Me>("GET", "/v1/access"),
+  /** The operator's machine clients, newest first (a 403 for anyone else). */
+  machineClients: () => call<MachineClient[]>("GET", "/v1/access/clients"),
+  createMachineClient: (c: NewMachineClient) => call<MadeMachineClient>("POST", "/v1/access/clients", c),
+  /** A new key (or, without one, a new secret, in the answer this once), keeping the id. */
+  rotateMachineClient: (id: string, r: { public_jwk?: Record<string, string> | null; oidc?: TrustedIdentity | null; keep_old_for_s?: number }) =>
+    call<{ grant: Grant; client_secret?: string }>("POST", `/v1/access/clients/${encodeURIComponent(id)}/rotate`, r),
   catalog: () => call<Catalog>("GET", "/v1/access/catalog"),
   tokens: () => call<Grant[]>("GET", "/v1/access/tokens"),
   /** The latest workload tokens (they're not in `tokens`). */
@@ -428,7 +562,7 @@ export const accessApi = {
   denyDevice: (code: string) => call<null>("DELETE", device(code)),
   /** A search cluster's indices by name (search's own route; it wakes the cluster), for the builder. */
   /** Each product's tool count and context cost, for the connect panel (counts only). */
-  toolsetCosts: () => call<{ products: ToolsetCost[] }>("GET", "/v1/mcp/toolsets").then((r) => r.products),
+  toolsetCosts: () => call<ToolsetCosts>("GET", "/v1/mcp/toolsets"),
   searchIndices: (cluster: string) => call<{ index: string }[]>("GET", `/v1/search/clusters/${encodeURIComponent(cluster)}/indices`),
   /** A secrets project's encryption keys by name (secrets' own route), for the builder. */
   encryptionKeys: (project: string) => call<{ name: string }[]>("GET", `/v1/secrets/projects/${encodeURIComponent(project)}/transit`),
@@ -577,6 +711,23 @@ export function ipProblems(list: string[]): string[] {
 // ── connecting clients ──
 
 export const CLIENTS = ["claude-code", "cursor", "vscode", "claude-ai", "codex", "other"] as const;
+
+/**
+ * A one-click install for clients that take one (Cursor's and VS Code's deep links), as Supabase's,
+ * Linear's and Stripe's MCP pages offer: the server's URL only, so the client signs in with OAuth
+ * and the person chooses what it may do. Never with a token in it: a link lands in the browser's
+ * history and the OS's handlers.
+ */
+export function installLink(client: McpClient, url: string): { href: string; label: string } | null {
+  if (client === "cursor") {
+    const config = btoa(JSON.stringify({ url }));
+    return { href: `cursor://anysphere.cursor-deeplink/mcp/install?name=roll&config=${encodeURIComponent(config)}`, label: "Add to Cursor" };
+  }
+  if (client === "vscode") {
+    return { href: `vscode:mcp/install?${encodeURIComponent(JSON.stringify({ name: "roll", type: "http", url }))}`, label: "Install in VS Code" };
+  }
+  return null;
+}
 export type McpClient = (typeof CLIENTS)[number];
 
 export const CLIENT_NAMES: Record<McpClient, string> = {
@@ -590,6 +741,8 @@ export const CLIENT_NAMES: Record<McpClient, string> = {
 
 /** One product's tools as `GET /v1/mcp/toolsets` counts them (the whole list, no narrowing). */
 export type ToolsetCost = { product: string; tools: number; read_only: number; context_tokens: number };
+/** Every product's costs, and search mode's own tools (`?tools=search`: find, run read-only, run). */
+export type ToolsetCosts = { products: ToolsetCost[]; search?: Omit<ToolsetCost, "product"> };
 
 /**
  * Tools a client can take in one request. VS Code: 128, its own built-in tools included (its
@@ -600,9 +753,15 @@ export const CLIENT_TOOL_LIMIT: Partial<Record<McpClient, { tools: number; note:
   cursor: { tools: 40, note: "Cursor is reported to drop tools past about 40" },
 };
 
-/** What a choice of toolsets lists (none picked: every product; the access tools always). */
-export function toolsetCost(costs: ToolsetCost[], picked: string[], readonly: boolean): { tools: number; tokens: number } {
-  const listed = costs.filter((c) => c.product === "access" || picked.length === 0 || picked.includes(c.product));
+/**
+ * What a choice of toolsets lists (none picked: every product; the access tools always). In search
+ * mode (`search` given) the products' tools are behind search mode's own instead.
+ */
+export function toolsetCost(costs: ToolsetCost[], picked: string[], readonly: boolean, search?: Omit<ToolsetCost, "product">): { tools: number; tokens: number } {
+  const listed = [
+    ...costs.filter((c) => c.product === "access" || (!search && (picked.length === 0 || picked.includes(c.product)))),
+    ...(search ? [{ product: "search mode", ...search }] : []),
+  ];
   const tools = listed.reduce((n, c) => n + (readonly ? c.read_only : c.tools), 0);
   // Read-only lists fewer tools: their share of the product's cost, near enough.
   const tokens = listed.reduce((n, c) => n + (readonly && c.tools ? Math.round((c.context_tokens * c.read_only) / c.tools) : c.context_tokens), 0);
@@ -613,15 +772,29 @@ export function toolsetCost(costs: ToolsetCost[], picked: string[], readonly: bo
 export const mcpUrl = (api: string = ROLL_API) => `${api.replace(/\/+$/, "")}/v1/mcp`;
 
 /** How to connect a client: OAuth by default (no secret in the config), a bearer token with one. */
-/** The MCP URL listing only these products' tools (`?toolsets=`); none: every product's. */
-export function withToolsets(url: string, products: string[], readonly = false): string {
-  if (products.length === 0 && !readonly) return url;
+/** How a connection narrows what the server offers it (docs/mcp.md). */
+export type McpMode = {
+  /** Only tools that read are listed and run (the token's rules still decide). */
+  readonly?: boolean;
+  /** A search tool and two run tools instead of the whole list (`?tools=search`). */
+  search?: boolean;
+  /** Text written by people who can't push to a repo is withheld from the agent (`?lockdown=1`). */
+  lockdown?: boolean;
+};
+
+/** The MCP URL listing only these products' tools (`?toolsets=`; none: every product's), in a mode. */
+export function withToolsets(url: string, products: string[], mode: McpMode = {}): string {
+  if (products.length === 0 && !mode.readonly && !mode.search && !mode.lockdown) return url;
   const u = new URL(url);
   if (products.length > 0) u.searchParams.set("toolsets", [...products].sort().join(","));
-  // Read-only: the server lists and runs only read-only tools (the token's rules still decide).
-  if (readonly) u.searchParams.set("readonly", "1");
+  if (mode.readonly) u.searchParams.set("readonly", "1");
+  if (mode.search) u.searchParams.set("tools", "search");
+  if (mode.lockdown) u.searchParams.set("lockdown", "1");
   return u.toString().replace(/%2C/g, ",");
 }
+
+/** A word as a shell reads it: a URL with a query (`?`, `&`) quoted, so `&` doesn't end the command. */
+export const shellWord = (s: string) => (/^[A-Za-z0-9_./:@%+=,-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
 
 export function mcpConfig(client: McpClient, url: string, token?: string): { lang: "sh" | "json" | "toml" | "text"; text: string } {
   const header = token ? `Bearer ${token}` : undefined;
@@ -632,7 +805,7 @@ export function mcpConfig(client: McpClient, url: string, token?: string): { lan
   };
   switch (client) {
     case "claude-code":
-      return { lang: "sh", text: `claude mcp add --transport http roll ${url}${header ? ` --header "Authorization: ${header}"` : ""}` };
+      return { lang: "sh", text: `claude mcp add --transport http roll ${shellWord(url)}${header ? ` --header "Authorization: ${header}"` : ""}` };
     case "cursor":
       return { lang: "json", text: server("mcpServers", false) };
     case "vscode":

@@ -103,6 +103,7 @@ impl Engine {
         table.key = crate::engine::table_key(st, idx);
         // Segments written after the wake must be sorted like the ones before it.
         table.schema = table.schema.clone().with_index_sort(crate::engine::index_sort(idx, &table));
+        table.stripped_vectors = crate::engine::source_vectors::stripped(idx, &table);
         let mut shards = Vec::new();
         for i in 0..idx.number_of_shards() {
             let shard = self.storage.open(&idx.uuid, i, table.schema.clone())?;
@@ -146,6 +147,15 @@ impl Engine {
         Ok(out)
     }
 
+    /// The vector fields of `idx` a copy of its documents puts back into their source
+    /// ([`crate::engine::source_vectors::copied`]), from its mapping: for searchers that aren't
+    /// the index's own (a closed index's snapshot copy).
+    pub fn copied_vectors(&self, cluster: &crate::Cluster, st: &ClusterState, idx: &IndexMeta) -> EsResult<Vec<Arc<crate::engine::fields::FieldInfo>>> {
+        let analysis = Arc::new(cluster.index_analysis(st, idx)?);
+        let table = FieldTable::build(idx.mapping.clone(), analysis, &idx.mapping_ctx(), &Numbers::default(), &similarities(idx))?;
+        Ok(crate::engine::source_vectors::copied(&table))
+    }
+
     /// Applies one logged operation to shard `shard` of `idx` again (recovery). The index must
     /// be open ([`Engine::open_seeded`]). Stale and duplicate operations are no-ops.
     pub fn replay(&self, scripts: &crate::scripting::ScriptService, st: &crate::meta::ClusterState, idx: &IndexMeta, shard: u32, op: &LoggedOp<'_>) -> EsResult<()> {
@@ -173,13 +183,13 @@ impl Engine {
                     )));
                 }
                 crate::search::index_time::apply(scripts, st, &idx.mapping, &value, &mut parsed)?;
-                let stored = crate::write::stored_source(idx, &table, &src, &value);
+                let stored = crate::write::stored_doc(idx, &table, &src, &value, crate::xcontent::XContentType::Json);
                 let doc = if crate::engine::tsdb::is_time_series(idx) {
                     let (gen_id, tsid, _) = crate::write::time_series_id(idx, &parsed, id, routing)?;
-                    let meta = DocMeta { id: &gen_id, routing: None, source: stored, tsid: Some((&tsid, routing.unwrap_or(""))) };
+                    let meta = DocMeta { id: &gen_id, routing: None, source: stored.source, ignored_source: stored.ignored_source, tsid: Some((&tsid, routing.unwrap_or(""))) };
                     convert::to_indexable(&table, &parsed, &meta)?
                 } else {
-                    convert::to_indexable(&table, &parsed, &DocMeta { id, routing, source: stored, tsid: None })?
+                    convert::to_indexable(&table, &parsed, &DocMeta { id, routing, source: stored.source, ignored_source: stored.ignored_source, tsid: None })?
                 };
                 let mut op = IndexOp::new(doc);
                 op.origin = Origin::Replay { seq_no, primary_term, version };

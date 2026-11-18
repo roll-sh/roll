@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, presetFor, presetRules, rulesOf, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
+import { installLink, proposedRule, approvableTogether, byConcern, catalogFor, denyRedirect, draftOf, expiringSoon, grantMatches, mcpConfig, parseAuthorize, githubIdentity, githubStep, presetFor, presetRules, publicJwk, rulesOf, trustedLabel, statusOf, toolsetCost, waitsForAdmin, withToolsets, type Approval, type Preset } from "./access-api";
 
 const presets: Preset[] = [
   { id: "read-only", name: "Read only", description: "", rules: [{ product: "*", resources: "*", actions: { read: "allow" } }] },
@@ -11,6 +11,8 @@ describe("access", () => {
   it("connects clients with OAuth unless a token is given, and never puts a token in an OAuth config", () => {
     const url = "https://api.roll.sh/v1/mcp";
     expect(mcpConfig("claude-code", url).text).toBe(`claude mcp add --transport http roll ${url}`);
+    // A URL with a mode is one shell word: `&` would end the command and run it in the background.
+    expect(mcpConfig("claude-code", `${url}?tools=search&lockdown=1`).text).toBe(`claude mcp add --transport http roll '${url}?tools=search&lockdown=1'`);
     expect(mcpConfig("cursor", url).text).not.toContain("Authorization");
     expect(mcpConfig("claude-code", url, "rlt_x").text).toContain('--header "Authorization: Bearer rlt_x"');
     expect(JSON.parse(mcpConfig("vscode", url, "rlt_x").text).servers.roll).toEqual({ type: "http", url, headers: { Authorization: "Bearer rlt_x" } });
@@ -106,7 +108,12 @@ describe("toolsets", () => {
     const read = [{ product: "workspace", resources: "*" as const, actions: { read: "allow" as const } }];
     expect([waitsForAdmin(person, read, false), waitsForAdmin(person, read, true), waitsForAdmin(person, [{ ...read[0], actions: { admin: "allow" as const } }], false), waitsForAdmin({ kind: "operator", locked: true }, read, true)]).toEqual([false, true, true, false]);
     expect(toolsetCost(costs, ["redis"], true)).toEqual({ tools: 7, tokens: 590 });
-    expect(withToolsets("https://api.roll.sh/v1/mcp", ["postgres"], true)).toBe("https://api.roll.sh/v1/mcp?toolsets=postgres&readonly=1");
+    expect(withToolsets("https://api.roll.sh/v1/mcp", ["postgres"], { readonly: true })).toBe("https://api.roll.sh/v1/mcp?toolsets=postgres&readonly=1");
+    // Search mode: the access tools and search mode's own, whatever products are picked.
+    const search = { tools: 3, read_only: 2, context_tokens: 900 };
+    expect(toolsetCost(costs, ["redis"], false, search)).toEqual({ tools: 8, tokens: 1300 });
+    expect(toolsetCost(costs, [], true, search)).toEqual({ tools: 5, tokens: 840 });
+    expect(withToolsets("https://api.roll.sh/v1/mcp", [], { search: true, lockdown: true })).toBe("https://api.roll.sh/v1/mcp?tools=search&lockdown=1");
   });
 });
 
@@ -129,5 +136,56 @@ describe("the checkup", () => {
   it("puts the most serious first", () => {
     const c = (id: string, ...kinds: string[]) => ({ grant: { id }, findings: kinds.map((kind) => ({ kind })) }) as never;
     expect(byConcern([c("a", "narrower"), c("b", "never_expires"), c("c", "everything", "never_expires"), c("d", "never_expires", "unused")]).map((x: { grant: { id: string } }) => x.grant.id)).toEqual(["c", "d", "b", "a"]);
+  });
+});
+
+describe("machine clients", () => {
+  it("trusts one repository's GitHub Actions, on a ref or in an environment, and says so in words", () => {
+    const on = (r: ReturnType<typeof githubIdentity>) => ("identity" in r ? r.identity.subject : r.problem);
+    expect(on(githubIdentity("acme/web", "refs/heads/main"))).toBe("repo:acme/web:ref:refs/heads/main");
+    expect(on(githubIdentity("acme/web", "refs/heads/main", "production"))).toBe("repo:acme/web:environment:production");
+    expect(on(githubIdentity("acme/web"))).toBe("repo:acme/web:*");
+    expect(on(githubIdentity("acme"))).toBe("The repository is owner/name");
+    expect(on(githubIdentity("acme/*"))).toBe("The repository is owner/name");
+    const gh = (subject: string) => trustedLabel({ issuer: "https://token.actions.githubusercontent.com", subject });
+    expect(gh("repo:acme/web:ref:refs/heads/main")).toBe("GitHub Actions in acme/web on refs/heads/main");
+    expect(gh("repo:acme/web:environment:production")).toBe("GitHub Actions in acme/web (production)");
+    const step = githubStep("mcl_1", "https://api.roll.example/v1/access/oauth/token");
+    expect(step).toContain("audience=https://api.roll.example\"");
+    expect(step).toContain("client_id=mcl_1");
+    expect(step).toContain("::add-mask::");
+  });
+
+  it("turns openssl's PEM public keys into the JWKs the API takes, and refuses a private key", () => {
+    const ed = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA5rj3iN7HTU2KOZ5TXM2Zyw8+3iISgidPeqHONeMvZQM=\n-----END PUBLIC KEY-----\n";
+    expect(publicJwk(ed)).toEqual({ jwk: { kty: "OKP", crv: "Ed25519", x: "5rj3iN7HTU2KOZ5TXM2Zyw8-3iISgidPeqHONeMvZQM" } });
+    const ec =
+      "-----BEGIN PUBLIC KEY-----\r\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0CXl01/W8B09OrWXFui602a0TapW\r\nrUnzlc/PDXFBLWXU0czXjt63cFk2Zkq8vPXit79F07TIc2OQ08izssxVEg==\r\n-----END PUBLIC KEY-----";
+    expect(publicJwk(ec)).toEqual({ jwk: { kty: "EC", crv: "P-256", x: "0CXl01_W8B09OrWXFui602a0TapWrUnzlc_PDXFBLWU", y: "1NHM147et3BZNmZKvLz14re_RdO0yHNjkNPIs7LMVRI" } });
+    expect(publicJwk("-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEI…\n-----END PRIVATE KEY-----")).toHaveProperty("problem");
+  });
+});
+
+describe("a refusal's proposal", () => {
+  it("reads roll's widen link as one rule, and nothing else", () => {
+    expect(proposedRule("?add=postgres:delete&id=prj_a", "allow")).toEqual({ product: "postgres", resources: [{ id: "prj_a" }], actions: { delete: "allow" } });
+    expect(proposedRule("?add=search:read&id=cl_1&index=logs", "ask")).toEqual({ product: "search", resources: [{ id: "cl_1", index: "logs" }], actions: { read: "ask" } });
+    expect(proposedRule("?add=apps:deploy", "allow")).toEqual({ product: "apps", resources: "*", actions: { deploy: "allow" } });
+    expect(proposedRule("?add=postgres:everything&id=x", "allow")).toBeNull();
+    expect(proposedRule("?add=*:admin", "allow")).toBeNull();
+    expect(proposedRule("", "allow")).toBeNull();
+  });
+});
+
+describe("one-click installs", () => {
+  it("links Cursor and VS Code to the server's URL alone, and nothing else", () => {
+    const url = "https://api.roll.example/v1/mcp?tools=search";
+    const cursor = installLink("cursor", url)!;
+    const config = new URL(cursor.href).searchParams.get("config")!;
+    expect(cursor.href.startsWith("cursor://anysphere.cursor-deeplink/mcp/install?name=roll&")).toBe(true);
+    expect(JSON.parse(atob(config))).toEqual({ url });
+    const vscode = installLink("vscode", url)!;
+    expect(JSON.parse(decodeURIComponent(vscode.href.slice("vscode:mcp/install?".length)))).toEqual({ name: "roll", type: "http", url });
+    expect(installLink("claude-code", url)).toBeNull();
   });
 });

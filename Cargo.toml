@@ -48,6 +48,9 @@ futures = "0.3"
 async-trait = "0.1"
 base64 = "0.22"
 bcrypt = "0.19"
+# OpenSearch Security's masked fields (BLAKE2b) and password strength (zxcvbn), in search-es.
+blake2 = "0.10"
+zxcvbn = { version = "3", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10"
 croner = "3"
@@ -166,6 +169,7 @@ roll-previews = { path = "crates/roll-previews" }
 apps-build = { path = "crates/apps-build" }
 apps-control = { path = "crates/apps-control" }
 roll-access = { path = "crates/roll-access" }
+roll-oidc = { path = "crates/roll-oidc" }
 roll-mcp = { path = "crates/roll-mcp" }
 roll-net = { path = "crates/roll-net" }
 roll-secrets = { path = "crates/roll-secrets" }
@@ -194,7 +198,6 @@ curve25519-dalek = "4"
 hkdf = "0.12"
 # GitHub Actions secrets are libsodium sealed boxes (code-github `seal_secret`).
 crypto_box = { version = "0.9", features = ["seal"] }
-blake2 = "0.10"
 toml = "1"
 http-body-util = "0.1"
 ignore = "0.4"
@@ -278,6 +281,10 @@ memmap2 = "0.9"
 hashbrown = "0.16"
 unicode-segmentation = "1"
 unicode-normalization = "0.1"
+icu_collator = "2.3"
+icu_collections = "2.3"
+icu_locale_core = "2.3"
+icu_properties = { version = "2.3", features = ["alloc", "unstable"] }
 regex-syntax = "0.8"
 search-analysis = { path = "crates/search-analysis" }
 search-codec = { path = "crates/search-codec" }

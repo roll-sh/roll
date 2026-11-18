@@ -3,10 +3,9 @@
 //! The roll-wide permission model (docs/permissions.md) classifies each request in rolld's gate.
 //! Inside the product, the checks that the gate can't make from the request alone (a second
 //! environment, a path inside a batch, each finding of a filtered answer) go through [`Grants`]:
-//! the operator (everything), a roll-access grant (`rlt_…`/`rlo_…`, [`GrantGrants`]) or one of the
-//! project's own scoped tokens (`rlst_…`, [`TokenScope`]).
+//! the operator (everything), a roll-access grant (`rlt_…`/`rlo_…`, [`GrantGrants`]; a person's
+//! own as them, [`Within`]) or a signed-in person ([`OwnProjects`]).
 
-use crate::names;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
@@ -42,19 +41,28 @@ pub struct Scope<'a> {
     pub project: &'a str,
     pub env: Option<&'a str>,
     pub path: Option<&'a str>,
+    /// About the project as a whole and not filtered per environment or folder afterwards (its
+    /// shares, required keys, rotators, the keys other environments have): only a rule over all of
+    /// it reaches it. A plain project-wide read answers per environment and folder instead.
+    pub whole: bool,
 }
 
 impl<'a> Scope<'a> {
     pub fn project(project: &'a str) -> Self {
-        Scope { project, env: None, path: None }
+        Scope { project, env: None, path: None, whole: false }
+    }
+
+    /// The project as a whole, unfiltered (see [`Scope::whole`]).
+    pub fn whole(project: &'a str) -> Self {
+        Scope { project, env: None, path: None, whole: true }
     }
 
     pub fn env(project: &'a str, env: &'a str) -> Self {
-        Scope { project, env: Some(env), path: None }
+        Scope { project, env: Some(env), path: None, whole: false }
     }
 
     pub fn at(project: &'a str, env: &'a str, path: &'a str) -> Self {
-        Scope { project, env: Some(env), path: Some(path) }
+        Scope { project, env: Some(env), path: Some(path), whole: false }
     }
 }
 
@@ -143,7 +151,7 @@ pub fn is_person(principal: &str) -> bool {
     principal.starts_with("usr_")
 }
 
-/// A grant a person made, acting as them: what its rules allow, and only on the person's own
+/// A person's own grant, acting as them: what its rules allow, and only on the person's own
 /// projects (a person's token never reaches further than their session does).
 #[derive(Debug)]
 pub struct Within(pub GrantGrants, pub OwnProjects);
@@ -212,43 +220,50 @@ impl Grants for Narrowed {
     }
 }
 
-/// A scoped token's grants: one project; environments and folders (prefixes) or all; actions.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct TokenScope {
-    pub project: String,
-    pub environments: Option<Vec<String>>,
-    pub paths: Option<Vec<String>>,
-    pub actions: Vec<Action>,
-}
-
-impl Grants for TokenScope {
-    fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
-        if at.project != self.project || !self.actions.contains(&action) {
-            return false;
-        }
-        // A token limited to some environments or folders only acts on project-wide things it
-        // can read (the list of environments); everything else names its environment.
-        if let Some(envs) = &self.environments {
-            match at.env {
-                Some(e) if envs.iter().any(|x| x == e) => {}
-                None if action == Action::Read => {}
-                _ => return false,
-            }
-        }
-        if let Some(paths) = &self.paths {
-            match at.path {
-                Some(p) if paths.iter().any(|x| names::under(p, x)) => {}
-                None if action == Action::Read => {}
-                _ => return false,
-            }
-        }
-        true
-    }
-
-    fn project(&self) -> Option<&str> {
-        Some(&self.project)
+/// One rule of roll-access's model for secrets: `project`, its environments and folders (all
+/// when `None`), these actions allowed. What a token made from secrets' page, and a workload
+/// identity's login, may do.
+pub fn rule(project: &str, environments: Option<Vec<String>>, paths: Option<Vec<String>>, actions: &[Action]) -> roll_auth::scope::Rule {
+    use roll_auth::scope;
+    let action = |a: Action| match a {
+        Action::Read => scope::Action::Read,
+        Action::Reveal => scope::Action::Reveal,
+        Action::Write => scope::Action::Write,
+        Action::Delete => scope::Action::Delete,
+        Action::Admin => scope::Action::Admin,
+    };
+    scope::Rule {
+        product: "secrets".into(),
+        resources: scope::Resources::Some(vec![scope::Selector::Project { project: project.into() }]),
+        environments,
+        paths,
+        actions: actions.iter().map(|a| (action(*a), scope::Effect::Allow)).collect(),
     }
 }
+
+/// Short-lived roll-access tokens for workload identities' logins (rolld: `Access::mint_workload`).
+/// The login is the proof, so there's no caller to gate: roll-access checks the rule is within the
+/// identity's scope and that its owner can still sign in.
+pub trait Workloads: Send + Sync {
+    /// A token for `minutes` with `rule`, from `ip_allow` only, owned by `owner` (`None`: the
+    /// operator).
+    fn mint(&self, name: &str, rule: roll_auth::scope::Rule, ip_allow: Option<Vec<String>>, minutes: u32, owner: Option<&str>) -> crate::Result<Minted>;
+    /// End one at once (its identity was deleted).
+    fn revoke(&self, id: &str) -> crate::Result<()>;
+    /// roll-access's live tokens other than workload logins, as their grants now (reach lists
+    /// those that reach a folder). Blocking.
+    fn grants(&self) -> crate::Result<Vec<roll_auth::Grant>> {
+        Ok(vec![])
+    }
+}
+
+/// A workload token: its grant's id, the secret (shown once) and when it ends (Unix ms).
+pub struct Minted {
+    pub id: String,
+    pub secret: String,
+    pub expires_at: i64,
+}
+
 
 /// A roll-access grant (`rlt_…` tokens and OAuth connections, docs/permissions.md): rolld's gate
 /// classified the request already; this answers the second resources the product checks itself.
@@ -265,7 +280,15 @@ impl Grants for GrantGrants {
             Action::Delete => scope::Action::Delete,
             Action::Admin => scope::Action::Admin,
         };
-        let r = scope::Resource { product: "secrets".into(), project: Some(at.project.into()), environment: at.env.map(Into::into), path: at.path.map(Into::into), ..Default::default() };
+        // A project-wide read that answers per environment and folder (its environments' names,
+        // health, findings, the audit log) answers only what the grant reaches in each: a rule
+        // limited to some of them takes part in it, as roll-access's `filters_itself` routes do.
+        // One about the project as a whole (`Scope::whole`) needs a rule over all of it.
+        let filtered = at.env.is_none() && action == scope::Action::Read && !at.whole;
+        // The resource as rolld's gate saw it: the project is also its id, so a rule naming it by
+        // id (`{id: "prj_…"}`, as the builder and Tighten write it) reaches it as one naming the
+        // project does.
+        let r = scope::Resource { product: "secrets".into(), id: Some(at.project.into()), project: Some(at.project.into()), environment: at.env.map(Into::into), path: at.path.map(Into::into), filters_itself: filtered, ..Default::default() };
         // `ask` pauses a whole request at the gate; inside the product it's a no.
         self.0.allows(&r, action) == scope::Outcome::Allow
     }
@@ -306,17 +329,44 @@ pub struct Caller {
     /// A machine roll runs or trusts (apps, previews, checks, sandboxes, syncs, a workload
     /// identity's login): the only callers a sensitive key's value reaches.
     pub runtime: bool,
+    /// The person's approval that let this request through roll-access's gate (an `ask` approved,
+    /// or a rule an approval remembered for a while), for the audit log.
+    pub approval: Option<Approval>,
 }
+
+/// An approval from roll-access's gate (`roll_auth::Approved`), as the audit log records it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Approval {
+    /// `apr_…`
+    pub id: String,
+    /// Who approved it, in order (`operator`, a person's `usr_…`, a chat approver's `slack:U…`):
+    /// more than one when a policy asks for two people. Empty when it wasn't recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by: Vec<String>,
+    /// Unix ms: the remembered rule that allowed it lasts until then; absent when it was approved
+    /// for this request alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<i64>,
+}
+
+impl From<&roll_auth::Approved> for Approval {
+    fn from(a: &roll_auth::Approved) -> Approval {
+        Approval { id: a.id.to_string(), by: a.by.iter().map(|b| b.to_string()).collect(), until: a.until }
+    }
+}
+
+/// roll previews' in-process consumer: the operator's equal for an environment's branches.
+pub const PREVIEWS: &str = "roll:previews";
 
 impl Caller {
     pub fn operator() -> Caller {
-        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false }
+        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false, approval: None }
     }
 
     /// An in-process consumer (roll apps, previews, sandboxes, tasks): everything the caller
     /// handing out the call may do, named for the audit log.
     pub fn consumer(name: &str) -> Caller {
-        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true }
+        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true, approval: None }
     }
 
     /// Whether this caller may learn anything of a row's value: reveal it, see its fingerprint, or
@@ -334,7 +384,7 @@ impl Caller {
     /// This caller, kept out of `except` (a project's protected environments) whatever it may
     /// otherwise do.
     pub fn without(&self, except: Vec<String>) -> Caller {
-        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime }
+        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime, approval: self.approval.clone() }
     }
 
     pub fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
@@ -367,14 +417,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn token_scopes_narrow_by_environment_path_and_action() {
-        let t = TokenScope { project: "prj_a".into(), environments: Some(vec!["production".into()]), paths: Some(vec!["/api".into()]), actions: vec![Action::Read, Action::Reveal] };
-        assert!(t.allows(Action::Reveal, &Scope::at("prj_a", "production", "/api/stripe")));
-        assert!(!t.allows(Action::Reveal, &Scope::at("prj_a", "production", "/apix")));
-        assert!(!t.allows(Action::Reveal, &Scope::at("prj_a", "staging", "/api")));
-        assert!(!t.allows(Action::Write, &Scope::at("prj_a", "production", "/api")));
-        assert!(!t.allows(Action::Read, &Scope::at("prj_b", "production", "/api")));
-        assert!(t.allows(Action::Read, &Scope::project("prj_a")), "lists the environments");
-        assert!(!t.allows(Action::Reveal, &Scope::env("prj_a", "production")), "a reveal names its folder");
+    fn a_secrets_rule_names_its_project_environments_folders_and_actions() {
+        let r = rule("prj_a", Some(vec!["production".into()]), Some(vec!["/api".into()]), &[Action::Read, Action::Reveal]);
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["product"], "secrets");
+        assert_eq!(json["resources"], serde_json::json!([{ "project": "prj_a" }]));
+        assert_eq!((json["environments"].clone(), json["paths"].clone()), (serde_json::json!(["production"]), serde_json::json!(["/api"])));
+        assert_eq!(json["actions"], serde_json::json!({ "read": "allow", "reveal": "allow" }));
     }
 }

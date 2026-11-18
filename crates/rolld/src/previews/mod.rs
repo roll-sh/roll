@@ -18,6 +18,7 @@ use std::time::Duration;
 mod data;
 mod secrets;
 mod services;
+pub mod fleet;
 
 pub use data::*;
 pub use secrets::Secrets;
@@ -37,6 +38,9 @@ pub struct Products {
 pub struct Running {
     pub engine: Arc<roll_previews::Engine>,
     pub runtime: Arc<roll_previews::runtime::Runtime>,
+    /// On a fleet: the internal route other nodes send screenshots of roll apps' instances that
+    /// run here to ([`fleet::SHOT`]).
+    pub internal: Option<axum::Router>,
 }
 
 /// Open the store and start the engine: branches through this node's API, services as
@@ -49,6 +53,7 @@ pub fn start(
     workspace: Arc<roll_workspace::Workspace>,
     cluster: Arc<roll_cluster::Cluster>,
     on: Products,
+    apps: Option<Arc<apps_control::Apps>>,
 ) -> anyhow::Result<Running> {
     let store = open_store(args, home)?;
     let api = Api::new(args.api);
@@ -83,6 +88,10 @@ pub fn start(
         roll_previews::runtime::RuntimeConfig {
             domain: domain.clone(),
             dashboard: Some(code.code.config.web_url.clone()).filter(|w| !w.trim().is_empty()),
+            // An idle service frozen this long before it's stopped (0: stopped at once), at most
+            // this many on the node.
+            warm_for: std::time::Duration::from_secs(60 * std::env::var("ROLL_PREVIEWS_WARM_MINUTES").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(8 * 60).min(24 * 60)),
+            warm_max: std::env::var("ROLL_PREVIEWS_WARM_MAX").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(32).min(1000),
             ..Default::default()
         },
         code.isolation.clone(),
@@ -97,26 +106,53 @@ pub fn start(
         let c = cluster.clone();
         Box::new(move || !clustered || c.singleton("previews")) as Box<dyn Fn() -> bool + Send + Sync>
     };
+    // roll apps takes `feedback` on an environment, and adds the button itself.
+    let mut roll_apps = RollApps::new(api.clone());
+    roll_apps.feedback = apps.is_some();
+    let apps_for_notes = apps.clone();
+    let shots: Option<Arc<dyn fleet::Shoot>> = apps.clone().map(|a| Arc::new(services::AppsShots { reach: Arc::new(services::AppsReach(a)), runtime: runtime.clone() }) as Arc<dyn fleet::Shoot>);
     let engine = roll_previews::Engine::new(
-        roll_previews::engine::Config { domain, port: Some(args.api.port()), ..Default::default() },
-        store,
+        roll_previews::engine::Config { domain, port: Some(args.api.port()), mail: Some(format!("127.0.0.1:{}", args.previews_smtp.port())), ..Default::default() },
+        store.clone(),
         workspace.clone(),
         source.clone(),
         branchers,
-        Arc::new(Services { apps: RollApps::new(api.clone()), runtime: runtime.clone() }),
+        // roll apps' instances are screenshotted where roll apps says they run (`Apps::reachable`):
+        // on a fleet, on their service's holder (`fleet`).
+        Arc::new(Services { apps: roll_apps, runtime: runtime.clone(), shots: shots.clone(), fleet: clustered.then(|| cluster.clone()) }),
         Arc::new(Secrets(api.clone())),
         leader,
     );
     runtime.attach(&engine);
+    // roll apps' proxy lists a preview page's notes from the engine (`Engine::notes_for`).
+    if let Some(a) = &apps_for_notes {
+        a.set_feedback_notes(Arc::new(services::Notes(Arc::downgrade(&engine))));
+        // Its pushes to branches of a Git URL service: those branches' previews.
+        a.set_git_pushes(Arc::new(services::GitPushes(Arc::downgrade(&engine))));
+    }
     if clustered {
         let _ = engine.cluster.set(cluster.clone());
     }
     let backend = roll_previews::code::Backend::new(code.previews.clone(), workspace, source);
     backend.attach(&engine);
     code.code.set_preview_backend(backend);
+    // The mail catcher: previews' mail is kept with them, never sent on.
+    let bound = std::net::TcpListener::bind(args.previews_smtp).and_then(|l| {
+        l.set_nonblocking(true)?;
+        tokio::net::TcpListener::from_std(l)
+    });
+    match bound {
+        Ok(l) => {
+            tracing::info!(addr = %args.previews_smtp, "roll previews: catching previews' mail");
+            tokio::spawn(roll_previews::mail::serve(l, Arc::new(roll_previews::mail::Store(store))));
+        }
+        Err(e) => tracing::warn!(addr = %args.previews_smtp, error = %e, "roll previews: no mail catcher (previews' mail fails)"),
+    }
     drop(engine.start());
+    crate::logs::PreviewMetrics::start(&engine);
     tracing::info!("roll previews: on");
-    Ok(Running { engine, runtime })
+    let internal = shots.filter(|_| clustered).map(|s| fleet::internal_router(s, cluster.clone()));
+    Ok(Running { engine, runtime, internal })
 }
 
 pub fn open_store(args: &crate::Args, home: &Path) -> anyhow::Result<Arc<Store>> {

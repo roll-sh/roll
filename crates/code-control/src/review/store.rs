@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS reviews (
     source TEXT NOT NULL,
     external_id TEXT,
     url TEXT,
+    -- Its author can't push to the repo: MCP's lockdown withholds it.
+    outside INTEGER NOT NULL DEFAULT 0,
     dismissed_at INTEGER,
     dismissed_by TEXT,
     dismiss_reason TEXT,
@@ -65,6 +67,8 @@ CREATE TABLE IF NOT EXISTS review_comments (
     body TEXT NOT NULL,
     source TEXT NOT NULL,
     external_id TEXT,
+    -- Its author can't push to the repo: MCP's lockdown withholds it.
+    outside INTEGER NOT NULL DEFAULT 0,
     deleted INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -134,7 +138,7 @@ fn reviewer(kind: String, name: String, app: Option<String>) -> Reviewer {
 }
 
 const REVIEW_COLS: &str = "id, change_id, revision, head, reviewer_kind, reviewer_name, reviewer_app, verdict, body, source, url, \
-                           dismissed_at, dismissed_by, dismiss_reason, created_at, updated_at, external_id, rowid, ai";
+                           dismissed_at, dismissed_by, dismiss_reason, created_at, updated_at, external_id, rowid, ai, outside";
 
 fn review_row(r: &Row<'_>) -> code_sql::Result<Review> {
     Ok(Review {
@@ -155,6 +159,7 @@ fn review_row(r: &Row<'_>) -> code_sql::Result<Review> {
         external_id: r.get(16)?,
         seq: r.get(17)?,
         ai: r.get::<_, Option<String>>(18)?.and_then(|a| serde_json::from_str(&a).ok()),
+        outside: r.get::<_, i64>(19)? != 0,
         stale: false,
         threads: None,
     })
@@ -189,7 +194,7 @@ fn thread_row(r: &Row<'_>) -> code_sql::Result<Thread> {
     })
 }
 
-const COMMENT_COLS: &str = "id, thread_id, author_kind, author_name, author_app, body, source, created_at, updated_at, external_id";
+const COMMENT_COLS: &str = "id, thread_id, author_kind, author_name, author_app, body, source, created_at, updated_at, external_id, outside";
 
 fn comment_row(r: &Row<'_>) -> code_sql::Result<Comment> {
     let body: String = r.get(5)?;
@@ -209,6 +214,7 @@ fn comment_row(r: &Row<'_>) -> code_sql::Result<Comment> {
         created_at: r.get(7)?,
         updated_at: r.get(8)?,
         external_id: r.get(9)?,
+        outside: r.get::<_, i64>(10)? != 0,
     })
 }
 
@@ -225,6 +231,8 @@ pub struct NewReview<'a> {
     pub source: &'a str,
     pub external_id: Option<&'a str>,
     pub url: Option<&'a str>,
+    /// Its author can't push to the repo (see [`super::Review::outside`]).
+    pub outside: bool,
 }
 
 /// A new thread, as stored.
@@ -323,7 +331,7 @@ impl Db {
         self.write(|c| {
             c.execute(
                 "INSERT INTO reviews (id, change_id, repo_id, revision, head, reviewer_kind, reviewer_name, reviewer_app, verdict, body, \
-                 source, external_id, url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 source, external_id, url, outside, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     n.id,
                     n.change_id,
@@ -338,6 +346,7 @@ impl Db {
                     n.source,
                     n.external_id,
                     n.url,
+                    n.outside as i64,
                     t,
                     t
                 ],
@@ -437,13 +446,14 @@ impl Db {
         body: &str,
         source: &str,
         external_id: Option<&str>,
+        outside: bool,
     ) -> Result<()> {
         let t = now();
         self.write(|c| {
             c.execute(
                 "INSERT INTO review_comments (id, thread_id, repo_id, author_kind, author_name, author_app, body, source, external_id, \
-                 created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, thread_id, repo_id, author.kind.as_str(), author.name, author.app, body, source, external_id, t, t],
+                 outside, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, thread_id, repo_id, author.kind.as_str(), author.name, author.app, body, source, external_id, outside as i64, t, t],
             )?;
             c.execute("UPDATE review_threads SET updated_at = ? WHERE id = ?", params![t, thread_id])?;
             Ok(())

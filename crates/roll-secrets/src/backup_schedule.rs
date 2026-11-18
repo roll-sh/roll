@@ -183,7 +183,7 @@ impl Secrets {
         if !self.members(project)?.contains(&("bucket".to_string(), bucket.clone())) {
             return Err(Error::BadRequest(self.not_linkable(project, "bucket", &bucket)));
         }
-        let caller = Caller { principal: format!("backup:{project}"), grants: Arc::new(Everything), ip: None, runtime: false };
+        let caller = Caller { principal: format!("backup:{project}"), grants: Arc::new(Everything), ip: None, runtime: false, approval: None };
         // As `POST …/backup` answers it, so `roll secrets restore` takes either.
         let sealed = serde_json::json!({ "sealed": self.backup(project, &recipient, &caller)?, "context": crate::backup::context(project) });
         let ms = self.db.now_ms()?;

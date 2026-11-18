@@ -105,12 +105,19 @@ pub fn options(idx: &crate::meta::IndexMeta) -> Options {
 /// `keep: None` keeps every vector.
 pub fn vectors(table: &FieldTable, path: &str, m: &mut Map, exclude: bool) {
     let none = super::source::Globs::new(&[]);
-    vectors_keeping(table, path, m, exclude.then_some(&none));
+    vectors_keeping(table, path, m, exclude.then_some(&none), true);
 }
 
 /// Returns whether a vector stayed in.
-pub fn vectors_keeping(table: &FieldTable, path: &str, m: &mut Map, keep: Option<&super::source::Globs>) -> bool {
+///
+/// Kept vectors print as Elasticsearch's patched ones do (`source_vectors`): at the end of
+/// their object, floats as floats, `sparse_vector` features sorted and as their postings keep
+/// them. A vector of an `index: false` field is never taken out of Elasticsearch's source and
+/// prints as sent. Normalizing twice changes nothing; `normalize: false` only keeps and drops,
+/// for a source [`vectors`] already went over.
+pub fn vectors_keeping(table: &FieldTable, path: &str, m: &mut Map, keep: Option<&super::source::Globs>, normalize: bool) -> bool {
     let mut drop = Vec::new();
+    let mut last = Vec::new();
     let mut kept = false;
     for (k, v) in m.iter_mut() {
         let full = join(path, k);
@@ -121,18 +128,21 @@ pub fn vectors_keeping(table: &FieldTable, path: &str, m: &mut Map, keep: Option
             // too, and patches back only the values the field holds: a null never shows.
             if v.is_null() || keep.is_some_and(|g| !g.matches(&full)) {
                 drop.push(k.clone());
+            } else if !normalize || (info.kind == Kind::DenseVector && !info.index) {
+                kept = true;
             } else {
                 normalize_vector(info, v);
+                last.push(k.clone());
                 kept = true;
             }
             continue;
         }
         match v {
-            Value::Obj(inner) => kept |= crate::stack::maybe_grow(|| vectors_keeping(table, &full, inner, keep)),
+            Value::Obj(inner) => kept |= crate::stack::maybe_grow(|| vectors_keeping(table, &full, inner, keep, normalize)),
             Value::Arr(a) => {
                 for e in a {
                     if let Value::Obj(inner) = e {
-                        kept |= crate::stack::maybe_grow(|| vectors_keeping(table, &full, inner, keep));
+                        kept |= crate::stack::maybe_grow(|| vectors_keeping(table, &full, inner, keep, normalize));
                     }
                 }
             }
@@ -142,10 +152,37 @@ pub fn vectors_keeping(table: &FieldTable, path: &str, m: &mut Map, keep: Option
     for k in drop {
         m.shift_remove(&k);
     }
+    for k in last {
+        if let Some(v) = m.shift_remove(&k) {
+            m.insert(k, v);
+        }
+    }
     kept
 }
 
 fn normalize_vector(info: &FieldInfo, v: &mut Value) {
+    if info.kind == Kind::SparseVector {
+        // Rebuilt from the feature postings: one object (an array of objects merges), features
+        // in term order, each value as its term frequency keeps it (`FeatureField`).
+        let mut features: Vec<(String, Value)> = Vec::new();
+        let mut take = |m: &Map| {
+            for (k, x) in m {
+                let x = match x {
+                    Value::Num(n) => float_value(f32::from_bits(((n.as_f64() as f32).to_bits() >> 15) << 15)),
+                    other => other.clone(),
+                };
+                features.push((k.clone(), x));
+            }
+        };
+        match &*v {
+            Value::Obj(m) => take(m),
+            Value::Arr(items) => items.iter().for_each(|it| if let Value::Obj(m) = it { take(m) }),
+            _ => return,
+        }
+        features.sort_by(|a, b| a.0.cmp(&b.0));
+        *v = Value::Obj(features.into_iter().collect());
+        return;
+    }
     // A base64 (or hex) encoded vector reads back as the values it encodes.
     if let (Value::Str(s), Some(spec)) = (&*v, info.vector) {
         match crate::search::knn::decode_query_vector(s, spec.element, spec.dims as usize) {
@@ -155,31 +192,33 @@ fn normalize_vector(info: &FieldInfo, v: &mut Value) {
         }
         return;
     }
-    let float = match info.kind {
-        Kind::SparseVector => true,
-        _ => info.vector.is_none_or(|s| s.element == search_codec::VectorElement::Float32),
-    };
-    if !float {
+    if !info.vector.is_none_or(|s| s.element == search_codec::VectorElement::Float32) {
         return;
     }
     match v {
         Value::Num(n) => *v = float_value(n.as_f64() as f32),
         Value::Arr(a) => a.iter_mut().for_each(|x| normalize_vector(info, x)),
-        Value::Obj(m) if info.kind == Kind::SparseVector => m.values_mut().for_each(|x| normalize_vector(info, x)),
         _ => {}
     }
 }
 
 /// The synthetic `_source` of `doc` under `mapping`.
 pub fn synthesize(mapping: &Mapping, ctx: &MappingCtx, table: &FieldTable, opts: Options, doc: &Map) -> Map {
+    synthesize_kept(mapping, ctx, table, opts, doc).0
+}
+
+/// [`synthesize`], and the values it kept verbatim (`_ignored_source`) in document order.
+pub fn synthesize_kept(mapping: &Mapping, ctx: &MappingCtx, table: &FieldTable, opts: Options, doc: &Map) -> (Map, Vec<super::ignored_source::Entry>) {
     let keep = opts.keep;
     if !mapping.root.is_enabled() {
         // The whole document is one `_ignored_source` value.
-        return doc.iter().filter(|(k, _)| !crate::mapping::METADATA_FIELDS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let m: Map = doc.iter().filter(|(k, _)| !crate::mapping::METADATA_FIELDS.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let kept = vec![super::ignored_source::whole_document(&m)];
+        return (m, kept);
     }
     let mut copy_dests = HashSet::new();
     collect_copy_dests(&mapping.root, &mut copy_dests);
-    let w = Walk { mapping, ctx, table, keep, copy_dests, binary_fallback: opts.binary_fallback };
+    let w = Walk { mapping, ctx, table, keep, copy_dests, binary_fallback: opts.binary_fallback, kept: Default::default() };
     let mut scope = Scope::default();
     let root_dynamic = mapping.root.dynamic.unwrap_or(Dynamic::True);
     w.object_fields(&mapping.root, "", doc, &mut scope, root_dynamic, Flags::default());
@@ -189,7 +228,7 @@ pub fn synthesize(mapping: &Mapping, ctx: &MappingCtx, table: &FieldTable, opts:
         let at = out.keys().position(|k| k.as_str() > "_doc_count").unwrap_or(out.len());
         out.shift_insert(at, "_doc_count".to_string(), Value::from(c));
     }
-    out
+    (out, w.kept.into_inner())
 }
 
 fn collect_copy_dests(o: &ObjectMapper, out: &mut HashSet<String>) {
@@ -274,6 +313,8 @@ struct Walk<'a> {
     keep: Keep,
     copy_dests: HashSet<String>,
     binary_fallback: bool,
+    /// Every verbatim value, in document order across nested scopes.
+    kept: std::cell::RefCell<Vec<super::ignored_source::Entry>>,
 }
 
 // The walk threads the document position (path, scope, flags) through every step.
@@ -301,6 +342,7 @@ impl<'a> Walk<'a> {
     }
 
     fn raw(&self, scope: &mut Scope, name: String, parent: &str, v: &Value) {
+        self.kept.borrow_mut().push(super::ignored_source::Entry { name: name.clone(), parent: parent.to_string(), value: v.clone() });
         scope.ignored.push(Ignored { name, parent: parent.to_string(), value: v.clone() });
     }
 
@@ -371,6 +413,8 @@ impl<'a> Walk<'a> {
     fn object_value(&self, path: &str, c: &'a ObjectMapper, full: &str, v: &Value, scope: &mut Scope, dynamic: Dynamic, fl: Flags) {
         let keep = self.keep_of(&c.source_keep);
         match v {
+            // A disabled object keeps whatever the document gives it: `null` and scalars too.
+            Value::Null | Value::Bool(_) | Value::Num(_) | Value::Str(_) if !c.is_enabled() => self.raw(scope, full.to_string(), path, v),
             Value::Null => {}
             Value::Obj(m) => {
                 if !c.is_enabled() || keep == Keep::All || (keep == Keep::Arrays && fl.in_array) {
@@ -575,7 +619,7 @@ impl<'a> Walk<'a> {
                 leaf.extra_sorted = true;
             }
         }
-        if info.kind == Kind::Text && !info.store && !info.doc_values {
+        if matches!(info.kind, Kind::Text | Kind::MatchOnlyText) && !info.store && !info.doc_values {
             // Text keeps what its keyword delegate can't: the value moves to the fallback layer.
             if let Value::Str(s) = v {
                 if !delegate_takes(self.table, self.ctx, f, full, s) {
@@ -957,10 +1001,12 @@ fn write_leaf(w: &Walk<'_>, info: &FieldInfo, f: &FieldMapper, full: &str, scope
         dv = leaf.dv.iter().map(|d| d.v.clone()).collect();
     } else {
         let mut sorted: Vec<&Dv> = leaf.dv.iter().collect();
-        let in_order = info.store || matches!(info.kind, Kind::MatchOnlyText | Kind::DenseVector) || (info.kind == Kind::Text && !info.doc_values);
-        let unique = matches!(info.kind, Kind::Keyword | Kind::Ip | Kind::Wildcard | Kind::Version | Kind::Binary | Kind::Text)
+        // Text read back from doc values comes sorted (and unique), as the doc values hold it.
+        let in_order = info.store || info.kind == Kind::DenseVector || (matches!(info.kind, Kind::Text | Kind::MatchOnlyText) && !info.doc_values);
+        let unique = matches!(info.kind, Kind::Keyword | Kind::Ip | Kind::Wildcard | Kind::Version | Kind::Binary | Kind::Text | Kind::MatchOnlyText)
             || info.kind.is_range();
-        let text_delegate = info.kind == Kind::Text && !info.store && delegate(w.table, w.ctx, f, full).is_some();
+        // `match_only_text` loads from a keyword multi-field as `text` does.
+        let text_delegate = matches!(info.kind, Kind::Text | Kind::MatchOnlyText) && !info.store && delegate(w.table, w.ctx, f, full).is_some();
         if !in_order || text_delegate {
             sorted.sort_by(|a, b| a.key.partial_cmp(&b.key).unwrap_or(std::cmp::Ordering::Equal));
             if unique || text_delegate {
@@ -974,7 +1020,7 @@ fn write_leaf(w: &Walk<'_>, info: &FieldInfo, f: &FieldMapper, full: &str, scope
         extra.sort_by(|a, b| a.1.cmp(&b.1));
     }
     let mut all: Vec<Value> = Vec::with_capacity(dv.len() + extra.len());
-    if info.kind == Kind::Text {
+    if matches!(info.kind, Kind::Text | Kind::MatchOnlyText) {
         // The fallback layer comes first.
         all.extend(extra.iter().map(|e| e.0.clone()));
         all.append(&mut dv);

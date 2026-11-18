@@ -121,6 +121,12 @@ pub struct NodeConfig {
     /// and recording a snapshot) must be before the sweep after a wake drops it
     /// ([`search_es::api::snapshots::sweep_leftover_copies`]).
     pub snapshot_leftover_grace: Duration,
+    /// Seals the secrets clusters store (`search_es::seal`; `None`: stored as given).
+    pub sealer: Option<Arc<search_es::seal::Sealer>>,
+    /// The name roll's default snapshot repository is registered under in every cluster whose
+    /// data is in object storage (`search_es::api::snapshots::install_default_repository`;
+    /// `None`: none).
+    pub default_repository: Option<String>,
 }
 
 impl Default for NodeConfig {
@@ -140,6 +146,8 @@ impl Default for NodeConfig {
             memory_budget: None,
             unload_memory_only: false,
             snapshot_leftover_grace: search_es::api::snapshots::LEFTOVER_GRACE,
+            sealer: None,
+            default_repository: None,
         }
     }
 }
@@ -1007,6 +1015,9 @@ impl Node {
         cfg.node_settings = self.cfg.node_settings.clone();
         cfg.test_features = self.cfg.test_features;
         cfg.host_metrics = self.cfg.host_metrics;
+        cfg.sealer = self.cfg.sealer.clone();
+        // Snapshot contents are durable only with object storage behind the cluster.
+        cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
         let mut cluster = Cluster::open(cfg, store).await?;
         cluster.node.id = stable_node_id(&spec.name);
         if cluster.state().version <= 1 {
@@ -1890,7 +1901,9 @@ mod tests {
         let mut spec = ClusterSpec::new("c");
         spec.max_in_flight = max;
         catalog.insert(spec);
-        Node::new(catalog, Arc::new(MemoryStores::new()), NodeConfig { default_cluster: Some("c".into()), ..NodeConfig::default() })
+        // The node-wide cap defaults to twice the CPUs: on one CPU it would queue a third request
+        // that these tests of the cluster's own limit hold at once.
+        Node::new(catalog, Arc::new(MemoryStores::new()), NodeConfig { default_cluster: Some("c".into()), max_running: 64, ..NodeConfig::default() })
     }
 
     #[tokio::test]
@@ -2015,13 +2028,14 @@ mod tests {
         let n = Node::new(catalog.clone(), stores, NodeConfig::default());
         let n2 = n.clone();
         let first = tokio::spawn(async move { n2.handle(req("/", Some(basic("c1", "old")))).await.status });
-        started.notified().await;
+        let within = Duration::from_secs(30);
+        tokio::time::timeout(within, started.notified()).await.expect("the wake reaches the store");
         // The wake read the catalog already; the password changes now.
         catalog.insert(ClusterSpec::new("c1").with_password("new"));
         n.update_spec(ClusterSpec::new("c1").with_password("new"));
         gate.notify_one();
         // The request that started the wake was checked against the old password.
-        assert_eq!(first.await.unwrap(), 200);
+        assert_eq!(tokio::time::timeout(within, first).await.expect("the released wake answers").unwrap(), 200);
         assert_eq!(n.handle(req("/", Some(basic("c1", "old")))).await.status, 401);
         assert_eq!(n.handle(req("/", Some(basic("c1", "new")))).await.status, 200);
         assert!(n.pending_specs.lock().is_empty());
@@ -2033,12 +2047,12 @@ mod tests {
         assert!(n.unload("c1").await);
         let n2 = n.clone();
         let first = tokio::spawn(async move { n2.handle(req("/", Some(basic("c1", "new")))).await.status });
-        started.notified().await;
+        tokio::time::timeout(within, started.notified()).await.expect("the second wake reaches the store");
         let mut changed = ClusterSpec::new("c1").with_password("newer");
         changed.max_requests_per_second = Some(1000.0);
         catalog.insert(changed);
         gate.notify_one();
-        assert_eq!(first.await.unwrap(), 200);
+        assert_eq!(tokio::time::timeout(within, first).await.expect("the second released wake answers").unwrap(), 200);
         assert_eq!(n.handle(req("/", Some(basic("c1", "new")))).await.status, 401);
         assert_eq!(n.handle(req("/", Some(basic("c1", "newer")))).await.status, 200);
         assert_eq!(n.get_loaded("c1").unwrap().spec().max_requests_per_second, Some(1000.0));
@@ -2146,7 +2160,9 @@ mod tests {
         let (n, _) = node(NodeConfig { idle_unload: None, ..NodeConfig::default() });
         assert_eq!(n.handle(req("/", Some(basic("c1", "pw1")))).await.status, 200);
         let l = n.get_loaded("c1").unwrap();
-        let idle = Duration::from_millis(60);
+        // Wide enough that a loaded host's late wake-ups (the gate runs beside builds) can't
+        // move a sleep across a boundary: a check fails only after a 150 ms stall.
+        let idle = Duration::from_millis(300);
         {
             let _task = l.cluster.tasks.register("indices:data/write/reindex", "long", None, Vec::new());
             tokio::time::sleep(idle * 2).await;

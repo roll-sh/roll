@@ -1,0 +1,34 @@
+# roll secrets' Secrets Store CSI Driver provider, without Helm (the chart is in ../chart).
+# Install the driver first, with the API's URL in its CSIDriver's tokenRequests (docs/secrets.md,
+# "Kubernetes"), then: kubectl apply -f provider.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: roll-secrets-csi-provider
+  namespace: kube-system
+  labels: { app.kubernetes.io/name: roll-secrets-csi-provider }
+spec:
+  selector:
+    matchLabels: { app.kubernetes.io/name: roll-secrets-csi-provider }
+  updateStrategy: { type: RollingUpdate }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: roll-secrets-csi-provider }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { seccompProfile: { type: RuntimeDefault } }
+      nodeSelector: { kubernetes.io/os: linux }
+      containers:
+        - name: provider
+          image: ghcr.io/roll-sh/roll-secrets-csi-provider:0.1.0
+          # -api=https://api.roll.example pins the APIs SecretProviderClasses may name.
+          args: ["-endpoint=/provider/roll.sock"]
+          securityContext: { runAsUser: 0, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - { name: providers, mountPath: /provider }
+      volumes:
+        - name: providers
+          hostPath: { path: /var/run/secrets-store-csi-providers, type: DirectoryOrCreate }

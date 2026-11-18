@@ -753,3 +753,40 @@ fn system_packages_go_in_a_generated_dockerfile_and_are_said() {
     let own = plan(&tree(&[("Dockerfile", "FROM alpine\n")]), &o).unwrap();
     assert!(!own.dockerfile.contains("ffmpeg"), "the tree's own Dockerfile is its own");
 }
+
+/// A monorepo's folders that build on their own are offered as roots; a library package, docs
+/// and dependencies aren't.
+#[test]
+fn a_monorepos_apps_are_its_candidate_roots() {
+    let t = tree(&[
+        ("package.json", r#"{"name":"mono","private":true,"workspaces":["apps/*","packages/*"]}"#),
+        ("apps/web/package.json", r#"{"name":"web","scripts":{"build":"next build","start":"next start"},"dependencies":{"next":"15.0.0"}}"#),
+        ("apps/api/go.mod", "module api\n\ngo 1.23\n"),
+        ("apps/api/main.go", "package main\nfunc main() {}\n"),
+        ("apps/worker/Dockerfile", "FROM busybox\nCMD [\"sleep\", \"1\"]\n"),
+        ("packages/ui/package.json", r#"{"name":"ui","main":"index.js"}"#),
+        ("docs/index.html", "<h1>docs</h1>"),
+        ("node_modules/x/package.json", r#"{"name":"x","scripts":{"start":"node x"}}"#),
+    ]);
+    let roots: Vec<String> = candidates(&t).into_iter().map(|c| c.root).collect();
+    assert_eq!(roots, ["apps/api", "apps/web", "apps/worker"]);
+}
+
+#[test]
+fn variables_reach_build_steps_as_secrets_and_files_at_their_paths() {
+    let o = Overrides {
+        build_env: vec!["NPMRC".into(), "TOKEN".into(), "ODD".into()],
+        build_files: vec![("NPMRC".into(), "/root/.npmrc".into()), ("ODD".into(), "/etc/a,b".into())],
+        ..Default::default()
+    };
+    let p = plan(&tree(&[("package.json", r#"{"scripts": {"start": "node index.js"}}"#), ("package-lock.json", "{}")]), &o).unwrap();
+    has(&p, &["--mount=type=secret,id=NPMRC,target=/root/.npmrc ", "--mount=type=secret,id=TOKEN,env=TOKEN ", "--mount=type=secret,id=ODD,env=ODD "]);
+    assert!(!p.dockerfile.contains("id=NPMRC,env="), "a file variable isn't in the environment: {}", p.dockerfile);
+}
+
+#[test]
+fn a_static_sites_functions_are_named_not_dropped() {
+    let p = plan(&tree(&[("index.html", "<h1>hi</h1>"), ("netlify/functions/hello.js", "export default () => new Response('hi')"), ("api/ping.ts", "export default () => {}")]), &Overrides::default()).unwrap();
+    assert!(p.notes.iter().any(|n| n.starts_with("netlify/functions/ has 1 Netlify Functions")), "{:?}", p.notes);
+    assert!(p.notes.iter().any(|n| n.starts_with("api/ has 1 Vercel functions")), "{:?}", p.notes);
+}

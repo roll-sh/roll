@@ -1153,8 +1153,9 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
         let names: Vec<&str> = rm.keys().map(String::as_str).collect();
         runtime::check_time_series(&t.idx, &names, true)?;
     }
-    // Named top-level kNN searches match before the query's named queries.
-    if !knn.is_empty() {
+    // Named top-level kNN searches match before the query's named queries. The sections were
+    // parsed (and checked) once for the whole request; only names need them again here.
+    if !knn.is_empty() && src.knn.iter().any(|m| m.contains_key("_name")) {
         let secs = knn::sections(src)?;
         if secs.len() == knn.len() {
             for (s, q) in secs.iter().zip(knn) {
@@ -1191,7 +1192,7 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
         },
         None => q,
     };
-    if !src.knn.is_empty() {
+    if src.knn.iter().any(|m| m.contains_key("inner_hits")) {
         knn::inner_hits(&qctx, &knn::sections_with_inner(src)?)?;
     }
     // `SeqNoPrimaryTermPhase` on nested inner hits.
@@ -1486,6 +1487,12 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
             return Err(EsError::illegal_argument("Sort must contain at least one field."));
         }
         let mut top = TopScoreCollector::new(n, threshold.unwrap_or(0).max(n as u64));
+        // `size: 0` with aggregations: the hit count takes the segments `Weight::count` knows
+        // whole (`PartialHitCountCollector`), so a segment the aggregations take from their
+        // statistics too is never iterated (no scorer is built for it).
+        if n == 0 && agg_collector.is_some() && post.is_none() && src.min_score.is_none() && src.terminate_after.is_none() && scroll_after.is_none() && profiler.is_none() {
+            top = top.with_segment_counts(searcher.create_weight(&q, search_index::search::ScoreMode::CompleteNoScores).map_err(crate::engine::convert::index_error)?);
+        }
         if let Some(a) = scroll_after {
             top = top.with_after(a);
         }
@@ -1523,7 +1530,7 @@ fn query_phase_inner(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, 
             }
             field_after = Some((vals, None));
         }
-        let mut top = TopFieldCollector::new(built.keys.clone(), n, field_threshold, field_scores).with_searcher(&searcher);
+        let mut top = TopFieldCollector::new(built.keys.clone(), n, field_threshold, field_scores).with_searcher(&searcher).with_query(&q);
         if let Some((vals, d)) = field_after {
             top = top.with_after(vals, d);
         }
@@ -3150,6 +3157,7 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
     if let Some(hl) = &src.highlight {
         let mut spec = highlight::Spec::parse(hl)?;
         spec.weight_matches = highlight::weight_matches_supported(src);
+        spec.semantic = crate::xpack::inference::highlight::probes(src.query.as_ref());
         // The stored fields read at the top serve the highlighter too.
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
         let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
@@ -3201,7 +3209,7 @@ fn render_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t: &Tar
         let stored = r.searcher.stored(h.doc).map_err(crate::engine::convert::index_error)?;
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
         let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
-        let mut ih = inner::render(&qctx, t, r, h.doc, source.as_ref(), req.total_as_int)?;
+        let mut ih = inner::render(&qctx, t, r, h.doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), req.total_as_int)?;
         // `stored_fields: _none_` reaches nested inner hits (their sub-context reads the
         // search's stored fields context): they print no `_id` either.
         if req.source.stored_fields.as_ref().is_some_and(|sf| sf.fields.is_none())
@@ -3393,7 +3401,7 @@ fn complete_top_hit(cluster: &Cluster, st: &ClusterState, req: &SearchRequest, t
         let stored = r.searcher.stored(doc).map_err(crate::engine::convert::index_error)?;
         let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
         let qctx = QueryCtx::new(cluster, st, &t.idx, &table, &r.searcher, req.now_ms);
-        m.insert("inner_hits".into(), inner::render(&qctx, t, r, doc, source.as_ref(), req.total_as_int)?);
+        m.insert("inner_hits".into(), inner::render(&qctx, t, r, doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), req.total_as_int)?);
     }
     Ok(())
 }
@@ -3885,7 +3893,23 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     } else {
         None
     };
+    // Retrievers that need inference: a top-level `text_similarity_reranker` reranks the page
+    // after the search, and `rrf`/`linear`'s simplified `query`/`fields` form expands against
+    // the targets' mappings.
+    let reranker = crate::xpack::inference::rerank::take(&mut body)?;
+    if let Some(b) = body.as_mut()
+        && crate::xpack::inference::retrievers::uses_simplified(b)
+    {
+        let st = ctx.state();
+        // Only what the caller may read: another index's mapping mustn't shape the query.
+        let readable = crate::xpack::security::authorized_names(ctx);
+        let names = crate::api::resolve_indices(ctx, crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN).unwrap_or_default();
+        let targets: Vec<Arc<IndexMeta>> = names.iter().filter(|n| readable(n)).filter_map(|n| st.metadata.indices.get(n).cloned()).collect();
+        crate::xpack::inference::retrievers::expand(&targets, b)?;
+    }
     let mut req = parse_request(ctx, body.as_ref(), ctx.raw_json())?;
+    // Queries that need inference (`semantic`, and others on `semantic_text` fields).
+    crate::xpack::inference::query::rewrite_request(ctx, &mut req).await?;
     crate::xpack::entsearch::query_rules::check_rulesets(ctx, body.as_ref())?;
     let phase_took = crate::opensearch::phase_took_requested(ctx)?;
     // OpenSearch's `verbose_pipeline` (the URL parameter wins over the body's).
@@ -3899,9 +3923,12 @@ pub async fn search(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let Some(pipeline) = pipeline else {
         // Hits carry their stored `_source` bytes as they are when the page goes straight out
         // (`json::raw`).
-        let raw = ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch && ctx.query("filter_path").is_none();
+        let raw = ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch && ctx.query("filter_path").is_none() && reranker.is_none();
         let mut out = crate::json::raw::with_enabled(raw, || run(ctx, req.clone()))?;
         let mut v = render_take(&mut out, &req);
+        if let Some(rr) = &reranker {
+            crate::xpack::inference::rerank::apply(ctx, rr, &mut v).await?;
+        }
         crate::opensearch::add_reduce_phases(ctx, &out, &req, &mut v)?;
         crate::opensearch::add_search_extras(&out, &req, phase_took, &mut v);
         return Reply::ok(v);
@@ -4239,12 +4266,19 @@ pub async fn msearch(ctx: &Ctx<'_>) -> EsResult<Reply> {
         .then(|| crate::breaker::Reservation::new(ctx.cluster.breakers.request(ctx.cluster, &ctx.state())));
     for mut req in reqs {
         // Each search is authorized as a search request of its own.
-        let r = crate::xpack::security::authorize_search(ctx, &req.indices, &req.opts).and_then(|narrowed| {
-            if let Some(n) = narrowed {
-                req.indices = n;
+        let r = match crate::xpack::security::authorize_search(ctx, &req.indices, &req.opts) {
+            Ok(narrowed) => {
+                if let Some(n) = narrowed {
+                    req.indices = n;
+                }
+                // Queries that need inference, per search.
+                match crate::xpack::inference::query::rewrite_request(ctx, &mut req).await {
+                    Ok(()) => run(ctx, req.clone()),
+                    Err(e) => Err(e),
+                }
             }
-            run(ctx, req.clone())
-        });
+            Err(e) => Err(e),
+        };
         let r = r.map(|out| {
             // Elasticsearch 9.5.5's `_msearch` items don't mark the `top_hits` / `inner_hits`
             // hits of a `seq_no_primary_term` search as unassigned, as `_search` does.
@@ -4431,7 +4465,7 @@ fn complete_completion_options(cluster: &Cluster, st: &ClusterState, req: &Searc
                     script_fields_of_hit(cluster, st, t, &table, &r.searcher, doc, score, &src.script_fields, m)?;
                 }
                 if !r.inner_hits.is_empty() {
-                    m.insert("inner_hits".into(), inner::render(&qctx, t, r, doc, source.as_ref(), req.total_as_int)?);
+                    m.insert("inner_hits".into(), inner::render(&qctx, t, r, doc, &hits::stored_id(&stored).unwrap_or_default(), source.as_ref(), req.total_as_int)?);
                 }
             }
         }

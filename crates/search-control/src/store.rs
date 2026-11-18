@@ -5,9 +5,17 @@
 //! - `clusters`: one row per cluster (name, dialect, password, limits, branch origin) plus the
 //!   last figures metering saw (indices, documents, stored bytes), so listing clusters never
 //!   wakes them or touches object storage. A cluster being deleted keeps its row, flagged
-//!   `deleting`, until its data is gone; lookups don't see it. On a fleet every change to a
+//!   `deleting`, until its data is gone; lookups don't see it.
+//!   A deleted cluster kept for restoring (`--search-deleted-retention-days`) keeps its row too,
+//!   with `deleted_at`, `purge_at`, the name it had (`deleted_name`) and the name its storage is
+//!   kept under (`stored_as`, also in `name`, so its own name is free at once). Lookups don't see
+//!   it either. Restoring and purging claim the row first (`claim`, a conditional update in one
+//!   transaction), so two nodes never restore and purge the same cluster at once; a restore
+//!   reserves the name it restores to in `name` while it runs. On a fleet every change to a
 //!   cluster is made on its owner (`crate::cluster::on_owner`), which applies it to the loaded
 //!   cluster itself: no node has to follow the catalog.
+//!   A cluster has an `owner`: the signed-in person (`usr_…`) who made it, or none for the
+//!   operator's and admins' (and every cluster made before owners). A branch keeps its parent's.
 //! - `usage`: one row per metering interval of a *loaded* cluster: loaded seconds, the
 //!   estimated resident bytes, requests. An idle cluster adds no rows.
 //! - `storage`: a change log of each cluster's stored bytes. Storage accrues while a cluster
@@ -61,6 +69,16 @@ pub struct SearchCluster {
     /// lists show without asking the cluster's lease.
     #[serde(skip)]
     pub loaded_on: Option<String>,
+    /// When a sleeping cluster's next background job is due (ms; its node wakes it then).
+    #[serde(skip)]
+    pub wake_at: Option<i64>,
+    /// The signed-in person (`usr_…`) whose cluster it is; `None` for the operator's and admins'.
+    /// Set on create, kept by branches, never changed.
+    pub owner: Option<String>,
+    /// When it was last restored after a delete (Unix seconds): its point-in-time history
+    /// starts again there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restored_at: Option<i64>,
 }
 
 /// One metering interval of a loaded cluster.
@@ -86,9 +104,90 @@ pub struct UsageTotals {
     pub stored_gib_months: f64,
 }
 
+/// A deleted cluster kept for restoring until `purge_at`.
+#[derive(Clone, Debug, Serialize)]
+pub struct DeletedCluster {
+    /// As it was, under the name it had.
+    #[serde(flatten)]
+    pub cluster: SearchCluster,
+    /// Unix seconds.
+    pub deleted_at: i64,
+    /// Unix seconds: when its storage is removed for good.
+    pub purge_at: i64,
+    /// The name its storage is kept under in object storage (never a valid cluster name).
+    #[serde(skip)]
+    pub stored_as: String,
+    /// What the catalog's `name` holds now: `stored_as`, or the name a restore reserved.
+    #[serde(skip)]
+    pub reserved: String,
+}
+
+/// What [`Store::claim_deleted`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Claim {
+    /// Claimed. `reserved` is what the row's `name` held before (a crashed restore's target).
+    Claimed { reserved: String },
+    /// No such deleted cluster (restored, purged, or never deleted).
+    Gone,
+    /// Another restore or purge holds it.
+    Busy,
+    /// A restore's name is taken by another cluster.
+    Taken,
+}
+
+/// What lookups of live clusters filter on.
+const LIVE: &str = "deleting = 0 AND deleted_at IS NULL";
+
 pub struct Store {
     db: Db,
 }
+
+/// Per-person limits a write checks in its own transaction (`0`: no cap). Only clusters with an
+/// owner count, and only toward that owner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Caps {
+    /// Clusters a person may own, branches included.
+    pub clusters: i64,
+    /// Of those, ones that never unload (`idle_timeout_s` 0).
+    pub always_on: i64,
+}
+
+impl Caps {
+    /// No caps: the operator's and admins' writes.
+    pub const NONE: Caps = Caps { clusters: 0, always_on: 0 };
+}
+
+/// A write refused by a [`Caps`] limit: the cap, and how many the owner already has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Over {
+    Clusters { cap: i64, count: i64 },
+    AlwaysOn { cap: i64, count: i64 },
+}
+
+/// What [`Store::insert`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Inserted {
+    Yes,
+    /// The name (or id) is taken.
+    Taken,
+    Over(Over),
+}
+
+/// What [`Store::record_revoke`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Recorded {
+    /// Kept with the deleted cluster, for its restore.
+    Yes,
+    /// The cluster is live (restored meanwhile): revoke it on the cluster.
+    Live,
+    /// No such cluster any more (purged, or never).
+    Gone,
+    /// The cluster keeps as many as it may.
+    Full,
+}
+
+/// The clusters a person owns, as [`Store::list_owned`] lists them.
+const OWNED: &str = "deleting = 0 AND deleted_at IS NULL AND owner = ?1";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS search_clusters (
@@ -111,10 +210,12 @@ CREATE INDEX IF NOT EXISTS search_storage_cluster ON search_storage (cluster_id,
 "#;
 
 const COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes";
+                    parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner";
 /// What lookups read: [`COLS`] and where the cluster is loaded.
 const READ_COLS: &str = "id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
-                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, loaded_on, own_bytes";
+                         parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes, owner, loaded_on, own_bytes, wake_at, restored_at";
+/// What deleted clusters' reads add to [`READ_COLS`].
+const DELETED_COLS: &str = "deleted_name, deleted_at, purge_at, stored_as, name";
 
 fn row(r: &Row) -> code_sql::Result<SearchCluster> {
     Ok(SearchCluster {
@@ -134,9 +235,20 @@ fn row(r: &Row) -> code_sql::Result<SearchCluster> {
         indices: r.get(13)?,
         docs: r.get(14)?,
         stored_bytes: r.get(15)?,
-        loaded_on: r.get(16)?,
-        own_bytes: r.get(17)?,
+        owner: r.get(16)?,
+        loaded_on: r.get(17)?,
+        own_bytes: r.get(18)?,
+        wake_at: r.get(19)?,
+        restored_at: r.get(20)?,
     })
+}
+
+fn deleted_row(r: &Row) -> code_sql::Result<DeletedCluster> {
+    let mut c = row(r)?;
+    c.name = r.get(21)?;
+    c.loaded_on = None;
+    c.wake_at = None;
+    Ok(DeletedCluster { cluster: c, deleted_at: r.get(22)?, purge_at: r.get(23)?, stored_as: r.get(24)?, reserved: r.get(25)? })
 }
 
 /// Seconds in the 30-day month the GB-month figures use (AWS bills storage per 730-hour month;
@@ -170,16 +282,38 @@ impl Store {
         db.add_column("search_clusters", "loaded_on", "TEXT")?;
         db.add_column("search_clusters", "own_bytes", "INTEGER NOT NULL DEFAULT 0")?;
         db.add_column("search_clusters", "wake_at", "INTEGER")?;
+        // Clusters made before owners stay the operator's (none).
+        db.add_column("search_clusters", "owner", "TEXT")?;
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_owner ON search_clusters (owner, created_at)")?;
+        // Deleted clusters kept for restoring.
+        db.add_column("search_clusters", "deleted_at", "INTEGER")?;
+        db.add_column("search_clusters", "purge_at", "INTEGER")?;
+        db.add_column("search_clusters", "deleted_name", "TEXT")?;
+        db.add_column("search_clusters", "stored_as", "TEXT")?;
+        db.add_column("search_clusters", "claim", "TEXT")?;
+        db.add_column("search_clusters", "claimed_at", "INTEGER")?;
+        db.add_column("search_clusters", "restored_at", "INTEGER")?;
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS search_clusters_purge ON search_clusters (purge_at) WHERE deleted_at IS NOT NULL")?;
+        // Credentials revoked while their cluster was deleted, for its restore to revoke.
+        db.ensure_schema("CREATE TABLE IF NOT EXISTS search_revokes (cluster_id TEXT NOT NULL, credential TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (cluster_id, credential))")?;
         // Catalogs written before `code-sql` lack nothing but may lack the index on parents
         // (created above); their extra columns (`seq`) and tables (`search_tombstones`) are unused.
         Ok(Self { db })
     }
 
-    /// Inserts a new cluster; `false` when its name (or id) is taken.
-    pub async fn insert(&self, c: &SearchCluster) -> anyhow::Result<bool> {
+    /// Inserts a new cluster, unless its name (or id) is taken or its owner is at a cap. The
+    /// owner's clusters are counted in the insert's own transaction (SQLite's one writer;
+    /// Postgres `SERIALIZABLE`, which re-runs one of two racing creates), so two creates at the
+    /// cap can't both pass.
+    pub async fn insert(&self, c: &SearchCluster, caps: Caps) -> anyhow::Result<Inserted> {
         let r = self.db.write(|x| {
+            if let Some(owner) = &c.owner
+                && let Some(over) = over_caps(x, owner, c.idle_timeout_s, caps)?
+            {
+                return Ok(Inserted::Over(over));
+            }
             x.execute(
-                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"),
+                &format!("INSERT INTO search_clusters ({COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"),
                 params![
                     c.id,
                     c.name,
@@ -196,39 +330,62 @@ impl Store {
                     c.password_rotated_at,
                     c.indices,
                     c.docs,
-                    c.stored_bytes
+                    c.stored_bytes,
+                    c.owner
                 ],
             )
+            .map(|_| Inserted::Yes)
         });
         match r {
-            Ok(_) => Ok(true),
-            Err(e) if e.is_unique_violation() => Ok(false),
-            Err(e) => Err(e.into()),
+            Err(e) if e.is_unique_violation() => Ok(Inserted::Taken),
+            r => Ok(r?),
         }
     }
 
+    /// Whether one more cluster of `owner` (`idle_timeout_s`: its setting) is past one of `caps`,
+    /// as [`Store::insert`] counts it. Only a quick refusal before work an insert would undo: the
+    /// insert's own count decides.
+    pub async fn check_caps(&self, owner: &str, idle_timeout_s: i64, caps: Caps) -> anyhow::Result<Option<Over>> {
+        Ok(self.db.read(|x| over_caps(x, owner, idle_timeout_s, caps))?)
+    }
+
     /// Saves the settings and the password (not the metering figures: see [`Store::set_stats`]).
-    pub async fn update(&self, c: &SearchCluster) -> anyhow::Result<()> {
-        self.db.write(|x| {
+    /// Making an owned cluster always-on checks `caps.always_on` in the same transaction.
+    pub async fn update(&self, c: &SearchCluster, caps: Caps) -> anyhow::Result<Result<(), Over>> {
+        Ok(self.db.write(|x| {
+            if let Some(owner) = &c.owner
+                && let Some(over) = over_always_on(x, owner, Some(&c.id), c.idle_timeout_s, caps)?
+            {
+                return Ok(Err(over));
+            }
             x.execute(
                 "UPDATE search_clusters SET flavor = ?2, password = ?3, idle_timeout_s = ?4, max_in_flight = ?5, max_body_mb = ?6,
                  destructive_requires_name = ?7, password_rotated_at = ?8 WHERE id = ?1",
                 params![c.id, c.flavor, c.password, c.idle_timeout_s, c.max_in_flight, c.max_body_mb, c.destructive_requires_name, c.password_rotated_at],
-            )
-        })?;
-        Ok(())
+            )?;
+            Ok::<_, code_sql::Error>(Ok(()))
+        })?)
     }
 
     /// A cluster's id from its id or name, synchronously (roll's access rules resolve resources
-    /// on blocking threads).
+    /// on blocking threads). A deleted cluster kept for restoring resolves by its id only (its
+    /// restore route names it).
     pub fn id_of(&self, id_or_name: &str) -> anyhow::Result<Option<String>> {
         Ok(self.db.read(|x| {
-            x.query_row("SELECT id FROM search_clusters WHERE (id = ?1 OR name = ?1) AND deleting = 0 ORDER BY id = ?1 DESC LIMIT 1", params![id_or_name], |r| r.get(0)).optional()
+            x.query_row(&format!("SELECT id FROM search_clusters WHERE (id = ?1 AND deleting = 0) OR (name = ?1 AND {LIVE}) ORDER BY id = ?1 DESC LIMIT 1"), params![id_or_name], |r| r.get(0)).optional()
+        })?)
+    }
+
+    /// Whose cluster `id_or_name` is, synchronously (rolld's workspace owners): `None` when there
+    /// is no such cluster, `Some(None)` for the operator's.
+    pub fn owner_of(&self, id_or_name: &str) -> anyhow::Result<Option<Option<String>>> {
+        Ok(self.db.read(|x| {
+            x.query_row(&format!("SELECT owner FROM search_clusters WHERE (id = ?1 OR name = ?1) AND {LIVE} ORDER BY id = ?1 DESC LIMIT 1"), params![id_or_name], |r| r.get(0)).optional()
         })?)
     }
 
     async fn one(&self, filter: &str, arg: &str) -> anyhow::Result<Option<SearchCluster>> {
-        Ok(self.db.read(|x| x.query_row(&format!("SELECT {READ_COLS} FROM search_clusters WHERE {filter} = ?1 AND deleting = 0"), params![arg], row).optional())?)
+        Ok(self.db.read(|x| x.query_row(&format!("SELECT {READ_COLS} FROM search_clusters WHERE {filter} = ?1 AND {LIVE}"), params![arg], row).optional())?)
     }
 
     pub async fn get(&self, id: &str) -> anyhow::Result<Option<SearchCluster>> {
@@ -241,7 +398,7 @@ impl Store {
     }
 
     async fn many(&self, filter: &str, arg: Option<&str>) -> anyhow::Result<Vec<SearchCluster>> {
-        let sql = format!("SELECT {READ_COLS} FROM search_clusters WHERE deleting = 0 {filter} ORDER BY created_at, rowid");
+        let sql = format!("SELECT {READ_COLS} FROM search_clusters WHERE {LIVE} {filter} ORDER BY created_at, rowid");
         Ok(self.db.read(|x| match arg {
             Some(a) => x.query(&sql, params![a], row),
             None => x.query(&sql, params![], row),
@@ -250,6 +407,11 @@ impl Store {
 
     pub async fn list(&self) -> anyhow::Result<Vec<SearchCluster>> {
         self.many("", None).await
+    }
+
+    /// The clusters of the signed-in person `owner` (what [`Caps`] counts).
+    pub async fn list_owned(&self, owner: &str) -> anyhow::Result<Vec<SearchCluster>> {
+        self.many(&format!("AND {OWNED}"), Some(owner)).await
     }
 
     /// Clusters that never unload (`idle_timeout_s` 0), through a partial index: what every node
@@ -282,7 +444,7 @@ impl Store {
 
     /// Sleeping clusters with a background job due by `now_ms`.
     pub async fn due_wakes(&self, now_ms: i64) -> anyhow::Result<Vec<SearchCluster>> {
-        let sql = format!("SELECT {READ_COLS} FROM search_clusters WHERE deleting = 0 AND wake_at IS NOT NULL AND wake_at <= ?1 ORDER BY wake_at");
+        let sql = format!("SELECT {READ_COLS} FROM search_clusters WHERE {LIVE} AND wake_at IS NOT NULL AND wake_at <= ?1 ORDER BY wake_at");
         Ok(self.db.read(|x| x.query(&sql, params![now_ms], row))?)
     }
 
@@ -293,12 +455,189 @@ impl Store {
         Ok(())
     }
 
+    /// Keeps a deleted cluster for restoring until `purge_at`: its name is freed at once (the
+    /// row's `name` becomes `stored_as`, where its storage now is), and lookups stop seeing it.
+    /// `false` when it isn't a live cluster any more (another delete won).
+    pub async fn mark_deleted(&self, id: &str, stored_as: &str, at: i64, purge_at: i64) -> anyhow::Result<bool> {
+        let n = self.db.write(|x| {
+            x.execute(
+                "UPDATE search_clusters SET deleted_name = name, name = ?2, stored_as = ?2, deleted_at = ?3, purge_at = ?4, deleting = 0,
+                 loaded_on = NULL, wake_at = NULL, claim = NULL, claimed_at = NULL WHERE id = ?1 AND deleted_at IS NULL",
+                params![id, stored_as, at, purge_at],
+            )
+        })?;
+        Ok(n == 1)
+    }
+
+    /// Deleted clusters kept for restoring (of `owner` only, when given), newest first.
+    pub async fn list_deleted(&self, owner: Option<&str>) -> anyhow::Result<Vec<DeletedCluster>> {
+        let sql = format!("SELECT {READ_COLS}, {DELETED_COLS} FROM search_clusters WHERE deleted_at IS NOT NULL {} ORDER BY deleted_at DESC, rowid DESC", if owner.is_some() { "AND owner = ?1" } else { "" });
+        Ok(self.db.read(|x| match owner {
+            Some(o) => x.query(&sql, params![o], deleted_row),
+            None => x.query(&sql, params![], deleted_row),
+        })?)
+    }
+
+    /// The deleted cluster `id`, if it is kept.
+    pub async fn get_deleted(&self, id: &str) -> anyhow::Result<Option<DeletedCluster>> {
+        let sql = format!("SELECT {READ_COLS}, {DELETED_COLS} FROM search_clusters WHERE id = ?1 AND deleted_at IS NOT NULL");
+        Ok(self.db.read(|x| x.query_row(&sql, params![id], deleted_row).optional())?)
+    }
+
+    /// Deleted clusters whose window ended by `now` (Unix seconds).
+    pub async fn due_purges(&self, now: i64) -> anyhow::Result<Vec<DeletedCluster>> {
+        let sql = format!("SELECT {READ_COLS}, {DELETED_COLS} FROM search_clusters WHERE deleted_at IS NOT NULL AND purge_at <= ?1 ORDER BY purge_at");
+        Ok(self.db.read(|x| x.query(&sql, params![now], deleted_row))?)
+    }
+
+    /// Claims deleted cluster `id` for a restore (`restore_as`: the name it comes back under,
+    /// reserved in the row at once, so no create can take it meanwhile) or a purge (`None`), in
+    /// one transaction: a claim another node holds since `stale_before` or later wins. A restore
+    /// needs the window still open at `now`.
+    pub async fn claim_deleted(&self, id: &str, claim: &str, restore_as: Option<&str>, now: i64, stale_before: i64) -> anyhow::Result<Claim> {
+        let r = self.db.write(|x| {
+            let cur: Option<(String, Option<i64>, i64)> = x
+                .query_row(
+                    "SELECT name, claimed_at, purge_at FROM search_clusters WHERE id = ?1 AND deleted_at IS NOT NULL",
+                    params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let Some((reserved, claimed_at, purge_at)) = cur else { return Ok(Claim::Gone) };
+            if claimed_at.is_some_and(|t| t >= stale_before) {
+                return Ok(Claim::Busy);
+            }
+            match restore_as {
+                Some(name) => {
+                    if purge_at <= now {
+                        return Ok(Claim::Gone);
+                    }
+                    if name != reserved {
+                        let taken: Option<i64> = x.query_row("SELECT 1 FROM search_clusters WHERE name = ?1", params![name], |r| r.get(0)).optional()?;
+                        if taken.is_some() {
+                            return Ok(Claim::Taken);
+                        }
+                    }
+                    x.execute("UPDATE search_clusters SET claim = ?2, claimed_at = ?3, name = ?4 WHERE id = ?1", params![id, claim, now, name])?;
+                }
+                None => {
+                    x.execute("UPDATE search_clusters SET claim = ?2, claimed_at = ?3 WHERE id = ?1", params![id, claim, now])?;
+                }
+            }
+            Ok::<_, code_sql::Error>(Claim::Claimed { reserved })
+        });
+        match r {
+            Ok(c) => Ok(c),
+            // A create took the name between the check and the update.
+            Err(e) if e.is_unique_violation() => Ok(Claim::Taken),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Gives a claim up (the restore failed): the row's name goes back to where its storage is.
+    pub async fn release_claim(&self, id: &str, claim: &str) -> anyhow::Result<()> {
+        self.db.write(|x| x.execute("UPDATE search_clusters SET claim = NULL, claimed_at = NULL, name = stored_as WHERE id = ?1 AND claim = ?2", params![id, claim]))?;
+        Ok(())
+    }
+
+    /// Makes a restored cluster live again under the name its claim reserved; `false` when the
+    /// claim was lost (it went stale and a purge took it).
+    /// Brings a deleted cluster's row back if `claim` still holds it, unless its owner is at one
+    /// of `caps` (counted in this transaction, as [`Store::insert`] counts them): `Ok(Ok(false))`
+    /// when the claim was lost.
+    pub async fn finish_restore(&self, id: &str, claim: &str, at: i64, caps: Caps) -> anyhow::Result<Result<bool, Over>> {
+        Ok(self.db.write(|x| {
+            let row: Option<(Option<String>, i64)> = x
+                .query_row("SELECT owner, idle_timeout_s FROM search_clusters WHERE id = ?1 AND claim = ?2 AND deleted_at IS NOT NULL", params![id, claim], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .optional()?;
+            let Some((owner, idle_timeout_s)) = row else { return Ok::<_, code_sql::Error>(Ok(false)) };
+            if let Some(owner) = &owner
+                && let Some(over) = over_caps(x, owner, idle_timeout_s, caps)?
+            {
+                return Ok(Err(over));
+            }
+            let n = x.execute(
+                "UPDATE search_clusters SET deleted_at = NULL, purge_at = NULL, deleted_name = NULL, stored_as = NULL, claim = NULL, claimed_at = NULL,
+                 restored_at = ?3 WHERE id = ?1 AND claim = ?2 AND deleted_at IS NOT NULL",
+                params![id, claim, at],
+            )?;
+            Ok(Ok(n == 1))
+        })?)
+    }
+
+    /// Removes a purged cluster's rows, if `claim` still holds it; `false` otherwise.
+    pub async fn finish_purge(&self, id: &str, claim: &str) -> anyhow::Result<bool> {
+        Ok(self.db.write(|x| {
+            if x.execute("DELETE FROM search_clusters WHERE id = ?1 AND claim = ?2 AND deleted_at IS NOT NULL", params![id, claim])? == 0 {
+                return Ok::<_, code_sql::Error>(false);
+            }
+            x.execute("DELETE FROM search_usage WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_storage WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1", params![id])?;
+            Ok(true)
+        })?)
+    }
+
+    /// Keeps `credential` (what `Control::revoke_link` takes) to revoke when deleted cluster `id`
+    /// is restored, unless it already keeps `max`. Checked against the row in the same
+    /// transaction, so a restore that flips the row live after this reads it
+    /// ([`Store::revokes`]), and one that flipped it before makes this [`Recorded::Live`].
+    pub async fn record_revoke(&self, id: &str, credential: &str, at: i64, max: i64) -> anyhow::Result<Recorded> {
+        Ok(self.db.write(|x| {
+            let deleted: Option<Option<i64>> = x.query_row("SELECT deleted_at FROM search_clusters WHERE id = ?1", params![id], |r| r.get(0)).optional()?;
+            match deleted {
+                None => return Ok::<_, code_sql::Error>(Recorded::Gone),
+                Some(None) => return Ok(Recorded::Live),
+                Some(Some(_)) => {}
+            }
+            let kept: Option<i64> = x.query_row("SELECT 1 FROM search_revokes WHERE cluster_id = ?1 AND credential = ?2", params![id, credential], |r| r.get(0)).optional()?;
+            if kept.is_some() {
+                return Ok(Recorded::Yes);
+            }
+            let n: i64 = x.query_row("SELECT COUNT(*) FROM search_revokes WHERE cluster_id = ?1", params![id], |r| r.get(0))?;
+            if n >= max {
+                return Ok(Recorded::Full);
+            }
+            x.execute("INSERT INTO search_revokes (cluster_id, credential, at) VALUES (?1, ?2, ?3)", params![id, credential, at])?;
+            Ok(Recorded::Yes)
+        })?)
+    }
+
+    /// The revokes live cluster `id` still has to apply ([`Store::record_revoke`]), oldest first.
+    /// Read with the row in a write transaction, so it can't miss one recorded before the row
+    /// went live.
+    pub async fn revokes(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self.db.write(|x| {
+            x.query(
+                "SELECT r.credential FROM search_revokes r JOIN search_clusters c ON c.id = r.cluster_id WHERE r.cluster_id = ?1 AND c.deleting = 0 AND c.deleted_at IS NULL ORDER BY r.at, r.credential",
+                params![id],
+                |r| r.get(0),
+            )
+        })?)
+    }
+
+    /// Live clusters with revokes still to apply (a restore that couldn't apply them all).
+    pub async fn clusters_with_revokes(&self) -> anyhow::Result<Vec<String>> {
+        Ok(self.db.read(|x| {
+            x.query("SELECT DISTINCT r.cluster_id FROM search_revokes r JOIN search_clusters c ON c.id = r.cluster_id WHERE c.deleting = 0 AND c.deleted_at IS NULL", params![], |r| r.get(0))
+        })?)
+    }
+
+    /// A revoke applied: forgotten.
+    pub async fn forget_revoke(&self, id: &str, credential: &str) -> anyhow::Result<()> {
+        self.db.write(|x| x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1 AND credential = ?2", params![id, credential]))?;
+        Ok(())
+    }
+
     /// Deletes a cluster's rows.
     pub async fn delete(&self, id: &str) -> anyhow::Result<()> {
         self.db.write(|x| {
             x.execute("DELETE FROM search_clusters WHERE id = ?1", params![id])?;
             x.execute("DELETE FROM search_usage WHERE cluster_id = ?1", params![id])?;
-            x.execute("DELETE FROM search_storage WHERE cluster_id = ?1", params![id])
+            x.execute("DELETE FROM search_storage WHERE cluster_id = ?1", params![id])?;
+            x.execute("DELETE FROM search_revokes WHERE cluster_id = ?1", params![id])
         })?;
         Ok(())
     }
@@ -372,6 +711,34 @@ impl Store {
     }
 }
 
+/// Whether `owner` may have one more always-on cluster: `None` unless `idle_timeout_s` is 0, the
+/// cap is set, and (for an existing cluster `id`) it isn't always-on already, so a cluster that
+/// already is keeps its other settings changeable when the cap is lowered.
+/// Whether one more cluster of `owner` (with `idle_timeout_s`) is past one of `caps`.
+fn over_caps(x: &code_sql::Conn<'_>, owner: &str, idle_timeout_s: i64, caps: Caps) -> code_sql::Result<Option<Over>> {
+    if caps.clusters > 0 {
+        let count: i64 = x.query_row(&format!("SELECT COUNT(*) FROM search_clusters WHERE {OWNED}"), params![owner], |r| r.get(0))?;
+        if count >= caps.clusters {
+            return Ok(Some(Over::Clusters { cap: caps.clusters, count }));
+        }
+    }
+    over_always_on(x, owner, None, idle_timeout_s, caps)
+}
+
+fn over_always_on(x: &code_sql::Conn<'_>, owner: &str, id: Option<&str>, idle_timeout_s: i64, caps: Caps) -> code_sql::Result<Option<Over>> {
+    if idle_timeout_s != 0 || caps.always_on <= 0 {
+        return Ok(None);
+    }
+    if let Some(id) = id {
+        let was: Option<i64> = x.query_row("SELECT idle_timeout_s FROM search_clusters WHERE id = ?1", params![id], |r| r.get(0)).optional()?;
+        if was == Some(0) {
+            return Ok(None);
+        }
+    }
+    let count: i64 = x.query_row(&format!("SELECT COUNT(*) FROM search_clusters WHERE {OWNED} AND idle_timeout_s = 0"), params![owner], |r| r.get(0))?;
+    Ok((count >= caps.always_on).then_some(Over::AlwaysOn { cap: caps.always_on, count }))
+}
+
 /// The integral of a step function given as `(from, value)` points (sorted by time) up to `end`.
 pub fn integrate(points: &[(i64, i64)], end: i64) -> f64 {
     let mut total = 0.0;
@@ -408,32 +775,45 @@ mod tests {
             stored_bytes: 0,
             own_bytes: 0,
             loaded_on: None,
+            wake_at: None,
+            owner: None,
+            restored_at: None,
         }
     }
 
     async fn crud(s: &Store) {
         let c = cluster("srch_a", "app");
-        assert!(s.insert(&c).await.unwrap());
-        assert!(!s.insert(&c).await.unwrap(), "ids are unique");
-        assert!(!s.insert(&cluster("srch_b", "app")).await.unwrap(), "names are unique");
+        assert_eq!(s.insert(&c, Caps::NONE).await.unwrap(), Inserted::Yes);
+        assert_eq!(s.insert(&c, Caps::NONE).await.unwrap(), Inserted::Taken, "ids are unique");
+        assert_eq!(s.insert(&cluster("srch_b", "app"), Caps::NONE).await.unwrap(), Inserted::Taken, "names are unique");
         assert_eq!(s.by_name("app").await.unwrap().unwrap().id, "srch_a");
         let mut child = cluster("srch_c", "app-dev");
         child.parent_id = Some("srch_a".into());
         child.parent_at = Some(5);
         child.created_at = 2;
-        assert!(s.insert(&child).await.unwrap());
+        assert_eq!(s.insert(&child, Caps::NONE).await.unwrap(), Inserted::Yes);
         assert_eq!(s.children("srch_a").await.unwrap().len(), 1);
+        let mut mine = cluster("srch_m", "mine");
+        mine.owner = Some("usr_a".into());
+        mine.created_at = 3;
+        assert_eq!(s.insert(&mine, Caps::NONE).await.unwrap(), Inserted::Yes);
+        assert_eq!(s.list_owned("usr_a").await.unwrap().iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["srch_m"]);
+        assert!(s.list_owned("usr_b").await.unwrap().is_empty());
+        assert_eq!(s.owner_of("mine").unwrap(), Some(Some("usr_a".into())));
+        assert_eq!(s.owner_of("srch_a").unwrap(), Some(None));
+        assert_eq!(s.owner_of("nope").unwrap(), None);
+        s.delete("srch_m").await.unwrap();
         let mut c = s.get("srch_a").await.unwrap().unwrap();
         c.flavor = "opensearch".into();
         c.password = "new".into();
         c.max_in_flight = 8;
-        s.update(&c).await.unwrap();
+        s.update(&c, Caps::NONE).await.unwrap().unwrap();
         let back = s.get("srch_a").await.unwrap().unwrap();
         assert_eq!((back.flavor.as_str(), back.password.as_str(), back.max_in_flight), ("opensearch", "new", 8));
         assert_eq!(s.list().await.unwrap().iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["app", "app-dev"]);
         assert!(s.always_on().await.unwrap().is_empty());
         c.idle_timeout_s = 0;
-        s.update(&c).await.unwrap();
+        s.update(&c, Caps::NONE).await.unwrap().unwrap();
         assert_eq!(s.always_on().await.unwrap().iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["app"]);
         s.set_deleting("srch_a", true).await.unwrap();
         assert!(s.always_on().await.unwrap().is_empty(), "a cluster being deleted is never loaded");
@@ -444,7 +824,7 @@ mod tests {
     }
 
     async fn usage_totals(s: &Store) {
-        assert!(s.insert(&cluster("srch_u", "usage")).await.unwrap());
+        assert_eq!(s.insert(&cluster("srch_u", "usage"), Caps::NONE).await.unwrap(), Inserted::Yes);
         s.record_usage("srch_u", &UsageSample { at: 100, seconds: 60, loaded_bytes: 1 << 30, requests: 10 }).await.unwrap();
         s.record_usage("srch_u", &UsageSample { at: 160, seconds: 30, loaded_bytes: 2 << 30, requests: 5 }).await.unwrap();
         let t = s.usage_since("srch_u", 0, 200).await.unwrap();
@@ -456,7 +836,7 @@ mod tests {
     }
 
     async fn storage_is_a_step_function(s: &Store) {
-        assert!(s.insert(&cluster("srch_s", "storage")).await.unwrap());
+        assert_eq!(s.insert(&cluster("srch_s", "storage"), Caps::NONE).await.unwrap(), Inserted::Yes);
         s.set_stats("srch_s", 100, 1, 10, 1000).await.unwrap();
         // An unchanged size logs nothing.
         s.set_stats("srch_s", 150, 1, 12, 1000).await.unwrap();
@@ -472,8 +852,42 @@ mod tests {
         s.delete("srch_s").await.unwrap();
     }
 
+    /// Restore and purge exclude each other through the claim, whichever node runs them.
+    async fn deleted_claims(s: &Store) {
+        assert_eq!(s.insert(&cluster("srch_d", "gone"), Caps::NONE).await.unwrap(), Inserted::Yes);
+        assert!(s.mark_deleted("srch_d", "deleted_srch_d_x", 100, 200).await.unwrap());
+        assert!(!s.mark_deleted("srch_d", "deleted_srch_d_y", 100, 200).await.unwrap(), "deleted once");
+        assert!(s.by_name("gone").await.unwrap().is_none() && s.get("srch_d").await.unwrap().is_none());
+        assert_eq!(s.id_of("srch_d").unwrap().as_deref(), Some("srch_d"), "its restore route resolves");
+        assert_eq!(s.id_of("gone").unwrap(), None);
+        assert_eq!(s.insert(&cluster("srch_n", "gone"), Caps::NONE).await.unwrap(), Inserted::Yes, "the name is free");
+        assert_eq!(s.list_deleted(None).await.unwrap()[0].cluster.name, "gone");
+        assert_eq!(s.claim_deleted("srch_d", "r1", Some("gone"), 150, 0).await.unwrap(), Claim::Taken);
+        assert_eq!(
+            s.claim_deleted("srch_d", "r1", Some("back"), 150, 0).await.unwrap(),
+            Claim::Claimed { reserved: "deleted_srch_d_x".into() }
+        );
+        // The restore holds it: a purge (or another restore) waits; the reserved name is taken.
+        assert_eq!(s.claim_deleted("srch_d", "p1", None, 250, 100).await.unwrap(), Claim::Busy);
+        assert_eq!(s.insert(&cluster("srch_o", "back"), Caps::NONE).await.unwrap(), Inserted::Taken);
+        assert!(!s.finish_purge("srch_d", "p1").await.unwrap());
+        // A claim older than `stale_before` lapses: the purge takes it and the restore loses.
+        assert_eq!(s.claim_deleted("srch_d", "p1", None, 250, 151).await.unwrap(), Claim::Claimed { reserved: "back".into() });
+        assert!(!s.finish_restore("srch_d", "r1", 260, Caps::NONE).await.unwrap().unwrap());
+        assert!(s.finish_purge("srch_d", "p1").await.unwrap());
+        assert_eq!(s.claim_deleted("srch_d", "r2", Some("back"), 150, 0).await.unwrap(), Claim::Gone);
+        // A restore after the window is too late; within it, it finishes.
+        assert!(s.mark_deleted("srch_n", "deleted_srch_n_x", 100, 200).await.unwrap());
+        assert_eq!(s.claim_deleted("srch_n", "r", Some("gone"), 200, 0).await.unwrap(), Claim::Gone);
+        assert!(matches!(s.claim_deleted("srch_n", "r", Some("gone"), 199, 0).await.unwrap(), Claim::Claimed { .. }));
+        assert!(s.finish_restore("srch_n", "r", 199, Caps::NONE).await.unwrap().unwrap());
+        assert_eq!(s.by_name("gone").await.unwrap().unwrap().restored_at, Some(199));
+        s.delete("srch_n").await.unwrap();
+    }
+
     async fn all(s: &Store) {
         crud(s).await;
+        deleted_claims(s).await;
         usage_totals(s).await;
         storage_is_a_step_function(s).await;
     }
@@ -505,13 +919,20 @@ mod tests {
                  PRAGMA user_version = 3;",
             )
             .unwrap();
-            conn.execute(&format!("INSERT INTO search_clusters ({COLS}) VALUES ('srch_o', 'old', 'local', 'elasticsearch', 'pw', 300, 64, 100, 1, NULL, NULL, 1, NULL, 0, 0, 0)"), []).unwrap();
+            conn.execute(
+                "INSERT INTO search_clusters (id, name, region, flavor, password, idle_timeout_s, max_in_flight, max_body_mb, destructive_requires_name, \
+                 parent_id, parent_at, created_at, password_rotated_at, indices, docs, stored_bytes) \
+                 VALUES ('srch_o', 'old', 'local', 'elasticsearch', 'pw', 300, 64, 100, 1, NULL, NULL, 1, NULL, 0, 0, 0)",
+                [],
+            )
+            .unwrap();
         }
         if std::env::var(code_sql::TEST_DATABASE_ENV).is_ok_and(|v| !v.is_empty()) {
             return;
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.by_name("old").await.unwrap().unwrap().id, "srch_o");
+        let old = s.by_name("old").await.unwrap().unwrap();
+        assert_eq!((old.id.as_str(), old.owner.as_deref()), ("srch_o", None), "an earlier cluster is the operator's");
         s.delete("srch_o").await.unwrap();
         all(&s).await;
         let _ = std::fs::remove_dir_all(&dir);

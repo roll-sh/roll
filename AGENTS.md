@@ -188,6 +188,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     `roll_net::literal_private_host`, because IP literals skip the resolver. That covers webhooks,
     review apps, owners' own provider `base_url` (`ROLL_CODE_PROVIDER_ALLOW_PRIVATE` to allow),
     gateway upstreams and MCP clients' metadata documents. Bound what you read from it.
+  - OIDC tokens from workloads (CI jobs, clusters) are checked by `crates/roll-oidc`, shared by roll
+    secrets' workload identities and roll-access's trusted machine clients. Its `Fetch` is rolld's
+    guarded client; never write a second verifier, and never make the shared-issuer rule optional.
   - Owner-management routes check `Code::manages`/`check_manage`, not `owns`/`check_write`:
     agent tokens (`agent:<name>`) work code but never manage the owner, and review only as their
     own agent.
@@ -347,6 +350,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     is printed).
     The Kubernetes operator (`sdk/kubernetes-operator`) builds on the Go client and talks to the
     Kubernetes API over plain HTTP; it only ever writes Secrets its RollSecret owns.
+    The Secrets Store CSI Driver provider (`sdk/csi-provider`) builds on the Go client too and
+    speaks the driver's gRPC with the standard library (Go 1.24's unencrypted HTTP/2); it writes
+    no Kubernetes object, reads strictly, and logs each pod in with its own service account.
   - Values are encrypted with the project's data key, sealed by `ROLL_SECRET_KEY`, and bound to
     their row (project, secret, version) as associated data. A value never goes in a log, a
     `Debug`, an error, an audit row, a change's or request's diff, or a command line: `Value`
@@ -355,6 +361,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     Anything that touches a second environment (a reference, an import, a base, a promote's
     source) checks the caller through `Caller::allows`; checks, sandboxes and previews resolve
     untrusted (`Secrets::untrusted`, `"untrusted": true`): never a protected environment.
+  - Tokens are roll-access's: a project's token is a grant with one secrets rule made through
+    `POST /v1/access/tokens`, and identities' logins get `workload` grants (`Workloads`). Never
+    add a token store to secrets; it asks the caller's `Grant` (`GrantGrants`).
   - Signed-in people manage their own projects' secrets (`OwnProjects`; others' projects 404). A
     canvas proves nothing about who owns what's on it: anything acting on a resource through a
     project asks `roll_workspace::Workspace::trusts` (secrets' `members`, `counts_for_repo`, roll

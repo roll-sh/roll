@@ -62,6 +62,13 @@ pub struct Deploy {
     /// Deploy this public image instead of the service's source.
     #[arg(long)]
     pub image: Option<String>,
+    /// Deploy an image built on this machine, with no registry (Fly's `--local-only`):
+    /// `docker save` runs here and its archive is uploaded.
+    #[arg(long, conflicts_with_all = ["image", "revision", "image_file"])]
+    pub local_image: Option<String>,
+    /// Or an archive `docker save` wrote (`.tar`, gzipped or not).
+    #[arg(long, conflicts_with_all = ["image", "revision"])]
+    pub image_file: Option<PathBuf>,
     /// Build and health-check it without putting it live: it answers on its own URL
     /// (`<id>--<host>`), and `roll apps rollback <id>` puts it live.
     #[arg(long)]
@@ -160,6 +167,13 @@ pub enum Domains {
         #[command(flatten)]
         target: Target,
     },
+    /// Change the environment's name on the roll domain (`<name>.<domain>`); the old one stops
+    /// answering at once.
+    Rename {
+        name: String,
+        #[command(flatten)]
+        target: Target,
+    },
     /// Make a custom domain redirect to another of the environment's hostnames (308), or serve
     /// again with `--to none`.
     Redirect {
@@ -186,13 +200,24 @@ pub enum AppsCmd {
         #[command(flatten)]
         target: Target,
     },
-    /// Make a service from a repo (`--repo owner/name`) or an image (`--image`).
+    /// Make a service from a repo (`--repo owner/name`), a Git URL (`--git
+    /// https://github.com/owner/name`; a private one with `--git-username` and its token on stdin)
+    /// or an image (`--image`).
     Create {
         name: String,
         #[arg(long, short = 'p')]
         project: String,
-        #[arg(long, conflicts_with = "image")]
+        #[arg(long, conflicts_with_all = ["image", "git"])]
         repo: Option<String>,
+        /// A Git repository's URL: each new commit on its branch deploys.
+        #[arg(long, conflicts_with = "image")]
+        git: Option<String>,
+        /// A private Git repository's login: this username, its token on stdin.
+        #[arg(long, requires = "git")]
+        git_username: Option<String>,
+        /// The branch production follows (the repo's default when not given).
+        #[arg(long)]
+        branch: Option<String>,
         /// A subdirectory of the repo to build.
         #[arg(long)]
         root: Option<String>,
@@ -273,6 +298,16 @@ pub enum AppsCmd {
         /// How long a new instance has to pass its health check at a deploy.
         #[arg(long, value_name = "SECONDS")]
         health_timeout: Option<u32>,
+        /// Seconds between two health checks while running (2–300; 0: the default, 10).
+        #[arg(long, value_name = "SECONDS")]
+        health_every: Option<u32>,
+        /// Failed health checks in a row that replace an instance (1–10; 0: the default, 3).
+        #[arg(long, value_name = "N")]
+        health_failures: Option<u32>,
+        /// A worker's health check: a shell command in its instance, healthy on exit 0; `none`
+        /// removes it.
+        #[arg(long, value_name = "COMMAND")]
+        health_command: Option<String>,
         /// Alert when an instance's memory stays at this share of its limit for five minutes (0
         /// off).
         #[arg(long, value_name = "PERCENT")]
@@ -334,6 +369,10 @@ pub enum AppsCmd {
         /// A step whose 5xx share reaches this (and beats the old deployment's) rolls back.
         #[arg(long, value_name = "PERCENT")]
         rollout_errors: Option<u8>,
+        /// Each rollout step waits for a person once it passes (`true`), or advances by itself;
+        /// `roll apps rollout advance|all|abort` decides.
+        #[arg(long)]
+        rollout_manual: Option<bool>,
         /// The app speaks HTTP/2 without TLS (a gRPC server): `true` or `false`.
         #[arg(long)]
         h2c: Option<bool>,
@@ -351,6 +390,10 @@ pub enum AppsCmd {
         /// percent for a minute (10–100); `0` turns it off.
         #[arg(long, value_name = "PERCENT")]
         cpu_target: Option<u32>,
+        /// And on memory: another instance while they average over this percent of their
+        /// memory for a minute (10–100); `0` turns it off.
+        #[arg(long, value_name = "PERCENT")]
+        memory_target: Option<u32>,
         /// A worker that stops: `always` started again, `on_failure`, or `never`.
         #[arg(long, value_parser = ["always", "on_failure", "never"])]
         restart: Option<String>,
@@ -493,14 +536,18 @@ pub enum AppsCmd {
         cancel: Option<String>,
         /// Run a command on a schedule (Heroku Scheduler): `--schedule NAME --at "0 3 * * *"
         /// --command "node cleanup.js"` adds or replaces it; each due time is a job.
-        #[arg(long, value_name = "NAME", requires_all = ["at", "command"], conflicts_with_all = ["logs", "cancel", "unschedule"])]
+        #[arg(long, value_name = "NAME", requires = "at", conflicts_with_all = ["logs", "cancel", "unschedule"])]
         schedule: Option<String>,
         /// With `--schedule`: five cron fields, or `@hourly`, `@daily` …
         #[arg(long, requires = "schedule")]
         at: Option<String>,
         /// With `--schedule`: the command.
-        #[arg(long, requires = "schedule")]
+        #[arg(long, requires = "schedule", required_unless_present_any = ["path", "logs", "cancel", "unschedule"])]
         command: Option<String>,
+        /// With `--schedule`: a path of a web service to GET instead (Vercel's crons), with
+        /// `Authorization: Bearer $CRON_SECRET` when it has one.
+        #[arg(long, requires = "schedule", conflicts_with = "command")]
+        path: Option<String>,
         /// With `--schedule`: its time zone (IANA; default UTC).
         #[arg(long, requires = "schedule")]
         tz: Option<String>,
@@ -533,8 +580,8 @@ pub enum AppsCmd {
     },
     /// Run a command here, on this machine, with an environment's variables (Railway's
     /// `railway run`): `roll apps exec -- npm run dev`. `PORT` and `ROLL_*` are left out (they're
-    /// the platform's), sealed variables can't be (they're never shown again), and `*.internal`
-    /// names only resolve inside roll (`roll apps proxy` reaches a private service from here).
+    /// the platform's), sealed variables can't be (they're never shown again), and a linked
+    /// service's `*.internal` URL points at a local tunnel to it while the command runs.
     /// Exits with the command's exit code.
     Exec {
         #[command(flatten)]
@@ -588,16 +635,29 @@ pub enum AppsCmd {
         /// Print the values (never a sealed one's).
         #[arg(long)]
         reveal: bool,
+        /// Keep these revealable: a new variable whose name reads as a secret (`*_KEY`, `*TOKEN*`,
+        /// `*PASSWORD*`, `*SECRET*`) is sealed unless it's named here (Vercel's sensitive by
+        /// default).
+        #[arg(long, value_name = "NAME")]
+        plain: Vec<String>,
         /// Set every `KEY=value` line of a `.env` file (`export`, comments and quotes as in a
         /// shell's).
         #[arg(long, value_name = "PATH")]
         from_file: Option<PathBuf>,
+        /// Keep a variable as a file in its instances instead of their environment,
+        /// `NAME=/etc/secrets/key.json` (Render's secret files); repeatable.
+        #[arg(long = "as-file", value_name = "NAME=PATH")]
+        as_file: Vec<String>,
+        /// Put a variable kept as a file back in the environment; repeatable.
+        #[arg(long = "not-file", value_name = "NAME")]
+        not_file: Vec<String>,
         /// Put them live now: a redeploy of the live image with the new values (Heroku's
         /// `config:set`), followed until it's live.
         #[arg(long, conflicts_with = "reveal")]
         deploy: bool,
     },
-    /// Link a roll resource (`postgres <project>`, `redis <db>`): its connection variables go in.
+    /// Link a roll resource (`postgres <project>`, `redis <db>`, `search <cluster>`): its
+    /// connection variables go in (a search cluster's are an API key of the link's own).
     Link {
         kind: String,
         r#ref: String,
@@ -630,6 +690,28 @@ pub enum AppsCmd {
         #[arg(long)]
         remove: bool,
     },
+    /// A Git URL service's private repository login: `--username` with the token or app password
+    /// on stdin (sealed, never shown again), or with `--secret NAME`, the project's roll secret
+    /// that holds it (read at each fetch); `--remove`. Sent only to the URL's host.
+    GitLogin {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, conflicts_with = "remove")]
+        username: Option<String>,
+        #[arg(long, requires = "username")]
+        secret: Option<String>,
+        #[arg(long)]
+        remove: bool,
+    },
+    /// Connect a Git URL service on GitHub to roll's GitHub App (the operator's: installations
+    /// span tenants): fetches with its installation's tokens, deploys as commit statuses.
+    /// `--remove` disconnects it.
+    Github {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long)]
+        remove: bool,
+    },
     /// Scale to zero now.
     Sleep {
         #[command(flatten)]
@@ -639,6 +721,72 @@ pub enum AppsCmd {
     Wake {
         #[command(flatten)]
         target: Target,
+    },
+    /// Drop roll's cached answers (on-demand revalidation): these paths (`/blog/*` for a prefix)
+    /// and those tagged `--tag` (the app's `Cache-Tag` or `Surrogate-Key`), or everything.
+    Purge {
+        #[command(flatten)]
+        target: Target,
+        paths: Vec<String>,
+        /// A tag the app's answers carry (repeat for more).
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+    },
+    /// Visitors and page views from the access log (no script, no cookie): totals, top pages,
+    /// referring sites and countries.
+    Analytics {
+        #[command(flatten)]
+        target: Target,
+        /// How far back, in minutes (60–10080; default a day).
+        #[arg(long, default_value_t = 1440)]
+        minutes: i64,
+    },
+    /// Its errors, grouped from its log (stack traces joined, the same error at another line one
+    /// group): how many, when last seen, and (`--sample`) the newest one whole.
+    Errors {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, default_value_t = 1440)]
+        minutes: i64,
+        #[arg(long)]
+        sample: bool,
+    },
+    /// The app's own metrics its OpenTelemetry SDK sent (its environment's Traces switch on):
+    /// each series' latest point (a gauge's value, a counter's rate a second, a histogram's mean).
+    AppMetrics {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, default_value_t = 60)]
+        minutes: i64,
+    },
+    /// A manual rollout waiting after its step: `advance` to the next step, `all` to every
+    /// request, or `abort` back to what was live.
+    Rollout {
+        #[command(flatten)]
+        target: Target,
+        #[arg(value_parser = ["advance", "all", "abort"])]
+        action: String,
+    },
+    /// How fast its pages are for real visitors (its environment's Web Vitals on, `roll apps env
+    /// --vitals true`): each metric's p75 and rating, and the busiest routes'.
+    Vitals {
+        #[command(flatten)]
+        target: Target,
+        /// How far back, in minutes (60–10080; default a day).
+        #[arg(long, default_value_t = 1440)]
+        minutes: i64,
+    },
+    /// Recent traces the app's OpenTelemetry SDK sent once its environment's Traces switch is on
+    /// (newest first; `--min-ms` keeps the slow ones); `--trace ID` prints one's spans.
+    Traces {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long, default_value_t = 60)]
+        minutes: i64,
+        #[arg(long)]
+        min_ms: Option<u64>,
+        #[arg(long)]
+        trace: Option<String>,
     },
     /// Replace the instances with fresh ones (the same deployment).
     Restart {
@@ -850,12 +998,29 @@ pub enum AppsCmd {
         /// or not.
         #[arg(long)]
         redeploy_on_secrets: Option<bool>,
+        /// Measure its pages' Web Vitals in visitors' browsers (`true`: roll adds a small script
+        /// to its HTML pages), or not.
+        #[arg(long)]
+        vitals: Option<bool>,
+        /// What its code may reach, from its next deploy: `roll` (roll's products, the
+        /// project's services and the `--egress-host`s, nothing else) or `open`.
+        #[arg(long, value_parser = ["roll", "open"])]
+        egress: Option<String>,
+        /// With `--egress roll`: a host outside roll it may still reach on 443 and 80
+        /// (`api.stripe.com`, or `*.sentry.io` for its subdomains). Repeatable; the list replaces
+        /// the one it has.
+        #[arg(long = "egress-host", value_name = "HOST", requires = "egress")]
+        egress_host: Vec<String>,
         /// Only visitors with its link get in (a new link, printed once; the old one stops).
         #[arg(long, conflicts_with = "open")]
         private: bool,
         /// Anyone with its URL gets in again.
         #[arg(long)]
         open: bool,
+        /// Only people signed in to roll who can open its project get in (sent to roll to sign
+        /// in, then back); its link, if it has one, stops.
+        #[arg(long, conflicts_with_all = ["open", "private"])]
+        signed_in: bool,
         /// Maintenance: its public names answer roll's page (with this note, if given) and
         /// nothing wakes.
         #[arg(long, value_name = "NOTE", num_args = 0..=1, default_missing_value = "", conflicts_with = "serve")]
@@ -869,9 +1034,14 @@ pub enum AppsCmd {
         pause: bool,
         #[arg(long)]
         resume: bool,
-        /// Resume deploys held after a rollback (pushes, hooks and tag moves put live again).
-        #[arg(long)]
+        /// Resume deploys held by a person or after a rollback (pushes, hooks and tag moves put
+        /// live again).
+        #[arg(long, conflicts_with = "hold")]
         resume_deploys: bool,
+        /// Hold deploys: pushes, hooks and tag moves build to `ready` (a web service) and wait
+        /// for a person to put one live (`roll apps rollback <deployment> --keep-variables`).
+        #[arg(long)]
+        hold: bool,
         /// Only this network gets in through its public URLs (`a.b.c.d/n`, an IPv6 `/n`, an
         /// address). Repeatable; the list replaces the one it has.
         #[arg(long = "allow-ip", value_name = "CIDR", conflicts_with = "allow_any")]
@@ -900,6 +1070,14 @@ pub enum AppsCmd {
         /// Its answers carry no headers of the environment's own again.
         #[arg(long)]
         no_headers: bool,
+        /// A path another service of the project answers, `/api/*=api` (a prefix ends in `*`;
+        /// that service's environment of the same name), repeatable; the list replaces the
+        /// environment's.
+        #[arg(long = "route", value_name = "PATH=SERVICE", conflicts_with = "no_routes")]
+        route: Vec<String>,
+        /// No routes to other services.
+        #[arg(long)]
+        no_routes: bool,
         /// Its own page (an HTML file, at most 64 KiB) for the 502, 503 and 504 visitors get
         /// while the app can't answer or wake (Heroku's error page).
         #[arg(long, value_name = "HTML_FILE")]
@@ -1060,20 +1238,30 @@ fn secret_env_file(name: &str) -> bool {
 
 /// `…/tunnel` for each connection to `127.0.0.1:local`: its bytes copied both ways.
 async fn proxy(api: &Api, env: &str, what: &str, port: u16, local: u16) -> anyhow::Result<()> {
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let l = tokio::net::TcpListener::bind(("127.0.0.1", local)).await.map_err(|e| anyhow::anyhow!("127.0.0.1:{local} is taken ({e}): pick another with --local-port"))?;
+    eprintln!("127.0.0.1:{local} → {what}:{port} (Ctrl-C ends it)");
+    let (url, headers) = tunnel_to(api, env);
+    tokio::select! {
+        r = tunnels(url, headers, l) => r,
+        _ = tokio::signal::ctrl_c() => Ok(()),
+    }
+}
+
+/// Environment `env`'s tunnel URL and the headers that open it.
+fn tunnel_to(api: &Api, env: &str) -> (String, Vec<(String, String)>) {
     let base = api.base.strip_prefix("http").map(|rest| format!("ws{rest}")).unwrap_or_else(|| api.base.clone());
-    let url = format!("{base}{env}/tunnel");
     let mut headers: Vec<(String, String)> = api.headers.clone();
     if let Some(k) = &api.key {
         headers.push(("authorization".into(), format!("Bearer {k}")));
     }
-    eprintln!("127.0.0.1:{local} → {what}:{port} (Ctrl-C ends it)");
+    (format!("{base}{env}/tunnel"), headers)
+}
+
+/// Every connection to `l` carried through a tunnel of its own (`tunnel_to`).
+async fn tunnels(url: String, headers: Vec<(String, String)>, l: tokio::net::TcpListener) -> anyhow::Result<()> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     loop {
-        let (conn, _) = tokio::select! {
-            a = l.accept() => a?,
-            _ = tokio::signal::ctrl_c() => return Ok(()),
-        };
+        let (conn, _) = l.accept().await?;
         let mut req = url.as_str().into_client_request()?;
         for (k, v) in &headers {
             req.headers_mut().insert(reqwest::header::HeaderName::from_bytes(k.as_bytes())?, v.parse()?);
@@ -1505,7 +1693,35 @@ fn print_line(l: &Value) {
         Some("system") => "roll".to_string(),
         _ => l["instance"].as_str().map(|i| i.rsplit('-').next().unwrap_or(i).to_string()).unwrap_or_default(),
     };
+    // A stack trace's lines past its first: under it, with no time of their own.
+    if l["trace"] == "more" {
+        println!("{:8} {who:>5} ┆   {}", "", s(&l["text"]));
+        return;
+    }
     println!("{t} {who:>5} │ {}", s(&l["text"]));
+}
+
+/// A read log's lines with each stack trace's lines together, at its first line (another
+/// instance's lines that fell between come after it).
+fn traces_together(lines: &[Value]) -> Vec<&Value> {
+    let mut out: Vec<Vec<&Value>> = Vec::new();
+    let mut open: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+    for l in lines {
+        let k = (s(&l["instance"]), s(&l["stream"]));
+        if l["trace"] == "more"
+            && let Some(&i) = open.get(&k)
+        {
+            out[i].push(l);
+            continue;
+        }
+        if l["trace"] == "start" {
+            open.insert(k, out.len());
+        } else {
+            open.remove(&k);
+        }
+        out.push(vec![l]);
+    }
+    out.into_iter().flatten().collect()
 }
 
 /// Follow a deployment's build and rollout, then say how it ended.
@@ -1522,7 +1738,10 @@ async fn watch(api: &Api, svc: &Value, env: &str, dep: &Value) -> anyhow::Result
             }
             Ok(())
         }
-        Some(st) => bail!("the deploy is {st}: {}", d["error"].as_str().unwrap_or("see the log above")),
+        Some(st) => match d["fix"].as_str() {
+            Some(f) => bail!("the deploy is {st}: {}\n  fix: {f}", d["error"].as_str().unwrap_or("see the log above")),
+            None => bail!("the deploy is {st}: {}", d["error"].as_str().unwrap_or("see the log above")),
+        },
         None => bail!("the deploy has no status"),
     }
 }
@@ -1622,7 +1841,7 @@ pub async fn up(api: &Api, json_out: bool, u: Up) -> anyhow::Result<()> {
 
 // ── a project in one file: `roll up --all` ──
 
-use apps_build::project::{compose_to_toml, entry_kind, entry_run, parse_project, ProjectFile};
+use apps_build::project::{compose_to_toml, entry_kind, entry_run, entry_source, parse_project, ProjectFile};
 
 /// What `--all` will do, as lines: `+` made, `=` already there, `~` linked, `↑` deployed.
 fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Value>, dbs: &std::collections::BTreeMap<(String, String), String>, links: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<String> {
@@ -1632,16 +1851,20 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
         out.push(format!("{} {} database {n}", if have { "=" } else { "+" }, d.kind));
     }
     for (n, a) in &f.apps {
-        let from = match (&a.repo, &a.image, &a.root) {
-            (Some(r), _, root) => format!("repo {r}{}", root.as_ref().map(|d| format!(" at {d}")).unwrap_or_default()),
+        let from = match (a.repo.as_ref().or(a.git.as_ref()), &a.image, &a.root) {
+            (Some(r), _, root) => format!("{} {r}{}", entry_kind(a), root.as_ref().map(|d| format!(" at {d}")).unwrap_or_default()),
             (None, Some(i), _) => format!("image {i}"),
             (None, None, r) => format!("from {}", r.as_deref().unwrap_or(".")),
         };
         let have = services.get(n);
         out.push(format!("{} service {n} ({from})", if have.is_some() { "=" } else { "+" }));
         for l in &a.links {
-            let kind = &f.databases[l].kind;
-            let linked = dbs.get(&(kind.clone(), l.clone())).is_some_and(|r| links.get(n).is_some_and(|ls| ls.contains(r)));
+            // A database by its name, or another app of the project (its service's id).
+            let target = match apps_build::project::link_kind(f, l) {
+                "service" => services.get(l).map(|s| s["id"].as_str().unwrap_or("").to_string()),
+                kind => dbs.get(&(kind.to_string(), l.clone())).cloned(),
+            };
+            let linked = target.is_some_and(|r| links.get(n).is_some_and(|ls| ls.contains(&r)));
             if !linked {
                 out.push(format!("~ link {n} to {l}"));
             }
@@ -1654,8 +1877,12 @@ fn plan_lines(f: &ProjectFile, services: &std::collections::BTreeMap<String, Val
                 out.push(format!("~ settings {n} ({})", differs.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")));
             }
         }
+        for e in a.environments.keys() {
+            let there = have.is_some_and(|s| s["environments"].as_array().is_some_and(|l| l.iter().any(|x| x["name"] == e.as_str())));
+            out.push(format!("{} environment {e} of {n}", if there { "~" } else { "+" }));
+        }
         let image_moved = a.image.as_ref().is_some_and(|i| have.is_some_and(|s| s["source"]["image"].as_str() != Some(i.as_str())));
-        if (a.root.is_some() && a.repo.is_none()) || image_moved {
+        if entry_kind(a) == "upload" || image_moved {
             out.push(format!("↑ deploy {n}"));
         }
     }
@@ -1699,6 +1926,29 @@ fn fill_vars(app: &str, vars: &std::collections::BTreeMap<String, apps_build::pr
         out.insert(k.clone(), json!(value));
     }
     Ok(out)
+}
+
+/// Whether a variable's name reads as a secret, as the dashboard's `looksSecret` does.
+fn looks_secret(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    let words = ["SECRET", "TOKEN", "PASSWORD", "PASSWD", "PASS", "PRIVATE_KEY", "API_KEY", "ACCESS_KEY", "KEY", "CREDENTIAL", "CREDENTIALS", "DSN"];
+    let parts: Vec<&str> = n.split('_').collect();
+    // A whole word of the name (`DB_PASS`, `API_KEY`), or anywhere for the plain ones.
+    words.iter().any(|w| {
+        let wp: Vec<&str> = w.split('_').collect();
+        parts.windows(wp.len()).any(|win| win == wp.as_slice())
+    }) || ["SECRET", "PASSWORD", "TOKEN"].iter().any(|w| n.contains(w))
+}
+
+/// How long ago, as a person reads it (`12s ago`, `3m ago`, `5h ago`, `2d ago`).
+fn ago(ms: i64) -> String {
+    let s = ms.max(0) / 1000;
+    match s {
+        0..60 => format!("{s}s ago"),
+        60..3600 => format!("{}m ago", s / 60),
+        3600..86400 => format!("{}h ago", s / 3600),
+        _ => format!("{}d ago", s / 86400),
+    }
 }
 
 fn local_plan(dir: &Path, env: &str) -> anyhow::Result<apps_build::Plan> {
@@ -1751,6 +2001,14 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
             dbs.insert(("redis".to_string(), s(&d["name"])), s(&d["id"]));
         }
     }
+    // Buckets go by their name; streams and NoSQL databases by their id.
+    for (kind, path, id) in [("bucket", "/v1/storage/buckets", "name"), ("stream", "/v1/streams", "id"), ("nosql", "/v1/nosql/databases", "id")] {
+        if wants(kind) {
+            for d in api.get(path).await?.as_array().into_iter().flatten().filter(|d| placed.contains(&(kind.to_string(), s(&d[id])))) {
+                dbs.insert((kind.to_string(), s(&d["name"])), s(&d[id]));
+            }
+        }
+    }
     // A service the file names with another source is a mistake to stop at, not to convert.
     for (n, a) in &f.apps {
         if let Some(svc) = services.get(n) {
@@ -1785,31 +2043,27 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
         }
         let made = match d.kind.as_str() {
             "postgres" => api.post("/v1/projects", json!({ "name": n })).await?,
-            _ => api.post("/v1/redis/databases", json!({ "name": n })).await?,
+            "redis" => api.post("/v1/redis/databases", json!({ "name": n })).await?,
+            "bucket" => api.post("/v1/storage/buckets", json!({ "name": n })).await?,
+            "stream" => api.post("/v1/streams", json!({ "name": n })).await?,
+            _ => api.post("/v1/nosql/databases", json!({ "name": n })).await?,
         };
-        let r = s(&made["id"]);
+        let r = if d.kind == "bucket" { s(&made["name"]) } else { s(&made["id"]) };
         let _ = api.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/resources/{}/{}", enc(&project), d.kind, enc(&r)), Some(json!({ "x": 48 + 320 * i as i64, "y": 340 }))).await;
-        eprintln!("made {} database {n}", d.kind);
+        eprintln!("made {} {n}", if d.kind == "bucket" || d.kind == "stream" { d.kind.clone() } else { format!("{} database", d.kind) });
         dbs.insert((d.kind.clone(), n.clone()), r);
     }
     let mut out = Vec::new();
+    // Every app's service id, for links between them (made once all are made).
+    let mut ids: std::collections::BTreeMap<String, String> = services.iter().map(|(n, svc)| (n.clone(), s(&svc["id"]))).collect();
+    let db_links = |a: &apps_build::project::AppEntry| a.links.iter().filter(|l| f.databases.contains_key(*l)).cloned().collect::<Vec<_>>();
     for (n, a) in &f.apps {
         let fresh = !services.contains_key(n);
         let svc = match services.get(n) {
             Some(svc) => svc.clone(),
             None => {
-                let source = match (&a.repo, &a.image) {
-                    (Some(r), _) => {
-                        let mut src = json!({ "kind": "repo", "repo": r });
-                        if let Some(root) = &a.root {
-                            src["root"] = json!(root);
-                        }
-                        src
-                    }
-                    (None, Some(i)) => json!({ "kind": "image", "image": i }),
-                    (None, None) => json!({ "kind": "upload" }),
-                };
-                let made_links: Vec<Value> = a.links.iter().map(|l| json!({ "kind": f.databases[l].kind, "ref": dbs[&(f.databases[l].kind.clone(), l.clone())] })).collect();
+                let source = entry_source(a);
+                let made_links: Vec<Value> = db_links(a).iter().map(|l| json!({ "kind": f.databases[l].kind, "ref": dbs[&(f.databases[l].kind.clone(), l.clone())] })).collect();
                 let mut body = json!({ "project": project, "name": n, "source": source, "links": made_links });
                 // Production follows it from the first deploy (not the default branch's head first).
                 if let Some(b) = &a.branch {
@@ -1820,7 +2074,18 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                     body["run"] = Value::Object(run);
                 }
                 if !a.variables.is_empty() {
-                    body["variables"] = Value::Object(fill_vars(n, &a.variables)?);
+                    let vars = fill_vars(n, &a.variables)?;
+                    // Secrets made for it, and names that read as secrets, sealed from the start
+                    // (as the dashboard's import seals them); a reference reads as what it reads.
+                    let sealed: Vec<&String> = vars
+                        .iter()
+                        .filter(|(k, v)| matches!(a.variables.get(*k), Some(apps_build::project::VarSpec::Generate(_))) || (looks_secret(k) && !v.as_str().unwrap_or("").contains("${{")))
+                        .map(|(k, _)| k)
+                        .collect();
+                    if !sealed.is_empty() {
+                        body["sealed"] = json!(sealed);
+                    }
+                    body["variables"] = Value::Object(vars);
                 }
                 let svc = api.post("/v1/apps/services", body).await?;
                 eprintln!("made service {n}");
@@ -1836,7 +2101,7 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
                 api.call(reqwest::Method::PATCH, &format!("/v1/apps/services/{}", enc(&id)), Some(json!({ "run": differs }))).await?;
                 eprintln!("set {n}'s settings");
             }
-            for l in &a.links {
+            for l in &db_links(a) {
                 let kind = &f.databases[l].kind;
                 let r = &dbs[&(kind.clone(), l.clone())];
                 if !links.get(n).is_some_and(|ls| ls.contains(r)) {
@@ -1846,7 +2111,7 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
             }
         }
         let dep = match (&a.root, &a.image) {
-            (Some(root), _) if a.repo.is_none() => {
+            (Some(root), _) if entry_kind(a) == "upload" => {
                 let tree = dir.join(root);
                 let bundle = tokio::task::spawn_blocking(move || pack(&tree)).await??;
                 let mut req = api.http.post(format!("{}{}/deploys", api.base, env_path(&svc, &u.target.env))).header("content-type", "application/gzip").body(bundle);
@@ -1877,6 +2142,35 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
             }
             out.push(json!({ "service": n, "deployment": d["id"] }));
         }
+        ids.insert(n.clone(), s(&svc["id"]));
+        // Its other environments: each put (made, or its branch and run settings set again),
+        // a new one's variables set as they are.
+        for (e, env) in &a.environments {
+            let there = svc["environments"].as_array().is_some_and(|l| l.iter().any(|x| x["name"] == e.as_str()));
+            let mut body = json!({});
+            if let Some(b) = &env.branch {
+                body["branch"] = json!(b);
+            }
+            if let Some(r) = &env.run {
+                body["run"] = serde_json::to_value(r)?;
+            }
+            let path = format!("/v1/apps/services/{}/environments/{}", enc(&s(&svc["id"])), enc(e));
+            api.call(reqwest::Method::PUT, &path, Some(body)).await?;
+            if !there && !env.variables.is_empty() {
+                api.call(reqwest::Method::PATCH, &format!("{path}/variables"), Some(json!({ "set": env.variables }))).await?;
+            }
+            eprintln!("{} {n}'s {e} environment", if there { "set" } else { "made" });
+        }
+    }
+    // Links to other apps of the file: their URLs (each made by now).
+    for (n, a) in &f.apps {
+        for l in a.links.iter().filter(|l| !f.databases.contains_key(*l)) {
+            let (Some(id), Some(target)) = (ids.get(n), ids.get(l)) else { continue };
+            if !links.get(n).is_some_and(|ls| ls.contains(target)) {
+                api.call(reqwest::Method::PUT, &format!("/v1/apps/services/{}/links/service/{}", enc(id), enc(target)), Some(json!({}))).await?;
+                eprintln!("linked {n} to {l}");
+            }
+        }
     }
     if json_out {
         println!("{}", serde_json::to_string_pretty(&json!({ "project": pname, "deploys": out }))?);
@@ -1888,13 +2182,43 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
 
 pub async fn deploy(api: &Api, json_out: bool, d: Deploy) -> anyhow::Result<()> {
     let svc = service(api, &d.target).await?;
-    let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true), "no_cache": d.no_cache.then_some(true) });
-    let dep = api.post(&format!("{}/deploys", env_path(&svc, &d.target.env)), body).await?;
+    let dep = if d.local_image.is_some() || d.image_file.is_some() {
+        upload_image(api, &svc, &d).await?
+    } else {
+        let body = json!({ "revision": d.revision, "image": d.image, "no_traffic": d.no_traffic.then_some(true), "no_cache": d.no_cache.then_some(true) });
+        api.post(&format!("{}/deploys", env_path(&svc, &d.target.env)), body).await?
+    };
     if json_out || d.detach {
         println!("{}", serde_json::to_string_pretty(&dep)?);
         return Ok(());
     }
     watch(api, &svc, &d.target.env, &dep).await
+}
+
+/// An image from this machine as a deploy: `docker save`'s archive (or the file given), sent
+/// as it is; rolld takes its names out before loading it.
+async fn upload_image(api: &Api, svc: &Value, d: &Deploy) -> anyhow::Result<Value> {
+    const MAX: usize = 512 << 20;
+    let bytes = match (&d.local_image, &d.image_file) {
+        (Some(image), _) => {
+            eprintln!("saving {image}…");
+            let out = tokio::process::Command::new("docker").args(["save", image]).output().await.context("can't run docker here")?;
+            anyhow::ensure!(out.status.success(), "docker save {image} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+            out.stdout
+        }
+        (None, Some(path)) => std::fs::read(path).with_context(|| format!("can't read {}", path.display()))?,
+        (None, None) => unreachable!("an image to upload"),
+    };
+    anyhow::ensure!(bytes.len() <= MAX, "the image is {} MiB: at most {} MiB goes up this way (push it to a registry and deploy it with --image)", bytes.len() >> 20, MAX >> 20);
+    eprintln!("uploading {} MiB…", bytes.len() >> 20);
+    let mut req = api.http.post(format!("{}{}/deploys", api.base, env_path(svc, &d.target.env))).header("content-type", "application/x-docker-image").body(bytes);
+    if let Some(k) = &api.key {
+        req = req.bearer_auth(k);
+    }
+    let res = req.send().await.with_context(|| format!("can't reach {}", api.base))?;
+    let (ok, v) = (res.status().is_success(), res.json::<Value>().await.unwrap_or(Value::Null));
+    anyhow::ensure!(ok, "{}", v["error"].as_str().unwrap_or("the upload failed"));
+    Ok(v)
 }
 
 pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
@@ -1963,7 +2287,7 @@ pub async fn logs(api: &Api, json_out: bool, l: Logs) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&lines)?);
         return Ok(());
     }
-    for line in lines.as_array().into_iter().flatten() {
+    for line in traces_together(lines.as_array().map(Vec::as_slice).unwrap_or_default()) {
         print_line(line);
     }
     Ok(())
@@ -2011,6 +2335,15 @@ pub async fn domains(api: &Api, json_out: bool, d: Domains) -> anyhow::Result<()
             api.call(reqwest::Method::DELETE, &format!("{}/domains/{}", env_path(&svc, &target.env), enc(&hostname)), None).await?;
             json!({ "removed": hostname })
         }
+        Domains::Rename { name, target } => {
+            let svc = service(api, &target).await?;
+            let e = api.call(reqwest::Method::PUT, &env_path(&svc, &target.env), Some(json!({ "hostname": name }))).await?;
+            if !json_out {
+                println!("{}  (redeploy to give the app its new ROLL_PUBLIC_URL)", s(&e["url"]));
+                return Ok(());
+            }
+            e
+        }
         Domains::Redirect { hostname, to, target } => {
             let svc = service(api, &target).await?;
             let to = if to == "none" { Value::Null } else { json!(to) };
@@ -2056,14 +2389,31 @@ fn human(v: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// An environment's or instance's state in words: a web service that's stopped is asleep (the
+/// next request wakes it), a frozen one resumes in milliseconds, `none` was never deployed.
+fn state_word(state: &str, kind: &str) -> String {
+    match (state, kind) {
+        ("stopped", "web") => "asleep".into(),
+        ("stopped", "cron") => "idle".into(),
+        ("suspended", _) => "frozen".into(),
+        ("none", _) => "not deployed".into(),
+        (s, _) => s.to_string(),
+    }
+}
+
 fn print_service(v: &Value) {
-    println!("{}  {}  {}", s(&v["id"]), s(&v["name"]), s(&v["run"]["type"]));
+    let kind = s(&v["run"]["type"]);
+    println!("{:<16} {:<7} {}", s(&v["name"]), kind, s(&v["id"]));
     for e in v["environments"].as_array().into_iter().flatten() {
         let latest = match e["latest"]["status"].as_str() {
             Some(st) if st != "active" => format!("  (latest deploy {st})"),
             _ => String::new(),
         };
-        println!("  {:<12} {:<10} {}{latest}", s(&e["name"]), s(&e["state"]), s(&e["url"]));
+        // Only a web service answers at a URL (a worker's and a cron's would only 404).
+        let url = if kind == "web" { s(&e["url"]) } else { String::new() };
+        // A static site's live deployment has no instance: `none` with one live is its files.
+        let state = if s(&e["state"]) == "none" && !e["active"].is_null() { "serving files".to_string() } else { state_word(&s(&e["state"]), &kind) };
+        println!("  {:<12} {:<13} {url}{latest}", s(&e["name"]), state);
     }
 }
 
@@ -2088,19 +2438,21 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             if !json_out {
                 print_service(&svc);
                 let e = api.get(&env_path(&svc, &target.env)).await?;
+                let kind = s(&svc["run"]["type"]);
                 for i in e["instances"].as_array().into_iter().flatten() {
-                    println!("    {}  {}  {} in flight", s(&i["id"]), s(&i["state"]), s(&i["in_flight"]));
+                    println!("    {}  {}  {} in flight", s(&i["id"]), state_word(&s(&i["state"]), &kind), s(&i["in_flight"]));
                 }
                 return Ok(());
             }
             svc
         }
-        AppsCmd::Create { name, project, repo, root, image, kind, port, schedule, timezone } => {
-            let source = match (repo, image) {
-                (Some(r), None) => json!({ "kind": "repo", "repo": r, "root": root }),
-                (None, Some(i)) => json!({ "kind": "image", "image": i }),
-                (None, None) => json!({ "kind": "upload" }),
-                _ => bail!("--repo or --image, not both"),
+        AppsCmd::Create { name, project, repo, git, git_username, branch, root, image, kind, port, schedule, timezone } => {
+            let source = match (repo, git, image) {
+                (Some(r), None, None) => json!({ "kind": "repo", "repo": r, "root": root }),
+                (None, Some(u), None) => json!({ "kind": "git", "url": u, "root": root }),
+                (None, None, Some(i)) => json!({ "kind": "image", "image": i }),
+                (None, None, None) => json!({ "kind": "upload" }),
+                _ => bail!("one of --repo, --git or --image"),
             };
             let mut run = serde_json::Map::new();
             if let Some(k) = kind {
@@ -2116,17 +2468,24 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 run.insert("schedule".into(), sch.into());
             }
             let project = project_id(api, &project).await?;
-            let v = api.post("/v1/apps/services", json!({ "project": project, "name": name, "source": source, "run": run })).await?;
+            let mut body = json!({ "project": project, "name": name, "source": source, "run": run });
+            if let Some(user) = git_username {
+                body["git_login"] = json!({ "username": user, "password": secret_from_stdin("the token")? });
+            }
+            if let Some(b) = branch {
+                body["branch"] = json!(b);
+            }
+            let v = api.post("/v1/apps/services", body).await?;
             if !json_out {
                 print_service(&v);
                 return Ok(());
             }
             v
         }
-        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, rollout, rollout_step, rollout_errors, h2c, scale, public, drain, cpu_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
+        AppsCmd::Set { target, name, repo, root, image, upload, builder, dockerfile, stage, install, build_command, build_start, health_timeout, health_every, health_failures, health_command, alert_memory, alert_errors, alert_p95, alert_log, alert_log_count, min, max, cpu, memory, port, start, pre_deploy, health, schedule, timezone, kind, concurrency, suspend_after, sleep_after, timeout, retries, volume, watch, packages, rollout, rollout_step, rollout_errors, rollout_manual, h2c, scale, public, drain, cpu_target, memory_target, restart, restart_tries, affinity, tcp, rollback_on_crash } => {
             let svc = service(api, &target).await?;
             // The service's rollout with what was given replaced (the API takes it whole).
-            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() {
+            let rollout = if rollout.is_some() || rollout_step.is_some() || rollout_errors.is_some() || rollout_manual.is_some() {
                 let mut r = svc["run"]["rollout"].as_object().cloned().unwrap_or_default();
                 match rollout.as_deref() {
                     None => {}
@@ -2143,6 +2502,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 if let Some(n) = rollout_errors {
                     r.insert("error_pct".into(), json!(n));
+                }
+                if let Some(m) = rollout_manual {
+                    r.insert("manual".into(), json!(m));
                 }
                 Some(Value::Object(r))
             } else {
@@ -2234,6 +2596,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("pre_deploy", text(pre_deploy)),
                 ("health_path", text(health)),
                 ("health_timeout_s", health_timeout.map(Value::from)),
+                ("health_every_s", health_every.map(|n| if n == 0 { Value::Null } else { Value::from(n) })),
+                ("health_failures", health_failures.map(|n| if n == 0 { Value::Null } else { Value::from(n) })),
+                ("health_command", text(health_command)),
                 ("alerts", alerts),
                 ("schedule", schedule.map(Value::from)),
                 ("timezone", timezone.map(Value::from)),
@@ -2249,6 +2614,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 ("public", public.map(Value::from)),
                 ("drain_s", drain.map(|d| if d == 0 { Value::Null } else { Value::from(d) })),
                 ("cpu_target", cpu_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
+                ("memory_target", memory_target.map(|t| if t == 0 { Value::Null } else { Value::from(t) })),
                 ("restart", restart.map(Value::from)),
                 ("restart_tries", restart_tries.map(Value::from)),
                 ("affinity", affinity.map(Value::from)),
@@ -2378,6 +2744,47 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             if !sealed.is_empty() {
                 eprintln!("not set here (sealed, never shown again): {}", sealed.join(", "));
             }
+            // A linked service's private URL (`http://<name>.<env>.internal:<port>`) pointed at a
+            // local tunnel to it, as `roll apps proxy` makes one, for as long as the command runs.
+            let mut vars = vars;
+            let mut tunneled = Vec::new();
+            // Only when something names one: the links (and each linked service) are read then, and
+            // one that can't be read is said, not fatal.
+            let links = if vars.iter().any(|(_, v)| v.contains(".internal")) {
+                api.get(&format!("/v1/apps/services/{}/links", enc(&s(&svc["id"])))).await.unwrap_or_else(|e| {
+                    eprintln!("its links couldn't be read ({e:#}): no tunnels");
+                    Value::Null
+                })
+            } else {
+                Value::Null
+            };
+            for l in links.as_array().into_iter().flatten().filter(|l| l["kind"] == "service") {
+                let other = match api.get(&format!("/v1/apps/services/{}", enc(&s(&l["ref"])))).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        eprintln!("the linked service {} couldn't be read ({e:#}): no tunnel to it", s(&l["ref"]));
+                        continue;
+                    }
+                };
+                let host = format!("{}.{}.internal", s(&other["name"]), target.env);
+                if !vars.iter().any(|(_, v)| internal_rewritten(v, &host, "").is_some()) {
+                    continue;
+                }
+                let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+                let local = listener.local_addr()?.to_string();
+                for (_, v) in vars.iter_mut() {
+                    if let Some(new) = internal_rewritten(v, &host, &local) {
+                        *v = new;
+                    }
+                }
+                eprintln!("{local} → {} ({}), for {}'s link", s(&other["name"]), target.env, s(&svc["name"]));
+                let (url, headers) = tunnel_to(api, &env_path(&other, &target.env));
+                tunneled.push(tokio::spawn(async move {
+                    if let Err(e) = tunnels(url, headers, listener).await {
+                        eprintln!("a tunnel ended: {e:#}");
+                    }
+                }));
+            }
             let internal: Vec<&str> = vars.iter().filter(|(_, v)| v.contains(".internal")).map(|(k, _)| k.as_str()).collect();
             if !internal.is_empty() {
                 eprintln!("{} name a private address (*.internal) that only resolves inside roll: `roll apps proxy` reaches one from here", internal.join(", "));
@@ -2388,6 +2795,9 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 .status()
                 .await
                 .with_context(|| format!("couldn't run {}", command[0]))?;
+            for t in tunneled {
+                t.abort();
+            }
             match status.code() {
                 Some(0) => return Ok(()),
                 Some(code) => std::process::exit(code),
@@ -2579,13 +2989,17 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                     let by = d["actor"].as_str().map(|a| format!("  ({})", a.strip_prefix("git:").unwrap_or(a))).unwrap_or_default();
                     // A pruned one is history only (its image is gone): nothing to roll back to.
                     let status = if d["pruned_at"].is_i64() { "pruned".to_string() } else { s(&d["status"]) };
-                    println!("{}  {status:<10} {:<8} {rev:<8} {}{by}", s(&d["id"]), s(&d["trigger"]), s(&d["message"]));
+                    let age = d["created_at"].as_i64().map(|t| ago(chrono::Utc::now().timestamp_millis() - t)).unwrap_or_default();
+                    println!("{}  {status:<10} {:<8} {rev:<8} {age:>8}  {}{by}", s(&d["id"]), s(&d["trigger"]), s(&d["message"]));
+                    if let Some(f) = d["fix"].as_str() {
+                        println!("    fix: {f}");
+                    }
                 }
                 return Ok(());
             }
             v
         }
-        AppsCmd::Jobs { target, logs, follow, cancel, schedule, at, command, tz, unschedule } => {
+        AppsCmd::Jobs { target, logs, follow, cancel, schedule, at, command, path, tz, unschedule } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/jobs", env_path(&svc, &target.env));
             let mut schedules: Vec<Value> = svc["run"]["schedules"].as_array().cloned().unwrap_or_default();
@@ -2597,7 +3011,10 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 if let Some(name) = schedule {
                     schedules.retain(|x| x["name"] != name.as_str());
-                    let mut one = json!({ "name": name, "schedule": at, "command": command });
+                    let mut one = match &path {
+                        Some(p) => json!({ "name": name, "schedule": at, "path": p }),
+                        None => json!({ "name": name, "schedule": at, "command": command }),
+                    };
                     if let Some(z) = tz {
                         one["timezone"] = json!(z);
                     }
@@ -2606,7 +3023,8 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 let v = api.call(reqwest::Method::PATCH, &format!("/v1/apps/services/{}", enc(&s(&svc["id"]))), Some(json!({ "run": { "schedules": schedules } }))).await?;
                 if !json_out {
                     for x in v["run"]["schedules"].as_array().into_iter().flatten() {
-                        println!("{:<16} {:<16} {}", s(&x["name"]), s(&x["schedule"]), s(&x["command"]));
+                        let what = x["path"].as_str().map(|p| format!("GET {p}")).unwrap_or_else(|| s(&x["command"]));
+                        println!("{:<16} {:<16} {what}", s(&x["name"]), s(&x["schedule"]));
                     }
                     return Ok(());
                 }
@@ -2629,9 +3047,13 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             } else {
                 let v = api.get(&base).await?;
                 if !json_out {
+                    let states = if schedules.is_empty() { Value::Null } else { api.get(&env_path(&svc, &target.env)).await.map(|e| e["schedules"].clone()).unwrap_or(Value::Null) };
                     for x in &schedules {
                         let zone = x["timezone"].as_str().map(|z| format!(" ({z})")).unwrap_or_default();
-                        println!("on a schedule: {} at {}{zone}: {}", s(&x["name"]), s(&x["schedule"]), s(&x["command"]));
+                        let st = states.as_array().and_then(|a| a.iter().find(|st| st["name"] == x["name"]));
+                        let next = st.and_then(|st| st["next_run_at"].as_i64()).map(|t| format!(", next in {}", ago(t - chrono::Utc::now().timestamp_millis()).trim_end_matches(" ago"))).unwrap_or_default();
+                        let last = st.and_then(|st| st["last"]["status"].as_str()).map(|l| format!(", last {l}")).unwrap_or_default();
+                        println!("on a schedule: {} at {}{zone}{next}{last}: {}", s(&x["name"]), s(&x["schedule"]), s(&x["command"]));
                     }
                     for j in v.as_array().into_iter().flatten() {
                         let at = j["started_at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
@@ -2790,7 +3212,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             dep
         }
-        AppsCmd::Vars { target, set, unset, seal, reveal, from_file, deploy } => {
+        AppsCmd::Vars { target, set, unset, mut seal, reveal, from_file, deploy, plain, as_file, not_file } => {
+            let mut files = serde_json::Map::new();
+            for f in &as_file {
+                let (n, p) = f.split_once('=').ok_or_else(|| anyhow::anyhow!("--as-file is NAME=/path"))?;
+                files.insert(n.to_string(), json!(p));
+            }
+            for n in &not_file {
+                files.insert(n.clone(), Value::Null);
+            }
             let svc = service(api, &target).await?;
             let base = format!("{}/variables", env_path(&svc, &target.env));
             let mut m = serde_json::Map::new();
@@ -2802,12 +3232,20 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 m.extend(vars.into_iter().map(|(k, v)| (k, Value::String(v))));
             }
-            if !set.is_empty() || !unset.is_empty() || !m.is_empty() || !seal.is_empty() {
+            if !set.is_empty() || !unset.is_empty() || !m.is_empty() || !seal.is_empty() || !files.is_empty() {
                 for kv in set {
                     let (k, v) = kv.split_once('=').ok_or_else(|| anyhow::anyhow!("{kv}: set variables as KEY=value"))?;
                     m.insert(k.to_string(), v.into());
                 }
-                api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset, "seal": seal }))).await?;
+                // New ones whose names read as secrets are sealed unless `--plain` keeps them; one
+                // already there keeps what it was.
+                let there: std::collections::HashSet<String> = api.get(&base).await.ok().and_then(|v| v["vars"].as_array().map(|a| a.iter().filter_map(|x| x["name"].as_str().map(str::to_string)).collect())).unwrap_or_default();
+                let auto: Vec<String> = m.keys().filter(|k| !there.contains(*k) && !plain.contains(*k) && !seal.contains(*k) && looks_secret(k)).cloned().collect();
+                if !auto.is_empty() && !json_out {
+                    eprintln!("sealed as secrets (--plain NAME keeps one revealable): {}", auto.join(", "));
+                }
+                seal.extend(auto);
+                api.call(reqwest::Method::PATCH, &base, Some(json!({ "set": m, "unset": unset, "seal": seal, "files": files }))).await?;
                 if deploy {
                     let dep = api.post(&format!("{}/redeploy", env_path(&svc, &target.env)), json!({})).await?;
                     if !json_out {
@@ -2861,11 +3299,155 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 api.call(reqwest::Method::DELETE, &path, None).await?
             } else {
                 let user = username.ok_or_else(|| anyhow::anyhow!("--username, with the password or token on stdin (or --remove)"))?;
-                let mut password = String::new();
-                std::io::Read::read_to_string(&mut std::io::stdin(), &mut password)?;
-                let password = password.trim_end_matches(['\r', '\n']).to_string();
-                anyhow::ensure!(!password.is_empty(), "the password or token goes on stdin (never argv)");
-                api.call(reqwest::Method::PUT, &path, Some(json!({ "username": user, "password": password }))).await?
+                api.call(reqwest::Method::PUT, &path, Some(json!({ "username": user, "password": secret_from_stdin("the password or token")? }))).await?
+            }
+        }
+        AppsCmd::Analytics { target, minutes } => {
+            let svc = service(api, &target).await?;
+            let a = api.get(&format!("{}/analytics?minutes={minutes}", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                println!("{} visitors, {} page views over {} minutes{}", a["visitors"], a["page_views"], a["minutes"], if a["cut"] == true { " (the newest requests read)" } else { "" });
+                for (title, list, key) in [("pages", &a["pages"], "path"), ("referrers", &a["referrers"], "host"), ("countries", &a["countries"], "country")] {
+                    let rows = list.as_array().cloned().unwrap_or_default();
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    println!("\n{title}");
+                    for r in rows.iter().take(10) {
+                        println!("  {:>7}  {}", r["views"], s(&r[key]));
+                    }
+                }
+                return Ok(());
+            }
+            a
+        }
+        AppsCmd::Errors { target, minutes, sample } => {
+            let svc = service(api, &target).await?;
+            let v = api.get(&format!("{}/errors?minutes={minutes}", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                let groups = v["groups"].as_array().cloned().unwrap_or_default();
+                if groups.is_empty() {
+                    println!("no errors in the last {minutes} minutes ({} lines read)", v["scanned"]);
+                }
+                for g in &groups {
+                    let last = g["last_seen"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
+                    println!("{:>6}×  {}  [{}] {}", g["count"], last, s(&g["kind"]), s(&g["title"]));
+                    if sample {
+                        for l in s(&g["sample"]).lines() {
+                            println!("          {l}");
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            v
+        }
+        AppsCmd::AppMetrics { target, minutes } => {
+            let svc = service(api, &target).await?;
+            let v = api.get(&format!("{}/app-metrics?minutes={minutes}", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                let series = v["series"].as_array().cloned().unwrap_or_default();
+                if series.is_empty() {
+                    println!("no metrics from the app in the last {minutes} minutes (traces on, and an OpenTelemetry SDK with a metrics reader)");
+                }
+                for sr in &series {
+                    let attrs: Vec<String> = sr["attrs"].as_array().into_iter().flatten().map(|a| format!("{}={}", s(&a["key"]), s(&a["value"]))).collect();
+                    let last = sr["points"].as_array().and_then(|p| p.last()).and_then(|p| p[1].as_f64());
+                    let unit = Some(s(&sr["unit"])).filter(|u| !u.is_empty() && u != "1").map(|u| format!(" {u}")).unwrap_or_default();
+                    let per = if sr["shows"] == "per_second" { "/s" } else { "" };
+                    let shown = last.map(|v| format!("{v:.3}{unit}{per}")).unwrap_or_else(|| "–".into());
+                    println!("  {:<40} {:<24} {}", s(&sr["name"]), attrs.join(" "), shown);
+                }
+                return Ok(());
+            }
+            v
+        }
+        AppsCmd::Rollout { target, action } => {
+            let svc = service(api, &target).await?;
+            let path = env_path(&svc, &target.env);
+            let env = api.get(&path).await?;
+            let Some(dep) = env["canary"]["deployment"].as_str().filter(|_| env["canary"]["waiting"] == true) else {
+                anyhow::bail!("{} has no rollout waiting for anyone", target.env);
+            };
+            api.call(reqwest::Method::POST, &format!("{path}/deploys/{}/rollout", enc(dep)), Some(json!({ "action": action }))).await?
+        }
+        AppsCmd::Vitals { target, minutes } => {
+            let svc = service(api, &target).await?;
+            let v = api.get(&format!("{}/vitals?minutes={minutes}", env_path(&svc, &target.env))).await?;
+            if !json_out {
+                let show = |m: &Value, name: &str| match m.get(name).filter(|x| !x.is_null()) {
+                    Some(x) if name == "cls" => format!("{:.3} ({})", x["p75"].as_f64().unwrap_or(0.0), s(&x["rating"])),
+                    Some(x) => format!("{} ms ({})", x["p75"].as_f64().unwrap_or(0.0).round(), s(&x["rating"])),
+                    None => "–".into(),
+                };
+                println!("p75 of {} page loads over {} minutes{}", v["samples"], v["minutes"], if v["cut"] == true { " (the newest read)" } else { "" });
+                for (name, label) in [("lcp", "largest paint"), ("inp", "interaction"), ("cls", "layout shift"), ("fcp", "first paint"), ("ttfb", "first byte")] {
+                    println!("  {label:<14} {}", show(&v["metrics"], name));
+                }
+                let routes = v["routes"].as_array().cloned().unwrap_or_default();
+                if !routes.is_empty() {
+                    println!("\nroutes (LCP, INP, CLS)");
+                    for r in routes.iter().take(10) {
+                        println!("  {:>6}  {:<40} {}  {}  {}", r["samples"], s(&r["route"]), show(&r["metrics"], "lcp"), show(&r["metrics"], "inp"), show(&r["metrics"], "cls"));
+                    }
+                }
+                return Ok(());
+            }
+            v
+        }
+        AppsCmd::Traces { target, minutes, min_ms, trace } => {
+            let svc = service(api, &target).await?;
+            let base = env_path(&svc, &target.env);
+            let v = match &trace {
+                Some(t) => api.get(&format!("{base}/traces/{}", enc(t))).await?,
+                None => api.get(&format!("{base}/traces?minutes={minutes}&min_ms={}", min_ms.unwrap_or(0))).await?,
+            };
+            if !json_out {
+                if trace.is_some() {
+                    let spans = v["spans"].as_array().cloned().unwrap_or_default();
+                    let start = spans.iter().filter_map(|s| s["start"].as_u64()).min().unwrap_or(0);
+                    for sp in &spans {
+                        let (a, b) = (sp["start"].as_u64().unwrap_or(0), sp["end"].as_u64().unwrap_or(0));
+                        println!("{:>8.1} ms  +{:>8.1} ms  {}{}", (b.saturating_sub(a)) as f64 / 1e6, (a.saturating_sub(start)) as f64 / 1e6, s(&sp["name"]), if sp["error"] == true { "  (error)" } else { "" });
+                    }
+                } else {
+                    for t in v["traces"].as_array().into_iter().flatten() {
+                        println!("{:>8} ms  {:>3} spans  {}  {}{}", t["ms"], t["spans"], s(&t["trace"]), s(&t["name"]), if t["error"] == true { "  (error)" } else { "" });
+                    }
+                }
+                return Ok(());
+            }
+            v
+        }
+        AppsCmd::Purge { target, paths, tags } => {
+            let svc = service(api, &target).await?;
+            let mut body = serde_json::json!({});
+            if !paths.is_empty() {
+                body["paths"] = serde_json::json!(paths);
+            }
+            if !tags.is_empty() {
+                body["tags"] = serde_json::json!(tags);
+            }
+            api.post(&format!("{}/cache/purge", env_path(&svc, &target.env)), body).await?
+        }
+        AppsCmd::Github { target, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/services/{}/github", enc(&s(&svc["id"])));
+            let method = if remove { reqwest::Method::DELETE } else { reqwest::Method::PUT };
+            api.call(method, &path, None).await?
+        }
+        AppsCmd::GitLogin { target, username, secret, remove } => {
+            let svc = service(api, &target).await?;
+            let path = format!("/v1/apps/services/{}/git-login", enc(&s(&svc["id"])));
+            if remove {
+                api.call(reqwest::Method::DELETE, &path, None).await?
+            } else {
+                let user = username.ok_or_else(|| anyhow::anyhow!("--username, with the token on stdin or --secret (or --remove)"))?;
+                let body = match secret {
+                    Some(name) => json!({ "username": user, "secret": name }),
+                    None => json!({ "username": user, "password": secret_from_stdin("the token")? }),
+                };
+                api.call(reqwest::Method::PUT, &path, Some(body)).await?
             }
         }
         AppsCmd::Sleep { target } => {
@@ -3263,7 +3845,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, private, open, maintenance, serve, pause, resume, resume_deploys, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, error_page, maintenance_page, roll_pages } => {
+        AppsCmd::Env { target, all_services, branch, no_branch, variables_from, wait_for_ci, run, follow_tag, redeploy_on_secrets, vitals, egress, egress_host, private, open, signed_in, maintenance, serve, pause, resume, resume_deploys, hold, allow_ip, allow_any, rate_limit, no_rate_limit, firewall, no_firewall, header, no_headers, route, no_routes, error_page, maintenance_page, roll_pages } => {
             let svc = service(api, &target).await?;
             // Only what was asked changes: no `--branch` keeps the one it has.
             let mut body = serde_json::Map::new();
@@ -3281,14 +3863,25 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             if let Some(r) = redeploy_on_secrets {
                 body.insert("redeploy_on_secrets".into(), json!(r));
             }
+            if let Some(v) = vitals {
+                body.insert("vitals".into(), json!(v));
+            }
             if let Some(f) = follow_tag {
                 body.insert("follow_tag".into(), json!(f));
+            }
+            if signed_in {
+                body.insert("access".into(), json!({ "signed_in": true }));
+            }
+            if let Some(mode) = egress {
+                body.insert("egress".into(), json!({ "mode": mode, "hosts": egress_host }));
             }
             if pause || resume {
                 body.insert("paused".into(), json!(pause));
             }
             if resume_deploys {
                 body.insert("held".into(), json!(false));
+            } else if hold {
+                body.insert("held".into(), json!(true));
             }
             if let Some(note) = maintenance {
                 body.insert("maintenance".into(), json!({ "message": Some(note).filter(|n| !n.is_empty()) }));
@@ -3320,6 +3913,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 body.insert("headers".into(), header_rules(&header)?);
             } else if no_headers {
                 body.insert("headers".into(), Value::Null);
+            }
+            if !route.is_empty() {
+                let rs = route
+                    .iter()
+                    .map(|r| r.split_once('=').map(|(p, s)| json!({ "path": p.trim(), "service": s.trim() })).ok_or_else(|| anyhow::anyhow!("--route is PATH=SERVICE, like /api/*=api")))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                body.insert("routes".into(), Value::Array(rs));
+            } else if no_routes {
+                body.insert("routes".into(), Value::Null);
             }
             let mut pages = serde_json::Map::new();
             for (k, f) in [("error", &error_page), ("maintenance", &maintenance_page)] {
@@ -3418,8 +4020,17 @@ pub(crate) fn new_token() -> String {
 /// A firewall rule as typed: `<allow|deny> [/path] [method=A,B] [ua=the rest of the line]`.
 fn firewall_rule(line: &str) -> anyhow::Result<Value> {
     let mut words = line.split_whitespace();
-    let action = words.next().filter(|a| *a == "allow" || *a == "deny").ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow or deny: {line:?}"))?;
+    let action = words.next().filter(|a| ["allow", "deny", "limit"].contains(a)).ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow, deny or limit: {line:?}"))?;
     let mut rule = json!({ "action": action });
+    // `limit N[:BURST] …`: N a minute a client through the rule.
+    if action == "limit" {
+        let rate = words.next().ok_or_else(|| anyhow::anyhow!("limit takes a rate, `limit 10[:20] /login`: {line:?}"))?;
+        let (n, b) = rate.split_once(':').map_or((rate, None), |(n, b)| (n, Some(b)));
+        rule["per_minute"] = json!(n.parse::<u32>().map_err(|_| anyhow::anyhow!("{rate:?} in {line:?}: requests a minute, `10` or `10:20`"))?);
+        if let Some(b) = b {
+            rule["burst"] = json!(b.parse::<u32>().map_err(|_| anyhow::anyhow!("{rate:?} in {line:?}: a burst is a number"))?);
+        }
+    }
     let rest: Vec<&str> = words.collect();
     for (i, w) in rest.iter().enumerate() {
         if let Some(ua) = w.strip_prefix("ua=") {
@@ -3478,8 +4089,51 @@ fn header_rules(lines: &[String]) -> anyhow::Result<Value> {
     ))
 }
 
+/// A secret read from stdin, never argv: one line, its line ending trimmed.
+fn secret_from_stdin(what: &str) -> anyhow::Result<String> {
+    let mut v = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut v)?;
+    let v = v.trim_end_matches(['\r', '\n']).to_string();
+    anyhow::ensure!(!v.is_empty(), "{what} goes on stdin (never argv)");
+    Ok(v)
+}
+
+/// `v` with every URL whose host is exactly `host` (after `//` or `@`, before a port, a path,
+/// a query or the end) pointed at `local` instead, its port too; None when there's none.
+fn internal_rewritten(v: &str, host: &str, local: &str) -> Option<String> {
+    let (mut out, mut rest, mut hit) = (String::new(), v, false);
+    while let Some(i) = rest.find(host) {
+        let (before, after) = (&rest[..i], &rest[i + host.len()..]);
+        let starts = before.ends_with("//") || before.ends_with('@');
+        let ends = after.is_empty() || after.starts_with([':', '/', '?', '#']);
+        if !(starts && ends) {
+            out.push_str(&rest[..i + host.len()]);
+            rest = after;
+            continue;
+        }
+        hit = true;
+        out.push_str(before);
+        out.push_str(local);
+        // The port it named goes too: the tunnel reaches whichever port the service listens on.
+        rest = match after.strip_prefix(':') {
+            Some(p) => &p[p.find(|c: char| !c.is_ascii_digit()).unwrap_or(p.len())..],
+            None => after,
+        };
+    }
+    out.push_str(rest);
+    hit.then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_linked_hosts_urls_are_pointed_at_its_tunnel() {
+        let r = |v: &str| super::internal_rewritten(v, "api.production.internal", "127.0.0.1:4000");
+        assert_eq!(r("http://api.production.internal:3000/v1").as_deref(), Some("http://127.0.0.1:4000/v1"));
+        assert_eq!(r("http://u:p@api.production.internal").as_deref(), Some("http://u:p@127.0.0.1:4000"));
+        assert_eq!(r("http://admin-api.production.internal:8080"), None);
+        assert_eq!(r("http://api.production.internal.evil:80"), None);
+    }
     use super::*;
 
     #[test]
@@ -3586,3 +4240,4 @@ mod tests {
         out
     }
 }
+
