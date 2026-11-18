@@ -224,12 +224,17 @@ export type Identity = {
 /** `jwks`: the issuer's keys (a JWKS document as text); then the issuer is never fetched. */
 export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string };
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
-export type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null };
+/** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
+export type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval };
+/** `by`: who approved it, in order (more than one when a policy asks for two people). */
+export type Approval = { id: string; by?: string[]; until?: number };
 /** `since`: rows at or after this time (ms); `before`: rows older than this id. */
 export type AuditFilter = { env?: string; key?: string; actor?: string; action?: string; before?: number; since?: number; limit?: number };
 export type AuditFormat = "csv" | "jsonl";
 /** An audit stream to a SIEM: signed batches of new rows, in order. */
-export type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
+/** `format`: how a batch goes (`roll` signed JSON; `splunk`, `datadog` and `bearer` carry a token that is never shown). */
+export type SinkFormat = "roll" | "splunk" | "datadog" | "bearer";
+export type Sink = { id: string; url: string; format: SinkFormat; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 export type Imported = Applied & { skipped: string[] };
 /** A local copy against a folder (`POST …/environments/{env}/diff`): names only. */
 export type FileDiff = { added: string[]; changed: string[]; same: string[]; missing: string[]; references: string[]; linked: string[] };
@@ -301,6 +306,8 @@ export type CloudAccount =
 export type NewCloudAccount = { name: string } & ({ cloud: "gcp"; audience: string; service_account: string } | { cloud: "azure"; tenant: string; client_id: string; scope?: string });
 /** A Postgres, MySQL, Redis or MongoDB server outside roll: two login roles that take turns (managed), a group dynamic logins join, or both; the admin URL stays sealed. */
 export type OutsideDatabase = { id: string; name: string; host: string; roles: string[]; group?: string; ca?: string; created_at: number; created_by: string };
+/** A GitHub App's installation; `repositories` and `permissions` are the most its tokens may reach. */
+export type GitHubApp = { id: string; name: string; app_id: number; installation_id: number; api_base: string; repositories: string[]; permissions: Record<string, string>; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
 export type WhoAmI = { principal: string; project?: string | null; scopes?: unknown };
 

@@ -70,6 +70,33 @@ pub enum Token {
     },
     /// Take back what an approval allowed a token for a while (`roll token show` lists them).
     TakeBack { id: String, approval: String },
+    /// Ask a person, with the token you're using (ROLL_TOKEN), for one more rule for a while,
+    /// saying why; `--wait` waits for the decision.
+    ///
+    /// Example:
+    ///   roll token request --product postgres --allow delete --resource prj_ab… --for 1h \
+    ///     --reason "drop the scratch database" --wait
+    Request {
+        #[arg(long)]
+        product: String,
+        /// One action: read, write, delete, reveal, deploy or admin.
+        #[arg(long)]
+        allow: String,
+        /// One resource (every resource of the product when left out).
+        #[arg(long)]
+        resource: Option<String>,
+        #[arg(long)]
+        environment: Option<String>,
+        /// 15m, 1h, 8h or 1d.
+        #[arg(long = "for", default_value = "1h")]
+        for_: String,
+        /// Why: the person deciding reads it.
+        #[arg(long)]
+        reason: String,
+        /// Wait (up to 10 minutes) until a person decides.
+        #[arg(long)]
+        wait: bool,
+    },
     /// Which tokens need attention and why (admin over everything, never expiring, unused,
     /// narrower than their rules, roaming), each with its fix.
     Checkup,
@@ -84,7 +111,8 @@ pub enum Token {
     #[command(subcommand)]
     Client(MachineCmd),
     /// roll's rules for every token: `--max-days 90`, `--require-expiry`, `--no-limit`,
-    /// `--max-idle-days 60` (`0` for no idle limit); nothing to show them.
+    /// `--max-idle-days 60` (`0` for no idle limit), `--approval-rule secrets:reveal@production=2`
+    /// (what needs several approvers); nothing to show them.
     Policy {
         #[arg(long)]
         max_days: Option<u32>,
@@ -95,7 +123,54 @@ pub enum Token {
         /// Tokens unused this many days stop working (0: no limit).
         #[arg(long)]
         max_idle_days: Option<u32>,
+        /// Add a rule asking several people to approve: `product[:action][@env,…]=N[/approver,…]`,
+        /// e.g. `secrets:reveal@production=2` or `postgres:delete=2/usr_a,usr_b`. Repeatable.
+        #[arg(long = "approval-rule", value_parser = approval_rule)]
+        approval_rules: Vec<Value>,
+        /// Remove every approval rule (one person decides each request again).
+        #[arg(long, conflicts_with = "approval_rules")]
+        no_approval_rules: bool,
     },
+}
+
+/// `--approver` values: chat ids, and the roll accounts of those given as `U…=usr_…`.
+fn chat_approvers(given: &[String]) -> (Vec<String>, std::collections::BTreeMap<String, String>) {
+    let mut ids = Vec::new();
+    let mut people = std::collections::BTreeMap::new();
+    for a in given {
+        let (id, user) = a.split_once('=').map_or((a.as_str(), None), |(i, u)| (i, Some(u)));
+        let id = id.trim().trim_start_matches('@').to_string();
+        if let Some(u) = user {
+            people.insert(id.clone(), u.trim().to_string());
+        }
+        ids.push(id);
+    }
+    (ids, people)
+}
+
+/// `product[:action][@env,…]=N[/approver,…]` as a policy approval rule.
+fn approval_rule(s: &str) -> Result<Value, String> {
+    let bad = || format!("{s:?}: product[:action][@env,…]=N[/approver,…], e.g. secrets:reveal@production=2");
+    let (what, rest) = s.split_once('=').ok_or_else(bad)?;
+    let (n, approvers) = rest.split_once('/').map_or((rest, None), |(n, a)| (n, Some(a)));
+    let approvals: u8 = n.trim().parse().map_err(|_| bad())?;
+    let (what, envs) = what.split_once('@').map_or((what, None), |(w, e)| (w, Some(e)));
+    let (product, action) = what.split_once(':').map_or((what, None), |(p, a)| (p, Some(a)));
+    if product.trim().is_empty() {
+        return Err(bad());
+    }
+    let list = |l: &str| l.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect::<Vec<_>>();
+    let mut rule = json!({ "product": product.trim(), "approvals": approvals });
+    if let Some(a) = action {
+        rule["actions"] = json!(list(a));
+    }
+    if let Some(e) = envs {
+        rule["environments"] = json!(list(e));
+    }
+    if let Some(a) = approvers {
+        rule["approvers"] = json!(list(a));
+    }
+    Ok(rule)
 }
 
 #[derive(Args)]
@@ -548,6 +623,8 @@ pub enum Mcp {
         #[arg(long, requires = "install")]
         channel: Option<String>,
         /// A chat user id (Slack `U…`, a Discord user id) who may decide there; repeat it for more.
+        /// `U…=usr_…` links them to their roll account: they decide as that person (they count
+        /// toward the policy's approval rules, never for their own token's request).
         #[arg(long, requires = "install")]
         approver: Vec<String>,
         #[arg(long, conflicts_with_all = ["install", "channel"])]
@@ -826,6 +903,27 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
                 println!("revoked {} ({})", s(&g["id"]), s(&g["name"]));
             }
         }
+        Token::Request { product, allow, resource, environment, for_, reason, wait } => {
+            let mut asked = api.post("/v1/access/requests", json!({ "product": product, "action": allow, "resource": resource, "environment": environment, "for": for_, "reason": reason })).await?;
+            let id = s(&asked["id"]).to_string();
+            if wait {
+                eprintln!("waiting for a person to decide {id} (on roll's approvals page, in chat, or `roll mcp approve {id}`)…");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+                while asked["state"] == "pending" && std::time::Instant::now() < deadline {
+                    asked = api.get(&format!("/v1/access/approvals/{}?wait=55", urlencoding::encode(&id))).await?;
+                }
+            }
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&asked)?);
+            } else {
+                match asked["state"].as_str() {
+                    Some("approved") => println!("{id} approved: this token may {allow} on {product} for {for_}"),
+                    Some("denied") => anyhow::bail!("{id} denied{}", asked["reason"].as_str().map(|r| format!(": {r}")).unwrap_or_default()),
+                    Some("pending") => println!("{id} waits for a person: {}", s(&asked["summary"])),
+                    other => anyhow::bail!("{id} is {}", other.unwrap_or("unknown")),
+                }
+            }
+        }
         Token::Tools { id } => {
             let seen = api.get(&format!("/v1/access/tokens/{}/tools", urlencoding::encode(&id))).await?;
             if json_out {
@@ -972,12 +1070,21 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
                 println!("note: {u} is set too, and isn't used: {source} wins.");
             }
         }
-        Token::Policy { max_days, require_expiry, no_limit, max_idle_days } => {
+        Token::Policy { max_days, require_expiry, no_limit, max_idle_days, approval_rules, no_approval_rules } => {
             let mut p = api.get("/v1/access/policy").await?;
             if let Some(d) = max_idle_days {
                 p["max_idle_days"] = if d == 0 { Value::Null } else { json!(d) };
             }
-            if max_days.is_some() || require_expiry.is_some() || no_limit || max_idle_days.is_some() {
+            let rules_changed = no_approval_rules || !approval_rules.is_empty();
+            if no_approval_rules {
+                p["approval_rules"] = json!([]);
+            }
+            if !approval_rules.is_empty() {
+                let mut all = p["approval_rules"].as_array().cloned().unwrap_or_default();
+                all.extend(approval_rules);
+                p["approval_rules"] = json!(all);
+            }
+            if max_days.is_some() || require_expiry.is_some() || no_limit || max_idle_days.is_some() || rules_changed {
                 if let Some(d) = max_days {
                     p["max_days"] = json!(d);
                 }
@@ -996,6 +1103,17 @@ pub async fn token(api: &Api, json_out: bool, cmd: Token, credential: &Credentia
                 let must = if p["require_expiry"].as_bool() == Some(true) { ", and must expire" } else { "" };
                 let idle = p["max_idle_days"].as_u64().map(|d| format!("; unused for {d} days, they stop")).unwrap_or_default();
                 println!("tokens live {days}{must}{idle}");
+                for r in p["approval_rules"].as_array().into_iter().flatten() {
+                    let names = |k: &str, none: &str| r[k].as_array().map_or_else(|| none.to_string(), |l| l.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "));
+                    println!(
+                        "{} {} in {}: {} approvals from {}",
+                        r["product"].as_str().unwrap_or("?"),
+                        names("actions", "anything"),
+                        names("environments", "every environment"),
+                        r["approvals"],
+                        names("approvers", "anyone who decides (never the token's own person)")
+                    );
+                }
             }
         }
         Token::Client(cmd) => machine(api, json_out, cmd).await?,
@@ -1160,7 +1278,11 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
         Mcp::Notify { install, channel, approver, off } => {
             let v = match (install, channel, off) {
                 (Some(i), Some(c), _) => {
-                    let chat = json!({ "install": i, "channel": c.trim_start_matches('#'), "approvers": approver });
+                    let (ids, people) = chat_approvers(&approver);
+                    let mut chat = json!({ "install": i, "channel": c.trim_start_matches('#'), "approvers": ids });
+                    if !people.is_empty() {
+                        chat["people"] = json!(people);
+                    }
                     api.call(reqwest::Method::PUT, "/v1/access/notify", Some(json!({ "chat": chat }))).await?
                 }
                 (_, _, true) => api.call(reqwest::Method::PUT, "/v1/access/notify", Some(json!({ "chat": null }))).await?,
@@ -1171,7 +1293,8 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
             } else if v["chat"].is_null() {
                 println!("approvals go only to the dashboard and `roll mcp approvals`");
             } else {
-                let who: Vec<&str> = v["chat"]["approvers"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+                let people = &v["chat"]["people"];
+                let who: Vec<String> = v["chat"]["approvers"].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).map(|u| people[u].as_str().map_or(u.to_string(), |p| format!("{u} ({p})"))).collect()).unwrap_or_default();
                 println!("approvals are also posted to {} in {}; decided there by {}", s(&v["chat"]["channel"]), s(&v["chat"]["install"]), who.join(", "));
             }
         }
@@ -1206,6 +1329,19 @@ pub async fn mcp(api: &Api, json_out: bool, cmd: Mcp) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_approvers_can_name_their_account() {
+        let (ids, people) = chat_approvers(&["U1=usr_ana".into(), "@U2".into()]);
+        assert_eq!((ids, people.get("U1").map(String::as_str), people.len()), (vec!["U1".to_string(), "U2".to_string()], Some("usr_ana"), 1));
+    }
+
+    #[test]
+    fn approval_rules_read_as_the_policy_takes_them() {
+        assert_eq!(approval_rule("secrets:reveal@production=2").unwrap(), json!({ "product": "secrets", "actions": ["reveal"], "environments": ["production"], "approvals": 2 }));
+        assert_eq!(approval_rule("postgres=1/usr_a, usr_b").unwrap(), json!({ "product": "postgres", "approvals": 1, "approvers": ["usr_a", "usr_b"] }));
+        assert!(approval_rule("secrets:reveal").is_err() && approval_rule("=2").is_err() && approval_rule("apps=two").is_err());
+    }
 
     #[test]
     fn expiry_and_dates() {

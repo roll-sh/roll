@@ -54,7 +54,7 @@ impl roll_previews::ports::Secrets for Secrets {
         }
     }
 
-    async fn resolve(&self, project: &str, env: &str, untrusted: bool, consumer: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
+    async fn resolve(&self, project: &str, env: &str, untrusted: bool, dynamic: bool, consumer: &str) -> anyhow::Result<roll_previews::ports::Resolved> {
         let path = format!("/v1/secrets/projects/{}/environments/{}/resolve", seg(project), seg(env));
         // Dynamic credentials only for code the project trusts with production's secrets: each is
         // a lease the engine renews while the service runs and revokes when it stops. An untrusted
@@ -63,9 +63,10 @@ impl roll_previews::ports::Secrets for Secrets {
         // cloud session would outlive what the code was approved for. Those keys come back named
         // in `dynamic`. A roll secrets from before the field (#20 without #62) refuses it (unknown
         // fields are a 400): asked again without it, and what it issues anyway is dropped below.
+        // A read that starts nothing (masking logs, `dynamic`: false) asks for none either.
         let body = |with_field: bool| {
             let mut b = json!({ "path": "/", "consumer": consumer, "untrusted": untrusted });
-            if with_field && untrusted {
+            if with_field && (untrusted || !dynamic) {
                 b["dynamic"] = json!(false);
             }
             b
@@ -113,6 +114,7 @@ impl roll_previews::ports::Secrets for Secrets {
                     Some((f["name"].as_str()?.to_string(), kind, f["parent"].as_str()?.to_string(), f["field"].as_str()?.to_string()))
                 })
                 .collect(),
+            plain: v["plain"].as_array().into_iter().flatten().filter_map(|k| k.as_str()).map(str::to_string).collect(),
         })
     }
 
