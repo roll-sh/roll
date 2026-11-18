@@ -56,6 +56,7 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/me/recovery-codes", post(recovery_codes))
         .route("/v1/accounts/me/passkeys", get(my_passkeys).post(add_passkey))
         .route("/v1/accounts/me/reauth", get(reauth_info).post(reauth))
+        .route("/v1/accounts/me/export", post(export_me))
         .route("/v1/accounts/me/reauth/email", post(reauth_email))
         .route("/v1/accounts/me/reauth/passkey/options", post(reauth_passkey_options))
         .route("/v1/accounts/me/passkeys/options", post(passkey_options))
@@ -634,6 +635,22 @@ async fn approve_reset(State(a): S, me: Me, op: Op, ip: Ip, headers: HeaderMap, 
 
 async fn deny_reset(State(a): S, me: Me, op: Op, ip: Ip, headers: HeaderMap, Path(id): Path<String>) -> Result<Response> {
     decide(a, me, op, ip, headers, id, false).await
+}
+
+/// Your data (docs/accounts.md, "Your data"): one JSON file, a download, behind sudo mode.
+async fn export_me(State(a): S, me: Me, ip: Ip, headers: HeaderMap) -> Result<Response> {
+    let u = signed_in(me)?;
+    sudo(&a, &u).await?;
+    let who = Who::of(ip, &headers);
+    let (user, session) = (u.user.clone(), u.session.clone());
+    let data = blocking(&a, move |a| a.export(&user, &session)).await?;
+    a.record(crate::audit::AccountEvent { actor: u.user.clone(), action: "account.export".into(), method: "-".into(), target: Some(u.user.clone()), ok: true, status: 200, ip: who.ip, user_agent: who.user_agent, detail: json!({}) });
+    let name = format!("roll-account-{}.json", u.handle.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect::<String>());
+    let mut resp = Json(data).into_response();
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
+        resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+    }
+    Ok(resp)
 }
 
 // ── sudo mode (docs/accounts.md, "Sudo mode") ──

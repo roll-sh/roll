@@ -38,6 +38,12 @@ pub trait Audit: Send + Sync {
     /// The events about `user` (their sign-ins and changes to their account), newest first,
     /// before `before` (Unix ms), at most `limit`: a person's own security log.
     fn activity(&self, user: &str, before: Option<i64>, limit: usize) -> Vec<Activity>;
+    /// `user`'s own roll tokens and connections, for their data export: names, rules and dates,
+    /// never a secret or its hint. None by default.
+    fn tokens(&self, user: &str) -> Vec<Value> {
+        let _ = user;
+        Vec::new()
+    }
 }
 
 /// One line of a person's security log.
@@ -121,7 +127,7 @@ impl Accounts {
         *self.audit.write().unwrap_or_else(|e| e.into_inner()) = Some(audit);
     }
 
-    fn audit_hook(&self) -> Option<Arc<dyn Audit>> {
+    pub(crate) fn audit_hook(&self) -> Option<Arc<dyn Audit>> {
         self.audit.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
@@ -210,6 +216,7 @@ fn recorded_elsewhere(route: &str) -> bool {
                 | "/v1/accounts/signin/passkey" | "/v1/accounts/signin/passkey/options" | "/v1/accounts/me/passkeys/options"
                 | "/v1/accounts/me/reauth" | "/v1/accounts/me/reauth/email" | "/v1/accounts/me/reauth/passkey/options"
                 | "/v1/accounts/signin/reset-request" | "/v1/accounts/reset-requests/{id}/approve" | "/v1/accounts/reset-requests/{id}/deny"
+                | "/v1/accounts/me/export"
         )
 }
 

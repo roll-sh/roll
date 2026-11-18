@@ -44,6 +44,7 @@ export function AccountPage() {
           <Passkeys />
           <Sessions />
           <RecentActivity me={user.id} />
+          <YourData handle={user.handle} />
           {user.admin && <Invites />}
           {user.admin && <Resets me={user.id} />}
           {user.admin && <Users me={user.id} />}
@@ -416,6 +417,37 @@ const browser = (ua: string) => {
   const os = /Mac OS X/.test(ua) ? "macOS" : /Windows/.test(ua) ? "Windows" : /Android/.test(ua) ? "Android" : /iPhone|iPad/.test(ua) ? "iOS" : /Linux/.test(ua) ? "Linux" : "";
   return os ? `${name} on ${os}` : name;
 };
+
+/** Your data (docs/accounts.md, "Your data"): everything roll keeps about you, as a file. */
+function YourData({ handle }: { handle: string }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await accountsApi.exportData();
+      const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+      const a = Object.assign(document.createElement("a"), { href: url, download: `roll-account-${handle}.json` });
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Section title="Your data" lead="Everything roll keeps about your account, as one JSON file: your sign-in methods, sessions, passkeys, security log and tokens. Never a secret.">
+      <div className={`${card} flex flex-wrap items-center gap-3 p-4`}>
+        <button disabled={busy} onClick={save} className={btn}>
+          Export your data
+        </button>
+        {error && <span className="text-[12px] text-danger">{error}</span>}
+      </div>
+    </Section>
+  );
+}
 
 /** Your security log (GitHub's): sign-ins, refused ones too, and changes to your account. */
 function RecentActivity({ me }: { me: string }) {

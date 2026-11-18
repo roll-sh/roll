@@ -14,6 +14,7 @@ pub mod audit;
 mod mail;
 mod oauth;
 pub mod passkeys;
+mod export;
 mod places;
 pub mod recovery;
 mod sudo;
