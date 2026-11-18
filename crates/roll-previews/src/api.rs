@@ -48,6 +48,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/logs", get(logs))
                 .route("/v1/previews/{id}/requests", get(requests))
                 .route("/v1/previews/{id}/metrics", get(metrics))
+                .route("/v1/previews/{id}/errors", get(errors))
+                .route("/v1/previews/{id}/errors/count", get(error_count))
                 .route_layer(axum::middleware::from_fn_with_state(engine.clone(), on_leader))
                 .with_state(engine.clone()),
         )
@@ -561,6 +563,27 @@ struct LogsQuery {
 async fn metrics(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
     Ok(Json(json!({ "services": e.metrics(&id).await? })))
+}
+
+#[derive(Deserialize)]
+struct ErrorsQuery {
+    minutes: Option<i64>,
+}
+
+/// Its services' errors in the last 5–1,440 minutes (60 by default, rounded up to 15-minute
+/// steps), grouped, newest first (`{minutes, groups: [...]}`; 404 for no such preview).
+async fn errors(AxState(e): S, Path(id): Path<String>, Query(q): Query<ErrorsQuery>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    let minutes = crate::engine::error_span(q.minutes.unwrap_or(60));
+    Ok(Json(json!({ "minutes": minutes, "groups": e.errors(&id, minutes).await? })))
+}
+
+/// How many errors its services wrote in the span (`{minutes, count}`): a list's rows, with
+/// nothing masked to read.
+async fn error_count(AxState(e): S, Path(id): Path<String>, Query(q): Query<ErrorsQuery>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    let minutes = crate::engine::error_span(q.minutes.unwrap_or(60));
+    Ok(Json(json!({ "minutes": minutes, "count": e.error_count(&id, minutes).await? })))
 }
 
 async fn requests(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {

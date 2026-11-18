@@ -559,6 +559,55 @@ pub struct ServiceMetrics {
     pub memory_mb: i64,
 }
 
+/// One error in a preview's service's output, grouped (roll apps' Errors, Sentry's issues): a
+/// stack trace joined from its lines, or an error line, by its fingerprint (its type and first
+/// frames, with what varies taken out). How many, first and last seen (ms), and the newest one
+/// whole. Title and sample are masked as its logs are.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ErrorGroup {
+    #[serde(default)]
+    pub service: String,
+    pub fingerprint: String,
+    pub kind: String,
+    pub title: String,
+    pub count: u64,
+    pub first_seen: i64,
+    pub last_seen: i64,
+    pub sample: String,
+}
+
+/// `text` with every secret value replaced by `***` (`code_preview::runner::mask`), and then, on
+/// each line, a value's start (6 characters or more) left at the line's end replaced too: text
+/// cut before it was masked (roll apps cuts a log line at 16 KiB, an error's title at 300
+/// characters and its sample at 8 KiB) can end inside a value, which masking whole can't find.
+pub fn mask_cut(text: &str, values: &[String]) -> String {
+    let masked = code_preview::runner::mask(text, values);
+    let starts: Vec<&[u8]> = values.iter().flat_map(|v| v.lines()).filter(|l| l.trim().len() >= 6).map(str::as_bytes).collect();
+    if starts.is_empty() {
+        return masked;
+    }
+    masked
+        .split('\n')
+        .map(|line| {
+            let b = line.as_bytes();
+            // The earliest place a value's start runs to the line's end: what's after it goes.
+            let cut = starts
+                .iter()
+                .filter_map(|v| {
+                    let from = b.len().saturating_sub(v.len() - 1);
+                    (from..b.len().saturating_sub(5)).find(|&i| b[i] == v[0] && v.starts_with(&b[i..]))
+                })
+                .min();
+            // A value starts on a character's first byte, so `i` is one of the line's boundaries.
+            match cut {
+                Some(i) => format!("{}***", &line[..i]),
+                None => line.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// `docker stats --no-stream --format '{{.CPUPerc}}|{{.MemUsage}}'` (`1.23%|84.2MiB / 256MiB`):
 /// cores and resident bytes.
 pub fn parse_docker_stats(line: &str) -> Option<(f64, u64)> {
@@ -1113,6 +1162,18 @@ pub fn label_part(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A value a cut splits (its start left at the end of a line, or of the text) never shows;
+    /// whole ones are masked anywhere, and text that only looks a little like one is kept.
+    #[test]
+    fn a_value_cut_in_two_never_shows_its_start() {
+        let values = ["sk_test_51Hx9abc".to_string(), "line-one\nline-two".to_string()];
+        let cut = format!("{}sk_test_5", "x".repeat(20));
+        assert_eq!(mask_cut(&cut, &values), format!("{}***", "x".repeat(20)));
+        assert_eq!(mask_cut("key sk_test_51Hx9abc ok\nthen sk_te\nline-tw", &values), "key *** ok\nthen sk_te\n***");
+        assert_eq!(mask_cut("é sk_test_51H", &values), "é ***", "cut on a character's boundary");
+        assert_eq!(mask_cut("nothing secret", &values), "nothing secret");
+    }
 
     #[test]
     fn docker_stats_read_as_cores_and_bytes() {
