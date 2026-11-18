@@ -3651,6 +3651,11 @@ cache waited out. Ranked now:
    operator-only to set, for now). Next: let whoever may `reveal` the key set the reference, then
    search's snapshot repositories, the reviewer's provider keys and the gateway's upstreams, each
    with its thread.
+4b. **roll's issuer for the other products** (asked by roll apps, 2026-11-18): an in-process
+   `Secrets::issue(subject, aud, ttl)` for apps' per-instance workload tokens (`roll-apps:<project>:<service>:<env>`,
+   Vercel's OIDC federation), scheduled key rotation (publish ahead, retire after the last token
+   expires), and secrets' own workload logins trusting roll's issuer for apps' subjects; one issuer,
+   never a second one.
 5. **A sealed start for the deployment key** (#276's follow-up: holders unseal over the API, on a fleet).
 6. **R10's other decoys** (database roles, IAM users) once #270's tokens are wired to secrets' alerts;
    **R4** (GCP KMS, Azure Key Vault, HSM) and confirming #290, #284, #227, #229 on real accounts: the
