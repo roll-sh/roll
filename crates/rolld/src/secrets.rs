@@ -807,7 +807,8 @@ impl LinkProvider for Nosql {
 struct Queue(Api);
 
 impl Queue {
-    /// The vhost's AMQP URL as roll queues answers it (the admin's user in it, never used here).
+    /// The vhost's AMQP URL as roll queues answers it (the admin's user in it: only its scheme,
+    /// host, port, path and query are used, never edited into a link's value).
     fn amqp_url(&self, vhost: &str) -> roll_secrets::Result<url::Url> {
         let list = self.0.call(Method::GET, "/v1/queues/vhosts", None)?;
         let v = list.as_array().into_iter().flatten().find(|v| v["name"] == vhost).ok_or_else(|| Error::Link(format!("roll queues has no vhost {vhost}")))?;
@@ -828,6 +829,21 @@ impl Queue {
 
     fn permission(link: &Link) -> &str {
         link.options.get("permission").and_then(Json::as_str).unwrap_or("configure")
+    }
+
+    /// `user`'s URL for the vhost `admin` reaches, built from its scheme, host, port, path and
+    /// query: the admin's user and password are never in it, and anything that doesn't come out
+    /// exactly as built is refused rather than handed out.
+    fn user_url(admin: &url::Url, user: &str, password: &str) -> roll_secrets::Result<String> {
+        let bad = || Error::Link("the vhost's AMQP URL can't carry a user of its own".into());
+        let host = admin.host_str().filter(|h| !h.is_empty()).ok_or_else(bad)?;
+        let port = admin.port().map(|p| format!(":{p}")).unwrap_or_default();
+        let query = admin.query().map(|q| format!("?{q}")).unwrap_or_default();
+        let u = url::Url::parse(&format!("{}://{user}:{password}@{host}{port}{}{query}", admin.scheme(), admin.path())).map_err(|_| bad())?;
+        if u.username() != user || u.password() != Some(password) || u.host_str() != Some(host) || u.port() != admin.port() || u.path() != admin.path() {
+            return Err(bad());
+        }
+        Ok(u.to_string())
     }
 
     /// Only a user this provider made (`roll-` and its random part): a lease never names another.
@@ -868,10 +884,12 @@ impl LinkProvider for Queue {
     }
     fn issue(&self, r#ref: &str, _: &str, link: &Link, _: &str, _: Option<u64>) -> roll_secrets::Result<Issued> {
         let (configure, write, read) = Self::patterns(Self::permission(link)).ok_or_else(|| Error::BadRequest("a queue link's permission is read, write or configure".into()))?;
-        let mut url = self.amqp_url(r#ref)?;
+        let admin = self.amqp_url(r#ref)?;
         // Only letters and digits we made: nothing to escape.
         let user = format!("roll-{}", random(12));
         let password = random(32);
+        // Before the user exists: a URL that can't carry it is refused, never handed out.
+        let url = Self::user_url(&admin, &user, &password)?;
         // No tags: the user can't sign in to the management API.
         self.0.call(Method::PUT, &format!("/v1/queues/users/{}", enc(&user)), Some(json!({ "password": password, "tags": [] })))?;
         let granted = self.0.call(Method::PUT, &format!("/v1/queues/permissions/{}/{}", enc(r#ref), enc(&user)), Some(json!({ "configure": configure, "write": write, "read": read })));
@@ -880,10 +898,8 @@ impl LinkProvider for Queue {
             let _ = self.0.delete_gone(&format!("/v1/queues/users/{}", enc(&user)));
             return Err(e);
         }
-        let _ = url.set_username(&user);
-        let _ = url.set_password(Some(&password));
         let parts = BTreeMap::from([
-            ("url".to_string(), Value::new(url.to_string())),
+            ("url".to_string(), Value::new(url)),
             ("username".to_string(), Value::new(user.clone())),
             ("password".to_string(), Value::new(password)),
         ]);
