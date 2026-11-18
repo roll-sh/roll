@@ -190,6 +190,8 @@ pub static OS_INDEX_SETTINGS: &[IndexSetting] = &[
     s!("index.remote_store.translog.repository", D(""), Str, Private),
     s!("index.replication.type", D("DOCUMENT"), Str, Final),
     s!("index.requests.cache.enable", D("true"), Bool, Dynamic),
+    // roll's own: search analytics (`crate::analytics`), with no default to print.
+    s!("index.roll.analytics.enabled", Dflt::None, Bool, Dynamic),
     s!("index.routing.allocation.enable", D("all"), Enum(&["all", "primaries", "new_primaries", "none", "ALL", "PRIMARIES", "NEW_PRIMARIES", "NONE"], EnumErr::OneOf), Dynamic),
     s!("index.routing.allocation.total_primary_shards_per_node", D("-1"), Long(-1, i64::MAX), Dynamic),
     s!("index.routing.allocation.total_remote_capable_primary_shards_per_node", D("-1"), Long(-1, i64::MAX), Dynamic),
