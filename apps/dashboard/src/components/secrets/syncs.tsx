@@ -6,6 +6,8 @@ import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field
 import { Cas } from "./cas";
 import { SshCas } from "./ssh-cas";
 import { CloudAccounts } from "./cloud-accounts";
+import { GitHubApps } from "./github-apps";
+import { KubernetesClusters } from "./kubernetes-clusters";
 import { OutsideDatabases } from "./outside-databases";
 import { AwsRoles } from "./aws-roles";
 import { Rotators } from "./rotators";
@@ -72,11 +74,13 @@ export function SyncsView() {
         )}
       </Section>
       <OutsideDatabases />
+      <GitHubApps />
       <Rotators />
       <TransitKeys />
       <Cas />
       <SshCas />
       <CloudAccounts />
+      <KubernetesClusters />
       <AwsRoles />
     </div>
   );
@@ -84,9 +88,10 @@ export function SyncsView() {
 
 /** The kind picker's groups, in order; `[]`: every kind no group names. */
 const GROUPS: [string, string[]][] = [
-  ["CI", ["github", "gitlab", "circleci", "bitbucket"]],
+  ["CI", ["github", "gitlab", "azure-devops", "circleci", "bitbucket"]],
   ["Hosting", ["vercel", "netlify", "render", "fly", "railway", "heroku", "digitalocean", "cloudflare"]],
-  ["Clouds and clusters", ["aws-ssm", "aws-secrets-manager", "google-secret-manager", "azure-key-vault", "kubernetes", "terraform-cloud"]],
+  ["Pages and backends", ["cloudflare-pages", "supabase"]],
+  ["Clouds and clusters", ["aws-ssm", "aws-secrets-manager", "google-secret-manager", "azure-key-vault", "azure-app-configuration", "vault-kv", "kubernetes", "terraform-cloud"]],
   ["Anything else", []],
 ];
 
@@ -98,6 +103,10 @@ function targetSummary(s: Sync): string {
   if (s.kind === "kubernetes") return `${str("namespace")}/${str("secret")}`;
   if (s.kind === "gitlab") return `${str("project")} · ${str("environment_scope") || "*"}`;
   if (s.kind === "render") return str("service");
+  if (s.kind === "supabase") return str("project_ref");
+  if (s.kind === "cloudflare-pages") return `${str("project")} · ${str("environment")}`;
+  if (s.kind === "azure-app-configuration") return `${str("store")}${str("label") ? ` · ${str("label")}` : ""}${str("prefix") ? ` · ${str("prefix")}…` : ""}`;
+  if (s.kind === "vault-kv") return `${str("mount") || "secret"}/${str("path")}`;
   if (s.kind === "netlify") return `${str("site")} · ${str("context") || "all"}`;
   if (s.kind === "fly") return str("app");
   if (s.kind === "railway") return `${str("project")} · ${str("environment")}${str("service") ? ` · ${str("service")}` : ""}`;
@@ -109,6 +118,7 @@ function targetSummary(s: Sync): string {
   if (s.kind === "aws-secrets-manager") return `${str("region")} · ${str("secret_name")}`;
   if (s.kind === "google-secret-manager") return `${str("project")}${str("prefix") ? ` · ${str("prefix")}…` : ""}`;
   if (s.kind === "azure-key-vault") return str("vault");
+  if (s.kind === "azure-devops") return `${str("organization")}/${str("project")} · ${str("group")}`;
   if (s.kind === "terraform-cloud") return `${str("workspace_id")} · ${str("category") || "env"}`;
   if (str("url")) {
     try {

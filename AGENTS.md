@@ -188,6 +188,9 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     `roll_net::literal_private_host`, because IP literals skip the resolver. That covers webhooks,
     review apps, owners' own provider `base_url` (`ROLL_CODE_PROVIDER_ALLOW_PRIVATE` to allow),
     gateway upstreams and MCP clients' metadata documents. Bound what you read from it.
+  - OIDC tokens from workloads (CI jobs, clusters) are checked by `crates/roll-oidc`, shared by roll
+    secrets' workload identities and roll-access's trusted machine clients. Its `Fetch` is rolld's
+    guarded client; never write a second verifier, and never make the shared-issuer rule optional.
   - Owner-management routes check `Code::manages`/`check_manage`, not `owns`/`check_write`:
     agent tokens (`agent:<name>`) work code but never manage the owner, and review only as their
     own agent.
@@ -338,8 +341,10 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     is its client (change both together). `crates/roll-secrets` is the store, crypto and router
     (`/v1/secrets`); `crates/rolld/src/secrets.rs` mounts it and implements the link providers;
     `roll secrets …` and `roll run` are `crates/roll-cli/src/secrets.rs`. Runtime clients:
-    `packages/secrets` (TypeScript), `sdk/go/secrets` (Go, standard library only) and
-    `sdk/python/roll_secrets` (Python, `cryptography` only for sealed resolves); keep their
+    `packages/secrets` (TypeScript), `sdk/go/secrets` (Go, standard library only),
+    `sdk/python/roll_secrets` (Python, `cryptography` only for sealed resolves),
+    `sdk/java/secrets` (Java 17, the JDK only) and
+    `sdk/dotnet/secrets` (.NET 8, the base class library only; X25519 its own); keep their
     surfaces the same, and the sealed box test vector from the TypeScript one opening in the others.
     The Terraform provider is `sdk/terraform-provider-roll` (`TF_ACC=1 go test ./...` drives it
     against a fake rolld).

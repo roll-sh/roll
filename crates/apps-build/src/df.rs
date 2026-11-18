@@ -9,6 +9,13 @@ pub(crate) struct Df {
     copy_source: &'static str,
     /// Variables install and build steps see ([`crate::Overrides::build_env`]).
     env: Vec<String>,
+    /// Those of them mounted as files ([`crate::Overrides::build_files`]).
+    files: Vec<(String, String)>,
+}
+
+/// A path a mount's `target=` takes as it is (no quoting: its options are comma-separated).
+fn mountable(path: &str) -> bool {
+    path.starts_with('/') && path.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-@+".contains(&b))
 }
 
 impl Df {
@@ -17,6 +24,7 @@ impl Df {
             text: String::from("# syntax=docker/dockerfile:1\n"),
             copy_source: "COPY . .",
             env: c.env.to_vec(),
+            files: c.files.to_vec(),
         }
     }
 
@@ -67,7 +75,11 @@ impl Df {
             .map(|c| format!("--mount=type=cache,target={c} "))
             .collect();
         for k in &self.env {
-            mounts.push_str(&format!("--mount=type=secret,id={k},env={k} "));
+            // A file variable at its path; one whose path a mount can't name, in the environment.
+            match self.files.iter().find(|(n, _)| n == k) {
+                Some((_, path)) if mountable(path) => mounts.push_str(&format!("--mount=type=secret,id={k},target={path} ")),
+                _ => mounts.push_str(&format!("--mount=type=secret,id={k},env={k} ")),
+            }
         }
         if cmd.contains('\n') || cmd.trim_end().ends_with('\\') {
             self.line(&format!("RUN {mounts}[\"/bin/sh\", \"-c\", {}]", json(cmd)));

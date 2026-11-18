@@ -1,7 +1,8 @@
-import { AtSign, Braces, Check, Clock, Copy, CornerDownRight, Eye, EyeOff, Import as ImportIcon, Link2, MessageSquare, User } from "lucide-react";
+import { AtSign, BadgeCheck, Braces, Check, Clock, Copy, CornerDownRight, Eye, EyeOff, Import as ImportIcon, Link2, MessageSquare, Timer, User } from "lucide-react";
+import { useReducedMotion } from "@roll/brand";
 import { useWorkspace } from "@/lib/workspace-store";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import type { Cell, Link, Problem, Secret } from "@/lib/secrets-api";
+import type { AuditEntry, Cell, Link, Problem, Secret, Totp } from "@/lib/secrets-api";
 import { KIND_ICON } from "../workspace/kind";
 import type { ResourceKind } from "@/lib/workspace-api";
 
@@ -216,6 +217,17 @@ export const ActorMark = ({ who }: { who: string }) => (
   </span>
 );
 
+/** The approval that let a request through roll-access's gate (an `ask` approved, or a rule remembered for a while). */
+export function ApprovalMark({ approval }: { approval: NonNullable<AuditEntry["approval"]> }) {
+  const until = approval.until ? `, allowed until ${new Date(approval.until).toLocaleString()}` : ", this request only";
+  return (
+    <span className="inline-flex shrink-0 items-center gap-0.5 text-[10.5px] text-subtle" title={`Approved in ${approval.id}${until}`}>
+      <BadgeCheck className="size-3" />
+      approved{approval.by?.length ? ` by ${approval.by.join(", ")}` : ""}
+    </span>
+  );
+}
+
 /** How long a revealed value stays on screen. */
 export const REVEAL_MS = 20_000;
 
@@ -308,6 +320,89 @@ export function Reveal({ load, className = "" }: { load: () => Promise<{ value: 
           {shown.problems.length} unresolved
         </span>
       )}
+    </span>
+  );
+}
+
+/**
+ * A TOTP key's current code (docs/secrets.md, "TOTP keys"): a click fetches it (audited as
+ * `secrets.totp`) and shows it with a ring counting down its step. It hides when the step ends, and
+ * again as a revealed value does (`useMaskAgain`). Reduced motion: the ring steps, it doesn't glide.
+ */
+export function TotpCode({ load }: { load: () => Promise<Totp> }) {
+  const reduced = useReducedMotion();
+  const [shown, setShown] = useState<Totp | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useMaskAgain(shown, () => setShown(null));
+  useEffect(() => {
+    if (!shown) return;
+    setNow(Date.now());
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    const end = setTimeout(() => setShown(null), Math.max(0, shown.expires_at - Date.now()));
+    return () => {
+      clearInterval(tick);
+      clearTimeout(end);
+    };
+  }, [shown]);
+
+  const show = async () => {
+    if (shown) return setShown(null);
+    setBusy(true);
+    setError(null);
+    try {
+      setShown(await load());
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const copy = async () => {
+    if (!shown) return;
+    await navigator.clipboard?.writeText(shown.code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
+
+  const left = shown ? Math.max(0, Math.ceil((shown.expires_at - now) / 1000)) : 0;
+  const ring = 2 * Math.PI * 6;
+  return (
+    <span className="flex shrink-0 items-center gap-1">
+      {shown ? (
+        <>
+          <button onClick={show} aria-label="Hide the code" title="Hide" className="rounded px-1 py-0.5 font-mono text-[12px] tracking-[0.08em] text-fg tabular-nums transition-colors hover:bg-fg/[0.04]">
+            <span data-revealed>{shown.code}</span>
+          </button>
+          <svg viewBox="0 0 16 16" className="size-3.5 -rotate-90" role="img" aria-label={`${left} s left`}>
+            <circle cx="8" cy="8" r="6" fill="none" strokeWidth="1.5" className="stroke-line-2" />
+            <circle
+              cx="8"
+              cy="8"
+              r="6"
+              fill="none"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              className={`stroke-accent ${reduced ? "" : "transition-[stroke-dashoffset] duration-1000 ease-linear"}`}
+              strokeDasharray={ring}
+              strokeDashoffset={ring * (1 - left / shown.period)}
+            />
+          </svg>
+          <span className="w-6 font-mono text-[11px] text-subtle tabular-nums">{left}s</span>
+          <button onClick={copy} className={iconButton} aria-label="Copy the code" title="Copy">
+            {copied ? <Check className="size-3.5 text-ok" /> : <Copy className="size-3.5" />}
+          </button>
+        </>
+      ) : (
+        <button onClick={show} disabled={busy} className={`${ghost} h-6 px-1.5`} aria-label="Show the one-time code" title="The current one-time code (audited)">
+          <Timer className="size-3.5" strokeWidth={1.5} />
+          {busy ? <span className="shimmer">code…</span> : "code"}
+        </button>
+      )}
+      {error && <span className="text-[11px] text-danger">{error}</span>}
     </span>
   );
 }
