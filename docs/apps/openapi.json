@@ -2972,7 +2972,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/shell": {
       "get": {
-        "description": "Answers a terminal: binary both ways, text `{\"resize\":[cols,rows]}`.",
+        "description": "Answers a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400).",
         "operationId": "getServicesIdEnvironmentsEnvShell",
         "parameters": [
           {
@@ -3004,7 +3004,7 @@
         },
         "responses": {
           "200": {
-            "description": "a terminal: binary both ways, text `{\"resize\":[cols,rows]}`"
+            "description": "a terminal: binary both ways, text `{\"resize\":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -3047,7 +3047,7 @@
               }
             }
           },
-          "description": "`{ instance?, cols?, rows? }`"
+          "description": "`{ instance?, cols?, rows?, console?, command?, cpu?, memory_mb? }` (a console as on the WebSocket)"
         },
         "responses": {
           "201": {

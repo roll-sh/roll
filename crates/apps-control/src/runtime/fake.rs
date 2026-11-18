@@ -661,10 +661,13 @@ impl Runtime for Fake {
     }
 
     /// A shell that says which instance it's in, then echoes what it's sent.
-    async fn shell(&self, name: &str, cols: u16, rows: u16) -> anyhow::Result<super::Shell> {
+    async fn shell(&self, name: &str, command: Option<&str>, cols: u16, rows: u16) -> anyhow::Result<super::Shell> {
         anyhow::ensure!(self.state(name) == Some(FakeState::Running), "{name} isn't running");
         let (ours, theirs) = tokio::io::duplex(64 << 10);
-        let banner = format!("fake shell in {name} ({cols}x{rows})\r\n");
+        let banner = match command {
+            Some(c) => format!("fake shell in {name} ({cols}x{rows}) running {c}\r\n"),
+            None => format!("fake shell in {name} ({cols}x{rows})\r\n"),
+        };
         tokio::spawn(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let (mut r, mut w) = tokio::io::split(theirs);

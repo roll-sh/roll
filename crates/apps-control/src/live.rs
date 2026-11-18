@@ -2275,6 +2275,56 @@ impl EnvLive {
     }
 }
 
+/// A one-off console's container ([`EnvLive::start_console`]): what to meter and remove at its end.
+pub struct ConsoleBox {
+    pub name: String,
+    began: Instant,
+    cpu: f64,
+    memory_mb: u32,
+}
+
+impl EnvLive {
+    /// A one-off console (`roll apps run -it`, Heroku's `heroku run bash`): a fresh container of
+    /// the live deployment, with its variables and on its network, no port and no volume, its own
+    /// `cpu` and `memory_mb` when asked; it waits (`sleep`) for the terminal opened in it.
+    pub async fn start_console(self: &Arc<Self>, cpu: Option<f64>, memory_mb: Option<u32>) -> anyhow::Result<ConsoleBox> {
+        let mut tpl = (*self.template().ok_or_else(|| anyhow::anyhow!("no deployment"))?).clone();
+        // Kept up while the terminal is open (a day at most: the shell's idle limit ends it first).
+        tpl.spec.command = Some("exec sleep 86400".into());
+        tpl.spec.port = None;
+        tpl.spec.ports.clear();
+        tpl.spec.volume = None;
+        tpl.spec.aliases.clear();
+        tpl.spec.health = None;
+        if let Some(c) = cpu {
+            tpl.spec.cpu = c;
+            tpl.run.cpu = c;
+        }
+        if let Some(m) = memory_mb {
+            tpl.spec.memory_mb = m;
+            tpl.run.memory_mb = m;
+        }
+        let n = self.seq.fetch_add(1, Ordering::SeqCst);
+        let name = format!("{}console{n}", instance_prefix(&self.service, &self.env, &tpl.deployment));
+        let inst = self.make_run(&tpl, Some(name)).await?;
+        let log = self.log.instance(&inst.name, &inst.deployment);
+        if let Err(e) = self.runtime.start(&inst.name, log).await {
+            self.runtime.remove(&inst.name).await;
+            return Err(e);
+        }
+        self.runtime.settle(&inst.name).await;
+        Ok(ConsoleBox { name: inst.name.clone(), began: Instant::now(), cpu: tpl.run.cpu, memory_mb: tpl.run.memory_mb })
+    }
+
+    /// A console ended: its container stops and goes, metered at its allocation as a run is.
+    pub async fn end_console(&self, c: ConsoleBox) {
+        let _ = self.runtime.stop(&c.name, Duration::from_secs(5)).await;
+        let secs = c.began.elapsed().as_secs_f64();
+        self.meter.lock().sample(now_ms(), secs * c.cpu * 0.5, (c.memory_mb as u64) << 20, secs, 1);
+        self.runtime.remove(&c.name).await;
+    }
+}
+
 /// How a run ended.
 #[derive(Debug)]
 pub struct Exit {
