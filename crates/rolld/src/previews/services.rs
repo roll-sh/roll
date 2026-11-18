@@ -525,7 +525,7 @@ impl apps_control::integrations::GitPushes for GitPushes {
     async fn pushed(&self, push: apps_control::integrations::GitPush) {
         let Some(engine) = self.0.upgrade() else { return };
         let pull = push.pull.map(|p| roll_previews::ports::GitPull { number: p.number, title: p.title, url: p.url, fork: p.fork, author: p.author });
-        let p = roll_previews::ports::GitPush { service: push.service, url: push.url, branch: push.branch, sha: push.sha, message: push.message, pull };
+        let p = roll_previews::ports::GitPush { service: push.service, url: push.url, branch: push.branch, sha: push.sha, message: push.message, pusher: push.pusher, pull };
         tokio::spawn(async move {
             if let Err(e) = engine.git_push(&p).await {
                 tracing::warn!(service = %p.service, branch = %p.branch, error = %e, "previews: a Git URL service's push");
