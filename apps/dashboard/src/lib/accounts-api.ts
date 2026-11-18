@@ -120,6 +120,8 @@ export function activityText(e: Activity, me: string): string {
       return d.via === "provisioned" ? "Your account was made by your company's sign-in" : "Your account was made from your invite";
     case "identity.link":
       return e.ok ? `${how(d.method) || "A sign-in"} was linked to your account` : `Linking ${how(d.method)} was refused`;
+    case "account.export":
+      return "You exported your data";
     case "recovery.request":
       return "You asked an admin to reset your second factor";
     case "recovery.approve":
@@ -238,6 +240,8 @@ export const accountsApi = {
   addPasskey: (id: string, name: string, credential: unknown) => call<Passkey>("POST", "/me/passkeys", { id, name, credential }),
   renamePasskey: (id: string, name: string) => call<Passkey>("PATCH", `/me/passkeys/${encodeURIComponent(id)}`, { name }),
   removePasskey: (id: string) => call<null>("DELETE", `/me/passkeys/${encodeURIComponent(id)}`),
+  /** Your data as one JSON document (sudo mode): a file to save. */
+  exportData: () => call<Record<string, unknown>>("POST", "/me/export"),
   requestReset: (reason: string) => call<{ id: string; state: string }>("POST", "/signin/reset-request", { reason }),
   resetRequests: () => call<ResetRequest[]>("GET", "/reset-requests"),
   decideReset: (id: string, approve: boolean) => call<ResetRequest>("POST", `/reset-requests/${encodeURIComponent(id)}/${approve ? "approve" : "deny"}`),

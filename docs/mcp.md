@@ -832,23 +832,27 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Accounts as GitHub has them, built 2026-11-18, stacked for the next turn:** #254 (refused
-   codes in the security log) → #256 passkeys → #257 sudo mode → #258 new-sign-in mail → #260
-   tokens from a session behind sudo mode, the dialog app-wide (checked end to end in a real
-   Chromium's virtual authenticator, `users-live/passkeys-shot.sh`) → #263 second-factor resets an
-   admin decides. Land them in one turn, in that order (each PR's base is the one before; retarget
-   each to main after its base squashes).
-2. **For roll secrets' incident tools (asked 2026-11-18; after the merge turn):**
-   `Access::revoke_many(ids, why)` and `POST /v1/access/tokens/revoke {ids, why}` (one write, all or
-   none, an admin row, an audit row per grant naming the incident; secrets' reach chooses the ids,
-   never a second scope matcher); `roll_auth::credentials::kind_in` public plus a bounded
-   `find_all(text)` with each match's kind and range, for roll code's landing blocker and
-   `roll secrets scan`; honeytokens (`decoy: true` grants: never allow, any use is a leak-style
-   audit row with mail to admins and the owner).
-3. **Accounts, after that:** WebAuthn attestation for companies that require hardware keys (an
-   AAGUID allowlist per roll, off by default, with the FIDO metadata's names shown on each
-   passkey); then a person's own data export (GitHub's account data export: their account, its
-   sessions, security log and tokens' names, as JSON).
+1. **Built 2026-11-18, for the next turn (after secrets #79 and search's turn):** a person's own
+   data export (#283, this PR), hardware keys only (#286), one provider for people and agents
+   (#287), an SSO connection's session length (#289) with back-channel logout on it (#292),
+   allowed networks (#294) with a second factor for everyone (#298), who has one (#299) and an
+   idle timeout (#302) on it; moving an account to another address (#306) with deleting your own
+   account on it (#309); downloads that send the session (signed-in people got 401s on the audit
+   export, apps' logs and previews' QR codes, screenshots, mail and logs) and the sign-in report
+   link (#307); the audit log naming people by handle, the CSV too (#313); tools for search's
+   metrics, slow log and IP allowlist and previews' metrics (#310). #306, #307 and #309 were
+   checked together in a real Chromium (`users-live/review306-shot.sh`). Conflicts: appended
+   tests (keep both), #287×#289 in `account-sso.tsx`, #306/#309×#302's stack in `account.tsx`,
+   `api.rs` and docs/accounts.md, #307×#313 in the audit page; build land commits up front as the
+   last turn did.
+2. **Next, ranked (now):** the email change's and deletion's SCIM and SSO refusals in the SSO and
+   SCIM flow tests; what a removed person owned (their roll code owner's repositories) handed to
+   someone else when an admin disables or a person deletes the account (GitHub's transfer on
+   removal; roll code's routes, so asked of no thread until a code thread runs); tools for
+   search's audit and analytics once #247 and #291 are on main.
+3. **Landed 2026-11-18 (main 1a60b43be):** passkeys (#256), sudo mode (#257, #260), new-sign-in mail
+   (#258), second-factor resets (#263), refused codes in the security log (#254); for roll secrets,
+   `revoke_many` and the public detectors (#267) and decoy tokens (#270).
 4. **Enterprise:** a provider made once in the dashboard for both people and agents (#252 picks
    an existing connection today).
 5. **People's accounts, enterprise-grade:** on main since 2026-11-18: SSO (#225), SCIM

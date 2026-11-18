@@ -390,6 +390,17 @@ phished: a passkey works only on roll's own site.
 - A refused passkey sign-in is in the passkey owner's security log (by `anonymous` when no
   session owed a second factor); adding, renaming and removing one are there too.
 
+### Your data
+
+A person exports everything roll keeps about them, as GitHub's account data export does (and as
+the GDPR's right to portability asks): `POST /v1/accounts/me/export` answers one JSON file
+(`Content-Disposition: attachment`, "Export your data" on the account page) with their account and
+sign-in methods, sessions, passkeys (never a key), the places they signed in from (when only:
+roll keeps a hash of where), second-factor resets they asked for, their security log (the newest
+1000 lines), and their roll tokens (names, rules and dates through `Audit::tokens`; never a secret
+or its hint). It's sudo mode (a stolen cookie can't take it), and the export is in their security
+log (`account.export`).
+
 ### Recovery
 
 Someone who lost their authenticator app and their recovery codes asks an admin to reset their
@@ -508,6 +519,7 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | `POST /v1/accounts/me/totp/confirm` | `{code}` | `{recovery_codes: string[10]}`, shown once; 400 `{code: "bad_code"}`; 404 nothing to confirm |
 | `DELETE /v1/accounts/me/totp` | `{code}` (TOTP or recovery) | 204; 400 `{code: "bad_code"}` |
 | `POST /v1/accounts/me/recovery-codes` | `{code}` (TOTP) | `{recovery_codes}`, replacing the old ones |
+| `POST /v1/accounts/me/export` | | your data as one JSON file (an attachment; sudo mode) |
 | `GET /v1/accounts/me/reauth` | | `{fresh_until, methods: ("totp" \| "passkey" \| "email")[]}` (sudo mode) |
 | `POST /v1/accounts/me/reauth` | `{code}`, `{challenge, code}` or `{id, credential}` | `{fresh_until}`; 400 `{code: "bad_code"}` or `{code: "passkey"}` |
 | `POST /v1/accounts/me/reauth/email` | | 202 `{challenge}`: a code to the person's own address |
