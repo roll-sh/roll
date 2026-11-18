@@ -1653,7 +1653,7 @@ pub(crate) fn parse_copy_data(
     } else {
         data
     };
-    st.phys_lines += data.iter().filter(|b| **b == b'\n').count();
+    st.phys_lines += memchr::memchr_iter(b'\n', data).count();
     let text = std::str::from_utf8(data).map_err(|_| {
         Error::new(
             code::CHARACTER_NOT_IN_REPERTOIRE,
@@ -1994,12 +1994,17 @@ fn plain_fields<'a>(line: &'a str, f: &CopyFormat) -> Vec<InField<'a>> {
 /// parses: the values, as the record loop makes them (no field can be the NULL marker, which
 /// has a backslash, or a DEFAULT one, which this COPY hasn't). None: the loop's general path.
 fn plain_values(line: &str, c: &CopyIn, fmt: &crate::types::text::FormatCtx) -> Option<Vec<Value>> {
+    // (The delimiter is one byte, ASCII: its bytes found as such, not as a char's.)
+    let d = u8::try_from(c.format.delimiter).ok().filter(u8::is_ascii)?;
     let mut vals = Vec::with_capacity(c.ncols);
-    let mut fields = line.split(c.format.delimiter);
+    let mut ends = memchr::memchr_iter(d, line.as_bytes()).chain(std::iter::once(line.len()));
+    let mut start = 0;
     for &col in &c.target {
-        vals.push(parse_value(fields.next()?, &c.table.columns[col].ty, fmt).ok()?);
+        let end = ends.next()?;
+        vals.push(parse_value(&line[start..end], &c.table.columns[col].ty, fmt).ok()?);
+        start = end + 1;
     }
-    fields.next().is_none().then_some(vals)
+    ends.next().is_none().then_some(vals)
 }
 
 /// Columns a COPY reads or writes; generated columns can't be listed.
@@ -2173,22 +2178,35 @@ fn split_text<'a>(data: &'a str, f: &CopyFormat, table: &str, first: usize) -> R
     if data.is_empty() {
         return Ok((out, false));
     }
-    let data = data.strip_suffix('\n').unwrap_or(data);
-    for (lineno, line) in data.split('\n').enumerate() {
-        let lineno = first + lineno;
+    // (One pass finds the lines' ends and their backslashes; a line after the last newline
+    // only when the data doesn't end with one.)
+    let bytes = data.as_bytes();
+    let mut hits = memchr::memchr2_iter(b'\n', b'\\', bytes);
+    let (mut start, mut escaped, mut lineno) = (0, false, first);
+    loop {
+        let end = loop {
+            match hits.next() {
+                Some(i) if bytes[i] == b'\\' => escaped = true,
+                Some(i) => break i,
+                None if start < bytes.len() => break bytes.len(),
+                None => return Ok((out, false)),
+            }
+        };
+        let line = &data[start..end];
         let line = line.strip_suffix('\r').unwrap_or(line);
+        start = end + 1;
         if line == "\\." {
             return Ok((out, true));
         }
         // A line without escapes: each field is its own text, borrowed.
-        let fields = if !line.as_bytes().contains(&b'\\') {
+        let fields = if !std::mem::take(&mut escaped) {
             Rec::Plain(line)
         } else {
             Rec::Fields(split_text_escaped(line, f, table, lineno)?)
         };
         out.push((Cow::Borrowed(line), fields));
+        lineno += 1;
     }
-    Ok((out, false))
 }
 
 /// A text-format line's fields, its escapes decoded.
