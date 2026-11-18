@@ -964,7 +964,10 @@ pub static CLUSTER_SETTINGS: &[IndexSetting] = &[
     s!("xpack.searchable_snapshots.cache_prewarming_thread_pool.core", D("0"), Long(-1, i64::MAX), Static),
     s!("xpack.searchable_snapshots.cache_prewarming_thread_pool.keep_alive", D("30s"), Time(-1), Static),
     s!("xpack.searchable_snapshots.cache_prewarming_thread_pool.max", D("16"), Long(-1, i64::MAX), Static),
-    s!("xpack.security.audit.enabled", D("false"), Bool, Dynamic),
+    // roll's audit log is on by default, without the per-request granted events
+    // (`xpack::security::audit`); Elasticsearch's defaults are `false` and the list with
+    // `ACCESS_GRANTED` and `RUN_AS_GRANTED`.
+    s!("xpack.security.audit.enabled", D("true"), Bool, Dynamic),
     s!("xpack.security.audit.logfile.emit_cluster_name", D("false"), Bool, Dynamic),
     s!("xpack.security.audit.logfile.emit_cluster_uuid", D("true"), Bool, Dynamic),
     s!("xpack.security.audit.logfile.emit_node_host_address", D("false"), Bool, Dynamic),
@@ -973,7 +976,7 @@ pub static CLUSTER_SETTINGS: &[IndexSetting] = &[
     s!("xpack.security.audit.logfile.emit_node_name", D("false"), Bool, Dynamic),
     s!("xpack.security.audit.logfile.events.emit_request_body", D("false"), Bool, Dynamic),
     s!("xpack.security.audit.logfile.events.exclude", L(&[]), List, Dynamic),
-    s!("xpack.security.audit.logfile.events.include", L(&["ACCESS_DENIED", "ACCESS_GRANTED", "ANONYMOUS_ACCESS_DENIED", "AUTHENTICATION_FAILED", "CONNECTION_DENIED", "TAMPERED_REQUEST", "RUN_AS_DENIED", "RUN_AS_GRANTED", "SECURITY_CONFIG_CHANGE"]), List, Dynamic),
+    s!("xpack.security.audit.logfile.events.include", L(&["ACCESS_DENIED", "ANONYMOUS_ACCESS_DENIED", "AUTHENTICATION_FAILED", "CONNECTION_DENIED", "TAMPERED_REQUEST", "RUN_AS_DENIED", "SECURITY_CONFIG_CHANGE"]), List, Dynamic),
     s!("xpack.security.audit.logfile.events.max_request_body_size", D("2147483647b"), Bytes, Dynamic),
     s!("xpack.security.authc.anonymous.authz_exception", D("true"), Bool, Static),
     s!("xpack.security.authc.anonymous.roles", L(&[]), List, Static),

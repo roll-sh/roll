@@ -48,6 +48,7 @@ use crate::xcontent::filter::glob_match;
 use std::sync::Arc;
 
 mod analyze;
+mod cloud;
 mod s3;
 mod transfer;
 pub use analyze::analyze_repository;
@@ -587,11 +588,20 @@ fn validate_repository(ctx: &Ctx, name: &str, ty: &str, settings: &Settings) -> 
         Ok(())
     };
     let failed = |e: EsError| repository_exception(name, "failed to create repository").caused_by(e);
-    // `BlobStoreRepository`'s constructor reads the throttles before the type's own settings.
-    if matches!(ty, "fs" | "url" | "source" | "s3") {
+    cloud::secret_shapes(ty, settings).map_err(failed)?;
+    if ty == "gcs" {
+        cloud::gcs_bucket(name, settings).map_err(failed)?;
+    }
+    // `BlobStoreRepository`'s constructor reads `compress` and the throttles before the type's
+    // own settings, and `readonly` after them.
+    let blob_store = matches!(ty, "fs" | "url" | "source" | "s3" | "gcs" | "azure");
+    if blob_store {
+        if let Some(v) = settings.get("compress") {
+            crate::units::parse_bool(v).map_err(failed)?;
+        }
         transfer::validate_rates(settings).map_err(failed)?;
     }
-    match ty {
+    let own = match ty {
         "fs" => fs_location(settings).map_err(failed),
         "source" => {
             let Some(delegate) = settings.get("delegate_type").filter(|d| !d.is_empty()) else {
@@ -605,8 +615,15 @@ fn validate_repository(ctx: &Ctx, name: &str, ty: &str, settings: &Settings) -> 
         }
         "url" => validate_url(ctx, name, settings, &paths),
         "s3" => s3::validate(ctx.cluster, name, settings),
+        "gcs" => cloud::validate_gcs(ctx.cluster, name, settings),
+        "azure" => cloud::validate_azure(name, settings),
         other => Err(repository_exception(name, format!("repository type [{other}] does not exist for project [default]"))),
+    };
+    own?;
+    if blob_store && let Some(v) = settings.get("readonly") {
+        crate::units::parse_bool(v).map_err(failed)?;
     }
+    Ok(())
 }
 
 /// `URLRepository`: `file:` URLs within `path.repo`, others within
@@ -693,7 +710,7 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let mut settings = settings;
     validate_repository(ctx, &name, &ty, &settings)?;
-    let secrets = if ty == "s3" { s3::take_secrets(ctx.cluster, &mut settings) } else { Default::default() };
+    let secrets = cloud::take_secrets(ctx.cluster, &ty, &mut settings);
     let repo = Repository { ty, settings, secrets };
     // A bucket is checked once registered (a write, a read and a delete); a repository that
     // fails stays registered, as on Elasticsearch, and the error is the answer.
@@ -722,7 +739,7 @@ pub async fn put_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
         .await?;
     // The snapshots already in the bucket show from now on.
     if let Some((name, repo)) = registered {
-        s3::Bucket::open(ctx.cluster, &name, &repo)?.verify().await?;
+        s3::verify(ctx.cluster, &name, &repo).await?;
         s3::refresh(ctx.cluster, &name, &repo).await?;
     }
     Reply::acknowledged()
@@ -856,7 +873,7 @@ pub async fn verify_repository(ctx: &Ctx<'_>) -> EsResult<Reply> {
         return Err(repository_missing(name));
     }
     if let Some(r) = s3::bucket_repository(&st, name) {
-        s3::Bucket::open(ctx.cluster, name, &r)?.verify().await?;
+        s3::verify(ctx.cluster, name, &r).await?;
     }
     let node = &ctx.cluster.node;
     let mut nodes = Map::new();

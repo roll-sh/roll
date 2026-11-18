@@ -332,9 +332,8 @@ fn zero_boosted_match_none_rewrites_once() {
     for _ in 0..8 {
         q = Arc::new(ConstantScoreQuery::new(Arc::new(BooleanQuery::new().add(Occur::Filter, q).add(Occur::Should, Arc::new(TermQuery::new(T, "fox"))))));
     }
-    let started = std::time::Instant::now();
-    let r = s.rewrite(&q).unwrap();
-    assert!(started.elapsed() < std::time::Duration::from_secs(5), "rewrite took {:?}", started.elapsed());
+    let (r, cpu) = search_test_support::cpu_time(|| s.rewrite(&q).unwrap());
+    assert!(cpu < std::time::Duration::from_secs(5), "rewrite took {cpu:?} of CPU");
     assert!(r.as_any().is::<MatchNoneQuery>(), "{}", r.lucene_string(s.schema()));
     let mut c = TopScoreCollector::new(10, u64::MAX);
     s.search(&q, &mut c).unwrap();
