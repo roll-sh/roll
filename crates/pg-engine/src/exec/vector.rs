@@ -732,10 +732,15 @@ impl VN {
 
 /// A batch's exact numbers at one scale (`Lanes`): each live row's unscaled value, by its
 /// position in the selection, none of them past `bound` in magnitude, so the loops over
-/// them need no overflow checks.
+/// them need no overflow checks. Held in 64 bits (`n64`, `narrow`) where every value and
+/// every value computed from them fits (an i128 multiply is three, its loads and stores two).
 #[derive(Default)]
 pub struct Lane {
-    pub v: Vec<i128>,
+    /// The values (not `narrow`).
+    v: Vec<i128>,
+    /// The values (`narrow`).
+    n64: Vec<i64>,
+    narrow: bool,
     /// By position; empty: no NULL (a NULL's value is 0).
     pub nulls: Vec<bool>,
     pub scale: u32,
@@ -747,6 +752,34 @@ pub struct Lane {
 /// The bound a lane's numbers keep under (`Lane::bound`): sums of a batch of them, and
 /// their sum with another, stay well inside an i128.
 pub const LANE_LIMIT: u128 = 1 << 100;
+
+/// A lane's values (`Lane::vals`).
+pub enum LaneVals<'a> {
+    Narrow(&'a [i64]),
+    Wide(&'a [i128]),
+}
+
+impl Lane {
+    /// Its values, by position.
+    pub fn vals(&self) -> LaneVals<'_> {
+        match self.narrow {
+            true => LaneVals::Narrow(&self.n64),
+            false => LaneVals::Wide(&self.v),
+        }
+    }
+
+    /// Its values as i128s (a narrow lane's widened into `tmp`).
+    fn wide<'a>(&'a self, tmp: &'a mut Vec<i128>) -> &'a [i128] {
+        match self.narrow {
+            false => &self.v,
+            true => {
+                tmp.clear();
+                tmp.extend(self.n64.iter().map(|&x| x as i128));
+                tmp
+            }
+        }
+    }
+}
 
 /// A node of `Lanes`: a column, a constant, or + − × of two nodes before it.
 #[derive(Clone, Copy, PartialEq)]
@@ -821,7 +854,12 @@ impl Lanes {
             if let Some(k) = l.konst.take() {
                 let (x, s) = k.unwrap_or((0, 0));
                 l.v.clear();
-                l.v.resize(live.len(), x);
+                l.n64.clear();
+                l.narrow = i64::try_from(x).is_ok();
+                match l.narrow {
+                    true => l.n64.resize(live.len(), x as i64),
+                    false => l.v.resize(live.len(), x),
+                }
                 l.nulls.clear();
                 if k.is_none() {
                     l.nulls.resize(live.len(), true);
@@ -845,11 +883,21 @@ fn bound_of(v: &[i128]) -> u128 {
     if v.is_empty() { 0 } else { m + 1 }
 }
 
+/// `bound_of` of 64-bit values.
+#[inline]
+fn bound_of64(v: &[i64]) -> u128 {
+    let m = v.iter().fold(0u64, |m, &x| m | (x ^ (x >> 63)) as u64);
+    if v.is_empty() { 0 } else { m as u128 + 1 }
+}
+
 /// Node `node`'s lane into `o` (its operands' in `done`); false: none.
 fn node_lane(node: LNode, done: &[Lane], o: &mut Lane, b: &ColBatch, live: &[u32]) -> bool {
     o.konst = None;
     o.v.clear();
+    o.n64.clear();
     o.nulls.clear();
+    // (A constant's lane, or one computed to a constant, is its `konst`: not narrow.)
+    o.narrow = false;
     match node {
         LNode::Const(k) => {
             o.konst = Some(k);
@@ -865,27 +913,36 @@ fn node_lane(node: LNode, done: &[Lane], o: &mut Lane, b: &ColBatch, live: &[u32
             let nulls = &o.nulls;
             let null = |p: usize| !nulls.is_empty() && nulls[p];
             o.scale = 0;
+            o.narrow = true;
             match &c.data {
-                ColData::I32(x) => o.v.extend(live.iter().map(|&r| x[r as usize] as i128)),
-                ColData::I64(x) => o.v.extend(live.iter().map(|&r| x[r as usize] as i128)),
+                ColData::I32(x) => o.n64.extend(live.iter().map(|&r| x[r as usize] as i64)),
+                ColData::I64(x) => o.n64.extend(live.iter().map(|&r| x[r as usize])),
                 // (One scale, every row's: a product's scale is its operands' sum, so rows of
-                // other scales would give it another.)
+                // other scales would give it another. Each value's high bits xor its low word's
+                // sign accumulated: 0 when every one fits 64 bits.)
                 ColData::Num(x) if nulls.is_empty() => {
                     let s = live.first().map_or(0, |&r| x[r as usize].1);
                     // (Every row's scale xor the first's: 0 when they are all one.)
-                    let mut other = 0;
-                    o.v.extend(live.iter().map(|&r| {
+                    let (mut other, mut high) = (0, 0i128);
+                    o.n64.extend(live.iter().map(|&r| {
                         let (n, ns) = x[r as usize];
                         other |= ns ^ s;
-                        n
+                        high |= n ^ (n as i64 as i128);
+                        n as i64
                     }));
                     if other != 0 {
                         return false;
+                    }
+                    if high != 0 {
+                        o.n64.clear();
+                        o.narrow = false;
+                        o.v.extend(live.iter().map(|&r| x[r as usize].0));
                     }
                     o.scale = s;
                 }
                 ColData::Num(x) => {
                     let mut s = None;
+                    o.narrow = false;
                     for (p, &r) in live.iter().enumerate() {
                         let (n, ns) = x[r as usize];
                         if null(p) {
@@ -901,7 +958,10 @@ fn node_lane(node: LNode, done: &[Lane], o: &mut Lane, b: &ColBatch, live: &[u32
                 }
                 _ => return false,
             }
-            o.bound = bound_of(&o.v);
+            o.bound = match o.narrow {
+                true => bound_of64(&o.n64),
+                false => bound_of(&o.v),
+            };
             true
         }
         LNode::Op(op, x, y) => {
@@ -938,35 +998,53 @@ fn node_lane(node: LNode, done: &[Lane], o: &mut Lane, b: &ColBatch, live: &[u32
             }
             (o.scale, o.bound) = (scale, bound);
             let n = live.len();
-            // (In range by the bounds: no check per row.)
-            match (x.konst, y.konst) {
-                (None, None) => {
-                    let (a, c) = (&x.v, &y.v);
-                    match op {
-                        NumOp::Mul => o.v.extend(a.iter().zip(c).map(|(a, c)| a.wrapping_mul(*c))),
-                        NumOp::Add => o.v.extend(a.iter().zip(c).map(|(a, c)| a.wrapping_mul(fx).wrapping_add(c.wrapping_mul(fy)))),
-                        NumOp::Sub => o.v.extend(a.iter().zip(c).map(|(a, c)| a.wrapping_mul(fx).wrapping_sub(c.wrapping_mul(fy)))),
+            // (In range by the bounds: no check per row. In 64 bits where the operands are
+            // and every product and sum stays under 2^63: bound, its factors, a constant.)
+            let k64 = |l: &Lane| l.konst.is_some_and(|k| k.is_some_and(|(k, _)| i64::try_from(k).is_ok()));
+            o.narrow = bound <= i64::MAX as u128
+                && i64::try_from(fx).is_ok()
+                && i64::try_from(fy).is_ok()
+                && (x.narrow || k64(x))
+                && (y.narrow || k64(y));
+            macro_rules! ops {
+                ($out:expr, $t:ty, $xv:expr, $yv:expr, $fx:expr, $fy:expr) => {
+                    match (x.konst, y.konst) {
+                        (None, None) => {
+                            let (a, c) = ($xv, $yv);
+                            match op {
+                                NumOp::Mul => $out.extend(a.iter().zip(c).map(|(a, c)| a.wrapping_mul(*c))),
+                                NumOp::Add => $out.extend(a.iter().zip(c).map(|(a, c)| a.wrapping_mul($fx).wrapping_add(c.wrapping_mul($fy)))),
+                                NumOp::Sub => $out.extend(a.iter().zip(c).map(|(a, c)| a.wrapping_mul($fx).wrapping_sub(c.wrapping_mul($fy)))),
+                            }
+                        }
+                        (Some(Some((k, _))), None) => {
+                            let k = (k as $t).wrapping_mul($fx);
+                            match op {
+                                NumOp::Mul => $out.extend($yv.iter().map(|c| k.wrapping_mul(*c))),
+                                NumOp::Add => $out.extend($yv.iter().map(|c| k.wrapping_add(c.wrapping_mul($fy)))),
+                                NumOp::Sub => $out.extend($yv.iter().map(|c| k.wrapping_sub(c.wrapping_mul($fy)))),
+                            }
+                        }
+                        (None, Some(Some((k, _)))) => {
+                            let k = (k as $t).wrapping_mul($fy);
+                            match op {
+                                NumOp::Mul => $out.extend($xv.iter().map(|a| a.wrapping_mul(k))),
+                                NumOp::Add => $out.extend($xv.iter().map(|a| a.wrapping_mul($fx).wrapping_add(k))),
+                                NumOp::Sub => $out.extend($xv.iter().map(|a| a.wrapping_mul($fx).wrapping_sub(k))),
+                            }
+                        }
+                        _ => unreachable!("constants handled above"),
                     }
-                }
-                (Some(Some((k, _))), None) => {
-                    let k = k.wrapping_mul(fx);
-                    match op {
-                        NumOp::Mul => o.v.extend(y.v.iter().map(|c| k.wrapping_mul(*c))),
-                        NumOp::Add => o.v.extend(y.v.iter().map(|c| k.wrapping_add(c.wrapping_mul(fy)))),
-                        NumOp::Sub => o.v.extend(y.v.iter().map(|c| k.wrapping_sub(c.wrapping_mul(fy)))),
-                    }
-                }
-                (None, Some(Some((k, _)))) => {
-                    let k = k.wrapping_mul(fy);
-                    match op {
-                        NumOp::Mul => o.v.extend(x.v.iter().map(|a| a.wrapping_mul(k))),
-                        NumOp::Add => o.v.extend(x.v.iter().map(|a| a.wrapping_mul(fx).wrapping_add(k))),
-                        NumOp::Sub => o.v.extend(x.v.iter().map(|a| a.wrapping_mul(fx).wrapping_sub(k))),
-                    }
-                }
-                _ => unreachable!("constants handled above"),
+                };
             }
-            debug_assert_eq!(o.v.len(), n);
+            if o.narrow {
+                ops!(o.n64, i64, &x.n64, &y.n64, fx as i64, fy as i64);
+                debug_assert_eq!(o.n64.len(), n);
+            } else {
+                let (mut tx, mut ty) = (Vec::new(), Vec::new());
+                ops!(o.v, i128, x.wide(&mut tx), y.wide(&mut ty), fx, fy);
+                debug_assert_eq!(o.v.len(), n);
+            }
             let (xn, yn) = (x.konst.is_none() && !x.nulls.is_empty(), y.konst.is_none() && !y.nulls.is_empty());
             match (xn, yn) {
                 (true, true) => o.nulls.extend(x.nulls.iter().zip(&y.nulls).map(|(a, c)| *a || *c)),
@@ -975,9 +1053,12 @@ fn node_lane(node: LNode, done: &[Lane], o: &mut Lane, b: &ColBatch, live: &[u32
                 (false, false) => {}
             }
             // (A NULL row's value: 0, as a column's.)
-            for (v, null) in o.v.iter_mut().zip(&o.nulls) {
+            for (p, null) in o.nulls.iter().enumerate() {
                 if *null {
-                    *v = 0;
+                    match o.narrow {
+                        true => o.n64[p] = 0,
+                        false => o.v[p] = 0,
+                    }
                 }
             }
             true
