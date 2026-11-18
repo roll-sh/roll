@@ -422,6 +422,10 @@ impl Accounts {
         if !db.has_column("scim_users", "user_name")? {
             db.add_column("scim_users", "user_name", "TEXT")?;
         }
+        // Whether a passkey is synced to the person's other devices (its authenticator says so).
+        if !db.has_column("passkeys", "synced")? {
+            db.add_column("passkeys", "synced", "INTEGER")?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;

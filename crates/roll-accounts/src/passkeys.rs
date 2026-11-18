@@ -195,7 +195,8 @@ pub(crate) fn verify(cose: &[u8], msg: &[u8], sig: &[u8]) -> bool {
 
 pub(crate) const UP: u8 = 0x01;
 pub(crate) const UV: u8 = 0x04;
-pub(crate) const BE: u8 = 0x08;
+/// Backed up (synced to the person's other devices, as iCloud Keychain or Google Password Manager
+/// do): shown, so a person knows which of their passkeys lives on one device only.
 pub(crate) const BS: u8 = 0x10;
 pub(crate) const AT: u8 = 0x40;
 
@@ -350,6 +351,8 @@ pub struct Passkey {
     pub name: String,
     pub created_at: i64,
     pub last_used_at: Option<i64>,
+    /// Synced to the person's other devices (the authenticator says it's backed up).
+    pub synced: bool,
 }
 
 fn refused(r: Refused) -> Error {
@@ -443,6 +446,7 @@ impl Accounts {
         let id = crate::new_id("pk");
         let now = self.db.now_ms()?;
         let public_key = encode(&key.public_key);
+        let synced = key.flags & BS != 0;
         self.db.write(|c| {
             let n: i64 = c.query_row("SELECT COUNT(*) FROM passkeys WHERE user_id = ?", [user], |r| r.get(0))?;
             if n as usize >= MAX_PER_USER {
@@ -452,18 +456,18 @@ impl Accounts {
                 return Err(Error::Conflict("that passkey is already registered".into()));
             }
             c.execute(
-                "INSERT INTO passkeys (id, user_id, credential_id, public_key, sign_count, name, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
-                params![id, user, credential_id, public_key, key.sign_count as i64, name, now],
+                "INSERT INTO passkeys (id, user_id, credential_id, public_key, sign_count, name, created_at, last_used_at, synced) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+                params![id, user, credential_id, public_key, key.sign_count as i64, name, now, synced],
             )?;
             Ok(())
         })?;
-        Ok(Passkey { id, name, created_at: now, last_used_at: None })
+        Ok(Passkey { id, name, created_at: now, last_used_at: None, synced })
     }
 
     pub fn passkeys(&self, user: &str) -> Result<Vec<Passkey>> {
         Ok(self.db.read(|c| {
-            c.query("SELECT id, name, created_at, last_used_at FROM passkeys WHERE user_id = ? ORDER BY created_at", [user], |r| {
-                Ok(Passkey { id: r.get(0)?, name: r.get(1)?, created_at: r.get(2)?, last_used_at: r.get(3)? })
+            c.query("SELECT id, name, created_at, last_used_at, synced FROM passkeys WHERE user_id = ? ORDER BY created_at", [user], |r| {
+                Ok(Passkey { id: r.get(0)?, name: r.get(1)?, created_at: r.get(2)?, last_used_at: r.get(3)?, synced: r.get::<_, Option<bool>>(4)?.unwrap_or(false) })
             })
         })?)
     }
@@ -505,6 +509,13 @@ impl Accounts {
         }))
     }
 
+    /// Whose passkey `credential` names (a refusal goes in their security log; nothing is told
+    /// to whoever tried).
+    pub(crate) fn passkey_owner(&self, credential: &Value) -> Option<String> {
+        let id = credential["id"].as_str()?.trim_end_matches('=');
+        self.db.read(|c| c.query_row("SELECT user_id FROM passkeys WHERE credential_id = ?", [id], |r| r.get::<_, String>(0)).optional()).ok().flatten()
+    }
+
     /// Check a passkey sign-in: the person it signs in. `owed` is the person this request owes a
     /// second factor for (its session says so), or `None` for a sign-in on the passkey alone. The
     /// challenge must have been made for the same: a second factor's challenge (user verification
@@ -535,7 +546,7 @@ impl Accounts {
         }
         let now = self.db.now_ms()?;
         // The count moves only forward, even with two sign-ins at once.
-        let moved = self.db.write(|c| c.execute("UPDATE passkeys SET sign_count = ?, last_used_at = ? WHERE id = ? AND (sign_count < ? OR (sign_count = 0 AND ? = 0))", params![count as i64, now, pk, count as i64, count as i64]))?;
+        let moved = self.db.write(|c| c.execute("UPDATE passkeys SET sign_count = ?, last_used_at = ?, synced = ? WHERE id = ? AND (sign_count < ? OR (sign_count = 0 AND ? = 0))", params![count as i64, now, flags & BS != 0, pk, count as i64, count as i64]))?;
         if moved == 0 {
             return Err(refused(Refused("this passkey's counter went backwards: it may have been copied")));
         }

@@ -67,8 +67,11 @@ totp(user_id TEXT PRIMARY KEY, seed TEXT NOT NULL,  -- sealed with ROLL_SECRET_K
      enabled INTEGER NOT NULL, last_step INTEGER NOT NULL, created_at INTEGER NOT NULL)
 recovery_codes(user_id TEXT, code_hash TEXT, PRIMARY KEY (user_id, code_hash))
 passkeys(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, credential_id TEXT NOT NULL UNIQUE,
-         public_key TEXT NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL,
-         created_at INTEGER NOT NULL, last_used_at INTEGER)      -- phase 2, see below
+         public_key TEXT NOT NULL,                                -- COSE, base64url
+         sign_count INTEGER NOT NULL, name TEXT NOT NULL,
+         created_at INTEGER NOT NULL, last_used_at INTEGER, synced INTEGER)
+passkey_challenges(id TEXT PRIMARY KEY, user_id TEXT, purpose TEXT NOT NULL,  -- register | signin
+         challenge TEXT NOT NULL, expires_at INTEGER NOT NULL)     -- used once, 5 minutes
 throttle(key TEXT PRIMARY KEY, n INTEGER NOT NULL, since INTEGER NOT NULL)
 ```
 
@@ -338,10 +341,42 @@ When the user has TOTP on, every sign-in (email code or OAuth) ends at level `mf
 `GET /v1/accounts/session` then says `mfa_required`, and the dashboard asks for a code:
 `POST /v1/accounts/signin/totp {code}` or `POST /v1/accounts/signin/recovery {code}`.
 
-Passkeys (WebAuthn) are phase 2: the `passkeys` table is in place; registration and assertion
-need a CBOR/COSE parser and attestation handling that didn't fit this phase cleanly. They will
-be a second factor (and later a first one) next to TOTP, through
-`/v1/accounts/me/passkeys` and `/v1/accounts/signin/passkey/{options,verify}`.
+A passkey (below) gives the second factor too: `methods` lists `passkey` when the person has one.
+
+### Passkeys
+
+Passkeys (WebAuthn Level 3, `src/passkeys.rs`) sign a person in without a code, and can't be
+phished: a passkey works only on roll's own site.
+
+- **Made** on the account page: `POST /v1/accounts/me/passkeys/options` answers `{id, publicKey}`
+  for `navigator.credentials.create`, and `POST /v1/accounts/me/passkeys {id, name, credential}`
+  keeps it. The options ask for a discoverable credential, ES256, EdDSA or RS256 (2048 bits and
+  up), and no attestation: roll trusts no attestation statement (whatever `fmt` a browser sends,
+  it's ignored), so any authenticator works and none is vouched for. At most 20 per person.
+- **On its own** (`POST /v1/accounts/signin/passkey/options` with no session, then
+  `POST /v1/accounts/signin/passkey {id, credential}`): any passkey the browser holds for roll
+  (user verification `required`) signs its person in, as both factors, TOTP on or not (GitHub
+  counts a passkey the same way). An authenticator that didn't verify the person (no PIN or
+  biometric) is refused. An enforced SSO domain still signs in only through its provider.
+- **As the second factor** (the same two routes with a session owing one): the person's own
+  passkeys, user verification `preferred` (presence is enough on top of the first factor).
+- A challenge is used once, within five minutes, and only for the sign-in it was made for: one
+  made for a second factor never signs anyone in on its own, and one made without a session
+  never finishes someone's second factor.
+- Checked every time: the ceremony type, the challenge, the origin (the dashboard's,
+  `ROLL_WEB_URL`; never inside another site's frame), the RP id hash (the dashboard's host), user
+  presence, the signature over the authenticator data and the client data's hash, and the sign
+  count: a count that doesn't go up when either side counts means a copied key, refused (synced
+  passkeys count 0 and stay there). `synced` shows whether the passkey is backed up across the
+  person's devices (the authenticator's `BS` flag).
+- Everything from the browser is hostile: the CBOR reader takes definite lengths only, believes
+  a length or count only as far as the bytes present hold it, and stops at a small depth; a
+  credential id is at most 1023 bytes; the blobs at most 16 KiB.
+- Anonymous challenges are throttled per address (60 every 10 minutes). Passkeys need
+  `ROLL_WEB_URL` (503 `{code: "passkeys_off"}` without it); `GET /v1/accounts` says
+  `providers.passkey`.
+- A refused passkey sign-in is in the passkey owner's security log (by `anonymous` when no
+  session owed a second factor); adding, renaming and removing one are there too.
 
 ## Routes
 
@@ -369,7 +404,7 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 
 | Route | Body | Answer |
 | --- | --- | --- |
-| `GET /v1/accounts` | | `{providers: {email: bool, github: bool, google: bool, sso: bool}}`: which sign-ins are configured |
+| `GET /v1/accounts` | | `{providers: {email: bool, github: bool, google: bool, sso: bool, passkey: bool}}`: which sign-ins are configured |
 | `GET /v1/accounts/session` | | `{status: "anonymous"}`, `MfaRequired` or `SignedIn` (always 200) |
 | `POST /v1/accounts/invites/peek` | `{token}` | `{email, expires_at}`; 404 for a used, revoked, expired or unknown invite |
 | `POST /v1/accounts/email/start` | `{email, invite?}` | 202 `{challenge}`; 400 bad email; 403 `{code: "sso_required"}` for a domain whose SSO connection enforces it; 503 `{code: "email_off"}` when mail isn't configured |
@@ -378,6 +413,8 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | `GET /v1/accounts/oauth/{provider}/callback` | query `code`, `state` (or `error`) | 303 to the dashboard, see above |
 | `POST /v1/accounts/sso/start` | `{email, invite?, return_to?}`, or `{intent: "link"}` with a session (csrf) | `{url}` and `Set-Cookie` (the browser cookie); 400 `{code: "no_sso"}` when no connection answers for the email's (verified) domain, `throttled`, `provider` |
 | `GET /v1/accounts/sso/{id}/callback` | query `code`, `state` (or `error`) | 303 to the dashboard; `?error=` `unverified_email`, `domain`, `not_invited`, `link_required`, `linked_elsewhere`, `link_email`, `state` or `provider` |
+| `POST /v1/accounts/signin/passkey/options` | | `{id, publicKey}` for `navigator.credentials.get`: with a session owing a second factor, that person's passkeys; without, any (throttled per address); 503 `{code: "passkeys_off"}` |
+| `POST /v1/accounts/signin/passkey` | `{id, credential}` | 200 `SignedIn`, with `Set-Cookie`; 400 `{code: "passkey"}` (unknown, wrong site, unverified, copied, a used or another sign-in's challenge); 403 `{code: "sso_required"}` |
 | `POST /v1/accounts/signout` | | 204, clears the cookie and deletes the session (any level; csrf) |
 
 ### Second factor (a session at level `mfa`, csrf)
@@ -401,6 +438,11 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | `POST /v1/accounts/me/totp/confirm` | `{code}` | `{recovery_codes: string[10]}`, shown once; 400 `{code: "bad_code"}`; 404 nothing to confirm |
 | `DELETE /v1/accounts/me/totp` | `{code}` (TOTP or recovery) | 204; 400 `{code: "bad_code"}` |
 | `POST /v1/accounts/me/recovery-codes` | `{code}` (TOTP) | `{recovery_codes}`, replacing the old ones |
+| `GET /v1/accounts/me/passkeys` | | `{passkeys: [{id, name, created_at, last_used_at, synced}]}` (never a key) |
+| `POST /v1/accounts/me/passkeys/options` | | `{id, publicKey}` for `navigator.credentials.create`; 409 at 20 passkeys |
+| `POST /v1/accounts/me/passkeys` | `{id, name, credential}` | 201 `Passkey`; 400 `{code: "passkey"}`; 409 already registered |
+| `PATCH /v1/accounts/me/passkeys/{id}` | `{name}` | `Passkey` (1–64 characters) |
+| `DELETE /v1/accounts/me/passkeys/{id}` | | 204; 404 if it isn't yours |
 
 Linking: `POST /v1/accounts/oauth/{provider}/start {intent: "link"}` with the session, then the
 same callback; on success it redirects to `return_to` (default `/dashboard/account`).
@@ -501,6 +543,6 @@ Each product needs its resources to have an owner, and its routes to scope by th
 - **Workspace**: done in phase 1.
 - **Billing** (Home's spend): per user once the above carry owners.
 - **Orgs**: users in roll code orgs, and invites into an org.
-- **Passkeys**: see "Second factor".
+- **Passkeys**: done (see "Passkeys").
 - **Handles**: renaming a handle renames the roll code owner.
 - **CLI**: `roll login` through the device flow, giving a session-backed token.

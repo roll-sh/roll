@@ -566,7 +566,7 @@ async fn signin_passkey(State(a): S, owed: Owed, ip: Ip, headers: HeaderMap, b: 
                 // they were already signed in up to their second factor).
                 match (&owed, user) {
                     (Some(o), _) => a.record_sign_in(Some(&o.user), "passkey", Some(&e), false, &who),
-                    (None, u) => a.record_code_refused(u.as_deref(), "passkey", &e, &who),
+                    (None, u) => a.record_code_refused(u.or_else(|| a.passkey_owner(&credential)).as_deref(), "passkey", &e, &who),
                 }
                 Err(e)
             }
