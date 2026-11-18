@@ -30,6 +30,8 @@ function Schedules({ service, env, schedules, states, runner, onRan }: { service
   const [command, setCommand] = useState("");
   const save = (next: Scheduled[]) => runner.run("schedules", () => appsApi.update(service, { run: { schedules: next } }));
   const ok = /^[a-z0-9-]{1,32}$/.test(name) && !schedules.some((s) => s.name === name) && schedule.trim() !== "" && command.trim() !== "";
+  // A path (`/api/cron`) is called; anything else is a command.
+  const one = (): Scheduled => (command.trim().startsWith("/") ? { name, schedule: schedule.trim(), path: command.trim() } : { name, schedule: schedule.trim(), command: command.trim() });
   return (
     <Panel title="On a schedule" aside={<span className="text-[12px] text-muted">each a job at its due times, UTC unless a time zone is set</span>}>
       {schedules.length > 0 && (
@@ -38,12 +40,17 @@ function Schedules({ service, env, schedules, states, runner, onRan }: { service
             <li key={s.name} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-2.5 text-[12.5px]">
               <span className="font-medium">{s.name}</span>
               <code className="font-mono text-[12px] text-muted">{s.schedule}{s.timezone ? ` (${s.timezone})` : ""}</code>
-              <code className="min-w-0 flex-1 truncate font-mono text-[12px]">{s.command}</code>
+              <code className="min-w-0 flex-1 truncate font-mono text-[12px]">{s.path ? `GET ${s.path}` : s.command}</code>
               {(() => {
                 const st = states?.find((x) => x.name === s.name);
                 return (
                   <>
                     {st?.last && <JobBadge job={{ status: st.last.status, exit_code: null }} />}
+                    {st?.last_call && (
+                      <span className={`font-mono text-[11.5px] ${st.last_call.status && st.last_call.status < 400 ? "text-muted" : "text-danger"}`} title={st.last_call.error ?? `${st.last_call.ms} ms, ${new Date(st.last_call.at).toLocaleString()}`}>
+                        {st.last_call.status ?? "no answer"}
+                      </span>
+                    )}
                     {st?.next_run_at && (
                       <span className="text-[11.5px] text-subtle" title={new Date(st.next_run_at).toLocaleString()}>
                         next {until(st.next_run_at, Date.now())}
@@ -55,9 +62,10 @@ function Schedules({ service, env, schedules, states, runner, onRan }: { service
               <button
                 type="button"
                 className="inline-flex items-center gap-1 text-[12px] text-muted hover:text-fg disabled:opacity-50"
+                hidden={!s.command}
                 disabled={runner.busy !== null}
                 title="Run it now, as a job (its schedule stays as it is)"
-                onClick={() => void runner.run(`run:${s.name}`, () => appsApi.startJob(service, env, { command: s.command, ...(s.timeout_s ? { timeout_s: s.timeout_s } : {}) })).then((j) => j && onRan(j))}
+                onClick={() => void runner.run(`run:${s.name}`, () => appsApi.startJob(service, env, { command: s.command ?? "", ...(s.timeout_s ? { timeout_s: s.timeout_s } : {}) })).then((j) => j && onRan(j))}
               >
                 <Play className="size-3" /> Run now
               </button>
@@ -72,7 +80,7 @@ function Schedules({ service, env, schedules, states, runner, onRan }: { service
         className="flex flex-wrap gap-2 px-5 py-4"
         onSubmit={(e) => {
           e.preventDefault();
-          void save([...schedules, { name, schedule: schedule.trim(), command: command.trim() }]).then((r) => {
+          void save([...schedules, one()]).then((r) => {
             if (r) {
               setName("");
               setCommand("");
@@ -82,7 +90,7 @@ function Schedules({ service, env, schedules, states, runner, onRan }: { service
       >
         <input value={name} onChange={(e) => setName(e.target.value.toLowerCase())} placeholder="cleanup" aria-label="Schedule name" spellCheck={false} className={`${input} w-32 font-mono text-[12px]`} />
         <input value={schedule} onChange={(e) => setSchedule(e.target.value)} placeholder="0 3 * * *" aria-label="When (cron)" spellCheck={false} className={`${input} w-32 font-mono text-[12px]`} />
-        <input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="node scripts/cleanup.js" aria-label="Scheduled command" spellCheck={false} className={`${input} min-w-0 flex-1 font-mono text-[12px]`} />
+        <input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="node scripts/cleanup.js, or a path: /api/cron" aria-label="Scheduled command or path" spellCheck={false} className={`${input} min-w-0 flex-1 font-mono text-[12px]`} />
         <button type="submit" className={primary} disabled={!ok || runner.busy !== null}>
           Add
         </button>

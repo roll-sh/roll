@@ -65,6 +65,11 @@ pub struct Settings {
     /// `*.sentry.io`), through a proxy on the preview's network that refuses anything else.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub egress_hosts: Vec<String>,
+    /// What a fork's preview (an untrusted head a writer approved to run) may reach when `egress`
+    /// is `open`: `roll` (the default) holds it to roll's products and `egress_hosts`, since an
+    /// approval is to run its code, not a read of it for what it sends out; `open` lets it reach
+    /// what the project's own previews do.
+    pub egress_forks: EgressRule,
     /// Branch the data as of a point in time (Neon's time-travel branches), where the product
     /// keeps history: `-24h` (`-30m`, `-7d`) before each branching or reset, or an RFC 3339 time;
     /// at most 30 days back. Products without history branch as of now and say so.
@@ -341,6 +346,7 @@ impl Default for Settings {
             mail: MailRule::Catch,
             egress: EgressRule::Open,
             egress_hosts: Vec::new(),
+            egress_forks: EgressRule::Roll,
             data_at: None,
             feedback: true,
             warm: true,
@@ -373,6 +379,12 @@ pub fn is_production(env: &str) -> bool {
 }
 
 impl Settings {
+    /// What a preview's code may reach: the project's rule, and for a fork's head (`trusted`
+    /// false) `egress_forks` where the project's is open.
+    pub fn egress_for(&self, trusted: bool) -> EgressRule {
+        if trusted { self.egress } else if self.egress == EgressRule::Roll { EgressRule::Roll } else { self.egress_forks }
+    }
+
     /// These settings with `patch`'s fields on top (objects merge, everything else replaces),
     /// checked.
     pub fn patched(&self, patch: &Value) -> Result<Settings> {
@@ -418,8 +430,8 @@ impl Settings {
         if let Some(h) = self.egress_hosts.iter().find(|h| !egress_host_ok(h)) {
             return bad(format!("egress_hosts: {h:?} isn't a host name (api.stripe.com, or *.sentry.io for its subdomains)"));
         }
-        if !self.egress_hosts.is_empty() && self.egress != EgressRule::Roll {
-            return bad("egress_hosts: only with egress \"roll\" (with \"open\" everything is reachable)".into());
+        if !self.egress_hosts.is_empty() && self.egress != EgressRule::Roll && self.egress_forks != EgressRule::Roll {
+            return bad("egress_hosts: only with egress (or egress_forks) \"roll\" (with \"open\" everything is reachable)".into());
         }
         if !(1..=24 * 90).contains(&self.ttl_hours) {
             return bad("ttl_hours: 1 to 2160".into());

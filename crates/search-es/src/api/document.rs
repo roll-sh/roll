@@ -70,6 +70,7 @@ pub fn write_args(ctx: &Ctx) -> EsResult<WriteArgs> {
         internal: false,
         list_executed_pipelines: false,
         principal: Some(std::sync::Arc::new(crate::xpack::security::principal(ctx).clone())),
+        source_type: None,
     })
 }
 
@@ -164,7 +165,15 @@ pub async fn index(ctx: &Ctx<'_>, create_api: bool) -> EsResult<Reply> {
     if let Some(e) = crate::xpack::streams::check_item(ctx, &expr, args.pipeline.as_deref()) {
         return Err(e);
     }
-    let body = ctx.body.clone();
+    // A YAML or CBOR document is kept as JSON; the objects synthetic `_source` keeps verbatim
+    // remember its type (`_ignored_source`).
+    let body = match ctx.body_type {
+        Some(ty) if ty != crate::xcontent::XContentType::Json => {
+            args.source_type = Some(ty);
+            Bytes::from(ctx.body()?.unwrap_or(Value::Null).to_json())
+        }
+        _ => ctx.body.clone(),
+    };
     let out = index_one(ctx, &expr, args, body, auto_id).await?;
     let mut out = out;
     finish_refresh(ctx, &mut out)?;

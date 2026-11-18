@@ -6,6 +6,7 @@ import { ActorMark, ago, button, card, dangerButton, ErrorNote, errorText, field
 import { Cas } from "./cas";
 import { SshCas } from "./ssh-cas";
 import { CloudAccounts } from "./cloud-accounts";
+import { GitHubApps } from "./github-apps";
 import { OutsideDatabases } from "./outside-databases";
 import { AwsRoles } from "./aws-roles";
 import { Rotators } from "./rotators";
@@ -73,6 +74,7 @@ export function SyncsView() {
         )}
       </Section>
       <OutsideDatabases />
+      <GitHubApps />
       <Rotators />
       <SaasRotators />
       <TransitKeys />
