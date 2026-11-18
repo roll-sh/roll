@@ -37,6 +37,8 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
                 return r;
             }
             match apps.env_for_host(&host).await {
+                // Image optimization on the environment's own host (`/__roll/image`).
+                Some((service, env, None, _)) if req.uri().path() == crate::images::PATH => crate::images::serve(apps, service, env, req).await,
                 Some((service, env, deployment, port)) => {
                     let mut req = req;
                     if let Some(p) = port {
@@ -44,7 +46,12 @@ pub fn router(apps: Arc<Apps>) -> axum::Router {
                     }
                     serve(apps, service, env, deployment, req).await
                 }
-                None => page(StatusCode::NOT_FOUND, "Nothing here", "No roll apps service answers on this address."),
+                // A name under a project's preview domain no environment holds: roll previews'
+                // (a preview on roll's own runtime), with the request as it came.
+                None => match apps.preview_router_for(&host).await {
+                    Some(router) => router.serve(req).await,
+                    None => page(StatusCode::NOT_FOUND, "Nothing here", "No roll apps service answers on this address."),
+                },
             }
         }
     })

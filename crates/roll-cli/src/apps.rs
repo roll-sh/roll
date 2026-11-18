@@ -534,10 +534,21 @@ pub enum AppsCmd {
     },
     /// Run a one-off command in a fresh container of the live deployment, with its variables
     /// and on its network (no port, no volume): `roll apps run -- npx prisma db seed`. Its output
-    /// streams here; the CLI exits with the command's exit code.
+    /// streams here; the CLI exits with the command's exit code. `-i` makes it a console
+    /// instead (Heroku's `heroku run bash`): a terminal to the command (a login shell when none
+    /// is given), its container gone when you leave.
     Run {
         #[command(flatten)]
         target: Target,
+        /// A terminal to it: `roll apps run -i -- rails console`.
+        #[arg(short = 'i', long, conflicts_with_all = ["timeout", "tasks"])]
+        interactive: bool,
+        /// A console's CPUs (0.25–8; default the environment's size).
+        #[arg(long, requires = "interactive")]
+        cpu: Option<f64>,
+        /// A console's memory in MB (256–16384; default the environment's size).
+        #[arg(long, requires = "interactive")]
+        memory: Option<u32>,
         /// The job's limit, in seconds (default 3600).
         #[arg(long)]
         timeout: Option<u64>,
@@ -545,7 +556,7 @@ pub enum AppsCmd {
         /// `ROLL_TASK_COUNT`; done when all are (1–100, ten at a time).
         #[arg(long)]
         tasks: Option<u32>,
-        #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
+        #[arg(trailing_var_arg = true, required_unless_present = "interactive", allow_hyphen_values = true)]
         command: Vec<String>,
     },
     /// One-off jobs (`roll apps run`), newest first; `--logs JOB` prints one's output (`--follow`
@@ -884,9 +895,10 @@ pub enum AppsCmd {
         #[arg(long)]
         remove: bool,
     },
-    /// The environment's volume backups (daily, the newest seven kept): list them, `--now` to
-    /// back up now, or `--restore <id>` to put the volume back as it was then (asks first;
-    /// `--yes` doesn't).
+    /// The environment's volume backups (daily and the newest seven kept, unless
+    /// `run.volume.backups` says otherwise): list them, `--now` to back up now, or `--restore
+    /// <id>` to put the volume back as it was then; `--from <env>`: list or restore another
+    /// environment's backups here (seeding staging from production). Asks first; `--yes` doesn't.
     Backups {
         #[command(flatten)]
         target: Target,
@@ -894,16 +906,23 @@ pub enum AppsCmd {
         now: bool,
         #[arg(long, value_name = "ID")]
         restore: Option<String>,
+        #[arg(long, value_name = "ENV", conflicts_with = "now")]
+        from: Option<String>,
         #[arg(long, short = 'y')]
         yes: bool,
     },
     /// The project's log drains: list them, `--add <https url>` (prints its signing secret
-    /// once), `--edit <id>`, `--test <id>`, or `--remove <id>`.
+    /// once; `--format otlp` for a collector's `/v1/logs`, `--format syslog` for
+    /// `syslog+tls://host:port`), `--edit <id>`, `--test <id>`, or `--remove <id>`.
     Drains {
         #[command(flatten)]
         target: Target,
         #[arg(long, conflicts_with_all = ["remove", "edit", "test"])]
         add: Option<String>,
+        /// With `--add`: how its lines go: `ndjson` (the default, signed), `otlp` (OpenTelemetry
+        /// logs over OTLP/HTTP JSON) or `syslog` (RFC 5424 over TLS).
+        #[arg(long, requires = "add", value_parser = ["ndjson", "otlp", "syslog"])]
+        format: Option<String>,
         /// With `--add` or `--edit`: what it's sent, comma-separated: `runtime` (the default),
         /// `http` (a request a line), `build`.
         #[arg(long, value_name = "SOURCES")]
@@ -1375,15 +1394,12 @@ async fn carry(req: tokio_tungstenite::tungstenite::handshake::client::Request, 
 
 /// A shell over `…/shell`: the terminal raw, keystrokes and the screen copied both ways, the
 /// window's size sent when it changes.
-async fn ssh(api: &Api, env: &str, instance: Option<&str>) -> anyhow::Result<()> {
+async fn ssh(api: &Api, env: &str, query: &str) -> anyhow::Result<()> {
     use futures::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::{Error as WsError, Message, client::IntoClientRequest};
     let (cols, rows) = term::size().unwrap_or((80, 24));
-    let mut path = format!("{env}/shell?cols={cols}&rows={rows}");
-    if let Some(i) = instance {
-        path.push_str(&format!("&instance={}", enc(i)));
-    }
+    let path = format!("{env}/shell?cols={cols}&rows={rows}{query}");
     let base = api.base.strip_prefix("http").map(|rest| format!("ws{rest}")).unwrap_or_else(|| api.base.clone());
     let mut req = format!("{base}{path}").into_client_request()?;
     if let Some(k) = &api.key {
@@ -3272,14 +3288,29 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
         }
         AppsCmd::Ssh { target, instance } => {
             let svc = service(api, &target).await?;
-            return ssh(api, &env_path(&svc, &target.env), instance.as_deref()).await;
+            let query = instance.map(|i| format!("&instance={}", enc(&i))).unwrap_or_default();
+            return ssh(api, &env_path(&svc, &target.env), &query).await;
         }
         AppsCmd::Proxy { target, local_port } => {
             let svc = service(api, &target).await?;
             let port = svc["run"]["port"].as_u64().unwrap_or(8080) as u16;
             return proxy(api, &env_path(&svc, &target.env), &format!("{}/{}", s(&svc["name"]), target.env), port, local_port.unwrap_or(port)).await;
         }
-        AppsCmd::Run { target, timeout, tasks, command } => {
+        AppsCmd::Run { target, interactive: true, cpu, memory, command, .. } => {
+            let svc = service(api, &target).await?;
+            let mut query = "&console=true".to_string();
+            if !command.is_empty() {
+                query.push_str(&format!("&command={}", enc(&shell_join(&command))));
+            }
+            if let Some(c) = cpu {
+                query.push_str(&format!("&cpu={c}"));
+            }
+            if let Some(m) = memory {
+                query.push_str(&format!("&memory_mb={m}"));
+            }
+            return ssh(api, &env_path(&svc, &target.env), &query).await;
+        }
+        AppsCmd::Run { target, timeout, tasks, command, .. } => {
             let svc = service(api, &target).await?;
             let base = format!("{}/jobs", env_path(&svc, &target.env));
             let job = api.post(&base, json!({ "command": shell_join(&command), "timeout_s": timeout, "tasks": tasks })).await?;
@@ -3694,9 +3725,11 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 json!({ "url": url })
             }
         }
-        AppsCmd::Backups { target, now, restore, yes } => {
+        AppsCmd::Backups { target, now, restore, from, yes } => {
             let svc = service(api, &target).await?;
             let path = format!("{}/volume/backups", env_path(&svc, &target.env));
+            // Another environment's backups are listed where they are.
+            let listed = format!("{}/volume/backups", env_path(&svc, from.as_deref().unwrap_or(&target.env)));
             let when = |b: &Value| b["at"].as_i64().and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
             if now {
                 let b = api.post(&path, json!({})).await?;
@@ -3706,15 +3739,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 b
             } else if let Some(id) = restore {
-                confirm(yes, &target.env, "the volume's current files (they become the backup's)")?;
-                let b = api.post(&format!("{path}/{}/restore", enc(&id)), json!({})).await?;
+                confirm(yes, &target.env, "the volume's current files (they become the backup's; backed up first)")?;
+                let b = api.post(&format!("{path}/{}/restore", enc(&id)), json!({ "from": from })).await?;
                 if !json_out {
                     println!("restored {} from {}; it wakes on the next request", target.env, when(&b));
                     return Ok(());
                 }
                 b
             } else {
-                let v = api.get(&path).await?;
+                let v = api.get(&listed).await?;
                 if !json_out {
                     for b in v.as_array().into_iter().flatten() {
                         println!("{}  {}  {} KiB", s(&b["id"]), when(b), b["size"].as_u64().unwrap_or(0) / 1024);
@@ -3777,7 +3810,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             }
             v
         }
-        AppsCmd::Drains { target, add, source, only_env, only_service, previews, every_env, every_service, header, edit, test, remove } => {
+        AppsCmd::Drains { target, add, format, source, only_env, only_service, previews, every_env, every_service, header, edit, test, remove } => {
             let given = source.is_some() || !only_env.is_empty() || !only_service.is_empty() || previews.is_some() || !header.is_empty();
             if given && add.is_none() && edit.is_none() {
                 bail!("--source, --only-env, --only-service, --previews and --header go with --add or --edit");
@@ -3811,7 +3844,7 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 }
                 settings.insert("headers".into(), Value::Object(h));
             }
-            let row = |d: &Value| format!("{}  {}  {}{}", s(&d["id"]), s(&d["host"]), d["sources"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_default(), d["headers"].as_array().filter(|a| !a.is_empty()).map(|a| format!("  headers {}", a.iter().map(s).collect::<Vec<_>>().join(", "))).unwrap_or_default());
+            let row = |d: &Value| format!("{}  {}{}  {}{}", s(&d["id"]), s(&d["host"]), d["format"].as_str().filter(|f| *f != "ndjson").map(|f| format!("  {f}")).unwrap_or_default(), d["sources"].as_array().map(|a| a.iter().map(s).collect::<Vec<_>>().join(",")).unwrap_or_default(), d["headers"].as_array().filter(|a| !a.is_empty()).map(|a| format!("  headers {}", a.iter().map(s).collect::<Vec<_>>().join(", "))).unwrap_or_default());
             if let Some(id) = test {
                 let r = api.post(&format!("{path}/{}/test", enc(&id)), json!({})).await?;
                 if !json_out {
@@ -3834,10 +3867,15 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 d
             } else if let Some(url) = add {
                 settings.insert("url".into(), json!(url));
+                if let Some(f) = &format {
+                    settings.insert("format".into(), json!(f));
+                }
                 let d = api.post(&path, Value::Object(settings)).await?;
                 if !json_out {
                     println!("{}  {}  secret {}", s(&d["id"]), s(&d["host"]), s(&d["secret"]));
-                    eprintln!("the secret is shown once: check X-Roll-Signature-256 with it");
+                    if format.as_deref().is_none_or(|f| f == "ndjson") {
+                        eprintln!("the secret is shown once: check X-Roll-Signature-256 with it");
+                    }
                     return Ok(());
                 }
                 d

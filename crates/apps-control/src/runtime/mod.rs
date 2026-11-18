@@ -300,7 +300,8 @@ pub trait Runtime: Send + Sync {
     fn reach(&self, url: &str) -> String;
     /// An interactive shell in a running instance (`bash`, else `sh`) on a terminal of
     /// `cols`×`rows`: what's written is typed, what's read is the screen.
-    async fn shell(&self, _name: &str, _cols: u16, _rows: u16) -> anyhow::Result<Shell> {
+    /// A terminal in instance `name`: a login shell, or `command` (`sh -c`) when one is given.
+    async fn shell(&self, _name: &str, _command: Option<&str>, _cols: u16, _rows: u16) -> anyhow::Result<Shell> {
         anyhow::bail!("this runtime has no shells")
     }
     async fn resize_shell(&self, _shell: &str, _cols: u16, _rows: u16) -> anyhow::Result<()> {

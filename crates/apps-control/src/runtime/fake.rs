@@ -507,8 +507,10 @@ impl Runtime for Fake {
         // A fingerprinted chunk of this build's own, as Vite names them.
         let h = image.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, c| (h ^ c as u64).wrapping_mul(0x0100_0000_01b3));
         let chunk = format!("./assets/chunk-{:08x}z9.js", h as u32);
-        let files: [(&str, &[u8]); 9] = [
+        let files: [(&str, &[u8]); 10] = [
             (chunk.as_str(), b"chunk()"),
+            // A real image, for image optimization (64×48 PNG).
+            ("./assets/hero.png", include_bytes!("fake-hero.png")),
             ("./assets/big.js", big.as_bytes()),
             ("./assets/pre.css", b"body{color:#000}"),
             ("./assets/pre.css.br", b"BROTLI-BYTES"),
@@ -659,10 +661,13 @@ impl Runtime for Fake {
     }
 
     /// A shell that says which instance it's in, then echoes what it's sent.
-    async fn shell(&self, name: &str, cols: u16, rows: u16) -> anyhow::Result<super::Shell> {
+    async fn shell(&self, name: &str, command: Option<&str>, cols: u16, rows: u16) -> anyhow::Result<super::Shell> {
         anyhow::ensure!(self.state(name) == Some(FakeState::Running), "{name} isn't running");
         let (ours, theirs) = tokio::io::duplex(64 << 10);
-        let banner = format!("fake shell in {name} ({cols}x{rows})\r\n");
+        let banner = match command {
+            Some(c) => format!("fake shell in {name} ({cols}x{rows}) running {c}\r\n"),
+            None => format!("fake shell in {name} ({cols}x{rows})\r\n"),
+        };
         tokio::spawn(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let (mut r, mut w) = tokio::io::split(theirs);
