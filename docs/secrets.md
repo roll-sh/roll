@@ -1103,8 +1103,10 @@ are letters and digits, so nothing needs escaping, and names are quoted (their c
 refused statement holding a password reports a syntax error by its kind alone (the server quotes
 the statement in one) and any other with the password, or its hash, cut out.
 Neither has an expiry for a role: ending the lease gives the role a password nobody knows, then
-`DROP ROLE IF EXISTS` (Cassandra keeps a dropped role's credentials cached for up to
-`credentials_validity`, 2 s by default, but takes a new password at once). Registering checks that
+`DROP ROLE IF EXISTS`. Cassandra caches each role's credentials on each node for up to
+`credentials_validity` (2 s by default), so a login with an ended lease's password can still work
+for that long, however the lease ends; set `credentials_validity` lower on the servers to shorten
+it (ScyllaDB has no such window). Registering checks that
 both roles exist and can log in (`LIST ROLES OF`) and that the group exists; a server that lets
 anyone in (`AllowAllAuthenticator`) is refused. The admin needs a superuser, or `CREATE`, `ALTER`,
 `DROP`, `AUTHORIZE` and `DESCRIBE` on `ALL ROLES` and `SELECT` on `system_schema` for the keyspace check; the server needs `PasswordAuthenticator`,
