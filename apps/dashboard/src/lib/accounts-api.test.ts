@@ -14,6 +14,15 @@ describe("activityText", () => {
   });
 });
 
+describe("second-factor resets in the security log", () => {
+  const e = (a: Partial<Activity>): Activity => ({ at: 0, action: "sign_in", actor: "usr_me", ok: true, status: 200, ...a });
+  it("say who asked and who decided", () => {
+    expect(activityText(e({ action: "recovery.request" }), "usr_me")).toBe("You asked an admin to reset your second factor");
+    expect(activityText(e({ action: "recovery.approve", actor: "usr_admin" }), "usr_me")).toBe("Your second factor was reset by an admin");
+    expect(activityText(e({ action: "recovery.deny", actor: "operator" }), "usr_me")).toBe("The operator declined to reset your second factor");
+  });
+});
+
 describe("refused changes in the security log", () => {
   const e = (a: Partial<Activity>): Activity => ({ at: 0, action: "sign_in", actor: "usr_me", ok: true, status: 200, ...a });
   it("say what was refused, never what it would have done", () => {

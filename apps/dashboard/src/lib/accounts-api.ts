@@ -120,6 +120,12 @@ export function activityText(e: Activity, me: string): string {
       return d.via === "provisioned" ? "Your account was made by your company's sign-in" : "Your account was made from your invite";
     case "identity.link":
       return e.ok ? `${how(d.method) || "A sign-in"} was linked to your account` : `Linking ${how(d.method)} was refused`;
+    case "recovery.request":
+      return "You asked an admin to reset your second factor";
+    case "recovery.approve":
+      return `Your second factor was reset by ${by}`;
+    case "recovery.deny":
+      return `${by === "you" ? "You" : by[0].toUpperCase() + by.slice(1)} declined to reset your second factor`;
     case "reauth":
       return e.ok ? `You confirmed it's you with ${how(d.method)}` : `Confirming it's you with ${how(d.method)} was refused`;
     case "scim.update":
@@ -142,6 +148,21 @@ export function activityText(e: Activity, me: string): string {
 
 /** Which sign-ins this roll offers (`sso`: a company's provider answers for some domains). */
 export type Providers = { email: boolean; github: boolean; google: boolean; sso?: boolean; passkey?: boolean };
+
+/** A second-factor reset someone asked an admin for (docs/accounts.md, "Recovery"). */
+export interface ResetRequest {
+  id: string;
+  user: string;
+  email: string;
+  handle: string;
+  reason: string;
+  ip: string | null;
+  user_agent: string | null;
+  created_at: number;
+  state: "pending" | "approved" | "denied";
+  decided_by: string | null;
+  decided_at: number | null;
+}
 
 /** A passkey of yours (never its key): `synced` when your devices share it (iCloud, Google). */
 export interface Passkey {
@@ -215,6 +236,9 @@ export const accountsApi = {
   addPasskey: (id: string, name: string, credential: unknown) => call<Passkey>("POST", "/me/passkeys", { id, name, credential }),
   renamePasskey: (id: string, name: string) => call<Passkey>("PATCH", `/me/passkeys/${encodeURIComponent(id)}`, { name }),
   removePasskey: (id: string) => call<null>("DELETE", `/me/passkeys/${encodeURIComponent(id)}`),
+  requestReset: (reason: string) => call<{ id: string; state: string }>("POST", "/signin/reset-request", { reason }),
+  resetRequests: () => call<ResetRequest[]>("GET", "/reset-requests"),
+  decideReset: (id: string, approve: boolean) => call<ResetRequest>("POST", `/reset-requests/${encodeURIComponent(id)}/${approve ? "approve" : "deny"}`),
   reauthInfo: () => call<{ fresh_until: number; methods: ("totp" | "passkey" | "email")[] }>("GET", "/me/reauth"),
   reauthEmail: () => call<{ challenge: string }>("POST", "/me/reauth/email"),
   reauthPasskeyOptions: () => call<PasskeyOptions<{ challenge: string; rpId: string; allowCredentials?: { type: "public-key"; id: string }[] }>>("POST", "/me/reauth/passkey/options"),
