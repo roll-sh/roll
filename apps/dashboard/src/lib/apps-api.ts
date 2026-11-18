@@ -32,7 +32,7 @@ export type Source =
   | { kind: "git"; url: string; root?: string };
 
 export interface Build {
-  builder: "auto" | "dockerfile";
+  builder: "auto" | "dockerfile" | "functions";
   dockerfile?: string;
   install?: string;
   build?: string;
@@ -102,6 +102,8 @@ export interface Run {
   tcp?: boolean;
   /** A deployment that crash-loops within ten minutes of going live is replaced by the one before it. */
   rollback_on_crash?: boolean;
+  /** Build the same revision again, without the cache, when one of its base images moves. */
+  rebuild_on_base?: boolean;
   /** A worker follows `group`'s lag on `stream` (a roll stream of its project): one instance per `per_instance` behind. */
   scale?: { stream: string; group: string; per_instance?: number };
   /** Commands on a schedule, each a job of the live deployment at its due times (Heroku Scheduler); at most 20. */
@@ -132,6 +134,15 @@ export interface EnvironmentSummary {
   latest: { id: string; status: DeployStatus } | null;
   /** What wants its owner's eye: a crash loop, the project capped by its spend limit, paused, maintenance, its latest deploy failed. */
   attention?: ("crash_loop" | "capped" | "paused" | "held" | "maintenance" | "deploy_failed")[];
+}
+
+/** A deleted service, kept stopped for a restore until `purge_at` (ms), then deleted for good. */
+export interface DeletedService {
+  id: string;
+  project: string;
+  name: string;
+  deleted_at: number;
+  purge_at: number;
 }
 
 export interface Service {
@@ -281,7 +292,7 @@ export function describePending(p: Pending): string | null {
 
 export interface FirewallRule {
   /** `limit`: let in at `per_minute` a client, a 429 past it. */
-  action: "allow" | "deny" | "limit";
+  action: "allow" | "deny" | "limit" | "challenge";
   per_minute?: number;
   burst?: number;
   /** A path, or a prefix ending in `*`. */
@@ -299,7 +310,7 @@ export function parseFirewall(text: string): FirewallRule[] {
     .filter((l) => l && !l.startsWith("#"))
     .map((l) => {
       const [action, ...words] = l.split(/\s+/);
-      const rule: FirewallRule = { action: action === "allow" ? "allow" : action === "limit" ? "limit" : "deny" };
+      const rule: FirewallRule = { action: action === "allow" ? "allow" : action === "limit" ? "limit" : action === "challenge" ? "challenge" : "deny" };
       let rest = words;
       // `limit N[:BURST] …`
       if (rule.action === "limit") {
@@ -405,6 +416,21 @@ export function parseAllowList(text: string): IpRule[] {
     });
 }
 
+/** How an environment differs from another (`GET …/diff?from=`): never a value. */
+export interface EnvironmentDiff {
+  from: string;
+  to: string;
+  variables: {
+    /** `from`'s own variables this one lacks (a sealed one can't be copied). */
+    missing: { name: string; sealed: boolean }[];
+    extra: string[];
+    /** Set in both with other values; null: the caller can't reveal both, so isn't told. */
+    differ: string[] | null;
+  };
+  /** Each setting that differs, and the `PUT …/environments/{to}` body that makes it `from`'s. */
+  settings: { field: string; from: unknown; to: unknown; put: EnvironmentPut }[];
+}
+
 export interface EnvironmentPut {
   branch?: string | null;
   /** Its name on the roll domain (`<hostname>.<domain>`): the old one stops answering. */
@@ -424,6 +450,8 @@ export interface EnvironmentPut {
   traces?: boolean;
   /** Its pages measure their Web Vitals (a tag roll adds). */
   vitals?: boolean;
+  /** Its deploys post commit statuses and GitHub Deployments (false: someone else reports them). */
+  report?: boolean;
   /** What its code may reach from the next deploy: roll and `hosts` only, or anything. null: open. */
   egress?: Egress | null;
   /** Paused (Render's Suspend): nothing runs, wakes, deploys or is scheduled until false. */
@@ -521,6 +549,9 @@ export interface Environment extends EnvironmentSummary {
   traces?: boolean;
   /** Its pages measure their Web Vitals for roll. */
   vitals?: boolean;
+  /** Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
+   *  someone else reports them (roll previews' `pv-` environments). */
+  report?: boolean;
   /** People signed in to roll who can open its project get in. */
   signed_in?: boolean;
   /** What its code may reach: roll and the listed hosts (`roll`), or anything (`open`). */
@@ -531,6 +562,10 @@ export interface Environment extends EnvironmentSummary {
   wait_for_ci?: boolean;
   /** The push (sha) waiting for its checks, if one is. */
   waiting_for_ci?: string | null;
+  /** `egress` roll: its builds get no secret values. */
+  build_closed?: boolean;
+  /** Base images the live deployment was built on that have moved since in their registries. */
+  base_updated?: string[];
   /** Paused: nothing runs, wakes, deploys or is scheduled. Absent: not paused. */
   paused?: boolean;
   /** Deploys are held after this rollback: pushes, hooks and tag moves aren't put live until a person deploys or resumes them. */
@@ -574,7 +609,7 @@ export interface NewDeploy {
 export type DeployTrigger = "push" | "manual" | "rollback" | "upload" | "api" | "settings" | "promote";
 
 export interface Plan {
-  provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "static";
+  provider: "dockerfile" | "deno" | "node" | "python" | "go" | "rust" | "ruby" | "php" | "java" | "dotnet" | "elixir" | "static" | "functions";
   framework: string | null;
   language_version: string | null;
   install: string | null;
@@ -587,6 +622,8 @@ export interface Plan {
   spa?: boolean;
   /** Datastores the code has client libraries for (New service offers to make and link them). */
   uses?: ("postgres" | "redis")[];
+  /** A static site's function directories (`netlify/functions`, `api`) the `functions` builder runs. */
+  functions?: string[];
 }
 
 export interface RootCandidate {
@@ -817,6 +854,18 @@ export interface Metrics {
   egress_bytes: number[];
   /** Requests a minute that found every instance busy at `max_instances` (saturation). */
   over_capacity: number[];
+  /** Each instance's own last hour by minute (those it has now), whatever the range. */
+  by_instance?: InstanceSeries[];
+}
+
+/** One instance's last hour (Railway's per replica): cores in use on average each minute, and
+ *  the minute's peak memory. */
+export interface InstanceSeries {
+  instance: string;
+  deployment: string;
+  minutes: number[];
+  cpu: number[];
+  memory_bytes: number[];
 }
 
 export interface Usage {
@@ -847,6 +896,7 @@ export interface NotifyTarget {
 
 export type NotifyEvent =
   | "deploy.failed"
+  | "deploy.base_updated"
   | "rollout.waiting"
   | "deploy.ready"
   | "crash_loop"
@@ -997,7 +1047,10 @@ export const appsApi = {
   create: (body: NewService) => call<Service>("POST", "/v1/apps/services", body),
   service: (id: string) => call<Service>("GET", svc(id)),
   update: (id: string, patch: ServicePatch) => call<Service>("PATCH", svc(id), patch),
+  /** Deletes it until it's restored (48 hours); a deleted service's delete deletes it for good. */
   remove: (id: string) => call<null>("DELETE", svc(id)),
+  deletedServices: (project?: string) => call<DeletedService[]>("GET", `/v1/apps/services${qs({ project, deleted: "true" })}`),
+  restoreService: (id: string) => call<Service>("POST", `${svc(id)}/restore`),
 
   links: (id: string) => call<Link[]>("GET", `${svc(id)}/links`),
   /** `all`: every kind of event (its timeline), not only what people changed. */
@@ -1072,8 +1125,12 @@ export const appsApi = {
   /** The values in the clear (the `reveal` action). */
   reveal: (id: string, e: string) => call<Record<string, string>>("GET", `${env(id, e)}/variables/values`),
   /** `seal`: names set here or already set, sealed for good (a new value keeps them sealed). */
-  setVariables: (id: string, e: string, change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null> }) =>
-    call<Variables>("PATCH", `${env(id, e)}/variables`, change),
+  setVariables: (
+    id: string,
+    e: string,
+    change: { set?: Record<string, string>; unset?: string[]; seal?: string[]; files?: Record<string, string | null>; copy_from?: string; copy?: string[] },
+  ) => call<Variables>("PATCH", `${env(id, e)}/variables`, change),
+  diff: (id: string, e: string, from: string) => call<EnvironmentDiff>("GET", `${env(id, e)}/diff${qs({ from })}`),
 
   logs: (id: string, e: string, q: LogQuery = {}) => call<LogLine[]>("GET", `${env(id, e)}/logs${qs({ tail: q.tail, since: q.since })}`),
   /** Lines that contain `q` (any case), back through the stored logs (7 days), newest last. */
@@ -1415,4 +1472,23 @@ export function deployChange(
       }
     }
   return { pending, finished, seen };
+}
+
+/** Where each platform's functions answer, to route them to their service. */
+export const FUNCTION_ROUTES: Record<string, string> = { "netlify/functions": "/.netlify/functions/*", api: "/api/*" };
+
+/**
+ * A static site's functions, run (Netlify Functions, Vercel's `api/`): a service of them from the
+ * same source (the `functions` builder), and the site's environment routing their paths to it.
+ * Its environment of the same name answers, so the site's `env` must be one the new service has
+ * (a new service has production).
+ */
+export async function runFunctions(siteId: string, env: string, dirs: string[]): Promise<Service> {
+  const site = await appsApi.service(siteId);
+  const fns = await appsApi.create({ project: site.project, name: `${site.name}-fn`.slice(0, 40), source: site.source, build: { ...site.build, builder: "functions" }, run: { port: 8080 } });
+  const current = await appsApi.environment(siteId, env);
+  const wanted = dirs.map((d) => FUNCTION_ROUTES[d]).filter((p): p is string => !!p);
+  const routes = [...(current.routes ?? []).filter((r) => !wanted.includes(r.path)), ...wanted.map((path) => ({ path, service: fns.name }))];
+  await appsApi.putEnvironment(siteId, env, { routes });
+  return fns;
 }

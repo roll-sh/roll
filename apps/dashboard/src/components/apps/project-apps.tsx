@@ -2,13 +2,14 @@ import { Download } from "lucide-react";
 import { appsApi } from "@/lib/apps-api";
 import { useWorkspace } from "@/lib/workspace-store";
 import { btn, Panel } from "../ui";
+import { DeletedPanel } from "./deleted";
 import { DrainsPanel } from "./drains";
 import { NotificationsPanel } from "./notifications";
 import { RunnerError, useRunner } from "./shared";
 import { SpendPanel } from "./spend";
 
 /** A project's roll apps settings, which cover all of its services: where its notifications
- *  go, its log drains, and its spending limits. The same panels as a service's Settings → The
+ *  go, its log drains, its spending limits, and its recently deleted services. The same panels as a service's Settings → The
  *  project. */
 export function ProjectApps({ project, projectName }: { project: string; projectName: string }) {
   const runner = useRunner(() => {});
@@ -43,6 +44,7 @@ export function ProjectApps({ project, projectName }: { project: string; project
       <NotificationsPanel project={project} projectName={projectName} runner={runner} />
       <DrainsPanel project={project} projectName={projectName} runner={runner} />
       <SpendPanel project={project} projectName={projectName} runner={runner} />
+      <DeletedPanel project={project} projectName={projectName} runner={runner} />
       <RunnerError runner={runner} />
     </div>
   );
