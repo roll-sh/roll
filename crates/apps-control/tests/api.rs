@@ -445,13 +445,16 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
         c.visitor_recheck = Duration::ZERO;
     })
     .await;
-    struct Allowed(std::sync::atomic::AtomicBool);
+    struct Allowed(std::sync::atomic::AtomicBool, std::sync::atomic::AtomicBool);
     impl apps_control::integrations::Visitors for Allowed {
         fn may_open(&self, user: &str, _project: &str) -> bool {
             user == "usr_ada" && self.0.load(std::sync::atomic::Ordering::SeqCst)
         }
+        fn session_live(&self, _user: &str, session: &str) -> bool {
+            session == "ses_1" && self.1.load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
-    let allowed = Arc::new(Allowed(true.into()));
+    let allowed = Arc::new(Allowed(true.into(), true.into()));
     w.apps.set_visitors(allowed.clone());
     let (svc, _) = image_service(&w, "admin", json!({"port": 80})).await;
     let id = svc["id"].as_str().unwrap().to_string();
@@ -496,6 +499,11 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
     };
     assert_eq!(ask(None, to.clone()).await.0, StatusCode::FORBIDDEN);
     assert_eq!(ask(Some("usr_ada"), "https://evil.example/".into()).await.0, StatusCode::BAD_REQUEST);
+    // The ticket goes to the environment's own scheme and port, whatever `to` names: never over
+    // another scheme, nor to whatever listens on another port of the address.
+    let origin = svc["environments"][0]["url"].as_str().unwrap().trim_end_matches('/').to_string();
+    let (_, t) = ask(Some("usr_ada"), format!("https://{h}:9999/dash?x=1")).await;
+    assert!(t["url"].as_str().unwrap().starts_with(&format!("{origin}/__roll/visit?ticket=")), "{t} vs {origin}");
     let (st, t) = ask(Some("usr_ada"), to.clone()).await;
     assert_eq!(st, StatusCode::OK, "{t}");
     let url = t["url"].as_str().unwrap();
@@ -520,6 +528,14 @@ async fn a_signed_in_person_gets_into_a_gated_environment() {
     let (_, hd, _) = get(url[url.find("/__roll/visit").unwrap()..].to_string(), None, true).await;
     let session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
     assert_eq!(get("/dash".into(), Some(session.clone()), true).await.0, StatusCode::OK);
+    // The roll login that let them in ends (signed out, or revoked): so does the session.
+    allowed.1.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(get("/dash".into(), Some(session.clone()), true).await.0, StatusCode::FOUND, "a revoked login's session ends");
+    allowed.1.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (_, t) = ask(Some("usr_ada"), to.clone()).await;
+    let url = t["url"].as_str().unwrap();
+    let (_, hd, _) = get(url[url.find("/__roll/visit").unwrap()..].to_string(), None, true).await;
+    let session = hd["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
     call(&w.api, "PUT", &env, Some(json!({"access": {"signed_in": true}}))).await;
     assert_eq!(get("/dash".into(), Some(session), true).await.0, StatusCode::FOUND);
 }

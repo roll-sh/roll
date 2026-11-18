@@ -20,6 +20,7 @@ getrandom.workspace = true
 hex.workspace = true
 percent-encoding.workspace = true
 reqwest = { workspace = true, features = ["rustls", "form"] }
+ring.workspace = true
 roll-auth.workspace = true
 roll-net.workspace = true
 roll-oidc.workspace = true
@@ -33,7 +34,6 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-ring.workspace = true
 http-body-util.workspace = true
 url.workspace = true
 tempfile.workspace = true
