@@ -3063,7 +3063,9 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
    database engine has them; two roles taking turns and a login per lease, each checked live
    (Elasticsearch 9.5.5, OpenSearch 3.9.0, Cassandra 5.0.9, ScyllaDB 2026.3.3). Cassandra's
    credentials cache let a dropped role in for ~1.6 s, so a lease's end sets a password nobody knows
-   first. Next: OpenSearch's narrower permission set, and Couchbase and Oracle (Vault has both).
+   first. All four go through a gateway too (#166, checked against the real servers). Building: their
+   admin's own password rotated (`rotate-admin` fell through to Postgres's statement for them).
+   Next: OpenSearch's narrower permission set, and Couchbase and Oracle (Vault has both).
 4c. **MongoDB Atlas through its Admin API** (#173, on #136): Atlas refuses the user commands on
    every tier and rolls back changes made another way, so the MongoDB engine never could rotate an
    Atlas login (it now refuses Atlas hosts and points here). Users taking turns and a user per
