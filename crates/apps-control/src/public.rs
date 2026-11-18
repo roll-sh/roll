@@ -58,8 +58,7 @@ async fn otlp(apps: Arc<Apps>, req: Request) -> Response {
         return (StatusCode::NOT_FOUND, "").into_response();
     }
     let (id, env, token) = (id.clone(), env.clone(), token.clone());
-    let sid = id.clone();
-    if apps.db(move |s| s.service(&sid)).await.is_err() {
+    if !apps.otlp_token_ok(&id, &env, &token).await {
         return (StatusCode::NOT_FOUND, "").into_response();
     }
     let cluster = apps.deps.cluster.clone();
@@ -556,7 +555,7 @@ impl SiteRequest {
 
 async fn serve_site(apps: &Arc<Apps>, live: &Arc<crate::live::EnvLive>, tpl: &crate::live::Template, req: SiteRequest, service: &str, env: &str, began: Instant) -> Response {
     let key = tpl.site.clone().unwrap_or_default();
-    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: req.seen, span: None };
+    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: req.seen, span: None, deployment: Default::default() };
     let request_id = req.request_id.as_deref().map(|v| v.chars().take(64).collect()).unwrap_or_else(|| crate::model::random(16));
     let done = |status: u16, bytes: u64| {
         live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, status, bytes);
@@ -934,7 +933,7 @@ async fn proxy(apps: Arc<Apps>, service: &str, env: &str, deployment: Option<&st
         // 5xx alert for an environment its owner stopped.
         let metered = if matches!(by, "paused" | "maintenance") { 0 } else { status };
         apps.live(service, env).meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, metered, 0);
-        Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen, span: None }.write_by(status, began, by);
+        Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen, span: None, deployment: Default::default() }.write_by(status, began, by);
     }
     let mut r = their_page(&apps, service, env, r).await;
     // A preview's answers (and a deployment's own URL, a copy of what's live) are never indexed,
@@ -977,8 +976,61 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     }
     // Its firewall rules (a 403 that says nothing of them).
     let ua = req.headers().get(header::USER_AGENT).map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned()).unwrap_or_default();
-    if !ours && !gate.firewall.is_empty() && !gate.firewall_allows(req.method().as_str(), &crate::model::normal_path(req.uri().path()), &ua) {
-        return by("firewall", page(StatusCode::FORBIDDEN, "Not allowed", "This service doesn't answer this request."));
+    // A challenge page's answer, on the environment's own host: checked, then a pass.
+    if !ours && req.uri().path() == crate::challenge::PATH && req.method() == axum::http::Method::POST
+        && let Some(key) = &gate.challenge_key
+    {
+        let net = crate::challenge::network(crate::live::client_ip(client.as_deref()));
+        let Ok(body) = axum::body::to_bytes(req.into_body(), 1024).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
+        let (mut seed, mut nonce) = (String::new(), String::new());
+        for (k, v) in url::form_urlencoded::parse(&body) {
+            match k.as_ref() {
+                "seed" => seed = v.into_owned(),
+                "nonce" => nonce = v.into_owned(),
+                _ => {}
+            }
+        }
+        if !crate::challenge::answers(key, &net, code_sql::now_ms(), &seed, &nonce) {
+            return by("challenge", StatusCode::FORBIDDEN.into_response());
+        }
+        let until = code_sql::now_ms() / 1000 + crate::challenge::PASS_S;
+        let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
+        let cookie = format!("{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}", crate::challenge::cookie(env), crate::challenge::pass(key, &net, until), crate::challenge::PASS_S);
+        let mut r = StatusCode::NO_CONTENT.into_response();
+        if let Ok(c) = HeaderValue::from_str(&cookie) {
+            r.headers_mut().insert(header::SET_COOKIE, c);
+        }
+        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return by("challenge", r);
+    }
+    if !ours && !gate.firewall.is_empty() {
+        match gate.firewall_verdict(req.method().as_str(), &crate::model::normal_path(req.uri().path()), &ua) {
+            crate::live::Verdict::Allow => {}
+            // A browser with this hour's pass goes on (the cookie is roll's: the app never sees it);
+            // anything else gets the page that earns one.
+            crate::live::Verdict::Challenge => {
+                let key = gate.challenge_key.clone().unwrap_or_default();
+                let net = crate::challenge::network(crate::live::client_ip(client.as_deref()));
+                let passed = take_cookie(&mut req, &crate::challenge::cookie(env)).is_some_and(|c| crate::challenge::passes(&key, &net, code_sql::now_ms() / 1000, &c));
+                if !passed {
+                    let to = crate::visit::local_path(req.uri().path_and_query().map_or("/", |p| p.as_str()));
+                    let mut r = (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], crate::challenge::page(&crate::challenge::seed(&key, &net, code_sql::now_ms()), &to)).into_response();
+                    r.extensions_mut().insert(RollPage::Error);
+                    return by("challenge", r);
+                }
+            }
+            crate::live::Verdict::Deny => return by("firewall", page(StatusCode::FORBIDDEN, "Not allowed", "This service doesn't answer this request.")),
+            // A rule's own limit (Vercel's rate-limit rules): its bucket per client, before anything wakes.
+            crate::live::Verdict::Limit(bucket, limit) => {
+                if let Err(wait) = apps.live(service, env).take_token_in(bucket, crate::live::client_ip(client.as_deref()), &limit) {
+                    let mut r = page(StatusCode::TOO_MANY_REQUESTS, "Slow down", "Too many requests from your address. Try again in a moment.");
+                    if let Ok(v) = HeaderValue::from_str(&(wait.as_secs_f64().ceil() as u64).max(1).to_string()) {
+                        r.headers_mut().insert(header::RETRY_AFTER, v);
+                    }
+                    return by("rate_limit", r);
+                }
+            }
+        }
     }
     // Its rate limit per client, before anything wakes (a cache refresh is roll's, not a client's).
     if let Some(limit) = &gate.rate
@@ -994,8 +1046,9 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     }
     // A private environment answers only visitors with its token, before anything wakes. A
     // site's rewrite (a header only roll sets) was let in by the site, by the project's own rule.
-    let rewritten = req.headers().contains_key(VIA_SITE) || ours;
-    if !rewritten && let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
+    // A site's rewrite was let in by the site; roll's own scheduled call by roll.
+    let rewritten = req.headers().contains_key(VIA_SITE);
+    if !rewritten && !ours && let Some(turned_away) = check_access(&apps, service, env, &mut req).await {
         // The access link's own redirect is a way in, not a refusal.
         return match turned_away.status() {
             StatusCode::UNAUTHORIZED => by("private", turned_away),
@@ -1007,7 +1060,9 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // Its routes (Vercel's rewrites to another project): the first that takes the path sends the
     // request to that service's environment of the same name, the path as it came, past the
     // target's gates as a site's rewrite is (this environment's let it in). Never again from there.
+    // Never roll's own scheduled call: its `CRON_SECRET` is this service's, not the route's.
     if !req.headers().contains_key(VIA_SITE)
+        && !ours
         && let Some(r) = gate.routes.iter().find(|r| r.takes(req.uri().path()))
     {
         let pq = req.uri().path_and_query().map_or("/", |p| p.as_str()).to_string();
@@ -1090,6 +1145,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         && live.canary().is_none()
         && !feedback.feedback
         && !rewritten
+        && !ours
         && matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
         && !req.headers().contains_key(header::AUTHORIZATION)
         && !is_upgrade(req.headers())
@@ -1106,7 +1162,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
             let bytes = r.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).unwrap_or(0);
             let bytes = if head { 0 } else { bytes };
             live.meter.lock().request(code_sql::now_ms(), began.elapsed().as_secs_f64() * 1000.0, r.status().as_u16(), bytes);
-            Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span: None }.write_cached(r.status().as_u16(), began, bytes);
+            Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span: None, deployment: Default::default() }.write_cached(r.status().as_u16(), began, bytes);
         };
         match hit {
             Some(crate::resp_cache::Hit::Fresh(r)) => {
@@ -1181,7 +1237,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     // The access line's method and path (no query: it can carry tokens), and with traces on
     // the proxy's own span in the request's trace (the wait, a wake, the answer).
     let span = gate.traces.then(|| ProxySpan::start(&apps, service, env, req.headers()));
-    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span };
+    let access = Access { log: apps.logs.sink(format!("http:{service}/{env}"), crate::logs::Stream::Http), seen: Seen::of(&req), span, deployment: Default::default() };
     let pq = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
     let Ok(uri) = format!("http://{}{pq}", lease.addr).parse::<Uri>() else {
         return (StatusCode::BAD_REQUEST, "bad request").into_response();
@@ -1243,6 +1299,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         && axum::body::HttpBody::size_hint(req.body()).exact() == Some(0);
     let replay = bodiless.then(|| (req.method().clone(), pq.clone(), req.headers().clone(), req.version()));
     let (mut instance, mut cold, mut waited_ms) = (lease.inst.name.clone(), lease.cold, lease.waited.as_millis() as u64);
+    *access.deployment.lock() = Some(lease.inst.deployment.clone());
     let send = async { if h2 { apps.client_h2.request(req).await } else { apps.client.request(req).await } };
     // Its timeout runs to the answer's head: an upgrade, or a stream that has begun, is the
     // app's to keep.
@@ -1281,6 +1338,7 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
                 Ok(l) => {
                     lease = l;
                     (instance, cold, waited_ms) = (lease.inst.name.clone(), lease.cold, lease.waited.as_millis() as u64);
+                    *access.deployment.lock() = Some(lease.inst.deployment.clone());
                     let mut r = Request::new(Body::empty());
                     (*r.method_mut(), *r.headers_mut(), *r.version_mut()) = (method, headers, version);
                     *r.uri_mut() = format!("http://{}{pq}", lease.addr).parse().unwrap_or_default();
@@ -1471,6 +1529,9 @@ struct Access {
     log: crate::logs::LogSink,
     seen: Seen,
     span: Option<ProxySpan>,
+    /// The deployment whose instance answered, once a lease names it (a canary's or the live
+    /// one's): its line says it, so metrics split by deployment.
+    deployment: parking_lot::Mutex<Option<String>>,
 }
 
 /// The proxy's own span in a request's trace (traces on, Cloud Run's): it continues the
@@ -1635,6 +1696,9 @@ impl Access {
             "bytes": bytes, "instance": instance, "request_id": request_id, "cold": cold, "waited_ms": waited_ms,
             "ip": s.ip, "ua": s.ua, "host": s.host,
         });
+        if let Some(d) = self.deployment.lock().as_deref() {
+            line["deployment"] = serde_json::json!(d);
+        }
         s.mark(&mut line);
         self.log.line(line.to_string());
         if let Some(p) = &self.span {

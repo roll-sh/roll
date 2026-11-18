@@ -316,6 +316,7 @@ mod tests {
                     loaded_on: None,
                     wake_at: None,
                     owner: None,
+                    restored_at: None,
                 },
                 crate::store::Caps::NONE,
             )

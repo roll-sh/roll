@@ -81,9 +81,54 @@ pub struct Inst {
     /// The stop a crash started: a start of the same instance waits for it, so it never stops
     /// the restarted process.
     stopping: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Its last hour by minute (Railway's per replica): `(minute, CPU seconds, seconds measured,
+    /// peak memory bytes)`, from the reaper's samples.
+    minutes: Mutex<std::collections::VecDeque<(i64, f64, f64, u64)>>,
+}
+
+/// An instance's last hour by minute ([`EnvLive::by_instance`]).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct InstanceSeries {
+    pub instance: String,
+    pub deployment: String,
+    pub minutes: Vec<i64>,
+    /// Cores in use, on average over each minute.
+    pub cpu: Vec<f64>,
+    /// The minute's peak.
+    pub memory_bytes: Vec<u64>,
 }
 
 impl Inst {
+    /// One sample: `cpu_s` CPU seconds over `elapsed` seconds, and memory in use now.
+    fn record(&self, minute: i64, cpu_s: f64, elapsed: f64, memory: u64) {
+        let mut m = self.minutes.lock();
+        match m.back_mut() {
+            Some(last) if last.0 == minute => {
+                last.1 += cpu_s;
+                last.2 += elapsed;
+                last.3 = last.3.max(memory);
+            }
+            _ => m.push_back((minute, cpu_s, elapsed, memory)),
+        }
+        while m.front().is_some_and(|f| f.0 <= minute - 60) {
+            m.pop_front();
+        }
+    }
+
+    fn series(&self) -> Option<InstanceSeries> {
+        let m = self.minutes.lock();
+        if m.is_empty() {
+            return None;
+        }
+        Some(InstanceSeries {
+            instance: self.name.clone(),
+            deployment: self.deployment.clone(),
+            minutes: m.iter().map(|x| x.0).collect(),
+            cpu: m.iter().map(|x| if x.2 > 0.0 { (x.1 / x.2 * 1000.0).round() / 1000.0 } else { 0.0 }).collect(),
+            memory_bytes: m.iter().map(|x| x.3).collect(),
+        })
+    }
+
     fn new(name: String, deployment: String) -> Arc<Inst> {
         Arc::new(Inst {
             name,
@@ -98,6 +143,7 @@ impl Inst {
             private_checked: Mutex::new(None),
             health_fails: AtomicU32::new(0),
             stopping: Mutex::new(None),
+            minutes: Mutex::new(std::collections::VecDeque::new()),
         })
     }
 
@@ -236,6 +282,21 @@ pub struct Gate {
     pub traces: bool,
     /// Its pages carry roll's Web Vitals tag.
     pub vitals: bool,
+    /// Its challenge rules' key ([`crate::challenge`]), when it has such a rule.
+    pub challenge_key: Option<Vec<u8>>,
+}
+
+/// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's) and whose.
+type BucketKey = (u16, Option<std::net::IpAddr>);
+
+/// A firewall's answer: in, a 403, or in under a rule's own limit (its bucket, 1 + its index).
+#[derive(Debug, PartialEq)]
+pub enum Verdict {
+    Allow,
+    Deny,
+    Limit(u16, crate::model::RateLimit),
+    /// In with a pass ([`crate::challenge`]); else its page.
+    Challenge,
 }
 
 /// Clients a rate limit remembers at most (a full bucket is the same as none, so those go first).
@@ -244,8 +305,16 @@ const MAX_BUCKETS: usize = 100_000;
 impl Gate {
     /// Whether its firewall lets the request in: the first rule that matches decides; none
     /// matching, it does.
-    pub fn firewall_allows(&self, method: &str, path: &str, user_agent: &str) -> bool {
-        self.firewall.iter().find(|r| r.matches(method, path, user_agent)).is_none_or(|r| r.action == crate::model::FirewallAction::Allow)
+    /// What its firewall says of the request: the first rule that matches decides; none lets it
+    /// in.
+    pub fn firewall_verdict(&self, method: &str, path: &str, user_agent: &str) -> Verdict {
+        match self.firewall.iter().enumerate().find(|(_, r)| r.matches(method, path, user_agent)) {
+            None => Verdict::Allow,
+            Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
+            Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(i as u16 + 1, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
+            Some((_, r)) if r.action == crate::model::FirewallAction::Challenge => Verdict::Challenge,
+            Some(_) => Verdict::Deny,
+        }
     }
 
     /// Whether `client` (the address the fleet vouches for) gets in. None, with a list: no.
@@ -384,7 +453,8 @@ pub struct EnvLive {
     gate: Mutex<Option<Arc<Gate>>>,
     gate_gen: AtomicU64,
     /// Each client's tokens and when they were counted (its rate limit; None: no address).
-    buckets: Mutex<HashMap<Option<std::net::IpAddr>, (f64, Instant)>>,
+    /// Each client's tokens, by bucket: 0 the environment's rate limit, 1 + i firewall rule i's.
+    buckets: Mutex<HashMap<BucketKey, (f64, Instant)>>,
     /// CPU its awake instances used and could have used, per tick, for `cpu_window` (only what
     /// the runtime measures).
     cpu_samples: Mutex<std::collections::VecDeque<(Instant, f64, f64)>>,
@@ -945,6 +1015,11 @@ impl EnvLive {
     /// One request from `client` under `limit`: let through (a token taken), or how long until
     /// the next token.
     pub fn take_token(&self, client: Option<std::net::IpAddr>, limit: &crate::model::RateLimit) -> Result<(), Duration> {
+        self.take_token_in(0, client, limit)
+    }
+
+    /// [`Self::take_token`] in one of its buckets (a firewall rule's own: 1 + its index).
+    pub fn take_token_in(&self, bucket: u16, client: Option<std::net::IpAddr>, limit: &crate::model::RateLimit) -> Result<(), Duration> {
         let (rate, burst) = (limit.per_minute as f64 / 60.0, limit.burst() as f64);
         // An IPv6 client counts by its /64: one host has the whole of it to rotate through.
         let client = client.map(|ip| match ip {
@@ -952,8 +1027,9 @@ impl EnvLive {
             v4 => v4,
         });
         let now = Instant::now();
+        let key = (bucket, client);
         let mut b = self.buckets.lock();
-        if b.len() >= MAX_BUCKETS && !b.contains_key(&client) {
+        if b.len() >= MAX_BUCKETS && !b.contains_key(&key) {
             // Full ones first: they're the same as no entry. Then the longest unseen, never
             // everyone's (a flood of new addresses mustn't reset the limited ones).
             b.retain(|_, (tokens, at)| *tokens + now.duration_since(*at).as_secs_f64() * rate < burst);
@@ -966,7 +1042,7 @@ impl EnvLive {
                 b.retain(|_, (_, at)| *at > nth);
             }
         }
-        let (tokens, at) = b.entry(client).or_insert((burst, now));
+        let (tokens, at) = b.entry(key).or_insert((burst, now));
         *tokens = (*tokens + now.duration_since(*at).as_secs_f64() * rate).min(burst);
         *at = now;
         if *tokens >= 1.0 {
@@ -1726,6 +1802,7 @@ impl EnvLive {
                     let mut seen = i.cpu_seen.lock();
                     if let Some(prev) = *seen {
                         let d = u.cpu_ns.saturating_sub(prev) as f64 / 1e9;
+                        i.record(now_ms() / 60_000, d, elapsed, u.memory_bytes);
                         cpu += d;
                         if let Some(tpl) = self.serving(&i.deployment) {
                             used += d;
@@ -1762,6 +1839,13 @@ impl EnvLive {
             }
         }
         insts
+    }
+
+    /// Its instances' last hour by minute (those it has now, that were measured), by name.
+    pub fn by_instance(&self) -> Vec<InstanceSeries> {
+        let mut v: Vec<InstanceSeries> = self.instances().iter().filter_map(|i| i.series()).collect();
+        v.sort_by(|a, b| a.instance.cmp(&b.instance));
+        v
     }
 
     /// Its awake instances' CPU over the last `cpu_window`, in percent of what they could use;

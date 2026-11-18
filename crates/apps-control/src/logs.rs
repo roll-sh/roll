@@ -234,7 +234,10 @@ impl LogHub {
 
     /// From now on `key`'s lines have `deployment`'s secret `values` taken out, with the values of
     /// the few deployments before it (an old instance still draining prints too).
-    pub fn redact(&self, key: &str, deployment: &str, values: Vec<String>) {
+    pub fn redact(&self, key: &str, deployment: &str, mut values: Vec<String>) {
+        // Each as a JSON string holds it too (an OTLP record, a span's attribute, written as JSON).
+        let escaped: Vec<String> = values.iter().filter_map(|v| serde_json::to_string(v).ok().map(|j| j[1..j.len() - 1].to_string()).filter(|j| j != v)).collect();
+        values.extend(escaped);
         let mut all = self.redactions.lock();
         let r = all.entry(key.to_string()).or_default();
         r.by.retain(|(d, _)| d != deployment);
@@ -630,6 +633,10 @@ mod tests {
         let got: Vec<String> = hub.tail("env:svc_x/production", 10, None).await.into_iter().map(|l| l.text).collect();
         assert_eq!(got, ["auth with *** then abc", "***"]);
         assert_eq!(hub.tail("job:job_1", 10, None).await[0].text, "***");
+        // Written as JSON (an OTLP record), a value with a quote in it is still found.
+        hub.redact("trace:svc_x/production", "dep_a", vec!["pa\"ss-word".into()]);
+        hub.sink("trace:svc_x/production", Stream::System).line(serde_json::json!({ "attr": "pa\"ss-word" }).to_string());
+        assert_eq!(hub.tail("trace:svc_x/production", 10, None).await[0].text, r#"{"attr":"***"}"#);
     }
 
     /// A trace's lines are marked as one however another instance's lines fall between them,

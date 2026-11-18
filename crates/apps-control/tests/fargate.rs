@@ -898,7 +898,10 @@ async fn a_multi_line_value_reaches_the_task_through_its_deployments_secret() {
     assert_eq!(defs(), 2, "a task definition naming the new secret");
     // Another deployment's goes with the service.
     w.fake.aws.lock().secrets.insert(format!("roll-apps/vars/roll-cloud/{short}-older"), "{}".into());
-    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
+    // (Deleted for good: a first delete keeps them for a restore.)
+    for _ in 0..2 {
+        assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
+    }
     assert!(!w.fake.aws.lock().secrets.keys().any(|k| k.starts_with(&format!("roll-apps/vars/roll-cloud/{short}-"))), "it goes with the service");
 }
 

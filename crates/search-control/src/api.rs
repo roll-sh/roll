@@ -58,6 +58,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/branches", get(branches).post(branch))
         .route("/v1/search/clusters/{id}/password", post(rotate))
         .route("/v1/search/clusters/{id}/unload", post(unload))
+        .route("/v1/search/clusters/{id}/restore", post(restore))
         .route("/v1/search/clusters/{id}/indices", get(indices))
         .route("/v1/search/clusters/{id}/request", post(request))
         .route("/v1/search/clusters/{id}/usage", get(usage))
@@ -136,6 +137,10 @@ impl Caller {
     }
 }
 
+fn no_deleted(id: &str) -> ControlError {
+    ControlError::NotFound(format!("no deleted search cluster {id}"))
+}
+
 fn no_such(id_or_name: &str) -> ControlError {
     ControlError::NotFound(format!("no search cluster {id_or_name}"))
 }
@@ -152,10 +157,28 @@ impl<S: Send + Sync> FromRequestParts<S> for Caller {
 /// the caller's (else 404), then the call runs on the cluster's owner. Each node a call reaches
 /// checks it, so the check holds wherever it lands.
 async fn per_cluster(State(c): State<AppState>, req: Request, next: Next) -> Response {
-    let id = req.uri().path().strip_prefix("/v1/search/clusters/").and_then(|r| r.split('/').next()).filter(|s| !s.is_empty());
+    let rest = req.uri().path().strip_prefix("/v1/search/clusters/").map(|r| r.split_once('/').unwrap_or((r, "")));
+    let id = rest.map(|(id, _)| id).filter(|s| !s.is_empty());
     let Some(id) = id.and_then(|id| urlencoding::decode(id).ok().map(|s| s.into_owned())) else { return next.run(req).await };
+    // A deleted cluster has no owner node: its restore runs where it lands, once the caller
+    // may see it (theirs, or the operator's and admins').
+    if rest.is_some_and(|(_, r)| r == "restore") {
+        return match c.get_deleted(&id).await {
+            Ok(d) if Caller::of(req.extensions()).sees(&d.cluster) => next.run(req).await,
+            Ok(_) => no_deleted(&id).into_response(),
+            Err(e) => e.into_response(),
+        };
+    }
     let d = match Caller::of(req.extensions()).get(&c, &id).await {
         Ok(d) => d,
+        // A key revoked while its cluster is deleted is kept for the restore
+        // (`Control::delete_key`): it too runs where it lands, for whoever may see the cluster.
+        Err(ControlError::NotFound(_)) if req.method() == Method::DELETE && rest.is_some_and(|(_, r)| r.starts_with("keys/")) => {
+            return match c.get_deleted(&id).await {
+                Ok(d) if Caller::of(req.extensions()).sees(&d.cluster) => next.run(req).await,
+                _ => no_such(&id).into_response(),
+            };
+        }
         Err(e) => return e.into_response(),
     };
     crate::cluster::on_owner(&c, &d.name, req, next).await
@@ -189,6 +212,7 @@ async fn info(State(c): State<AppState>, caller: Caller) -> Json<Value> {
         "tls": c.cfg.tls,
         "domain": c.cfg.domain,
         "history_retention_s": c.cfg.history_retention.as_secs(),
+        "deleted_retention_s": c.cfg.deleted_retention.as_secs(),
         "defaults": c.cfg.defaults,
         "pricing": c.cfg.pricing,
     });
@@ -276,12 +300,39 @@ async fn views(c: &Control, caller: &Caller, list: Vec<SearchCluster>) -> Result
     Ok(out)
 }
 
-async fn list(State(c): State<AppState>, caller: Caller) -> ApiResult<Vec<ClusterView>> {
+#[derive(Deserialize)]
+struct ListQuery {
+    /// Recently deleted clusters instead, kept for restoring.
+    #[serde(default)]
+    deleted: bool,
+}
+
+async fn list(State(c): State<AppState>, caller: Caller, Query(q): Query<ListQuery>) -> Result<Response, ControlError> {
+    if q.deleted {
+        return Ok(Json(c.list_deleted(caller.owner()).await?).into_response());
+    }
     let list = match &caller {
         Caller::All => c.list().await?,
         Caller::Person(u) => c.store.list_owned(u).await?,
     };
-    Ok(Json(views(&c, &caller, list).await?))
+    Ok(Json(views(&c, &caller, list).await?).into_response())
+}
+
+#[derive(Deserialize, Default)]
+struct RestoreReq {
+    /// Restore under this name instead of the one it had (that one is taken).
+    name: Option<String>,
+}
+
+/// `POST /v1/search/clusters/{id}/restore`: a deleted cluster back as it was, within its window.
+async fn restore(State(c): State<AppState>, caller: Caller, Path(id): Path<String>, body: bytes::Bytes) -> ApiResult<ClusterView> {
+    let r: RestoreReq = if body.iter().all(u8::is_ascii_whitespace) {
+        RestoreReq::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ControlError::Invalid(format!("invalid request: {e}")))?
+    };
+    let d = c.restore(&id, r.name.as_deref(), caller.caps(&c)).await?;
+    Ok(Json(view(&c, d, false).await?))
 }
 
 #[derive(Deserialize)]

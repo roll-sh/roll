@@ -6,6 +6,7 @@
 GET /v1/apps/services/{id}/activity
 GET /v1/apps/services/{id}/changes
 GET /v1/apps/services/{id}/environments
+GET /v1/apps/services/{id}/environments/{env}/diff
 GET /v1/apps/services/{id}/environments/{env}/deploys
 POST /v1/apps/services/{id}/environments/{env}/deploys
 GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}
@@ -45,7 +46,6 @@ POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize
 POST /v1/apps/services/{id}/environments/{env}/sleep
 GET /v1/apps/services/{id}/environments/{env}/usage
 GET /v1/apps/services/{id}/environments/{env}/variables
-PATCH /v1/apps/services/{id}/environments/{env}/variables
 GET /v1/apps/services/{id}/environments/{env}/volume/backups
 GET /v1/apps/services/{id}/links
 GET /v1/code/agents/{owner}/automations
@@ -180,6 +180,7 @@ POST /v1/previews/{id}/notes/{note}/resolve
 GET /v1/previews/{id}/notes/{note}/crop
 GET /v1/previews/{id}/logs
 POST /v1/previews/{id}/refresh
+GET /v1/previews/{id}/requests
 GET /v1/previews/{id}/screenshot
 GET /v1/previews/{id}/shares
 DELETE /v1/previews/{id}/shares/{share}

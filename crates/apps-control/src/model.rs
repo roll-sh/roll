@@ -366,6 +366,8 @@ pub enum Builder {
     #[default]
     Auto,
     Dockerfile,
+    /// A static site's functions, as a Node service (`apps_build::functions`).
+    Functions,
 }
 
 impl Build {
@@ -400,6 +402,7 @@ impl Build {
             builder: match self.builder {
                 Builder::Auto => apps_build::Builder::Auto,
                 Builder::Dockerfile => apps_build::Builder::Dockerfile,
+                Builder::Functions => apps_build::Builder::Functions,
             },
             dockerfile: self.dockerfile.clone(),
             install: self.install.clone(),
@@ -532,6 +535,11 @@ pub struct Run {
     /// at-once deploy. Never a rollback's own: no two in a row.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rollback_on_crash: bool,
+    /// A built service's live deployment is built again, from the same revision and without the
+    /// cache, when one of its base images moves in its registry (Railway's automatic security
+    /// patches). Without it the environment only says so (`base_updated`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rebuild_on_base: bool,
     /// Commands on a schedule, each a job of the live deployment at its due times (Heroku
     /// Scheduler, Vercel crons): any service's, without a cron service of its own.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -765,6 +773,7 @@ impl Default for Run {
             affinity: false,
             tcp: false,
             rollback_on_crash: false,
+            rebuild_on_base: false,
             schedules: Vec::new(),
         }
     }
@@ -1113,6 +1122,10 @@ pub struct Environment {
     pub traces: bool,
     /// Its pages measure their Web Vitals for roll (`…/vitals`).
     pub vitals: bool,
+    /// Its deploys are reported to the Git host (commit statuses, GitHub Deployments); false:
+    /// someone else reports them (roll previews, for its `pv-` environments: one voice on a
+    /// pull request).
+    pub report: bool,
     /// A preview's pages carry roll previews' feedback button for visitors who came in through
     /// its access link.
     pub feedback: bool,
@@ -1157,6 +1170,14 @@ pub struct Environment {
     pub wait_for_ci: bool,
     /// The push waiting for its checks, if one is.
     pub waiting_for_ci: Option<String>,
+    /// Its builds get no secret values (`egress` `roll`: a build has the default network, so it
+    /// isn't given what it could send out).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub build_closed: bool,
+    /// Base images the live deployment was built on that have moved since in their registries:
+    /// a build now would get their fixes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub base_updated: Vec<String>,
     pub created_at: i64,
 }
 
@@ -1184,6 +1205,12 @@ pub struct FirewallRule {
     /// Text the `User-Agent` contains (case aside).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// `limit`'s: each client's requests a minute through this rule, and how many at once
+    /// (default: a minute's worth).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_minute: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1191,6 +1218,11 @@ pub struct FirewallRule {
 pub enum FirewallAction {
     Allow,
     Deny,
+    /// Let in at `per_minute` a client (Vercel's rate-limit rules), a 429 past it.
+    Limit,
+    /// Let in a browser that has passed a proof of work this hour (Vercel's Attack Challenge
+    /// Mode, `challenge.rs`); anything else gets the page that works it out.
+    Challenge,
 }
 
 /// The most rules an environment has.
@@ -1240,6 +1272,15 @@ impl FirewallRule {
         }
         if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() {
             return bad("a rule matches on a path, methods or a user agent");
+        }
+        if self.action == FirewallAction::Challenge && !self.methods.is_empty() && self.methods.iter().any(|m| m != "GET") {
+            return bad("a challenge is a page a browser opens: GET only");
+        }
+        match (self.action, self.per_minute) {
+            (FirewallAction::Limit, Some(n)) => RateLimit { per_minute: n, burst: self.burst }.check().map_err(|_| Error::BadRequest("firewall: a limit is 1–100000 a minute, its burst 1–100000".into()))?,
+            (FirewallAction::Limit, None) => return bad("a limit rule says per_minute"),
+            _ if self.per_minute.is_some() || self.burst.is_some() => return bad("per_minute and burst are a limit rule's"),
+            _ => {}
         }
         Ok(self)
     }

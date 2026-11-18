@@ -50,6 +50,8 @@ export interface SearchInfo {
   tls: boolean;
   domain: string | null;
   history_retention_s: number;
+  /** How long a deleted cluster can be restored (`--search-deleted-retention-days`; 0: never). */
+  deleted_retention_s: number;
   defaults: SearchDefaults;
   pricing: SearchPricing;
   /** A signed-in person's (not an admin's): how many clusters, and always-on ones, they may own
@@ -113,6 +115,25 @@ export interface SearchCluster extends SearchSettings {
   branches: BranchRef[];
   /** Only in the responses that create the cluster or rotate its password. */
   password?: string;
+}
+
+/** A deleted cluster kept for restoring (`GET /v1/search/clusters?deleted=true`). */
+export interface DeletedSearchCluster extends SearchSettings {
+  id: string;
+  /** The name it had (it restores under it unless another cluster took it). */
+  name: string;
+  region: string;
+  parent_id: string | null;
+  created_at: number;
+  indices: number;
+  docs: number;
+  /** Still billed as storage until it is purged. */
+  stored_bytes: number;
+  owner?: string | null;
+  /** Unix seconds. */
+  deleted_at: number;
+  /** Unix seconds: when its storage is removed for good. */
+  purge_at: number;
 }
 
 export interface SearchIndex {
@@ -199,6 +220,9 @@ export const searchApi = {
     call<SearchCluster>("POST", "/v1/search/clusters", { name, ...settings }),
   update: (id: string, settings: Partial<SearchSettings>) => call<SearchCluster>("PATCH", cl(id), settings),
   remove: (id: string) => call<{ deleted: string; name: string }>("DELETE", cl(id)),
+  deleted: () => call<DeletedSearchCluster[]>("GET", "/v1/search/clusters?deleted=true"),
+  /** Without `name` it comes back under its own (409 when another cluster took it). */
+  restore: (id: string, name?: string) => call<SearchCluster>("POST", `${cl(id)}/restore`, name ? { name } : {}),
   branch: (id: string, name: string, at?: number) => call<SearchCluster>("POST", `${cl(id)}/branches`, { name, at }),
   rotatePassword: (id: string) => call<SearchCluster>("POST", `${cl(id)}/password`, {}),
   unload: (id: string) => call<{ unloaded: boolean }>("POST", `${cl(id)}/unload`, {}),
@@ -344,6 +368,15 @@ export function formatDuration(s: number) {
   if (s % 3600 === 0) return `${s / 3600}h`;
   if (s % 60 === 0) return `${s / 60}m`;
   return `${s}s`;
+}
+
+/** A window such as the deleted-cluster retention: whole days in words ("7 days"). */
+export function formatWindow(s: number) {
+  if (s > 0 && s % 86_400 === 0) {
+    const d = s / 86_400;
+    return `${d} day${d === 1 ? "" : "s"}`;
+  }
+  return formatDuration(s);
 }
 
 /** The URL with credentials embedded (`http://user:password@host:port`). */

@@ -346,7 +346,9 @@ impl Secrets {
             c.execute(
                 "INSERT INTO source_generations (kind, ref, generation) VALUES (?, ?, 1) ON CONFLICT (kind, ref) DO UPDATE SET generation = source_generations.generation + 1",
                 [kind, r#ref],
-            )
+            )?;
+            // The syncs of projects that link it check their digests next.
+            crate::syncs::due_for_source(c, kind, r#ref)
         })?;
         Ok(())
     }

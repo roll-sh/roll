@@ -118,7 +118,7 @@ function ChangeView() {
           {reviews && reviews.length > 0 && (
             <section>
               <h2 className="mb-4 text-[15px] font-semibold tracking-[-0.02em]">Reviews</h2>
-              <ReviewTimeline reviews={reviews} status={status} threads={threads ?? []} />
+              <ReviewTimeline reviews={reviews} status={status} threads={threads ?? []} previewId={c.preview?.environment?.id} />
             </section>
           )}
         </div>

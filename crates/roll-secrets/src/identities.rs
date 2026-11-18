@@ -320,7 +320,7 @@ impl Secrets {
             crate::caller::Maker::Gone => return Err(denied()),
         };
         let m = workloads.mint(&i.name, rule, i.allowed_ips.clone(), i.ttl_minutes as u32, owner.as_deref())?;
-        let caller = Caller { principal: format!("identity:{}", i.id), grants: std::sync::Arc::new(crate::access::Everything), ip, runtime: false };
+        let caller = Caller { principal: format!("identity:{}", i.id), grants: std::sync::Arc::new(crate::access::Everything), ip, runtime: false, approval: None };
         let kept = self.db.write(|c| {
             // Deleted meanwhile, or its keys replaced (and so its maker changed): the token goes
             // too. A login verified against the old keys mustn't keep one after the replacement
