@@ -1,5 +1,5 @@
 import { RollLogo, RollMark } from "@roll/brand";
-import { ArrowLeft, LoaderCircle, Mail } from "lucide-react";
+import { ArrowLeft, Fingerprint, LoaderCircle, Mail } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
@@ -7,6 +7,7 @@ import { acceptSignIn, accountsApi, AccountsError, useSession, type Provider, ty
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { TokenButton } from "./code/sign-in";
 import { useMarkState } from "./mark-state";
+import { credentialJSON, passkeyProblem, passkeysSupported, requestOptions } from "@/lib/webauthn";
 
 const ERRORS: Record<string, string> = {
   state: "That sign-in took too long or came from another browser. Try again.",
@@ -70,6 +71,20 @@ export function SignInPage({ invite, step, returnTo, error }: { invite?: string;
     else play([["success", 900]], "idle");
     acceptSignIn(a);
   };
+  // A passkey: on its own from the start page, or as the second factor a sign-in owes.
+  const passkey = () =>
+    run(async () => {
+      const o = await accountsApi.passkeySigninOptions();
+      let used: PublicKeyCredential | null;
+      try {
+        used = (await navigator.credentials.get({ publicKey: requestOptions(o.publicKey) })) as PublicKeyCredential | null;
+      } catch (e) {
+        throw new Error(passkeyProblem(e));
+      }
+      if (!used) throw new Error("No passkey was used.");
+      done(await accountsApi.passkeySignin(o.id, credentialJSON(used)));
+    });
+  const owedPasskey = session.status === "mfa_required" && session.methods.includes("passkey") && passkeysSupported();
   const oauth = (p: Provider) =>
     run(async () => {
       const { url } = await accountsApi.oauthStart(p, { invite, return_to: to });
@@ -105,6 +120,7 @@ export function SignInPage({ invite, step, returnTo, error }: { invite?: string;
               busy={busy}
               defaultEmail={invited && invited !== "invalid" ? invited.email : ""}
               onOauth={oauth}
+              onPasskey={passkey}
               onEmail={(email) =>
                 run(async () => {
                   // A domain with SSO goes to the company's provider; any other gets a code.
@@ -147,6 +163,11 @@ export function SignInPage({ invite, step, returnTo, error }: { invite?: string;
                 recovery={current.recovery}
                 onSubmit={(code) => run(async () => done(current.recovery ? await accountsApi.recoverySignin(code) : await accountsApi.totpSignin(code)))}
               />
+              {owedPasskey && (
+                <button disabled={busy} onClick={passkey} className={`${button} mt-3`}>
+                  <Fingerprint className="size-4" /> Use a passkey
+                </button>
+              )}
               <button onClick={() => setCurrent({ kind: "mfa", recovery: !current.recovery })} className="mt-3 text-[12px] text-muted hover:text-fg">
                 {current.recovery ? "Use the authenticator app" : "Lost your phone? Use a recovery code"}
               </button>
@@ -172,12 +193,14 @@ function Start({
   defaultEmail,
   onOauth,
   onEmail,
+  onPasskey,
 }: {
   providers: Providers | null;
   busy: boolean;
   defaultEmail: string;
   onOauth: (p: Provider) => void;
   onEmail: (email: string) => void;
+  onPasskey: () => void;
 }) {
   const [email, setEmail] = useState(defaultEmail);
   useEffect(() => setEmail((e) => e || defaultEmail), [defaultEmail]);
@@ -187,12 +210,18 @@ function Start({
         <LoaderCircle className="size-4 animate-spin text-subtle motion-reduce:animate-none" />
       </div>
     );
-  const social = providers.github || providers.google;
+  const withPasskey = Boolean(providers.passkey) && passkeysSupported();
+  const social = providers.github || providers.google || withPasskey;
   // The email box serves a code, a company's SSO, or both.
   const byEmail = providers.email || Boolean(providers.sso);
   if (!social && !byEmail) return <p className="text-[12.5px] leading-relaxed text-muted">Sign-in isn't set up on this roll yet. An admin can still use their token below.</p>;
   return (
     <div className="space-y-2.5">
+      {withPasskey && (
+        <button disabled={busy} onClick={onPasskey} className={button}>
+          <Fingerprint className="size-4" /> Sign in with a passkey
+        </button>
+      )}
       {providers.github && (
         <button disabled={busy} onClick={() => onOauth("github")} className={button}>
           <GitHubMark className="size-4" /> Continue with GitHub

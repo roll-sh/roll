@@ -789,3 +789,177 @@ async fn account_events_are_audited() {
     let all = serde_json::to_string(&got).unwrap();
     assert!(!all.contains(&invite) && !all.contains(&newest_code(&env.outbox, "ada@example.com")), "never a token or a code");
 }
+
+/// A passkey on a device, in software: a P-256 key, attestation `none`, its own sign count.
+struct Authenticator {
+    key: ring::signature::EcdsaKeyPair,
+    credential: Vec<u8>,
+    count: u32,
+    /// Flags besides user presence: `UV` (0x04), `BS` (0x10, synced).
+    flags: u8,
+}
+
+impl Authenticator {
+    fn new(flags: u8) -> Authenticator {
+        use ring::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair};
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
+        let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng).unwrap();
+        Authenticator { key, credential: (0..32).map(|i| i as u8 ^ 0x5a).collect(), count: 0, flags }
+    }
+    fn b64(b: &[u8]) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+    }
+    /// Its public key as COSE: {1: 2, 3: -7, -1: 1, -2: x, -3: y}.
+    fn cose(&self) -> Vec<u8> {
+        use ring::signature::KeyPair;
+        let p = self.key.public_key().as_ref();
+        let mut c = vec![0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20];
+        c.extend_from_slice(&p[1..33]);
+        c.extend_from_slice(&[0x22, 0x58, 0x20]);
+        c.extend_from_slice(&p[33..65]);
+        c
+    }
+    fn auth_data(&self, rp: &str, new: bool) -> Vec<u8> {
+        let mut d = Sha256::digest(rp.as_bytes()).to_vec();
+        d.push(0x01 | self.flags | if new { 0x40 } else { 0 });
+        d.extend_from_slice(&self.count.to_be_bytes());
+        if new {
+            d.extend_from_slice(&[0; 16]);
+            d.extend_from_slice(&(self.credential.len() as u16).to_be_bytes());
+            d.extend_from_slice(&self.credential);
+            d.extend_from_slice(&self.cose());
+        }
+        d
+    }
+    fn client(kind: &str, options: &Value, origin: &str) -> Vec<u8> {
+        json!({ "type": kind, "challenge": options["publicKey"]["challenge"], "origin": origin, "crossOrigin": false }).to_string().into_bytes()
+    }
+    /// `navigator.credentials.create`, as the browser answers it.
+    fn create(&mut self, options: &Value) -> Value {
+        let rp = options["publicKey"]["rp"]["id"].as_str().unwrap().to_string();
+        let data = self.auth_data(&rp, true);
+        let mut att = vec![0xa3, 0x63, b'f', b'm', b't', 0x64, b'n', b'o', b'n', b'e', 0x67];
+        att.extend_from_slice(b"attStmt");
+        att.extend_from_slice(&[0xa0, 0x68]);
+        att.extend_from_slice(b"authData");
+        att.extend_from_slice(&[0x58, data.len() as u8]);
+        att.extend_from_slice(&data);
+        let id = Self::b64(&self.credential);
+        json!({ "id": id, "rawId": id, "type": "public-key", "response": { "clientDataJSON": Self::b64(&Self::client("webauthn.create", options, WEB)), "attestationObject": Self::b64(&att) } })
+    }
+    /// `navigator.credentials.get` at `origin`: the count goes up, the data is signed.
+    fn get(&mut self, options: &Value, origin: &str) -> Value {
+        self.count += 1;
+        let data = self.auth_data(options["publicKey"]["rpId"].as_str().unwrap(), false);
+        let client = Self::client("webauthn.get", options, origin);
+        let mut msg = data.clone();
+        msg.extend_from_slice(&Sha256::digest(&client));
+        let sig = self.key.sign(&ring::rand::SystemRandom::new(), &msg).unwrap();
+        let id = Self::b64(&self.credential);
+        json!({ "id": id, "rawId": id, "type": "public-key", "response": { "clientDataJSON": Self::b64(&client), "authenticatorData": Self::b64(&data), "signature": Self::b64(sig.as_ref()) } })
+    }
+}
+
+/// Passkeys (docs/accounts.md, "Passkeys"): made on the account page, they sign a person in on
+/// their own when the authenticator verified them, or give the second factor a sign-in owes. A
+/// challenge is used once and only for the sign-in it was made for; another site's, an unverified
+/// or a copied (counter going back) passkey is refused.
+#[tokio::test]
+async fn passkeys_sign_people_in_on_their_own_or_as_a_second_factor() {
+    let env = Env::new().await;
+    let events = Arc::new(Events::default());
+    env.accounts.set_audit(events.clone());
+    let invite = env.invite("ada@example.com").await;
+    let mut b = Browser::default();
+    env.email_sign_in(&mut b, "ada@example.com", Some(&invite)).await;
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts", None).await.json["providers"]["passkey"], true);
+
+    // Made on the account page: for roll's dashboard, discoverable, no attestation.
+    let opts = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys/options", None).await.json;
+    assert_eq!((opts["publicKey"]["rp"]["id"].as_str(), opts["publicKey"]["attestation"].as_str(), opts["publicKey"]["authenticatorSelection"]["residentKey"].as_str()), (Some("roll.test"), Some("none"), Some("required")), "{opts}");
+    let mut phone = Authenticator::new(0x04 | 0x10);
+    let made = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys", Some(json!({ "id": opts["id"], "name": "Ada's phone", "credential": phone.create(&opts) }))).await;
+    assert_eq!((made.status, made.json["synced"].as_bool()), (StatusCode::CREATED, Some(true)), "{}", made.json);
+    let again = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys", Some(json!({ "id": opts["id"], "name": "again", "credential": phone.create(&opts) }))).await;
+    assert_eq!((again.status, again.json["code"].as_str()), (StatusCode::BAD_REQUEST, Some("passkey")), "a challenge is used once");
+    let pk = made.json["id"].as_str().unwrap().to_string();
+
+    // On its own: any passkey the browser holds for roll, verified by the authenticator.
+    let mut c = Browser::default();
+    let o = env.call(&mut c, Method::POST, "/v1/accounts/signin/passkey/options", None).await.json;
+    assert_eq!((o["publicKey"]["userVerification"].as_str(), o["publicKey"]["allowCredentials"].as_array().map(Vec::len)), (Some("required"), Some(0)), "{o}");
+    let a = env.call(&mut c, Method::POST, "/v1/accounts/signin/passkey", Some(json!({ "id": o["id"], "credential": phone.get(&o, WEB) }))).await;
+    assert_eq!((a.status, a.json["status"].as_str(), a.json["user"]["email"].as_str()), (StatusCode::OK, Some("signed_in"), Some("ada@example.com")), "{}", a.json);
+    assert_eq!(env.call(&mut c, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
+    // Refused: another site's origin, an authenticator that didn't verify the person, a copied key.
+    let refused = |browser: &mut Browser, credential: Value, id: Value| {
+        let env = &env;
+        let mut b = std::mem::take(browser);
+        async move { (env.call(&mut b, Method::POST, "/v1/accounts/signin/passkey", Some(json!({ "id": id, "credential": credential }))).await, b) }
+    };
+    let mut d = Browser::default();
+    let o = env.call(&mut d, Method::POST, "/v1/accounts/signin/passkey/options", None).await.json;
+    let (a, mut d) = refused(&mut d, phone.get(&o, "https://evil.test"), o["id"].clone()).await;
+    assert_eq!((a.status, a.json["code"].as_str()), (StatusCode::BAD_REQUEST, Some("passkey")), "another site: {}", a.json);
+    let o = env.call(&mut d, Method::POST, "/v1/accounts/signin/passkey/options", None).await.json;
+    phone.flags = 0x10;
+    let (a, mut d) = refused(&mut d, phone.get(&o, WEB), o["id"].clone()).await;
+    assert!(a.json["error"].as_str().is_some_and(|e| e.contains("didn't verify you")), "no user verification: {}", a.json);
+    phone.flags = 0x04 | 0x10;
+    let o = env.call(&mut d, Method::POST, "/v1/accounts/signin/passkey/options", None).await.json;
+    phone.count = 0;
+    let (a, _) = refused(&mut d, phone.get(&o, WEB), o["id"].clone()).await;
+    assert!(a.json["error"].as_str().is_some_and(|e| e.contains("copied")), "a counter going back: {}", a.json);
+    phone.count = 100;
+
+    // As a second factor: with TOTP on, an email sign-in owes one, and the passkey gives it.
+    let t = env.call(&mut b, Method::POST, "/v1/accounts/me/totp", None).await.json;
+    let seed = roll_auth::totp::base32_decode(t["secret"].as_str().unwrap()).unwrap();
+    let step = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 / roll_auth::totp::STEP_S;
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/totp/confirm", Some(json!({ "code": format!("{:06}", roll_auth::totp::totp(&seed, step)) }))).await.status, StatusCode::OK);
+    let mut e = Browser::default();
+    let a = env.email_sign_in(&mut e, "ada@example.com", None).await;
+    assert_eq!(a.json["methods"], json!(["totp", "recovery", "passkey"]), "{}", a.json);
+    let o = env.call(&mut e, Method::POST, "/v1/accounts/signin/passkey/options", None).await.json;
+    assert_eq!((o["publicKey"]["userVerification"].as_str(), o["publicKey"]["allowCredentials"][0]["id"].as_str()), (Some("preferred"), Some(Authenticator::b64(&phone.credential).as_str())), "{o}");
+    // That challenge is this owing sign-in's: it never signs anyone in on its own elsewhere.
+    let mut f = Browser::default();
+    let (a, _) = refused(&mut f, phone.get(&o, WEB), o["id"].clone()).await;
+    assert!(a.json["error"].as_str().is_some_and(|e| e.contains("another sign-in")), "{}", a.json);
+    let o = env.call(&mut e, Method::POST, "/v1/accounts/signin/passkey/options", None).await.json;
+    phone.flags = 0x10; // a second factor needs presence, not verification
+    let a = env.call(&mut e, Method::POST, "/v1/accounts/signin/passkey", Some(json!({ "id": o["id"], "credential": phone.get(&o, WEB) }))).await;
+    assert_eq!(a.json["status"], "signed_in", "{}", a.json);
+    phone.flags = 0x04 | 0x10;
+    // On its own it's both factors, TOTP on or not.
+    let mut g = Browser::default();
+    let o = env.call(&mut g, Method::POST, "/v1/accounts/signin/passkey/options", None).await.json;
+    assert_eq!(env.call(&mut g, Method::POST, "/v1/accounts/signin/passkey", Some(json!({ "id": o["id"], "credential": phone.get(&o, WEB) }))).await.json["status"], "signed_in");
+
+    // Renamed, listed, removed: a removed passkey signs nobody in.
+    assert_eq!(env.call(&mut b, Method::PATCH, &format!("/v1/accounts/me/passkeys/{pk}"), Some(json!({ "name": "Phone" }))).await.json["name"], "Phone");
+    let listed = env.call(&mut b, Method::GET, "/v1/accounts/me/passkeys", None).await.json;
+    assert_eq!((listed["passkeys"][0]["name"].as_str(), listed["passkeys"][0]["last_used_at"].is_i64()), (Some("Phone"), true), "{listed}");
+    assert!(listed.get("public_key").is_none() && !listed.to_string().contains("credential"), "never the key: {listed}");
+    assert_eq!(env.call(&mut b, Method::DELETE, &format!("/v1/accounts/me/passkeys/{pk}"), None).await.status, StatusCode::NO_CONTENT);
+    let mut h = Browser::default();
+    let o = env.call(&mut h, Method::POST, "/v1/accounts/signin/passkey/options", None).await.json;
+    let (a, _) = refused(&mut h, phone.get(&o, WEB), o["id"].clone()).await;
+    assert!(a.json["error"].as_str().is_some_and(|e| e.contains("doesn't know")), "{}", a.json);
+
+    // The audit log: passkey sign-ins and refusals by method, the passkey's add and removal; never
+    // the ceremonies' options, never a credential.
+    let got = events.0.lock().unwrap().clone();
+    let ada = listed_owner(&got);
+    assert!(got.iter().any(|e| e.action == "sign_in" && e.ok && e.detail["method"] == "passkey" && e.target.as_deref() == Some(ada.as_str())), "{got:#?}");
+    assert!(got.iter().any(|e| e.action == "sign_in" && !e.ok && e.detail["method"] == "passkey" && e.actor == "anonymous" && e.target.as_deref() == Some(ada.as_str())), "a refusal is the owner's");
+    assert!(got.iter().any(|e| e.action == "POST /v1/accounts/me/passkeys") && got.iter().any(|e| e.action == "DELETE /v1/accounts/me/passkeys/{id}"));
+    assert!(!got.iter().any(|e| e.action.contains("options")), "no row for asking for a challenge");
+    assert!(!serde_json::to_string(&got).unwrap().contains("clientDataJSON"));
+}
+
+/// Ada's id, from the account event that made her.
+fn listed_owner(got: &[roll_accounts::audit::AccountEvent]) -> String {
+    got.iter().find(|e| e.action == "POST /v1/accounts/me/passkeys").and_then(|e| e.target.clone()).unwrap()
+}

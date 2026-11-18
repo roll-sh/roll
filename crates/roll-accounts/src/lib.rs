@@ -13,6 +13,7 @@ pub mod api;
 pub mod audit;
 mod mail;
 mod oauth;
+pub mod passkeys;
 mod scim;
 pub mod sso;
 mod twofactor;
@@ -115,6 +116,13 @@ CREATE TABLE IF NOT EXISTS passkeys (
     name TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     last_used_at INTEGER
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS passkey_challenges (
+    id TEXT PRIMARY KEY,
+    user_id TEXT,
+    purpose TEXT NOT NULL,
+    challenge TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS throttle (
     key TEXT PRIMARY KEY,
@@ -418,6 +426,10 @@ impl Accounts {
         if !db.has_column("scim_tokens", "leaked")? {
             db.add_column("scim_tokens", "leaked", "TEXT")?;
         }
+        // Whether a passkey is synced to the person's other devices (its authenticator says so).
+        if !db.has_column("passkeys", "synced")? {
+            db.add_column("passkeys", "synced", "INTEGER")?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;
@@ -500,15 +512,22 @@ impl Accounts {
     /// in).
     pub fn issue(&self, user: &str, user_agent: &str) -> Result<Issued> {
         self.sso_not_enforced(user)?;
-        self.issue_session(user, user_agent, None)
+        self.issue_session(user, user_agent, None, false)
     }
 
     /// A session for a person their company's SSO provider just signed in.
     pub(crate) fn issue_sso(&self, user: &str, user_agent: &str) -> Result<Issued> {
-        self.issue_session(user, user_agent, Some("sso"))
+        self.issue_session(user, user_agent, Some("sso"), false)
     }
 
-    fn issue_session(&self, user: &str, user_agent: &str, method: Option<&str>) -> Result<Issued> {
+    /// A session for a person a passkey signed in on its own: the authenticator verified them
+    /// (a PIN or biometric) and holds the key, so it's both factors, as GitHub counts it.
+    pub(crate) fn issue_passkey(&self, user: &str, user_agent: &str) -> Result<Issued> {
+        self.sso_not_enforced(user)?;
+        self.issue_session(user, user_agent, Some("passkey"), true)
+    }
+
+    fn issue_session(&self, user: &str, user_agent: &str, method: Option<&str>, both_factors: bool) -> Result<Issued> {
         self.provision_owner(user);
         let now = self.db.now_ms()?;
         let token = new_token("rls");
@@ -520,7 +539,7 @@ impl Accounts {
                 Some(true) => return Err(Error::Forbidden("this account is disabled".into(), "disabled")),
                 Some(false) => {}
             }
-            let mfa = c.query_row("SELECT 1 FROM totp WHERE user_id = ? AND enabled = 1", [user], |_| Ok(())).optional()?.is_some();
+            let mfa = !both_factors && c.query_row("SELECT 1 FROM totp WHERE user_id = ? AND enabled = 1", [user], |_| Ok(())).optional()?.is_some();
             let (level, ttl) = if mfa { ("mfa", SECOND_FACTOR_TTL_MS) } else { ("full", SESSION_TTL_MS) };
             // The user's sessions that ended go with each new one: no sweeper needed.
             c.execute("DELETE FROM sessions WHERE user_id = ? AND (expires_at <= ? OR (level = 'full' AND seen_at <= ?))", params![user, now, now - SESSION_IDLE_MS])?;
