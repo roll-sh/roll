@@ -1037,7 +1037,8 @@ impl Apps {
 
     async fn summary(self: &Arc<Self>, e: &EnvRow) -> Result<EnvironmentSummary> {
         let sid = e.service.clone();
-        let public = self.db(move |s| s.service(&sid)).await.map(|s| s.run.public).unwrap_or(true);
+        let svc_row = self.db(move |s| s.service(&sid)).await.ok();
+        let public = svc_row.as_ref().map(|s| s.run.public).unwrap_or(true);
         let (svc, env) = (e.service.clone(), e.name.clone());
         let recent = self.db(move |s| s.deployments(&svc, &env, 1, None)).await?;
         let active = match &e.active {
@@ -1079,7 +1080,12 @@ impl Apps {
         if latest.as_ref().is_some_and(|l| l.status == DeployStatus::Failed) {
             attention.push("deploy_failed");
         }
-        Ok(EnvironmentSummary { name: e.name.clone(), state, url: public.then(|| self.url(&e.slug)), active, latest, attention })
+        // Cached for a minute per environment ([`Apps::needs_deploy`]), so a list stays cheap.
+        let needs_deploy = match (&e.active, svc_row) {
+            (Some(a), Some(svc)) => self.needs_deploy(&svc.for_env(e).unwrap_or(svc), e, a).await?,
+            _ => false,
+        };
+        Ok(EnvironmentSummary { name: e.name.clone(), state, url: public.then(|| self.url(&e.slug)), active, latest, attention, needs_deploy, ephemeral: e.ephemeral })
     }
 
     pub async fn patch_service(self: &Arc<Self>, id: &str, body: Value) -> Result<Service> {
@@ -1434,10 +1440,6 @@ impl Apps {
             (Some(sched), Some(_)) if svc.run.kind == RunType::Cron => crate::cron::Schedule::parse(sched, svc.run.timezone.as_deref()).ok().and_then(|s| s.next_after(code_sql::now_ms())),
             _ => None,
         };
-        let needs_deploy = match &r.active {
-            Some(a) => self.needs_deploy(&svc, &r, a).await?,
-            None => false,
-        };
         let gate = self.access(&r.service, &r.name).await?;
         let (private, signed_in) = (gate.is_some(), gate.is_some_and(|a| a.signed_in));
         let (sid, e) = (r.service.clone(), r.name.clone());
@@ -1446,12 +1448,10 @@ impl Apps {
             summary,
             service: r.service.clone(),
             branch: r.branch.clone(),
-            ephemeral: r.ephemeral,
             instances,
             domains,
             port: r.port,
             tcp: r.tcp_port.filter(|_| svc.run.tcp && svc.run.public && !private).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
-            needs_deploy,
             private,
             signed_in,
             next_run_at,

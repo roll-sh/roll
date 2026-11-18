@@ -1134,6 +1134,9 @@ async fn a_deploy_that_fails_its_health_check_leaves_the_old_one_serving() {
     call(&w.api, "PATCH", &format!("{base}/variables"), Some(json!({"set": {"FAKE_UNHEALTHY": "1"}}))).await;
     let (_, env) = call(&w.api, "GET", &base, None).await;
     assert_eq!(env["needs_deploy"], true, "a variable changed since the active deployment");
+    // Lists say so too (the canvas's cards and the project's staged changes read them).
+    let (_, list) = call(&w.api, "GET", "/v1/apps/services", None).await;
+    assert_eq!(list[0]["environments"][0]["needs_deploy"], true, "{list}");
     let (_, d2) = call(&w.api, "POST", &format!("{base}/deploys"), Some(json!({}))).await;
     let d2 = settled(&w, id, "production", d2["id"].as_str().unwrap()).await;
     assert_eq!(d2["status"], "failed", "{d2}");

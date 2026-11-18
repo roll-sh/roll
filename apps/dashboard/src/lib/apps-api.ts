@@ -137,6 +137,10 @@ export interface EnvironmentSummary {
   latest: { id: string; status: DeployStatus } | null;
   /** What wants its owner's eye: a crash loop, the project capped by its spend limit, paused, maintenance, its latest deploy failed. */
   attention?: ("crash_loop" | "capped" | "paused" | "held" | "maintenance" | "deploy_failed")[];
+  /** Settings, variables, links or the project's secrets changed since the live deployment: a redeploy applies them. */
+  needs_deploy: boolean;
+  /** A preview's (made for a branch or a pull request). */
+  ephemeral: boolean;
 }
 
 /** A deleted service, kept stopped for a restore until `purge_at` (ms), then deleted for good. */
@@ -521,13 +525,11 @@ export interface Egress {
 export interface Environment extends EnvironmentSummary {
   service: string;
   branch: string | null;
-  ephemeral: boolean;
   instances: Instance[];
   domains: Domain[];
   port: number | null;
   /** A TCP service's address (`host:port`), once it has its port. */
   tcp?: string | null;
-  needs_deploy: boolean;
   /** Its hostnames answer only visitors with its access token (a preview). */
   private: boolean;
   /** A cron service's next scheduled run, once deployed. */
