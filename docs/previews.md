@@ -1790,7 +1790,7 @@ Ranked by what a person notices first. Done so far:
    made without touching the user's index or HEAD is pushed to a branch of their own
    (`preview/<user>/<name>`) and previewed, the URL printed once it's ready; again moves it,
    `roll preview down` deletes the branch and the preview.
-3. **Mask suggestions, in review** (#324; Tonic's and Neon's anonymisation): previews read production's data, and
+3. **Mask suggestions, in review** (#324, review findings fixed: never a suggestion that fails masking, checked on real Postgres; Tonic's and Neon's anonymisation). Then: read columns only when asked (a "Suggest masks" disclosure), so opening the dialog never resets a running parent's idle timer: previews read production's data, and
    today the rules dialog only says "mask what holds people's data" when a resource has no masks
    at all. Name the columns and fields that look like personal data (email, phone, name, address,
    birth date, IP, national ids, tokens) in each branched Postgres, NoSQL and search parent and
