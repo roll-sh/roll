@@ -1785,7 +1785,7 @@ Ranked by what a person notices first. Done so far:
    `team` is #300 on it: a visitor let in through roll (link or a live team session) gets it, and
    a note is posted from roll's dashboard as the signed-in person; a team preview's services on
    roll apps get no button yet (apps adds it only for link visitors).
-2. **Who opened a team preview** (on #285): a sign-in to a `team` preview (the ticket traded for a
+2. **Who opened a team preview, in review** (#335, on #285): a sign-in to a `team` preview (the ticket traded for a
    session) is said in its activity, once per person per session ("ana opened it"), so a team sees
    who looked at production's data; the sheet lists who opened it lately.
 3. **`roll preview up`, in review** (#314): a preview of the working tree (Netlify's `netlify deploy`, Vercel's
