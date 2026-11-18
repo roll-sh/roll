@@ -578,7 +578,7 @@ pub fn open(
     })
 }
 
-impl Txn {
+impl crate::txn::TxnState {
     /// newLOfd: the lowest free descriptor number.
     pub fn lo_add(&mut self, d: Desc) -> i32 {
         match self.lo_descs.iter().position(Option::is_none) {

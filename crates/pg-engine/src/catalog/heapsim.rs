@@ -3321,7 +3321,7 @@ mod tests {
         for k in 0..400u64 {
             assert_eq!(group.tid_of(&key(k)), one.tid_of(&key(k)));
         }
-        let mut pending = |h: &mut Heap| {
+        let pending = |h: &mut Heap| {
             let mut p: Vec<_> = h.pending.get_mut().iter().map(|(x, l)| (*x, l.clone())).collect();
             p.sort();
             p
