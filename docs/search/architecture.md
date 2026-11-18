@@ -426,14 +426,35 @@ allowlist (a preview's branch included); change it like any setting.
   writes no more than `max_total_data_size`, runs at most 16 blobs at once, holds a part per
   blob in flight (breaker-charged), pays the repository's throttles and stops at `timeout`. On
   roll's own repositories it plans and answers without storage, as before.
-- **Credentials.** Elasticsearch takes an `s3` client's keys from its keystore; a roll tenant
-  has none, so `access_key`, `secret_key` and `session_token` come with the repository's
-  settings and are moved out of them at once into the repository's sealed secrets (`seal.rs`,
-  the deployment's `ROLL_SECRET_KEY`), opened only to sign a request (SigV4), never returned by
-  `GET _snapshot` or the cluster state and never logged. Without credentials requests are
-  anonymous: roll's own credentials are never used for a tenant's bucket. The endpoint is a URL
-  the tenant chose: public addresses only (`roll_net::PublicOnly`, `literal_private_host`), no
-  redirects, no proxy, bounded reads (`--search-repository-allow-private` for local MinIO).
+- **`gcs` and `azure` repositories** (`api/snapshots/cloud.rs`, clients `gcs.rs` and `azure.rs`
+  behind `blob.rs`'s `Store`) keep exactly the `s3` layout above in a GCS bucket (the JSON API)
+  or an Azure container (block blobs): the same repository data, shard files, records, chunks,
+  throttles, counters, cleanup and analysis, through one `Bucket`. Only writing in parts
+  differs: an object past 8 MiB goes up as a GCS resumable upload (8 MiB chunks, the last one
+  naming the size and completing it; a failed upload's session is cancelled) or as staged
+  Azure blocks committed by one block list (uncommitted blocks are invisible and expire, so a
+  failed upload leaves nothing to find); one 8 MiB part is held at a time, breaker-charged.
+  Conditional writes are `ifGenerationMatch` (GCS generations stand for ETags) and
+  `If-Match`/`If-None-Match`. Only S3 lists dangling uploads. An `azure` repository's reads go
+  where `location_mode` says (primary, secondary, either first), writes to the primary;
+  `secondary_only` is read-only.
+- **Credentials.** Elasticsearch takes a client's secure settings from its keystore; a roll
+  tenant has none, so they come with the repository's settings (`s3`: `access_key`,
+  `secret_key`, `session_token`; `gcs`: `credentials_file`, the service account key file's
+  JSON as a string; `azure`: `account`, `key`, `sas_token`) and are moved out of them at once
+  into the repository's sealed secrets (`seal.rs`, the deployment's `ROLL_SECRET_KEY`), opened
+  only to sign a request (SigV4, an RS256 JWT exchanged for a GCS access token, Shared Key) or
+  to carry it (a SAS token), never returned by `GET _snapshot` or the cluster state, and never
+  logged or put in an error (clients drop URLs from transport errors: a SAS token or a GCS
+  upload session is in them). A credential given as an object is refused rather than kept
+  flattened in the settings. GCS access tokens are cached in memory until five minutes before
+  they expire, keyed by a digest of the account. Without credentials requests are anonymous:
+  roll's own credentials are never used for a tenant's bucket. Endpoints, a key file's
+  `token_uri` and a GCS session URL (which must be on the endpoint's origin) are URLs the
+  tenant chose: public addresses only (`roll_net::PublicOnly`, `literal_private_host`), no
+  redirects, no proxy, bounded reads (`--search-repository-allow-private` for local MinIO,
+  fake-gcs-server and Azurite; `scripts/search-repo-emulators.sh` runs the `gcs` and `azure`
+  tests against those two in Docker).
 
 ## On the fleet (roll cloud)
 
