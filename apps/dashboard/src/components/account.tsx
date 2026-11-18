@@ -812,6 +812,22 @@ function Invites() {
                   {i.admin && <span className="ml-2 text-[11px] text-accent">admin</span>}
                 </span>
                 <span className="text-[11px] text-subtle">{state}</span>
+                {state !== "Used" && (
+                  <button
+                    onClick={() =>
+                      accountsApi.resendInvite(i.id).then(
+                        (r) => {
+                          setMade({ email: r.email, url: r.url });
+                          void load();
+                        },
+                        (e) => setError(errorText(e)),
+                      )
+                    }
+                    className={btn}
+                  >
+                    Resend
+                  </button>
+                )}
                 {state === "Waiting" && (
                   <button onClick={() => accountsApi.revokeInvite(i.id).then(load, (e) => setError(errorText(e)))} className={btn}>
                     Revoke

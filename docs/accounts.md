@@ -676,6 +676,7 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 | `POST /v1/accounts/invites` | `{email, admin?, handle?}` | 201 `Invite & {token, url}` (the token is shown once, and mailed when mail is on); 409 an account has the email |
 | `GET /v1/accounts/invites` | | `Invite[]`, newest first |
 | `DELETE /v1/accounts/invites/{id}` | | 204 (unused invites only; 409 once used) |
+| `POST /v1/accounts/invites/{id}/resend` | | `Invite` with a fresh `token` and `url`, valid another 7 days, mailed again; the old link stops at once (sudo mode for an invite that makes an admin); 409 used |
 | `GET /v1/accounts/users` | | `User[]`, oldest first |
 | `PATCH /v1/accounts/users/{id}` | `{admin?, disabled?}` | `User`; disabling deletes the user's sessions and cuts off their roll code owner (its tokens are revoked and its machines' links closed; turning the account back on gives none of them back) |
 | `DELETE /v1/accounts/users/{id}/sessions` | | 204: signs the user out everywhere |

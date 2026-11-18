@@ -69,6 +69,7 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/invites", get(list_invites).post(create_invite))
         .route("/v1/accounts/invites/peek", post(peek_invite))
         .route("/v1/accounts/invites/{id}", delete(revoke_invite))
+        .route("/v1/accounts/invites/{id}/resend", post(resend_invite))
         .route("/v1/accounts/users", get(list_users))
         .route("/v1/accounts/users/{id}", axum::routing::patch(update_user))
         .route("/v1/accounts/users/{id}/sessions", delete(revoke_user_sessions))
@@ -1002,6 +1003,11 @@ async fn create_invite(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response
         sudo(&a, u).await?;
     }
     let (invite, token, url) = blocking(&a, move |a| a.invite(&by, &email, admin, handle.as_deref())).await?;
+    invite_sent(&a, invite, token, url, StatusCode::CREATED)
+}
+
+/// An invite's link, mailed to it and answered once (with its token): a new invite or a resent one.
+fn invite_sent(a: &Arc<Accounts>, invite: crate::Invite, token: String, url: String, status: StatusCode) -> Result<Response> {
     if a.mail_on() {
         let text = format!("You're invited to roll.\n\nSign in here within 7 days: {url}\n\nThe link works once, for {}.\n", invite.email);
         a.send_later(crate::Mail { to: invite.email.clone(), subject: "You're invited to roll".into(), text }, "invite");
@@ -1009,7 +1015,24 @@ async fn create_invite(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response
     let mut v = serde_json::to_value(&invite).map_err(|e| Error::Internal(e.to_string()))?;
     v["token"] = token.into();
     v["url"] = url.into();
-    Ok(with_cookies((StatusCode::CREATED, Json(v)).into_response(), None))
+    Ok(with_cookies((status, Json(v)).into_response(), None))
+}
+
+/// Send an unused invite again (Okta's and GitHub's "resend"): a fresh link for another 7 days,
+/// mailed again; the old link stops at once. An invite that makes an admin needs sudo mode, as
+/// making it did.
+async fn resend_invite(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    let makes_admin = blocking(&a, {
+        let id = id.clone();
+        move |a| Ok(a.invites()?.into_iter().find(|i| i.id == id).is_some_and(|i| i.admin))
+    })
+    .await?;
+    if let (true, Some(Extension(u))) = (makes_admin, &me) {
+        sudo(&a, u).await?;
+    }
+    let (invite, token, url) = blocking(&a, move |a| a.resend_invite(&id)).await?;
+    invite_sent(&a, invite, token, url, StatusCode::OK)
 }
 
 async fn list_invites(State(a): S, me: Me, op: Op) -> Result<Response> {
