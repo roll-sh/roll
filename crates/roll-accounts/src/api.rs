@@ -512,6 +512,12 @@ async fn update_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>, b: Byte
     if ch.client_id.is_some() || ch.client_secret.is_some() {
         what.push("its client credentials replaced".into());
     }
+    if let Some(h) = ch.session_hours {
+        what.push(if h == 0 { "its sessions' cap removed".into() } else { format!("its sessions last at most {h} hours") });
+    }
+    if let Some(n) = &ch.name {
+        what.push(format!("renamed {n}"));
+    }
     let c = blocking(&a, move |a| a.update_sso(&id, ch)).await?;
     if !what.is_empty() {
         alert(&a, by, format!("the SSO connection {} changed: {}", c.name, what.join("; "))).await;
@@ -1104,18 +1110,28 @@ async fn update_user(State(a): S, me: Me, op: Op, Path(id): Path<String>, b: Byt
         move |a| Ok(a.user(&id)?.admin)
     })
     .await?;
-    let u = blocking(&a, move |a| a.update_user(&id, admin, disabled)).await?;
-    let who = format!("{} ({})", u.handle, u.email);
-    let what = match (admin, disabled) {
-        (Some(true), _) if !was_admin => Some(format!("{who} was made an admin")),
-        (Some(false), _) if was_admin => Some(format!("{who} is no longer an admin")),
-        (_, Some(true)) if was_admin => Some(format!("the admin {who}'s account was turned off")),
-        _ => None,
-    };
-    if let Some(what) = what {
-        alert(&a, by, what).await;
+    let target = blocking(&a, {
+        let id = id.clone();
+        move |a| a.user(&id)
+    })
+    .await?;
+    // The change is committed before a failure to cut off its roll code owner shows: the alert
+    // says what was done either way.
+    let done = blocking(&a, move |a| a.update_user(&id, admin, disabled)).await;
+    let who = format!("{} ({})", target.handle, target.email);
+    let mut what: Vec<String> = Vec::new();
+    match admin {
+        Some(true) if !was_admin => what.push(format!("{who} was made an admin")),
+        Some(false) if was_admin => what.push(format!("{who} is no longer an admin")),
+        _ => {}
     }
-    Ok(Json(u).into_response())
+    if disabled == Some(true) && was_admin {
+        what.push(format!("the admin {who}'s account was turned off"));
+    }
+    if !what.is_empty() {
+        alert(&a, by, what.join("; ")).await;
+    }
+    Ok(Json(done?).into_response())
 }
 
 async fn revoke_user_sessions(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<StatusCode> {
