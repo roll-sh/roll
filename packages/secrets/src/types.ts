@@ -316,6 +316,11 @@ export type OutsideDatabase = { id: string; name: string; host: string; roles: s
 /** A GitHub App's installation; `repositories` and `permissions` are the most its tokens may reach. */
 export type GitHubApp = { id: string; name: string; app_id: number; installation_id: number; api_base: string; repositories: string[]; permissions: Record<string, string>; created_at: number; created_by: string };
 export type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
+/** A vendor roll issues and revokes keys at itself (`saas` links): its account, never the credential. */
+export type SaasVendor = "sendgrid" | "twilio" | "okta" | "entra" | "auth0";
+export type SaasRotator = { id: string; name: string; vendor: SaasVendor; target: Record<string, unknown>; created_at: number; created_by: string };
+/** `credential` is sealed at once and never answered. */
+export type NewSaasRotator = { name: string; vendor: SaasVendor; target: Record<string, unknown>; credential: string };
 /** A Kubernetes cluster whose service accounts get short-lived tokens per lease (dynamic `kubernetes` links); the admin token and the CA stay sealed. */
 export type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 /** `token`: a service account token that may create tokens; `ca_pem`: the cluster's CA, when it isn't publicly trusted. */

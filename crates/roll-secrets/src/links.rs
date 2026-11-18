@@ -156,6 +156,11 @@ pub trait LinkProvider: Send + Sync {
     fn exclusive(&self) -> bool {
         false
     }
+    /// [`LinkProvider::exclusive`] for one resource (a vendor that keeps one secret per app).
+    fn exclusive_for(&self, r#ref: &str) -> bool {
+        let _ = r#ref;
+        self.exclusive()
+    }
     /// Refuse a link this kind can't serve as asked (its options, its mode, its resource's
     /// policy), when it's written rather than at its first issue.
     fn check(&self, link: &Link) -> Result<()> {
@@ -253,6 +258,9 @@ impl crate::Secrets {
         }
         if let Some(provider) = self.links.0.get(crate::rotators::KIND) {
             out.extend(self.rotator_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::rotators::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
+        }
+        if let Some(provider) = self.links.0.get(crate::saas::KIND) {
+            out.extend(self.saas_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::saas::KIND.into(), fields: provider.fields_for(&id), r#ref: id, name }));
         }
         if let Some(provider) = self.links.0.get(crate::outside::KIND) {
             out.extend(self.outside_db_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::outside::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));

@@ -1061,6 +1061,56 @@ the key button): the new `whsec_…` is shown once and signs every call from the
 endpoint right away; a call the endpoint refuses in between fails, changes nothing (the value in
 use stays) and is retried, as any failed rotation or revocation is.
 
+### SaaS rotators
+
+For the vendors below, roll speaks the vendor's own API, so there's no endpoint to write. A project
+registers a vendor credential roll may issue and revoke keys with (`POST …/saas {name, vendor,
+target, credential}`, `admin`; `roll secrets saas add NAME --vendor sendgrid`, the credential on
+stdin), and a key linked to it in `managed` mode (`{kind: "saas", ref: "sas_…", field: "secret" |
+"id", mode: "managed"}`, from the dashboard's Link a resource too) gets a fresh vendor secret on
+every rotation. It works as a rotator does: it rotates every `rotate_days` or on demand, and the
+old key is revoked after `grace_minutes`. `secret` is the vendor's secret (masked) and `id` is
+the key's or secret's id at the vendor (plain). Keys of one environment linked to the same
+registration share one issue: linking `TWILIO_API_KEY` to `id` and `TWILIO_API_SECRET` to `secret`
+gives one Twilio key.
+
+Registering checks the credential with the vendor first, read only, so a credential the vendor
+refuses, or one that can't manage keys, is refused at once (400, naming the vendor and the status)
+instead of at the first rotation:
+- SendGrid: `GET /v3/scopes`, which must include `api_keys.create` and `api_keys.delete`;
+- Twilio: one page of the account's keys;
+- Okta: the app's secrets;
+- Entra: sign in, then the application;
+- Auth0: sign in, then the client.
+
+| `vendor` | `target` | `credential` | Issue | Revoke |
+| --- | --- | --- | --- | --- |
+| `sendgrid` | `{scopes?: string[]}` (none: full access) | an API key that may manage API keys | `POST https://api.sendgrid.com/v3/api_keys {name, scopes?}` (Bearer) → `api_key`, `api_key_id` | `DELETE /v3/api_keys/{id}` |
+| `twilio` | `{account_sid: "AC…"}` | the Auth Token, or a main API key as `SK…:secret` | `POST https://api.twilio.com/2010-04-01/Accounts/{sid}/Keys.json`, form `FriendlyName` (basic auth) → `sid`, `secret` | `DELETE …/Keys/{sid}.json` |
+| `okta` | `{domain: "acme.okta.com", app_id}` | an API token (`SSWS`) that may manage the app | `POST https://{domain}/api/v1/apps/{app_id}/credentials/secrets` → `id`, `client_secret` | `POST …/secrets/{id}/lifecycle/deactivate`, then `DELETE …/secrets/{id}` |
+| `entra` | `{tenant, client_id, object_id}` | a client secret of `client_id`, an app with `Application.ReadWrite.OwnedBy` that owns `object_id` (or `Application.ReadWrite.All`) | a client credentials token at `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token` (scope `https://graph.microsoft.com/.default`), then `POST https://graph.microsoft.com/v1.0/applications/{object_id}/addPassword {passwordCredential: {displayName}}` → `keyId`, `secretText` | `POST …/removePassword {keyId}` |
+| `auth0` | `{domain: "acme.us.auth0.com", client_id, app_client_id}` | the client secret of `client_id`, a machine-to-machine app of the Management API with `update:client_keys` | a client credentials token at `https://{domain}/oauth/token` (audience `https://{domain}/api/v2/`), then `POST https://{domain}/api/v2/clients/{app_client_id}/rotate-secret` → `client_secret` (`id` is the app's client id) | nothing |
+
+- **Auth0 has no grace period.** `rotate-secret` replaces the app's secret at once: the old one
+  stops working the moment roll rotates, whatever `grace_minutes` says, so services must pick up
+  the new value right away. `domain` is the tenant's Auth0 domain, not a custom domain (the
+  Management API's audience names it), and `app_client_id` can't be the app roll signs in as.
+- **One environment per Okta or Auth0 registration.** Auth0 keeps one secret per app and Okta two,
+  so a second environment linking the same registration is refused (409 `in_use`): register the
+  app once per environment, or link one environment. Okta also refuses a new secret while the app
+  already has two; a rotation then fails and shows in health.
+- Entra passwords get Microsoft's default lifetime (two years); set `rotate_days` below it.
+
+Requests go out from rolld's guarded client, as a rotator's calls do: HTTPS to a public address, no
+redirects, a 15-second timeout, at most 64 KiB of answer. The hosts are the vendors' own, except
+Okta's and Auth0's tenant domains, which must be hostnames (no IP literal, no port) and then pass
+the same guard. The credential is sealed with the project's data key, bound to the registration's
+id, vendor and target, so a row pointed at another host no longer opens; it's never answered,
+logged or audited, and the list shows the vendor and target only. A vendor's answer is never part
+of an error: errors name the vendor, the step and the status (`okta answered 401 issuing a key`).
+A key the vendor no longer has (404) counts as revoked. Deleting a registration is refused while a
+key links to it or a retired key waits out its grace period, as with rotators.
+
 ### Databases outside roll
 
 A Postgres, MySQL, Redis or MongoDB server roll doesn't run (Amazon RDS, Supabase, Neon, PlanetScale, ElastiCache, Upstash, MongoDB Atlas, a server of the customer's own)
@@ -2929,6 +2979,9 @@ isn't in the workspace is 404.
 | `DELETE /rotators/{id}` | | 204; 409 while a key links to it (`admin`) |
 | `PATCH /rotators/{id}` | `{name?, url?}` | `Rotator` (`admin`; a new URL is checked first) |
 | `POST /rotators/{id}/rotate-secret` | | `Rotator & {secret}` (`admin`; the new signing secret, shown once) |
+| `GET /saas` | | `SaasRotator[]` (`read` on the project; never the credential) |
+| `POST /saas` | `{name, vendor, target, credential}` | 201 `SaasRotator` (`admin`; never the credential) |
+| `DELETE /saas/{id}` | | 204; 409 while a key links to it or a retired key waits (`admin`) |
 | `GET /outside-databases` | | `OutsideDatabase[]` (`read` on the project; never the URL) |
 | `POST /outside-databases` | `{name, url, roles?: [a, b], group?, ca?}` | 201 `OutsideDatabase` (`admin`; connects and checks the roles first: 400 with the server's reason) |
 | `DELETE /outside-databases/{id}` | | 204; 409 while a key links to it or a retired password waits (`admin`) |
@@ -3040,6 +3093,7 @@ type Finding = { issue: "expired" | "rotation_failing" | "revoke_failing" | "mis
 type Rotation = { environment: string; path: string; keys: string[]; kind: string; ref: string; name: string; rotate_days: number | null; grace_minutes: number; issued_at: number | null; next_due: number | null; last_error: string | null; failed_at: number | null };
 type Finding = { issue: "expired" | "missing" | "exposed" | "public" | "weak" | "expiring" | "stale" | "unread" | "unreferenced"; environment: string; path: string; key: string; detail: string };
 type Rotator = { id: string; name: string; host: string; created_at: number; created_by: string };
+type SaasRotator = { id: string; name: string; vendor: "sendgrid" | "twilio" | "okta" | "entra" | "auth0"; target: Record<string, unknown>; created_at: number; created_by: string };
 type KubernetesCluster = { id: string; name: string; api_url: string; has_ca: boolean; created_at: number; created_by: string };
 type Share = { id: string; note: string; views_left: number; created_by: string; created_at: number; expires_at: number; opened_at: number | null; open: boolean };
 type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: "own" | "import" | "base"; comment: boolean; personal: boolean; misfit?: string };
@@ -3372,8 +3426,9 @@ rotating a database's admin password and editing registrations in place (#75), s
 5. **Rotation windows and schedules** (`Sun 02:00–04:00`, `rate(30 days)`, cron) and **password
    policies per key** (length, classes, a target's rules) for every generated value (AWS Secrets
    Manager, Vault password policies).
-6. **SaaS rotators built in**: Entra app client secrets, Auth0, SendGrid, Twilio, Okta API tokens
-   on the rotator framework (Infisical, Akeyless).
+6. **SaaS rotators built in** (built: `feature/roll-secrets-saas-rotators`, "SaaS rotators"):
+   SendGrid, Twilio, Okta, Entra and Auth0 keys on the rotator framework (Infisical, Akeyless);
+   next, checking a registration's credential when it's added, and more vendors.
 7. **AWS roles and users edited in place** (a new role ARN or trust; on #68's branch, where trust
    lives), and Terraform updating registrations in place (#72, after #75).
 8. **More dynamic credentials**: Kubernetes service account tokens, Snowflake, LDAP and Active

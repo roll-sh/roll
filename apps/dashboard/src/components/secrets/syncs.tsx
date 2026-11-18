@@ -11,6 +11,7 @@ import { KubernetesClusters } from "./kubernetes-clusters";
 import { OutsideDatabases } from "./outside-databases";
 import { AwsRoles } from "./aws-roles";
 import { Rotators } from "./rotators";
+import { SaasRotators } from "./saas-rotators";
 import { TransitKeys } from "./transit-keys";
 
 /** Syncs (docs/secrets.md, "Syncs"): one-way pushes of an environment's values to GitHub, a webhook or a deploy hook. */
@@ -76,6 +77,7 @@ export function SyncsView() {
       <OutsideDatabases />
       <GitHubApps />
       <Rotators />
+      <SaasRotators />
       <TransitKeys />
       <Cas />
       <SshCas />
