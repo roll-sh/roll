@@ -28,6 +28,7 @@ impl std::fmt::Debug for Mail {
     }
 }
 
+#[derive(Clone)]
 pub enum Mailer {
     Off,
     Outbox(PathBuf),
