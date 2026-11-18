@@ -2450,3 +2450,30 @@ async fn a_token_from_a_session_needs_a_recent_proof() {
     d.people.3.lock().unwrap().clear();
     assert_eq!(d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "ci", "rules": rules }))).await.0, StatusCode::CREATED);
 }
+
+/// An incident's cut-off (docs/permissions.md, "Revoking at once"): every listed token at once,
+/// with why, all or none; the operator's only.
+#[tokio::test]
+async fn tokens_are_revoked_at_once_or_not_at_all() {
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
+    let mut made = Vec::new();
+    for name in ["ci", "deploy", "kept"] {
+        let (_, g) = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": name, "rules": rules }))).await;
+        made.push((g["grant"]["id"].as_str().unwrap().to_string(), g["token"].as_str().unwrap().to_string()));
+    }
+    let ids = |i: &[usize]| json!(i.iter().map(|&n| made[n].0.clone()).collect::<Vec<_>>());
+    // An unknown id refuses the lot.
+    let (s, _) = d.call(OPERATOR, Method::POST, "/v1/access/tokens/revoke", Some(json!({ "ids": [made[0].0, "grt_nope"], "why": "incident 42" }))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(d.call(&made[0].1, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK, "nothing was revoked");
+    // Not a person's, not a token's.
+    assert_eq!(d.as_user("usr_alice", Method::POST, "/v1/access/tokens/revoke", Some(json!({ "ids": ids(&[0]), "why": "x" }))).await.0, StatusCode::FORBIDDEN);
+    let (s, r) = d.call(OPERATOR, Method::POST, "/v1/access/tokens/revoke", Some(json!({ "ids": ids(&[0, 1]), "why": "incident 42: the CI box leaked" }))).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert!(r["revoked"].as_array().unwrap().iter().all(|g| g["revoked_why"] == "incident 42: the CI box leaked" && g["revoked_at"].is_i64()), "{r}");
+    assert_eq!(d.call(&made[0].1, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(d.call(&made[1].1, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(d.call(&made[2].1, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK, "only the listed ones");
+}

@@ -1047,6 +1047,14 @@ and Google mail a sign-in from somewhere new): a leaked token is used from somew
   OAuth client put in a name (Slack's `<!channel>`, Discord's `[label](url)`) is dropped, and Slack
   text is escaped.
 
+## Revoking at once
+
+An incident's cut-off revokes many tokens in one write: `POST /v1/access/tokens/revoke {ids, why}`
+(the operator's; at most 500 ids) revokes every listed token or none (an unknown id refuses the
+lot), puts `why` on each (`revoked_why`), and writes an audit row per token naming who and why.
+roll secrets' reach chooses the ids (the tokens and identities that can read a folder) and calls
+`Access::revoke_many` in process; roll-access never matches scopes a second way for it.
+
 ## Leaked tokens
 
 Other products' secrets made the same way are found and revoked the same way: apps' deploy hooks
@@ -1126,6 +1134,7 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
+| `POST /v1/access/tokens/revoke` | operator | `{ids, why}`: every listed token revoked at once, all or none (404 for an unknown id), `why` on each → `{revoked: Grant[]}` |
 | `POST /v1/access/requests` | the token itself | `{product, action, resource?, environment?, path?, index?, for, reason}`: ask for one more rule for a while ("Access requests"); `202` the pending approval |
 | `DELETE /v1/access/tokens/{id}/temporary/{approval}` | operator | take back what an approval allowed it for a while, and the approval if its request hasn't used it |
 | `POST /v1/access/tokens/{id}/tighten` | operator | `{from, days?}`: apply the proposal, made again now, if its rules are still `from` (else 409) → the grant |
