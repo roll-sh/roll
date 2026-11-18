@@ -1037,6 +1037,14 @@ mod tests {
         for name in ["node-a", "node-b"] {
             nodes.push(stores.node(Box::new(roll_cluster::Memory::new(mem.clone())), |url| roll_cluster::ClusterConfig::for_tests(name, url, b"test cluster secret, 32 bytes!!".to_vec())).await);
         }
+        // Each node sees the other before the gateway connects: a node that sees only itself takes
+        // the lease as its preferred node, and rebalancing then hands it to the real one.
+        for _ in 0..100 {
+            if nodes.iter().all(|n| n.cluster.nodes().len() == 2) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         let http = reqwest::Client::new();
         let project = project(&http, &nodes[0].url).await;
         let (gw, token) = make_gateway(&http, &nodes[0].url, &project, "vpc").await;
@@ -1045,13 +1053,16 @@ mod tests {
         let (lb, to) = balancer(nodes.iter().map(|n| n.url.clone()).collect()).await;
         let (agent, lines) = gateway_up(&lb, &gw, Auth::Token(token), &[format!("localhost:{ch}")]);
 
-        // The link lands on the holder of secrets:gateway:<id>, and only there.
+        // The link lands on the holder of secrets:gateway:<id>, and only there. Settled once that's
+        // the key's preferred node as both see it (no rebalancing moves it then).
         let on_holder = async |nodes: &[Node]| -> usize {
             for _ in 0..300 {
                 let holder = nodes[0].cluster.lease_record(&key(&gw)).unwrap().map(|(n, _)| n);
                 let linked: Vec<usize> = (0..nodes.len()).filter(|i| nodes[*i].hub.link(&gw).is_some()).collect();
+                let preferred = |n: &Node| n.cluster.preferred(&key(&gw)).map(|p| p.id);
                 if let ([i], Some(h)) = (linked.as_slice(), holder)
                     && nodes[*i].cluster.node_id() == h
+                    && nodes.iter().all(|n| preferred(n).as_deref() == Some(h.as_str()))
                 {
                     return *i;
                 }
