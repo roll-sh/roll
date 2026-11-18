@@ -206,7 +206,6 @@ async fn an_inference_endpoint_keyed_by_a_secret_follows_its_rotation() {
         ("ROLL_PRODUCTS", "search"),
         ("ROLL_SECRET_KEY", "node-test-secret-key-0123456789abcdef"),
         ("ROLL_SEARCH_INFERENCE_ALLOW_PRIVATE", "true"),
-        ("ROLL_SECRETS_SWEEP_SECONDS", "1"),
     ];
     let (mut rolld, _) = start(home.path(), &env);
     let http = reqwest::Client::new();
@@ -242,6 +241,7 @@ async fn an_inference_endpoint_keyed_by_a_secret_follows_its_rotation() {
     });
     let (s, b) = send(Method::POST, &format!("/v1/search/clusters/{cluster}/inference/secrets"), made).await;
     assert_eq!(s, 201, "{b}");
+    let sync = b["binding"]["sync"].as_str().unwrap().to_string();
     assert!(!b.to_string().contains("sk-first"), "{b}");
     assert_eq!(seen.lock().unwrap().last().map(String::as_str), Some("Bearer sk-first-value"), "created with the secret's value");
 
@@ -270,9 +270,52 @@ async fn an_inference_endpoint_keyed_by_a_secret_follows_its_rotation() {
     let (_, b) = send(Method::POST, &format!("/v1/search/clusters/{cluster}/request"), json!({ "method": "GET", "path": "/_inference/emb" })).await;
     assert!(!b.to_string().contains("sk-"), "{b}");
 
+    let es = |method: &str, path: &str, body: Value| json!({ "method": method, "path": path, "body": body });
+    let mine = |a: &String| a.starts_with("Bearer sk-") && !a.contains("sk-other");
+
+    // Deleted, kept for restoring, and its name taken by another cluster with an endpoint of the
+    // same id: a rotation goes nowhere, and the sync says so.
+    let (s, b) = send(Method::DELETE, &format!("/v1/search/clusters/{cluster}"), Value::Null).await;
+    assert!(s < 300, "{b}");
+    let (s, b) = send(Method::POST, "/v1/search/clusters", json!({ "name": "emb" })).await;
+    assert!(s < 300, "{b}");
+    let other = b["id"].as_str().unwrap().to_string();
+    let theirs = json!({ "service": "openai", "service_settings": { "api_key": "sk-other", "model_id": "m", "url": format!("{mock}/v1/embeddings") } });
+    let (_, b) = send(Method::POST, &format!("/v1/search/clusters/{other}/request"), es("PUT", "/_inference/text_embedding/emb", theirs)).await;
+    assert_eq!(b["status"].as_u64(), Some(200), "{b}");
+    let before = seen.lock().unwrap().iter().filter(|a| mine(a)).count();
+    let (s, b) = send(Method::PUT, &key, json!({ "value": "sk-while-deleted" })).await;
+    assert!(s < 300, "{b}");
+    let syncs = format!("/v1/secrets/projects/{project}/syncs");
+    let started = Instant::now();
+    loop {
+        let (_, b) = send(Method::GET, &syncs, Value::Null).await;
+        let row = b["syncs"].as_array().and_then(|a| a.iter().find(|r| r["id"] == sync.as_str())).cloned().unwrap_or(Value::Null);
+        if row["status"] == "error" {
+            assert!(row["error"].as_str().is_some_and(|e| e.contains(&cluster) && e.contains("restored")), "{row}");
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(30), "the push to a deleted cluster never failed: {row}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(seen.lock().unwrap().iter().filter(|a| mine(a)).count(), before, "a key went out while its cluster was deleted");
+
+    // Restored under another name: the sync follows the id, so the key reaches it, never the
+    // cluster that took the old name.
+    let (s, b) = send(Method::POST, &format!("/v1/search/clusters/{cluster}/restore"), json!({ "name": "emb-back" })).await;
+    assert!(s < 300, "{b}");
+    let (s, b) = send(Method::POST, &format!("{syncs}/{sync}/run"), Value::Null).await;
+    assert_eq!((s, b["status"].as_str()), (200, Some("ok")), "{b}");
+    let infer = json!({ "method": "POST", "path": "/_inference/text_embedding/emb", "body": { "input": "hello" } });
+    let (_, b) = send(Method::POST, &format!("/v1/search/clusters/{other}/request"), infer.clone()).await;
+    assert_eq!(b["status"].as_u64(), Some(200), "{b}");
+    assert_eq!(seen.lock().unwrap().last().map(String::as_str), Some("Bearer sk-other"), "the cluster that took the name got the key");
+    let (_, b) = send(Method::POST, &format!("/v1/search/clusters/{cluster}/request"), infer).await;
+    assert_eq!(b["status"].as_u64(), Some(200), "{b}");
+    assert_eq!(seen.lock().unwrap().last().map(String::as_str), Some("Bearer sk-while-deleted"), "the restored cluster's endpoint");
+
     // Recreated by someone who may change the cluster but not reveal the key: same id, service and
     // URL, one header more. The next rotation isn't sent there.
-    let es = |method: &str, path: &str, body: Value| json!({ "method": method, "path": path, "body": body });
     let (_, b) = send(Method::POST, &format!("/v1/search/clusters/{cluster}/request"), es("DELETE", "/_inference/text_embedding/emb", Value::Null)).await;
     assert_eq!(b["status"].as_u64(), Some(200), "{b}");
     let again = json!({ "service": "openai", "service_settings": { "api_key": "sk-their-own", "model_id": "m", "url": format!("{mock}/v1/embeddings") }, "task_settings": { "headers": { "X-Route": "theirs" } } });
@@ -291,5 +334,5 @@ async fn an_inference_endpoint_keyed_by_a_secret_follows_its_rotation() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     assert!(!seen.lock().unwrap().iter().any(|a| a.contains("sk-third")), "the rotated key reached a recreated endpoint");
-    assert!(!rolld.stdout.lock().unwrap().iter().any(|l| l.contains("sk-first") || l.contains("sk-second") || l.contains("sk-third")), "a value in rolld's log");
+    assert!(!rolld.stdout.lock().unwrap().iter().any(|l| ["sk-first", "sk-second", "sk-while-deleted", "sk-third"].iter().any(|v| l.contains(v))), "a value in rolld's log");
 }

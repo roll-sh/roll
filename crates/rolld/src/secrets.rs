@@ -438,9 +438,7 @@ fn issuer_url(args: &crate::Args) -> String {
 
 fn sweeper(s: Arc<Secrets>, what: &'static str, pass: fn(&Secrets) -> roll_secrets::Result<roll_secrets::Swept>) {
     tokio::spawn(async move {
-        // Every 30 s (`ROLL_SECRETS_SWEEP_SECONDS`: tests that wait for a sync).
-        let every = std::env::var("ROLL_SECRETS_SWEEP_SECONDS").ok().and_then(|s| s.parse::<u64>().ok()).filter(|s| *s > 0).unwrap_or(30);
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(every));
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;

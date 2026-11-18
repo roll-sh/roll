@@ -1532,6 +1532,13 @@ cluster, instead of a key pasted into it: the Inference tab's "A roll secret", o
   a key).
 - Deleting the endpoint from the tab deletes its sync; one deleted another way leaves the sync,
   whose next push says the endpoint is gone. Deleting the key leaves the endpoint its last value.
+- The sync names the cluster by its id (`srch_…`, never a name: a name has no `_`) and pushes
+  through roll search's control plane (`/v1/search/clusters/{id}/request`, on the cluster's owner
+  on a fleet), not the cluster's endpoint, so its Basic auth user and IP allowlist don't apply. A
+  deleted cluster (kept for restoring or not) is no cluster: a push fails, the sync shows the
+  error and keeps its last digest, and nothing goes out. A restore, under its own name or another,
+  keeps the id, so the next try (or `POST …/syncs/{id}/run`) pushes the current value to it; a
+  cluster that took the old name never gets it.
   The Elasticsearch `_inference` API is unchanged: clients there send keys.
 
 ### Checks, sandboxes and previews

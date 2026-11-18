@@ -59,14 +59,21 @@ impl Target {
     }
 }
 
-/// An Elasticsearch request on cluster `cluster`, through `/v1/search/clusters/{id}/request` as
-/// the operator (on a fleet that route runs it on the cluster's owner): its status and JSON body.
+/// An Elasticsearch request on cluster `cluster` (its id: a restore under another name keeps it,
+/// and no name can be one), through `/v1/search/clusters/{id}/request` as the operator (on a
+/// fleet that route runs it on the cluster's owner; the control plane, so the cluster's IP
+/// allowlist doesn't apply): its status and JSON body. A deleted cluster, kept for restoring or
+/// not, is no cluster: the push fails and the sync shows it until a restore.
 fn es(api: &Api, cluster: &str, method: &str, path: &str, body: Option<Json>) -> Result<(u16, Json)> {
     let mut req = json!({ "method": method, "path": path });
     if let Some(b) = body {
         req["body"] = b;
     }
-    let v = api.call(Method::POST, &format!("/v1/search/clusters/{}/request", seg(cluster)), Some(req))?;
+    let v = match api.call_status(Method::POST, &format!("/v1/search/clusters/{}/request", seg(cluster)), Some(req))? {
+        (s, v) if s.is_success() => v,
+        (StatusCode::NOT_FOUND, _) => return Err(Error::Link(format!("search {cluster}: no such cluster: deleted (the key is pushed once it's restored) or gone (delete this sync)"))),
+        (s, v) => return Err(Error::Link(format!("search {cluster}: {} {}", s.as_u16(), v.get("error").and_then(Json::as_str).unwrap_or(s.as_str())))),
+    };
     let status = v["status"].as_u64().unwrap_or(0) as u16;
     let body = v["body"].as_str().and_then(|b| serde_json::from_str(b).ok()).unwrap_or(Json::Null);
     Ok((status, body))
@@ -154,7 +161,7 @@ impl SyncTarget for InferenceKeys {
     fn check(&self, _: &str, resources: &Resources, t: &Json) -> Result<()> {
         let t = Target::parse(t)?;
         if !resources.contains(&("search".to_string(), t.cluster.clone())) {
-            return Err(Error::BadRequest(format!("search cluster {} isn't on this project's canvas", t.cluster)));
+            return Err(Error::BadRequest(format!("search cluster {} isn't on this project's canvas, or isn't live (a deleted one's key is pushed once it's restored)", t.cluster)));
         }
         Ok(())
     }
