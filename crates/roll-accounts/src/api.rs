@@ -45,6 +45,7 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/signin/reset-request", post(request_reset))
         .route("/v1/accounts/reset-requests", get(list_resets))
         .route("/v1/accounts/passkey-policy", get(passkey_policy).put(set_passkey_policy))
+        .route("/v1/accounts/network-policy", get(network_policy).put(set_network_policy))
         .route("/v1/accounts/reset-requests/{id}/approve", post(approve_reset))
         .route("/v1/accounts/reset-requests/{id}/deny", post(deny_reset))
         .route("/v1/accounts/me", get(me).patch(update_me))
@@ -653,6 +654,20 @@ async fn set_passkey_policy(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Res
     admin_sudo(&a, &me, &op).await?;
     let p: crate::attestation::Policy = body(&b)?;
     Ok(Json(blocking(&a, move |a| a.set_passkey_policy(p)).await?).into_response())
+}
+
+/// Allowed networks (docs/accounts.md): where people's sessions may be used from.
+async fn network_policy(State(a): S, me: Me, op: Op) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    Ok(Json(blocking(&a, |a| a.network_policy()).await?).into_response())
+}
+
+async fn set_network_policy(State(a): S, me: Me, op: Op, ip: Ip, b: Bytes) -> Result<Response> {
+    admin_sudo(&a, &me, &op).await?;
+    let p: crate::networks::NetworkPolicy = body(&b)?;
+    // An admin's own address must stay on it; the operator's token has no session to lock out.
+    let from = me.as_ref().and(ip.map(|Extension(roll_auth::ClientIp(i))| i));
+    Ok(Json(blocking(&a, move |a| a.set_network_policy(p, from)).await?).into_response())
 }
 
 async fn list_resets(State(a): S, me: Me, op: Op) -> Result<Response> {
