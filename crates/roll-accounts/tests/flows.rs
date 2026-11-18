@@ -60,6 +60,8 @@ struct Env {
 struct Browser {
     cookies: HashMap<String, String>,
     csrf: Option<String>,
+    /// Its User-Agent, if it sends one.
+    user_agent: Option<String>,
 }
 
 struct Answer {
@@ -150,6 +152,9 @@ impl Env {
         }
         if let Some(c) = b.csrf.as_ref().filter(|_| method != Method::GET) {
             req = req.header("x-roll-csrf", c);
+        }
+        if let Some(ua) = &b.user_agent {
+            req = req.header(header::USER_AGENT, ua);
         }
         let a = self.send(req.body(body.map_or(Body::empty(), |v| Body::from(v.to_string()))).unwrap()).await;
         for c in a.headers.get_all(header::SET_COOKIE) {
@@ -1009,4 +1014,43 @@ async fn sudo_mode_asks_for_a_recent_proof() {
 
     let got = events.0.lock().unwrap().clone();
     assert_eq!(got.iter().filter(|e| e.action == "reauth").map(|e| (e.ok, e.detail["method"].as_str().unwrap().to_string())).collect::<Vec<_>>(), [(false, "email".into()), (false, "totp".into()), (true, "email".into())]);
+}
+
+/// The mails "a new sign-in to your roll account" sent to `to`.
+fn new_sign_in_mails(outbox: &std::path::Path, to: &str) -> Vec<String> {
+    let mut out: Vec<(String, String)> = std::fs::read_dir(outbox)
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| (e.file_name().to_string_lossy().into_owned(), serde_json::from_slice::<Value>(&std::fs::read(e.path()).unwrap()).unwrap())).filter(|(_, m)| m["to"] == to && m["subject"] == "A new sign-in to your roll account").map(|(n, m)| (n, m["text"].as_str().unwrap().to_string())).collect())
+        .unwrap_or_default();
+    out.sort();
+    out.into_iter().map(|(_, t)| t).collect()
+}
+
+/// A whole sign-in from a browser and network a person hasn't signed in from before mails them
+/// (docs/accounts.md, "New sign-ins"); their first sign-in, and the same place again, don't.
+#[tokio::test]
+async fn a_sign_in_from_somewhere_new_mails_the_person() {
+    let env = Env::new().await;
+    env.accounts.set_audit(Arc::new(Events::default()));
+    let mac = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36";
+    let windows = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0";
+    let invite = env.invite("ada@example.com").await;
+    let mut b = Browser { user_agent: Some(mac.into()), ..Default::default() };
+    env.email_sign_in(&mut b, "ada@example.com", Some(&invite)).await;
+    let mut again = Browser { user_agent: Some(mac.into()), ..Default::default() };
+    assert_eq!(env.email_sign_in(&mut again, "ada@example.com", None).await.json["status"], "signed_in");
+    let mut elsewhere = Browser { user_agent: Some(windows.into()), ..Default::default() };
+    assert_eq!(env.email_sign_in(&mut elsewhere, "ada@example.com", None).await.json["status"], "signed_in");
+    let mut twice = Browser { user_agent: Some(windows.into()), ..Default::default() };
+    env.email_sign_in(&mut twice, "ada@example.com", None).await;
+    // The mail goes out off the request: wait for it, then a moment for any wrong second one.
+    for _ in 0..100 {
+        if !new_sign_in_mails(&env.outbox, "ada@example.com").is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mails = new_sign_in_mails(&env.outbox, "ada@example.com");
+    assert_eq!(mails.len(), 1, "one mail, for the one new place: {mails:?}");
+    assert!(mails[0].contains("Firefox on Windows, from 203.0.113.7") && mails[0].contains(&format!("{WEB}/dashboard/account#activity")), "{}", mails[0]);
 }

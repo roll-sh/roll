@@ -70,6 +70,8 @@ passkeys(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, credential_id TEXT NOT NULL
          public_key TEXT NOT NULL,                                -- COSE, base64url
          sign_count INTEGER NOT NULL, name TEXT NOT NULL,
          created_at INTEGER NOT NULL, last_used_at INTEGER, synced INTEGER)
+sign_in_places(user_id TEXT, place TEXT, first_at INTEGER, last_at INTEGER,  -- new-sign-in mail
+         PRIMARY KEY (user_id, place))                            -- place: sha256(browser, network)
 passkey_challenges(id TEXT PRIMARY KEY, user_id TEXT, purpose TEXT NOT NULL,  -- register | signin
          challenge TEXT NOT NULL, expires_at INTEGER NOT NULL)     -- used once, 5 minutes
 throttle(key TEXT PRIMARY KEY, n INTEGER NOT NULL, since INTEGER NOT NULL)
@@ -377,6 +379,20 @@ phished: a passkey works only on roll's own site.
   `providers.passkey`.
 - A refused passkey sign-in is in the passkey owner's security log (by `anonymous` when no
   session owed a second factor); adding, renaming and removing one are there too.
+
+### New sign-ins
+
+As GitHub does, the first whole sign-in (nothing more owed) from a browser and network a person
+hasn't signed in from before mails them: "A new sign-in to your roll account", with the browser
+in words ("Firefox on Windows"), the address, and a link to their Recent activity. A stolen code
+or link shows up in their inbox, not only in their security log.
+
+- A place is the browser and OS from the User-Agent plus the network (an IPv4 /24, an IPv6 /48),
+  kept hashed in `sign_in_places` (the newest 50 per person), so a new address at the same home
+  or office isn't new.
+- A person's first sign-in mails nothing, and neither does the first after this shipped (nobody
+  is mailed for what they did before). Without mail configured nothing is sent.
+- The mail goes out off the request, after the sign-in's answer.
 
 ### Sudo mode
 

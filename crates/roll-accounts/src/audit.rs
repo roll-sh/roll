@@ -139,6 +139,10 @@ impl Accounts {
     /// A sign-in that ended: well (`user`, `refused: None`; `second_factor`: it still owes one) or
     /// not (the error, and the person when they're known).
     pub(crate) fn record_sign_in(&self, user: Option<&str>, method: &str, refused: Option<&Error>, second_factor: bool, who: &Who) {
+        // A whole sign-in (nothing more owed): from somewhere new, the person is mailed.
+        if let (Some(u), None, false) = (user, refused, second_factor) {
+            self.note_sign_in_place(u, who);
+        }
         self.sign_in_event(user.unwrap_or("anonymous"), user, method, refused, second_factor, who);
     }
 
