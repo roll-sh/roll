@@ -1944,29 +1944,6 @@ impl Search<'_, '_, '_> {
                     }
                 }
             }
-            // (A catalog: its scan as it is planned alone, and parameterized index scans
-            // of its stand-in table.)
-            Some((_, r)) if leaf.sys.is_some() => {
-                let r = Rc::new(r.shallow_with_quals());
-                rel.paths.push(JP {
-                    node: JNode::Opaque {
-                        leaf: l,
-                        kind: leaf.kind,
-                        params: Vec::new(),
-                        merged: None,
-                        sub: None,
-                    },
-                    rows: leaf.rows,
-                    startup: leaf.startup,
-                    total: leaf.total,
-                    width,
-                    disabled: 0,
-                    keys: Vec::new(),
-                    req: 0,
-                    set,
-                });
-                rel.param = self.param_paths(l, &r, width);
-            }
             Some((_, r)) => {
                 let mut r = r.shallow_with_quals();
                 // (A relation with lateral_relids: its index paths repeat once per row of
@@ -1987,7 +1964,8 @@ impl Search<'_, '_, '_> {
                 let mut fdw_plain = None;
                 let paths = self.pl.paths(&pr, &want);
                 // (Its partial index and bitmap paths are made along with these.)
-                if self.par.is_some() && !self.has_lat(l) && fdw.is_none() {
+                // (A catalog's stand-in has no partial paths: its rows are made whole.)
+                if self.par.is_some() && !self.has_lat(l) && fdw.is_none() && self.leaves[l].sys.is_none() {
                     rel.partial = self.base_partial(l, width, &pr, &paths);
                 }
                 for mut p in paths {
@@ -6670,17 +6648,13 @@ impl Search<'_, '_, '_> {
                 // (A catalog's: its scan by the path chosen, the filter with the
                 // parameterized clauses what the executor checks.)
                 if let Some((t, alias)) = &l.sys {
-                    let plan = if matches!(s.access, Access::Seq) && params.is_empty() {
-                        l.plan.clone()
-                    } else {
-                        let ordered = matches!(s.access, Access::Index { .. });
-                        Plan::SysScan {
-                            table: *t,
-                            filter: s.filter.clone(),
-                            path: Some(Arc::new(crate::sql::plan::SysPath { scan: s, ordered })),
-                            alias: alias.clone(),
-                            mark: None,
-                        }
+                    let ordered = matches!(s.access, Access::Index { .. });
+                    let plan = Plan::SysScan {
+                        table: *t,
+                        filter: s.filter.clone(),
+                        path: Some(Arc::new(crate::sql::plan::SysPath { scan: s, ordered })),
+                        alias: alias.clone(),
+                        mark: None,
                     };
                     return (plan, (l.off..l.off + l.ncols).collect());
                 }
@@ -9517,7 +9491,7 @@ impl Planner<'_, '_> {
                 _ => None,
             };
             let est = match &scan {
-                Some(_) if sys.is_none() => crate::sql::explain::PlanEstimate {
+                Some(_) => crate::sql::explain::PlanEstimate {
                     rows: 0.0,
                     startup: 0.0,
                     total: 0.0,
@@ -9534,7 +9508,7 @@ impl Planner<'_, '_> {
                 _ => crate::sql::explain::estimate(&Arc::new(plan.clone()), self.ctx),
             };
             let (rows, cols) = match &scan {
-                Some((sp, r)) if sys.is_none() => {
+                Some((sp, r)) => {
                     let cols = (0..n)
                         .map(|k| {
                             if k < sp.table.columns.len() {

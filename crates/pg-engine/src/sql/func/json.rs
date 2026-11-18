@@ -367,6 +367,32 @@ fn exists_all(a: &[Value], _: &FnCtx) -> Result<Value> {
     ))
 }
 
+/// The test of jsonb operator `name` (`@>`, `<@`, `?`, `?|`, `?&`, `@?`, `@@`) on its two
+/// operands, needing no session (a jsonpath's zone is `fmt`'s, its notices dropped): what
+/// matchingsel applies to a column's statistics.
+pub fn matching_test(name: &str) -> Option<fn(&Value, &Value, &FormatCtx) -> bool> {
+    fn both(a: &Value, b: &Value) -> Option<(Arc<Jsonb>, Arc<Jsonb>)> {
+        Some((jb(a).ok()?, jb(b).ok()?))
+    }
+    fn path(a: &Value, b: &Value, fmt: &FormatCtx, exists: bool) -> bool {
+        let (Ok(target), Ok(path)) = (jb(a), jsonpath::parse(text_arg(b))) else {
+            return false;
+        };
+        let run = if exists { jsonpath::exists_with } else { jsonpath::matches_with };
+        matches!(run(&target, &path, None, true, false, &fmt.tz, &|_| {}), Ok(Some(true)))
+    }
+    Some(match name {
+        "@>" => |a, b, _| both(a, b).is_some_and(|(a, b)| a.contains(&b)),
+        "<@" => |a, b, _| both(a, b).is_some_and(|(a, b)| b.contains(&a)),
+        "?" => |a, b, _| jb(a).is_ok_and(|j| has_key(&j, text_arg(b))),
+        "?|" => |a, b, _| jb(a).is_ok_and(|j| path_of(b).iter().flatten().any(|k| has_key(&j, k))),
+        "?&" => |a, b, _| jb(a).is_ok_and(|j| path_of(b).iter().flatten().all(|k| has_key(&j, k))),
+        "@?" => |a, b, fmt| path(a, b, fmt, true),
+        "@@" => |a, b, fmt| path(a, b, fmt, false),
+        _ => return None,
+    })
+}
+
 fn concat(a: &[Value], _: &FnCtx) -> Result<Value> {
     let (x, y) = (jb(&a[0])?, jb(&a[1])?);
     let (x, y) = ((*x).clone(), (*y).clone());

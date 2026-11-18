@@ -3092,6 +3092,12 @@ impl Catalog {
     }
 
     pub fn table_indexes(&self, t: &Table) -> Vec<Arc<Index>> {
+        // (A system catalog's planning stand-in: the catalog's indexes.)
+        if t.next_index_id == u32::MAX
+            && let Some(ix) = crate::sql::paths::stand_in_indexes(t)
+        {
+            return ix.to_vec();
+        }
         t.indexes
             .iter()
             .filter_map(|i| self.indexes.get(i).cloned())

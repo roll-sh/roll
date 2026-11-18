@@ -1,0 +1,139 @@
+> EXPLAIN SELECT * FROM pg_class WHERE oid = 1259
+QUERY PLAN:text
+Index Scan using pg_class_oid_index on pg_class  (cost=0.27..8.29 rows=1 width=277)
+  Index Cond: (oid = '1259'::oid)
+-- EXPLAIN
+
+> EXPLAIN SELECT relname, oid FROM pg_class WHERE relname = ANY ('{p1,p2,c1,gc1}')
+QUERY PLAN:text
+Bitmap Heap Scan on pg_class  (cost=8.58..18.22 rows=4 width=68)
+  Recheck Cond: (relname = ANY ('{p1,p2,c1,gc1}'::name[]))
+  ->  Bitmap Index Scan on pg_class_relname_nsp_index  (cost=0.00..8.57 rows=4 width=0)
+        Index Cond: (relname = ANY ('{p1,p2,c1,gc1}'::name[]))
+-- EXPLAIN
+
+> EXPLAIN SELECT count(*) FROM pg_attribute WHERE attrelid = 1259
+QUERY PLAN:text
+Aggregate  (cost=5.08..5.09 rows=1 width=8)
+  ->  Index Only Scan using pg_attribute_relid_attnum_index on pg_attribute  (cost=0.28..4.98 rows=40 width=0)
+        Index Cond: (attrelid = '1259'::oid)
+-- EXPLAIN
+
+> EXPLAIN SELECT p.proname, n.nspname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('a', 'b') ORDER BY 1
+QUERY PLAN:text
+Sort  (cost=247.24..251.50 rows=1706 width=128)
+  Sort Key: p.proname
+  ->  Hash Join  (cost=1.07..155.65 rows=1706 width=128)
+        Hash Cond: (p.pronamespace = n.oid)
+        ->  Seq Scan on pg_proc p  (cost=0.00..136.13 rows=3413 width=68)
+        ->  Hash  (cost=1.05..1.05 rows=2 width=68)
+              ->  Seq Scan on pg_namespace n  (cost=0.00..1.05 rows=2 width=68)
+                    Filter: (nspname = ANY ('{a,b}'::name[]))
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM pg_trigger
+QUERY PLAN:text
+Seq Scan on pg_trigger  (cost=0.00..0.00 rows=1 width=324)
+-- EXPLAIN
+
+> SELECT 'infinity'::date = 'infinity'::timestamp, '5874897-12-31'::date > '294276-12-31 23:59:59'::timestamp, '5874897-12-31'::date < 'infinity'::timestamp, '5874897-12-31'::date = 'infinity'::timestamp
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | f
+-- SELECT 1
+
+> CREATE TABLE a254_d (x date, t timestamp, i interval) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO a254_d SELECT '2000-01-01'::date + (s % 3000), '2000-01-01'::timestamp + s * interval '1 hour', s * interval '1 minute' FROM generate_series(1, 10000) s
+-- INSERT 0 10000
+
+> INSERT INTO a254_d SELECT 'infinity', 'infinity', 'infinity' FROM generate_series(1, 50)
+-- INSERT 0 50
+
+> INSERT INTO a254_d SELECT '-infinity', '-infinity', '-infinity' FROM generate_series(1, 50)
+-- INSERT 0 50
+
+> ANALYZE a254_d
+-- ANALYZE
+
+> EXPLAIN SELECT * FROM a254_d WHERE x < '2003-01-01'::timestamp
+QUERY PLAN:text
+Seq Scan on a254_d  (cost=0.00..201.25 rows=4336 width=28)
+  Filter: (x < '2003-01-01 00:00:00'::timestamp without time zone)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a254_d WHERE x > '2005-01-01 00:00:00+00'::timestamptz
+QUERY PLAN:text
+Seq Scan on a254_d  (cost=0.00..201.25 rows=3566 width=28)
+  Filter: (x > '2005-01-01 00:00:00+00'::timestamp with time zone)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a254_d WHERE x = 'infinity'::timestamp
+QUERY PLAN:text
+Seq Scan on a254_d  (cost=0.00..201.25 rows=50 width=28)
+  Filter: (x = 'infinity'::timestamp without time zone)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a254_d WHERE x < 'infinity'::timestamp
+QUERY PLAN:text
+Seq Scan on a254_d  (cost=0.00..201.25 rows=10049 width=28)
+  Filter: (x < 'infinity'::timestamp without time zone)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a254_d WHERE t < '2000-06-01'::date
+QUERY PLAN:text
+Seq Scan on a254_d  (cost=0.00..201.25 rows=3697 width=28)
+  Filter: (t < '2000-06-01'::date)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a254_d WHERE i < '30 hours'
+QUERY PLAN:text
+Seq Scan on a254_d  (cost=0.00..201.25 rows=1849 width=28)
+  Filter: (i < '30:00:00'::interval)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a254_d WHERE i > '100 hours'
+QUERY PLAN:text
+Seq Scan on a254_d  (cost=0.00..201.25 rows=4050 width=28)
+  Filter: (i > '100:00:00'::interval)
+-- EXPLAIN
+
+> CREATE TABLE a254_j (id int, j jsonb) WITH (autovacuum_enabled = false)
+-- CREATE TABLE
+
+> INSERT INTO a254_j SELECT s, jsonb_build_object('a', s % 10, 'b', s % 3, 'k' || (s % 50), true) FROM generate_series(1, 5000) s
+-- INSERT 0 5000
+
+> INSERT INTO a254_j SELECT s, '{"z": 1}' FROM generate_series(1, 2000) s
+-- INSERT 0 2000
+
+> INSERT INTO a254_j SELECT s, NULL FROM generate_series(1, 300) s
+-- INSERT 0 300
+
+> ANALYZE a254_j
+-- ANALYZE
+
+> EXPLAIN SELECT * FROM a254_j WHERE j @> '{"a": 1}'
+QUERY PLAN:text
+Seq Scan on a254_j  (cost=0.00..162.25 rows=508 width=47)
+  Filter: (j @> '{"a": 1}'::jsonb)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a254_j WHERE '{"z": 1}' <@ j
+QUERY PLAN:text
+Seq Scan on a254_j  (cost=0.00..162.25 rows=2008 width=47)
+  Filter: ('{"z": 1}'::jsonb <@ j)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a254_j WHERE j ?| array['k7', 'z']
+QUERY PLAN:text
+Seq Scan on a254_j  (cost=0.00..162.25 rows=2077 width=47)
+  Filter: (j ?| '{k7,z}'::text[])
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM a254_j WHERE j @? '$.a'
+QUERY PLAN:text
+Seq Scan on a254_j  (cost=0.00..162.25 rows=4184 width=47)
+  Filter: (j @? '$."a"'::jsonpath)
+-- EXPLAIN
+
