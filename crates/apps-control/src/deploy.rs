@@ -55,10 +55,11 @@ impl Apps {
         self.refuse_paused(service, env).await?;
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["revision", "image", "message", "no_traffic", "no_cache", "image_upload"].contains(&k.as_str()) {
+            if !["revision", "image", "message", "no_traffic", "no_cache", "image_upload", "closed"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
+        self.require_closed(service, env, &o).await?;
         let text = |k: &str| -> Result<Option<String>> {
             match o.get(k) {
                 None | Some(Value::Null) => Ok(None),
@@ -194,6 +195,24 @@ impl Apps {
         Ok(dep)
     }
 
+    /// `closed: true` in a deploy's body (roll previews' for a fork's head): refused unless the
+    /// environment is closed and this node builds it closed (its own network, no secret value).
+    /// A node that predates the field refuses it as unknown, so the request fails closed.
+    async fn require_closed(self: &Arc<Self>, service: &str, env: &str, o: &serde_json::Map<String, Value>) -> Result<()> {
+        match o.get("closed") {
+            None | Some(Value::Null | Value::Bool(false)) => Ok(()),
+            Some(Value::Bool(true)) => {
+                let (sid, e) = (service.to_string(), env.to_string());
+                let row = self.db(move |s| s.environment(&sid, &e)).await?;
+                if !row.egress.closed() || !self.deps.runtime.closes_egress() {
+                    return Err(Error::Conflict(format!("{env} isn't built closed here (egress roll, on a node that closes it)")));
+                }
+                Ok(())
+            }
+            Some(_) => Err(Error::BadRequest("closed is a boolean".into())),
+        }
+    }
+
     /// `POST …/redeploy`: the active deployment's image again, with the service's current run
     /// settings and variables (variables are read when its instances are made), without a build
     /// and without moving to another revision. What a change of variables or settings needs,
@@ -216,9 +235,10 @@ impl Apps {
             }
         }
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| k.as_str() != "message") {
+        if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "message" | "closed")) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
+        self.require_closed(service, env, &o).await?;
         let message = match o.get("message") {
             None | Some(Value::Null) => None,
             Some(Value::String(m)) => Some(m.chars().take(500).collect::<String>()),
@@ -1250,7 +1270,8 @@ impl Apps {
         // secrets values, links' credentials, URL passwords), nor a variable that holds one. Its
         // code can't send what it never has.
         let build_egress = match env_row.egress.closed() {
-            true => self.deps.runtime.build_egress(&svc.project).await.map_err(|e| anyhow::anyhow!("a closed build's network: {e:#}"))?,
+            // Never on the default network instead: a node that can't build it closed fails it.
+            true => Some(self.deps.runtime.build_egress(&svc.project).await.map_err(|e| anyhow::anyhow!("a closed build's network: {e:#}"))?.ok_or_else(|| anyhow::anyhow!("this node can't build a closed environment (it needs Docker here)"))?),
             false => None,
         };
         if build_egress.is_some() {

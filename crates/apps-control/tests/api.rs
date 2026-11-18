@@ -3045,9 +3045,13 @@ async fn a_closed_environments_build_gets_no_secret_values() {
     let env = format!("/v1/apps/services/{id}/environments/production");
     let (st, b) = call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"set": {"API_TOKEN": "tok_9f8e7d6c5b", "DATABASE_URL": "postgres://app:tok_9f8e7d6c5b@db/app", "GREETING": "hello-world"}, "seal": ["API_TOKEN"]}))).await;
     assert!(st.is_success(), "{b}");
+    // A deploy that asks to be built closed (roll previews' for a fork's head) is refused while
+    // the environment is open; a node without the field refuses it as unknown.
+    assert_eq!(call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"closed": true}))).await.0, StatusCode::CONFLICT);
     let (st, e) = call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll"}}))).await;
     assert_eq!((st, e["build_closed"].as_bool()), (StatusCode::OK, Some(true)), "{e}");
-    let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({}))).await;
+    let (st, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"closed": true}))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
     settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     let vars = w.fake.build_vars.lock().last().cloned().unwrap();
     assert!(vars.contains(&"GREETING".to_string()) && !vars.contains(&"API_TOKEN".to_string()) && !vars.contains(&"DATABASE_URL".to_string()), "{vars:?}");
