@@ -5,7 +5,7 @@
 use super::config::Values;
 use super::extract;
 use super::rules::{S3Rule, s3_rules};
-use super::{DOC_BYTES_MAX, Sink, Stop};
+use super::{DOC_BYTES_MAX, PAGE_BYTES, Sink, Stop};
 use crate::json::{Map, Value};
 use crate::s3::{Client, Credentials, Location};
 use md5::Digest;
@@ -57,6 +57,7 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
     loop {
         let (objects, next) = client.list_page(&t.prefix, token.as_deref(), page_size).await.map_err(|e| Stop::Failed(format!("listing bucket [{}] failed: {e}", t.bucket)))?;
         let mut docs = Vec::new();
+        let mut bytes = 0usize;
         for o in objects {
             // Folder markers.
             if o.key.ends_with('/') && o.size == 0 {
@@ -80,9 +81,10 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
             doc.insert("size_in_bytes".into(), (o.size as i64).into());
             if let Some(kind) = extract::kind_of(&o.key).filter(|_| o.size as usize <= DOC_BYTES_MAX) {
                 match client.get(&o.key, DOC_BYTES_MAX).await {
-                    Ok(Some(bytes)) => {
-                        sink.read(bytes.len() as u64);
-                        doc.insert("body".into(), extract::text(kind, &bytes).into());
+                    Ok(Some(body)) => {
+                        sink.read(body.len() as u64);
+                        bytes += body.len();
+                        doc.insert("body".into(), extract::text(kind, &body).into());
                     }
                     // Gone since the listing.
                     Ok(None) => continue,
@@ -90,6 +92,11 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
                 }
             }
             docs.push(doc);
+            // A page holds at most PAGE_BYTES of objects' text.
+            if bytes >= PAGE_BYTES {
+                sink.page(std::mem::take(&mut docs)).await?;
+                bytes = 0;
+            }
         }
         sink.page(docs).await?;
         match next {

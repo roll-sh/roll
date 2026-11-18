@@ -237,8 +237,9 @@ async fn read_table(conn: &mut Conn, sink: &mut Sink<'_>, database: &str, schema
             }
             docs.push(doc);
         }
-        // Pages of large rows get fewer rows.
-        n = if bytes > PAGE_BYTES { (n / 2).max(1) } else { fetch };
+        // The next page aims at PAGE_BYTES from the size of these rows.
+        let avg = (bytes / rows.len()).max(1);
+        n = (PAGE_BYTES / avg).clamp(1, fetch);
         let short = rows.len() < asked;
         sink.page(docs).await?;
         if short {

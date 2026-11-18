@@ -479,7 +479,8 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   failures that are also over a tenth of the documents fail the job.
 - **Limits.** A sync reads at most `roll.connectors.max_docs_per_second` documents (1,000) and
   `roll.connectors.max_bytes_per_second` bytes (10 MiB) per second (node settings), sleeping
-  between pages to stay under them; a page is at most 500 rows or objects and 20 MiB. A table
+  between pages to stay under them; a page is at most 500 rows or objects, and aims at 20 MiB
+(a bucket's page is cut there; a table's next fetch is sized from its last rows). A table
   is read through a server-side cursor in one `REPEATABLE READ READ ONLY` transaction, and a
   bucket a listing page at a time, so neither is ever loaded whole. A row over 10 MiB is
   skipped and counted; an object over 10 MiB is indexed without its text (Elastic's default
