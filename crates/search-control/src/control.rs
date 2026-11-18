@@ -27,7 +27,7 @@
 
 use crate::meter::{Meter, MeterHooks, engine_figures, index_figures, now_ms};
 use crate::pricing::{Cost, Pricing};
-use crate::store::{Caps, DeletedCluster, Inserted, Over, Recorded, SearchCluster, Store, UsageTotals};
+use crate::store::{Caps, DeletedCluster, Inserted, IpRule, Over, Recorded, SearchCluster, Store, UsageTotals};
 pub use crate::wake::SqlCatalog;
 use crate::wake::{ControlHooks, GuardedStores, LOAD_WAIT, Wakes};
 use base64::Engine;
@@ -191,6 +191,50 @@ pub struct ClusterOptions {
     pub max_in_flight: Option<i64>,
     pub max_body_mb: Option<i64>,
     pub destructive_requires_name: Option<bool>,
+    /// Who may reach the data plane: CIDRs or addresses, each a string or `{cidr, description?}`
+    /// (at most [`search_server::allow::MAX_ENTRIES`]); `[]` opens the cluster to anyone again.
+    pub ip_allowlist: Option<Vec<IpRuleInput>>,
+}
+
+/// An allowlist entry as given (roll apps' `allow_ips` take the same).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum IpRuleInput {
+    Cidr(String),
+    Rule(IpRuleFields),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IpRuleFields {
+    pub cidr: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// The most characters an allowlist entry's description may have.
+const DESCRIPTION_CHARS: usize = 200;
+
+/// An allowlist as given, checked and made canonical.
+fn ip_rules(given: Vec<IpRuleInput>) -> Result<Vec<IpRule>> {
+    if given.len() > search_server::allow::MAX_ENTRIES {
+        return Err(ControlError::Invalid(format!("ip_allowlist: at most {} entries", search_server::allow::MAX_ENTRIES)));
+    }
+    given
+        .into_iter()
+        .map(|g| {
+            let (cidr, description) = match g {
+                IpRuleInput::Cidr(c) => (c, None),
+                IpRuleInput::Rule(r) => (r.cidr, r.description),
+            };
+            let net = search_server::allow::parse_cidr(&cidr).map_err(|e| ControlError::Invalid(format!("ip_allowlist: {e}")))?;
+            let description = description.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+            if description.as_ref().is_some_and(|d| d.chars().count() > DESCRIPTION_CHARS || d.chars().any(char::is_control)) {
+                return Err(ControlError::Invalid(format!("ip_allowlist: a description is one line of at most {DESCRIPTION_CHARS} characters")));
+            }
+            Ok(IpRule { cidr: net.to_string(), description })
+        })
+        .collect()
 }
 
 /// One REST request through the console.
@@ -297,7 +341,25 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec.max_in_flight = c.max_in_flight.max(1) as usize;
     spec.max_body_bytes = Some((c.max_body_mb.max(1) as usize) << 20);
     spec.destructive_requires_name = c.destructive_requires_name;
+    spec.ip_allowlist = allowlist_of(&c.ip_allowlist);
     spec
+}
+
+/// The node's allowlist for the catalog's rules. They were checked when written; one that no
+/// longer parses (a hand-edited catalog) is logged and closes the list rather than opening it.
+fn allowlist_of(rules: &[IpRule]) -> search_server::IpAllowlist {
+    let mut nets = Vec::with_capacity(rules.len());
+    for r in rules {
+        match search_server::allow::parse_cidr(&r.cidr) {
+            Ok(n) => nets.push(n),
+            Err(e) => tracing::error!(cidr = r.cidr, error = e, "an IP allowlist entry in the catalog doesn't parse: it admits nobody"),
+        }
+    }
+    if nets.is_empty() && !rules.is_empty() {
+        // 0.0.0.0 is never a client's address.
+        nets.push(std::net::IpAddr::from([0, 0, 0, 0]).into());
+    }
+    search_server::IpAllowlist::new(nets)
 }
 
 /// `target` as a loaded instance can take it now, and whether it needs a reload: the dialect
@@ -675,7 +737,10 @@ impl Control {
         Ok(())
     }
 
-    fn apply(mut c: SearchCluster, o: ClusterOptions) -> SearchCluster {
+    fn apply(mut c: SearchCluster, o: ClusterOptions) -> Result<SearchCluster> {
+        if let Some(v) = o.ip_allowlist {
+            c.ip_allowlist = ip_rules(v)?;
+        }
         if let Some(v) = o.flavor {
             c.flavor = v.to_ascii_lowercase();
         }
@@ -691,7 +756,7 @@ impl Control {
         if let Some(v) = o.destructive_requires_name {
             c.destructive_requires_name = v;
         }
-        c
+        Ok(c)
     }
 
     /// Fails when the name is taken, by a cluster or by data left in object storage.
@@ -742,6 +807,7 @@ impl Control {
             wake_at: None,
             owner: None,
             restored_at: None,
+            ip_allowlist: Vec::new(),
         }
     }
 
@@ -749,7 +815,7 @@ impl Control {
     /// Past one of `caps` for the owner it is refused (409). Nothing is written to object storage
     /// until it is first used.
     pub async fn create(&self, name: &str, o: ClusterOptions, owner: Option<&str>, caps: Caps) -> Result<SearchCluster> {
-        let c = Self::apply(SearchCluster { owner: owner.map(str::to_string), ..self.fresh(name) }, o);
+        let c = Self::apply(SearchCluster { owner: owner.map(str::to_string), ..self.fresh(name) }, o)?;
         self.check(&c)?;
         self.check_free(name).await?;
         self.insert(&c, caps).await?;
@@ -827,7 +893,7 @@ impl Control {
                 ..p.clone()
             },
             o,
-        );
+        )?;
         self.check(&c)?;
         self.check_free(name).await?;
         // Refused by a cap before anything is copied (the insert's count, in its transaction,
@@ -902,7 +968,7 @@ impl Control {
     pub async fn update(&self, id: &str, o: ClusterOptions, caps: Caps) -> Result<SearchCluster> {
         let c = {
             let _g = self.specs.lock().await;
-            let c = Self::apply(self.get(id).await?, o);
+            let c = Self::apply(self.get(id).await?, o)?;
             self.check(&c)?;
             self.save(&c, caps).await?;
             self.apply_spec(&c.name).await;
@@ -2076,8 +2142,10 @@ mod tests {
             wake_at: None,
             owner: None,
             restored_at: None,
+            ip_allowlist: vec![IpRule { cidr: "203.0.113.0/24".into(), description: None }],
         };
         let s = spec_for(&c);
+        assert!(s.ip_allowlist.contains("::ffff:203.0.113.9".parse().unwrap()) && !s.ip_allowlist.is_open());
         assert_eq!(s.name, "app");
         assert_eq!(s.dialect, Dialect::OpenSearch);
         assert_eq!(s.credentials.len(), 1);

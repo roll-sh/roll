@@ -278,6 +278,85 @@ without naming either. With no key they are stored as given, as Elasticsearch do
 Elasticsearch does without cluster state encryption. Users' passwords are hashes and API keys
 are kept as hashes, never sealed.
 
+## Client addresses and IP allowlists
+
+A cluster can have an IP allowlist (`ip_allowlist`: at most 64 CIDRs, IPv4 or IPv6, each with an
+optional description; empty means open). It works like Elastic Cloud's traffic filters and AWS
+OpenSearch Service's IP-based policies. It filters the **data plane**: every request to the
+cluster's Elasticsearch/OpenSearch endpoint, on any node and through the edge. The node checks it
+in `Node::enter_from` as soon as it knows which cluster the request names (`search-server`
+`allow.rs`). It runs before the credentials are looked at and before a sleeping cluster wakes. A
+refused request gets Elastic Cloud's answer, 403
+`{"ok":false,"message":"Forbidden due to traffic filtering"}`, the same for every cluster and
+dialect. Wrong credentials from a refused address get that 403, not a 401, so a scanner can't
+probe credentials or learn the flavor or version. A name that isn't a cluster still gets the
+401 it gets today: whether a cluster exists can be told from outside, as on Elastic Cloud (404
+from its proxy), and cluster names are DNS labels anyway.
+
+The **control plane** isn't filtered: `/v1/search` and the dashboard sit behind roll's own
+sign-in and tokens, as Elastic Cloud's console and API aren't subject to traffic filters. Its
+own requests to a cluster (the console, the per-index routes, links' API keys, previews'
+masking) run in process (`Control::call`, `Origin::Internal`). On a fleet they are forwarded to
+the owner signed with `INTERNAL_CLIENT` in place of an address. So the dashboard's console keeps
+working from anywhere, also on a cluster whose allowlist admits nobody the person is at.
+
+**The client address** is decided by the node that accepted the connection, by one rule
+(`ClientAddresses`, rolld's flags):
+
+1. The connection's peer: the socket's peer, or with `--search-proxy-protocol` the PROXY header's
+   source. The NLB is transparent: a v1/v2 header is read before anything else, within 5 s,
+   and a connection without a valid one is dropped. A `LOCAL` header (a health check) leaves
+   the socket's peer.
+2. When the operator names a header (`--search-client-ip-header`, e.g. `CF-Connecting-IP`), its
+   address replaces the peer's only when that peer is inside `--search-trusted-proxies`. The
+   last value is used (a proxy appends its own). A header from any other peer is ignored, and an
+   unreadable one leaves the peer. Neither flag works without the other, and naming
+   `X-Forwarded-For` or `Forwarded` is refused: those carry what the client wrote itself.
+3. IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`, from a dual-stack socket) are the IPv4 address
+   they carry, for the trusted-proxy check and for the allowlist. A mapped CIDR in an allowlist
+   is stored as its IPv4 CIDR.
+
+Nothing else is believed: a client's own `X-Forwarded-For`, `X-Real-IP` or `x-roll-code-client`
+never decides its address.
+
+**On the fleet** the node a client reached decides the address. It is roll-edge's HTTPS
+listener for `<cluster>.search.…`, which puts it in `ConnectInfo`, or a node's REST port
+(`cluster::serve_front`, the same rule as above). A forward to the owner carries it in
+`x-roll-code-client`, which the HMAC over the forward covers (roll-cluster `sign.rs`). The owner
+takes the address only from that signed field (`cluster::origin_of`). The owner's check is the
+one that counts; the forwarding node doesn't check first, since it doesn't hold the cluster. The
+internal route forwards arrive on (`/internal/search/rest`, which rolld's gate lets in without
+a token) takes signed requests only (`roll_cluster::require_signed`). So a client can't reach the
+owner with an address it chose, or with none. A forward that carries no address, or one that
+doesn't parse, is refused by any allowlist.
+
+**roll cloud** (docs/cloud/README.md) needs no search flags for this. Clients reach clusters at
+`https://<cluster>.search.<region>.<domain>` through the NLB, which sends PROXY v2 to the edge
+(`--edge-proxy-protocol`). These hostnames are DNS only, not proxied by Cloudflare, so the
+edge's client is the PROXY source, the client's own address. The REST port (`--search-http`)
+isn't behind the NLB there. A deployment that puts the REST port itself behind a load balancer
+sets `--search-proxy-protocol` for an NLB or HAProxy. Behind an HTTP proxy that writes the
+client's address, it names that header with the proxy's addresses as trusted: for Cloudflare,
+`--search-client-ip-header CF-Connecting-IP --search-trusted-proxies <cloudflare.com/ips>`, with
+the PROXY header first when an NLB sits between them.
+
+**What an owner must allow.** Anything that uses the cluster over its endpoint is a client like
+any other, and roll apps' instances and roll previews' services are no exception. They connect
+from the addresses roll's hosts send from, which every tenant on those hosts shares. On one node
+an app instance reaches a linked cluster through roll apps' link relay on the host's loopback, so
+the address search sees is the node's own (`127.0.0.1`, or `::1`), not the container's; an
+instance that calls the REST port directly comes from the container bridge's gateway (`172.17.0.1`
+on Docker's default network).
+On roll cloud today it is per-task public IPs. There is no NAT gateway (docs/cloud/README.md,
+"Isolated work"), and fixed outbound addresses are roll apps' Next item "Static outbound IPs".
+Until then, a cluster that a roll-hosted app or preview uses stays open, or lists those
+addresses as they change. As on Elastic Cloud, where other deployments can't connect through a
+traffic filter unless admitted, roll doesn't let its own hosted workloads through implicitly:
+that would let every tenant's app past every allowlist. Credentials still decide who gets in
+after that. What roll does for a link itself (making and revoking its API key, a preview
+branch's masking) is the control plane and needs nothing. A branch starts with its parent's
+allowlist (a preview's branch included); change it like any setting.
+
 ## Snapshots
 
 - **Where they live.** A repository's snapshots are recorded with the cluster's metadata, keyed

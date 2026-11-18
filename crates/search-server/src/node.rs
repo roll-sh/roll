@@ -59,6 +59,7 @@
 //! - **Shutdown** ([`Node::shutdown`]): refuses new loads, unloads every cluster (flushing and
 //!   handing the leases back, so another node can take over at once) and closes the WAL.
 
+use crate::allow::Origin;
 use crate::auth::{self, Presented};
 use crate::catalog::{Catalog, ClusterSpec, StoreProvider};
 use crate::lease::Leases;
@@ -657,6 +658,21 @@ fn reads_async_results(uri: &str) -> bool {
 pub struct Rejected {
     pub error: EsError,
     pub dialect: Dialect,
+}
+
+/// Why [`Node::enter_from`] turned a request away.
+#[derive(Debug)]
+pub enum Refused {
+    /// The cluster's IP allowlist doesn't admit the request's origin: answered with
+    /// [`crate::allow::REFUSED_BODY`], before its credentials are looked at.
+    Filtered,
+    Rejected(Rejected),
+}
+
+impl From<Rejected> for Refused {
+    fn from(r: Rejected) -> Refused {
+        Refused::Rejected(r)
+    }
 }
 
 const WWW_AUTHENTICATE: [&str; 3] = ["Basic realm=\"security\", charset=\"UTF-8\"", "Bearer realm=\"security\"", "ApiKey"];
@@ -1664,9 +1680,24 @@ impl Node {
         Ok(lease)
     }
 
+    /// Finds and authenticates a request from roll itself (in process: not on the data plane,
+    /// so no IP allowlist applies) and pins its cluster, as [`Node::enter_from`] does.
+    pub async fn enter(self: &Arc<Self>, req: &EsRequest, sni: Option<&str>) -> Result<Lease, Rejected> {
+        self.enter_from(req, sni, Origin::Internal).await.map_err(|r| match r {
+            Refused::Rejected(r) => r,
+            // An in-process request is admitted by every allowlist.
+            Refused::Filtered => Rejected { error: EsError::new(403, "security_exception", "forbidden"), dialect: Dialect::Elasticsearch },
+        })
+    }
+
     /// Finds and authenticates a request and pins its cluster (loading it if needed), without
     /// taking a concurrency permit yet ([`Lease::acquire`]). Applies the request rate.
-    pub async fn enter(self: &Arc<Self>, req: &EsRequest, sni: Option<&str>) -> Result<Lease, Rejected> {
+    ///
+    /// The cluster's IP allowlist is checked against `origin` first, before its credentials and
+    /// before a sleeping cluster wakes: a refused address learns nothing from its credentials
+    /// and costs nothing ([`Refused::Filtered`]). A request that names no cluster that exists is
+    /// refused (401) as before.
+    pub async fn enter_from(self: &Arc<Self>, req: &EsRequest, sni: Option<&str>, origin: Origin) -> Result<Lease, Refused> {
         crate::process::note_activity();
         let reject = |error: EsError| Rejected { error, dialect: Dialect::Elasticsearch };
         let presented;
@@ -1677,7 +1708,7 @@ impl Node {
                 None
             }
             None => {
-                presented = auth::parse_authorization(req.header("authorization")).map_err(|m| reject(malformed(m)))?;
+                presented = auth::parse_authorization(req.header("authorization")).map_err(|m| Refused::Rejected(reject(malformed(m))))?;
                 host_cluster = sni
                     .and_then(|s| auth::host_label(s, self.cfg.domain.as_deref()))
                     .or_else(|| req.header("host").and_then(|h| auth::host_label(h, self.cfg.domain.as_deref())));
@@ -1700,12 +1731,12 @@ impl Node {
         let claim = match claim {
             None => None,
             Some(Some(c)) => Some(c),
-            Some(None) => return Err(failed()),
+            Some(None) => return Err(failed().into()),
         };
         let name = match (&claim, &self.cfg.default_cluster) {
             (Some(c), _) => c.cluster.as_str(),
             (None, Some(name)) => name.as_str(),
-            (None, None) => return Err(failed()),
+            (None, None) => return Err(failed().into()),
         };
         // Credentials that aren't the cluster's own may be a principal of the cluster's
         // security (native user, API key, access token): checked once the cluster is loaded.
@@ -1714,12 +1745,15 @@ impl Node {
         // Fast path: a loaded cluster checks against its shared description, no catalog read.
         if let Some(loaded) = self.get_loaded(name) {
             let spec = loaded.spec();
+            if !spec.ip_allowlist.admits(origin) {
+                return Err(Refused::Filtered);
+            }
             let mut via_native = false;
             if let Some(c) = &claim
                 && !auth::verify(&spec, c)
             {
                 if !native_ok(&loaded) {
-                    return Err(failed());
+                    return Err(failed().into());
                 }
                 via_native = true;
             }
@@ -1727,7 +1761,7 @@ impl Node {
             // cluster flushes and hands its lease over instead of being starved by a steady
             // stream of requests. Refused before running: the proxy resends it to the next owner.
             if self.shutting_down.load(Ordering::SeqCst) {
-                return Err(Rejected { error: EsError::new(503, "node_closed_exception", "node is shutting down"), dialect: spec.dialect });
+                return Err(Rejected { error: EsError::new(503, "node_closed_exception", "node is shutting down"), dialect: spec.dialect }.into());
             }
             // Otherwise it is being unloaded: wake it again below.
             if let Ok(mut lease) = self.pin(loaded, spec.dialect) {
@@ -1736,20 +1770,23 @@ impl Node {
                 } else {
                     lease.user = claim.as_ref().map(authenticated_user);
                 }
-                return self.admitted(lease, req);
+                return self.admitted(lease, req).map_err(Refused::Rejected);
             }
         }
         let spec = match self.catalog.lookup(name).await {
             Some(spec) => spec,
             None if self.cfg.default_cluster.is_some() => ClusterSpec::new(name.to_string()),
-            None => return Err(failed()),
+            None => return Err(failed().into()),
         };
+        if !spec.ip_allowlist.admits(origin) {
+            return Err(Refused::Filtered);
+        }
         let mut via_native = false;
         if let Some(c) = &claim
             && !auth::verify(&spec, c)
         {
             if native.is_none() {
-                return Err(failed());
+                return Err(failed().into());
             }
             via_native = true;
         }
@@ -1763,10 +1800,10 @@ impl Node {
                         EsError::new(503, "cluster_block_exception", format!("cluster could not be loaded: {e:#}"))
                     }
                 };
-                Rejected { error, dialect }
+                Refused::Rejected(Rejected { error, dialect })
             })?;
             if via_native && !native_ok(&loaded) {
-                return Err(failed());
+                return Err(failed().into());
             }
             match self.pin(loaded, dialect) {
                 Ok(mut lease) => {
@@ -1775,7 +1812,7 @@ impl Node {
                     } else {
                         lease.user = claim.as_ref().map(authenticated_user);
                     }
-                    return self.admitted(lease, req);
+                    return self.admitted(lease, req).map_err(Refused::Rejected);
                 }
                 Err(()) => tokio::task::yield_now().await,
             }
