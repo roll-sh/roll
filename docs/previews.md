@@ -1796,7 +1796,7 @@ Ranked by what a person notices first. Done so far:
    birth date, IP, national ids, tokens) in each branched Postgres, NoSQL and search parent and
    aren't masked, each with a one-click rule (`email`, `redact`, `hash`, `null`), on the rules
    dialog and the sheet.
-4. **A preview's errors on its sheet** (Vercel's runtime logs, Sentry's grouping): the sheet shows
+4. **A preview's errors on its sheet, in review** (#326; Vercel's runtime logs, Sentry's grouping): the sheet shows
    raw logs only. Group a preview's errors by fingerprint: roll apps' `…/environments/pv-…/errors`
    for its instances, the same grouping over roll's runtime's logs (stack traces joined, ids and
    numbers taken out), masked as logs are; the count on the row and the pull request comment's
