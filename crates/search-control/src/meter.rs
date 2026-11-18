@@ -317,6 +317,7 @@ mod tests {
                     wake_at: None,
                     owner: None,
                     restored_at: None,
+                    ip_allowlist: Vec::new(),
                 },
                 crate::store::Caps::NONE,
             )

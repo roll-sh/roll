@@ -83,6 +83,19 @@ export interface SearchSettings {
   destructive_requires_name: boolean;
 }
 
+/** One entry of a cluster's IP allowlist (roll apps' `allow_ips` have the same shape). */
+export interface IpRule {
+  /** Canonical: `203.0.113.7/32`, `10.0.0.0/8`, `2001:db8::/32`. */
+  cidr: string;
+  description?: string;
+}
+
+/** What `PATCH /v1/search/clusters/{id}` takes. */
+export type SearchClusterPatch = Partial<SearchSettings> & {
+  /** Only these networks reach the cluster's endpoint ([]: anyone). */
+  ip_allowlist?: (string | IpRule)[];
+};
+
 export interface BranchRef {
   id: string;
   name: string;
@@ -107,6 +120,8 @@ export interface SearchCluster extends SearchSettings {
   own_bytes: number;
   /** The signed-in person (`usr_…`) whose cluster it is; null for the operator's and admins'. */
   owner?: string | null;
+  /** Only these networks reach its endpoint ([]: anyone). The dashboard and API aren't filtered. */
+  ip_allowlist: IpRule[];
   url: string;
   host: string;
   port: number;
@@ -218,7 +233,7 @@ export const searchApi = {
   get: (id: string) => call<SearchCluster>("GET", cl(id)),
   create: (name: string, settings: Partial<SearchSettings>) =>
     call<SearchCluster>("POST", "/v1/search/clusters", { name, ...settings }),
-  update: (id: string, settings: Partial<SearchSettings>) => call<SearchCluster>("PATCH", cl(id), settings),
+  update: (id: string, settings: SearchClusterPatch) => call<SearchCluster>("PATCH", cl(id), settings),
   remove: (id: string) => call<{ deleted: string; name: string }>("DELETE", cl(id)),
   deleted: () => call<DeletedSearchCluster[]>("GET", "/v1/search/clusters?deleted=true"),
   /** Without `name` it comes back under its own (409 when another cluster took it). */

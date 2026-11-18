@@ -14,8 +14,17 @@
 //!   `/internal/search/rest/…` ([`REST_FORWARDED`]) and served there as if they had come in on its
 //!   own REST port. The control plane's own requests to a cluster (a link's credential, which
 //!   rolld's apps glue asks any node for) go the same way ([`to_owner`]).
+//! - **Client addresses** (a cluster's IP allowlist, docs/search/architecture.md, "Client
+//!   addresses and IP allowlists"): the node a client reached decides its address (the edge's,
+//!   or [`serve_front`]'s) and a forward carries it signed (`x-roll-code-client`); the owner
+//!   believes only that ([`origin_of`]). The internal route takes signed requests only, so a
+//!   client can't come in there with an address of its choosing. The control plane's own
+//!   forwards carry [`INTERNAL_CLIENT`] instead, which no address parses as.
 
 use async_trait::async_trait;
+use axum::extract::ConnectInfo;
+use search_server::Origin;
+use std::net::{IpAddr, SocketAddr};
 use parking_lot::Mutex;
 use roll_cluster::{Cluster, Guard, Route};
 use search_server::lease::{Leases, Owner};
@@ -28,6 +37,11 @@ pub const KEY_PREFIX: &str = "search:cluster:";
 
 /// The internal route REST requests other nodes forward come in on.
 pub const REST_FORWARDED: &str = "/internal/search/rest";
+
+/// The client a forward of the control plane's own request names (signed, like a client's
+/// address): roll itself, which no IP allowlist filters. It isn't an address, so nothing a
+/// listener decides can be it.
+pub const INTERNAL_CLIENT: &str = "roll-search-control";
 
 pub fn key(name: &str) -> String {
     format!("{KEY_PREFIX}{name}")
@@ -197,11 +211,118 @@ pub fn rest_router(control: Arc<crate::Control>) -> axum::Router {
 }
 
 /// The internal API's part: REST requests other nodes forwarded here ([`REST_FORWARDED`]),
-/// checked as signed by a node of the cluster.
+/// signed by a node of the cluster or refused (401): the client address a forward carries is
+/// believed only because a node signed it.
 pub fn internal_router(control: Arc<crate::Control>, cluster: Arc<Cluster>) -> axum::Router {
     axum::Router::new()
         .nest_service(REST_FORWARDED, rest_router(control))
-        .layer(axum::middleware::from_fn_with_state(cluster, roll_cluster::accept_forwarded))
+        .layer(axum::middleware::from_fn_with_state(cluster, roll_cluster::require_signed))
+}
+
+/// Who a REST request comes from, for the cluster's IP allowlist: a forward's client, signed by
+/// the node that took it (an address, or [`INTERNAL_CLIENT`]); else the address the listener
+/// that took it decided (`ConnectInfo`: the edge's, or [`serve_front`]'s); else nobody anyone
+/// vouches for.
+pub fn origin_of(ext: &axum::http::Extensions) -> Origin {
+    if let Some(f) = ext.get::<roll_cluster::Forwarded>() {
+        return match f.client.as_deref() {
+            Some(INTERNAL_CLIENT) => Origin::Internal,
+            Some(c) => c.parse::<IpAddr>().map_or(Origin::Unknown, Origin::Client),
+            None => Origin::Unknown,
+        };
+    }
+    ext.get::<ConnectInfo<SocketAddr>>().map_or(Origin::Unknown, |c| Origin::Client(c.0.ip()))
+}
+
+/// The address [`FrontListener`] took a connection's requests from: the socket's peer, or the
+/// PROXY header's source.
+#[derive(Clone, Copy, Debug)]
+struct Peer(SocketAddr);
+
+/// A fleet node's REST port as an axum listener: each connection's PROXY header (when the
+/// listener expects one) is read on a task of its own, so a slow one holds up nobody else.
+struct FrontListener {
+    local: SocketAddr,
+    ready: tokio::sync::mpsc::Receiver<(tokio::net::TcpStream, Peer)>,
+}
+
+impl FrontListener {
+    fn new(listener: tokio::net::TcpListener, proxy_protocol: bool) -> std::io::Result<FrontListener> {
+        let local = listener.local_addr()?;
+        let (tx, ready) = tokio::sync::mpsc::channel(256);
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, addr) = tokio::select! {
+                    a = listener.accept() => match a {
+                        Ok(a) => a,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "accept failed");
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            continue;
+                        }
+                    },
+                    _ = tx.closed() => return,
+                };
+                let _ = sock.set_nodelay(true);
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Some(ip) = search_server::http::connection_peer(&mut sock, addr.ip(), proxy_protocol).await {
+                        let _ = tx.send((sock, Peer(SocketAddr::new(ip, addr.port())))).await;
+                    }
+                });
+            }
+        });
+        Ok(FrontListener { local, ready })
+    }
+}
+
+impl axum::serve::Listener for FrontListener {
+    type Io = tokio::net::TcpStream;
+    type Addr = Peer;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        match self.ready.recv().await {
+            Some(c) => c,
+            // The accept task only ends once this listener is gone.
+            None => std::future::pending().await,
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        Ok(Peer(self.local))
+    }
+}
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, FrontListener>> for Peer {
+    fn connect_info(stream: axum::serve::IncomingStream<'_, FrontListener>) -> Peer {
+        *stream.remote_addr()
+    }
+}
+
+/// Serves a fleet node's Elasticsearch REST port until `stop` resolves: [`rest_router`] with
+/// each request's client address decided as the node's own listener decides it (the PROXY
+/// header's source with `opts.proxy_protocol`, a trusted proxy's header per `opts.client`), so
+/// a forward carries it to the cluster's owner.
+pub async fn serve_front(listener: tokio::net::TcpListener, control: Arc<crate::Control>, opts: &search_server::ListenOptions, stop: impl std::future::Future<Output = ()> + Send + 'static) -> std::io::Result<()> {
+    let client = opts.client.clone();
+    let front = rest_router(control).layer(axum::middleware::from_fn(move |mut req: axum::extract::Request, next: axum::middleware::Next| {
+        let client = client.clone();
+        async move {
+            match req.extensions().get::<ConnectInfo<Peer>>().map(|c| c.0.0) {
+                Some(peer) => {
+                    let ip = client.client(peer.ip(), req.headers());
+                    req.extensions_mut().insert(ConnectInfo(SocketAddr::new(ip, peer.port())));
+                }
+                // Not from this listener: vouch for nobody.
+                None => {
+                    req.extensions_mut().remove::<ConnectInfo<SocketAddr>>();
+                }
+            }
+            next.run(req).await
+        }
+    }));
+    let listener = FrontListener::new(listener, opts.proxy_protocol)?;
+    axum::serve(listener, front.into_make_service_with_connect_info::<Peer>()).with_graceful_shutdown(stop).await
 }
 
 async fn rest(c: Arc<crate::Control>, req: axum::extract::Request) -> axum::response::Response {
@@ -263,7 +384,9 @@ pub(crate) async fn to_owner(c: &crate::Control, name: &str, req: &search_es::Es
     for (k, v) in &req.headers {
         r = r.header(k, v);
     }
-    let r = r.body(axum::body::Body::from(req.body.clone())).ok()?;
+    let mut r = r.body(axum::body::Body::from(req.body.clone())).ok()?;
+    // roll's own request: the owner admits it whatever the cluster's IP allowlist says.
+    r.extensions_mut().insert(roll_cluster::ClientAddr(INTERNAL_CLIENT.into()));
     let resp = cluster.forward(&owner, r, 0).await;
     let status = resp.status().as_u16();
     let headers = resp.headers().iter().filter_map(|(k, v)| Some((k.to_string(), v.to_str().ok()?.to_string()))).collect();
@@ -287,7 +410,8 @@ async fn send(cluster: &Cluster, key: &str, mut req: axum::extract::Request, for
 
 /// Serves a request on this node, as its own REST port does.
 async fn local(node: Arc<search_server::Node>, req: axum::extract::Request) -> axum::response::Response {
-    match search_server::http::serve_request(node, req).await {
+    let origin = origin_of(req.extensions());
+    match search_server::http::serve_request(node, req, origin).await {
         Ok(r) => r.map(axum::body::Body::new),
         // The client went away or sent a body that can't be read: nobody to answer.
         Err(_) => axum::http::StatusCode::BAD_REQUEST.into_response(),

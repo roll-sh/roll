@@ -644,6 +644,87 @@ async fn domain_routing() {
     assert_eq!(v["cluster_name"], "web");
 }
 
+/// A REST listener of the node `e` serves, with `opts` (trusted proxies, PROXY protocol).
+async fn listen(e: &Env, opts: search_server::ListenOptions) -> std::net::SocketAddr {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a = l.local_addr().unwrap();
+    tokio::spawn(search_server::serve(l, e.control.node.clone(), opts));
+    a
+}
+
+/// One request written by hand (`head` before it: a PROXY header), and the status line back.
+async fn raw_status(addr: std::net::SocketAddr, head: &str, user: &str, pw: &str) -> String {
+    use base64::Engine;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let auth = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pw}"));
+    let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    tcp.write_all(format!("{head}GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Basic {auth}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+    let mut out = Vec::new();
+    tcp.read_to_end(&mut out).await.unwrap();
+    String::from_utf8_lossy(&out).lines().next().unwrap_or_default().to_string()
+}
+
+/// A cluster's IP allowlist turns other addresses away on the data plane before their
+/// credentials are looked at and before a sleeping cluster wakes, with Elastic Cloud's
+/// traffic-filter 403. The client's address is the peer, the PROXY header's source, or a trusted
+/// proxy's header, never a header from anyone else. roll's own requests (the console) aren't
+/// filtered.
+#[tokio::test]
+async fn ip_allowlists_turn_addresses_away_before_credentials() {
+    const REFUSED: &str = r#"{"ok":false,"message":"Forbidden due to traffic filtering"}"#;
+    let e = env().await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let (user, pw) = creds(&c);
+    let path = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    for bad in [json!(["nope"]), json!([{"cidr": "10.0.0.0/8", "note": "x"}]), json!(vec!["10.0.0.0/8"; 65]), json!([{"cidr": "10.0.0.0/8", "description": "x".repeat(201)}])] {
+        let (s, v) = e.call(reqwest::Method::PATCH, &path, Some(json!({ "ip_allowlist": bad }))).await;
+        assert!(s == 400 || s == 422, "{bad}: {s} {v}");
+    }
+    // Two networks this test's loopback client isn't in, kept canonical (a mapped CIDR as IPv4).
+    let (s, v) = e.call(reqwest::Method::PATCH, &path, Some(json!({ "ip_allowlist": ["203.0.113.9/24", {"cidr": "::ffff:198.51.100.0/120", "description": " office "}] }))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["ip_allowlist"], json!([{"cidr": "203.0.113.0/24"}, {"cidr": "198.51.100.0/24", "description": "office"}]));
+    assert!(e.control.node.loaded().is_empty(), "made, never used");
+
+    // Right or wrong credentials, the same 403, and the cluster stays asleep.
+    for p in [pw.as_str(), "wrong"] {
+        let r = e.http.get(format!("{}/", e.es)).basic_auth(&user, Some(p)).header("x-forwarded-for", "203.0.113.1").send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 403);
+        assert_eq!(r.text().await.unwrap(), REFUSED);
+    }
+    assert!(e.control.node.loaded().is_empty(), "a refused request doesn't wake the cluster");
+    // The console is roll's own request: it reaches the cluster from anywhere (and loads it).
+    let r = e.post(&format!("{path}/request"), json!({"method": "GET", "path": "/"})).await;
+    assert_eq!(r["status"], 200, "{r}");
+    let (s, _) = e.es(&user, "wrong", reqwest::Method::GET, "/", None).await;
+    assert_eq!(s, 403, "loaded, still refused before its credentials");
+
+    // A trusted proxy's header is believed; the same header from a peer that isn't one isn't.
+    let header = |trusted: &str| search_server::ListenOptions { client: search_server::ClientAddresses::new(Some("CF-Connecting-IP"), Some(trusted)).unwrap(), ..Default::default() };
+    let trusted = listen(&e, header("127.0.0.0/8")).await;
+    let untrusted = listen(&e, header("10.0.0.0/8")).await;
+    let via = |addr: std::net::SocketAddr, ip: &'static str, p: &str| e.http.get(format!("http://{addr}/")).basic_auth(&user, Some(p)).header("cf-connecting-ip", ip).send();
+    assert_eq!(via(trusted, "203.0.113.50", &pw).await.unwrap().status().as_u16(), 200);
+    assert_eq!(via(trusted, "203.0.113.50", "wrong").await.unwrap().status().as_u16(), 401, "let in, then authenticated");
+    assert_eq!(via(trusted, "192.0.2.1", &pw).await.unwrap().status().as_u16(), 403);
+    assert_eq!(via(untrusted, "203.0.113.50", &pw).await.unwrap().status().as_u16(), 403, "an untrusted peer's header is ignored");
+
+    // Behind an NLB: the PROXY header's source, an IPv4-mapped one included.
+    let nlb = listen(&e, search_server::ListenOptions { proxy_protocol: true, ..Default::default() }).await;
+    let ok = raw_status(nlb, "PROXY TCP4 203.0.113.7 127.0.0.1 5000 9200\r\n", &user, &pw).await;
+    assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+    let mapped = raw_status(nlb, "PROXY TCP6 ::ffff:198.51.100.4 ::1 5000 9200\r\n", &user, &pw).await;
+    assert!(mapped.starts_with("HTTP/1.1 200"), "{mapped}");
+    let refused = raw_status(nlb, "PROXY TCP4 192.0.2.1 127.0.0.1 5000 9200\r\n", &user, &pw).await;
+    assert!(refused.starts_with("HTTP/1.1 403"), "{refused}");
+
+    // An empty list opens it again.
+    let (s, _) = e.call(reqwest::Method::PATCH, &path, Some(json!({ "ip_allowlist": [] }))).await;
+    assert_eq!(s, 200);
+    let (s, _) = e.es(&user, &pw, reqwest::Method::GET, "/", None).await;
+    assert_eq!(s, 200);
+}
+
 #[tokio::test]
 async fn documents() {
     let e = env().await;
