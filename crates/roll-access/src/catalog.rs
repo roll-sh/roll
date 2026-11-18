@@ -284,6 +284,7 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/policy", "the rules for every token are the operator's"),
     ("/v1/access/enterprise", "which identity providers roll trusts is the operator's"),
     ("/v1/access/enterprise/idps", "which identity providers roll trusts is the operator's"),
+    ("/v1/access/tokens/revoke", "an incident's cut-off of many tokens at once is the operator's"),
     ("/v1/access/enterprise/apps", "which apps an identity provider may sign people in to is the operator's"),
     ("/v1/access/enterprise/apps/{id}", "which apps an identity provider may sign people in to is the operator's"),
     ("/v1/access/enterprise/apps/{id}/rotate", "an enterprise app's credential is the operator's"),
@@ -1116,6 +1117,10 @@ static ROWS: &[Row] = &[
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
     row("DELETE", "/v1/search/clusters/{id}/keys/{key}", "search", ADMIN, one(PG, "cluster")),
+    // Request metrics and the slow logs (queries' and documents' sources, cut): reads of the
+    // cluster's data.
+    row("GET", "/v1/search/clusters/{id}/metrics", "search", R, one(PG, "cluster")),
+    row("GET", "/v1/search/clusters/{id}/slowlog", "search", R, one(PG, "cluster")),
     row("*", "/v1/search/clusters/{id}/", "search", M, one(PG, "cluster")),
     // An index's routes are about those indices (`{index}`: a name, or on reads an expression),
     // so a rule can grant some of a cluster's indices. The console (`request`) and the index list
