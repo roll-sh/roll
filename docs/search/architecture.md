@@ -297,8 +297,10 @@ the PROXY header first when an NLB sits between them.
 **What an owner must allow.** Anything that uses the cluster over its endpoint is a client like
 any other, and roll apps' instances and roll previews' services are no exception. They connect
 from the addresses roll's hosts send from, which every tenant on those hosts shares. On one node
-that is the host itself as its REST port sees it: its own address, or the container bridge's
-gateway (`172.17.0.1` on Docker's default network) for instances that reach the port directly.
+an app instance reaches a linked cluster through roll apps' link relay on the host's loopback, so
+the address search sees is the node's own (`127.0.0.1`, or `::1`), not the container's; an
+instance that calls the REST port directly comes from the container bridge's gateway (`172.17.0.1`
+on Docker's default network).
 On roll cloud today it is per-task public IPs. There is no NAT gateway (docs/cloud/README.md,
 "Isolated work"), and fixed outbound addresses are roll apps' Next item "Static outbound IPs".
 Until then, a cluster that a roll-hosted app or preview uses stays open, or lists those
