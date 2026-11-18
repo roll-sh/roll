@@ -2999,10 +2999,12 @@ inconsistencies are fixed in #264:
   accounts/workspace and roll-access threads.
 - R2. **Cut off everything that reaches a folder** (M): reach lists it but can't act; one action to
   revoke its tokens and identities, end leases and shares, pause syncs and optionally freeze reads.
-  Needs a bulk revoke in roll-access (roll MCP).
+  roll MCP adds `Access::revoke_many(ids, why)` (atomic, one audit row per grant) after its turn;
+  reach passes its own grant ids, and leases, shares and syncs stay in secrets' transaction.
 - R3. **Credentials roll doesn't hold yet** (M): landings and `roll secrets scan` match stored values
-  only; share roll MCP's guard detectors and offer "store in roll, replace with `${KEY}`". With the
-  code and MCP threads.
+  only. The detectors are already shared (`roll_auth::credentials`, #208); roll MCP makes `kind_in`
+  and a bounded `find_all` public after its turn. Then a landing warning and `roll secrets scan`
+  offering "store in roll, replace with `${KEY}`".
 - R4. **GCP KMS, Azure Key Vault and HSM keys** (M), next to AWS KMS: real accounts (the user's call).
 - R5. **`roll://` wherever another roll product takes a key** (M): agent endpoints (they take `op://`),
   the gateway's upstreams, review provider keys, storage replication and search snapshot credentials.
@@ -3012,7 +3014,8 @@ inconsistencies are fixed in #264:
   chain written with each row, digests signed by roll's issuer key to the sinks, `audit verify`.
 - R9. **Secret requests** (building: `feature/roll-secrets-requests`): a link that asks someone outside
   roll for a value, sealed in their browser, landing as a change or a change request.
-- R10. **Honeytokens** (M): decoy tokens, database roles and IAM users that alert on use.
+- R10. **Honeytokens** (M): decoy `rlt_` tokens are roll-access's (`decoy: true`, on roll MCP's list);
+  database roles and IAM users that alert on use are this side's, once those land.
 - R11. **Moving in from 1Password, Bitwarden SM, Parameter Store, GCP, Azure and Akeyless** (S each).
 - R12. **A split deployment key** (M; N of M to recover or rotate it). R13. **A FIPS build** (L).
   R14. **Format-preserving encryption** (M, low). R15. Clearing a copied value from the clipboard: not
