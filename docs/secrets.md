@@ -3680,8 +3680,10 @@ cache waited out. Ranked now:
    - P5, CI snippets that work on a fresh runner (the GitHub Action, GitLab's `id_tokens`).
    - P6, MCP tools: import, rollback (destructive), create environment, link and link targets in roll
      MCP's #353 (rollback's `bypass` left out); secret requests and cut-off when batch 4 lands; the
-     development preset is roll MCP's #354 (reveal allowed in the project's development environments for
-     `roll login`'s default, approved on the consent screen; production out of reach).
+     development preset change (#354) was closed after roll MCP's review: `roll login` is an ordinary
+     OAuth client, so a looser preset would loosen every approved agent too. The first run is fixed in
+     the CLI instead (the approval link at once, then a remembered "allow from now on"); asked of roll
+     MCP: remembered approvals up to ~30 days, per project and environment, tied to the client.
    - P7–P8, **tests** (building: `feature/roll-secrets-test-gaps`): `roll run --watch`, the six links
      to roll's own products, and a `pnpm test:secrets` gate.
    - P9–P11, apps' variables, search's connectors and previews' variables as `roll://` references
