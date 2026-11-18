@@ -1816,17 +1816,22 @@ async fn a_5xx_rate_past_the_alert_is_an_event_once() {
     }
     let minute = |m: i64, errors: i64| apps_control::store::MinuteRow { minute: m, requests: 100, errors, instances: 1, memory_bytes: 64 << 20, ..Default::default() };
     let live = w.apps.live(&id, "production");
-    let mut now;
-    // A loaded machine can cross into the next minute before the judging: written again then.
-    loop {
-        now = code_sql::now_ms() / 60_000;
+    // A loaded machine can cross into the next minute, or judge before the live deployment's
+    // template is in place: written and judged again until it fires (then judged once more: once).
+    let fired = || async {
+        let (_, ev) = call(&w.api, "GET", "/v1/apps/events?after=0", None).await;
+        ev["events"].as_array().unwrap().iter().any(|e| e["kind"] == "alert.errors")
+    };
+    for _ in 0..100 {
+        let now = code_sql::now_ms() / 60_000;
         w.apps.store.put_minutes(&id, "production", &(1..=5).map(|i| minute(now - i, 20)).collect::<Vec<_>>()).unwrap();
         w.apps.judge_alerts(&live).await;
-        w.apps.judge_alerts(&live).await;
-        if code_sql::now_ms() / 60_000 == now {
+        if fired().await {
             break;
         }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    w.apps.judge_alerts(&live).await;
     let (_, ev) = call(&w.api, "GET", "/v1/apps/events?after=0", None).await;
     let alerts: Vec<&Value> = ev["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "alert.errors").collect();
     assert_eq!(alerts.len(), 1, "{ev}");
@@ -4874,7 +4879,7 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     // Pull requests go to previews with their number, title and page: a same-repository one on
     // its branch, a fork's as `pull/N` once `refs/pull/N/head` agrees, a close with no commit.
     let pr = |action: &str, n: u64, branch: &str, sha: &str, head_repo: u64| {
-        json!({ "action": action, "number": n, "pull_request": { "number": n, "title": "Try it", "head": { "ref": branch, "sha": sha, "repo": { "id": head_repo } }, "base": { "repo": { "id": 1 } } } }).to_string()
+        json!({ "action": action, "number": n, "pull_request": { "number": n, "title": "Try it", "user": { "login": "dependabot[bot]" }, "head": { "ref": branch, "sha": sha, "repo": { "id": head_repo } }, "base": { "repo": { "id": 1 } } } }).to_string()
     };
     // One from a branch an environment follows (staging's) is that environment's, not a preview.
     let (_, v) = answer(raw("application/json", Some("pull_request"), pr("opened", 6, "feature", &code, 1))).await;
@@ -4888,6 +4893,8 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     answer(raw("application/json", Some("pull_request"), pr("synchronize", 8, "main", &first, 2))).await;
     answer(raw("application/json", Some("pull_request"), pr("closed", 8, "main", &first, 2))).await;
     let got: Vec<_> = pushes.0.lock()[3..].iter().map(|p| (p.branch.clone(), p.sha.clone(), p.pull.as_ref().map(|q| (q.number, q.fork, q.url.clone(), q.title.clone())))).collect();
+    // Who opened it, for roll previews' `skip_authors` (untrusted: never for trust).
+    assert_eq!(pushes.0.lock()[3].pull.as_ref().and_then(|q| q.author.clone()).as_deref(), Some("dependabot[bot]"));
     let page = |n: u64| format!("{url}/pull/{n}");
     assert_eq!(got, vec![
         ("topic".to_string(), Some(code.clone()), Some((7, false, page(7), "Try it".to_string()))),
@@ -4895,12 +4902,12 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
         ("pull/8".to_string(), None, Some((8, true, page(8), "Try it".to_string()))),
     ]);
     // GitLab's merge request: its own event and fields, its page under `/-/merge_requests/`.
-    let mr = json!({ "object_kind": "merge_request", "object_attributes": { "iid": 3, "title": "Try it on GitLab", "action": "open", "source_branch": "topic", "source_project_id": 5, "target_project_id": 5, "last_commit": { "id": code } } }).to_string();
+    let mr = json!({ "object_kind": "merge_request", "user": { "username": "renovate-bot" }, "object_attributes": { "iid": 3, "title": "Try it on GitLab", "action": "open", "source_branch": "topic", "source_project_id": 5, "target_project_id": 5, "last_commit": { "id": code } } }).to_string();
     let r = Request::builder().method("POST").uri(hook.clone()).header("content-type", "application/json").header("x-gitlab-event", "Merge Request Hook").body(Body::from(mr)).unwrap();
     let (_, v) = answer(r).await;
     assert!(v["ignored"].as_str().unwrap().contains("handed to roll previews"), "{v}");
     let last = pushes.0.lock().last().cloned().unwrap();
-    assert_eq!((last.branch.as_str(), last.pull.map(|p| (p.number, p.fork, p.url))), ("topic", Some((3, false, format!("{url}/-/merge_requests/3")))));
+    assert_eq!((last.branch.as_str(), last.pull.map(|p| (p.number, p.fork, p.url, p.author))), ("topic", Some((3, false, format!("{url}/-/merge_requests/3"), Some("renovate-bot".to_string())))));
 }
 
 /// A private repository on any Git host: the service's own login (sealed, never returned, sent

@@ -190,6 +190,9 @@ pub struct GitPull {
     pub url: String,
     /// From another repository (head and base repository ids differ): its code is untrusted.
     pub fork: bool,
+    /// Who opened it, as the event says (GitHub's `user.login`, GitLab's `user.username`):
+    /// untrusted text, for rules like roll previews' `skip_authors` (`*[bot]`), never for trust.
+    pub author: Option<String>,
 }
 
 /// Where pushes to branches roll apps doesn't follow go (rolld fills it with roll previews).

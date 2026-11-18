@@ -248,7 +248,7 @@ impl Apps {
     /// (the head ref stays): at worst a forged one takes a preview down, as a forged branch
     /// deletion would. What the hook answers.
     async fn hand_pull_to_previews(self: &Arc<Self>, pushes: Arc<dyn crate::integrations::GitPushes>, service: &str, url: &str, p: PullEvent) -> String {
-        let PullEvent { number, title, branch, sha, fork, gitlab } = p;
+        let PullEvent { number, title, branch, sha, fork, gitlab, author } = p;
         let page = format!("{}{}{number}", url.trim_end_matches('/').trim_end_matches(".git"), if gitlab { "/-/merge_requests/" } else { "/pull/" });
         let branch = if fork { format!("pull/{number}") } else { branch };
         if let Some(sha) = &sha {
@@ -266,7 +266,7 @@ impl Apps {
             }
         }
         let what = if sha.is_some() { "for its preview" } else { "closed: its preview goes" };
-        let pull = crate::integrations::GitPull { number, title: title.chars().take(200).collect(), url: page, fork };
+        let pull = crate::integrations::GitPull { number, title: title.chars().take(200).collect(), url: page, fork, author };
         pushes.pushed(crate::integrations::GitPush { service: service.to_string(), url: url.to_string(), branch, sha, message: String::new(), pull: Some(pull) }).await;
         format!("pull request {number}, handed to roll previews {what}")
     }
@@ -281,6 +281,8 @@ struct PullEvent {
     sha: Option<String>,
     fork: bool,
     gitlab: bool,
+    /// Who opened it (untrusted, at most 100 characters).
+    author: Option<String>,
 }
 
 /// A branch a push moved to `sha` (none: it was deleted).
@@ -345,16 +347,16 @@ fn push_of(w: &Webhook) -> Push {
 fn pull_of(w: &Webhook) -> Option<Push> {
     let p = &w.body;
     let hex = |s: &str| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit());
-    let (number, title, branch, sha, fork, gitlab, action) = match w.event.as_deref()? {
+    let (number, title, branch, sha, fork, gitlab, action, author) = match w.event.as_deref()? {
         "pull_request" => {
             let pr = &p["pull_request"];
             let fork = pr["head"]["repo"]["id"].as_u64().is_none() || pr["head"]["repo"]["id"] != pr["base"]["repo"]["id"];
-            (pr["number"].as_u64().or(p["number"].as_u64()), pr["title"].as_str(), pr["head"]["ref"].as_str(), pr["head"]["sha"].as_str(), fork, false, p["action"].as_str().unwrap_or(""))
+            (pr["number"].as_u64().or(p["number"].as_u64()), pr["title"].as_str(), pr["head"]["ref"].as_str(), pr["head"]["sha"].as_str(), fork, false, p["action"].as_str().unwrap_or(""), pr["user"]["login"].as_str())
         }
         "Merge Request Hook" => {
             let mr = &p["object_attributes"];
             let fork = mr["source_project_id"].as_u64().is_none() || mr["source_project_id"] != mr["target_project_id"];
-            (mr["iid"].as_u64(), mr["title"].as_str(), mr["source_branch"].as_str(), mr["last_commit"]["id"].as_str(), fork, true, mr["action"].as_str().unwrap_or(""))
+            (mr["iid"].as_u64(), mr["title"].as_str(), mr["source_branch"].as_str(), mr["last_commit"]["id"].as_str(), fork, true, mr["action"].as_str().unwrap_or(""), p["user"]["username"].as_str())
         }
         _ => return None,
     };
@@ -369,7 +371,8 @@ fn pull_of(w: &Webhook) -> Option<Push> {
         (true, None) => return Some(Push::Ignored(format!("pull request {number} names no head commit"))),
         (false, _) => None,
     };
-    Some(Push::Pull(PullEvent { number, title: title.unwrap_or("").to_string(), branch: branch.to_string(), sha, fork, gitlab }))
+    let author = author.filter(|a| !a.is_empty()).map(|a| a.chars().take(100).collect());
+    Some(Push::Pull(PullEvent { number, title: title.unwrap_or("").to_string(), branch: branch.to_string(), sha, fork, gitlab, author }))
 }
 
 /// A hook's token: `rlk_`, 34 random characters of lowercase base32 and 6 of CRC-32, as roll's
