@@ -672,6 +672,11 @@ function Sessions() {
           ))
         )}
       </div>
+      {list && list.some((s) => !s.current) && (
+        <button onClick={() => accountsApi.endOtherSessions().then(load)} className={`${btn} mt-2`}>
+          Sign out of all other sessions
+        </button>
+      )}
     </Section>
   );
 }

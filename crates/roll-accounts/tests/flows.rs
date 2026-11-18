@@ -384,6 +384,14 @@ async fn revocation_is_immediate() {
     assert_eq!(env.call(&mut phone, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
     assert_eq!(env.call(&mut phone, Method::GET, "/v1/accounts/session", None).await.json["status"], "anonymous");
 
+    // "Sign out of all other sessions": every one but this browser's.
+    let mut tablet = Browser::default();
+    env.email_sign_in(&mut tablet, "ada@example.com", None).await;
+    let a = env.call(&mut laptop, Method::DELETE, "/v1/accounts/me/sessions", None).await;
+    assert_eq!((a.status, a.json["ended"].as_u64()), (StatusCode::OK, Some(1)), "{}", a.json);
+    assert_eq!(env.call(&mut tablet, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(env.call(&mut laptop, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
+
     // Disabling the user ends the rest, on the next request.
     let user = env.call(&mut laptop, Method::GET, "/v1/accounts/me", None).await.json["id"].as_str().unwrap().to_string();
     let a = env.operator(Method::PATCH, &format!("/v1/accounts/users/{user}"), json!({ "disabled": true })).await;
