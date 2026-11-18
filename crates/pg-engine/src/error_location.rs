@@ -46,6 +46,13 @@ const KNOWN: &[(&str, &str, &str, &str, &str, u32)] = &[
     ("22P04", "missing data for column \"", "", "CopyFromTextLikeOneRow", "copyfromparse.c", 974),
     ("22P04", "unterminated CSV quoted field", "", "CopyReadAttributesCSV", "copyfromparse.c", 1919),
     ("22P04", "COPY file signature not recognized", "", "ReceiveCopyBinaryHeader", "copyfromparse.c", 198),
+    ("22P04", "invalid COPY file header (missing flags)", "", "ReceiveCopyBinaryHeader", "copyfromparse.c", 203),
+    ("22P04", "invalid COPY file header (WITH OIDS)", "", "ReceiveCopyBinaryHeader", "copyfromparse.c", 207),
+    ("22P04", "unrecognized critical flags in COPY file header", "", "ReceiveCopyBinaryHeader", "copyfromparse.c", 212),
+    ("22P04", "invalid COPY file header (missing length)", "", "ReceiveCopyBinaryHeader", "copyfromparse.c", 218),
+    ("22P04", "invalid COPY file header (wrong length)", "", "ReceiveCopyBinaryHeader", "copyfromparse.c", 225),
+    ("22P04", "received copy data after EOF marker", "", "CopyFromBinaryOneRow", "copyfromparse.c", 1120),
+    ("22P04", "row field count is ", "", "CopyFromBinaryOneRow", "copyfromparse.c", 1127),
     ("22023", "COPY format \"", "\" not recognized", "ProcessCopyOptions", "copy.c", 574),
     ("22P02", "skipped more than REJECT_LIMIT ", "", "CopyFrom", "copyfrom.c", 1169),
     ("55000", "cannot perform COPY FREEZE because the table was not created or truncated in the current subtransaction", "", "CopyFrom", "copyfrom.c", 904),
@@ -344,6 +351,7 @@ const NOTICES: &[(&str, &str, &str, &str, &str, u32)] = &[
 /// The files of routines whose errors always name their line (`Error::routine_at`).
 const ROUTINE_FILES: &[(&str, &str)] = &[
     ("RollbackToSavepoint", "xact.c"),
+    ("CopyReadBinaryAttribute", "copyfromparse.c"),
     ("findDependentObjects", "dependency.c"),
     ("ReleaseSavepoint", "xact.c"),
     ("checkInsertTargets", "parse_target.c"),

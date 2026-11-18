@@ -2622,7 +2622,10 @@ fn binary_copy_in(
         if ext >= 0 && !have(p + ext as usize) {
             return Ok((0, false));
         }
-        if ext < 0 || take(&mut p, ext as usize).is_none() {
+        if ext < 0 {
+            return Err(bad("invalid COPY file header (missing length)"));
+        }
+        if take(&mut p, ext as usize).is_none() {
             return Err(bad("invalid COPY file header (wrong length)"));
         }
         st.header = true;
@@ -2657,32 +2660,32 @@ fn binary_copy_in(
         for &col in &c.target {
             let colname = &t.columns[col].name;
             let ty = &t.columns[col].ty;
+            // (CopyReadBinaryAttribute's errors, its size's and data's too, name the column.)
+            let ctx_col = || format!("COPY {}, line {line}, column {colname}", t.name);
             let Some(len) = take(&mut p, 4).map(i32_at) else {
                 if !last {
                     incomplete = true;
                     break;
                 }
-                return Err(bad("unexpected EOF in COPY data").context(ctx_line()));
+                return Err(bad("unexpected EOF in COPY data").routine_at("CopyReadBinaryAttribute", 2021).context(ctx_col()));
             };
             if len == -1 {
                 row.push(Expr::Const(Value::Null, ty.clone()));
                 continue;
             }
             if len < 0 {
-                return Err(bad("invalid field size").context(ctx_line()));
+                return Err(bad("invalid field size").routine_at("CopyReadBinaryAttribute", 2030).context(ctx_col()));
             }
             let Some(bytes) = take(&mut p, len as usize) else {
                 if !last {
                     incomplete = true;
                     break;
                 }
-                return Err(bad("unexpected EOF in COPY data").context(ctx_line()));
+                return Err(bad("unexpected EOF in COPY data").routine_at("CopyReadBinaryAttribute", 2040).context(ctx_col()));
             };
             // (A field is received as it is read, CopyReadBinaryAttribute: its error comes
             // before the rest of the tuple has.)
-            let v = crate::types::binary::decode(bytes, ty, fmt).map_err(|e| {
-                e.context(format!("COPY {}, line {line}, column {colname}", t.name))
-            })?;
+            let v = crate::types::binary::decode(bytes, ty, fmt).map_err(|e| e.context(ctx_col()))?;
             row.push(Expr::Const(v, ty.clone()));
         }
         if incomplete {
