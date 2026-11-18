@@ -18,6 +18,7 @@ use super::heapsim::{Tid, get_varint, put_varint};
 use crate::exec::fasthash::FastState;
 use std::hash::BuildHasher;
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicU16, AtomicU32};
 
 /// How far past the cursor (in rows, about twice this) a lookup searches the ascending rows
 /// before asking the hash table.
@@ -26,16 +27,23 @@ const FORWARD_MAX: usize = 64;
 /// A row of no key (a version written without one).
 pub const NO_ROW: u32 = u32::MAX;
 
-/// A row past the ascending ones.
-#[derive(Clone, Copy, Debug)]
+/// A row past the ascending ones. (Its current version's TID is atomic: a size model lock
+/// group's writer moves its own row's while the map is shared, `KeyMap::set_tid_shared`.)
+#[derive(Debug)]
 struct Row {
     /// Where the key's length and bytes start in the arena (`part` counts 4 GB parts of it,
     /// below `PRESENT`: arenas past one are rare enough to spend two bytes on rather than
     /// widen every row).
     at: u32,
     part: u16,
-    off: u16,
-    blk: u32,
+    off: AtomicU16,
+    blk: AtomicU32,
+}
+
+impl Clone for Row {
+    fn clone(&self) -> Row {
+        Row { at: self.at, part: self.part, off: AtomicU16::new(self.off.load(Relaxed)), blk: AtomicU32::new(self.blk.load(Relaxed)) }
+    }
 }
 
 const PART: usize = 1 << 32;
@@ -44,7 +52,16 @@ const PRESENT: u16 = 1 << 15;
 
 impl Row {
     fn new(pos: usize, tid: Tid) -> Row {
-        Row { at: (pos % PART) as u32, part: (pos / PART) as u16 | PRESENT, off: tid.1, blk: tid.0 }
+        Row { at: (pos % PART) as u32, part: (pos / PART) as u16 | PRESENT, off: AtomicU16::new(tid.1), blk: AtomicU32::new(tid.0) }
+    }
+
+    fn tid(&self) -> Tid {
+        (self.blk.load(Relaxed), self.off.load(Relaxed))
+    }
+
+    fn set_tid(&self, tid: Tid) {
+        self.blk.store(tid.0, Relaxed);
+        self.off.store(tid.1, Relaxed);
     }
 
     fn present(&self) -> bool {
@@ -54,26 +71,42 @@ impl Row {
 
 /// An ascending row's current version: its block's halves and its offset, whose top bit
 /// (`PRESENT`, past any line pointer's offset) says its key is present.
-#[derive(Clone, Copy, Debug)]
-struct AscTid([u16; 3]);
+/// (Atomic as `Row`'s TID is.)
+#[derive(Debug)]
+struct AscTid([AtomicU16; 3]);
+
+impl Clone for AscTid {
+    fn clone(&self) -> AscTid {
+        AscTid(self.0.each_ref().map(|a| AtomicU16::new(a.load(Relaxed))))
+    }
+}
 
 impl AscTid {
     fn new(tid: Tid) -> AscTid {
         debug_assert!(tid.1 < PRESENT);
-        AscTid([tid.0 as u16, (tid.0 >> 16) as u16, tid.1 | PRESENT])
+        AscTid([AtomicU16::new(tid.0 as u16), AtomicU16::new((tid.0 >> 16) as u16), AtomicU16::new(tid.1 | PRESENT)])
     }
 
-    fn tid(self) -> Tid {
-        (self.0[0] as u32 | (self.0[1] as u32) << 16, self.0[2] & !PRESENT)
+    fn tid(&self) -> Tid {
+        let [a, b, c] = self.0.each_ref().map(|x| x.load(Relaxed));
+        (a as u32 | (b as u32) << 16, c & !PRESENT)
     }
 
-    fn present(self) -> bool {
-        self.0[2] & PRESENT != 0
+    fn present(&self) -> bool {
+        self.0[2].load(Relaxed) & PRESENT != 0
     }
 
-    fn set(&mut self, tid: Tid) {
+    /// The current version moves to `tid` (by the row's own writer only: `Row`).
+    fn set(&self, tid: Tid) {
         debug_assert!(tid.1 < PRESENT);
-        *self = AscTid([tid.0 as u16, (tid.0 >> 16) as u16, tid.1 | (self.0[2] & PRESENT)]);
+        self.0[0].store(tid.0 as u16, Relaxed);
+        self.0[1].store((tid.0 >> 16) as u16, Relaxed);
+        let present = self.0[2].load(Relaxed) & PRESENT;
+        self.0[2].store(tid.1 | present, Relaxed);
+    }
+
+    fn unpresent(&mut self) {
+        *self.0[2].get_mut() &= !PRESENT;
     }
 }
 
@@ -198,24 +231,22 @@ impl KeyMap {
         if row < self.asc {
             self.asc_tids[row as usize].tid()
         } else {
-            let r = &self.rows[(row - self.asc) as usize];
-            (r.blk, r.off)
+            self.rows[(row - self.asc) as usize].tid()
         }
     }
 
-    fn set_row_tid(&mut self, row: u32, tid: Tid) {
+    fn set_row_tid(&self, row: u32, tid: Tid) {
         if row < self.asc {
             self.asc_tids[row as usize].set(tid);
         } else {
-            let r = &mut self.rows[(row - self.asc) as usize];
-            (r.blk, r.off) = tid;
+            self.rows[(row - self.asc) as usize].set_tid(tid);
         }
     }
 
     /// Present row `row`'s key is no longer present (the hash table's slot aside).
     fn unpresent(&mut self, row: u32) {
         if row < self.asc {
-            self.asc_tids[row as usize].0[2] &= !PRESENT;
+            self.asc_tids[row as usize].unpresent();
             self.asc_present -= 1;
         } else {
             self.rows[(row - self.asc) as usize].part &= !PRESENT;
@@ -463,6 +494,12 @@ impl KeyMap {
     /// Row `row` (one `find` gave) now has its current version at `tid`: `insert` of its
     /// key, without the lookup.
     pub fn set_tid(&mut self, row: u32, tid: Tid) {
+        self.set_tid_shared(row, tid);
+    }
+
+    /// `set_tid` through a shared map, by the row's own writer while no other thread touches
+    /// that row (a size model lock group's: `heapsim::Heap::update_hot_shared`).
+    pub fn set_tid_shared(&self, row: u32, tid: Tid) {
         self.set_row_tid(row, tid);
         self.cursor.store(row, std::sync::atomic::Ordering::Relaxed);
     }
@@ -513,14 +550,14 @@ impl KeyMap {
     pub fn retain(&mut self, mut keep: impl FnMut(Tid) -> bool) {
         for a in &mut self.asc_tids {
             if a.present() && !keep(a.tid()) {
-                a.0[2] &= !PRESENT;
+                a.unpresent();
                 self.asc_present -= 1;
             }
         }
         let (rows, asc) = (&mut self.rows, self.asc);
         self.table.retain(|&mut s| {
             let row = &mut rows[(s as u32 - asc) as usize];
-            let kept = keep((row.blk, row.off));
+            let kept = keep(row.tid());
             if !kept {
                 row.part &= !PRESENT;
             }
@@ -571,9 +608,9 @@ impl KeyMap {
                     put_varint(&mut asc_bytes, k.len() as u64);
                 }
                 asc_bytes.extend_from_slice(k);
-                asc_tids.push(self.asc_tids[i]);
+                asc_tids.push(self.asc_tids[i].clone());
             } else {
-                let r = self.rows[i - self.asc as usize];
+                let r = self.rows[i - self.asc as usize].clone();
                 let pos = arena.len();
                 put_varint(&mut arena, k.len() as u64);
                 arena.extend_from_slice(k);

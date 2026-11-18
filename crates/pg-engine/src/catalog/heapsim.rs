@@ -360,15 +360,16 @@ impl Page {
         Page::default()
     }
 
-    fn set_all_visible(&mut self, visible: bool, visible_pages: &mut VisPages) {
+    fn set_all_visible(&mut self, visible: bool, visible_pages: &VisPages) {
+        use std::sync::atomic::Ordering::Relaxed;
         if !visible {
             visible_pages.changed();
         }
         if self.all_visible != visible {
             if visible {
-                visible_pages.n += 1;
+                visible_pages.n.fetch_add(1, Relaxed);
             } else {
-                visible_pages.n -= 1;
+                visible_pages.n.fetch_sub(1, Relaxed);
             }
             self.all_visible = visible;
         }
@@ -918,7 +919,8 @@ const SKIP_PAGES_THRESHOLD: u32 = 32;
 /// holds while the counter stays (`VisWatch`), without the model's lock.
 #[derive(Debug, Default)]
 struct VisPages {
-    n: u32,
+    /// (Atomic: a group's writers clear pages' bits each under its page's latch.)
+    n: std::sync::atomic::AtomicU32,
     changes: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -1022,7 +1024,11 @@ impl Drop for HintsHandle {
 
 #[derive(Debug, Default)]
 pub struct Heap {
-    pages: Vec<Page>,
+    /// (Changed through a shared reference only by a model lock group's writers, each page
+    /// under its latch: `update_hot_shared`.)
+    pages: super::cellvec::CellVec<Page>,
+    /// The pages' latches for a group's writers, by page number modulo their count.
+    latches: Latches,
     visible_pages: VisPages,
     /// `PruneHints` of its pages.
     hints: HintsHandle,
@@ -1036,12 +1042,12 @@ pub struct Heap {
     /// Heap fillfactor (percent).
     pub fillfactor: usize,
     /// Tuple versions held (normal line pointers).
-    versions: usize,
+    versions: std::sync::atomic::AtomicUsize,
     /// Versions made by updates whose transaction may still abort, by its xid: (the row's
     /// key, the new version, the key the row had before when that differs). An aborted
     /// one's row goes back to the version it replaced (`settle`) before pruning can
     /// remove the way back.
-    pending: HashMap<u64, Vec<(u32, Tid, Option<u32>)>>,
+    pending: parking_lot::Mutex<HashMap<u64, Vec<(u32, Tid, Option<u32>)>>>,
     /// Pages pinned by something else while a scan reads them (an AFTER ROW trigger's
     /// tuple slot): pruning them needs a cleanup lock it can't get.
     pins: HashMap<u32, usize>,
@@ -1052,7 +1058,7 @@ pub struct Heap {
     /// space before the last row's, rows rekeyed or laid out out of key order. Until then
     /// keys and TIDs increase together, so a sequential scan reading rows in storage order
     /// reads them in heap order (`in_key_order`).
-    pub disordered: bool,
+    disordered: std::sync::atomic::AtomicBool,
     /// The last row placed in key order: its key and TID.
     last_placed: Option<(Vec<u8>, Tid)>,
     /// Deleted rows' last versions, by TID, with their keys: once pruning or VACUUM makes
@@ -1065,9 +1071,26 @@ pub struct Heap {
     pub sizes: SizeGen,
     size_sig: (u32, u32, u32),
     /// Pages versions went on that may still settle (`settle_left`; `Page::queued`).
-    left: std::collections::VecDeque<u32>,
+    left: parking_lot::Mutex<std::collections::VecDeque<u32>>,
     /// Versions written and rows deleted or rekeyed so far (`writes`).
-    writes: u64,
+    writes: std::sync::atomic::AtomicU64,
+}
+
+/// A heap's page latches (`Heap::update_hot_shared`): page `b`'s is `b % LATCHES`.
+const LATCHES: usize = 64;
+
+struct Latches([parking_lot::Mutex<()>; LATCHES]);
+
+impl Default for Latches {
+    fn default() -> Latches {
+        Latches(std::array::from_fn(|_| parking_lot::Mutex::new(())))
+    }
+}
+
+impl std::fmt::Debug for Latches {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Latches")
+    }
 }
 
 impl Heap {
@@ -1094,14 +1117,14 @@ impl Heap {
     /// Whether rows in storage (key) order are in heap order: every row was placed after
     /// the rows of smaller keys, and the TIDs rows carry are the model's.
     pub fn in_key_order(&self) -> bool {
-        !self.disordered && !self.unstamped
+        !self.disordered.load(std::sync::atomic::Ordering::Relaxed) && !self.unstamped
     }
 
     /// Whether its rows are in key order, whatever TIDs they were stored with: a scan that
     /// doesn't read their TIDs may read them in storage order (`in_key_order` without
     /// `unstamped`).
     pub fn keys_in_heap_order(&self) -> bool {
-        !self.disordered
+        !self.disordered.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Whether some page has a prunable xid (a delete or an update set pd_prune_xid).
@@ -1111,7 +1134,7 @@ impl Heap {
 
     /// A row stored under `key` was placed at `tid`.
     fn placed(&mut self, key: &[u8], tid: Tid) {
-        if self.disordered {
+        if *self.disordered.get_mut() {
             return;
         }
         match &mut self.last_placed {
@@ -1121,7 +1144,7 @@ impl Heap {
                 *t = tid;
             }
             Some(_) => {
-                self.disordered = true;
+                *self.disordered.get_mut() = true;
                 self.last_placed = None;
             }
             None => self.last_placed = Some((key.to_vec(), tid)),
@@ -1173,24 +1196,24 @@ impl Heap {
         self.pages.capacity() * size_of::<Page>()
             + lps
             + self.keys.bytes()
-            + self.left.capacity() * size_of::<u32>()
+            + self.left.lock().capacity() * size_of::<u32>()
             + self.fsm.pages.len() * (size_of::<FsmPage>() + 16)
             + (self.deleted.len() + self.far_prev.len()) * 24
-            + self.pending.values().map(|l| l.capacity() * 20 + 16).sum::<usize>()
+            + self.pending.lock().values().map(|l| l.capacity() * 20 + 16).sum::<usize>()
     }
 
     pub fn versions(&self) -> usize {
-        self.versions
+        self.versions.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// A count that moves with every version written and every row deleted or rekeyed:
     /// what a pass over the rows saw is still the model's while it holds.
     pub fn writes(&self) -> u64 {
-        self.writes
+        self.writes.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn all_visible_pages(&self) -> u32 {
-        self.visible_pages.n
+        self.visible_pages.n.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The pages' prune hints, and whether the TIDs stored with rows are the model's (a
@@ -1203,8 +1226,7 @@ impl Heap {
     fn publish_page(&mut self, blk: u32) {
         use std::sync::atomic::{AtomicU64, Ordering::Release};
         let Some(p) = self.pages.get(blk as usize) else { return };
-        let minfree = self.save_free().max(BLCKSZ / 10);
-        let h = if p.prune_xid != 0 && (p.full || p.heap_free() < minfree) { p.prune_xid } else { 0 };
+        let h = self.prune_hint(p);
         if blk as usize >= self.hints.0.slots.len() {
             let n = (blk as usize + 1).max(self.pages.len()).next_power_of_two().max(64);
             let old = &self.hints.0.slots;
@@ -1215,6 +1237,12 @@ impl Heap {
             self.hints = HintsHandle(std::sync::Arc::new(PruneHints { slots, retired: Default::default(), visible_at: Default::default() }));
         }
         self.hints.0.slots[blk as usize].store(h, Release);
+    }
+
+    /// Page `p`'s prune hint (`PruneHints`).
+    fn prune_hint(&self, p: &Page) -> u64 {
+        let minfree = self.save_free().max(BLCKSZ / 10);
+        if p.prune_xid != 0 && (p.full || p.heap_free() < minfree) { p.prune_xid } else { 0 }
     }
 
     /// Every page's prune hint published again (after a pass over the pages).
@@ -1228,7 +1256,7 @@ impl Heap {
     /// without the lock as well: `publish_visibility`).
     pub fn visibility_watch(&self) -> Option<VisWatch> {
         self.publish_visibility();
-        (self.visible_pages.n >= self.nblocks()).then(|| VisWatch {
+        (self.visible_pages.n.load(std::sync::atomic::Ordering::Relaxed) >= self.nblocks()).then(|| VisWatch {
             seen: self.visible_pages.changes.load(std::sync::atomic::Ordering::Acquire),
             changes: self.visible_pages.changes.clone(),
             model: self.sizes.watch(),
@@ -1241,7 +1269,7 @@ impl Heap {
     /// takes the paths that look at the pages.
     pub fn publish_visibility(&self) {
         use std::sync::atomic::Ordering::{Acquire, Release};
-        let at = match self.visible_pages.n >= self.nblocks() {
+        let at = match self.visible_pages.n.load(std::sync::atomic::Ordering::Relaxed) >= self.nblocks() {
             true => self.visible_pages.changes.load(Acquire) + 1,
             false => 0,
         };
@@ -1265,7 +1293,7 @@ impl Heap {
     /// all-visible (the catalog's relallvisible; the map isn't kept with the model).
     pub fn seed_all_visible(&mut self, n: u32) {
         for p in self.pages.iter_mut().take(n as usize) {
-            p.set_all_visible(true, &mut self.visible_pages);
+            p.set_all_visible(true, &self.visible_pages);
         }
         self.publish_visibility();
     }
@@ -1290,8 +1318,8 @@ impl Heap {
 
     /// pg_truncate_visibility_map: the map's file goes; no page is marked any more.
     pub fn truncate_vm(&mut self) {
-        for p in &mut self.pages {
-            p.set_all_visible(false, &mut self.visible_pages);
+        for p in self.pages.iter_mut() {
+            p.set_all_visible(false, &self.visible_pages);
         }
         self.vm_blocks = 0;
         self.note_size();
@@ -1303,7 +1331,7 @@ impl Heap {
     /// PageGetExactFreeSpace's.
     pub fn tuple_stats(&self, v: &Vis) -> (u64, u64, u64, u64, u64) {
         let mut s = (0, 0, 0, 0, 0);
-        for p in &self.pages {
+        for p in self.pages.iter() {
             for l in p.lps.iter() {
                 if let Lp::Normal(t) = l {
                     match t.status(v) {
@@ -1330,7 +1358,7 @@ impl Heap {
     /// must keep though dead: (HEAPTUPLE_DEAD, HEAPTUPLE_RECENTLY_DEAD).
     pub fn dead_counts(&self, v: &Vis) -> (u64, u64) {
         let mut n = (0, 0);
-        for p in &self.pages {
+        for p in self.pages.iter() {
             for l in p.lps.iter() {
                 if let Lp::Normal(t) = l {
                     match t.status(v) {
@@ -1493,11 +1521,11 @@ impl Heap {
     /// deleted or pending, only inserted. None otherwise.
     pub fn inserted_in_heap_order(&self) -> Option<Vec<&[u8]>> {
         let k = &self.keys;
-        if !self.pending.is_empty() || k.rows() != k.len() || self.versions != k.len() {
+        if !self.pending.lock().is_empty() || k.rows() != k.len() || self.versions() != k.len() {
             return None;
         }
         let mut out = Vec::with_capacity(k.len());
-        for p in &self.pages {
+        for p in self.pages.iter() {
             for off in 1..=p.lps.len() as u16 {
                 if let Some(t) = p.tup(off) {
                     out.push(self.keys.key(t.row)?);
@@ -1532,7 +1560,7 @@ impl Heap {
     fn init_page(&mut self, blk: u32) {
         let p = &mut self.pages[blk as usize];
         if p.new {
-            p.set_all_visible(false, &mut self.visible_pages);
+            p.set_all_visible(false, &self.visible_pages);
             *p = Page::fresh();
         }
     }
@@ -1680,20 +1708,20 @@ impl Heap {
     fn put_quiet(&mut self, blk: u32, t: Tup, frozen: bool) -> Tid {
         let p = &mut self.pages[blk as usize];
         if frozen && p.lps.is_empty() {
-            p.set_all_visible(true, &mut self.visible_pages);
+            p.set_all_visible(true, &self.visible_pages);
         } else if p.all_visible && !frozen {
-            p.set_all_visible(false, &mut self.visible_pages);
+            p.set_all_visible(false, &self.visible_pages);
         }
         let off = p.add(t);
         if p.settle_at != u64::MAX && !p.queued {
             p.queued = true;
-            self.left.push_back(blk);
+            self.left.get_mut().push_back(blk);
         }
         if frozen {
             self.vm_pin(blk);
         }
-        self.versions += 1;
-        self.writes += 1;
+        *self.versions.get_mut() += 1;
+        *self.writes.get_mut() += 1;
         (blk, off)
     }
 
@@ -1812,7 +1840,7 @@ impl Heap {
     /// `delete`, the version's command id and xmax set as `replace` says, in the same
     /// lookup.
     pub fn delete_cid(&mut self, key: &[u8], xid: u64, v: &Vis, replace: &mut dyn FnMut(Tid, &Tup) -> Replace) {
-        self.writes += 1;
+        *self.writes.get_mut() += 1;
         let Some((b, off)) = self.locate(key, v) else {
             return;
         };
@@ -1826,7 +1854,7 @@ impl Heap {
             row = t.row;
         });
         p.set_prunable(xid);
-        p.set_all_visible(false, &mut self.visible_pages);
+        p.set_all_visible(false, &self.visible_pages);
         if row != super::keymap::NO_ROW {
             self.deleted.insert((b, off), row);
         }
@@ -1967,13 +1995,13 @@ impl Heap {
             op.full = true;
         }
         op.set_prunable(xid);
-        op.set_all_visible(false, &mut self.visible_pages);
+        op.set_all_visible(false, &self.visible_pages);
         self.publish_page(ob);
         // (Lockers of the old version still running lock the new one too.)
         if carried.raw != 0 {
             self.pages[nb as usize].update_tup(noff, |t| t.set_xmax(carried));
         }
-        self.disordered = true;
+        *self.disordered.get_mut() = true;
         let row = if moved {
             self.keys.remove(old_key);
             self.keyed(new_key, (nb, noff))
@@ -1982,7 +2010,7 @@ impl Heap {
             krow
         };
         if xid >= crate::txn::xids::FIRST_NORMAL_XID {
-            self.pending
+            self.pending.get_mut()
                 .entry(xid)
                 .or_default()
                 .push((row, (nb, noff), moved.then_some(old_row)));
@@ -1990,18 +2018,92 @@ impl Heap {
         ((nb, noff), hot)
     }
 
+    /// `update_cid` of a heap-only update of the row under `key` whose new version fits on
+    /// its current version's page, through a shared heap: by a writer of a size model lock's
+    /// group (`exec::sizing::modellock`) while the group's other writers change other rows.
+    /// What it changes is the page's (under the page's latch), the row's current version
+    /// (`KeyMap::set_tid_shared`: the row is its writer's alone, under its row lock) and
+    /// counts and lists kept atomic or behind mutexes of their own, so the outcome is
+    /// `update_cid`'s in any order of the group's writers: two of one page take its latch in
+    /// turn, as PostgreSQL's take the page's buffer lock. None, having changed nothing, when
+    /// it doesn't apply (no row, its current version's insert aborted so the row leads back
+    /// across pages, no room on the page, the hints not covering it yet): `update_cid` then,
+    /// under the exclusive lock.
+    pub fn update_hot_shared(
+        &self,
+        key: &[u8],
+        len: usize,
+        (xid, cid): (u64, u32),
+        v: &Vis,
+        replace: &mut dyn FnMut(Tid, &Tup) -> Replace,
+    ) -> Option<Tid> {
+        use std::sync::atomic::Ordering::{Relaxed, Release};
+        let row = self.keys.find(key)?;
+        let (ob, ooff) = self.keys.tid(row);
+        let cell = self.pages.cell(ob as usize)?;
+        let slot = self.hints.0.slots.get(ob as usize)?;
+        let _latch = self.latches.0[ob as usize % LATCHES].lock();
+        // SAFETY: the page's latch is held, and nothing else reaches the page meanwhile: the
+        // group's other writers take its latch first, and readers and exclusive writers are
+        // kept out by the model's lock while a group holds it (`CellVec::cell`).
+        let p = unsafe { &mut *cell.get() };
+        let o = p.tup(ooff)?;
+        if v.state(o.xmin) == Xs::Aborted || maxalign(len) > p.heap_free() {
+            return None;
+        }
+        // (As `update_cid` does on the old version's page: `put`, `set_prev`, the old
+        // version's xmax, the key's row.)
+        let mut t = Self::new_tup(len, xid);
+        t.heap_only = true;
+        t.cid = cid;
+        t.row = row;
+        if p.all_visible {
+            p.set_all_visible(false, &self.visible_pages);
+        }
+        let noff = p.add(t);
+        if p.settle_at != u64::MAX && !p.queued {
+            p.queued = true;
+            self.left.lock().push_back(ob);
+        }
+        self.versions.fetch_add(1, Relaxed);
+        self.writes.fetch_add(1, Relaxed);
+        self.visible_pages.changed();
+        p.update_tup(noff, |t| t.prev_off = ooff);
+        let mut carried = crate::txn::multixact::Xmax::NONE;
+        p.update_tup(ooff, |o| {
+            let r = replace((ob, ooff), o);
+            carried = r.carried;
+            o.cid = r.cmax;
+            o.set_xmax(r.xmax);
+            o.set_hot_updated(true);
+            o.next = noff;
+        });
+        p.set_prunable(xid);
+        p.set_all_visible(false, &self.visible_pages);
+        if carried.raw != 0 {
+            p.update_tup(noff, |t| t.set_xmax(carried));
+        }
+        slot.store(self.prune_hint(p), Release);
+        self.disordered.store(true, Relaxed);
+        self.keys.set_tid_shared(row, (ob, noff));
+        if xid >= crate::txn::xids::FIRST_NORMAL_XID {
+            self.pending.lock().entry(xid).or_default().push((row, (ob, noff), None));
+        }
+        Some((ob, noff))
+    }
+
     /// Rows whose last update's transaction aborted point at the version it replaced
     /// again (see `pending`); those of transactions that ended otherwise are forgotten,
     /// with the links back to other pages their new versions kept (`far_prev`).
     fn settle(&mut self, v: &Vis) {
-        if self.pending.is_empty() {
+        if self.pending.get_mut().is_empty() {
             return;
         }
-        let ended: Vec<u64> = (self.pending.keys().copied())
+        let ended: Vec<u64> = (self.pending.get_mut().keys().copied())
             .filter(|x| v.state(*x) != Xs::Running)
             .collect();
         for x in ended {
-            let list = self.pending.remove(&x).unwrap_or_default();
+            let list = self.pending.get_mut().remove(&x).unwrap_or_default();
             if v.state(x) == Xs::Aborted {
                 for &(row, tid, moved) in list.iter().rev() {
                     // (Rare: the keys are copied out of the map they go back into.)
@@ -2043,19 +2145,19 @@ impl Heap {
     /// written, a page or two settled.)
     pub fn settle_left(&mut self, v: &Vis) {
         for _ in 0..2 {
-            let Some(&b) = self.left.front() else { return };
+            let Some(&b) = self.left.get_mut().front() else { return };
             let Some(p) = self.pages.get_mut(b as usize) else {
-                self.left.pop_front();
+                self.left.get_mut().pop_front();
                 continue;
             };
             if p.settle_at >= v.horizon && p.settle_at != u64::MAX {
                 return;
             }
-            self.left.pop_front();
+            self.left.get_mut().pop_front();
             p.settle(v);
             p.queued = p.settle_at != u64::MAX;
             if p.queued {
-                self.left.push_back(b);
+                self.left.get_mut().push_back(b);
             }
         }
     }
@@ -2276,7 +2378,7 @@ impl Heap {
             for &(off, st) in changes.iter() {
                 if let Some(Lp::Normal(t)) = p.lps.get(off - 1) {
                     p.used -= maxalign(t.len as usize);
-                    self.versions -= 1;
+                    *self.versions.get_mut() -= 1;
                 }
                 if matches!(st, Lp::Unused) {
                     freed.push((blk, off as u16));
@@ -2375,7 +2477,7 @@ impl Heap {
             }
             if p.lps.is_empty() {
                 let p = &mut self.pages[b as usize];
-                p.set_all_visible(true, &mut self.visible_pages);
+                p.set_all_visible(true, &self.visible_pages);
                 let free = p.heap_free();
                 self.fsm.record(b, free);
                 continue;
@@ -2392,7 +2494,7 @@ impl Heap {
             if hastup {
                 nonempty = b + 1;
             }
-            self.pages[b as usize].set_all_visible(all_visible, &mut self.visible_pages);
+            self.pages[b as usize].set_all_visible(all_visible, &self.visible_pages);
             if !dead.is_empty() {
                 lpdead_pages += 1;
                 res.lpdead_items += dead.len() as u64;
@@ -2426,7 +2528,7 @@ impl Heap {
                         Lp::Dead => false,
                         Lp::Normal(t) => t.status(v) == Htsv::Live && visible_to_all(&t, v),
                     });
-                    p.set_all_visible(vis, &mut self.visible_pages);
+                    p.set_all_visible(vis, &self.visible_pages);
                     let free = p.heap_free();
                     self.fsm.record(b, free);
                 }
@@ -2533,8 +2635,8 @@ impl Heap {
 
     fn truncate_to(&mut self, pages: u32) {
         for p in &mut self.pages[pages as usize..] {
-            self.versions -= p.lps.normal();
-            p.set_all_visible(false, &mut self.visible_pages);
+            *self.versions.get_mut() -= p.lps.normal();
+            p.set_all_visible(false, &self.visible_pages);
         }
         self.pages.truncate(pages as usize);
         self.keys.retain(|t| t.0 < pages);
@@ -2563,7 +2665,7 @@ impl Heap {
 
     /// Rows stored under new keys (old, new); rows not listed are forgotten.
     pub fn rekey(&mut self, pairs: &[(Vec<u8>, Vec<u8>)]) {
-        self.writes += 1;
+        *self.writes.get_mut() += 1;
         let mut keys = super::keymap::KeyMap::default();
         keys.reserve(pairs.len(), pairs.iter().map(|(_, n)| n.len()).sum());
         let mut map = vec![super::keymap::NO_ROW; self.keys.rows()];
@@ -2573,10 +2675,10 @@ impl Heap {
             }
         }
         self.keys = keys;
-        self.disordered = true;
+        *self.disordered.get_mut() = true;
         // (A row that moved back from an aborted update is under its old key: forgotten.)
         self.renumber_rows(&map);
-        for list in self.pending.values_mut() {
+        for list in self.pending.get_mut().values_mut() {
             list.retain_mut(|(row, _, moved)| {
                 *moved = None;
                 *row != super::keymap::NO_ROW
@@ -2591,7 +2693,7 @@ impl Heap {
         for p in &mut self.pages {
             p.lps.rows_mut(|r| *r = to(*r));
         }
-        for list in self.pending.values_mut() {
+        for list in self.pending.get_mut().values_mut() {
             for (row, _, moved) in list.iter_mut() {
                 *row = to(*row);
                 *moved = moved.map(to);
@@ -2860,7 +2962,7 @@ impl Heap {
                         t.xmax = crate::txn::xids::FIRST_NORMAL_XID - 1;
                         chain(&mut t, f, next);
                         p.used += maxalign(len as usize);
-                        self.versions += 1;
+                        *self.versions.get_mut() += 1;
                         p.lps.set(j, Lp::Normal(t));
                     }
                 }
@@ -2869,7 +2971,7 @@ impl Heap {
             for (to, from) in prev {
                 p.lps.update((to as usize).wrapping_sub(1), |t| t.prev_off = from);
             }
-            p.set_all_visible(flags & 1 != 0, &mut self.visible_pages);
+            p.set_all_visible(flags & 1 != 0, &self.visible_pages);
             p.full = flags & 2 != 0;
             p.free_lps = flags & 4 != 0;
             p.prune_xid = if flags & 8 != 0 { crate::txn::xids::FIRST_NORMAL_XID - 1 } else { 0 };
@@ -2970,14 +3072,14 @@ impl Heap {
         if matches!(p.lps.get(off as usize - 1), Some(Lp::Normal(_) | Lp::Redirect(_))) {
             return false;
         }
-        p.set_all_visible(false, &mut self.visible_pages);
+        p.set_all_visible(false, &self.visible_pages);
         while p.lps.len() < off as usize {
             p.lps.push(Lp::Dead);
         }
         p.used += maxalign(t.len as usize);
         p.lps.set(off as usize - 1, Lp::Normal(t));
         p.new = false;
-        self.versions += 1;
+        *self.versions.get_mut() += 1;
         true
     }
 
@@ -3002,7 +3104,7 @@ impl Heap {
             let p = &mut self.pages[b as usize];
             p.update_tup(off, |t| t.xmax = xid);
             p.set_prunable(xid);
-            p.set_all_visible(false, &mut self.visible_pages);
+            p.set_all_visible(false, &self.visible_pages);
             self.publish_page(b);
         }
         let Some((len, stored)) = new else {
@@ -3014,9 +3116,9 @@ impl Heap {
             None => self.append(t),
         };
         self.set_prev(tid, old);
-        self.disordered = true;
+        *self.disordered.get_mut() = true;
         let row = self.keyed(&key, tid);
-        self.pending.entry(xid).or_default().push((row, tid, None));
+        self.pending.get_mut().entry(xid).or_default().push((row, tid, None));
         stored.is_some_and(|s| s != tid)
     }
 }

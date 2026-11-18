@@ -5,6 +5,7 @@
 
 pub mod acl;
 pub mod btsim;
+pub mod cellvec;
 pub mod comments;
 pub mod depend;
 pub mod ginsim;

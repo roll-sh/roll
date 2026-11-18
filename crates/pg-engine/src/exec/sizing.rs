@@ -29,6 +29,7 @@ pub mod btest;
 pub mod estkeep;
 pub mod gistlog;
 pub mod kept;
+pub mod modellock;
 
 /// Tables with more row versions than this aren't modelled (their sizes are estimated).
 /// Packed line pointers (`heapsim::lps`) and leaf buffers (`btsim::leaf`) make a modelled
@@ -102,7 +103,7 @@ pub const COPY_BYTES: usize = 65535;
 /// for one lock, and each table's models change in the order its writers take its shard.
 /// Nothing locks two shards at once.
 pub struct Models {
-    shards: Box<[parking_lot::RwLock<RelFiles>]>,
+    shards: Box<[modellock::ModelLock<RelFiles>]>,
     /// The database's stored TIDs were checked (`tids_checked`).
     tids_checked: std::sync::atomic::AtomicBool,
     /// Signalled when a kept table's models are laid out (`kept::Building`).
@@ -134,7 +135,7 @@ impl Default for Models {
 impl Models {
     /// The shard with table `table`'s models. An index's or a TOAST relation's are in its
     /// table's: pass the table's oid.
-    pub fn of(&self, table: u32) -> &parking_lot::RwLock<RelFiles> {
+    pub fn of(&self, table: u32) -> &modellock::ModelLock<RelFiles> {
         &self.shards[table as usize % SHARDS]
     }
 
@@ -156,7 +157,7 @@ impl Models {
     }
 
     /// Every shard, one at a time.
-    fn all(&self) -> impl Iterator<Item = &parking_lot::RwLock<RelFiles>> {
+    fn all(&self) -> impl Iterator<Item = &modellock::ModelLock<RelFiles>> {
         self.shards.iter()
     }
 
@@ -2854,6 +2855,33 @@ pub fn updated(
         let xid = ctx.txn.borrow_mut().cur_xid();
         // (The horizon before the shard's lock: other sessions' readers wait while it is held.)
         let v = vis_of(xids, t, ctx);
+        // (Whether the UPDATE changes a key column: the old version's lock mode.)
+        let key_changed = || match noted {
+            Some(k) => k,
+            None => old_key != new_key || ctx.with_catalog(|cat| super::scan::any_key_column(t, cat, |i| old.get(i) != new.get(i))),
+        };
+        // A heap-only update whose new version fits on its old one's page changes only that
+        // page and its own row: in the shard lock's group of such writers, which don't wait
+        // for each other (`modellock`). Anything else, or when it finds no room after all,
+        // under the exclusive lock below.
+        if hot_ok && t.toast == 0 && exts.is_empty() && old_exts.is_empty() {
+            let rf = modellock::group(db.relfiles.of(t.oid));
+            let Some(heap) = rf.heaps.get(&t.oid) else {
+                return Ok(None);
+            };
+            let cid = ctx.txn.borrow_mut().output_cid();
+            let mut replace = |at: Tid, o: &heapsim::Tup| {
+                let mode = if key_changed() { RowLockMode::Update } else { RowLockMode::NoKeyUpdate };
+                let r = replaced(o, xid, mode, &v, ctx);
+                kept = Some((at, o.xmax != 0, r.carried));
+                r
+            };
+            if let Some(tid) = heap.update_hot_shared(old_key, len, (xid, cid), &v, &mut replace) {
+                let big = heap.versions() > max_versions();
+                drop(rf);
+                break (tid, true, v, big);
+            }
+        }
         let big;
         let (tid, hot) = {
             let mut rf = db.relfiles.of(t.oid).write();
@@ -2902,10 +2930,6 @@ pub fn updated(
             // (The old version's command id as HeapTupleHeaderAdjustCmax sets it and its
             // xmax, within the update's lookup; an update changing a key column holds the
             // row FOR UPDATE.)
-            let key_changed = || match noted {
-                Some(k) => k,
-                None => old_key != new_key || ctx.with_catalog(|cat| super::scan::any_key_column(t, cat, |i| old.get(i) != new.get(i))),
-            };
             let mut replace = |at: Tid, o: &heapsim::Tup| {
                 let mode = if key_changed() { RowLockMode::Update } else { RowLockMode::NoKeyUpdate };
                 let r = replaced(o, xid, mode, &v, ctx);
