@@ -76,6 +76,8 @@ pub struct Row {
     /// The product answers only what the caller's grant reaches per environment and path (secrets'
     /// health and leak scan): rules limited to some environments or paths match it too.
     pub filters_itself: bool,
+    /// The product answers only the indices the grant reaches (`roll_auth::scope::Resource::filters_index`).
+    pub filters_index: bool,
     /// Other resources whose credentials the request hands to this one (apps' links put a
     /// database's address and password in a service's variables): it also needs `reveal` on each.
     pub lends: Option<Lend>,
@@ -131,6 +133,12 @@ fn apps_patch_lends(b: &Value) -> Vec<Lent> {
     let mut out = apps_scale(b);
     out.extend(apps_repo(b));
     out
+}
+
+/// A search cluster made as a branch of `parent` (a body field, unlike `…/{id}/branches`): it
+/// copies the parent's indices, so it needs what branching there does, `write` on the parent.
+fn search_parent(b: &Value) -> Vec<Lent> {
+    b.get("parent").and_then(Value::as_str).map(|p| Lent { kind: "search".into(), r#ref: p.into(), action: Action::Write }).into_iter().collect()
 }
 
 /// What an apps link's kind is, as a rule names it: its product and the resource kind its ids are.
@@ -191,7 +199,7 @@ impl Row {
 }
 
 const fn row(method: &'static str, route: &'static str, product: &'static str, act: Act, target: Tgt) -> Row {
-    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false }
+    Row { method, route, product, act, target, env: EnvFrom::None, path_query: None, reveals: &[], copies_from: None, index: None, lends: None, filters_itself: false, filters_index: false }
 }
 
 const R: Act = Act::Is(Action::Read);
@@ -233,6 +241,12 @@ impl Row {
     /// and leaks): a rule limited to some environments or folders matches it too.
     const fn filters_itself(mut self) -> Row {
         self.filters_itself = true;
+        self
+    }
+    /// A list that keeps only the indices the caller's `Grant` reaches (secrets' encryption keys):
+    /// a rule limited to some indices matches it too.
+    const fn filters_index(mut self) -> Row {
+        self.filters_index = true;
         self
     }
     const fn lends(mut self, l: Lend) -> Row {
@@ -282,6 +296,8 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
+    ("/v1/apps/services/{id}/environments/{env}/visit", "a browser session in a sign-in-gated environment is a signed-in person's (rolld's gate sees their session), never a token's"),
+    ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
 ];
 
 pub fn rows() -> &'static [Row] {
@@ -732,10 +748,11 @@ fn apps_create_action(b: &Value) -> Action {
 /// A service's run settings that change only how much of it runs and how it's watched: its size,
 /// scale, health checks, timers, alerts, rollout and restarts. Every other run key decides what
 /// production runs, when, or who reaches it (start, pre-deploy, schedule, schedules and their
-/// timezone and retries, kind, port, volume, public, tcp, and `rollback_on_crash`, which has roll
+/// timezone and retries, kind, port, volume, public, tcp, a worker's `health_command`, which runs
+/// in its instances, and `rollback_on_crash`, which has roll
 /// put an older deployment live by itself), and so does any key apps adds later until it's listed
 /// here: a new setting is never a quiet way into production.
-const APPS_WRITE_RUN: [&str; 18] = [
+const APPS_WRITE_RUN: [&str; 21] = [
     "min_instances",
     "max_instances",
     "concurrency",
@@ -743,6 +760,8 @@ const APPS_WRITE_RUN: [&str; 18] = [
     "memory_mb",
     "health_path",
     "health_timeout_s",
+    "health_every_s",
+    "health_failures",
     "suspend_after_s",
     "sleep_after_s",
     "alerts",
@@ -750,6 +769,7 @@ const APPS_WRITE_RUN: [&str; 18] = [
     "scale",
     "drain_s",
     "cpu_target",
+    "memory_target",
     "restart",
     "restart_tries",
     "affinity",
@@ -1085,12 +1105,14 @@ static ROWS: &[Row] = &[
     // ── search (feature/roll-search) ──
     row("GET", "/v1/search", "search", R, Tgt::AnyGrant),
     row("GET", "/v1/search/clusters", "search", R, list("id")).reveals(SEARCH_SECRETS),
-    row("POST", "/v1/search/clusters", "search", W, create("search", "id")).reveals(SEARCH_SECRETS),
+    row("POST", "/v1/search/clusters", "search", W, create("search", "id")).reveals(SEARCH_SECRETS).lends(Lend::Each(search_parent)),
     row("GET", "/v1/search/clusters/{id}", "search", R, one(PG, "cluster")).reveals(SEARCH_SECRETS),
     row("PATCH", "/v1/search/clusters/{id}", "search", ADMIN, one(PG, "cluster")).reveals(SEARCH_SECRETS),
     row("DELETE", "/v1/search/clusters/{id}", "search", D, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/branches", "search", W, one(PG, "cluster")).reveals(SEARCH_SECRETS),
     row("POST", "/v1/search/clusters/{id}/password", "search", REVEAL, one(PG, "cluster")),
+    // A deleted cluster back (its id still resolves while it is kept): a write, like a create.
+    row("POST", "/v1/search/clusters/{id}/restore", "search", W, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")),
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
@@ -1153,14 +1175,20 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/aws-roles", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/aws-roles", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/aws-roles/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/aws-roles/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/aws-users", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/aws-users", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/aws-users/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/aws-users/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/rotators", "secrets", R, one(&["project"], "project")),
     // A signing secret signs calls that mint vendor keys: shown only to who may also reveal.
     row("POST", "/v1/secrets/projects/{project}/rotators", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
     row("DELETE", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),
-    row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/rotators/{id}/rotate-secret", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
+    // Lists only the keys the caller's grant reaches (`Grants::reaches_key`, each key's name as
+    // its index), so a rule limited to some keys sees those.
+    row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")).filters_index(),
     row("POST", "/v1/secrets/projects/{project}/transit", "secrets", ADMIN, one(&["project"], "project")),
     // Each key's routes name it (`.index("name")`): a rule can grant one key
     // (`{"id": "prj_x", "index": "payments"}`); the list and making a key stay the project's.
@@ -1190,12 +1218,23 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/cloud-accounts", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cloud-accounts", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/cloud-accounts/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/github-apps", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/github-apps", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/github-apps/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/outside-databases", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/outside-databases", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/outside-databases/{id}/rotate-admin", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/kubernetes", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/kubernetes", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/kubernetes/{id}", "secrets", ADMIN, one(&["project"], "project")),
     // A backup seals every environment's values to a key the caller chooses; a restore loads a
     // whole project. Both are admin in secrets too.
     row("POST", "/v1/secrets/projects/{project}/backup", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/backup/schedule", "secrets", ADMIN, one(&["project"], "project")),
+    row("PUT", "/v1/secrets/projects/{project}/backup/schedule", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/backup/schedule", "secrets", ADMIN, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/restore", "secrets", ADMIN, one(&["project"], "project")),
     row("PUT", "/v1/secrets/projects/{project}/environments/{env}/policy", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/folder-policies", "secrets", R, one(&["project"], "project")).env(EnvFrom::Param("env")),
@@ -1204,6 +1243,8 @@ static ROWS: &[Row] = &[
     row("POST", "/v1/secrets/projects/{project}/environments/{env}/requests/{id}/review", "secrets", ADMIN, one(&["project"], "project")).env(EnvFrom::Param("env")),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/values", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
+    // A TOTP key's current code is a credential: reveal, never the prefix's read.
+    row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/totp", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     row("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{name}/versions/{v}/value", "secrets", REVEAL, one(&["project"], "project")).env(EnvFrom::Param("env")).path_query("path"),
     // What hands out more than the request itself: syncs (they push values
     // elsewhere), audit sinks and required keys are admin; a share link of a value reveals it.
@@ -1368,6 +1409,9 @@ static ROWS: &[Row] = &[
     // Accepting a visual change is a person's call (with `visual_review = "required"` previews
     // refuses tokens anyway): admin, so a write token can't wave its own diff through.
     row("POST", "/v1/previews/{id}/visual/accept", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
+    // Letting a fork's pull request run with the project's data (a Git URL service's preview,
+    // roll code's `approve-run`): a person's call, as accepting a visual change is.
+    row("POST", "/v1/previews/{id}/approve", "previews", ADMIN, one(PG, "preview")).env(EnvFrom::Fixed("preview")),
     // ── roll code ──
     row("GET", "/v1/code", "code", R, Tgt::AnyGrant),
     row("GET", "/v1/code/health", "code", R, Tgt::AnyGrant),
@@ -1555,7 +1599,7 @@ mod tests {
         let f = find("GET", "/v1/secrets/projects/{project}/environments/{env}/secrets/{key}/value", "x").unwrap();
         assert_eq!(f.row.action("GET", &[], None), Action::Reveal);
         // Every route that answers secret values is reveal.
-        for r in ["values", "secrets/{name}/value", "secrets/{name}/versions/{v}/value", "requests/{id}/values"] {
+        for r in ["values", "secrets/{name}/value", "secrets/{name}/totp", "secrets/{name}/versions/{v}/value", "requests/{id}/values"] {
             let route = format!("/v1/secrets/projects/{{project}}/environments/{{env}}/{r}");
             let f = by_path("GET", &route.replace('{', "x").replace('}', "")).unwrap();
             assert_eq!(f.row.action("GET", &[], None), Action::Reveal, "{route}");

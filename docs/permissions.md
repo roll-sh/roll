@@ -147,14 +147,54 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
   - **`client_secret_basic` or `client_secret_post`:** a secret roll makes (`rlc_…`, shown once,
     stored as its hash, with a checksum, so a leaked one is found and revokes its client, as a
     leaked token does).
+  - **A trusted identity** (trusted publishing, as PyPI's and npm's; AWS's and GCP's workload
+    federation): CI's own OIDC token, so nothing is stored or held anywhere.
+    - **Making one:** `oidc: {issuer, audience?, subject, claims?, jwks?}` in place of a key or a
+      secret. The audience defaults to roll's API. `subject` is the token's `sub` or a pattern with
+      `*`. A shared issuer (GitHub Actions, GitLab.com, Terraform Cloud, Buildkite, Google) must
+      name one tenant literally (`repo:acme/web:…`), or anyone's job could sign in, and that rule is
+      never optional. `claims` are up to ten others that must match (`repository_owner_id`, `ref`).
+      `jwks` pins the issuer's keys for one roll can't reach.
+    - **Signing in:** RFC 7523's grant,
+      `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&client_id=mcl_…&assertion=<the OIDC token>`.
+      The client id is named because a shared issuer's token says nothing about which roll client
+      it's for.
+    - **What's checked:** `crates/roll-oidc`, the same code roll secrets' workload identities use
+      (moved there with the secrets thread's review): RS256 or ES256, `iss` exactly, `aud`, `exp`
+      and `nbf` with 60 s of leeway, a lifetime of at most a day, then the subject and the claims.
+      Keys are fetched only from the issuer named, through rolld's guarded client (public
+      addresses, no redirects, bounded reads), cached an hour, and refetched early for a new key
+      id at most every 30 s. Sign-ins are capped at 120 a minute per client. A refusal is
+      `invalid_grant`, and its text never holds the token.
+    - **From the CLI:** `roll token client create ci --product apps --allow read,deploy --github
+      acme/web [--ref refs/heads/main | --environment production]` prints the workflow step that
+      trades the job's token and exports a masked `ROLL_TOKEN`; `--gitlab group/project [--ref main
+      | --environment production]` prints the `.gitlab-ci.yml` lines (`id_tokens` for roll's
+      audience). The panel's "GitHub Actions" choice does the same for GitHub. Any other CI:
+      `--issuer URL --subject PATTERN [--claim name=value]… [--audience A] [--jwks file]`
+      (Buildkite, CircleCI, Terraform Cloud, a cluster's own with its keys pinned).
 - **The request:** `grant_type=client_credentials`; its `resource`, if any, must be roll's API or
-  MCP server. The answer has no refresh token: the client trades its credential again for the
+  MCP server. `scope=read-only` narrows that token to its rules' reads (no asks either), checked
+  wherever the token is looked up; no scope (or `granted`) is the client's rules, and any other
+  scope is `invalid_scope`: never wider. The answer has no refresh token: the client trades its credential again for the
   next one. Every failure to authenticate is the same `invalid_client`, so an unknown client and a
-  wrong credential look alike.
+  wrong credential look alike. A client gets at most 120 tokens a minute per node, counted once its
+  credential checks out, so junk naming it can't lock it out and a leaked credential can't mint
+  without end.
 - **The metadata** lists `client_secret_basic`, `client_secret_post` and `private_key_jwt`, the
   signature algorithms (`EdDSA`, `ES256`, `RS256`) and the grant type.
-- **Rotating one:** `POST /v1/access/clients/{id}/rotate {public_jwk?, keep_old_for_s?}` (or
-  `roll token client rotate <id> [--public-key f] [--keep-old 1h]`) gives it a new key, or a new
+- **In the audit log** (source `access`, on the client's grant): `create_client`, `rotate_client`,
+  `revoke_client` with who did it, and a `sign_in` row for every token a client gets. That row
+  holds the client, the kind of credential (`secret`, `key`, or `oidc` with the CI token's issuer
+  and subject, such as `repo:acme/web:ref:refs/heads/main`), whether it was read-only, and the
+  address it came from. It never holds a secret or a token.
+- **In the checkup:** a client that signs in with a secret is `secret_client`, with the fix to
+  rotate to a key or to CI's own identity, as GitHub nudges secrets toward OIDC. Its sign-ins count
+  as use, so one that only holds its token for later steps isn't `unused`.
+- **Rotating one:** `POST /v1/access/clients/{id}/rotate {public_jwk? | oidc?, keep_old_for_s?}` (or
+  `roll token client rotate <id> [--public-key f | --github owner/repo … | --gitlab … |
+  --issuer …] [--keep-old 1h]`, which moves a client on a secret to CI's own identity, the
+  checkup's fix) gives it a new key, or a new
   secret shown once, keeping its id and rules. The old credential stops at once, and so do the
   tokens it got, unless `keep_old_for_s` (at most a week) keeps it working while the automation
   moves over. A leaked old secret still revokes the client while it works.
@@ -172,7 +212,19 @@ endpoint for an hour's access token, rather than holding a long-lived token in a
   mint another kind of credential.
 - **Tests:** `roll-access/tests/access.rs::a_machine_client_trades_its_credential_for_a_token_its_rules_bound`
   (secret and key, rules bounding the token, a replayed assertion, a leaked secret, a revoked
-  client); `a_persons_machine_client_acts_as_them`; `roll-cli/tests/token.rs::a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules`.
+  client); `a_persons_machine_client_acts_as_them`; `a_ci_job_signs_in_with_its_own_oidc_token`
+  (the right repository and branch sign in, within the rules; another repository, branch, audience,
+  key or an expired token is `invalid_grant`; a shared issuer's wildcard tenant is refused); `roll-cli/tests/token.rs::a_machine_client_from_the_cli_trades_its_secret_for_a_token_held_to_its_rules`.
+
+### When a token is refused
+
+A refused request's answer says what it needed (`needs: {product, action, resource}`) and where a
+person can allow it: `widen`, the token's own page with that one rule proposed
+(`/dashboard/access/tokens/{id}?add=postgres:delete&id=prj_a`). MCP's refusal text carries the
+link, so the agent can hand it to the person. The page shows the rule and asks: "Allow", "Ask me
+each time" or "Not now". Nothing widens until they choose, the edit is theirs (the same route as
+any change to the token, audited as one), and a link never proposes a wildcard product. A workload's
+token, which is fixed, gets no link.
 
 ## The grant
 
@@ -319,6 +371,10 @@ first, so they can't hide what runs, and anything that makes or changes credenti
   is about the environment and folder copied from, so remembering it allows exactly that. A query
   parameter the gate decides from (`?path=`, `?from=`) must appear once: a repeated one is
   `400 repeated_parameter`, since the product could read another copy of it.
+- A search cluster created with a `parent` (`POST /v1/search/clusters`) is a branch of that
+  cluster, a copy of its indices: it also needs `write` on the parent, as
+  `POST /v1/search/clusters/{id}/branches` does there, so a token whose rules name one project
+  can't branch a cluster outside it.
 - Agents' machine commands, by `policy::agent_may`'s tiers: diffs and file reads `read`; working
   threads `write`; publishing with `land` `deploy`; a shell, writing files, rolling back, raising a
   thread's runtime or interaction mode, answering an agent's approval, endpoints, the gateway,
@@ -434,10 +490,16 @@ remembers only a request that named one. The builder writes it `prj_1/payments,p
 a project's keys to tick, as it lists a cluster's indices.
 
 It covers the routes of one key (`/v1/secrets/projects/{project}/transit/{name}/…`: encrypt,
-decrypt, sign, verify, HMAC, the public key), at their own actions, so a service that signs with
-one key needs write on that key only, not on the project. Listing, creating, rotating and deleting
-keys stay the project's (`roll_auth::scope::sub_resources` lists the products that have such
-names; secrets' rows name `{name}` with `.index("name")`).
+decrypt, sign, verify, HMAC, the public key; rotating, its minimum version and deleting it at
+admin), at their own actions, so a service that signs with one key needs write on that key only,
+not on the project. Roll secrets checks the key again itself (`Caller::need_key`). The list
+(`GET …/transit`) shows such a rule only the keys it names: the row filters by index
+(`filters_index`), roll-auth lets a rule limited to some indices match such a list and no other
+request that names none (secrets' health and leaks filter only by environment and folder, so a
+key-limited token gets a 403 there), and roll secrets asks the grant about each key
+(`Grants::reaches_key`); with none reachable it's a 403. Creating a key stays the project's
+(`roll_auth::scope::sub_resources` lists the products that have such names; secrets' rows name
+`{name}` with `.index("name")`).
 
 ### Presets
 
@@ -583,6 +645,16 @@ page's "Once ▾", `roll mcp approve --remember 1h`):
   lapses from the token's page or `roll token take-back <id> <approval>`
   (`DELETE /v1/access/tokens/{id}/temporary/{approval}`), and with it
   the approval when its request hasn't used it (the rule may have run that request instead).
+
+### What a product is told about an approval
+
+A request that runs because of an approval carries `roll_auth::Approved {id, by, until}` beside its
+`Grant` (`by`: who approved it, in order), so the product's own audit can say "revealed by token X, approved by Y" (roll secrets'
+audit and timeline do). `until` is `None` when the approval let this one request run, and when a
+rule remembered for a while allowed it, it's when that rule lapses (the longest-lasting one that
+covers it). A rule remembered for good is one of the grant's rules, so it names no approval; its
+change is in the access audit. The gate's own audit row names the approval either way. Only the
+node that decided sets it: a request forwarded to an owner after the decision doesn't carry it.
 
 ### Approvals in chat
 

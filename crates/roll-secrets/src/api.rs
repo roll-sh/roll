@@ -47,10 +47,12 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/shared"), get(shared_with))
         .route(&format!("{P}/suggestions"), get(suggestions))
         .route(&format!("{P}/backup"), post(backup))
+        .route(&format!("{P}/backup/schedule"), get(backup_schedule).put(set_backup_schedule).delete(delete_backup_schedule))
         .route(&format!("{P}/restore"), post(restore))
         .route(&format!("{E}/secrets"), get(secrets))
         .route(K, get(secret).put(set_secret).delete(delete_secret))
         .route(&format!("{K}/value"), get(reveal))
+        .route(&format!("{K}/totp"), get(totp))
         .route(&format!("{K}/versions"), get(versions))
         .route(&format!("{K}/versions/{{version}}/value"), get(version_value))
         .route(&format!("{K}/rotate"), post(rotate))
@@ -91,11 +93,12 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/rotations"), get(rotations))
         .route(&format!("{P}/kms"), get(kms_key).put(set_kms_key).delete(unset_kms_key))
         .route(&format!("{P}/aws-roles"), get(aws_roles).post(add_aws_role))
-        .route(&format!("{P}/aws-roles/{{id}}"), axum::routing::delete(delete_aws_role))
+        .route(&format!("{P}/aws-roles/{{id}}"), axum::routing::delete(delete_aws_role).patch(update_aws_role))
         .route(&format!("{P}/aws-users"), get(aws_users).post(add_aws_user))
-        .route(&format!("{P}/aws-users/{{id}}"), axum::routing::delete(delete_aws_user))
+        .route(&format!("{P}/aws-users/{{id}}"), axum::routing::delete(delete_aws_user).patch(update_aws_user))
         .route(&format!("{P}/rotators"), get(rotators).post(add_rotator))
-        .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator))
+        .route(&format!("{P}/rotators/{{id}}"), axum::routing::delete(delete_rotator).patch(update_rotator))
+        .route(&format!("{P}/rotators/{{id}}/rotate-secret"), post(rotate_rotator_secret))
         .route(&format!("{P}/transit"), get(transit_keys).post(add_transit_key))
         .route(&format!("{P}/transit/{{name}}"), axum::routing::patch(config_transit_key).delete(delete_transit_key))
         .route(&format!("{P}/transit/{{name}}/rotate"), post(rotate_transit_key))
@@ -122,8 +125,13 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route("/v1/secrets/ocsp/{id}/{*request}", get(ocsp_get))
         .route(&format!("{P}/cloud-accounts"), get(cloud_accounts).post(add_cloud_account))
         .route(&format!("{P}/cloud-accounts/{{id}}"), axum::routing::delete(delete_cloud_account))
+        .route(&format!("{P}/github-apps"), get(github_apps).post(add_github_app))
+        .route(&format!("{P}/github-apps/{{id}}"), axum::routing::delete(delete_github_app))
         .route(&format!("{P}/outside-databases"), get(outside_databases).post(add_outside_database))
-        .route(&format!("{P}/outside-databases/{{id}}"), axum::routing::delete(delete_outside_database))
+        .route(&format!("{P}/outside-databases/{{id}}"), axum::routing::delete(delete_outside_database).patch(update_outside_database))
+        .route(&format!("{P}/outside-databases/{{id}}/rotate-admin"), post(rotate_outside_admin))
+        .route(&format!("{P}/kubernetes"), get(kubernetes_clusters).post(add_kubernetes_cluster))
+        .route(&format!("{P}/kubernetes/{{id}}"), axum::routing::delete(delete_kubernetes_cluster))
         .route(&format!("{P}/required"), get(required).put(set_required))
         .route(&format!("{P}/shares"), get(shares).post(create_share))
         .route(&format!("{P}/shares/{{id}}"), axum::routing::delete(revoke_share))
@@ -388,6 +396,20 @@ struct BackupBody {
 }
 
 /// Every value of the project, sealed to the caller's key (admin).
+async fn backup_schedule(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.backup_schedule(&project, &c)).await?))
+}
+
+async fn set_backup_schedule(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::backup_schedule::NewBackupSchedule = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.set_backup_schedule(&project, n, &c)).await?))
+}
+
+async fn delete_backup_schedule(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_backup_schedule(&project, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn backup(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
     let body: BackupBody = body(&b)?;
     let context = crate::backup::context(&project);
@@ -478,6 +500,12 @@ async fn reveal(State(s): S, Who(c): Who, Path((project, env, key)): Path<(Strin
     Ok(secret_response(ok(json!({ "value": value, "problems": problems }))))
 }
 
+/// A TOTP key's current code (docs/secrets.md, "TOTP keys").
+async fn totp(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q) -> crate::Result<Response> {
+    let code = blocking(s, move |s| s.totp(&project, &env, &path_of(&q), &key, &c)).await?;
+    Ok(secret_response(ok(code)))
+}
+
 async fn versions(State(s): S, Who(c): Who, Path((project, env, key)): Path<(String, String, String)>, Query(q): Q) -> crate::Result<Response> {
     let kind = kind_of(&q)?;
     Ok(ok(blocking(s, move |s| s.versions(&project, &env, &path_of(&q), &key, kind, &c)).await?))
@@ -525,7 +553,10 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
         // so a write landing after it is a change. Asked for, since it costs about a read.
         // A conditional read (`If-None-Match`, a cache revalidating): unchanged is a 304 that
         // decrypts nothing, issues nothing and writes no audit row.
-        let etag = if_none_match(&headers);
+        // `codes=1` (`roll run --totp-codes`): `<KEY>_CODE` beside each TOTP key. A code moves
+        // without the digest, so such a read is never a 304.
+        let codes = flag(&q, "codes", false);
+        let etag = if_none_match(&headers).filter(|_| !codes);
         let want = flag(&q, "digest", false) || etag.is_some();
         let dynamic = flag(&q, "dynamic", true);
         if let Some(tag) = etag.clone() {
@@ -537,7 +568,10 @@ async fn values(State(s): S, Who(c): Who, Path((project, env)): Path<(String, St
         blocking(s, move |s| {
             let path = path_of(&q);
             let digest = if want { s.digest(&project, &env, &path, &c).ok() } else { None };
-            let v = s.values_for(&project, &env, &path, resolve, None, dynamic, &c)?;
+            let mut v = s.values_for(&project, &env, &path, resolve, None, dynamic, &c)?;
+            if codes {
+                s.add_codes(&project, &path, &mut v)?;
+            }
             if strict && !v.problems.is_empty() {
                 // Nothing is answered, so nothing this read issued may outlive it.
                 for lease in &v.leases {
@@ -719,6 +753,9 @@ struct ResolveBody {
     /// credential; such keys are left out and named in `dynamic`.
     #[serde(default = "yes")]
     dynamic: bool,
+    /// `true`: `<KEY>_CODE` beside each TOTP key, the one-time code when the values were read.
+    #[serde(default)]
+    codes: bool,
 }
 
 fn yes() -> bool {
@@ -735,10 +772,14 @@ async fn resolve(State(s): S, Who(c): Who, Path((project, env)): Path<(String, S
     }
     let path = r.path.unwrap_or_else(|| "/".into());
     let (p, e, cons) = (project.clone(), env.clone(), consumer.clone());
-    let (untrusted, dynamic) = (r.untrusted, r.dynamic);
+    let (untrusted, dynamic, codes) = (r.untrusted, r.dynamic, r.codes);
     let v = blocking(s, move |s| {
         let c = if untrusted { s.untrusted(&p, &c)? } else { c };
-        s.values_for(&p, &e, &path, true, Some(&cons), dynamic, &c)
+        let mut v = s.values_for(&p, &e, &path, true, Some(&cons), dynamic, &c)?;
+        if codes {
+            s.add_codes(&p, &path, &mut v)?;
+        }
+        Ok::<_, Error>(v)
     })
     .await?;
     let out = match r.seal_to {
@@ -1070,9 +1111,11 @@ struct Scan {
     candidates: Vec<String>,
 }
 
-async fn scan_leaks(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+async fn scan_leaks(State(s): S, Who(c): Who, Path(project): Path<String>, headers: HeaderMap, b: Bytes) -> crate::Result<Response> {
     let Scan { candidates } = body(&b)?;
-    Ok(ok(blocking(s, move |s| s.scan(&project, &candidates, &c)).await?))
+    // A credential guard's check of what a tool call would write (roll MCP): audited apart.
+    let guard = headers.get("x-roll-guard").is_some_and(|v| v.as_bytes() == b"1");
+    Ok(ok(blocking(s, move |s| s.scan_as(&project, &candidates, &c, guard)).await?))
 }
 
 async fn all_health(State(s): S, Who(c): Who) -> crate::Result<Response> {
@@ -1114,6 +1157,16 @@ async fn add_aws_role(State(s): S, Who(c): Who, Path(project): Path<String>, b: 
     Ok(created(json!(blocking(s, move |s| s.add_aws_role(&project, n, &c)).await?)))
 }
 
+async fn update_aws_role(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let ch: crate::aws::AwsRoleChange = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.update_aws_role(&project, &id, ch, &c)).await?))
+}
+
+async fn update_aws_user(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let ch: crate::iam::AwsUserChange = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.update_aws_user(&project, &id, ch, &c)).await?))
+}
+
 async fn aws_users(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
     Ok(ok(blocking(s, move |s| s.aws_users(&project, &c)).await?))
 }
@@ -1149,8 +1202,34 @@ async fn add_rotator(State(s): S, Who(c): Who, Path(project): Path<String>, b: B
     Ok(secret_response(created(v)))
 }
 
+async fn update_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let ch: crate::rotators::RotatorChange = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.update_rotator(&project, &id, ch, &c)).await?))
+}
+
+async fn rotate_rotator_secret(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<Response> {
+    let (r, secret) = blocking(s, move |s| s.rotate_rotator_secret(&project, &id, &c)).await?;
+    let mut v = serde_json::to_value(&r).expect("JSON");
+    v["secret"] = json!(secret);
+    Ok(secret_response(ok(v)))
+}
+
 async fn delete_rotator(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_rotator(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn github_apps(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.github_apps(&project, &c)).await?))
+}
+
+async fn add_github_app(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::github_app::NewGitHubApp = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_github_app(&project, n, &c)).await?))
+}
+
+async fn delete_github_app(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_github_app(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1163,8 +1242,31 @@ async fn add_outside_database(State(s): S, Who(c): Who, Path(project): Path<Stri
     Ok(created(blocking(s, move |s| s.add_outside_database(&project, n, &c)).await?))
 }
 
+async fn update_outside_database(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>, b: Bytes) -> crate::Result<Response> {
+    let ch: crate::outside::OutsideDatabaseChange = body(&b)?;
+    Ok(ok(blocking(s, move |s| s.update_outside_database(&project, &id, ch, &c)).await?))
+}
+
+async fn rotate_outside_admin(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.rotate_outside_admin(&project, &id, &c)).await?))
+}
+
 async fn delete_outside_database(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_outside_database(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn kubernetes_clusters(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.kubernetes_clusters(&project, &c)).await?))
+}
+
+async fn add_kubernetes_cluster(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::kubernetes::NewKubernetesCluster = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_kubernetes_cluster(&project, n, &c)).await?))
+}
+
+async fn delete_kubernetes_cluster(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_kubernetes_cluster(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

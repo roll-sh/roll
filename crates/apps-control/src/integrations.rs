@@ -205,6 +205,39 @@ pub trait GitPushes: Send + Sync {
     }
 }
 
+/// roll's GitHub App, for a Git URL service on its host (rolld fills it with roll code's App):
+/// which installation sees a repository, short-lived git credentials through it, commit statuses.
+/// Installations span tenants: connecting one is the operator's (an `admin` route).
+#[async_trait]
+pub trait GitHubApp: Send + Sync {
+    /// The App's host (`github.com`, a GitHub Enterprise Server's), lowercase, with a port if
+    /// any; none while the App isn't set up.
+    fn host(&self) -> Option<String>;
+    /// The installation that sees `owner/repo`, if one does.
+    async fn installation_for(&self, owner: &str, repo: &str) -> anyhow::Result<Option<u64>>;
+    /// A username and short-lived token for fetching `owner/repo` (never stored).
+    async fn git_login(&self, installation: u64, owner: &str, repo: &str) -> anyhow::Result<(String, String)>;
+    async fn status(&self, installation: u64, owner: &str, repo: &str, sha: &str, status: &CommitStatus) -> anyhow::Result<()>;
+    /// A GitHub Deployment of `sha` to `environment` (`production` or not; `transient`: a
+    /// preview's, which GitHub lets go). Its id.
+    #[allow(clippy::too_many_arguments)]
+    async fn deployment(&self, installation: u64, owner: &str, repo: &str, sha: &str, environment: &str, production: bool, transient: bool) -> anyhow::Result<u64>;
+    /// That deployment's state (`in_progress`, `success`, `failure`), with where it answers.
+    #[allow(clippy::too_many_arguments)]
+    async fn deployment_status(&self, installation: u64, owner: &str, repo: &str, deployment: u64, state: &str, url: Option<&str>, description: &str) -> anyhow::Result<()>;
+    /// What a commit's checks on GitHub say (roll's own left out), for `wait_for_ci`.
+    async fn ci(&self, _installation: u64, _owner: &str, _repo: &str, _sha: &str) -> anyhow::Result<Ci> {
+        Ok(Ci::None)
+    }
+}
+
+/// Whether a person may still open a project's environments (rolld answers from roll-accounts:
+/// the account still signs in, and may use roll apps). A sign-in-gated environment asks when it
+/// gives a ticket and again every few minutes of a visitor's session. Unset: a session lasts.
+pub trait Visitors: Send + Sync {
+    fn may_open(&self, user: &str, project: &str) -> bool;
+}
+
 /// Email to a person through their account (rolld fills it with roll-accounts' mailer). Unset or
 /// off: no email targets.
 #[async_trait]
@@ -227,6 +260,9 @@ pub struct SecretVar {
     /// to builds and instances, and no answer ever holds it, as a sealed variable (shown
     /// `sealed`, left out of `…/variables/values` for everyone, references to it sealed too).
     pub sensitive: bool,
+    /// A link field roll secrets says isn't a credential (`Values.plain`: a host, a port, a user,
+    /// a database): logs may show it. Every other value from roll secrets is a secret.
+    pub plain: bool,
 }
 
 /// Who asks for variables' values: what rolld's gate put on the request.

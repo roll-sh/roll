@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, AwsUser, CloudAccount, NewCloudAccount, SignedCertificate, CaCertificate, Ca, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat } from "@roll/secrets/types";
 import type { Grant } from "./access-api";
 import { withSession } from "./code-token";
 import { grantFor, tokenOf } from "./secrets-tokens";
@@ -17,7 +17,7 @@ import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 export type * from "@roll/secrets/types";
 
 export const ACTIONS: readonly Action[] = ["read", "reveal", "write", "delete", "admin"];
-export const KEY_TYPES: readonly KeyType[] = ["url", "int", "port", "bool", "json", "email"];
+export const KEY_TYPES: readonly KeyType[] = ["url", "int", "port", "bool", "json", "email", "totp"];
 
 /** An answer that isn't 2xx: the API's `error`, its `code` (`approval_required`, `stale`, `conflict`…) and the status. */
 export class SecretsError extends Error {
@@ -140,6 +140,8 @@ export function secretsApi(project: string) {
     /** Reveals one value (audited). `resolve` (default true) expands references. */
     value: (env: string, key: string, path = "/", resolve = true) =>
       req<{ value: string; problems: Problem[] }>("GET", `${K(env, key)}/value${qs({ path, resolve: resolve ? undefined : "false" })}`),
+    /** A TOTP key's current code (audited as `secrets.totp`, without the code). */
+    totp: (env: string, key: string, path = "/") => req<Totp>("GET", `${K(env, key)}/totp${qs({ path })}`),
     versions: (env: string, key: string, path = "/", type?: SecretType) => req<Version[]>("GET", `${K(env, key)}/versions${qs({ path, type })}`),
     versionValue: (env: string, key: string, version: number, path = "/", type?: SecretType) =>
       req<{ value: string }>("GET", `${K(env, key)}/versions/${version}/value${qs({ path, type })}`),
@@ -212,10 +214,17 @@ export function secretsApi(project: string) {
     sinks: () => req<Sink[]>("GET", `${P}/audit/sinks`),
     /** The `whsec_…` signing secret comes back once. */
     /** Postgres outside roll: registering one connects to it and checks both roles. */
+    githubApps: () => req<GitHubApp[]>("GET", `${P}/github-apps`),
+    addGitHubApp: (a: { name: string; app_id: number; installation_id: number; private_key: string; api_base?: string; repositories: string[]; permissions: Record<string, string> }) => req<GitHubApp>("POST", `${P}/github-apps`, a),
+    deleteGitHubApp: (id: string) => req<null>("DELETE", `${P}/github-apps/${enc(id)}`),
     outsideDatabases: () => req<OutsideDatabase[]>("GET", `${P}/outside-databases`),
     addOutsideDatabase: (d: { name: string; url: string; roles: [string, string] | []; group?: string; ca?: string }) => req<OutsideDatabase>("POST", `${P}/outside-databases`, d),
     deleteOutsideDatabase: (id: string) => req<null>("DELETE", `${P}/outside-databases/${enc(id)}`),
-    createSink: (url: string, fromStart = false) => req<Sink & { secret: string }>("POST", `${P}/audit/sinks`, { url, from_start: fromStart }),
+    updateOutsideDatabase: (id: string, ch: { name?: string; url?: string; ca?: string }) => req<OutsideDatabase>("PATCH", `${P}/outside-databases/${enc(id)}`, ch),
+    rotateOutsideAdmin: (id: string) => req<OutsideDatabase>("POST", `${P}/outside-databases/${enc(id)}/rotate-admin`),
+    /** `format` other than `roll` needs the SIEM's `token` (sealed, never shown again). */
+    createSink: (url: string, fromStart = false, format: SinkFormat = "roll", token?: string) =>
+      req<Sink & { secret: string }>("POST", `${P}/audit/sinks`, { url, from_start: fromStart, ...(format !== "roll" && { format, token }) }),
     deleteSink: (id: string) => req<null>("DELETE", `${P}/audit/sinks/${enc(id)}`),
     /** Which candidates (tokens of some text) are this project's values the caller may reveal; never the values. */
     scanLeaks: (candidates: string[]) => req<{ index: number; key: string; environment: string; path: string }[]>("POST", `${P}/leaks`, { candidates }),
@@ -250,9 +259,13 @@ export function secretsApi(project: string) {
     cloudAccounts: () => req<CloudAccount[]>("GET", `${P}/cloud-accounts`),
     addCloudAccount: (a: NewCloudAccount) => req<CloudAccount>("POST", `${P}/cloud-accounts`, a),
     deleteCloudAccount: (id: string) => req<null>("DELETE", `${P}/cloud-accounts/${enc(id)}`),
+    /** Kubernetes clusters: registering one calls the API server with the admin token first. */
+    kubernetesClusters: () => req<KubernetesCluster[]>("GET", `${P}/kubernetes`),
+    addKubernetesCluster: (k: NewKubernetesCluster) => req<KubernetesCluster>("POST", `${P}/kubernetes`, k),
+    deleteKubernetesCluster: (id: string) => req<null>("DELETE", `${P}/kubernetes/${enc(id)}`),
     /** AWS roles for dynamic credentials: registering one assumes it (its trust policy must pin the ExternalId). */
     awsRoles: () => req<AwsRole[]>("GET", `${P}/aws-roles`),
-    addAwsRole: (r: { name: string; role_arn: string }) => req<AwsRole>("POST", `${P}/aws-roles`, r),
+    addAwsRole: (r: { name: string; role_arn: string; trust?: "external_id" | "oidc" }) => req<AwsRole>("POST", `${P}/aws-roles`, r),
     deleteAwsRole: (id: string) => req<null>("DELETE", `${P}/aws-roles/${enc(id)}`),
     /** IAM users whose keys roll rotates as a role: registering one lists its keys as the role. */
     awsUsers: () => req<AwsUser[]>("GET", `${P}/aws-users`),
@@ -262,6 +275,8 @@ export function secretsApi(project: string) {
     /** The answer holds its signing secret, once. */
     addRotator: (r: { name: string; url: string }) => req<Rotator & { secret: string }>("POST", `${P}/rotators`, r),
     deleteRotator: (id: string) => req<null>("DELETE", `${P}/rotators/${enc(id)}`),
+    updateRotator: (id: string, ch: { name?: string; url?: string }) => req<Rotator>("PATCH", `${P}/rotators/${enc(id)}`, ch),
+    rotateRotatorSecret: (id: string) => req<Rotator & { secret: string }>("POST", `${P}/rotators/${enc(id)}/rotate-secret`),
   };
 }
 
