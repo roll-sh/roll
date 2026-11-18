@@ -148,6 +148,8 @@ export function activityText(e: Activity, me: string): string {
   if (e.action.includes("/me/passkeys")) return verb === "DELETE" ? was("A passkey was removed", "Removing a passkey") : verb === "PATCH" ? was("A passkey was renamed", "Renaming a passkey") : was("A passkey was added", "Adding a passkey");
   if (e.action.includes("/me/identities")) return was("A sign-in method was unlinked", "Unlinking a sign-in method");
   if (e.action.includes("/me/sessions") || e.action.endsWith("/sessions")) return was(`Sessions were ended by ${by}`, "Ending sessions");
+  if (e.action.endsWith("/me/email/confirm")) return was("Your account moved to another address", "Moving your account to another address");
+  if (e.action.endsWith("/me/email")) return was("A move to another address was started", "Starting a move to another address");
   if (e.action === "PATCH /v1/accounts/me") return was("Your profile was changed", "A change to your profile");
   return e.ok ? `${e.action} by ${by}` : `${e.action} by ${by} was refused`;
 }
@@ -258,6 +260,11 @@ export const accountsApi = {
   /** Your own security log: sign-ins and changes to your account, newest first. */
   activity: (before?: number) => call<{ events: Activity[] }>("GET", `/me/activity${before ? `?before=${before}` : ""}`),
   updateMe: (name: string) => call<User>("PATCH", "/me", { name }),
+  /** Move your account to `email`: a code goes there (docs/accounts.md, "Your address"). */
+  changeEmail: (email: string) => call<{ challenge: string }>("POST", "/me/email", { email }),
+  confirmEmail: (challenge: string, code: string) => call<User>("POST", "/me/email/confirm", { challenge, code }),
+  /** Delete your own account for good, `confirm` being your handle (docs/accounts.md, "Deleting your account"). */
+  deleteMe: (confirm: string) => call<null>("DELETE", "/me", { confirm }),
   sessions: () => call<Session[]>("GET", "/me/sessions"),
   revokeSession: (id: string) => call<null>("DELETE", `/me/sessions/${encodeURIComponent(id)}`),
   unlink: (provider: Provider | `sso:${string}`) => call<null>("DELETE", `/me/identities/${encodeURIComponent(provider)}`),

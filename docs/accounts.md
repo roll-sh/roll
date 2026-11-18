@@ -59,6 +59,10 @@ email_codes(id TEXT PRIMARY KEY,         -- chl_…
             email TEXT NOT NULL, user_id TEXT, invite_id TEXT,
             code_hash TEXT NOT NULL,     -- argon2id
             attempts INTEGER NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)
+email_changes(id TEXT PRIMARY KEY,       -- chl_…: a move to another address, one per person
+              user_id TEXT NOT NULL, email TEXT NOT NULL,  -- the new address
+              code_hash TEXT NOT NULL,   -- argon2id
+              attempts INTEGER NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)
 oauth_states(state_hash TEXT PRIMARY KEY, provider TEXT NOT NULL, intent TEXT NOT NULL,
              user_id TEXT, invite_id TEXT, verifier TEXT NOT NULL, nonce TEXT NOT NULL,
              browser_hash TEXT NOT NULL, return_to TEXT NOT NULL,
@@ -520,7 +524,7 @@ or make someone an admin.
 
 - What needs it, from a person's own session: adding a passkey (`POST /me/passkeys/options` and
   `POST /me/passkeys`), removing one, setting up an authenticator app (`POST /me/totp`), unlinking
-  a sign-in method. From an admin's session: changing a person's `admin` or `disabled`, an invite
+  a sign-in method, moving to another address, deleting the account. From an admin's session: changing a person's `admin` or `disabled`, an invite
   that makes an admin, and adding, changing or removing an SSO connection or its SCIM token. The
   operator's token has no session: it's exempt. Turning TOTP off and new recovery codes already
   take a code. Making a roll token from a session (`POST /v1/access/tokens`, a person's or an
@@ -536,6 +540,47 @@ or make someone an admin.
   dialog (mounted by the app shell) takes the proof, and the call runs once more (`withReauth` in
   `lib/reauth.ts`, used by the accounts client and every product's `call` in `roll-api.ts`).
 - Each confirmation, and each refused one, is in the person's security log (`reauth`).
+
+### Your address
+
+A person moves their account to another address as GitHub does: the new address proves itself,
+the old one is told.
+
+- `POST /v1/accounts/me/email {email}` (sudo mode) sends a six-digit code to the new address
+  and answers 202 `{challenge}`. `POST /me/email/confirm {challenge, code}` (sudo mode, the same
+  person's session) moves the account in one write: `users.email` is the address sign-in codes,
+  invites' matches and every mail roll sends go to, so the old address signs in no more. A code
+  works once, for 10 minutes, five tries, as a sign-in code; a new change replaces the last.
+- The old address then gets "Your roll account moved to another address", naming the new one.
+- An address that already has an account gets a note ("Someone tried to move a roll account to
+  this address") instead of a code; the answer is the same 202, so it doesn't say which.
+- An address a company manages stays with it: SCIM-provisioned people (403 `managed`: their
+  provider changes it), and a domain whose SSO connection enforces its sign-in, whether moving
+  from it or to it (403 `sso_required`). Checked again at the confirmation.
+- Five changes an hour per person (403 `throttled`), and the usual five mails an hour per address.
+- Both calls are in the person's security log (`POST /v1/accounts/me/email`, `…/confirm`).
+
+### Deleting your account
+
+As GitHub's "Delete your account": `DELETE /v1/accounts/me {confirm}` (sudo mode), `confirm`
+being the person's handle, answers 204 and clears the session cookie.
+
+- In one write, everything keyed by the person goes: sessions, sign-in links (GitHub, Google,
+  SSO), the authenticator app and recovery codes, passkeys, pending codes and address changes,
+  sign-in places and reset requests. The `users` row stays as a tombstone: the address becomes
+  `<id>@deleted.invalid` (so the real one can be invited again, as a new account), the name is
+  emptied, admin is dropped, and it's disabled for good (`disabled_by = 'self'`, `deleted_at`).
+  Ids in the audit log still name it, and the handle stays taken, as their roll code owner keeps
+  it.
+- Every token the person made dies with it (a user's own token acts as its person now, and there's
+  none), and their roll code owner is suspended as a disabled person's is: its tokens and machine
+  links stop. Its repositories stay for an admin to decide on.
+- Nothing brings it back: the People list leaves it out, and an admin's `PATCH /users/{id}` answers
+  404.
+- Refused for roll's last admin (409: make someone else an admin first) and for a company's people
+  (403 `managed` for SCIM-provisioned ones, `sso_required` on an SSO-enforced domain): their
+  admin removes them.
+- The old address gets "Your roll account was deleted", in case it wasn't them.
 
 ## Routes
 
@@ -590,6 +635,9 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | --- | --- | --- |
 | `GET /v1/accounts/me` | | `User` |
 | `PATCH /v1/accounts/me` | `{name}` | `User` (1–100 characters) |
+| `DELETE /v1/accounts/me` | `{confirm}` (your handle) | 204, signed out: the account is deleted (sudo mode; "Deleting your account"); 409 the last admin |
+| `POST /v1/accounts/me/email` | `{email}` | 202 `{challenge}`: a code to the new address (sudo mode; "Your address") |
+| `POST /v1/accounts/me/email/confirm` | `{challenge, code}` | `User` at the new address; 400 `{code: "bad_code"}`; 409 the address has an account now |
 | `GET /v1/accounts/me/sessions` | | `Session[]`, newest first |
 | `GET /v1/accounts/me/activity` | query `before?` (Unix ms), `limit?` (1–200, 50) | `{events: [{at, action, actor, ok, status, ip, user_agent, detail}]}`: your security log, newest first |
 | `DELETE /v1/accounts/me/sessions/{id}` | | 204; 404 if it isn't yours |
@@ -658,6 +706,16 @@ and the SIEM sinks), as Okta's System Log and GitHub's audit log keep them:
 
 Never a body: no code, token, secret or password is in an event. Starting a sign-in isn't
 recorded (its end is).
+
+The sign-in report, as Okta's and Google Workspace's: an admin's account page links the People
+section to the audit log narrowed to accounts (`/dashboard/access/audit?product=accounts`),
+which downloads as CSV for a spreadsheet or JSON lines for a log tool. An admin's session reads
+it as the operator does (an admin carries `Operator`); its downloads send the session like every
+other call (`withSession`: `lib/session-fetch.test.ts` fails on a fetch to rolld without it).
+
+The audit log names people by handle as well as id (`actor_handle`, `resource_handle`; the CSV's
+last two columns), disabled and deleted people too, so filtered to accounts it reads as Okta's
+and Google Workspace's sign-in reports do.
 
 Each person reads their own (`GET /v1/accounts/me/activity`, "Recent activity" on the account
 page, as GitHub's security log): their sign-ins, refused ones too, with the method, address and

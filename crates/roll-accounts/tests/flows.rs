@@ -608,6 +608,12 @@ async fn sso_signs_people_in_by_their_domain() {
     assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/sso/{id}"), json!({ "enforce": true })).await.status, StatusCode::OK);
     assert_eq!(env.call(&mut ada, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED, "the email-code session ended");
     assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK, "the SSO session stays");
+    // Her company's sign-in decides who she is: she can't move her address off the domain or
+    // delete her account (her admin removes her).
+    // (The session answer carries the CSRF token, as the dashboard reads it after a redirect.)
+    let ada_handle = env.call(&mut b, Method::GET, "/v1/accounts/session", None).await.json["user"]["handle"].as_str().unwrap().to_string();
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/email", Some(json!({ "email": "ada@elsewhere.test" }))).await.json["code"], "sso_required");
+    assert_eq!(env.call(&mut b, Method::DELETE, "/v1/accounts/me", Some(json!({ "confirm": ada_handle }))).await.json["code"], "sso_required");
     for who in ["ada@acme.test", "nobody@acme.test"] {
         let a = env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/start", Some(json!({ "email": who }))).await;
         assert_eq!((a.status, a.json["code"].as_str()), (StatusCode::FORBIDDEN, Some("sso_required")), "{}", a.json);
@@ -669,7 +675,10 @@ async fn scim_provisions_and_deactivates_people() {
     // Carol signs in; deactivated by the provider (Entra's string), her session ends at once.
     let mut b = Browser::default();
     env.email_sign_in(&mut b, "carol@acme.test", None).await;
-    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
+    let carol_handle = env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.json["handle"].as_str().unwrap().to_string();
+    // The provider manages her: she can't move her account to another address or delete it.
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/email", Some(json!({ "email": "carol@elsewhere.test" }))).await.json["code"], "managed");
+    assert_eq!(env.call(&mut b, Method::DELETE, "/v1/accounts/me", Some(json!({ "confirm": carol_handle }))).await.json["code"], "managed");
     let off = scim(Method::PATCH, format!("/Users/{carol_id}"), Some(json!({ "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{ "op": "Replace", "path": "active", "value": "False" }] })), token.clone()).await;
     assert_eq!((off.status, off.json["active"].as_bool()), (StatusCode::OK, Some(false)), "{}", off.json);
     assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED, "her session ended");
@@ -1537,4 +1546,116 @@ async fn a_company_requires_phishing_resistant_sign_in() {
     // Everyone's (the operator has no session to check): Ada too.
     assert_eq!(env.operator(Method::PUT, "/v1/accounts/policy", json!({ "phishing_resistant": "everyone" })).await.status, StatusCode::OK);
     assert_eq!(env.call(&mut ada, Method::GET, "/v1/workspace/projects", None).await.json["code"], "passkey_required");
+}
+
+/// Mails to `to` whose subject has `about`, oldest first: (subject, text).
+async fn mails_about(outbox: &std::path::Path, to: &str, about: &str, n: usize) -> Vec<(String, String)> {
+    for _ in 0..400 {
+        let mut out: Vec<(String, String, String)> = std::fs::read_dir(outbox)
+            .map(|d| d.filter_map(|e| e.ok()).filter(|e| !e.file_name().to_string_lossy().starts_with('.')).map(|e| (e.file_name().to_string_lossy().into_owned(), serde_json::from_slice::<Value>(&std::fs::read(e.path()).unwrap()).unwrap())).filter(|(_, m)| m["to"] == to && m["subject"].as_str().unwrap().contains(about)).map(|(f, m)| (f, m["subject"].as_str().unwrap().to_string(), m["text"].as_str().unwrap().to_string())).collect())
+            .unwrap_or_default();
+        if out.len() >= n {
+            out.sort();
+            return out.into_iter().map(|(_, s, t)| (s, t)).collect();
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("no mail to {to} about {about:?}");
+}
+
+async fn change(env: &Env, b: &mut Browser, email: &str) -> Answer {
+    env.call(b, Method::POST, "/v1/accounts/me/email", Some(json!({ "email": email }))).await
+}
+
+async fn confirm(env: &Env, b: &mut Browser, challenge: &str, code: &str) -> Answer {
+    env.call(b, Method::POST, "/v1/accounts/me/email/confirm", Some(json!({ "challenge": challenge, "code": code }))).await
+}
+
+/// A person moves their account to another address (docs/accounts.md, "Your address"): from a
+/// fresh session, with the code sent there; the old address is told, and signs in no more.
+#[tokio::test]
+async fn a_person_moves_their_account_to_another_address() {
+    let env = Env::new().await;
+    let mut ada = Browser::default();
+    let id = env.email_sign_in(&mut ada, "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json["user"]["id"].as_str().unwrap().to_string();
+    let mut bob = Browser::default();
+    env.email_sign_in(&mut bob, "bob@example.com", Some(&env.invite("bob@example.com").await)).await;
+
+    // A stolen cookie alone can't move it.
+    env.accounts.set_sudo_window(0);
+    assert_eq!(change(&env, &mut ada, "ada@new.test").await.json["code"], "reauth_required");
+    env.accounts.set_sudo_window(2 * 60 * 60 * 1000);
+
+    let started = change(&env, &mut ada, "Ada@New.test").await;
+    assert_eq!(started.status, StatusCode::ACCEPTED, "{}", started.json);
+    let challenge = started.json["challenge"].as_str().unwrap().to_string();
+    let code = mails_about(&env.outbox, "ada@new.test", "is your code to move", 1).await[0].0[..6].to_string();
+    // Only Ada's session confirms Ada's change, and only with its code.
+    assert_eq!(confirm(&env, &mut bob, &challenge, &code).await.json["code"], "bad_code");
+    assert_eq!(confirm(&env, &mut ada, &challenge, "000000").await.json["code"], "bad_code");
+    let moved = confirm(&env, &mut ada, &challenge, &code).await;
+    assert_eq!((moved.status, moved.json["email"].as_str()), (StatusCode::OK, Some("ada@new.test")), "{}", moved.json);
+    assert_eq!(confirm(&env, &mut ada, &challenge, &code).await.json["code"], "bad_code", "single use");
+    let told = mails_about(&env.outbox, "ada@example.com", "moved to another address", 1).await;
+    assert!(told[0].1.contains("ada@new.test"), "{}", told[0].1);
+
+    // The new address signs Ada in; the old one gets no code.
+    let old_codes = count_codes(&env.outbox, "ada@example.com");
+    let a = env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "ada@example.com" }))).await;
+    assert_eq!(a.status, StatusCode::ACCEPTED);
+    let again = env.email_sign_in(&mut Browser::default(), "ada@new.test", None).await;
+    assert_eq!(again.json["user"]["id"].as_str(), Some(id.as_str()));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(count_codes(&env.outbox, "ada@example.com"), old_codes);
+
+    // Bob's address: the same answer, a note to Bob instead of a code, and nothing to confirm.
+    let taken = change(&env, &mut ada, "bob@example.com").await;
+    assert_eq!(taken.status, StatusCode::ACCEPTED);
+    assert!(mails_about(&env.outbox, "bob@example.com", "Someone tried to move", 1).await[0].1.contains("Nothing changed"));
+    let guess = env.call(&mut ada, Method::POST, "/v1/accounts/me/email/confirm", Some(json!({ "challenge": taken.json["challenge"], "code": "123456" }))).await;
+    assert_eq!(guess.json["code"], "bad_code");
+    assert_eq!(change(&env, &mut ada, "ada@new.test").await.status, StatusCode::BAD_REQUEST, "already hers");
+}
+
+async fn delete(env: &Env, b: &mut Browser, confirm: &str) -> Answer {
+    env.call(b, Method::DELETE, "/v1/accounts/me", Some(json!({ "confirm": confirm }))).await
+}
+
+/// A person deletes their own account (docs/accounts.md, "Deleting your account"): from a fresh
+/// session, typing their handle; every way in ends at once, the address can be invited again,
+/// and nothing (an admin included) brings it back. The last admin can't leave.
+#[tokio::test]
+async fn a_person_deletes_their_own_account() {
+    let env = Env::new().await;
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@example.com", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let mut root = Browser::default();
+    env.email_sign_in(&mut root, "root@example.com", Some(&root_invite)).await;
+    let mut ada = Browser::default();
+    let signed = env.email_sign_in(&mut ada, "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json;
+    let (id, handle) = (signed["user"]["id"].as_str().unwrap().to_string(), signed["user"]["handle"].as_str().unwrap().to_string());
+
+    env.accounts.set_sudo_window(0);
+    assert_eq!(delete(&env, &mut ada, &handle).await.json["code"], "reauth_required", "a stolen cookie alone can't");
+    env.accounts.set_sudo_window(2 * 60 * 60 * 1000);
+    assert_eq!(delete(&env, &mut ada, "not-me").await.json["code"], "confirm");
+    assert_eq!(delete(&env, &mut root, "root").await.status, StatusCode::CONFLICT, "roll's last admin stays");
+
+    let gone = delete(&env, &mut ada, &handle).await;
+    assert_eq!(gone.status, StatusCode::NO_CONTENT, "{}", gone.json);
+    assert!(gone.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap().contains("Max-Age=0"));
+    assert_eq!(env.call(&mut ada, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
+    assert!(env.accounts.person(&id).unwrap().is_none(), "its tokens act as nobody");
+    assert!(mails_about(&env.outbox, "ada@example.com", "was deleted", 1).await[0].1.contains(&handle));
+    // Gone from the admin's list, and no admin turns it back on.
+    let people = env.call(&mut root, Method::GET, "/v1/accounts/users", None).await.json;
+    assert!(!people.to_string().contains(&id), "{people}");
+    assert_eq!(env.call(&mut root, Method::PATCH, &format!("/v1/accounts/users/{id}"), Some(json!({ "disabled": false }))).await.status, StatusCode::NOT_FOUND);
+
+    // The address signs nothing in; invited again, it's a new account.
+    let codes = count_codes(&env.outbox, "ada@example.com");
+    env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "ada@example.com" }))).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(count_codes(&env.outbox, "ada@example.com"), codes);
+    let again = env.email_sign_in(&mut Browser::default(), "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json;
+    assert_ne!(again["user"]["id"].as_str(), Some(id.as_str()), "{again}");
 }

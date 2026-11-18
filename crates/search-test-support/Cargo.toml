@@ -1,0 +1,10 @@
+[package]
+name = "search-test-support"
+description = "roll search test helpers: work-growth and CPU-time checks that a loaded host can't break"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc.workspace = true

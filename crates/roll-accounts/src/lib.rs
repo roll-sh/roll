@@ -11,6 +11,8 @@
 
 pub mod api;
 pub mod audit;
+mod deletion;
+mod email_change;
 mod mail;
 mod oauth;
 pub mod passkeys;
@@ -182,6 +184,15 @@ CREATE TABLE IF NOT EXISTS sso_connections (
     provision INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     challenge TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS email_changes (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS scim_tokens (
     connection_id TEXT PRIMARY KEY,
@@ -500,6 +511,10 @@ impl Accounts {
         if !db.has_column("sessions", "passkey_at")? {
             db.add_column("sessions", "passkey_at", "INTEGER")?;
         }
+        // A person deleted their own account: the row is a tombstone from then on.
+        if !db.has_column("users", "deleted_at")? {
+            db.add_column("users", "deleted_at", "INTEGER")?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;
@@ -717,8 +732,18 @@ impl Accounts {
         Ok(self.db.read(|c| c.query_row("SELECT code_owner_id FROM users WHERE id = ?", [user], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
     }
 
+    /// The handles of the people `ids` name (at most 500), whatever their state.
+    pub fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>> {
+        let ids = &ids[..ids.len().min(500)];
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; ids.len()].join(", ");
+        Ok(self.db.read(|c| c.query(&format!("SELECT id, handle FROM users WHERE id IN ({marks})"), ids, |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?)
+    }
+
     pub fn users(&self) -> Result<Vec<User>> {
-        let ids = self.db.read(|c| c.query("SELECT id FROM users ORDER BY created_at, id", (), |r| r.get::<_, String>(0)))?;
+        let ids = self.db.read(|c| c.query("SELECT id FROM users WHERE deleted_at IS NULL ORDER BY created_at, id", (), |r| r.get::<_, String>(0)))?;
         ids.iter().map(|id| self.user(id)).collect()
     }
 
@@ -740,7 +765,8 @@ impl Accounts {
     /// lifts only a disable of its own, never an admin's.
     pub(crate) fn update_user_by(&self, id: &str, admin: Option<bool>, disabled: Option<bool>, by: &str) -> Result<User> {
         self.db.write(|c| {
-            if c.query_row("SELECT 1 FROM users WHERE id = ?", [id], |_| Ok(())).optional()?.is_none() {
+            // A deleted account is gone for good: no admin turns it back on.
+            if c.query_row("SELECT 1 FROM users WHERE id = ? AND deleted_at IS NULL", [id], |_| Ok(())).optional()?.is_none() {
                 return Err(Error::NotFound(format!("no user {id}")));
             }
             if let Some(a) = admin {
@@ -1086,6 +1112,10 @@ impl roll_auth::Sessions for Resolver {
 
     fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
         self.0.person(user).map_err(|e| e.to_string())
+    }
+
+    fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>, String> {
+        self.0.handles(ids).map_err(|e| e.to_string())
     }
 
     fn sso_trust<'a>(&'a self, id: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SsoTrust>, String>> {

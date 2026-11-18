@@ -315,6 +315,14 @@ pub trait Sessions: Send + Sync + 'static {
         let _ = user;
         Ok(None)
     }
+
+    /// The handles of the people `ids` name, disabled and deleted ones too (an audit page naming
+    /// who acted and who it was about): blocking, one lookup for all. Unknown ids are left out;
+    /// none by default.
+    fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>, String> {
+        let _ = ids;
+        Ok(Vec::new())
+    }
     /// Mail a person about something of theirs (a token of theirs used from a new network,
     /// revoked as leaked, or about to expire). Nothing when they're disabled or gone, or mail is
     /// off. `text` holds no secret.
