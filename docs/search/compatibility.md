@@ -1518,6 +1518,12 @@ the rest are skipped by the tests' own prerequisites.
 
 ## Known gaps in the document and search APIs
 
+- roll adds one index setting Elasticsearch and OpenSearch don't have,
+  `index.roll.analytics.enabled` (search analytics, README "Search analytics"; dynamic, boolean,
+  no default, so `include_defaults` lists nothing new). Elasticsearch refuses it as an unknown
+  setting. A `search_click` behavioral analytics event is indexed as on Elasticsearch, and also
+  counts as a click for the index's analytics when they're on.
+
 - By-query tasks (`wait_for_completion=false`) run to completion before their task id is
   returned (their results are stored in the `.tasks` system index), so they are not
   throttled and `_rethrottle` doesn't reach them; synchronous requests are throttled by

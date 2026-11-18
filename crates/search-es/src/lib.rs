@@ -14,6 +14,7 @@
 //! See `docs/search/architecture.md` and `docs/search/contracts.md`.
 
 pub mod analysis;
+pub mod analytics;
 pub mod api;
 pub mod azure;
 pub mod blob;
