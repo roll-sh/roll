@@ -202,9 +202,27 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
             (id.clone(), rules::validate(str_of(c, "service_type"), &draft))
         })
         .collect();
+    // Schedules that came due (or are seen for the first time, which starts their count).
+    let fired: Vec<(String, &'static str, bool)> = st
+        .metadata
+        .xpack
+        .iter(CONNECTORS)
+        .filter(|(_, c)| config::runs(c))
+        .flat_map(|(id, c)| {
+            schedules(c).into_iter().filter_map(|(kind, cron)| match anchor(&st, id, kind) {
+                None => Some((id.clone(), kind, false)),
+                Some(a) => next_fire(&cron, a).filter(|t| *t <= now).map(|_| (id.clone(), kind, true)),
+            })
+        })
+        .collect();
     drop(st);
+    // Nothing to settle: no write (a write would wake the scheduler again).
+    let settle = !(orphans.is_empty() && drafts.is_empty() && fired.is_empty());
     let _ = cluster
         .update(move |st| {
+            if !settle {
+                return Ok(());
+            }
             for id in orphans {
                 let Some(j) = st.metadata.xpack.get(SYNC_JOBS, &id).cloned() else { continue };
                 let cid = connector_of(&j).to_string();
@@ -225,22 +243,9 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
                 }
                 store::put(st, CONNECTORS, &id, Value::Obj(c), now)?;
             }
-            // Schedules that came due make jobs (unless one is already waiting or running). A
-            // schedule seen for the first time starts counting now.
+            // Schedules that came due make jobs (unless one is already waiting or running).
             let busy = busy_connectors(st);
             let pending: HashSet<String> = st.metadata.xpack.iter(SYNC_JOBS).filter(|(_, j)| str_of(j, "status") == "pending").map(|(_, j)| connector_of(j).to_string()).collect();
-            let fired: Vec<(String, &'static str, bool)> = st
-                .metadata
-                .xpack
-                .iter(CONNECTORS)
-                .filter(|(_, c)| config::runs(c))
-                .flat_map(|(id, c)| {
-                    schedules(c).into_iter().filter_map(|(kind, cron)| match anchor(st, id, kind) {
-                        None => Some((id.clone(), kind, false)),
-                        Some(a) => next_fire(&cron, a).filter(|t| *t <= now).map(|_| (id.clone(), kind, true)),
-                    })
-                })
-                .collect();
             for (cid, kind, run) in fired {
                 let mut rec = st.metadata.xpack.get(RECORDS, &cid).cloned().unwrap_or_else(|| obj! {});
                 if let Value::Obj(m) = &mut rec {

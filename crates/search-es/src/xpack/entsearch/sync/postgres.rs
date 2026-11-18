@@ -124,6 +124,8 @@ impl AsyncRead for Counted {
             let n = (buf.filled().len() - before) as u64;
             let read = self.window.read.fetch_add(n, Ordering::SeqCst) + n;
             if read > self.window.limit.load(Ordering::SeqCst) {
+                // A failed read hands back nothing (AsyncRead's contract).
+                buf.set_filled(before);
                 return Poll::Ready(Err(std::io::Error::other("the server sent more than one page may hold")));
             }
         }

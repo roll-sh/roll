@@ -64,7 +64,7 @@ impl Jobs {
             self.shared.wake.notify_one();
             return;
         }
-        if !has_work(&cluster.state()) {
+        if !has_work(cluster) {
             return;
         }
         let Some(strong) = cluster.handle() else { return };
@@ -91,7 +91,7 @@ impl Jobs {
                     // No job left: end; the next managed index starts a new task. Recheck
                     // after clearing the flag, so a job added meanwhile isn't missed.
                     shared.started.store(false, Ordering::SeqCst);
-                    let again = weak.upgrade().is_some_and(|c| has_work(&c.state()));
+                    let again = weak.upgrade().is_some_and(|c| has_work(&c));
                     if again && !shared.started.swap(true, Ordering::SeqCst) {
                         continue;
                     }
@@ -149,13 +149,19 @@ impl Jobs {
 /// The earliest due time of any job (Unix ms): what the host records when the cluster unloads,
 /// to wake it then. The lifecycles' polls aren't in it (see the module docs).
 pub fn next_due(st: &crate::meta::ClusterState) -> Option<i64> {
+    due(st, None)
+}
+
+/// The earliest due time; `syncs` is a loaded cluster's running connector syncs (a sync already
+/// starting isn't due again).
+fn due(st: &crate::meta::ClusterState, syncs: Option<&crate::xpack::entsearch::sync::Syncs>) -> Option<i64> {
     [
         super::ism_run::next_due(st),
         crate::xpack::transform::next_due(st),
         crate::xpack::watcher::next_due(st),
         crate::xpack::rollup::next_due(st),
         crate::xpack::slm::next_due(st),
-        crate::xpack::entsearch::sync::next_due(st, None),
+        crate::xpack::entsearch::sync::next_due(st, syncs),
         crate::xpack::ilm_run::next_due(st),
         crate::api::data_stream_lifecycle::next_due(st),
     ]
@@ -164,9 +170,13 @@ pub fn next_due(st: &crate::meta::ClusterState) -> Option<i64> {
     .min()
 }
 
-/// Whether the scheduler has anything to run or poll.
-fn has_work(st: &crate::meta::ClusterState) -> bool {
-    next_due(st).is_some() || crate::xpack::ilm_run::polls(st) || crate::api::data_stream_lifecycle::polls(st)
+/// Whether a loaded cluster's scheduler has anything to run or poll. It must agree with
+/// [`loaded_due`] (the loaded view: a connector sync already starting isn't due again), or the
+/// task's "nothing left, but there is work" recheck would loop without ever waiting.
+fn has_work(c: &Cluster) -> bool {
+    let state = c.state();
+    let st = &*state;
+    due(st, Some(&c.xpack.connector_syncs)).is_some() || crate::xpack::ilm_run::polls(st) || crate::api::data_stream_lifecycle::polls(st)
 }
 
 /// When a loaded cluster's scheduler runs next: [`next_due`] or a lifecycle's poll; with when
