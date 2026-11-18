@@ -285,6 +285,123 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Point and range reads, round 6: the same-day table, 32 clients, idle footprint (2026-11-17/18, agent 250)
+
+HANDOFF.md "Point and range reads, round 6" has what changed and why. Base `6d3b7e9e5`, built
+as plain dist (`tools/dist.sh`) and PGO (`tools/dist-pgo.sh`, its own profile). Harness
+`~/.cache/a250/bench` (agent 230's and 236's): every server in a container on the lane's
+server CPUs (8 GiB, swap off, cpu-shares 2, host network), 100,000-row fixture, 2 s warmup,
+10 s measured; user instructions and cycles per operation from `perf stat` over the server's
+cgroup (all its threads; all three servers alike), CPU per operation from the cgroup's
+`cpu.stat`, memory anon+shmem after the run. Range reads: 100 rows, `SELECT id, balance FROM
+accounts WHERE id BETWEEN $1 AND $1 + 99 ORDER BY id`, binary (the bench client) and text
+(pgbench `-M prepared`). Lane A (servers 6,7,24,25) for point selects, lane B (10,11,28,29)
+for range reads.
+
+**Same day, interleaved** (2026-11-17 afternoon and evening): all four servers up at once on
+the lane, each cell's runs rotating the order every round, 3 rounds; a run with more than 1.0
+core of foreign load on the server CPUs was run again (up to three tries; "flagged": every try
+was, the least loaded one counts). The machine's load was 20-70 all day (median 0.62 foreign
+cores a run). roll is plain dist and PGO of `6d3b7e9e5`; pgrust is its published (PGO) image.
+
+| workload | clients | server | ops/s | CPU µs/op (user+sys) | p50 / p99 ms | user instr/op | user cycles/op | MB after | ÷PG | ÷pgrust | runs (flagged) |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| point select | 1 | roll, plain dist | 18,024 | 50.1 (21.6+28.5) | 0.046 / 0.138 | 62,283 | 73,888 | 29.6 | 2.16x | 1.61x | 3 (1) |
+| point select | 1 | roll, PGO | 23,322 | 38.8 (14.5+24.3) | 0.035 / 0.102 | 49,117 | 47,848 | 29.2 | 2.79x | 2.08x | 3 (0) |
+| point select | 1 | PostgreSQL 18.6 | 8,349 | 73.4 (31.3+41.2) | 0.101 / 0.275 | 45,393 | 69,574 | 103.1 |  |  | 3 (0) |
+| point select | 1 | pgrust | 11,221 | 47.5 (24.4+22.7) | 0.078 / 0.189 | 40,398 | 52,772 | 256.4 | 1.34x |  | 3 (1) |
+| point select | 8 | roll, plain dist | 71,931 | 46.1 (25.4+20.7) | 0.094 / 0.283 | 39,750 | 84,228 | 32.9 | 1.34x | 0.95x | 3 (0) |
+| point select | 8 | roll, PGO | 103,989 | 32.9 (14.9+18.0) | 0.062 / 0.188 | 31,373 | 49,677 | 30.8 | 1.94x | 1.38x | 3 (0) |
+| point select | 8 | PostgreSQL 18.6 | 53,640 | 63.7 (29.4+34.6) | 0.138 / 0.430 | 45,126 | 101,786 | 103.3 |  |  | 3 (0) |
+| point select | 8 | pgrust | 75,561 | 42.2 (21.5+20.7) | 0.098 / 0.238 | 39,381 | 70,548 | 286.3 | 1.41x |  | 3 (0) |
+| point select | 32 | roll, plain dist | 76,429 | 50.1 (27.5+22.5) | 0.225 / 5.859 | 38,751 | 89,577 | 42.5 | 1.31x | 0.87x | 3 (0) |
+| point select | 32 | roll, PGO | 110,245 | 35.5 (16.7+19.6) | 0.221 / 0.960 | 31,437 | 57,690 | 40.4 | 1.89x | 1.26x | 3 (0) |
+| point select | 32 | PostgreSQL 18.6 | 58,278 | 66.9 (33.2+34.0) | 0.486 / 1.882 | 45,247 | 117,160 | 103.4 |  |  | 3 (0) |
+| point select | 32 | pgrust | 87,637 | 44.3 (23.8+20.5) | 0.315 / 1.148 | 39,522 | 76,591 | 348.7 | 1.50x |  | 3 (0) |
+| range read, binary | 1 | roll, plain dist | 4,074 | 155.7 (123.0+32.8) | 0.217 / 0.615 | 353,250 | 277,016 | 29.9 | 1.14x | 1.16x | 3 (0) |
+| range read, binary | 1 | roll, PGO | 4,781 | 123.9 (89.3+34.6) | 0.196 / 0.522 | 287,371 | 178,687 | 30.1 | 1.34x | 1.36x | 3 (0) |
+| range read, binary | 1 | PostgreSQL 18.6 | 3,570 | 180.4 (129.7+51.7) | 0.239 / 0.743 | 390,716 | 295,480 | 103.3 |  |  | 3 (0) |
+| range read, binary | 1 | pgrust | 3,513 | 187.3 (156.1+30.5) | 0.239 / 0.788 | 490,659 | 377,054 | 268.6 | 0.98x |  | 3 (0) |
+| range read, binary | 8 | roll, plain dist | 24,131 | 138.0 (110.2+28.4) | 0.281 / 0.958 | 346,795 | 383,259 | 32.5 | 1.20x | 1.47x | 3 (0) |
+| range read, binary | 8 | roll, PGO | 33,495 | 98.8 (73.8+25.1) | 0.193 / 0.636 | 276,432 | 260,601 | 32.7 | 1.67x | 2.04x | 3 (0) |
+| range read, binary | 8 | PostgreSQL 18.6 | 20,052 | 174.1 (128.8+45.1) | 0.345 / 1.301 | 389,246 | 444,724 | 103.4 |  |  | 3 (0) |
+| range read, binary | 8 | pgrust | 16,381 | 196.2 (166.1+30.3) | 0.446 / 2.386 | 485,203 | 544,999 | 289.0 | 0.82x |  | 3 (0) |
+| range read, binary | 32 | roll, plain dist | 28,294 | 137.1 (109.9+27.3) | 0.841 / 5.785 | 346,007 | 406,047 | 41.7 | 1.27x | 1.38x | 3 (0) |
+| range read, binary | 32 | roll, PGO | 32,684 | 113.9 (87.7+26.2) | 0.765 / 4.504 | 278,133 | 291,707 | 43.4 | 1.46x | 1.59x | 3 (0) |
+| range read, binary | 32 | PostgreSQL 18.6 | 22,327 | 175.2 (132.3+44.0) | 1.204 / 5.361 | 392,485 | 491,189 | 103.4 |  |  | 3 (0) |
+| range read, binary | 32 | pgrust | 20,541 | 188.9 (159.7+29.2) | 1.323 / 6.282 | 489,761 | 592,747 | 365.5 | 0.92x |  | 3 (0) |
+| range read, text | 1 | roll, plain dist | 4,302 | 154.7 (122.0+31.6) | 0.209 / 0.598 | 380,025 | 281,589 | 31.0 | 1.09x | 1.10x | 3 (1) |
+| range read, text | 1 | roll, PGO | 5,181 | 120.1 (90.9+29.5) | 0.183 / 0.475 | 302,603 | 185,216 | 31.1 | 1.31x | 1.32x | 3 (0) |
+| range read, text | 1 | PostgreSQL 18.6 | 3,959 | 171.1 (122.0+46.0) | 0.220 / 0.742 | 410,480 | 305,857 | 103.4 |  |  | 3 (0) |
+| range read, text | 1 | pgrust | 3,926 | 169.9 (140.7+29.3) | 0.215 / 0.599 | 442,111 | 358,425 | 273.8 | 0.99x |  | 3 (1) |
+| range read, text | 8 | roll, plain dist | 25,022 | 131.7 (105.4+26.2) | 0.261 / 0.880 | 368,725 | 394,094 | 31.4 | 1.24x | 1.29x | 3 (0) |
+| range read, text | 8 | roll, PGO | 35,058 | 93.3 (72.9+20.8) | 0.191 / 0.599 | 294,227 | 267,343 | 33.3 | 1.74x | 1.81x | 3 (0) |
+| range read, text | 8 | PostgreSQL 18.6 | 20,205 | 163.7 (122.3+41.5) | 0.346 / 0.949 | 402,617 | 451,333 | 103.4 |  |  | 3 (0) |
+| range read, text | 8 | pgrust | 19,331 | 166.7 (137.7+29.0) | 0.330 / 1.455 | 430,086 | 485,006 | 281.6 | 0.96x |  | 3 (0) |
+| range read, text | 32 | roll, plain dist | 26,366 | 142.1 (117.0+25.1) | 0.921 / 6.438 | 370,461 | 432,358 | 33.7 | 1.30x | 1.18x | 3 (0) |
+| range read, text | 32 | roll, PGO | 35,233 | 107.3 (85.2+22.1) | 0.755 / 3.315 | 295,942 | 305,132 | 33.9 | 1.73x | 1.58x | 3 (0) |
+| range read, text | 32 | PostgreSQL 18.6 | 20,348 | 184.2 (140.0+44.2) | 1.269 / 5.824 | 409,497 | 516,787 | 103.4 |  |  | 3 (0) |
+| range read, text | 32 | pgrust | 22,346 | 169.1 (143.2+25.9) | 1.200 / 5.251 | 432,272 | 535,952 | 318.0 | 1.10x |  | 3 (0) |
+
+pgrust ran slower this day than in round 5's table (8 clients 75.6k against 109.7k; PGO roll
+104.0k against 116.9k): every ratio above is within the same hours. Range reads at 32 clients
+are close to their 8-client rates for all four servers (the client's 100-row checks limit).
+
+**32 clients on 4 CPUs** (base, plain dist, lane A, 10 s runs). The connection threads' user
+instructions and cycles a read are the same at 8 and 32 clients (40,060 / 81,822 and 39,928 /
+83,808); one `recvfrom` and one `sendto` a read (`perf trace -s`); the kernel side the same at
+both (netfilter's `nft_do_chain` 5-6% of all cycles on loopback, for every server). What 32
+clients add is the p99:
+
+| clients | `sched_yield` calls in 4 s | per read | time in them | each |
+|---:|---:|---:|---:|---:|
+| 8 | 612 | 0.7% | 0.47 s | 0.78 ms |
+| 32 | 4,899 | 1.8% | 33.0 s | 6.7 ms |
+
+They are parking_lot's spin-then-yield in `RawMutex::lock_slow`, by call stack (dwarf, 32
+clients): 70% `SstReader::block_with` (the block cache's shard mutex), 13% `notify::Hub::get`
+(`take_notifications`, every ReadyForQuery), 9% `pgstat::ensure` (the database's statistics
+mutex, per relation per transaction). Futex sleeps: `Hot::note_scan` 47%, `Hub::get` 12%,
+`block_with` 8%. A thread preempted holding one of these leaves the next spinning, yielding
+behind the run queue (8 runnable threads a CPU) and then sleeping.
+
+**Plain dist against PGO, per read** (base, 8 clients, lane A, sampled instructions:u and
+cycles:u of the connection threads): instructions 40,250 against 31,688 (-21%), cycles 84,208
+against 49,639 (-41%): IPC 0.48 against 0.64. PGO inlines most of the read into a few functions
+(`run_query`, `message_loop`, `PointReader::first_raw`, `point_probe`, `bound_as`), so a per-symbol
+comparison mostly shows code moving; the one function whose own cost halves is `Block::seek`
+(1,298 -> 694 instructions, 3,596 -> 1,783 cycles a read).
+
+**Idle footprint** (lane A then B, a fresh server each, cgroup anon+shmem 25 s into 100 idle
+sessions of `SELECT 1; \sleep 40 s`, arms alternating; MB):
+
+| build | base | idle stack given back (c1) | the variant c1b |
+|---|---|---|---|
+| plain dist | 37.71, 37.74, 37.73; 37.72, 37.65 | 34.91, 34.80 | 34.80, 34.79 |
+| PGO | 46.64, 46.61, 46.66; 46.55, 46.64 | 34.80, 34.77, 34.88 | 34.82, 34.79 |
+
+A fresh server without sessions: 8.2 MB in every build.
+
+**Its cost** (prepared point selects, 8 clients, alternating pairs; user instructions of the
+connection threads a read; "work": without the samples in lock spinning, socket polling and
+clock reads, from a sampled profile of each run):
+
+| change | build | lane | pairs | instructions | cycles | CPU/op | ops/s |
+|---|---|---|---:|---|---:|---:|---:|
+| c1 (kept) | plain dist | A | 4 | +1.72% (+0.70 to +3.03) | +1.71% | +2.9% | -1.9% |
+| | plain dist | B | 3 | -0.25% (-0.74 to +4.29) | +0.23% | +0.1% | -4.5% |
+| | PGO | A | 3 | +0.10% (+0.02 to +3.64) | -3.85% | -4.3% | +4.8% |
+| | PGO | B | 5 | -0.75% (-1.80 to +1.99), work -0.82% | +0.51% | +3.6% | -7.1% |
+| c1b (dropped) | plain dist | B | 4 | -0.44% (-2.43 to +0.42) | -4.33% | -8.2% | +10.8% |
+| | plain dist | A | 4 | -0.58% (-1.99 to +2.11) | -1.30% | -1.8% | +4.6% |
+| | PGO | B | 5 | +2.23% (-0.89 to +2.56) | +0.96% | +0.7% | +0.0% |
+| | PGO | B | 5 | +0.16% (-1.19 to +2.81) | +1.63% | +0.1% | +1.2% |
+
+Pairs of the same two binaries moved by up to ±4% in instructions a read on these days (spin
+and poll instructions grow with contention); medians over both runs: c1 plain +0.9%, PGO
++0.1%; c1b plain -0.3%, PGO +1.5%. Agent 225's dropped `e7ac6709b` (handlers out of line) cost
+PGO 1.8%.
+
 ## MultiXact (2026-11-18, agent 249)
 
 Lane A, agent 243's harness (plain dist builds, 10 s runs, a fresh server and 100,000-row fixture

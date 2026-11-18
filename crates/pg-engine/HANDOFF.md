@@ -11981,6 +11981,81 @@ user (`a234-rref2`): 1,881 / 1,881 units, newly differing 0, i.e. 51,148 / 51,15
 Run regress references as the image's user, not `--user 1000:1000`. No planner change: the
 difftest guard was not run.
 
+## Point and range reads, round 6: 32 clients, idle footprint (agent 250)
+
+BENCH.md "Point and range reads, round 6" has the tables. Base `6d3b7e9e5`, built plain dist
+(`tools/dist.sh`) and PGO (`tools/dist-pgo.sh`, its own profile).
+
+**Where it stands** (same day, all four servers up at once on the lane, rounds interleaved).
+Roll's PGO build leads PostgreSQL 18.6 and pgrust in every cell: point selects 2.08x / 1.38x /
+1.26x pgrust at 1 / 8 / 32 clients, 100-row range reads 1.36x / 2.04x / 1.59x (binary) and
+1.32x / 1.81x / 1.58x (text). The plain build leads PostgreSQL in every cell and pgrust in every
+range cell (1.10x-1.47x), but not on point selects at 8 and 32 clients (0.95x, 0.87x), and its
+32-client p99 is 5.9 ms (PGO 0.96, pgrust 1.15). pgrust ran slower that day than in round 5's
+table (75.6k against 109.7k at 8 clients) on a busy machine (load 20-70); every ratio is from
+the same hours.
+
+**32 clients on 4 CPUs** (lead 2). The connection threads' user work a read is the same at 8
+and 32 clients (81.8k / 83.8k cycles), one recvfrom and one sendto a read, the kernel side the
+same (netfilter on loopback 5-6% of all cycles, for every server). What 32 clients add is a
+tail: 1.8% of reads call `sched_yield`, 6.7 ms each (8 clients: 0.7%, 0.78 ms), which is the
+p99. They are parking_lot's spin-then-yield (`RawMutex::lock_slow`): with eight runnable
+threads a CPU, a thread preempted holding a lock leaves the next ones spinning, yielding
+behind the run queue and sleeping. By call stack: 70% the block cache's shard mutex
+(`SstReader::block_with`, agent 247's), 13% `notify::Hub::get` (`take_notifications` at every
+ReadyForQuery), 9% `pgstat::ensure` (the database's statistics mutex, per relation per
+transaction); futex sleeps also from `Hot::note_scan` (every unique-key probe). pgrust is
+thread-per-connection too (ideas only; its admission gate `max_active_queries` is off by
+default), so what differs is which shared locks a read takes. The block cache's is the
+largest; `block_with` is also where a plain build's read spends 2% of its cycles in memcpy.
+
+**Plain dist against PGO** (lead 3). On a point select PGO runs 21% fewer instructions and 41%
+fewer cycles (IPC 0.48 -> 0.64): most of the gain is layout and the front end, not the count,
+and PGO inlines most of a read into a few functions, so per-function comparisons show code
+moving. The one function whose own cost halves under PGO is `Block::seek` (storage, agents
+245/247's: worth a look at its comparisons and bounds checks). Tried for the plain build: the
+error constructors cold and out of line (c3 below).
+
+**Kept: an idle session gives back the stack below its wait** (lead 4; c1, `server.rs`,
+`bin/roll-engine.rs`, `stack.rs`). The binary's idle hook (`server::set_idle_hook`, run once a
+connection has waited 2 s) `madvise(MADV_DONTNEED)`s the thread's stack below the current frame
+(`stack::unused_range`, its margin 32 KB instead of 256 KB). Only the stack: the allocator
+collection the old efficient mode also ran cost the next statement 50-190 µs (BENCH "Modes")
+and stays off. For the stack below the wait to hold the handlers' frame, each wire message's
+work runs in `dispatch` (`#[inline(never)]`), out of `message_loop`, whose frame waits for the
+client: a profile-guided build inlines every handler into one frame (70 KB, against 11 KB in
+the plain build), which an idle session kept. 100 idle sessions: PGO 46.6 -> 34.8 MB, plain
+37.7 -> 34.8 MB (-118 and -29 KB a session). Cost on prepared point selects at 8 clients, two
+runs of alternating pairs on two lanes: PGO +0.10% and -0.75% instructions (cycles -3.9% and
++0.5%), plain +1.72% and -0.25%; pairs of the same binaries moved by up to ±4% these days.
+Agent 225's `e7ac6709b` (each handler out of line) had cost PGO 1.8%. Test: `tests/wire.rs`
+`idle_hook_runs_and_the_connection_goes_on` releases the stack in its hook as the binary does,
+with a 300-deep expression before and after the idle period. A statement after 2 s of idleness
+faults its stack pages in again (a few µs).
+
+**Dropped** (patches in `~/.cache/a250/patches/`): c1b, the same with one call per batch of
+buffered messages (`messages`) instead of one per message: plain -0.44% / -0.58%, PGO +2.23% /
++0.16% instructions; the same memory.
+
+**Not landed here, measured** (candidates of their own if they gate, else dropped):
+- c2, no lock every session shares where a read only counts: notifications taken through the
+  session's own listener (`ListenerHandle::take`), a relation's shared statistics entry made
+  once per prune (`Pending::ensured`, valid while `Database::pgstat_pruned_at` stays: only a
+  prune removes entries), `Hot::note_scan` by `try_lock` (a count missed only delays keeping a
+  range). 32 clients, 4 pairs: p99 4.6 -> 2.5 ms (3 of 4), instructions -2.2%, ops/s ±25%
+  between pairs; 8 clients 5 pairs too noisy to call.
+- c3, the error constructors (`Error::new`, `internal`, `unsupported`, `From<io::Error>`)
+  `#[cold] #[inline(never)]`: `.text` -200 KB; range reads at 8 clients -0.56% instructions
+  (every pair), -1.8% cycles, -5.5% CPU a read; point selects -0.69% (mixed), -4.3% cycles.
+
+**Left:** (1) the block cache's lock and hit-path copy (agent 247): the largest 32-client tail
+and 2% of a plain read's cycles; (2) `Block::seek` under plain dist; (3) the transaction object
+(83 fields) built, moved and dropped every transaction: `drop_glue<Txn>` and its memcpy are
+1.5-2% of a read (agent 243's commit path); (4) a lane whose foreign load stays under a core:
+instruction gates at 1% need 10+ pairs on these days.
+
+Verification: quick-check on the candidate over origin's `2ab7c7c54` (`483a7f4cb`): build and Clippy (16 warnings, none new in a changed file), 344 tests in 12 binaries (golden, wire, wire_waits, deep_input, the lib's), regress 51,148/51,150 (none newly differing), isolation 1,647/1,648, pg_dump_tap 14,609 passed. The c1b variant passed it too (over `fec3375ea`).
+
 ## Point reads, round 5 (agent 230)
 
 BENCH.md "Point reads, round 5" has the measurements (lane A, two cores, plain dist: prepared point
