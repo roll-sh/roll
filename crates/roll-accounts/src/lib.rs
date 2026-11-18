@@ -969,7 +969,14 @@ impl Accounts {
                 None => Err(Error::NotFound(format!("no invite {id}"))),
                 Some(Some(_)) => Err(Error::Conflict("the invite is used".into())),
                 Some(None) => {
+                    let email: String = c.query_row("SELECT email FROM invites WHERE id = ?", [id], |r| r.get(0))?;
+                    if c.query_row("SELECT 1 FROM users WHERE email = ?", [email.as_str()], |_| Ok(())).optional()?.is_some() {
+                        return Err(Error::Conflict(format!("an account has {email}")));
+                    }
                     c.execute("UPDATE invites SET token_hash = ?, expires_at = ? WHERE id = ? AND used_at IS NULL", params![sha256_hex(&token), now + INVITE_TTL_MS, id])?;
+                    // Sign-ins already started with the old link stop too: they hold the invite's id.
+                    c.execute("DELETE FROM email_codes WHERE invite_id = ?", [id])?;
+                    c.execute("DELETE FROM oauth_states WHERE invite_id = ?", [id])?;
                     Ok(())
                 }
             }
