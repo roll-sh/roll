@@ -1107,6 +1107,11 @@ pub struct EnvironmentSummary {
     /// the project capped by its spend limit, maintenance, its latest deploy failed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attention: Vec<&'static str>,
+    /// Settings, variables, links or the project's secrets changed since the live deployment:
+    /// a redeploy applies them (Railway's staged changes, on every list and card).
+    pub needs_deploy: bool,
+    /// A preview's (made for a branch or a pull request, deleted with it).
+    pub ephemeral: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1115,13 +1120,11 @@ pub struct Environment {
     pub summary: EnvironmentSummary,
     pub service: String,
     pub branch: Option<String>,
-    pub ephemeral: bool,
     pub instances: Vec<Instance>,
     pub domains: Vec<Domain>,
     pub port: Option<u16>,
     /// A TCP service's address (`host:port`), once it has its port.
     pub tcp: Option<String>,
-    pub needs_deploy: bool,
     /// Visitors need the environment's access token (`PUT … {access: {token}}`), or to sign in.
     pub private: bool,
     /// People signed in to roll who may open the project get in (`access.signed_in`).

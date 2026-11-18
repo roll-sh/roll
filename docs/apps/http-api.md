@@ -309,6 +309,8 @@ type EnvironmentSummary = {
   active: { id: string; revision: string | null; created_at: number } | null;
   latest: { id: string; status: DeployStatus } | null;
   attention?: ("crash_loop" | "capped" | "paused" | "held" | "maintenance" | "deploy_failed")[]; // what wants its owner's eye (absent: nothing)
+  needs_deploy: boolean;     // settings, variables, links or the project's secrets changed since the active deployment (cached a minute per environment)
+  ephemeral: boolean;        // a preview environment
 };
 
 type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
@@ -435,11 +437,9 @@ type EnvironmentPut = {
 type Environment = EnvironmentSummary & {
   service: string;
   branch: string | null;     // deploys on every landing on this branch (repo sources)
-  ephemeral: boolean;        // a preview environment
   instances: Instance[];
   domains: Domain[];
   port: number | null;       // locally, the service's own port (ROLL_APPS_PORTS)
-  needs_deploy: boolean;     // variables or settings changed since the active deployment
   private: boolean;          // its hostnames answer only visitors with its access token, or who signed in
   signed_in?: true;          // people signed in to roll who can open its project get in (access.signed_in)
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
