@@ -173,6 +173,10 @@
           "type": "boolean",
           "description": "Raw TCP, not HTTP."
         },
+        "rebuild_on_base": {
+          "type": "boolean",
+          "description": "Build again (same revision, no cache) when a base image moves."
+        },
         "rollback_on_crash": {
           "type": "boolean",
           "description": "Roll back when a new deployment crash-loops."
@@ -226,9 +230,10 @@
           "type": "string",
           "enum": [
             "auto",
-            "dockerfile"
+            "dockerfile",
+            "functions"
           ],
-          "description": "auto: detect; dockerfile: build the tree's own Dockerfile."
+          "description": "auto: detect; dockerfile: build the tree's own Dockerfile; functions: run a static site's netlify/functions and api/ as a Node service."
         },
         "dockerfile": {
           "type": "string",
