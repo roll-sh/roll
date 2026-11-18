@@ -1268,6 +1268,11 @@ impl Apps {
             self.drop_network_if_unused(&project, &e.name, id).await;
         }
         self.release_domains(&domains).await;
+        // The project's closed builds' builder, with its last service (a deleted one counts).
+        let p = project.clone();
+        if self.db(move |s| Ok(s.services(Some(&p))?.is_empty() && s.deleted_services(Some(&p))?.is_empty())).await.unwrap_or(false) {
+            self.deps.runtime.remove_build_egress(&project).await;
+        }
         self.unplace(id).await;
         self.deps.cluster.retire(&lease_key(id));
         Ok(())

@@ -1146,6 +1146,51 @@ async fn a_closed_environment_reaches_nothing_but_its_listed_hosts() {
     assert!(docker(&["network", "inspect", &closed]).await.is_err(), "the closed network and its proxy's relay went with the service");
 }
 
+/// A closed environment's build on real Docker runs on its project's builder, on a network with
+/// no route out and no way to the host: its steps have only the proxy (by address), a direct
+/// connection out fails, and the builder and its network go with the project's last service.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_environments_build_has_no_way_out_but_the_proxy() {
+    let Some(w) = docker_world().await else { return };
+    use apps_control::runtime::docker::docker;
+    let (st, svc) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "cb", "source": {"kind": "upload"}, "run": {"type": "worker", "start": "sleep 3600", "memory_mb": 256, "cpu": 0.25} })), "application/json", None).await;
+    assert_eq!(st, StatusCode::CREATED, "{svc}");
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let (st, e) = call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll"}})), "application/json", None).await;
+    assert_eq!((st, e["build_closed"].as_bool()), (StatusCode::OK, Some(true)), "{e}");
+    let tree = tempfile::tempdir().unwrap();
+    let probe = "RUN (ip route; echo \"proxy=$HTTPS_PROXY\"; wget -q -T 3 -O /dev/null http://1.1.1.1/ && echo out:open || echo out:closed) > /probe";
+    std::fs::write(tree.path().join("Dockerfile"), format!("FROM busybox:1.37\n{probe}\n")).unwrap();
+    let mut bundle = Vec::new();
+    roll_fetch::pack(&mut bundle, &Default::default(), Some(tree.path()), roll_fetch::Limits::default()).unwrap();
+    let (st, d) = call(&w.api, "POST", &format!("{env}/deploys"), None, "application/gzip", Some(bundle)).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
+    let dep = d["id"].as_str().unwrap().to_string();
+    let began = Instant::now();
+    let mut d = Value::Null;
+    for _ in 0..3000 {
+        let (_, x) = call(&w.api, "GET", &format!("{env}/deploys/{dep}"), None, "application/json", None).await;
+        if !["queued", "building", "deploying"].contains(&x["status"].as_str().unwrap_or("")) {
+            d = x;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (_, log) = call(&w.api, "GET", &format!("{env}/deploys/{dep}/logs"), None, "application/json", None).await;
+    assert_eq!(d["status"], "active", "{d} {log}");
+    eprintln!("MEASURED a closed build (its builder made, BuildKit's image pulled if missing): {} s", began.elapsed().as_secs());
+    let image = d["image"].as_str().unwrap().to_string();
+    let probe = docker(&["run", "--rm", "--network", "none", &image, "cat", "/probe"]).await.unwrap();
+    assert!(!probe.contains("default"), "no route out: {probe}");
+    assert!(probe.contains("proxy=http://") && probe.contains(":3128") && probe.contains("out:closed"), "{probe}");
+    let net = apps_control::runtime::docker::build_network_name(&w.project);
+    assert_eq!(docker(&["network", "inspect", "-f", "{{.Internal}}", &net]).await.unwrap(), "true");
+    delete_for_good(&w.api, &id).await;
+    assert!(docker(&["buildx", "inspect", &net]).await.is_err(), "the project's builder went with its last service");
+    assert!(docker(&["network", "inspect", &net]).await.is_err(), "and its network, with the proxy's relay");
+}
+
 /// A closed environment (egress `roll`) keeps its network sandbox: asleep, another service on its
 /// network reaches it by name and the waker hands the call to the app, at the sandbox's address;
 /// a public request wakes it too.
