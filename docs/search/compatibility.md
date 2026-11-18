@@ -1026,6 +1026,34 @@ Checked against Elasticsearch 9.5.5 (captures in
   file counts, `uploaded_blobs` and sizes differ from Elasticsearch's for the same index, and
   dangling multipart uploads are also aborted by `_cleanup` (Elasticsearch aborts them only
   after snapshot deletions).
+- `gcs` and `azure` repositories keep snapshots in a tenant's GCS bucket or Azure container,
+  as `s3` ones do, with Elasticsearch 9.5.5's settings, defaults, messages and their order
+  (checked against it): `gcs` checks `bucket` first (`Setting [bucket] is empty for
+  repository`), then `compress`, the throttles and `chunk_size` (1b..5tb); `azure` checks
+  `compress`, the throttles, `chunk_size` (1b..2684354550000b) and `location_mode` (`No enum
+  constant ...LocationMode.<VALUE>`), defaults `container` to `elasticsearch-snapshots`, and
+  `secondary_only` makes it read-only. `compress` and `readonly` are now validated for every
+  blob store type, `compress` before the throttles and `readonly` after the type's settings, as
+  Elasticsearch does. A client is made when the repository is first used, as Elasticsearch
+  makes it, so `PUT` with `verify` and `_verify` answer its errors in its shape: an `azure`
+  repository without an account `Unable to find client with name [default]`, a key and a SAS
+  token together `Both a secret as well as a shared access token were set for account [...]`,
+  an endpoint suffix with an endpoint, a secondary endpoint without a primary one, a secondary
+  `location_mode` without a secondary endpoint (all `settings_exception`); a `gcs` client
+  `cannot create blob store`. Analysis fails with `BlobStoreRepository`'s text on both (not
+  S3's), and on `azure` the register checks need `location_mode: primary_only`, as
+  Elasticsearch's do. Still different: a client's settings (`gcs`: `credentials_file`,
+  `endpoint`, `token_uri`, `project_id`; `azure`: `account`, `key`, `sas_token`,
+  `endpoint_suffix`, `endpoint`, `secondary_endpoint`) come with the repository's settings, as
+  roll has no keystore or node settings a tenant writes, so `client` only names it; the
+  secure ones are never shown, where Elasticsearch never had them in the repository. roll
+  refuses a bucket or container name the store would refuse, and a `base_path` with empty,
+  `.` or `..` segments, at `PUT` (Elasticsearch accepts them and fails on use). Without a
+  service account a `gcs` repository is anonymous (Elasticsearch would use the node's
+  application default credentials; roll never uses its own), as is an `azure` one with an
+  account and neither key nor SAS token. Objects past 8 MiB go up as resumable uploads in
+  8 MiB chunks or in 8 MiB staged blocks (Elasticsearch has no `buffer_size` for either), so an
+  `azure` object holds at most 400,000 MiB whatever `chunk_size` says.
 - Repository analysis (`_analyze`) on an `s3` repository writes, reads, overwrites, lists and
   deletes real blobs with Elasticsearch's blob sizes (`summary.write.total_size` matches it for
   the same parameters), register and overwrite-protection checks, and its failure chain
