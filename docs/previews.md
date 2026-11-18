@@ -96,7 +96,8 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
     the branch has no preview of it, so it never silences the one that does.
   - **The quiet preview** says so on its sheet (`reported_by`). On the operator's projects that's
     the speaker's name; on a person's project it's "another project", since a person never learns
-    another owner's project.
+    another owner's project. Its row in the Previews tab carries a `quiet` tag, and its chip on the
+    canvas says so on hover.
   - **Handover:** when the speaking preview goes (the service leaves that canvas, or its project's
     rules drop the branch), the next preview's own node reports at once. The comment is kept with
     the pull request, so the next preview edits the same one, and the preview that went doesn't
