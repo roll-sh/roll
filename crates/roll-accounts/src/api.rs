@@ -138,6 +138,19 @@ async fn blocking<T: Send + 'static>(a: &Arc<Accounts>, f: impl FnOnce(&Accounts
     tokio::task::spawn_blocking(move || f(&a)).await.map_err(|e| Error::Internal(e.to_string()))?
 }
 
+/// Tell the other admins what `by` just changed (alerts.rs). A failed lookup is logged: the change
+/// itself stands.
+async fn alert(a: &Arc<Accounts>, by: String, what: String) {
+    match blocking(a, move |a| a.alert_mails(&by, &what)).await {
+        Ok(mails) => mails.into_iter().for_each(|m| a.send_later(m, "admin alert")),
+        Err(e) => tracing::warn!(error = %e, "accounts: an admin alert failed"),
+    }
+}
+
+fn on_off(b: bool) -> &'static str {
+    if b { "on" } else { "off" }
+}
+
 /// The body as JSON, a 400 in the API's shape if it isn't.
 fn body<T: DeserializeOwned>(b: &Bytes) -> Result<T> {
     let b: &[u8] = if b.iter().all(u8::is_ascii_whitespace) { b"{}" } else { b };
@@ -475,28 +488,55 @@ async fn list_sso(State(a): S, me: Me, op: Op) -> Result<Response> {
 }
 
 async fn add_sso(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
     let n: crate::sso::NewConnection = body(&b)?;
-    Ok((StatusCode::CREATED, Json(a.add_sso(n).await?)).into_response())
+    let c = a.add_sso(n).await?;
+    alert(&a, by, format!("the SSO connection {} was added, for {}", c.name, c.domains.join(", "))).await;
+    Ok((StatusCode::CREATED, Json(c)).into_response())
 }
 
 async fn update_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>, b: Bytes) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
     let ch: crate::sso::ConnectionChange = body(&b)?;
-    Ok(Json(blocking(&a, move |a| a.update_sso(&id, ch)).await?).into_response())
+    // What changed, in words (never the secret itself).
+    let mut what: Vec<String> = Vec::new();
+    if let Some(e) = ch.enforce {
+        what.push(format!("its sign-in enforced {}", on_off(e)));
+    }
+    if let Some(p) = ch.provision {
+        what.push(format!("new people made at sign-in {}", on_off(p)));
+    }
+    if let Some(d) = &ch.domains {
+        what.push(format!("its domains now {}", d.join(", ")));
+    }
+    if ch.client_id.is_some() || ch.client_secret.is_some() {
+        what.push("its client credentials replaced".into());
+    }
+    let c = blocking(&a, move |a| a.update_sso(&id, ch)).await?;
+    if !what.is_empty() {
+        alert(&a, by, format!("the SSO connection {} changed: {}", c.name, what.join("; "))).await;
+    }
+    Ok(Json(c).into_response())
 }
 
 /// A SCIM token for the connection (replacing its old one): `{token, base_url}`, this once.
 async fn scim_token(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
-    let token = blocking(&a, move |a| a.scim_token(&id)).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
+    let token = blocking(&a, {
+        let id = id.clone();
+        move |a| a.scim_token(&id)
+    })
+    .await?;
+    let name = blocking(&a, move |a| Ok(a.sso_name(&id))).await?;
+    alert(&a, by, format!("a new SCIM token was made for {name} (its provider can now create and turn off people; the old token stopped)")).await;
     let base = format!("{}/v1/accounts/scim/v2", a.config.api_url);
     Ok(with_cookies((StatusCode::CREATED, Json(json!({ "token": token, "base_url": base }))).into_response(), None))
 }
 
 async fn remove_scim_token(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
-    blocking(&a, move |a| a.remove_scim_token(&id)).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
+    let name = blocking(&a, move |a| a.remove_scim_token(&id).map(|()| a.sso_name(&id))).await?;
+    alert(&a, by, format!("the SCIM token for {name} was removed")).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -525,8 +565,13 @@ async fn verify_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Resu
 }
 
 async fn remove_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
-    blocking(&a, move |a| a.remove_sso(&id)).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
+    let name = blocking(&a, move |a| {
+        let name = a.sso_name(&id);
+        a.remove_sso(&id).map(|()| name)
+    })
+    .await?;
+    alert(&a, by, format!("the SSO connection {name} was removed (its people sign in other ways now)")).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -659,9 +704,12 @@ async fn passkey_policy(State(a): S, me: Me, op: Op) -> Result<Response> {
 }
 
 async fn set_passkey_policy(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
     let p: crate::attestation::Policy = body(&b)?;
-    Ok(Json(blocking(&a, move |a| a.set_passkey_policy(p)).await?).into_response())
+    let p = blocking(&a, move |a| a.set_passkey_policy(p)).await?;
+    let models: Vec<&str> = p.models.iter().map(|m| m.name.as_str()).collect();
+    alert(&a, by, format!("hardware keys only is {} ({})", on_off(p.require), if models.is_empty() { "no models listed".into() } else { models.join(", ") })).await;
+    Ok(Json(p).into_response())
 }
 
 /// Account policy (docs/accounts.md): a second factor for everyone.
@@ -671,10 +719,18 @@ async fn account_policy(State(a): S, me: Me, op: Op) -> Result<Response> {
 }
 
 async fn set_account_policy(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
+    let actor = admin_sudo(&a, &me, &op).await?;
     let p: crate::policy::AccountPolicy = body(&b)?;
     let by = me.map(|Extension(u)| (u.user, u.session));
-    Ok(Json(blocking(&a, move |a| a.set_account_policy_by(p, by.as_ref().map(|(u, s)| (u.as_str(), s.as_str())))).await?).into_response())
+    let p = blocking(&a, move |a| a.set_account_policy_by(p, by.as_ref().map(|(u, s)| (u.as_str(), s.as_str())))).await?;
+    let idle = p.idle_minutes.map_or_else(|| "a week".to_string(), |m| format!("{m} minutes"));
+    let passkeys = match p.phishing_resistant {
+        Some(crate::policy::Whom::Admins) => "admins",
+        Some(crate::policy::Whom::Everyone) => "everyone",
+        None => "nobody",
+    };
+    alert(&a, actor, format!("the sign-in policy changed: a second factor for everyone {}, sessions end after {idle} unused, passkeys required for {passkeys}", on_off(p.require_second_factor))).await;
+    Ok(Json(p).into_response())
 }
 
 /// Allowed networks (docs/accounts.md): where people's sessions may be used from.
@@ -684,11 +740,13 @@ async fn network_policy(State(a): S, me: Me, op: Op) -> Result<Response> {
 }
 
 async fn set_network_policy(State(a): S, me: Me, op: Op, ip: Ip, b: Bytes) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
     let p: crate::networks::NetworkPolicy = body(&b)?;
     // An admin's own address must stay on it; the operator's token has no session to lock out.
     let from = me.as_ref().and(ip.map(|Extension(roll_auth::ClientIp(i))| i));
-    Ok(Json(blocking(&a, move |a| a.set_network_policy(p, from)).await?).into_response())
+    let p = blocking(&a, move |a| a.set_network_policy(p, from)).await?;
+    alert(&a, by, format!("allowed networks are {} ({})", on_off(p.on), p.networks.join(", "))).await;
+    Ok(Json(p).into_response())
 }
 
 async fn list_resets(State(a): S, me: Me, op: Op) -> Result<Response> {
@@ -1001,7 +1059,11 @@ async fn create_invite(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response
     if let (true, Some(Extension(u))) = (admin, &me) {
         sudo(&a, u).await?;
     }
+    let actor = by.clone();
     let (invite, token, url) = blocking(&a, move |a| a.invite(&by, &email, admin, handle.as_deref())).await?;
+    if admin {
+        alert(&a, actor, format!("an invite that makes an admin was made for {}", invite.email)).await;
+    }
     if a.mail_on() {
         let text = format!("You're invited to roll.\n\nSign in here within 7 days: {url}\n\nThe link works once, for {}.\n", invite.email);
         a.send_later(crate::Mail { to: invite.email.clone(), subject: "You're invited to roll".into(), text }, "invite");
@@ -1035,9 +1097,25 @@ struct UserPatch {
 }
 
 async fn update_user(State(a): S, me: Me, op: Op, Path(id): Path<String>, b: Bytes) -> Result<Response> {
-    admin_sudo(&a, &me, &op).await?;
+    let by = admin_sudo(&a, &me, &op).await?;
     let UserPatch { admin, disabled } = body(&b)?;
-    Ok(Json(blocking(&a, move |a| a.update_user(&id, admin, disabled)).await?).into_response())
+    let was_admin = blocking(&a, {
+        let id = id.clone();
+        move |a| Ok(a.user(&id)?.admin)
+    })
+    .await?;
+    let u = blocking(&a, move |a| a.update_user(&id, admin, disabled)).await?;
+    let who = format!("{} ({})", u.handle, u.email);
+    let what = match (admin, disabled) {
+        (Some(true), _) if !was_admin => Some(format!("{who} was made an admin")),
+        (Some(false), _) if was_admin => Some(format!("{who} is no longer an admin")),
+        (_, Some(true)) if was_admin => Some(format!("the admin {who}'s account was turned off")),
+        _ => None,
+    };
+    if let Some(what) = what {
+        alert(&a, by, what).await;
+    }
+    Ok(Json(u).into_response())
 }
 
 async fn revoke_user_sessions(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<StatusCode> {

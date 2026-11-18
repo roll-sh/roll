@@ -1659,3 +1659,30 @@ async fn a_person_deletes_their_own_account() {
     let again = env.email_sign_in(&mut Browser::default(), "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json;
     assert_ne!(again["user"]["id"].as_str(), Some(id.as_str()), "{again}");
 }
+
+/// Admin alerts (docs/accounts.md): making someone an admin or changing how people sign in mails
+/// every other admin, naming who did it; the admin who did it isn't mailed.
+#[tokio::test]
+async fn other_admins_are_told_of_security_changes() {
+    let env = Env::new().await;
+    let admin_invite = |email: &'static str| {
+        let env = &env;
+        async move { env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": email, "admin": true })).await.json["token"].as_str().unwrap().to_string() }
+    };
+    let mut root = Browser::default();
+    env.email_sign_in(&mut root, "root@example.com", Some(&admin_invite("root@example.com").await)).await;
+    env.email_sign_in(&mut Browser::default(), "ruth@example.com", Some(&admin_invite("ruth@example.com").await)).await;
+    let ada = env.email_sign_in(&mut Browser::default(), "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json["user"]["id"].as_str().unwrap().to_string();
+
+    assert_eq!(env.call(&mut root, Method::PATCH, &format!("/v1/accounts/users/{ada}"), Some(json!({ "admin": true }))).await.status, StatusCode::OK);
+    let told = mails_about(&env.outbox, "ruth@example.com", "was made an admin", 1).await;
+    assert!(told[0].0.starts_with("roll security: ") && told[0].1.contains("by root (root@example.com)"), "{told:?}");
+    assert_eq!(env.operator(Method::PUT, "/v1/accounts/policy", json!({ "require_second_factor": true })).await.status, StatusCode::OK);
+    let policy = mails_about(&env.outbox, "root@example.com", "sign-in policy changed", 1).await;
+    assert!(policy[0].1.contains("a second factor for everyone on") && policy[0].1.contains("by the operator's token"), "{policy:?}");
+    // Whoever made a change isn't told of it.
+    let mine = |to: &str| {
+        std::fs::read_dir(&env.outbox).unwrap().filter_map(|e| e.ok()).map(|e| serde_json::from_slice::<Value>(&std::fs::read(e.path()).unwrap()).unwrap()).filter(|m| m["to"] == to && m["subject"].as_str().unwrap().contains("was made an admin")).count()
+    };
+    assert_eq!(mine("root@example.com"), 0);
+}
