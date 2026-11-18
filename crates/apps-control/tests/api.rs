@@ -1662,6 +1662,53 @@ async fn a_project_over_its_spend_limit_is_paused_until_the_limit_is_raised() {
     assert!(call(&w.api, "GET", &limits, None).await.1["month_usd"].as_f64().unwrap() >= before);
 }
 
+/// Two environments compared (Railway's environment sync): variables missing, extra or with
+/// another value (never a value, nor a sealed one's), and each differing setting with the body
+/// that makes it the other's; copied through the usual routes, nothing differs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_environments_are_compared_and_synced() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "max_instances": 4})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments");
+    call(&w.api, "PUT", &format!("{base}/staging"), Some(json!({}))).await;
+    call(&w.api, "PATCH", &format!("{base}/production/variables"), Some(json!({"set": {"API_KEY": "k1", "MODE": "live", "TOKEN": "t"}, "seal": ["TOKEN"]}))).await;
+    call(&w.api, "PATCH", &format!("{base}/staging/variables"), Some(json!({"set": {"MODE": "test", "DEBUG": "1"}}))).await;
+    let prod = json!({"run": {"max_instances": 2}, "rate_limit": {"per_minute": 60, "burst": 2}, "headers": [{"set": {"x-frame-options": "DENY"}}], "allow_ips": [{"cidr": "203.0.113.0/24"}], "pages": {"error": "<h1>sorry</h1>"}, "vitals": true});
+    assert_eq!(call(&w.api, "PUT", &format!("{base}/production"), Some(prod)).await.0, StatusCode::OK);
+    let (st, d) = call(&w.api, "GET", &format!("{base}/staging/diff?from=production"), None).await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["variables"], json!({"missing": [{"name": "API_KEY", "sealed": false}, {"name": "TOKEN", "sealed": true}], "extra": ["DEBUG"], "differ": ["MODE"]}));
+    assert!(!d.to_string().contains("live") && !d.to_string().contains("k1"), "no variable's value: {d}");
+    // A token that reads both but reveals neither isn't told which values differ (setting one
+    // here and comparing would tell production's).
+    let scope: roll_auth::scope::Scope = serde_json::from_value(json!([{"product": "apps", "resources": "*", "actions": {"read": "allow", "write": "allow"}}])).unwrap();
+    let grant = roll_auth::Grant { id: "tok_t".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(scope), user: None, ask_otherwise: false };
+    let mut req = Request::builder().uri(format!("{base}/staging/diff?from=production")).body(Body::empty()).unwrap();
+    req.extensions_mut().insert(grant);
+    req.extensions_mut().insert(roll_auth::Operator);
+    let resp = w.api.clone().oneshot(req).await.unwrap();
+    let narrowed: Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!((&narrowed["variables"]["differ"], &narrowed["variables"]["extra"]), (&Value::Null, &json!(["DEBUG"])), "{narrowed}");
+    let fields: Vec<&str> = d["settings"].as_array().unwrap().iter().filter_map(|x| x["field"].as_str()).collect();
+    assert_eq!(fields, ["run.max_instances", "vitals", "allow_ips", "rate_limit", "headers", "pages.error"], "{d}");
+    // Synced: each setting's body, and the variables that can be copied (a sealed one can't).
+    for x in d["settings"].as_array().unwrap() {
+        let (st, e) = call(&w.api, "PUT", &format!("{base}/staging"), Some(x["put"].clone())).await;
+        assert_eq!(st, StatusCode::OK, "{x} {e}");
+    }
+    let vars = format!("{base}/staging/variables");
+    let (st, e) = call(&w.api, "PATCH", &vars, Some(json!({"copy_from": "production", "copy": ["TOKEN"]}))).await;
+    assert!(st == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("sealed"), "{st} {e}");
+    assert_eq!(call(&w.api, "PATCH", &vars, Some(json!({"copy_from": "production", "copy": ["API_KEY", "MODE"], "unset": ["DEBUG"]}))).await.0, StatusCode::OK);
+    let (_, vals) = call(&w.api, "GET", &format!("{vars}/values"), None).await;
+    assert_eq!((&vals["API_KEY"], &vals["MODE"], &vals["DEBUG"]), (&json!("k1"), &json!("live"), &Value::Null), "{vals}");
+    let (_, d) = call(&w.api, "GET", &format!("{base}/staging/diff?from=production"), None).await;
+    assert_eq!((&d["variables"], &d["settings"]), (&json!({"missing": [{"name": "TOKEN", "sealed": true}], "extra": [], "differ": []}), &json!([])), "{d}");
+    assert_eq!(call(&w.api, "GET", &format!("{base}/staging/diff?from=staging"), None).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "GET", &format!("{base}/staging/diff?from=nope"), None).await.0, StatusCode::NOT_FOUND);
+}
+
 /// A new environment starts with another's variables, and promoting deploys what another
 /// environment runs (its image, no pull or build) with the target's own variables.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -2,6 +2,7 @@ import { Lock, Rocket, Trash2, Unlock } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { appsApi, formatFirewall, formatHeaders, parseAllowList, parseFirewall, parseHeaders, PRODUCTION, shortSha, type Backup, type Environment, type EnvRunField, type Service, formatRoutes, parseRoutes } from "@/lib/apps-api";
 import { Field } from "../redis/shared";
+import { CompareSection } from "./env-compare";
 import { btn, Confirm, CopyButton, danger, input, Panel, primary, useCopy } from "../ui";
 import { clock, CPU, MEMORY, mb, since, StateBadge, SureButton, type Runner } from "./shared";
 
@@ -385,6 +386,8 @@ export function EnvironmentPanel({ service, env, runner, onDeleted }: { service:
             </div>
           </div>
         )}
+
+        <CompareSection service={service} env={env} runner={runner} />
 
         <p className="px-5 pb-2 pt-5 text-[11px] font-medium uppercase tracking-[0.06em] text-subtle">Who gets in</p>
 

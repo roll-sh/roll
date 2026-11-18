@@ -98,6 +98,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/sleep"), post(sleep))
         .route(&format!("{env}/wake"), post(wake))
         .route(&format!("{env}/variables"), get(variables).patch(change_variables))
+        .route(&format!("{env}/diff"), get(env_diff))
         .route(&format!("{env}/pending"), get(pending))
         .route(&format!("{env}/variables/values"), get(reveal))
         .route(&format!("{env}/logs"), get(env_logs))
@@ -1117,8 +1118,39 @@ async fn reveal(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Ex
     ok(v)
 }
 
+#[derive(Deserialize)]
+struct DiffQuery {
+    from: String,
+}
+
+async fn env_diff(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<DiffQuery>, ext: Extensions) -> R {
+    ok(apps.environment_diff(&id, &env, &q.from, roll_auth::Grant::on(&ext)).await?)
+}
+
 async fn change_variables(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
-    let change = body(&b)?;
+    let mut change = body(&b)?;
+    // Another environment's values copied (`copy_from`, `copy`: names): set here as given there.
+    if let Some(from) = change.get("copy_from").cloned() {
+        let Value::String(from) = from else { return Err(Error::BadRequest("copy_from is another environment's name".into())) };
+        if from == env {
+            return Err(Error::BadRequest("copy_from is another environment".into()));
+        }
+        let names: Vec<String> = change["copy"].as_array().map(|a| a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect()).filter(|n: &Vec<String>| !n.is_empty()).ok_or_else(|| Error::BadRequest("copy is a list of the names to copy".into()))?;
+        let copied = apps.copied_variables(&id, &from, &names).await?;
+        let o = change.as_object_mut().expect("an object");
+        o.remove("copy_from");
+        o.remove("copy");
+        let set = o.entry("set").or_insert_with(|| json!({}));
+        let Some(set) = set.as_object_mut() else { return Err(Error::BadRequest("set is an object of names to values".into())) };
+        for (k, v) in copied {
+            if set.contains_key(&k) {
+                return Err(Error::BadRequest(format!("{k} is both set and copied")));
+            }
+            set.insert(k, Value::String(v));
+        }
+    } else if change.get("copy").is_some() {
+        return Err(Error::BadRequest("copy needs copy_from, the environment to copy from".into()));
+    }
     let values: Vec<&str> = change["set"].as_object().into_iter().flatten().filter_map(|(_, v)| v.as_str()).collect();
     if values.iter().any(|v| v.contains("${{")) {
         let svc = apps.service(&id).await?;

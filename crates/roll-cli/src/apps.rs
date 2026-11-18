@@ -1108,6 +1108,18 @@ pub enum AppsCmd {
         #[arg(long, conflicts_with_all = ["error_page", "maintenance_page"])]
         roll_pages: bool,
     },
+    /// How this environment differs from another (Railway's environment sync): variables
+    /// missing, extra or with another value (never a value), and settings; `--sync` makes it the
+    /// other's (every variable that can be copied, every setting).
+    EnvDiff {
+        /// The environment to compare with.
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        sync: bool,
+        #[command(flatten)]
+        target: Target,
+    },
     /// Tear an environment down (asks first; `--yes` doesn't).
     EnvDelete {
         #[command(flatten)]
@@ -4088,6 +4100,43 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             e
+        }
+        AppsCmd::EnvDiff { from, sync, target } => {
+            let svc = service(api, &target).await?;
+            let path = format!("{}/diff?from={}", env_path(&svc, &target.env), enc(&from));
+            let mut d = api.get(&path).await?;
+            if sync {
+                let v = &d["variables"];
+                let names: Vec<Value> = v["missing"].as_array().into_iter().flatten().filter(|m| m["sealed"] != true).map(|m| m["name"].clone()).chain(v["differ"].as_array().into_iter().flatten().cloned()).collect();
+                if !names.is_empty() {
+                    api.call(reqwest::Method::PATCH, &format!("{}/variables", env_path(&svc, &target.env)), Some(json!({ "copy_from": from, "copy": names }))).await?;
+                }
+                for x in d["settings"].as_array().into_iter().flatten() {
+                    api.call(reqwest::Method::PUT, &env_path(&svc, &target.env), Some(x["put"].clone())).await?;
+                }
+                d = api.get(&path).await?;
+            }
+            if !json_out {
+                let (v, to) = (&d["variables"], &target.env);
+                let names = |x: &Value| x.as_array().into_iter().flatten().filter_map(|n| n.as_str().map(str::to_string)).collect::<Vec<_>>();
+                for m in v["missing"].as_array().into_iter().flatten() {
+                    println!("variable {}  only in {from}{}", s(&m["name"]), if m["sealed"] == true { " (sealed: set it by hand)" } else { "" });
+                }
+                for n in names(&v["differ"]) {
+                    println!("variable {n}  another value in {to}");
+                }
+                for n in names(&v["extra"]) {
+                    println!("variable {n}  only in {to}");
+                }
+                for x in d["settings"].as_array().into_iter().flatten() {
+                    println!("{}  {} in {to}, {} in {from}", s(&x["field"]), x["to"], x["from"]);
+                }
+                if v["differ"].is_null() {
+                    eprintln!("values weren't compared: that needs reveal on both environments");
+                }
+                return Ok(());
+            }
+            d
         }
         AppsCmd::EnvDelete { target, yes } => {
             let svc = service(api, &target).await?;

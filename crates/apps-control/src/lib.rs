@@ -1505,6 +1505,81 @@ impl Apps {
         Ok(())
     }
 
+    /// `GET …/environments/{env}/diff?from=`: how `env` differs from `from` (Railway's
+    /// environment sync): its own variables' names missing here, extra here, or with another
+    /// value (never a value; sealed ones can't be compared), and each setting that differs, with
+    /// the `PUT …/environments/{env}` body that makes it `from`'s. A grant reads `from` too, and
+    /// sees which values differ only with reveal on both (a value set here and compared would
+    /// tell `from`'s).
+    pub async fn environment_diff(self: &Arc<Self>, service: &str, env: &str, from: &str, grant: Option<&roll_auth::Grant>) -> Result<Value> {
+        if from == env {
+            return Err(Error::BadRequest("from is another environment".into()));
+        }
+        let (to_env, from_env) = (self.environment(service, env).await?, self.environment(service, from).await?);
+        let mut values = true;
+        if let Some(g) = grant {
+            let sid = service.to_string();
+            let project = self.db(move |s| s.service(&sid)).await?.project;
+            let on = |e: &str| roll_auth::scope::Resource { product: "apps".into(), id: Some(service.to_string()), project: Some(project.clone()), environment: Some(e.to_string()), ..Default::default() };
+            if g.allows(&on(from), roll_auth::scope::Action::Read) != roll_auth::scope::Outcome::Allow {
+                return Err(Error::Forbidden(format!("comparing with {from} needs read on {from}")));
+            }
+            values = [from, env].iter().all(|e| g.allows(&on(e), roll_auth::scope::Action::Reveal) == roll_auth::scope::Outcome::Allow);
+        }
+        let (sid, e, f) = (service.to_string(), env.to_string(), from.to_string());
+        let (here, there, sealed_here, sealed_there) = self.db(move |s| Ok((s.variables(&sid, &e)?, s.variables(&sid, &f)?, s.sealed_variables(&sid, &e)?, s.sealed_variables(&sid, &f)?))).await?;
+        let missing: Vec<Value> = there.keys().filter(|k| !here.contains_key(*k)).map(|k| json!({ "name": k, "sealed": sealed_there.contains(k) })).collect();
+        let extra: Vec<&String> = here.keys().filter(|k| !there.contains_key(*k)).collect();
+        let differ: Vec<&String> = here.iter().filter(|(k, v)| !sealed_here.contains(*k) && !sealed_there.contains(*k) && there.get(*k).is_some_and(|t| t != *v)).map(|(k, _)| k).collect();
+        let (a, b) = (serde_json::to_value(&from_env).expect("JSON"), serde_json::to_value(&to_env).expect("JSON"));
+        let mut settings = Vec::new();
+        for k in crate::model::ENV_RUN_FIELDS {
+            let (x, y) = (from_env.run.get(k).cloned().unwrap_or(Value::Null), to_env.run.get(k).cloned().unwrap_or(Value::Null));
+            if x != y {
+                settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
+            }
+        }
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes"] {
+            let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
+            if x != y {
+                settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: x } }));
+            }
+        }
+        for (k, x, y) in [("error", &from_env.pages.error, &to_env.pages.error), ("maintenance", &from_env.pages.maintenance, &to_env.pages.maintenance)] {
+            if x != y {
+                // Whether each has its own page (its HTML only in the body that copies it).
+                settings.push(json!({ "field": format!("pages.{k}"), "from": x.is_some(), "to": y.is_some(), "put": { "pages": { k: x } } }));
+            }
+        }
+        Ok(json!({
+            "from": from,
+            "to": env,
+            "variables": { "missing": missing, "extra": extra, "differ": if values { json!(differ) } else { Value::Null } },
+            "settings": settings,
+        }))
+    }
+
+    /// The values of `names` in `from` for `PATCH …/variables {copy_from, copy}`: its own
+    /// variables, never a sealed one (deploying the copy would read it, and that can take less
+    /// than reading it where it is).
+    pub async fn copied_variables(self: &Arc<Self>, service: &str, from: &str, names: &[String]) -> Result<BTreeMap<String, String>> {
+        let (sid, f) = (service.to_string(), from.to_string());
+        let (have, sealed) = self.db(move |s| {
+            s.environment(&sid, &f)?;
+            Ok((s.variables(&sid, &f)?, s.sealed_variables(&sid, &f)?))
+        })
+        .await?;
+        let mut out = BTreeMap::new();
+        for n in names {
+            if sealed.contains(n) {
+                return Err(Error::BadRequest(format!("{n} is sealed in {from}: set it here by hand")));
+            }
+            let v = have.get(n).ok_or_else(|| Error::BadRequest(format!("{n} isn't one of {from}'s own variables")))?;
+            out.insert(n.clone(), v.clone());
+        }
+        Ok(out)
+    }
+
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
