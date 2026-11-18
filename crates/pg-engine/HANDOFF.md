@@ -10623,10 +10623,11 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
-## Bulk writes, round 17: VACUUM leaves marked files to compaction (agent 257)
+## Bulk writes, round 17: VACUUM leaves marked files to compaction, three per-row costs (agent 257)
 
 BENCH.md "Bulk writes, round 17" has the measurements (joined windows, plain dist, lane C).
-`cand/a257`: one commit on origin's `c4ad9402d`. No format change.
+`cand/a257`: one commit on origin's `c4ad9402d`; `cand/a257-2`: three commits on it (the per-row
+costs). No format change.
 
 **VACUUM no longer writes files a compaction marked** (`session::ddl::vacuum`; the call of
 `Store::reclaim_dead` is gone). Since agent 253's reclaim trigger, VACUUM of a table wrote its
@@ -10655,6 +10656,127 @@ pg_dump_tap 14,609 passed. No checked build (the change removes a call; no asser
 count is on its path). No new test: nothing asserted that VACUUM rewrote marked files; the
 reclaim paths it leaves are tested as before (`reclaim_thread_waits_for_pressure_or_idle_and_no_statement`,
 `deletions_mark_dead_entries_instead_of_rewriting`, `power_cut_at_every_point`).
+
+**Three per-row costs** (`cand/a257-2`, three commits on `cand/a257`):
+- **`read_from` by a value's length** (`exec::sizing`): every text, json or bytea value a row
+  stores (COPY's, INSERT's, UPDATE's: `note_compression_len` -> `compressed_with`) searched the
+  thread's list of large values read lately (`READ`, up to 256) for its allocation, though only
+  values of `READ_MIN..READ_MAX` bytes (32 B to 1 MB) are ever noted: another length returns at
+  once. The bulk table's text is 19 bytes.
+- **The heap model's session key made once a thread** (`catalog::heapsim::session_key`): every
+  row a modelled heap places asked for its insertion target by a SipHash of
+  `thread::current().id()` (an `Arc` taken and dropped, the hash) each time; the same value is
+  kept in a thread-local now.
+- **A deferring DELETE's statistics counted once a call** (`DeleteNode::uncounted`,
+  `pgstat::count_delete` takes a count): a DELETE whose index entries wait for its end
+  (`defers_entries`: no BEFORE ROW trigger, RETURNING or volatile function, so nothing in it
+  reads the statistics) counted each row (`ensure`, the savepoint level, the transaction's map),
+  0.14 G of the bulk DELETE. Its rows are counted when its node's `next` returns, also with an
+  error, and before its AFTER triggers run (they may read `pg_stat_xact_*`).
+
+**Evaluated for the DELETE and not built** (the brief's options; b0's profile below):
+- **Delete marking at commit** (the DELETE writing dead-entry sets with the commit ts a snapshot
+  needs, instead of tombstones): what it could save is the deferred deletions, 1.0 G of the
+  10.1 (the statement's `put_entry_deletes`: sorting, `SstWriter::add`, the bloom filter), and the
+  compaction's merge of them. Finding each deleted entry's block and place costs what the
+  compaction's marking pass costs now (`raw_block`, `seek_on`, `find_block`: ~0.66 G, 14% of the
+  compaction), moved into the statement; a mark must carry its commit ts (older snapshots still
+  read the row), go into the WAL with the commit (by key: a place in a file changes with every
+  compaction racing the commit), and move with a compaction that rewrites the file before the
+  mark's ts passes the horizon. The table's rewrite stays (its file has the UPDATE's versions in
+  L0: 4.5 G with its compression), so at most ~1 G of 10.1, for a new on-disk state. Not built.
+- **Range tombstones**: the script deletes every fourth row (`id % 4 = 1`); its index entries are
+  every fourth of `bulk_id`'s and spread over `bulk_a`'s. No range of more than one key: nothing
+  to gain here (TRUNCATE and DROP use them already, `storage::rdel`).
+- **Folding the UPDATE's versions into L1 before the DELETE** (agents 217 and 246): the fold
+  writes the table at the UPDATE (1M rows with 500k versions) instead of at the DELETE (750k
+  rows), 246's +0.7 G net; nothing in this round changes that.
+
+Results (BENCH "Bulk writes, round 17"; plain dist, lane C, joined windows, five alternating pairs
+against v1, `cand/a257`'s code): COPY in -0.5%, INSERT … SELECT -2.0 to -2.1%, DELETE with its
+compaction -1.1%, UPDATE -0.0 to -0.4% (every pair), every other step level; all steps 52.93 ->
+52.60 G (-0.6 to -0.7%). The same day on lane C: PostgreSQL 52.33 G, pgrust 44.92, origin's b0
+56.63, this round 52.60: 1.005x PostgreSQL (b0 1.082x), 1.17x pgrust. Still above PostgreSQL: by
+the DELETE (10.0 against 1.67 G, item 1 below), COPY, the index builds and INSERT … SELECT; under it
+by UPDATE (12.0 against 27.5) and VACUUM (1.79 against 2.73). Peak memory the same (VmHWM v1
+271-288, v4 272-286 MB).
+
+**Where the DELETE's 10.1 G goes** (b0, instruction samples of the joined window; the
+statement's thread 54%, the compaction's 46%):
+- The statement, 5.5 G: the scan merging the UPDATE's versions in L0 with the table (`fill_batch`
+  27% of the statement: `Merge::min`, `Cursor::head`, `Scan::position`, and libc `memcmp` /
+  `bcmp` from their key comparisons, 10%); the rows it deletes decoded, filtered and locked
+  (`emit` 19%, `lock_row_with` 6%); the deferred deletions of the 250,000 rows and 500,000 index
+  entries (`put_entry_deletes` 18%: `SstWriter::add` 7.4, sorting 1.9, the bloom filter 2.3, the
+  rest the keys' allocations and copies); per row index keys (7.5%), statistics (2.6%), the heap
+  model (2.4%), `mark_row_modified` (2.5%).
+- The compaction, 4.6 G: the table written again with the UPDATE's versions folded in (750,000
+  rows; zstd compression 32% of the thread, half of it `ZSTD_compressBlock_fast_dictMatchState`;
+  decompression 7%; the merge 35%), the two index files marked (their blocks read for the deleted
+  keys), and the system keys' file holding the table's 7.7 MB size estimate (`estkeep`'s full
+  record, written at the UPDATE's commit; ~0.15 G to decompress and compress again).
+
+**Measured and dropped:**
+- **A value of 1 MB or more in a compaction output file of its own** (`BIG_VALUE`,
+  `~/.cache/a257/patches/big-value-files.patch`, with a unit test): so that a table's 7.7 MB
+  estimate (`estkeep`'s full record) isn't decompressed and compressed again by every compaction
+  after a commit that wrote the table (its change records sort right after it). In the bulk
+  script the full record is written at the UPDATE's commit and reaches L1 in one compaction, the
+  DELETE's, which has to write it anyway: DELETE with its compaction +0.2% (two pairs, an output
+  file more), nothing saved. It would pay where many compactions follow a full record (small
+  commits on a big table after a bulk change); not measured.
+- **Dictionary compression with the dictionary copied into the context** (`ZSTD_dictForceCopy`,
+  agent 247's item 2) instead of attached: on the blocks of the table the DELETE's compaction
+  writes (40.4 MB raw, 5,230 blocks of 8 kB, the file's own dictionary; an offline harness,
+  `~/.cache/a257/zexp`), 1.62 G instructions a rewrite attached or copied, the copy 5% more
+  bytes; loading it (`ZSTD_dictForceLoad`) 2.25 G. Without a dictionary 1.35 G and 3% more bytes.
+  Not built.
+- **zstd's match parameters for those blocks**: `minMatch` 5 writes 1.6% fewer bytes at the same
+  instructions (a size win, not taken: format 4's files are agent 247's), 7 more bytes; the fast
+  strategy's acceleration (`targetLength` 1, 2) -18% and -29% instructions for 11% and 20% more
+  bytes; `hashLog` 12 or 16 level. Not built.
+
+**Not measured: point reads and TPC-H.** Lane A had 2.3-3.8 foreign cores in every run tonight
+(other agents' gates and builds; the server containers run at `--cpu-shares 2`, so the engine
+starved): three pairs of `pgbench -S` (8 clients x2, 1 client x1; agent 246's point harness,
+`~/.cache/a257/point`) swung -92% to +310% in throughput either way and all were flagged. No
+change here is on a read path: VACUUM, COPY's / INSERT's size model, the heap model's insertion
+target and a DELETE's statistics; the bulk script's scans (`count(*)`, `sum(a)`, `count(*),
+sum(c)`) are level in every pair. TPC-H q01 / q06 were not run for the same reason (no scan or
+plan code changed).
+
+**Left (largest first, G user instructions against PostgreSQL's):**
+1. DELETE with its compaction, 10.0 against 1.67: the statement 5.4 (the merging scan over the
+   UPDATE's versions 1.5, with libc `memcmp` / `bcmp` from the merge's key comparisons a tenth of
+   the statement; the deferred deletions 1.0; decoding, filtering and locking the deleted rows
+   1.3) and the compaction 4.6 (the table written again, the UPDATE's debt: zstd with the file's
+   dictionary 1.5, the merge 1.6; the index files' marking 0.66). The options above don't close
+   it; the merge's cost per entry (about 830 instructions over count(*)'s 180 on a compacted
+   table) is the general lever, for every scan over L0 versions.
+2. COPY in 9.44 against 6.48: zstd of the runs ~14%, the heap model ~17% (`inserted_with`:
+   `untracked_write`, `datum_bytes`, `ensure`), number parsing ~10%, each row's allocations
+   (parsed values, the row's bytes, its key) ~5%.
+3. CREATE INDEX 5.29 against 3.13: `stored_tuple_len` 6% (every row sized again). A COPY into a
+   table found empty could keep its measure as a load after TRUNCATE does (`Txn::note_load`):
+   it needs a watch of the table armed at the COPY's start (`Store::watch_untouched` with
+   `changed_since` from its snapshot) and checked under the commit lock before the commit's own
+   writes drop it, and the size model's row lengths given to the load (`Load::row` sizes each row
+   with `stored_tuple_len` itself: done as it is, the sizing moves from CREATE INDEX to COPY).
+4. INSERT ... SELECT 6.68 against 4.31: zstd of the new table's runs ~12%, the heap model ~20%.
+5. A table too big to model writes its estimate in full (`estkeep`, 7.7 MB for the bulk table) at
+   a commit whose changes outgrow it (the bulk UPDATE's) and at every 256th change record: for
+   small commits on a big table that is 7.7 MB of WAL and memtable every 256 commits, and each
+   compaction meeting the system keys' file decompresses and compresses it again (the dropped
+   big-value files above would cover the second). Not measured.
+6. zstd `minMatch` 5 for the bottom level's files: 1.6% fewer bytes at the same instructions on
+   the bulk table's blocks (format 4's choice, agent 247's).
+
+Verification of `cand/a257-2` (`tools/quick-check.sh` with `QC_CHECKED=1` on `2c05d3b76`, these
+three commits on `cand/a257`): Clippy 16 warnings, none new in a changed file; 451 tests in 30
+binaries, again built `--profile verify-checked` (451 passed); crash_random seeds 1-3 x 2,
+power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648;
+pg_dump_tap 14,609 passed. No new test: the three change no result (the statistics a DELETE
+leaves are the same numbers at its end, which the regress suites' `pg_stat_*` checks read).
 
 ## Bulk writes, round 16: the reclaim trigger, COPY's line and field splitting (agent 253)
 

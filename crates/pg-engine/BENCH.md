@@ -439,7 +439,7 @@ HANDOFF "MultiXact"). User instructions per operation first.
 | short transactions, 8 clients | no clean pair | -1.31% (4 pairs) / -1.7% / +8.9% |
 | short transactions, 32 clients | +0.89% (4 pairs) / -1.3% / +0.1% | -0.49% / +0.4% / -0.8% |
 
-## Bulk writes, round 17: VACUUM leaves marked files to compaction (2026-11-18, agent 257)
+## Bulk writes, round 17: VACUUM leaves marked files to compaction, three per-row costs (2026-11-18, agent 257)
 
 HANDOFF "Bulk writes, round 17" has what changed. Lane C, the 1M-row bulk script, joined windows
 (agent 246's `bulkx.sh` with `JOIN=1`, copied to `~/.cache/a257/bench`), plain dist builds
@@ -469,6 +469,54 @@ VACUUM's bytes written 17.3 -> 2.0 MB. The database's store after VACUUM (one ru
 b0 43.91 MB, v1 44.73 MB (the bulk table's two index files keep their dead entries: 5.15 + 3.38 MB
 and 0.30 MB of sets, against 4.06 + 3.94 MB written again). Peak memory: VmHWM b0 271-292, v1
 269-298 MB; cgroup peak b0 346-403, v1 327-402 MB.
+
+### Three per-row costs: v1 against v4 (5 alternating pairs, % per pair)
+
+**v4** is `cand/a257-2`'s code (v1 with `read_from` by length, the heap model's session key once a
+thread, a deferring DELETE's statistics once a call); built 2026-11-18, the pairs ran 23:30-00:20.
+
+| step | v1 | v4 | % per pair |
+|---|---|---|---|
+| COPY in | 9.488 | 9.444 | -0.5 x5 |
+| CREATE INDEX, CREATE UNIQUE INDEX, COPY out | | | -0.2 to +0.2 |
+| INSERT … SELECT | 6.826 | 6.687 | -2.1 / -2.0 / -2.0 / -2.0 / -2.1 |
+| UPDATE half | 11.993 | 11.972 | -0.2 / -0.0 / -0.4 / -0.2 / -0.2 |
+| DELETE a quarter, with its compaction | 10.125 | 10.011 | -1.1 x5 |
+| VACUUM, ANALYZE, `count(*), sum(c)`, scans | | | -0.6 to +0.6 (count(*) 0.179 G: ±1 M) |
+| **all steps** | 52.93 | 52.60 | -0.6 / -0.6 / -0.7 / -0.6 / -0.6 |
+
+By change (builds between them; v2 also had the big-value files, dropped: HANDOFF): `read_from`
+COPY -0.5% (two pairs v1 / v2), INSERT … SELECT -0.2 / -0.5%, UPDATE -0.2%; the session key
+INSERT … SELECT -1.6% (one pair v2 / v3); the DELETE's statistics DELETE -1.1% (v2 / v3, and in
+every v1 / v4 pair). Peak memory: VmHWM v1 271-288, v4 272-286 MB; cgroup peak v1 376-392, v4
+375-390 MB. Foreign load 1.1-3.7 cores in every run.
+
+### Same lane and settings, 2026-11-18 (medians; PostgreSQL and pgrust 2 runs each, b0 and v4 5 each; plain dist builds)
+
+PostgreSQL and pgrust ran 22:40-23:50, b0 20:40-21:20, v4 23:30-00:20 (the last pair just past
+midnight). Foreign load 1.5-3.8 cores in every run (PostgreSQL 3.65-3.70, pgrust 3.28-3.82).
+
+| step | PostgreSQL 18.6 | pgrust | b0 | v4 | v4 / PostgreSQL | v4 / pgrust |
+|---|---|---|---|---|---|---|
+| COPY in | 6.477 | 4.973 | 9.488 | 9.444 | 1.46 | 1.90 |
+| CREATE INDEX | 3.128 | 2.918 | 5.292 | 5.293 | 1.69 | 1.81 |
+| CREATE UNIQUE INDEX | 2.247 | 1.878 | 3.472 | 3.469 | 1.54 | 1.85 |
+| COPY out | 3.211 | 2.021 | 3.088 | 3.088 | 0.96 | 1.53 |
+| INSERT … SELECT | 4.315 | 4.369 | 6.822 | 6.687 | 1.55 | 1.53 |
+| UPDATE half | 27.503 | 23.041 | 11.993 | 11.972 | 0.44 | 0.52 |
+| DELETE a quarter, with its compaction | 1.669 | 1.536 | 10.125 | 10.011 | 6.00 | 6.52 |
+| VACUUM | 2.729 | 3.266 | 5.500 | 1.786 | 0.65 | 0.55 |
+| ANALYZE | 0.500 | 0.571 | 0.472 | 0.472 | 0.94 | 0.83 |
+| `count(*), sum(c)` | 0.490 | 0.209 | 0.374 | 0.374 | 0.76 | 1.79 |
+| TRUNCATE | 0.024 | 0.065 | 0.004 | 0.004 | | |
+| DROP TABLE | 0.036 | 0.069 | 0.003 | 0.003 | | |
+| **all steps** | 52.33 | 44.92 | 56.63 | 52.60 | **1.005** | 1.17 |
+| count(*) by Seq Scan (extra) | 0.285 | 0.093 | 0.180 | 0.180 | 0.63 | 1.94 |
+| sum(a) by Seq Scan (extra) | 0.402 | 0.130 | 0.345 | 0.345 | 0.86 | 2.65 |
+
+PostgreSQL's VACUUM read 2.729 G in both runs today and `count(*), sum(c)` 0.490 (agent 253's
+2.529 and 0.589); every other step within 0.3% of theirs. Peak memory (cgroup): PostgreSQL 711-934 MB, pgrust 1,141-1,184, b0 346-403, v4
+375-390. Rows equal in every run of every server.
 
 ## Bulk writes, round 16: the reclaim trigger, COPY's splitting (2026-11-18, agent 253)
 
