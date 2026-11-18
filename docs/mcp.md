@@ -838,21 +838,23 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Next, ranked (now):** land turn 4 (15 PRs below, after previews); then open the follow-ups
-   built on its combined tree (`feature/roll-mcp-turn4-followups`: the policy alert naming the
-   longest session, People's Dormant filter and turning the dormant off in one step);
-   `previews_errors` and a mask-suggestions tool once previews' #326 and #324 land; secrets'
-   request (#277) and cut-off (#304) tools when secrets' batch 4 lands; apps' forms tools once
-   apps' forms routes land; a removed person's repositories handed to someone else (waits for a
-   repository transfer in roll code). Not doing: "remember this browser".
-   Open for the next turn (combined tree `wip/roll-mcp-turn4`, gated green; waiter
-   `roll-mcp-lock348`; land with `land-chain.sh`): the steadied tests (#348), passkey autofill
-   (#322), this list (#323), an admin's per-person security log (#328), admin alerts (#333),
-   `search_audit` and `search_analytics` (#334), the longest session (#337), how each session
-   signed in (#338), signing out of all other sessions (#342), People's search (#345), dormant
-   people (#349), resending an invite (#351), secrets tools for agents (#353), `roll login`'s
-   preset reading development's values (#354), tool answers that fit clients' limits (#355).
-   Checked in a real Chromium: `users-live/review-turn4.sh` (review pack `turn4.html`).
+1. **Next, ranked (now):** land turn 4 (15 PRs below, after previews), then open its follow-ups
+   (`feature/roll-mcp-turn4-followups`: the policy alert naming the longest session, People's
+   Dormant filter and turning the dormant off in one step); `previews_errors` and a
+   mask-suggestions tool once previews' #326 and #324 land (landing now); secrets' request (#277)
+   and cut-off (#304) tools when secrets' batch 4 lands; apps' forms tools once their routes land;
+   a removed person's repositories handed to someone else (waits for a repository transfer in roll
+   code). Not doing: "remember this browser"; `roll login`'s preset revealing development's values
+   without asking (#354, closed after review: a client's name proves nothing, so any approved
+   client would read them; #360 lets a CLI's approval be remembered for 30 days instead).
+   An independent security review of turn 4's account PRs (2026-11-19) found, and these fix:
+   token use counting as activity for dormant people (#349); resending an invite ending sign-ins
+   begun with the old link (#351); alerts naming every SSO change and everything a change to a
+   person did (#333); the session list ending sessions as the policy does (#337); signing out of
+   the others pointing to tokens and connections (#342); a 48 KiB cut for dense JSON (#355).
+   Open for the next turn (fresh chain `~/.local/share/roll-mcp/turn4-chain.sh`, waiter
+   `roll-mcp-lock348`, land with `land-chain.sh`): #348, #322, #323, #328, #333, #334, #337, #338,
+   #342, #345, #349, #351, #353, #355, #360.
 2. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
    hardware keys only (#286), one provider for people and agents (#287), an SSO connection's
    session length (#289) and back-channel logout (#292), allowed networks (#294), a second factor
