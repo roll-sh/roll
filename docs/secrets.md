@@ -3075,9 +3075,9 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
    engine and 1Password's one-time passwords: a `totp` key hands out its current code (`reveal`,
    audited, never the code in the row) to CI that logs into a 2FA-protected service; the CLI, the
    dashboard (a countdown) and the three clients.
-5. **Terraform resources and MCP tools for the new kinds**. Building (2026-11-18), now that batch 1
-   put their routes on main: rotators, audit sinks, GitHub Apps, AWS roles and users, cloud accounts,
-   required keys and the KMS key (`feature/roll-secrets-terraform-more`). Then, as each lands: SaaS
+5. **Terraform resources and MCP tools for the new kinds**. #262 (2026-11-18): rotators, audit sinks,
+   GitHub Apps, AWS roles and users, cloud accounts, required keys and the KMS key, credentials
+   write-only (never in plan or state, checked), and import for every registration. Then, as each lands: SaaS
    rotators, Kubernetes clusters, backup schedules, rotation windows, directories, Snowflake
    accounts, ACME bindings; the tools with roll MCP.
 6. **A gateway into private networks** (#166, on #132; Infisical's Gateway, Akeyless'): a small process inside a
