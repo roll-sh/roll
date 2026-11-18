@@ -567,6 +567,75 @@ export function publicJwk(text: string): { jwk: Record<string, string> } | { pro
   return { problem: "An Ed25519 or P-256 PEM public key (for RSA, paste its JWK)" };
 }
 
+/**
+ * An identity provider roll trusts to vouch for its people (docs/permissions.md, "Enterprise
+ * identity providers"): an app trades the provider's ID-JAG for a token acting as the person.
+ */
+export interface EnterpriseIdp {
+  issuer: string;
+  /** Its keys pinned (a JWKS document), for a provider roll can't reach. */
+  jwks?: string;
+  /** `email` (verified, in one of `domains`) or `aud_sub` (the assertion names the `usr_…`). */
+  matching?: "email" | "aud_sub";
+  domains?: string[];
+  /** Whether it may sign in roll's admins. */
+  admins?: boolean;
+  name?: string;
+  /** A multi-tenant issuer's one tenant roll trusts (its assertions' `tenant`). */
+  tenant?: string;
+}
+
+/** An app a trusted provider may vouch for: never its secret. */
+export interface EnterpriseApp {
+  client_id: string;
+  name: string;
+  rules: Rule[];
+  signs_with_key: boolean;
+  /** Until when the secret before a rotation still works (Unix ms). */
+  old_until?: number | null;
+  /** Where its secret was found leaked: roll dropped it, and it signs in again once rotated. */
+  leaked?: string | null;
+  created_at: number;
+}
+
+export interface Enterprise {
+  idps: EnterpriseIdp[];
+  apps: EnterpriseApp[];
+  /** What a provider puts in an assertion's `aud`: roll's API URL. */
+  audience: string;
+  token_endpoint: string;
+}
+
+/** The trust-a-provider form as a provider, or what's wrong with it (the API checks it again). */
+export function idpFromForm(f: { issuer: string; name: string; matching: "email" | "aud_sub"; domains: string; jwks: string; admins: boolean; tenant?: string }): { idp: EnterpriseIdp } | { problem: string } {
+  const issuer = f.issuer.trim();
+  if (!/^https:\/\/[^\s/]+/.test(issuer)) return { problem: "The issuer is an https URL" };
+  const domains = [...new Set(f.domains.split(/[\s,]+/).map((d) => d.trim().toLowerCase().replace(/^@/, "")).filter(Boolean))];
+  const bad = domains.find((d) => !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d));
+  if (bad) return { problem: `${bad} isn't a domain` };
+  if (f.matching === "email" && domains.length === 0) return { problem: "Name the email domains it vouches for" };
+  const jwks = f.jwks.trim();
+  if (jwks) {
+    try {
+      const doc = JSON.parse(jwks);
+      if (!Array.isArray(doc?.keys)) return { problem: "Pinned keys are a JWKS document ({\"keys\": [...]})" };
+    } catch {
+      return { problem: "The pinned keys aren't valid JSON" };
+    }
+  }
+  return {
+    idp: {
+      issuer,
+      matching: f.matching,
+      ...(domains.length ? { domains } : {}),
+      ...(jwks ? { jwks } : {}),
+      ...(f.admins ? { admins: true } : {}),
+      ...(f.name.trim() ? { name: f.name.trim() } : {}),
+      ...(f.tenant?.trim() ? { tenant: f.tenant.trim() } : {}),
+    },
+  };
+}
+
 export const accessApi = {
   me: () => call<Me>("GET", "/v1/access"),
   /** The operator's machine clients, newest first (a 403 for anyone else). */
@@ -575,6 +644,20 @@ export const accessApi = {
   /** A new key (or, without one, a new secret, in the answer this once), keeping the id. */
   rotateMachineClient: (id: string, r: { public_jwk?: Record<string, string> | null; oidc?: TrustedIdentity | null; keep_old_for_s?: number }) =>
     call<{ grant: Grant; client_secret?: string }>("POST", `/v1/access/clients/${encodeURIComponent(id)}/rotate`, r),
+  /** The operator's enterprise identity providers and apps (a 403 for anyone else). */
+  enterprise: () => call<Enterprise>("GET", "/v1/access/enterprise"),
+  /** Every trusted provider at once: the list replaces the old one. */
+  setIdps: (idps: EnterpriseIdp[]) => call<{ idps: EnterpriseIdp[] }>("PUT", "/v1/access/enterprise/idps", { idps }),
+  /** A new app: with no key, its secret is in the answer this once. */
+  addEnterpriseApp: (a: { name: string; rules: Rule[]; public_jwk?: Record<string, string> | null }) =>
+    call<EnterpriseApp & { client_secret?: string }>("POST", "/v1/access/enterprise/apps", a),
+  /** A new name or rules: its people's connections take the rules at once. */
+  updateEnterpriseApp: (id: string, c: { name?: string; rules?: Rule[] }) => call<EnterpriseApp>("PATCH", `/v1/access/enterprise/apps/${encodeURIComponent(id)}`, c),
+  /** A new key, or a new secret in the answer this once; the old secret kept a while or stopped now. */
+  rotateEnterpriseApp: (id: string, r: { public_jwk?: Record<string, string> | null; keep_old_for_s?: number }) =>
+    call<EnterpriseApp & { client_secret?: string }>("POST", `/v1/access/enterprise/apps/${encodeURIComponent(id)}/rotate`, r),
+  /** Removes an app and revokes every person's connection to it. */
+  removeEnterpriseApp: (id: string) => call<{ revoked: number }>("DELETE", `/v1/access/enterprise/apps/${encodeURIComponent(id)}`),
   catalog: () => call<Catalog>("GET", "/v1/access/catalog"),
   tokens: () => call<Grant[]>("GET", "/v1/access/tokens"),
   /** The latest workload tokens (they're not in `tokens`). */

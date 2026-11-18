@@ -241,10 +241,18 @@ pub struct Grant {
     /// OAuth connection's tokens change every hour.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// The access token it was looked up by is for roll's MCP server only (its audience, RFC 8707):
+    /// the gate honours it at `/v1/mcp` and for the calls that server makes, never on the API
+    /// directly. Set by [`Store::by_secret`]; never stored on the grant.
+    #[serde(skip)]
+    pub mcp_only: bool,
     /// Narrowed to reading for this request (`scope=read-only`): never asks.
     #[serde(skip)]
     pub read_only: bool,
 }
+
+/// Who an access token is for (`grant_secrets.audience`): `None`, roll's whole API.
+pub const AUDIENCE_MCP: &str = "mcp";
 
 /// Why a live token isn't honoured yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -373,9 +381,9 @@ fn insert_oauth_grant(c: &code_sql::Conn<'_>, grant_id: &str, client: &Client, n
 }
 
 /// A connection's first access and refresh tokens, inside a write.
-fn insert_oauth_secrets(c: &code_sql::Conn<'_>, grant_id: &str, client_id: &str, access: &str, refresh: &str, now: i64) -> Result<()> {
-    c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'access', ?, ?)", params![hash(access), grant_id, now + ACCESS_TTL_MS, now])?;
-    c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'refresh', ?, ?)", params![hash(refresh), grant_id, now + REFRESH_TTL_MS, now])?;
+fn insert_oauth_secrets(c: &code_sql::Conn<'_>, grant_id: &str, client_id: &str, access: &str, refresh: &str, audience: Option<&str>, now: i64) -> Result<()> {
+    c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at, audience) VALUES (?, ?, 'access', ?, ?, ?)", params![hash(access), grant_id, now + ACCESS_TTL_MS, now, audience])?;
+    c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at, audience) VALUES (?, ?, 'refresh', ?, ?, ?)", params![hash(refresh), grant_id, now + REFRESH_TTL_MS, now, audience])?;
     c.execute("UPDATE oauth_clients SET last_used_at = ? WHERE id = ?", params![now, client_id])?;
     Ok(())
 }
@@ -726,6 +734,7 @@ fn grant_row(r: &code_sql::Row<'_>) -> code_sql::Result<Grant> {
         revoked_why: r.get(19)?,
         temporary: r.get::<_, Option<String>>(20)?.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default(),
         ask_otherwise: r.get::<_, Option<bool>>(21)?.unwrap_or(false),
+        mcp_only: false,
     })
 }
 
@@ -832,7 +841,7 @@ fn check_rate(rate: Option<u32>) -> Result<()> {
     }
 }
 
-fn check_rules(rules: &Scope) -> Result<()> {
+pub(crate) fn check_rules(rules: &Scope) -> Result<()> {
     let problems = rules.problems();
     if problems.is_empty() { Ok(()) } else { Err(Error::BadRequest(problems.join("; "))) }
 }
@@ -860,6 +869,11 @@ impl Store {
         // An access token a machine client asked to be read-only (`scope=read-only`): its grant's
         // rules narrowed to reading wherever the secret is looked up.
         db.add_column("grant_secrets", "read_only", "INTEGER NOT NULL DEFAULT 0")?;
+        // Who an access token is for (RFC 8707): `mcp` for an MCP client's (it asked for the MCP
+        // server), none for roll's whole API. A refresh token's is what its access tokens get.
+        if !db.has_column("grant_secrets", "audience")? {
+            db.add_column("grant_secrets", "audience", "TEXT")?;
+        }
         // Where an approval's chat card is (`{install, channel, ts}`), once posted.
         if !db.has_column("approvals", "chat")? {
             db.add_column("approvals", "chat", "TEXT")?;
@@ -1138,13 +1152,14 @@ impl Store {
         let now = code_sql::now_ms();
         let h = hash(secret);
         let row = self.db.read(|c| {
-            c.query_row(                &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at, s.read_only FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
+            c.query_row(                &format!("SELECT {GRANT_COLUMNS}, s.kind, s.expires_at, s.read_only, s.audience FROM grant_secrets s JOIN grants g ON g.id = s.grant_id LEFT JOIN oauth_clients c ON c.id = g.client_id WHERE s.hash = ?"),
                 [&h],
                 |r| {
                     let mut g = grant_row(r)?;
                     if r.get::<_, i64>(after_grant(2))? != 0 {
                         g.read_only();
                     }
+                    g.mcp_only = r.get::<_, Option<String>>(after_grant(3))?.as_deref() == Some(AUDIENCE_MCP);
                     Ok((g, r.get::<_, String>(after_grant(0))?, r.get::<_, Option<i64>>(after_grant(1))?))
                 },
             )
@@ -1910,7 +1925,10 @@ impl Store {
             {
                 return Err(Error::OAuth("invalid_target", "the code was issued for another resource".into()));
             }
-            insert_oauth_secrets(c, &grant_id, client_id, &access, &refresh, now)?;
+            // Asked for roll's MCP server (at authorization or now, RFC 8707): its tokens are for
+            // that server only. Neither (`roll login`): roll's API.
+            let audience = (res.is_some() || resource.is_some()).then_some(AUDIENCE_MCP);
+            insert_oauth_secrets(c, &grant_id, client_id, &access, &refresh, audience, now)?;
             Ok(grant_id)
         })?;
         Ok((self.get(&grant_id)?, access, refresh))
@@ -1934,7 +1952,7 @@ impl Store {
         let outcome = self.db.write(|c| {
             let row = c
                 .query_row(
-                    "SELECT s.grant_id, s.expires_at, g.client_id, g.revoked_at, g.expires_at, s.kind, s.created_at FROM grant_secrets s JOIN grants g ON g.id = s.grant_id WHERE s.hash = ? AND s.kind IN ('refresh', 'spent_refresh')",
+                    "SELECT s.grant_id, s.expires_at, g.client_id, g.revoked_at, g.expires_at, s.kind, s.created_at, s.audience FROM grant_secrets s JOIN grants g ON g.id = s.grant_id WHERE s.hash = ? AND s.kind IN ('refresh', 'spent_refresh')",
                     [&h],
                     |r| {
                         Ok((
@@ -1945,11 +1963,12 @@ impl Store {
                             r.get::<_, Option<i64>>(4)?,
                             r.get::<_, String>(5)?,
                             r.get::<_, i64>(6)?,
+                            r.get::<_, Option<String>>(7)?,
                         ))
                     },
                 )
                 .optional()?;
-            let Some((grant_id, exp, cid, revoked, grant_exp, kind, at)) = row else { return Ok(Outcome::Bad("unknown refresh token")) };
+            let Some((grant_id, exp, cid, revoked, grant_exp, kind, at, audience)) = row else { return Ok(Outcome::Bad("unknown refresh token")) };
             if cid.as_deref() != Some(client_id) {
                 return Ok(Outcome::Bad("the refresh token belongs to another client"));
             }
@@ -1968,8 +1987,9 @@ impl Store {
                 return Ok(Outcome::Bad("the connection expired or was revoked: connect again"));
             }
             c.execute("UPDATE grant_secrets SET kind = 'spent_refresh', created_at = ? WHERE hash = ?", params![now, h])?;
-            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'access', ?, ?)", params![hash(&access), grant_id, now + ACCESS_TTL_MS, now])?;
-            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at) VALUES (?, ?, 'refresh', ?, ?)", params![hash(&refresh), grant_id, now + REFRESH_TTL_MS, now])?;
+            // The new pair is for whom the old one was.
+            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at, audience) VALUES (?, ?, 'access', ?, ?, ?)", params![hash(&access), grant_id, now + ACCESS_TTL_MS, now, audience])?;
+            c.execute("INSERT INTO grant_secrets (hash, grant_id, kind, expires_at, created_at, audience) VALUES (?, ?, 'refresh', ?, ?, ?)", params![hash(&refresh), grant_id, now + REFRESH_TTL_MS, now, audience])?;
             c.execute("UPDATE oauth_clients SET last_used_at = ? WHERE id = ?", params![now, client_id])?;
             Ok::<_, Error>(Outcome::Fresh(grant_id))
         })?;

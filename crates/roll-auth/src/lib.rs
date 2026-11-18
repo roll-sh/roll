@@ -253,6 +253,12 @@ pub trait Sessions: Send + Sync + 'static {
         let _ = user;
         Box::pin(async { Ok(None) })
     }
+    /// The person whose account has this email, as they are now (`None`: no such account, or
+    /// disabled): an enterprise identity assertion names a person by email. Never cached.
+    fn person_by_email<'a>(&'a self, email: &'a str) -> BoxFuture<'a, Result<Option<SignedIn>, String>> {
+        let _ = email;
+        Box::pin(async { Ok(None) })
+    }
     /// [`Sessions::person`] for callers off the request path (a product's background work checking
     /// a stored grant): blocking, never cached. `None` by default: an implementation that can't
     /// say keeps a person's grants dead there.

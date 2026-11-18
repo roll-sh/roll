@@ -330,6 +330,17 @@ async fn decide(access: Arc<Access>, req: Request, next: Next) -> Response {
     // Forwarded by a node that decided it for this grant already (a signed hop to an owner): a
     // person isn't asked twice, and the first node logs it. Everything else is decided again.
     let decided_before = req.extensions().get::<roll_cluster::Forwarded>().and_then(|f| f.decided.as_deref()) == Some(grant.id.as_str());
+    // A token for roll's MCP server (an MCP client's, RFC 8707) works there and in the calls that
+    // server makes for it (or a hop another node decided), never on the API directly: what the
+    // server adds (lockdown, the credential guard, a read-only connection URL) can't be stepped
+    // around with its token.
+    if grant.mcp_only && route != "/v1/mcp" && !route.starts_with("/v1/mcp/") && req.extensions().get::<McpCall>().is_none() && !decided_before {
+        let mut r = deny(StatusCode::UNAUTHORIZED, "invalid_token", "this token is for roll's MCP server (/v1/mcp) only: call the API with a token made for it".into(), json!({}));
+        if let Ok(v) = HeaderValue::from_str("Bearer error=\"invalid_token\", error_description=\"the token's audience is roll's MCP server\"") {
+            r.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+        }
+        return r;
+    }
     // A grant's request limit: every request counts, an MCP tool call too (as the route it calls),
     // but not the MCP envelope around it (a batch of calls is each call); a hop counts where it was
     // decided. Over it, nothing is written: a flood stays cheap.

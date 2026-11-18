@@ -19,6 +19,7 @@ pub mod oauth;
 pub mod rate;
 pub mod sinks;
 pub mod client_credentials;
+pub mod enterprise;
 mod clients_api;
 pub mod redact;
 pub mod store;
@@ -149,6 +150,7 @@ mod policy_tests {
             revoked_why: None,
             temporary: vec![],
             ask_otherwise: false,
+            mcp_only: false,
         };
         let now = 100 * day;
         assert!(p.idle(&g(0, None), now), "made 100 days ago, never used");
@@ -609,6 +611,31 @@ impl Access {
                         client: None,
                     });
                 }
+                continue;
+            }
+            // An enterprise app's secret: dropped with its tokens until the operator rotates it.
+            if let Some(app) = self.revoke_leaked_app(s, &format!("found in {found_at}"))? {
+                tracing::warn!(app = %app.client_id, at = %found_at, "a leaked enterprise app secret was revoked");
+                self.store.audit(&store::AuditEvent {
+                    id: new_id("aud"),
+                    at: code_sql::now_ms(),
+                    grant_id: None,
+                    grant_name: None,
+                    source: "leak".into(),
+                    tool: None,
+                    method: "-".into(),
+                    route: "leaked".into(),
+                    product: None,
+                    action: Some("admin".into()),
+                    resource: Some(format!("enterprise app {} ({}), found in {found_at}", app.name, app.client_id).chars().take(300).collect()),
+                    decision: "revoke".into(),
+                    approval: None,
+                    status: 200,
+                    args: None,
+                    ip: None,
+                    duration_ms: 0,
+                    client: None,
+                });
                 continue;
             }
             if let Some(g) = self.store.revoke_leaked(s, &format!("found in {found_at}"))? {
