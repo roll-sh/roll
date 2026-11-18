@@ -262,7 +262,7 @@ impl Secrets {
             }
             let mut rows = self.db.read(|c| {
                 c.query(
-                    "SELECT id, at, actor, action, env, path, keys, summary, ip FROM audit WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?",
+                    "SELECT id, at, actor, action, env, path, keys, summary, ip, approval FROM audit WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?",
                     params![project, cursor, BATCH],
                     |r| {
                         Ok(AuditEntry {
@@ -275,6 +275,7 @@ impl Secrets {
                             keys: from_json(&r.get::<_, String>(6)?),
                             summary: r.get(7)?,
                             ip: r.get(8)?,
+                            approval: r.get::<_, Option<String>>(9)?.and_then(|a| serde_json::from_str(&a).ok()),
                         })
                     },
                 )
@@ -324,9 +325,10 @@ fn host(url: &str) -> String {
 /// Rows as CSV: one header line, every field quoted.
 pub(crate) fn csv(rows: &[AuditEntry]) -> String {
     let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-    let mut out = String::from("id,at,actor,action,environment,path,keys,summary,ip\n");
+    let mut out = String::from("id,at,actor,action,environment,path,keys,summary,ip,approval,approved_by\n");
     for r in rows {
-        let fields = [r.id.to_string(), r.at.to_string(), q(&r.actor), q(&r.action), q(r.environment.as_deref().unwrap_or("")), q(r.path.as_deref().unwrap_or("")), q(&r.keys.join(" ")), q(&r.summary), q(r.ip.as_deref().unwrap_or(""))];
+        let (approval, by) = r.approval.as_ref().map_or((String::new(), String::new()), |a| (a.id.clone(), a.by.join(", ")));
+        let fields = [r.id.to_string(), r.at.to_string(), q(&r.actor), q(&r.action), q(r.environment.as_deref().unwrap_or("")), q(r.path.as_deref().unwrap_or("")), q(&r.keys.join(" ")), q(&r.summary), q(r.ip.as_deref().unwrap_or("")), q(&approval), q(&by)];
         out.push_str(&fields.join(","));
         out.push('\n');
     }

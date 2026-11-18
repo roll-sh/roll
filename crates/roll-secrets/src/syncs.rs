@@ -441,7 +441,7 @@ impl Secrets {
     fn sync_caller(&self, r: &Row) -> Result<Caller> {
         let principal = format!("sync:{}", r.info.id);
         if r.info.created_by == "operator" {
-            return Ok(Caller { principal, grants: Arc::new(Everything), ip: None, runtime: false });
+            return Ok(Caller { principal, grants: Arc::new(Everything), ip: None, runtime: false, approval: None });
         }
         let gone = || Error::Forbidden(format!("{} made this sync and can't reach secrets any more: make the sync again", r.info.created_by));
         // A person's: as they are now, while their account can sign in.
@@ -454,7 +454,7 @@ impl Secrets {
         // A roll-access grant: as it is now, or gone once revoked or expired (a person's acts as them).
         let token = r.info.created_by.strip_prefix("token:").ok_or_else(gone)?;
         let g = self.grants.as_ref().and_then(|g| g.grant(token)).ok_or_else(gone)?;
-        Ok(Caller { principal, grants: self.grant_grants(&g)?, ip: None, runtime: false })
+        Ok(Caller { principal, grants: self.grant_grants(&g)?, ip: None, runtime: false, approval: None })
     }
 
     /// A pass over the syncs only when a change marked some due (`checked_at` NULL): what rolld
@@ -554,7 +554,7 @@ impl Secrets {
         let outcome = caller.and_then(|caller| self.push_once(&r, &caller, digest, force));
         let now = self.db.now_ms().unwrap_or(hold - HOLD_MS);
         let (project, id, env, path) = (r.project.as_str(), r.info.id.as_str(), r.info.environment.as_str(), r.info.path.as_str());
-        let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None, runtime: false };
+        let actor = Caller { principal: format!("sync:{id}"), grants: Arc::new(Everything), ip: None, runtime: false, approval: None };
         let ok = outcome.is_ok();
         let res = self.db.write(|c| {
             match &outcome {
