@@ -1,6 +1,6 @@
 import { Building2, Check, Copy, Fingerprint, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { accountsApi, activityText, refreshSession, useSession, type AccountPolicy, type Activity, type Invite, type NetworkPolicy, type Passkey, type PasskeyPolicy, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
+import { accountsApi, findPeople, activityText, refreshSession, useSession, type AccountPolicy, type Activity, type Invite, type NetworkPolicy, type Passkey, type PeopleFilter, type PasskeyPolicy, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
 import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } from "@/lib/webauthn";
 import { Link } from "./link";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
@@ -884,6 +884,9 @@ function Users({ me }: { me: string }) {
   }, []);
   const act = (p: Promise<unknown>) => p.then(load, (e) => setError(errorText(e)));
   const without = (list ?? []).filter((u) => !u.disabled && !u.totp && !u.passkeys).length;
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<PeopleFilter>("everyone");
+  const shown = findPeople(list ?? [], query, filter);
   return (
     <Section title="People" lead="Everyone with an account. Turning someone off signs them out everywhere at once.">
       <p className="-mt-1 mb-2 text-[12px] text-muted">
@@ -899,8 +902,23 @@ function Users({ me }: { me: string }) {
           {without === 1 ? "One person has" : `${without} people have`} no second factor{required ? ": they can use only their account page until they set one up." : "."}
         </p>
       )}
+      {list && list.length > 8 && (
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <input id="people-search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Find by name, handle or address" aria-label="Find people" className={`${field} min-w-48 flex-1`} />
+          <select id="people-filter" value={filter} onChange={(e) => setFilter(e.target.value as PeopleFilter)} aria-label="Show" className={field}>
+            <option value="everyone">Everyone</option>
+            <option value="admins">Admins</option>
+            <option value="no-second-factor">No second factor</option>
+            <option value="turned-off">Turned off</option>
+          </select>
+          <span className="text-[11.5px] tabular-nums text-subtle">
+            {shown.length} of {list.length}
+          </span>
+        </div>
+      )}
+      {list && shown.length === 0 && <p className="mb-2 text-[12.5px] text-subtle">Nobody matches.</p>}
       <div className={card}>
-        {(list ?? []).map((u) => (
+        {shown.map((u) => (
           <div key={u.id} className={`flex items-center gap-3 border-t border-line px-4 py-2.5 first:border-t-0 ${u.disabled ? "opacity-60" : ""}`}>
             <span className="min-w-0 flex-1 leading-tight">
               <span className="block truncate text-[12.5px]">

@@ -154,6 +154,27 @@ export function activityText(e: Activity, me: string): string {
   return e.ok ? `${e.action} by ${by}` : `${e.action} by ${by} was refused`;
 }
 
+/** People's filters in the admin list. */
+export type PeopleFilter = "everyone" | "admins" | "no-second-factor" | "turned-off";
+
+/** The people matching `query` (name, handle or address, any case) and `filter`. */
+export function findPeople<U extends Pick<User, "name" | "handle" | "email" | "admin" | "disabled" | "totp" | "passkeys">>(list: U[], query: string, filter: PeopleFilter): U[] {
+  const q = query.trim().toLowerCase();
+  return list.filter((u) => {
+    if (q && ![u.name, u.handle, u.email].some((s) => s.toLowerCase().includes(q))) return false;
+    switch (filter) {
+      case "admins":
+        return u.admin;
+      case "no-second-factor":
+        return !u.disabled && !u.totp && !u.passkeys;
+      case "turned-off":
+        return u.disabled;
+      default:
+        return true;
+    }
+  });
+}
+
 /** Which sign-ins this roll offers (`sso`: a company's provider answers for some domains). */
 export type Providers = { email: boolean; github: boolean; google: boolean; sso?: boolean; passkey?: boolean };
 
