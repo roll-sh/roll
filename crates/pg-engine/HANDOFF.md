@@ -10604,6 +10604,75 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 15, part 2: integer filter kernels, kept index measures, COPY's record text (agent 246)
+
+BENCH.md "Bulk writes, round 15, part 2" has the measurements (joined windows, plain dist, lane C).
+Six commits on `cand/a246-2`, on `cand/a246` (part 1).
+
+- **Integer operators in filter kernels** (`K::Int`, `IntOp::apply`): int2 / int4 / int8 `+ - * %`
+  computed on the operands' exact numbers (a column read in place through `Cols::num`, never made a
+  `Value`; `%` in 64 bits, int8 minimum % -1 = 0), the result checked against its type's range; an
+  error (a zero divisor, out of range) or NULL goes to `eval` as before. `StoredCmps` now also takes
+  `col op const cmp const` (the bulk script's `id % 4 = 1` and `id % 2 = 0`), so a row it rejects is never
+  read at all (no `LazyBuf::read`, no row split, no value, no call). Against part 1, five pairs: UPDATE
+  -5.2 to -5.3%, DELETE with its compaction -7.8 to -7.9%, every other step level (all steps -2.7%).
+  Test: `stored_filters` checks seven integer-operator filters against plain evaluation (on the stored
+  path or not), the errors (`% 0`, int4 and int2 out of range) and int8's minimum % -1.
+- **A parallel btree build's heap measure kept** (`parbuild`, `txn::unchanged`): every parallel btree
+  build sized each row's heap tuple to pack the table's pages (`stored_tuple_len`, 12% of CREATE UNIQUE
+  INDEX), though the serial measure already takes the measure kept while nothing changed in the table
+  (`Ddl::kept_live`). Now the parallel build takes it too, and keeps the one it makes (rows and live pages)
+  when every row was sized from its stored bytes under the TOAST threshold and the transaction wrote
+  nothing in the table. Its xmins aren't read (`XMINS_UNKNOWN`: `oldest_xmin` decides nothing from them),
+  so VACUUM still measures the rows itself. The bulk script's CREATE UNIQUE INDEX after CREATE INDEX
+  sizes no row again: -15.6%.
+- **The untouched watch's per-key checks**: with a measure kept, every later commit ran each of its keys
+  through `unwatch_written` (a SipHash map) even after the watched table was gone from it (UPDATE +0.8%
+  on the first build of this). A commit stops once nothing is watched, and compares a key's table with
+  the one or two watched before touching the map.
+- **COPY's record text** (`CopyRaw`): each record's raw line, kept only for its CONTEXT line, was a
+  `String` per row; it is a range of one shared copy of the parsed chunk now (a CSV record, made apart,
+  keeps its own).
+- **One key buffer per run** (`Runs::write_fresh`, `write_deletes`): a run's keys with their version are
+  made in one buffer, not an allocation per key (agent 208's `run-key-buffer` idea).
+
+Results, joined windows, plain dist (BENCH.md): all steps b0 56.24 -> part 1 55.57 -> part 2 53.21 G
+(PostgreSQL 52.31, pgrust 44.77 the same day: 1.075x -> 1.017x PostgreSQL, 1.26x -> 1.19x pgrust).
+Against part 1, four or five pairs each: UPDATE -5.2%, DELETE with its compaction -8.4%, CREATE UNIQUE
+INDEX -15.7%, CREATE INDEX -1.0%, INSERT … SELECT -0.8 to -1.1%, COPY in -0.3%, the rest level. TPC-H q01
+and q06 level (three pairs, within 0.03%). Peak memory the same.
+
+**Measured and dropped:** the first build of the kept measure read every row's xmin to keep a measure
+VACUUM could take too, and left the per-key watch checks as they were: CREATE INDEX +1.5 to +1.7%,
+UPDATE +0.6 to +0.9% (four pairs); the kept form above is that without both.
+
+**Left (largest first):**
+1. DELETE with its compaction: 9.65 against PostgreSQL's 1.67 G, the one step far over. About half is
+   the statement (the merging scan over the UPDATE's versions in L0, 1.4 G of `count(*)` alone against
+   0.18 G once compacted; the deferred tombstones of the rows and both indexes' entries, 750,000 sorted
+   and written, ~1 G; row locks ~0.35 G), half the compaction (the table rewritten because the
+   UPDATE's versions are in L0, its index files marked). Folding the UPDATE's versions in at once
+   moves the rewrite rather than saving it (part 1).
+2. COPY in 10.25 against 6.48: parsing a quarter (`parse_copy_data`, five or six passes over the
+   chunk: the newline count, UTF-8 check, record boundary, line split, backslash check, field split),
+   the size model's per-row bookkeeping ~13% spread over a dozen calls, zstd ~9%.
+3. CREATE INDEX 5.31 against 3.13: the first read of COPY's linked runs decompresses every block (~11%,
+   the block cache's admission is agent 247's), `stored_tuple_len` and the sort. A COPY into a new table
+   could keep its measure too (`txn::unchanged` keeps a load's only after TRUNCATE in the same
+   transaction), and the first CREATE INDEX would size no row.
+4. INSERT … SELECT 6.79 against 4.31: zstd of the new table's runs ~12%, the size model ~10%.
+
+Not measured: lane A point reads (three pairs queued behind other agents' lane A runs for hours and
+didn't start before this hand-in). No read path changed but filter kernels (a point select's key range
+compiles none) and the commit's watch checks, which only got cheaper.
+
+Verification: `tools/quick-check.sh` on `7290ff3ac` (the six commits on `cand/a246`): Clippy 16 warnings,
+none new in a changed file; 432 tests in 27 binaries (`stored_filters` among them); crash_random seeds
+1-3 x 2, power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing; isolation 1647 / 1648;
+pg_dump_tap 14,609 passed. `--profile verify-checked` (debug assertions: the storage watch, VACUUM's and
+the index build's size checks): the lib's unit tests 236 passed, big_tables 21, compact_locks 4,
+parallel_scan 13, stored_filters 2. No format change.
+
 ## Bulk writes, round 15, part 1: DELETE's +4.5% explained, the bulk harness's background, the per-row micro set (agent 246)
 
 BENCH.md "Bulk writes, round 15, part 1" has the measurements (plain dist builds, lane C, the bulk

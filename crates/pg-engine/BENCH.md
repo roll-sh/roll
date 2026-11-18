@@ -285,6 +285,67 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Bulk writes, round 15, part 2: integer filter kernels, kept index measures (2026-11-18, agent 246)
+
+HANDOFF "Bulk writes, round 15, part 2" has what changed. Harness, lane and settings as in part 1
+(joined windows, plain dist builds of separate source snapshots of `6d3b7e9e5` with the changes).
+**n1** is part 1's four commits, **k1** n1 with the integer filter kernel, **r2** k1 with the rest of
+part 2 (CopyRaw, run key buffers, the kept index measure, the watch's per-key checks): the six commits of
+`cand/a246-2`. Every counter ran 100% of its window; foreign load 1.1-4.0 cores in most runs, the counts
+repeating within 0.3% regardless. Rows equal in every run.
+
+### Bulk, joined windows (G user instructions, alternating pairs)
+
+| step | n1 | k1 | % per pair (4) | r2 | % per pair against k1 (4) |
+|---|---|---|---|---|---|
+| COPY in | 10.284 | 10.284 | +0.0 x4 | 10.249 | -0.3 x4 |
+| CREATE INDEX | 5.365 | 5.364 | +0.0 / +0.1 / -0.2 / +0.0 | 5.309 | -1.0 x4 |
+| CREATE UNIQUE INDEX | 4.112 | 4.104 | -0.3 / -0.1 / -0.0 / -0.3 | 3.457 | -15.7 / -15.7 / -15.6 / -15.8 |
+| COPY out | 3.086 | 3.086 | +0.0 x4 | 3.088 | +0.1 x4 |
+| INSERT … SELECT | 6.857 | 6.854 | +0.0 / +0.1 / -0.0 / -0.6 | 6.787 | -0.8 / -1.1 / -0.6 / -1.0 |
+| UPDATE half | 12.618 | 11.953 | -5.2 / -5.3 / -5.3 / -5.2 | 11.960 | -0.0 / -0.0 / -0.1 / +0.1 |
+| DELETE a quarter, with its compaction | 10.534 | 9.705 | -7.8 / -7.9 / -7.9 / -7.9 | 9.652 | -0.5 / -0.5 / -0.5 / -0.6 |
+| VACUUM, ANALYZE, `count(*), sum(c)`, scans | | | +0.0 x4 | | +0.0 x4 |
+| **all steps** | 55.57 | 54.06 | -2.7 / -2.7 / -2.7 / -2.8 | 53.21 | -1.6 |
+
+An earlier build of the kept measure that read every row's xmin and left the watch's per-key checks as
+they were (r1, four pairs against k1): CREATE INDEX +1.5 to +1.7%, UPDATE +0.6 to +0.9% (every later
+commit's keys through a SipHash map), CREATE UNIQUE INDEX -15.6%; r2 is that with both fixed.
+
+### Same day, same lane and settings (medians; joined windows; PostgreSQL and pgrust 2 runs each, b0 and r2 4 each; plain dist builds)
+
+| step | PostgreSQL 18.6 | pgrust | b0 | r2 | r2 / PostgreSQL |
+|---|---|---|---|---|---|
+| COPY in | 6.478 | 4.963 | 10.495 | 10.249 | 1.58 |
+| CREATE INDEX | 3.130 | 2.885 | 5.364 | 5.309 | 1.70 |
+| CREATE UNIQUE INDEX | 2.247 | 1.881 | 4.111 | 3.457 | 1.54 |
+| COPY out | 3.211 | 2.018 | 3.086 | 3.088 | 0.96 |
+| INSERT … SELECT | 4.312 | 4.353 | 7.032 | 6.787 | 1.57 |
+| UPDATE half | 27.506 | 22.825 | 12.811 | 11.960 | 0.43 |
+| DELETE a quarter, with its compaction | 1.669 | 1.537 | 10.633 | 9.652 | 5.78 |
+| VACUUM | 2.529 | 3.122 | 1.795 | 1.795 | 0.71 |
+| ANALYZE | 0.499 | 0.836 | 0.469 | 0.469 | 0.94 |
+| `count(*), sum(c)` | 0.663 | 0.210 | 0.436 | 0.436 | 0.66 |
+| TRUNCATE | 0.031 | 0.064 | 0.005 | 0.005 | 0.15 |
+| DROP TABLE | 0.036 | 0.071 | 0.003 | 0.003 | 0.08 |
+| **all steps** | 52.31 | 44.77 | 56.24 | 53.21 | **1.017** |
+| x pgrust | 1.17 | 1 | 1.26 | 1.19 | |
+| count(*) by Seq Scan (extra) | 0.285 | 0.093 | 0.179 | 0.179 | 0.63 |
+| sum(a) by Seq Scan (extra) | 0.395 | 0.133 | 0.385 | 0.385 | 0.97 |
+
+Peak memory (cgroup): PostgreSQL 932-975 MB, pgrust 1,178-1,203, b0 340-389, r2 324-396 (VmHWM 275-284 and
+277-284). PostgreSQL's DELETE reads 1.67 G with its background in these windows (agent 245's split windows
+gave the same: nothing of its runs later).
+
+### TPC-H q01 and q06 (SF1, 2 GB cache, lane C; a fresh engine on b0's load, a warm-up, 5 runs in one perf window; 3 alternating pairs; G user instructions a run)
+
+| | q01 | q06 |
+|---|---|---|
+| b0 | 11.187 / 11.187 / 11.188 | 8.059 / 8.060 / 8.057 |
+| r2 | 11.188 / 11.186 / 11.187 | 8.057 / 8.059 / 8.056 |
+
+Level (within 0.03%); hashes equal. Foreign load 0.5-2.3 cores.
+
 ## Bulk writes, round 15, part 1: the per-row micro set (2026-11-17, agent 246)
 
 HANDOFF "Bulk writes, round 15, part 1" has what changed. **b0** is origin's `6d3b7e9e5`, **n1** the four
