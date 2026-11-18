@@ -3670,6 +3670,8 @@ cache waited out. Ranked now:
    replay refusal beaten by changing the box's `v`. Low: #330 storing an outsider's credential, #290's
    duplicated `Signature=`, #329's source bucket choosing the reference's project (and its refusal
    text an oracle), #248's per-reader eviction. Sound: #303's fixes, #274, #262, #281's key provenance.
+5b. **The thirty-first product review** (running, 2026-11-18 23:05): after today's builds, weighted to
+   the first ten minutes (UX and adoption), test gaps, and integration with the other threads.
 6. **R10, decoy keys** (building: `feature/roll-secrets-decoys`): a key holding a decoy `rlt_` token
    (#270) or a Postgres role, alerting `decoy_used` on any use; IAM users need an account;
    **R4** (GCP KMS, Azure Key Vault, HSM) and confirming #290, #284, #227, #229 on real accounts: the
