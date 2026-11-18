@@ -47,6 +47,8 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/reset-requests/{id}/approve", post(approve_reset))
         .route("/v1/accounts/reset-requests/{id}/deny", post(deny_reset))
         .route("/v1/accounts/me", get(me).patch(update_me))
+        .route("/v1/accounts/me/email", post(change_email))
+        .route("/v1/accounts/me/email/confirm", post(confirm_email))
         .route("/v1/accounts/me/sessions", get(my_sessions))
         .route("/v1/accounts/me/activity", get(my_activity))
         .route("/v1/accounts/me/sessions/{id}", delete(revoke_my_session))
@@ -772,6 +774,37 @@ async fn update_me(State(a): S, me: Me, b: Bytes) -> Result<Response> {
     let u = signed_in(me)?;
     let Name { name } = body(&b)?;
     Ok(Json(blocking(&a, move |a| a.rename(&u.user, &name)).await?).into_response())
+}
+
+#[derive(Deserialize)]
+struct NewEmail {
+    email: String,
+}
+
+/// Move your account to another address: a code goes there (docs/accounts.md, "Your address").
+async fn change_email(State(a): S, me: Me, b: Bytes) -> Result<(StatusCode, Json<Value>)> {
+    let u = signed_in(me)?;
+    sudo(&a, &u).await?;
+    if !a.mail_on() {
+        return Err(Error::Unavailable("email isn't configured on this server".into(), "email_off"));
+    }
+    let NewEmail { email } = body(&b)?;
+    let challenge = crate::new_id("chl");
+    let id = challenge.clone();
+    if let Some(mail) = blocking(&a, move |a| a.email_change_start(&u.user, &id, &email)).await? {
+        a.send_later(mail, "address change code");
+    }
+    Ok((StatusCode::ACCEPTED, Json(json!({ "challenge": challenge }))))
+}
+
+/// The code from the new address: the account moves, and the old address is told.
+async fn confirm_email(State(a): S, me: Me, b: Bytes) -> Result<Json<crate::User>> {
+    let u = signed_in(me)?;
+    sudo(&a, &u).await?;
+    let Verify { challenge, code } = body(&b)?;
+    let (user, mail) = blocking(&a, move |a| a.email_change_confirm(&u.user, &challenge, &code)).await?;
+    a.send_later(mail, "address changed");
+    Ok(Json(user))
 }
 
 #[derive(Deserialize)]
