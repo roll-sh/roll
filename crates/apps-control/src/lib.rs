@@ -1461,6 +1461,7 @@ impl Apps {
             },
             feedback: r.feedback,
             vitals: r.vitals,
+            report: r.report,
             maintenance: r.maintenance.clone().map(|m| crate::model::Maintenance { message: Some(m).filter(|m| !m.is_empty()) }),
             paused: r.paused,
             held_after: r.held_by.clone().filter(|h| h != crate::deploy::MANUAL_HOLD),
@@ -1544,7 +1545,7 @@ impl Apps {
                 settings.push(json!({ "field": format!("run.{k}"), "from": x, "to": y, "put": { "run": { k: x } } }));
             }
         }
-        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes"] {
+        for k in ["wait_for_ci", "follow_tag", "redeploy_on_secrets", "traces", "vitals", "report", "egress", "allow_ips", "rate_limit", "firewall", "headers", "routes"] {
             let (x, y) = (a.get(k).cloned().unwrap_or(Value::Null), b.get(k).cloned().unwrap_or(Value::Null));
             if x != y {
                 settings.push(json!({ "field": k, "from": x, "to": y, "put": { k: x } }));
@@ -1588,7 +1589,7 @@ impl Apps {
     pub async fn put_environment(self: &Arc<Self>, service: &str, env: &str, body: Value) -> Result<Environment> {
         let o = body.as_object().cloned().unwrap_or_default();
         for k in o.keys() {
-            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "paused", "held", "hostname", "traces", "egress", "vitals"].contains(&k.as_str()) {
+            if !["branch", "ephemeral", "access", "variables_from", "wait_for_ci", "run", "follow_tag", "redeploy_on_secrets", "feedback", "maintenance", "pages", "allow_ips", "rate_limit", "firewall", "headers", "routes", "paused", "held", "hostname", "traces", "egress", "vitals", "report"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown field {k}")));
             }
         }
@@ -1808,7 +1809,7 @@ impl Apps {
                 svc.for_env(&row).map_err(|e| Error::BadRequest(e.to_string().replace("no longer fit", "don't fit")))?;
             }
         }
-        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals"] {
+        for k in ["feedback", "follow_tag", "wait_for_ci", "redeploy_on_secrets", "traces", "vitals", "report"] {
             if !matches!(o.get(k), None | Some(Value::Null | Value::Bool(_))) {
                 return Err(Error::BadRequest(format!("{k} is a boolean")));
             }
@@ -1958,6 +1959,12 @@ impl Apps {
             self.live(service, env).forget_gate();
             self.changed(service);
         }
+        // Its deploys' reports to the Git host, from the next one on.
+        if let Some(Value::Bool(on)) = o.get("report") {
+            let (sid, e, on) = (service.to_string(), env.to_string(), *on);
+            self.db(move |s| s.set_report(&sid, &e, on)).await?;
+            self.changed(service);
+        }
         // Web Vitals: the proxy tags its pages from the next request on.
         if let Some(Value::Bool(on)) = o.get("vitals") {
             let (sid, e, on) = (service.to_string(), env.to_string(), *on);
@@ -2031,6 +2038,11 @@ impl Apps {
         self.release_domains(&domains).await;
         self.teardown_live(service, env).await;
         self.set_access_cache(service, env, None);
+        // And whatever its live state didn't know (an earlier process's instances, a sandbox or
+        // waker, a run): left on its network, the network and its relays would stay.
+        for name in self.deps.runtime.list_env(service, env).await {
+            self.deps.runtime.remove(&name).await;
+        }
         // Its last backup before the volume goes (kept a week), its instances stopped first.
         let sid = service.to_string();
         let had = self.db(move |s| s.service(&sid)).await.is_ok_and(|s| s.run.volume.is_some());
@@ -3170,6 +3182,10 @@ impl Apps {
             out.entry("over_capacity").or_default().push(r.over_capacity.into());
         }
         out.extend(series.into_iter().map(|(k, v)| (k, Value::Array(v))));
+        // Each instance's own last hour (on its owner, from the reaper's samples).
+        let live = self.lives.lock().get(&env_key(service, env)).cloned();
+        let by_instance = live.map(|l| l.by_instance()).unwrap_or_default();
+        out.insert("by_instance", serde_json::to_value(by_instance).expect("JSON"));
         Ok(serde_json::to_value(out).expect("JSON"))
     }
 

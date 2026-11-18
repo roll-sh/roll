@@ -95,7 +95,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/pending` | | `{ variables: { added, removed, changed } \| null, run: string[], secrets: boolean \| null }` (secrets: the project's secrets changed since, by roll secrets' digest; null without one): what the next deploy changes (names, never values; variables against the snapshot kept at the live deployment's switch, null without one; run: fields the service sets that the live deployment doesn't run with). Links and project secrets move `needs_deploy` too, unnamed | read |
 | `GET /v1/apps/services/{id}/environments/{env}/variables/values` | | `{[name]: value}`, never a sealed variable (nor a reference that reads one); 403 naming them when some come from roll secrets and roll secrets wouldn't show them to the caller (`SecretSource::may_reveal`) | reveal |
 | `PATCH /v1/apps/services/{id}/environments/{env}/variables` | `{set?: {[name]: value}, unset?: string[], seal?: string[], files?: {[name]: path \| null}, copy_from?: string, copy?: string[]}` (`copy_from` with `copy`: those names' values from another environment's own variables, set here as `set` sets them; 400 for a sealed one or one it lacks; reveal on `copy_from` too. set, then unset, then seal: names set here or already set; 400 for another; nothing unseals, a new value stays sealed. `files`: kept as a file at an absolute path in its instances, not in their environment, from the next deploy (0444; at most 20; not under `/proc`, `/sys` or `/dev`, no `..`; two can't share a path; null puts it back; unsetting a variable drops its file; 400 otherwise; on Fargate the deploy fails for now) | `Variables` | deploy* |
-| `GET /v1/apps/services/{id}/environments/{env}/diff?from=` | | `{from, to, variables: {missing: {name, sealed}[], extra: string[], differ: string[] \| null}, settings: {field, from, to, put}[]}`: how `env` differs from `from` (Railway's environment sync), never a value. `variables`: its own variables' names, `differ` null for a token without reveal on both; `settings`: `run.*`, `wait_for_ci`, `follow_tag`, `redeploy_on_secrets`, `traces`, `vitals`, `egress`, `allow_ips`, `rate_limit`, `firewall`, `headers`, `routes`, `pages.*` (whether each has its own), each with the `PUT …/environments/{env}` body that makes it `from`'s. A token needs read on `from` too (403) | read |
+| `GET /v1/apps/services/{id}/environments/{env}/diff?from=` | | `{from, to, variables: {missing: {name, sealed}[], extra: string[], differ: string[] \| null}, settings: {field, from, to, put}[]}`: how `env` differs from `from` (Railway's environment sync), never a value. `variables`: its own variables' names, `differ` null for a token without reveal on both; `settings`: `run.*`, `wait_for_ci`, `follow_tag`, `redeploy_on_secrets`, `traces`, `vitals`, `report`, `egress`, `allow_ips`, `rate_limit`, `firewall`, `headers`, `routes`, `pages.*` (whether each has its own), each with the `PUT …/environments/{env}` body that makes it `from`'s. A token needs read on `from` too (403) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/logs?follow=&tail=&since=&before=&instance=&deployment=&stream=&level=&where=&q=&http=&status=&min_ms=&by=` | | `LogLine[]` or SSE; `before` (unix ms) reads back to a time (not followed), `instance`/`deployment`/`stream` narrow it (followed too), `level` keeps lines at that level or worse (a line that says none isn't; 400 for another word), `where` keeps lines whose JSON or logfmt fields say all its terms (`level:error user_id:42`, `key:*`, `-key:value`, `a.b:x`, quoted values; at most 10; 400 for one that isn't `key:value`), `X-Roll-Search-Truncated: 1` when a read back stopped short; `http=1`: the proxy's access log (`stream: "http"`, text `AccessLine`), `status` (`500`, `5xx`, `400-499`), `min_ms` and `by` (one reason, or `any`: every answer roll gave itself) filtering it | read |
 | `GET /v1/apps/services/{id}/environments/{env}/metrics?minutes=&format=` | | `Metrics`; `format=prometheus`: the last finished minute as Prometheus text (`roll_apps_requests_per_minute`, `…_errors_per_minute`, `…_latency_ms{quantile}`, `…_cpu_seconds_per_minute`, `…_memory_bytes`, `…_instances`, `…_cold_starts_per_minute`, `…_cold_start_ms`, labelled `service`, `service_id`, `environment`) | read |
 | `GET /v1/apps/services/{id}/environments/{env}/routes?minutes=` | | `RouteStats` (with `deployments` and `instances`: the same requests by the deployment and the instance that answered, the busiest 50 of each) (the last 5–60 minutes, default 60): the access log grouped by method and route, id-like segments `:id` and no query; the busiest, the most 5xx and the slowest (5 requests or more), each at most 50 | read |
@@ -376,6 +376,7 @@ type EnvironmentPut = {
    *  environment, then 429). No cookie, no id; the edge's country is kept. Off: those paths are
    *  the app's. */
   vitals?: boolean;
+  report?: boolean; // false: its deploys post no commit status and no GitHub Deployment (someone else reports them: roll previews, for its `pv-` environments)
   follow_tag?: boolean;
   /** A preview environment (ephemeral) only, set by roll previews: a visitor who came in through
    *  its access link gets roll previews' feedback button on its pages (`/__roll/feedback.js`
@@ -443,6 +444,7 @@ type Environment = EnvironmentSummary & {
   redeploy_on_secrets: boolean; // the project's secrets changing redeploys it (same image, new values)
   traces: boolean; // its instances send OpenTelemetry traces to roll
   vitals: boolean; // its pages measure their Web Vitals for roll (`…/vitals`)
+  report: boolean; // its deploys are reported to the Git host (default true)
   egress: { mode: "roll" | "open"; hosts: string[] }; // what its code may reach (roll: roll and the hosts)
   egress_refused?: { host: string; private?: true }[]; // hosts its egress proxy refused lately, oldest first, at most 20: not listed, or (private) listed but resolving only to private addresses
   feedback: boolean;          // a preview's pages carry roll previews' feedback button
@@ -590,6 +592,10 @@ type Metrics = {
   cold_start_ms: number[];   // average of the minute's cold starts (0 when none)
   egress_bytes: number[];    // bytes answered (what egress is billed by); format=prometheus: roll_apps_egress_bytes_per_minute
   over_capacity: number[];   // requests that found every instance busy at max_instances (saturation); roll_apps_over_capacity_per_minute
+  by_instance: {             // each instance it has now, its own last hour whatever `minutes` asks (on its owner, in memory)
+    instance: string; deployment: string;
+    minutes: number[]; cpu: number[] /* cores, average over the minute */; memory_bytes: number[] /* the minute's peak */;
+  }[];
 };
 
 type Usage = {

@@ -596,6 +596,10 @@ impl Runtime for Fake {
         self.instances.lock().values().filter(|i| service.is_none_or(|s| i.spec.service == s)).map(|i| i.spec.name.clone()).collect()
     }
 
+    async fn list_env(&self, service: &str, env: &str) -> Vec<String> {
+        self.instances.lock().values().filter(|i| i.spec.service == service && i.spec.env == env).map(|i| i.spec.name.clone()).collect()
+    }
+
     async fn ensure_network(&self, name: &str, _service: &str, closed: bool) -> anyhow::Result<()> {
         let mut n = self.networks.lock();
         if !n.iter().any(|x| x == name) {

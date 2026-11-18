@@ -1602,7 +1602,7 @@
     },
     "/v1/apps/services/{id}/environments/{env}/diff": {
       "get": {
-        "description": "Answers `{from, to, variables: {missing: {name, sealed}[], extra: string[], differ: string[] | null}, settings: {field, from, to, put}[]}`: how `env` differs from `from` (Railway's environment sync), never a value. `variables`: its own variables' names, `differ` null for a token without reveal on both; `settings`: `run.*`, `wait_for_ci`, `follow_tag`, `redeploy_on_secrets`, `traces`, `vitals`, `egress`, `allow_ips`, `rate_limit`, `firewall`, `headers`, `routes`, `pages.*` (whether each has its own), each with the `PUT …/environments/{env}` body that makes it `from`'s. A token needs read on `from` too (403).",
+        "description": "Answers `{from, to, variables: {missing: {name, sealed}[], extra: string[], differ: string[] | null}, settings: {field, from, to, put}[]}`: how `env` differs from `from` (Railway's environment sync), never a value. `variables`: its own variables' names, `differ` null for a token without reveal on both; `settings`: `run.*`, `wait_for_ci`, `follow_tag`, `redeploy_on_secrets`, `traces`, `vitals`, `report`, `egress`, `allow_ips`, `rate_limit`, `firewall`, `headers`, `routes`, `pages.*` (whether each has its own), each with the `PUT …/environments/{env}` body that makes it `from`'s. A token needs read on `from` too (403).",
         "operationId": "getServicesIdEnvironmentsEnvDiff",
         "parameters": [
           {
@@ -1624,7 +1624,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`{from, to, variables: {missing: {name, sealed}[], extra: string[], differ: string[] | null}, settings: {field, from, to, put}[]}`: how `env` differs from `from` (Railway's environment sync), never a value. `variables`: its own variables' names, `differ` null for a token without reveal on both; `settings`: `run.*`, `wait_for_ci`, `follow_tag`, `redeploy_on_secrets`, `traces`, `vitals`, `egress`, `allow_ips`, `rate_limit`, `firewall`, `headers`, `routes`, `pages.*` (whether each has its own), each with the `PUT …/environments/{env}` body that makes it `from`'s. A token needs read on `from` too (403)"
+            "description": "`{from, to, variables: {missing: {name, sealed}[], extra: string[], differ: string[] | null}, settings: {field, from, to, put}[]}`: how `env` differs from `from` (Railway's environment sync), never a value. `variables`: its own variables' names, `differ` null for a token without reveal on both; `settings`: `run.*`, `wait_for_ci`, `follow_tag`, `redeploy_on_secrets`, `traces`, `vitals`, `report`, `egress`, `allow_ips`, `rate_limit`, `firewall`, `headers`, `routes`, `pages.*` (whether each has its own), each with the `PUT …/environments/{env}` body that makes it `from`'s. A token needs read on `from` too (403)"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
