@@ -287,14 +287,16 @@ limits. Their results have not been reverified on the current source.
 
 ## MultiXact (2026-11-18, agent 249)
 
-Lane A, short transactions at 8 clients (agent 243's harness, plain dist builds, 10 s runs, a fresh
-server and 100,000-row fixture each, alternating pairs, user instructions per transaction; host
-load 45-70 throughout: HANDOFF "MultiXact").
+Lane A, agent 243's harness (plain dist builds, 10 s runs, a fresh server and 100,000-row fixture
+each, 5 alternating pairs a cell; medians of the pairs under 1.0 foreign core; host load 45-70;
+HANDOFF "MultiXact"). User instructions per operation first.
 
-| baseline | pairs | unflagged | instr/txn (median of unflagged; all pairs) | cycles/txn | tps |
-|---|---:|---:|---|---:|---:|
-| `6d3b7e9e5` (h249 on `6913fd09c`: others' commits too) | 5 | 3 | +0.42% (-1.96 .. +4.65%) | -2.8% | +12.2% |
-| `6913fd09c` (h249's parent) | 5 | 0 (1.04-2.62 foreign cores after 4 tries each) | none (-7.6 .. +2.7%) | | |
+| cell | landed commit against `6913fd09c` (instr / cycles / tps) | with `Txn::mx` against `c55ecbb73` (instr / cycles / tps) |
+|---|---|---|
+| point select, 8 clients | +0.29% (+0.19 .. +0.36) / +1.5% / -4.0% | +0.20% (+0.12 .. +0.21) / +0.3% / -11.4% (pairs +0.5 .. -28.2) |
+| point select, 32 clients | +0.52% (-0.16 .. +0.61) / +2.9% / -3.6% | +0.15% (+0.14 .. +0.46) / -1.8% / +6.4% |
+| short transactions, 8 clients | no clean pair | -1.31% (4 pairs) / -1.7% / +8.9% |
+| short transactions, 32 clients | +0.89% (4 pairs) / -1.3% / +0.1% | -0.49% / +0.4% / -0.8% |
 
 ## Bulk writes, round 16: the reclaim trigger, COPY's splitting (2026-11-18, agent 253)
 

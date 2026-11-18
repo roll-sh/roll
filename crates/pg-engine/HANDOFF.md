@@ -15248,7 +15248,7 @@ Not done: datminmxid's advance (it needs every relation of the database, its cat
 vacuumed: the catalogs' relminmxid isn't modelled); multixact truncation (members of multis
 before every table's relminmxid aren't dropped; the records are 12 + 9 bytes a member); a table
 too big to model (over 400,000 versions) keeps no xmax (reads 0, as before), and its VACUUM
-moves relminmxid to OldestMxact; a clean lane A gate (below). Found on the way:
+moves relminmxid to OldestMxact. Found on the way:
 `count(DISTINCT xmax)` runs here, PostgreSQL rejects it ("could not identify an ordering
 operator for type xid", 42883): not fixed.
 
@@ -15272,23 +15272,25 @@ insert-conflict-do-update-*, eval-plan-qual, delete-abort-savept*, aborted-keyre
 `--profile verify-checked`, quick-check.
 
 Performance (lane A, agent 243's harness copied to `~/.cache/a249/bench`, plain dist builds, 10 s
-runs, a fresh server and 100,000-row fixture each, lane A's lock held for the whole gate). Not
-settled: the host ran at load 45-70 while it ran, and no clean result exists yet.
-- A first gate compared b249 at `6d3b7e9e5` with h249 on `6913fd09c` (the head after a rebase:
-  agents 243's and 244's commits in it too, so it measured more than this change). Short
-  transactions at 8 clients, 3 unflagged pairs of 5: user instructions per transaction +0.42%
-  (pairs -1.96 .. +4.65%, the two flagged ones included), cycles -2.8%, tps +12.2%.
-- The gate again with b249 rebuilt at `6913fd09c` (h249's parent): short transactions at 8
-  clients, all 5 pairs flagged after 4 tries each (1.04-2.62 foreign cores): instructions
-  -7.6 .. +2.7% a pair, not counted. The other cells (short at 32, point reads at 8 and 32) ran
-  after this note was written (`~/.cache/a249/runs/g1-*`).
-- What the change adds to a transaction that takes no row lock: on an UPDATE, the old version's
-  xmax is 0, so the model's update takes one branch more, reads whether a key column changed
-  from the executor (`sizing::note_update_keys`, a thread-local, instead of comparing the key
-  columns again) and sets the new version's xmax only when a locker remains; a commit takes an empty list of state records and checks the first
-  write's key; `Txn` has two more empty vectors. Point reads read nothing new (the `xmax` system
-  column's value comes from the same model lookup as cmin / cmax, only when asked for).
-  Measured in-process (1 client, the bench's own thread): within the runs' noise (-0.2% and
-  +4.0% in two rounds, compaction work inline with the transactions).
-A transaction that only locks rows writes its state records and commits without waiting for an
-fsync, where it wrote nothing before.
+runs, a fresh server and 100,000-row fixture each, 5 alternating pairs a cell, lane A's lock held
+for the whole gate; host load 45-70 throughout, BENCH "MultiXact"). The gate of the landed
+commit (`0808ed9ac`'s code against its parent `6913fd09c`) put point reads over their budget:
++0.29% user instructions at 8 clients (every pair +0.19 .. +0.36%) and +0.52% at 32; short
+transactions +0.89% at 32 clients (4 clean pairs, the connection threads -1.30%), none clean at 8.
+Its follow-up (`Txn::mx`: the two vectors the transaction gained in one boxed field made on first
+use, its commit and drop testing only that; `cand/a249-2`), against its base `c55ecbb73`:
+- point reads, 8 clients: +0.20% instructions (every pair +0.12 .. +0.21%), cycles +0.3%,
+  tps -11.4% (pairs +0.5 .. -28.2%, the drops in the runs with 0.67-0.85 foreign cores);
+- point reads, 32 clients: +0.15% (+0.14 .. +0.46%), cycles -1.8%, tps +6.4%;
+- short transactions, 8 clients (4 clean pairs): -1.31%, cycles -1.7%, tps +8.9% (up in every
+  clean pair; the connection threads' sampled instructions +0.45%);
+- short transactions, 32 clients: -0.49%, cycles +0.4%, tps -0.8% (connection threads +0.35%).
+Instructions are within +0.3% for point reads and +0.5% for short transactions; tps spreads by
+10-30% a pair on this host and isn't settled at 8 clients. What remains on a point read is the
+transaction's one more field and the read-only commit's test of it, and a few dozen instructions
+the profile (`perf record`, 20,011 instructions a sample) can't place: the build's inlining moved
+with the code. On an UPDATE whose old version's xmax is 0 the model's update takes one branch
+more, reads whether a key column changed from the executor (`sizing::note_update_keys`, a
+thread-local, instead of comparing the key columns again) and sets the new version's xmax only
+when a locker remains. A transaction that only locks rows writes its state records and commits
+without waiting for an fsync, where it wrote nothing before.
