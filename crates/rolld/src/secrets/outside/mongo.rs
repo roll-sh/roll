@@ -1,4 +1,6 @@
-//! MongoDB servers outside roll (Atlas, a replica set of the customer's own): the same guards as
+//! MongoDB servers outside roll (a replica set of the customer's own, a host such as DigitalOcean's;
+//! never Atlas, which refuses these commands on every tier: roll_secrets::atlas speaks its Admin
+//! API instead): the same guards as
 //! Postgres (public addresses resolved here; TLS verified against each host's name). User
 //! management runs on the primary, found with `hello` among the seed hosts only (or, for
 //! `mongodb+srv://`, the SRV record's targets, which must sit inside its domain), so a server can't
@@ -24,6 +26,8 @@ const DEPTH_MAX: usize = 16;
 /// MongoDB's default is 15,000; a server asking for more than this is refused, not obeyed.
 const ITERATIONS_MAX: u32 = 1_000_000;
 const SEEDS_MAX: usize = 16;
+/// Atlas's cluster domains (commercial, Atlas for Government, and its development cloud).
+const ATLAS_DOMAINS: &[&str] = &[".mongodb.net", ".mongodbgov.net", ".mongodb-dev.net"];
 
 pub(super) struct Url {
     /// Seed hosts and ports (several for a replica set).
@@ -66,6 +70,11 @@ pub(super) fn parse(url: &str, allow_private: bool) -> Result<Url, String> {
     }
     if seeds.is_empty() || seeds.len() > SEEDS_MAX || user.is_empty() || (srv && seeds.len() != 1) {
         return Err(bad());
+    }
+    // Atlas refuses createUser, updateUser and dropUser on every tier, and rolls back a user
+    // change made outside its UI, CLI or Admin API.
+    if seeds.iter().any(|(h, _)| ATLAS_DOMAINS.iter().any(|d| h.to_ascii_lowercase().ends_with(d))) {
+        return Err("that's a MongoDB Atlas cluster: Atlas manages database users only through its Admin API, so register its project instead (roll secrets atlas add, POST …/atlas-projects)".into());
     }
     // `mongodb+srv://` means TLS unless it says otherwise; `mongodb://` only with tls=true.
     let mut tls = srv;

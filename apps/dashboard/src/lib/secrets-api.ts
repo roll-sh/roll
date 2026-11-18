@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, Gateway, MadeGateway, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, Directory, NewDirectory, SnowflakeAccount, NewSnowflakeAccount, AtlasProject, NewAtlasProject, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat, Gateway, MadeGateway } from "@roll/secrets/types";
 import type { Grant } from "./access-api";
 import { withSession } from "./code-token";
 import { grantFor, tokenOf } from "./secrets-tokens";
@@ -224,6 +224,14 @@ export function secretsApi(project: string) {
     directories: () => req<Directory[]>("GET", `${P}/directories`),
     addDirectory: (d: NewDirectory) => req<Directory>("POST", `${P}/directories`, d),
     deleteDirectory: (id: string) => req<null>("DELETE", `${P}/directories/${enc(id)}`),
+    /** Snowflake: registering one signs in as its admin user and finds the managed user and the roles. */
+    snowflakeAccounts: () => req<SnowflakeAccount[]>("GET", `${P}/snowflake-accounts`),
+    addSnowflakeAccount: (a: NewSnowflakeAccount) => req<SnowflakeAccount>("POST", `${P}/snowflake-accounts`, a),
+    deleteSnowflakeAccount: (id: string) => req<null>("DELETE", `${P}/snowflake-accounts/${enc(id)}`),
+    /** MongoDB Atlas: registering one takes a token as its service account and finds the managed users. */
+    atlasProjects: () => req<AtlasProject[]>("GET", `${P}/atlas-projects`),
+    addAtlasProject: (a: NewAtlasProject) => req<AtlasProject>("POST", `${P}/atlas-projects`, a),
+    deleteAtlasProject: (id: string) => req<null>("DELETE", `${P}/atlas-projects/${enc(id)}`),
     /** Gateways into private networks: making one returns its roll token once. */
     gateways: () => req<Gateway[]>("GET", `${P}/gateways`),
     addGateway: (g: { name: string; token?: boolean }) => req<MadeGateway>("POST", `${P}/gateways`, g),

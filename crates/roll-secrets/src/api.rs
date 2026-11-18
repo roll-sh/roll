@@ -134,6 +134,10 @@ pub fn router(s: Arc<Secrets>) -> Router {
         .route(&format!("{P}/outside-databases/{{id}}/rotate-admin"), post(rotate_outside_admin))
         .route(&format!("{P}/directories"), get(directories).post(add_directory))
         .route(&format!("{P}/directories/{{id}}"), axum::routing::delete(delete_directory))
+        .route(&format!("{P}/snowflake-accounts"), get(snowflake_accounts).post(add_snowflake_account))
+        .route(&format!("{P}/snowflake-accounts/{{id}}"), axum::routing::delete(delete_snowflake_account))
+        .route(&format!("{P}/atlas-projects"), get(atlas_projects).post(add_atlas_project))
+        .route(&format!("{P}/atlas-projects/{{id}}"), axum::routing::delete(delete_atlas_project))
         .route(&format!("{P}/gateways"), get(gateways).post(add_gateway))
         .route(&format!("{P}/gateways/{{id}}"), axum::routing::delete(delete_gateway))
         .route(&format!("{P}/kubernetes"), get(kubernetes_clusters).post(add_kubernetes_cluster))
@@ -1317,6 +1321,34 @@ async fn add_directory(State(s): S, Who(c): Who, Path(project): Path<String>, b:
 
 async fn delete_directory(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
     blocking(s, move |s| s.delete_directory(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn snowflake_accounts(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.snowflake_accounts(&project, &c)).await?))
+}
+
+async fn add_snowflake_account(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::snowflake::NewSnowflakeAccount = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_snowflake_account(&project, n, &c)).await?))
+}
+
+async fn delete_snowflake_account(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_snowflake_account(&project, &id, &c)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn atlas_projects(State(s): S, Who(c): Who, Path(project): Path<String>) -> crate::Result<Response> {
+    Ok(ok(blocking(s, move |s| s.atlas_projects(&project, &c)).await?))
+}
+
+async fn add_atlas_project(State(s): S, Who(c): Who, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let n: crate::atlas::NewAtlasProject = body(&b)?;
+    Ok(created(blocking(s, move |s| s.add_atlas_project(&project, n, &c)).await?))
+}
+
+async fn delete_atlas_project(State(s): S, Who(c): Who, Path((project, id)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(s, move |s| s.delete_atlas_project(&project, &id, &c)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -11,6 +11,8 @@ import { GitHubApps } from "./github-apps";
 import { KubernetesClusters } from "./kubernetes-clusters";
 import { OutsideDatabases } from "./outside-databases";
 import { Directories } from "./directories";
+import { SnowflakeAccounts } from "./snowflake-accounts";
+import { AtlasProjects } from "./atlas-projects";
 import { AwsRoles } from "./aws-roles";
 import { Rotators } from "./rotators";
 import { SaasRotators } from "./saas-rotators";
@@ -79,6 +81,8 @@ export function SyncsView() {
       <Gateways />
       <OutsideDatabases />
       <Directories />
+      <SnowflakeAccounts />
+      <AtlasProjects />
       <GitHubApps />
       <Rotators />
       <SaasRotators />

@@ -602,9 +602,11 @@ mod tests {
         assert!(g.redis("redis://:pw@cache.example.com").err().unwrap().contains("rediss://"));
         assert!(g.redis("rediss://admin:pw@cache.example.com:6380").unwrap().is_some());
         // MongoDB: tls=true (mongodb+srv:// implies it), and nothing but what Atlas's strings carry.
+        // Atlas itself is refused: its users are managed only through its Admin API.
         assert!(g.mongo("mongodb://a:b@db.example.com:27017/").err().unwrap().contains("tls=true"));
         assert!(g.mongo("mongodb://a:b@db.example.com/?tls=true&tlsInsecure=true").err().unwrap().contains("tlsInsecure"));
-        assert!(g.mongo("mongodb+srv://a:b@cluster0.abcde.mongodb.net/?retryWrites=true&w=majority&appName=c").unwrap().is_some());
+        assert!(g.mongo("mongodb+srv://a:b@mongo.db.example.com/?retryWrites=true&w=majority&appName=c").unwrap().is_some());
+        assert!(g.mongo("mongodb+srv://a:b@cluster0.abcde.mongodb.net/").err().unwrap().contains("atlas-projects"));
         // SQL Server: TLS always (encrypt=false is refused even where private addresses are allowed).
         assert!(Engine { allow_private: true, via: Via::Direct { allow_private: true } }.mssql("sqlserver://a:b@db.example.com/x?encrypt=false").err().unwrap().contains("TLS"));
         assert!(g.mssql("sqlserver://a:b@db.example.com/x?trustServerCertificate=true").err().unwrap().contains("trustServerCertificate"));
