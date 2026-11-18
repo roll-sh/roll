@@ -34,6 +34,8 @@ pnpm dev                                # dashboard: /dashboard/search
 | `--search-test-features`                           | off               | publish Elasticsearch's test features (YAML suites through `--cluster-hook`; test deployments only) |
 | `--search-max-clusters-per-person` (`ROLL_SEARCH_MAX_CLUSTERS_PER_PERSON`) | `50` | clusters a signed-in person may own, branches included (0: no cap; the operator and admins aren't capped) |
 | `--search-max-always-on-per-person` (`ROLL_SEARCH_MAX_ALWAYS_ON_PER_PERSON`) | `2` | of those, always-on ones (`idle_timeout_s` 0) (0: no cap) |
+| `--search-audit-retention-days` (`ROLL_SEARCH_AUDIT_RETENTION_DAYS`) | `7` | how long each cluster's security audit log keeps its entries |
+| `--search-audit-max-mb` (`ROLL_SEARCH_AUDIT_MAX_MB`) | `32` | audit entries kept per cluster, compressed MiB; past it the oldest go |
 | `--no-search`, `--search-only`                     |                   | shorthands for `ROLL_PRODUCTS` without search, or with only search |
 | `--search-public-url` (`ROLL_SEARCH_PUBLIC_URL`)   |                   | the front clients use (a load balancer): cluster URLs name it |
 
@@ -145,6 +147,7 @@ them (`api::Caller`):
 | GET | `/v1/search/clusters/{id}/indices` | `_cat/indices` as JSON numbers: health, status, shards, docs, sizes; docs and sizes of open indices come from the engine (as `_stats` reports them: Lucene documents, nested ones included, unflushed writes included). Wakes the cluster |
 | POST | `/v1/search/clusters/{id}/request` | console: `{method, path, body?}` (a JSON body, sent byte for byte so `_source` keeps its key order, or a string such as NDJSON, sent as is) → `{status, headers, body, took_ms, truncated}`. Accepts bodies up to the cluster's `max_body_mb` (the request may be up to twice that plus 1 MiB, for JSON escapes) |
 | GET | `/v1/search/clusters/{id}/usage?days=30` | loaded seconds, GiB-hours, requests, stored GiB-months, cost, and the same workload on Elastic Cloud Hosted, an Amazon OpenSearch Service domain and OpenSearch Serverless |
+| GET | `/v1/search/clusters/{id}/audit?from=&to=&event=&size=` | the cluster's security audit log (below), newest first: `{flavor, retention_days, entries: [{at_ms, event, entry}], more}`. `from` (inclusive) and `to` (exclusive) are Unix milliseconds; `event` takes names or categories, comma-separated (an Elasticsearch `event.action` such as `put_user` too); `size` up to 1,000 (100). Never wakes the cluster. A read in roll's permissions, not a reveal: entries hold no secret |
 | POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?}` (`access`: `admin`, the default, or `data`: a link's role, data, templates, pipelines and lifecycle policies without security) → `{id, name, access, api_key, url, expires_at?}` (`access`: the access the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone) |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}` | Elasticsearch's `GET`/`PUT`/`DELETE /<index>`: mappings, settings and aliases; create (body: `mappings`, `settings`); delete |
@@ -223,6 +226,63 @@ tree (`_explain`; a `semantic` query, which `_explain` can't rewrite, is explain
 limited to that id; a hybrid hit shows each part). Either side copies as curl, Python or JavaScript
 with the key from `$ROLL_SEARCH_API_KEY` (OpenSearch-flavor clusters: OpenSearch's clients and
 `$OPENSEARCH_USERNAME`/`$OPENSEARCH_PASSWORD`).
+
+## Audit log
+
+Every cluster has a security audit log, as Elastic Cloud's audit logging and OpenSearch Security's
+audit log give one (`search-es` `xpack::security::audit` decides and writes entries,
+`search-server` `audit` keeps them). The owner and admins read it from the API (`GET …/audit`)
+and in the dashboard (Settings → Audit log: a table filtered by time and event, newest first).
+
+- **What it records by default:** failed logins, access denials, `run_as` denials and security
+  configuration changes: users (put, delete, password, enable, disable), roles, role mappings,
+  API keys (create, grant, update, invalidate, also through `…/keys`), application privileges,
+  service tokens, and OpenSearch Security's configuration documents. Granted access and
+  successful logins only when the cluster asks: one entry per request.
+- **Elasticsearch-flavor clusters** use Elasticsearch's event names (`authentication_failed`,
+  `anonymous_access_denied`, `access_denied`, `run_as_denied`, `security_config_change`,
+  `access_granted`, `authentication_success`) and entry fields (`event.type`, `event.action`,
+  `user.name`, `user.realm`, `user.roles`, `user.run_as.name`, `apikey.id`, `origin.type`,
+  `origin.address`, `url.path`, `request.method`, `request.id`, `action`, `request.name`,
+  `indices`; a change's `put`/`delete`/`change`/`create`/`invalidate` object), checked against
+  Elasticsearch 9.5.5. `xpack.security.audit.enabled` and
+  `xpack.security.audit.logfile.events.include`/`exclude` are dynamic cluster settings, as on
+  9.5.5 (event names checked: `invalid event name specified [x]`). roll's defaults differ:
+  enabled, and the include list without `access_granted` and `run_as_granted`.
+- **OpenSearch-flavor clusters** use OpenSearch Security's categories (`FAILED_LOGIN`,
+  `MISSING_PRIVILEGES`, `COMPLIANCE_INTERNAL_CONFIG_WRITE` and `_READ`, `INDEX_EVENT`,
+  `GRANTED_PRIVILEGES`, `AUTHENTICATED`) and `audit_*` fields (format version 4), and the stored
+  `_plugins/_security/api/audit` config decides: `enabled`, `enable_rest`, `enable_transport`, the
+  disabled categories (by default `AUTHENTICATED` and `GRANTED_PRIVILEGES`), `ignore_users`,
+  `ignore_requests`, and compliance's `internal_config` with its ignored users.
+- **Never in an entry:** a password, API key, token, `Authorization` or other header, query
+  string or request body. A failed login names the user only when Basic credentials gave one.
+  Changes are built field by field (a user's `has_password`, a grant's `has_password`), never by
+  copying the body. OpenSearch's `log_request_body`, `write_log_diffs` and headers are accepted
+  and never acted on. `control.rs` `audit_entries_hold_no_secrets` looks for every credential and
+  marker of its requests in the answered and the stored entries.
+- **Storage:** object storage next to the cluster's data
+  (`search/c/<cluster>/audit/<first ms>-<last ms>-<token>.ndjson.zst`). A node batches a
+  cluster's entries in memory for 5 s and writes them as one object, so a burst costs one write
+  and a cluster nothing happens to costs nothing: no object, no timer (the flusher runs only while
+  entries wait), and a read never wakes the cluster. The catalog was the other choice; it would
+  put every failed login of every tenant into the shared Postgres of a fleet, while object
+  storage is where a cluster's data already lives, scales with the cluster, and goes with it.
+  Entries past `--search-audit-retention-days` are left out of reads and their objects deleted
+  when the cluster's log is next written (at most every 10 minutes), as are the oldest past
+  `--search-audit-max-mb`. Keys carry their time range, so a read fetches only the objects that
+  overlap it, newest first, and stops once older ones can't make the page. A cluster's owner node
+  records and writes its entries (requests run there; keys are unique per write, so nodes never
+  overwrite each other); the owner flushes what waits before a read. A deleted cluster's entries
+  go with its storage (what still waited is dropped first); a branch starts with none. A node
+  without object storage keeps them in memory within the same window and size.
+- **Who reached it:** `origin.address` (`audit_request_remote_address`) is the address the REST
+  listener's connection came from, or the PROXY protocol's source behind a load balancer; the node
+  sets it and drops any copy a client sends. Requests that reach a cluster through rolld's edge
+  or another fleet node's front carry none yet.
+- **A sleeping cluster:** the node refuses a wrong cluster password without waking it, and records
+  the failure as the cluster's filter said when it last unloaded on that node (its defaults if it
+  never did there).
 
 ## Metering and pricing
 

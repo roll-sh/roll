@@ -139,7 +139,7 @@ pub async fn serve_until(listener: TcpListener, node: Arc<Node>, opts: ListenOpt
             a = listener.accept() => a,
             _ = stop.changed() => break,
         };
-        let (mut sock, _peer) = match accepted {
+        let (mut sock, peer) = match accepted {
             Ok(x) => x,
             Err(e) => {
                 // Out of file descriptors and similar: back off instead of spinning.
@@ -156,9 +156,12 @@ pub async fn serve_until(listener: TcpListener, node: Arc<Node>, opts: ListenOpt
         let stop = shutdown.subscribe();
         tokio::spawn(async move {
             let _guard = guard;
+            // The client's address, for audit entries: the PROXY header's source behind a load
+            // balancer, else the connection's peer.
+            let mut client = Some(peer);
             if opts.proxy_protocol {
                 match tokio::time::timeout(Duration::from_secs(5), read_proxy_header(&mut sock)).await {
-                    Ok(Ok(_)) => {}
+                    Ok(Ok(source)) => client = source,
                     _ => return,
                 }
             }
@@ -166,9 +169,9 @@ pub async fn serve_until(listener: TcpListener, node: Arc<Node>, opts: ListenOpt
                 Some(acceptor) => {
                     let Ok(Ok(tls)) = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(sock)).await else { return };
                     let sni = tls.get_ref().1.server_name().map(str::to_string);
-                    serve_connection(tls, node, sni, opts.body_timeouts, stop).await;
+                    serve_connection(tls, node, sni, client, opts.body_timeouts, stop).await;
                 }
-                None => serve_connection(sock, node, None, opts.body_timeouts, stop).await,
+                None => serve_connection(sock, node, None, client, opts.body_timeouts, stop).await,
             }
         });
     }
@@ -214,7 +217,7 @@ pub async fn spawn(addr: &str, node: Arc<Node>, opts: ListenOptions) -> anyhow::
     Ok((local, task))
 }
 
-async fn serve_connection<S>(io: S, node: Arc<Node>, sni: Option<String>, body_timeouts: Option<(Duration, Duration)>, mut stop: tokio::sync::watch::Receiver<bool>)
+async fn serve_connection<S>(io: S, node: Arc<Node>, sni: Option<String>, client: Option<SocketAddr>, body_timeouts: Option<(Duration, Duration)>, mut stop: tokio::sync::watch::Receiver<bool>)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -223,7 +226,7 @@ where
         let node = node.clone();
         let sni = sni.clone();
         let timeouts = body_timeouts.unwrap_or((BODY_IDLE_TIMEOUT, BODY_TIMEOUT));
-        async move { respond(node, req, sni.as_deref(), timeouts).await }
+        async move { respond(node, req, sni.as_deref(), client, timeouts).await }
     });
     let mut builder = hyper::server::conn::http1::Builder::new();
     // A client gets 30 s to send each request's headers (slowloris protection).
@@ -401,11 +404,17 @@ async fn read_body<B: RequestBody>(
 /// (a fleet node's front, which runs it on its cluster's owner): the same limits, decoding and
 /// answers. `Err`: close the connection without answering.
 pub async fn serve_request<B: RequestBody>(node: Arc<Node>, req: Request<B>) -> Result<Response<Full<Bytes>>, DropConnection> {
-    respond(node, req, None, (BODY_IDLE_TIMEOUT, BODY_TIMEOUT)).await
+    respond(node, req, None, None, (BODY_IDLE_TIMEOUT, BODY_TIMEOUT)).await
 }
 
-async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&str>, timeouts: (Duration, Duration)) -> Result<Response<Full<Bytes>>, DropConnection> {
+async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&str>, client: Option<SocketAddr>, timeouts: (Duration, Duration)) -> Result<Response<Full<Bytes>>, DropConnection> {
     let mut es = head_of(&req);
+    // Only the node says where a request came from.
+    use search_es::xpack::security::audit::CLIENT_ADDRESS_HEADER;
+    es.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(CLIENT_ADDRESS_HEADER));
+    if let Some(a) = client {
+        es.headers.push((CLIENT_ADDRESS_HEADER.to_string(), a.to_string()));
+    }
     let gzip_ok = accepts_gzip(es.header("accept-encoding")) && es.method != "HEAD";
     if let Some(e) = head_too_long(&req) {
         return Ok(closing(to_hyper(search_es::rest::error_response(&e, &es, search_es::Dialect::Elasticsearch), gzip_ok).await));

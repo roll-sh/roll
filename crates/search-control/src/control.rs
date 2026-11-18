@@ -122,6 +122,9 @@ pub struct SearchConfig {
     /// What a signed-in person who isn't an admin may own (rolld:
     /// `--search-max-clusters-per-person`, `--search-max-always-on-per-person`; 0: no cap).
     pub person_caps: Caps,
+    /// How long and how much each cluster's security audit log keeps (rolld:
+    /// `--search-audit-retention-days`, `--search-audit-max-mb`).
+    pub audit: search_server::audit::AuditConfig,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -169,6 +172,7 @@ impl SearchConfig {
             sealer: None,
             default_repository: Some("found-snapshots".into()),
             person_caps: Caps { clusters: 50, always_on: 2 },
+            audit: search_server::audit::AuditConfig::default(),
         }
     }
 }
@@ -435,6 +439,7 @@ impl Control {
                 memory_budget: cfg.memory_budget,
                 sealer: cfg.sealer.clone(),
                 default_repository: cfg.default_repository.clone(),
+                audit: cfg.audit.clone(),
                 ..NodeConfig::default()
             },
             hooks.clone(),
@@ -1057,6 +1062,8 @@ impl Control {
         if !self.unload_retrying(&c.name, Duration::from_secs(30)).await {
             return Err(ControlError::Conflict(format!("cluster {} has requests running; retry", c.name)));
         }
+        // Its audit entries still waiting go now; the stored ones go with its storage.
+        self.node.audit.forget(&c.name).await;
         self.data.delete_cluster(&c.name).await?;
         self.store.delete(&c.id).await?;
         // Its lease goes for good: the next cluster with this name starts from nothing.
@@ -1350,6 +1357,20 @@ impl Control {
             (200 | 404, false) => Err(ControlError::NotFound(format!("no API key {key_id} on cluster {}", c.name))),
             (s, _) => Err(ControlError::Internal(anyhow::anyhow!("revoking an API key of cluster {} failed ({s}): {v}", c.name))),
         }
+    }
+
+    /// The cluster's security audit entries matching `q`, newest first
+    /// ([`search_server::audit`]). Never wakes the cluster: they are in object storage.
+    pub async fn audit(&self, id: &str, q: &search_server::audit::AuditQuery) -> Result<Value> {
+        let c = self.get(id).await?;
+        let page = self.node.audit.read(&c.name, q).await?;
+        let cfg = self.node.audit.config();
+        Ok(json!({
+            "flavor": c.flavor,
+            "retention_days": cfg.retention.as_secs() / 86_400,
+            "entries": page.entries,
+            "more": page.more,
+        }))
     }
 
     /// The cluster's indices (`_cat/indices`): health, status, docs, size. Wakes the cluster.

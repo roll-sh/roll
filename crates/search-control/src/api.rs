@@ -61,6 +61,7 @@ pub fn router(control: Arc<Control>) -> Router {
         .route("/v1/search/clusters/{id}/indices", get(indices))
         .route("/v1/search/clusters/{id}/request", post(request))
         .route("/v1/search/clusters/{id}/usage", get(usage))
+        .route("/v1/search/clusters/{id}/audit", get(audit))
         .route("/v1/search/clusters/{id}/keys", post(create_key))
         .route("/v1/search/clusters/{id}/keys/{key}", axum::routing::delete(delete_key))
         .route("/v1/search/clusters/{id}/indices/{index}", get(index_get).put(index_create).delete(index_delete))
@@ -544,6 +545,24 @@ struct UsageQuery {
 
 async fn usage(State(c): State<AppState>, Path(id): Path<String>, Query(q): Query<UsageQuery>) -> ApiResult<Usage> {
     Ok(Json(c.usage(&id, q.days.unwrap_or(30).clamp(1, 366)).await?))
+}
+
+#[derive(Deserialize)]
+struct AuditParams {
+    /// Unix milliseconds, inclusive.
+    from: Option<i64>,
+    /// Unix milliseconds, exclusive.
+    to: Option<i64>,
+    /// Event names or categories, comma-separated.
+    event: Option<String>,
+    size: Option<usize>,
+}
+
+/// The cluster's security audit log, newest first (the caller's own cluster: `per_cluster`).
+async fn audit(State(c): State<AppState>, Path(id): Path<String>, Query(q): Query<AuditParams>) -> ApiResult<Value> {
+    let events = q.event.as_deref().unwrap_or_default().split(',').map(str::trim).filter(|e| !e.is_empty()).map(str::to_string).collect();
+    let query = search_server::audit::AuditQuery { from_ms: q.from, to_ms: q.to, events, size: q.size.unwrap_or(100) };
+    Ok(Json(c.audit(&id, &query).await?))
 }
 
 #[cfg(test)]

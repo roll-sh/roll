@@ -26,6 +26,7 @@ import { NewIndexPanel } from "./new-index";
 import { Templates } from "./templates";
 import { InferenceTab } from "./inference";
 import { ApiKeys } from "./api-keys";
+import { AuditLog } from "./audit-log";
 import { SearchConsole } from "./console";
 import { IndexBrowser } from "./index-browser";
 import { Playground } from "./playground";
@@ -952,6 +953,8 @@ function SettingsTab({
       </Panel>
 
       <ApiKeys cluster={cluster} />
+
+      <AuditLog cluster={cluster} />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Panel title="Password">
