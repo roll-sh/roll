@@ -98,7 +98,12 @@ impl roll_secrets::outside::OutsideDb for Guarded {
             return self.es(u, ca, async move |c| search::set_password(c, role, password).await);
         }
         if let Some(u) = self.cql(url)? {
-            return self.cq(u, ca, async move |c| cql::set_password(c, role, password).await);
+            // Handed out (or retired) as soon as this returns: wait out Cassandra's credentials
+            // cache, which refuses the new password for up to 2 s (cql::settled).
+            let next = u.as_user(role, password);
+            self.cq(u, ca, async move |c| cql::set_password(c, role, password).await)?;
+            tokio::runtime::Handle::current().block_on(cql::settled(&next, ca, self.allow_private));
+            return Ok(());
         }
         // Checked by roll-secrets (lowercase letters, digits, _), quoted anyway.
         let sql = format!("ALTER ROLE {} PASSWORD '{}'", ident(role), postgres_protocol::password::scram_sha_256(password.as_bytes()));

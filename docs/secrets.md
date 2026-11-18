@@ -1081,7 +1081,10 @@ TLS (`cassandra://admin:…@host:9142/keyspace`; the keyspace is optional and ch
 registration; no settings). rolld speaks the protocol itself through nosql-proto's bounded frames
 (capped at 256 KiB), on one connection to the address it checked, with the certificate verified
 against the URL's host: no driver goes looking for the cluster's other nodes. Rotation is `ALTER
-ROLE "<name>" WITH HASHED PASSWORD = '…'` on two roles that take turns; a dynamic login is `CREATE
+ROLE "<name>" WITH HASHED PASSWORD = '…'` on two roles that take turns, then up to 5 s until the
+role logs in with the new password before it's handed out (Cassandra's credentials cache, warm from
+an app's logins, refuses it for up to `credentials_validity`, 2 s by default; ScyllaDB takes it at
+once), kept with a warning naming the role if it never does; a dynamic login is `CREATE
 ROLE "<name>" WITH LOGIN = true AND HASHED PASSWORD = '…'` and `GRANT "<group>" TO "<name>"` (the
 group is a role), dropped if the grant fails. Neither database takes a password as a bound value,
 and both keep a traced statement whole (`system_traces.sessions`, for a client that asks or under
