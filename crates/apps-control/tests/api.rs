@@ -1967,6 +1967,23 @@ async fn a_preview_environment_answers_under_its_projects_preview_domain() {
     let (st, body) = visit(&w, "web-pr1-shop.preview.acme.dev", "/").await;
     assert_eq!((st, body["deployment"].as_str()), (StatusCode::OK, r["id"].as_str()), "{body}");
     assert_eq!(visit(&w, "someone-else.preview.acme.dev", "/").await.0, StatusCode::NOT_FOUND, "another label is none of roll apps'");
+    // With roll previews' router on the node, such a label is its (a preview on roll's own
+    // runtime), the request as it came; one held by an environment stays roll apps'.
+    struct Previews;
+    #[async_trait::async_trait]
+    impl apps_control::integrations::PreviewRouter for Previews {
+        async fn serve(&self, req: axum::extract::Request) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            format!("previews for {}", req.headers()["host"].to_str().unwrap()).into_response()
+        }
+    }
+    w.apps.set_preview_router(Arc::new(Previews));
+    let req = Request::builder().uri("/").header("host", "someone-else.preview.acme.dev").body(Body::empty()).unwrap();
+    let resp = w.public.clone().oneshot(req).await.unwrap();
+    let text = String::from_utf8(axum::body::to_bytes(resp.into_body(), 1 << 16).await.unwrap().to_vec()).unwrap();
+    assert_eq!(text, "previews for someone-else.preview.acme.dev");
+    assert_eq!(visit(&w, "web-pr1-shop.preview.acme.dev", "/").await.1["deployment"].as_str(), r["id"].as_str());
+    assert_eq!(visit(&w, "nobody.elsewhere.dev", "/").await.0, StatusCode::NOT_FOUND, "only under an active preview domain");
     // Another project can't take it, nor a service's custom domain.
     let p2 = w.apps.deps.workspace.as_ref().unwrap().create("", "other", "", None).unwrap().id;
     assert_eq!(call(&w.api, "POST", &format!("/v1/apps/projects/{p2}/preview-domain"), Some(json!({"hostname": "*.preview.acme.dev"}))).await.0, StatusCode::CONFLICT);

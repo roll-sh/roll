@@ -1775,6 +1775,11 @@ impl Store {
         })
     }
 
+    /// Whether `wildcard` is a project's active preview domain.
+    pub fn preview_domain_active(&self, wildcard: &str) -> Result<bool> {
+        Ok(self.db.query_row("SELECT 1 FROM preview_domains WHERE hostname = ? AND status = 'active'", [wildcard], |_| Ok(())).optional()?.is_some())
+    }
+
     pub fn set_preview_domain_status(&self, project: &str, status: DomainStatus, error: Option<&str>) -> Result<()> {
         self.db.execute("UPDATE preview_domains SET status = ?, error = ? WHERE project = ?", params![status.as_str(), error, project])?;
         Ok(())

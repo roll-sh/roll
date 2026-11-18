@@ -233,6 +233,8 @@ pub struct Apps {
     capped_refresh: tokio::sync::Mutex<()>,
     /// roll previews' notes for a preview's feedback button ([`Apps::set_feedback_notes`]).
     notes: std::sync::OnceLock<Arc<dyn integrations::FeedbackNotes>>,
+    /// Where a name under a project's preview domain no environment holds goes (roll previews).
+    preview_router: std::sync::OnceLock<Arc<dyn integrations::PreviewRouter>>,
     /// roll previews' branch pushes ([`Apps::set_git_pushes`]).
     pub(crate) pushes: std::sync::OnceLock<Arc<dyn integrations::GitPushes>>,
     /// roll's GitHub App ([`Apps::set_github_app`]).
@@ -463,6 +465,7 @@ impl Apps {
             capped: Mutex::new(Default::default()),
             capped_refresh: tokio::sync::Mutex::new(()),
             notes: std::sync::OnceLock::new(),
+            preview_router: std::sync::OnceLock::new(),
             pushes: std::sync::OnceLock::new(),
             github: std::sync::OnceLock::new(),
             mail: std::sync::OnceLock::new(),
@@ -3170,6 +3173,22 @@ impl Apps {
 
     pub(crate) fn feedback_notes(&self) -> Option<Arc<dyn integrations::FeedbackNotes>> {
         self.notes.get().cloned()
+    }
+
+    /// Where names under a project's preview domain that no environment holds go (roll previews'
+    /// router, for its previews on roll's own runtime). Set once.
+    pub fn set_preview_router(&self, router: Arc<dyn integrations::PreviewRouter>) {
+        let _ = self.preview_router.set(router);
+    }
+
+    /// The router for `host` when it's one label under a project's active preview domain that no
+    /// environment answers to.
+    pub(crate) async fn preview_router_for(self: &Arc<Self>, host: &str) -> Option<Arc<dyn integrations::PreviewRouter>> {
+        let router = self.preview_router.get().cloned()?;
+        let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h).trim_end_matches('.').to_ascii_lowercase();
+        let (_, rest) = host.split_once('.')?;
+        let wild = format!("*.{rest}");
+        self.db(move |s| s.preview_domain_active(&wild)).await.ok().filter(|on| *on).map(|_| router)
     }
 
     /// Where a Git URL service's pushes to branches it doesn't follow go (roll previews). Set once.

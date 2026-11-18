@@ -1493,8 +1493,10 @@ as a custom domain is (the CNAME to its own target, `previews-<project>.<domain>
 `_roll-challenge` TXT), one a project, and no other project's or service's domain. Each preview
 environment answers to its `preview_host`, one DNS label unique in the project, which roll
 previews sets on the `pv-` environment it makes; `host_target` maps `<label>.<base>` to it once
-the domain is active, after any exact or wildcard custom domain, and any other label under it is
-none of roll apps' (rolld's own previews may serve it). Plain HTTP for now: a wildcard's
+the domain is active, after any exact or wildcard custom domain. Any other label under it goes,
+in process and with its Host as it came, to roll previews' router (`Apps::set_preview_router`,
+which rolld fills: previews on roll's own runtime, from roll.toml's `[preview]`), so the wildcard
+points at one place, roll apps' ingress; without the router it's a 404. Plain HTTP for now: a wildcard's
 certificate needs DNS-01, which isn't issued here yet. The flow is
 `a_preview_environment_answers_under_its_projects_preview_domain`.
 
