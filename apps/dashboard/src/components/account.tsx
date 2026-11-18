@@ -5,7 +5,6 @@ import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } fr
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { SsoSection } from "./account-sso";
 import { AppShell } from "./app-shell";
-import { ReauthDialog } from "./reauth-dialog";
 
 const card = "rounded-xl border border-line-2 bg-sheet inset-shadow-highlight";
 const btn = "flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-raised px-2.5 text-[12px] font-medium inset-shadow-highlight transition-colors hover:border-line-3 disabled:opacity-50";
@@ -48,7 +47,6 @@ export function AccountPage() {
           {user.admin && <Invites />}
           {user.admin && <Users me={user.id} />}
           {user.admin && <SsoSection />}
-          <ReauthDialog />
         </div>
       )}
     </AppShell>
@@ -444,7 +442,7 @@ function RecentActivity({ me }: { me: string }) {
           {list.map((e, i) => (
             <div key={`${e.at}-${i}`} className="flex items-baseline gap-3 border-t border-line px-4 py-2.5 first:border-t-0 text-[12.5px]">
               <span className={`min-w-0 flex-1 ${e.ok ? "" : "text-danger"}`}>{activityText(e, me)}</span>
-              <span className="hidden truncate font-mono text-[11px] text-subtle sm:inline">{[e.ip, e.user_agent?.split(" ")[0]].filter(Boolean).join(" · ")}</span>
+              <span className="hidden truncate font-mono text-[11px] text-subtle sm:inline">{[e.ip, e.user_agent ? browser(e.user_agent) : null].filter(Boolean).join(" · ")}</span>
               <span className="shrink-0 text-[11px] text-subtle">{when(e.at)}</span>
             </div>
           ))}

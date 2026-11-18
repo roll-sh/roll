@@ -1022,6 +1022,13 @@ impl roll_auth::Sessions for Resolver {
         })
     }
 
+    fn fresh<'a>(&'a self, user: &'a str, session: &'a str) -> roll_auth::BoxFuture<'a, Result<bool, String>> {
+        let (accounts, user, session) = (self.0.clone(), user.to_string(), session.to_string());
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || accounts.fresh_for(&user, &session).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
+        })
+    }
+
     fn person_by_email<'a>(&'a self, email: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SignedIn>, String>> {
         // As addresses are kept (ASCII, lower-cased): a look-alike letter never folds into one.
         let (accounts, email) = (self.0.clone(), normalize_email(email).ok().filter(|e| e.is_ascii()));
