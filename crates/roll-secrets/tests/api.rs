@@ -106,9 +106,103 @@ impl SyncTarget for FakeSync {
     }
 }
 
-/// Audit deliveries, kept instead of sent; an OIDC issuer's keys, served; and vendors' APIs.
+/// Audit deliveries, kept instead of sent; an OIDC issuer's keys, served; vendors' APIs; and a
+/// Snowflake account's SQL API.
 #[derive(Default)]
-struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>);
+struct Sent(Mutex<Vec<Value>>, Mutex<Option<Value>>, std::sync::atomic::AtomicBool, Mutex<Option<(String, String)>>, Mutex<BTreeMap<(String, String), Value>>, Mutex<Vendors>, FakeSnowflake);
+
+/// A fake Snowflake user: its two key slots (base64 SPKI DER), password, default role, granted
+/// roles and days to expiry.
+#[derive(Clone, Default, Debug)]
+struct SnowflakeUser {
+    keys: [Option<String>; 2],
+    password: Option<String>,
+    default_role: Option<String>,
+    roles: Vec<String>,
+    days: Option<i64>,
+}
+
+/// Snowflake's SQL API for the account `myorg-acct`: the admin key it trusts (fingerprint, PKCS#1
+/// DER), its users and roles, every statement it ran, one answer still running, and a flag that
+/// refuses role grants.
+#[derive(Default)]
+struct FakeSnowflake {
+    admin: Mutex<Option<(String, Vec<u8>)>>,
+    users: Mutex<BTreeMap<String, SnowflakeUser>>,
+    roles: Mutex<Vec<String>>,
+    statements: Mutex<Vec<String>>,
+    running: Mutex<Option<Value>>,
+    fail_grants: std::sync::atomic::AtomicBool,
+}
+
+/// A public key as Snowflake keeps it (base64 SPKI DER), and its fingerprint.
+fn snowflake_public(key: &rsa::RsaPrivateKey) -> (String, String) {
+    use base64::Engine;
+    use rsa::pkcs8::EncodePublicKey;
+    use sha2::Digest;
+    let der = key.to_public_key().to_public_key_der().unwrap();
+    let b64 = base64::engine::general_purpose::STANDARD;
+    (b64.encode(der.as_bytes()), format!("SHA256:{}", b64.encode(sha2::Sha256::digest(der.as_bytes()))))
+}
+
+impl FakeSnowflake {
+    fn trust(&self, key: &rsa::RsaPrivateKey) {
+        use rsa::pkcs1::EncodeRsaPublicKey;
+        *self.admin.lock().unwrap() = Some((snowflake_public(key).1, key.to_public_key().to_pkcs1_der().unwrap().as_bytes().to_vec()));
+    }
+
+    /// The bearer is a key-pair JWT for ROLL_ADMIN, signed by the key it trusts.
+    fn signed_in(&self, headers: &[(&str, &str)]) -> bool {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = |k: &str| headers.iter().find(|(h, _)| h.eq_ignore_ascii_case(k)).map(|(_, v)| *v);
+        let Some((fp, pkcs1)) = self.admin.lock().unwrap().clone() else { return false };
+        let Some(jwt) = header("authorization").and_then(|a| a.strip_prefix("Bearer ")) else { return false };
+        let parts: Vec<&str> = jwt.split('.').collect();
+        if header("x-snowflake-authorization-token-type") != Some("KEYPAIR_JWT") || parts.len() != 3 {
+            return false;
+        }
+        let claims: Value = serde_json::from_slice(&b64.decode(parts[1]).unwrap_or_default()).unwrap_or_default();
+        let sig = b64.decode(parts[2]).unwrap_or_default();
+        let signed = ring::signature::UnparsedPublicKey::new(&ring::signature::RSA_PKCS1_2048_8192_SHA256, pkcs1).verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &sig).is_ok();
+        signed && claims["iss"] == format!("MYORG-ACCT.ROLL_ADMIN.{fp}") && claims["sub"] == "MYORG-ACCT.ROLL_ADMIN"
+    }
+
+    fn statement(&self, s: &str) -> Result<(Vec<&'static str>, Vec<Vec<String>>), String> {
+        let re = |p: &str| regex::Regex::new(&format!("^{p}$")).unwrap();
+        let mut users = self.users.lock().unwrap();
+        let none = || "SQL compilation error: User does not exist or not authorized.".to_string();
+        if let Some(c) = re(r#"DESCRIBE USER "(\w+)""#).captures(s) {
+            let u = users.get(&c[1]).ok_or_else(none)?;
+            let fp = |k: &Option<String>| k.clone().map_or("null".to_string(), |k| format!("SHA256:{}", k.len()));
+            return Ok((vec!["property", "value"], vec![vec!["RSA_PUBLIC_KEY_FP".into(), fp(&u.keys[0])], vec!["RSA_PUBLIC_KEY_2_FP".into(), fp(&u.keys[1])]]));
+        }
+        if let Some(c) = re(r"SHOW ROLES LIKE '(\w+)'").captures(s) {
+            return Ok((vec!["created_on", "name"], self.roles.lock().unwrap().iter().filter(|r| **r == c[1]).map(|r| vec!["2026-01-01".into(), r.clone()]).collect()));
+        }
+        if let Some(c) = re(r#"ALTER USER "(\w+)" SET (RSA_PUBLIC_KEY(?:_2)?) = '([A-Za-z0-9+/=]+)'"#).captures(s) {
+            users.get_mut(&c[1]).ok_or_else(none)?.keys[usize::from(&c[2] != "RSA_PUBLIC_KEY")] = Some(c[3].to_string());
+        } else if let Some(c) = re(r#"ALTER USER "(\w+)" UNSET (RSA_PUBLIC_KEY(?:_2)?)"#).captures(s) {
+            users.get_mut(&c[1]).ok_or_else(none)?.keys[usize::from(&c[2] != "RSA_PUBLIC_KEY")] = None;
+        } else if let Some(c) = re(r#"ALTER USER "(\w+)" SET PASSWORD = '([^'\\]+)' MUST_CHANGE_PASSWORD = FALSE"#).captures(s) {
+            users.get_mut(&c[1]).ok_or_else(none)?.password = Some(c[2].to_string());
+        } else if let Some(c) = re(r#"ALTER USER "(\w+)" SET DAYS_TO_EXPIRY = (\d+)"#).captures(s) {
+            users.get_mut(&c[1]).ok_or_else(none)?.days = c[2].parse().ok();
+        } else if let Some(c) = re(r#"CREATE USER "(ROLL_\w+)" TYPE = SERVICE RSA_PUBLIC_KEY = '([A-Za-z0-9+/=]+)' DEFAULT_ROLE = "(\w+)" DAYS_TO_EXPIRY = (\d+) COMMENT = '([^'\\]*)'"#).captures(s) {
+            users.insert(c[1].to_string(), SnowflakeUser { keys: [Some(c[2].to_string()), None], default_role: Some(c[3].to_string()), days: c[4].parse().ok(), ..Default::default() });
+        } else if let Some(c) = re(r#"GRANT ROLE "(\w+)" TO USER "(\w+)""#).captures(s) {
+            if self.fail_grants.load(std::sync::atomic::Ordering::Relaxed) || !self.roles.lock().unwrap().iter().any(|r| *r == c[1]) {
+                return Err("SQL access control error: Insufficient privileges to operate on role.".into());
+            }
+            users.get_mut(&c[2]).ok_or_else(none)?.roles.push(c[1].to_string());
+        } else if let Some(c) = re(r#"DROP USER IF EXISTS "(\w+)""#).captures(s) {
+            users.remove(&c[1]);
+        } else {
+            return Err(format!("SQL compilation error: syntax error in {s}"));
+        }
+        Ok((vec!["status"], vec![vec!["Statement executed successfully.".into()]]))
+    }
+}
 
 /// SendGrid and Twilio: the key ids each has live, and how many were ever made.
 #[derive(Default)]
@@ -215,8 +309,12 @@ impl roll_secrets::Deliver for Sent {
         let answer = if body["action"] == "issue" { json!({ "value": format!("vendor-key-{n}"), "handle": n }) } else { json!({}) };
         Ok(answer.to_string().into_bytes().into())
     }
-    /// SendGrid's and Twilio's key APIs, matched on the URL, each taking only its credential.
+    /// SendGrid's and Twilio's key APIs, matched on the URL, each taking only its credential;
+    /// Snowflake's SQL API apart ([`Sent::snowflake`]).
     fn request(&self, method: &str, url: &str, headers: &[(&str, &Secret)], body: Option<(&str, &Secret)>, _: usize) -> roll_secrets::Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        if url.starts_with("https://myorg-acct.snowflakecomputing.com") {
+            return self.snowflake(method, url, headers, body);
+        }
         use base64::Engine;
         let auth = headers.iter().find(|(h, _)| *h == "authorization").map(|(_, v)| v.expose().to_string()).unwrap_or_default();
         let twilio_auth = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{TWILIO_SID}:twilio-token")));
@@ -250,6 +348,45 @@ impl roll_secrets::Deliver for Sent {
             _ => (401, json!({ "errors": [{ "message": "authorization required" }] })),
         };
         Ok((status, answer.to_string().into_bytes().into()))
+    }
+}
+
+impl Sent {
+    /// Snowflake's SQL API: one statement a request, as rolld's guarded client would send it.
+    fn snowflake(&self, method: &str, url: &str, headers: &[(&str, &roll_secrets::Value)], body: Option<(&str, &roll_secrets::Value)>) -> roll_secrets::Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        let sf = &self.6;
+        let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.expose())).collect();
+        let headers = &headers[..];
+        let body: Option<Value> = body.map(|(t, b)| {
+            assert_eq!(t, "application/json");
+            serde_json::from_str(b.expose()).unwrap()
+        });
+        let body = body.as_ref();
+        let answer = |status: u16, v: Value| Ok((status, v.to_string().into_bytes().into()));
+        let Some(path) = url.strip_prefix("https://myorg-acct.snowflakecomputing.com") else { return Err(roll_secrets::Error::Link(format!("{url}: connection refused"))) };
+        if !sf.signed_in(headers) {
+            return answer(401, json!({ "code": "390144", "message": "JWT token is invalid." }));
+        }
+        if method == "GET" {
+            let done = sf.running.lock().unwrap().take().filter(|_| path == "/api/v2/statements/01-fake-handle");
+            return done.map_or_else(|| answer(404, json!({ "code": "000709", "message": "Statement not found." })), |v| answer(200, v));
+        }
+        let body = body.unwrap();
+        assert!(path == "/api/v2/statements" && body["role"] == "ROLL_ADMIN", "{path} {body}");
+        let statement = body["statement"].as_str().unwrap().to_string();
+        sf.statements.lock().unwrap().push(statement.clone());
+        match sf.statement(&statement) {
+            Ok((columns, rows)) => {
+                let v = json!({ "code": "090001", "resultSetMetaData": { "rowType": columns.iter().map(|c| json!({ "name": c })).collect::<Vec<_>>() }, "data": rows });
+                // A DESCRIBE is still running when first asked: its answer comes from the status URL.
+                if statement.starts_with("DESCRIBE") {
+                    *sf.running.lock().unwrap() = Some(v);
+                    return answer(202, json!({ "code": "333334", "statementHandle": "01-fake-handle", "statementStatusUrl": "/api/v2/statements/01-fake-handle" }));
+                }
+                answer(200, v)
+            }
+            Err(message) => answer(422, json!({ "code": "002003", "sqlState": "02000", "message": message })),
+        }
     }
 }
 
@@ -2304,6 +2441,104 @@ async fn a_directory_hands_out_accounts_in_turn_and_a_user_per_lease() {
     assert!(audit.to_string().contains("directory.add") && !format!("{listed}{audit}{rows:?}").contains("fake-bind-pw"));
     // In use, it can't go.
     let (s, _) = api.call(Method::DELETE, &format!("/directories/{id}"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");
+}
+
+#[tokio::test]
+async fn a_snowflake_account_rotates_key_slots_in_turn_and_makes_a_user_per_lease() {
+    use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey};
+    let api = Api::new().await;
+    let sf = &api.sent.6;
+    // Throwaway keys made for this test.
+    let pem = |k: &rsa::RsaPrivateKey| k.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF).unwrap().to_string();
+    let admin = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+    let stranger = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+    sf.trust(&admin);
+    sf.users.lock().unwrap().insert("SVC_APP".into(), SnowflakeUser { keys: [Some("set-by-hand".into()), None], ..Default::default() });
+    *sf.roles.lock().unwrap() = vec!["ANALYST".into(), "LOADER".into()];
+    let new = |key: &str, account: &str, roles: Value| json!({ "name": "warehouse", "account": account, "admin_user": "roll_admin", "admin_role": "roll_admin", "admin_private_key": key, "managed_user": "svc_app", "roles": roles });
+    // The account and every name are checked before anything is sent; a refused sign-in says so,
+    // never the key.
+    for (body, why) in [(new(&pem(&admin), "evil.example/x", json!([])), "account"), (new(&pem(&admin), "myorg-acct", json!(["accountadmin"])), "ACCOUNTADMIN"), (new(&pem(&admin), "myorg-acct", json!(["x\" OR 1=1"])), "unquoted")] {
+        let (s, e) = api.call(Method::POST, "/snowflake-accounts", Some(body)).await;
+        assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains(why), "{e}");
+    }
+    assert!(sf.statements.lock().unwrap().is_empty());
+    let (s, e) = api.call(Method::POST, "/snowflake-accounts", Some(new(&pem(&stranger), "myorg-acct", json!(["analyst"])))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("refused roll's sign-in") && !e.to_string().contains("PRIVATE KEY"), "{e}");
+    let a = api.ok(Method::POST, "/snowflake-accounts", Some(new(&pem(&admin), "myorg-acct", json!(["analyst", "loader"])))).await;
+    let id = a["id"].as_str().unwrap().to_string();
+    assert!(id.starts_with("sfa_") && a.get("admin_private_key").is_none() && a["admin_key_fp"] == snowflake_public(&admin).1 && a["managed_user"] == "SVC_APP" && a["roles"] == json!(["ANALYST", "LOADER"]), "{a}");
+
+    // Managed: the two key slots take turns. The first slot holds a key set by hand, so roll's
+    // first key goes in the second, and the hand-set one keeps working.
+    let link = |field: &str| json!({ "kind": "snowflake", "ref": id, "field": field, "mode": "managed" });
+    let (s, e) = api.call(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "SNOWFLAKE_PASSWORD", "link": link("password") }] }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("private_key"), "a key-pair account has no password: {e}");
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "SNOWFLAKE_USER", "link": link("user") }, { "op": "set", "key": "SNOWFLAKE_ACCOUNT", "link": link("account") }, { "op": "set", "key": "SNOWFLAKE_PRIVATE_KEY", "link": link("private_key") }] }))).await;
+    let public_of = |pem: &str| snowflake_public(&rsa::RsaPrivateKey::from_pkcs8_pem(pem).unwrap()).0;
+    let login = || async {
+        let v = api.values("production", "/").await["values"].clone();
+        assert_eq!((v["SNOWFLAKE_USER"].as_str(), v["SNOWFLAKE_ACCOUNT"].as_str()), (Some("SVC_APP"), Some("myorg-acct")));
+        public_of(v["SNOWFLAKE_PRIVATE_KEY"].as_str().unwrap())
+    };
+    let slots = || sf.users.lock().unwrap()["SVC_APP"].keys.clone();
+    let first = login().await;
+    assert_eq!(slots(), [Some("set-by-hand".to_string()), Some(first.clone())]);
+    let rotate = || api.call(Method::POST, "/environments/production/secrets/SNOWFLAKE_PRIVATE_KEY/rotate", None);
+    assert!(rotate().await.0.is_success());
+    let second = login().await;
+    assert_eq!(slots(), [Some(second.clone()), Some(first.clone())], "the first key keeps working through its grace");
+    // The rotation's hold on its slot ends (it lasts two minutes).
+    let unhold = id.clone();
+    api.db
+        .write(move |c| {
+            let s: String = c.query_row("SELECT state FROM snowflake_accounts WHERE id = ?", [unhold.as_str()], |r| r.get(0))?;
+            let mut v: Value = serde_json::from_str(&s).unwrap();
+            v["held"] = json!({});
+            c.execute("UPDATE snowflake_accounts SET state = ? WHERE id = ?", [v.to_string().as_str(), unhold.as_str()])
+        })
+        .unwrap();
+    assert_eq!(rotate().await.0, StatusCode::CONFLICT, "the second slot is still in its grace");
+    let p = api.project.clone();
+    api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ? AND kind = 'retired'", [p.as_str()])).unwrap();
+    let s = api.secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap();
+    assert_eq!(slots(), [Some(second.clone()), None], "its grace over, the old key's slot is cleared");
+
+    // Dynamic: each lease is a user of its own, named after it, with the link's roles (the first
+    // its default); ending the lease drops it.
+    let dynamic = |field: &str, roles: Value| json!({ "kind": "snowflake", "ref": id, "field": field, "mode": "dynamic", "options": { "ttl_minutes": 15, "roles": roles } });
+    let (s, e) = api.call(Method::POST, "/environments/staging/changes", Some(json!({ "ops": [{ "op": "set", "key": "TMP_USER", "link": dynamic("user", json!(["sysadmin"])) }] }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("SYSADMIN"), "only the account's roles: {e}");
+    api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": [{ "op": "set", "key": "TMP_USER", "link": dynamic("user", json!(["loader"])) }, { "op": "set", "key": "TMP_KEY", "link": dynamic("private_key", json!(["loader"])) }] }))).await;
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:sync" }))).await;
+    let lease = r["leases"][0].as_str().unwrap().to_string();
+    let user = r["values"]["TMP_USER"].as_str().unwrap().to_string();
+    assert_eq!(user, format!("ROLL_{}", lease.to_uppercase()));
+    let made = sf.users.lock().unwrap()[&user].clone();
+    assert_eq!((made.keys[0].clone(), made.default_role.as_deref(), made.roles.clone(), made.days), (Some(public_of(r["values"]["TMP_KEY"].as_str().unwrap())), Some("LOADER"), vec!["LOADER".to_string()], Some(1)));
+    api.ok(Method::DELETE, &format!("/leases/{lease}"), None).await;
+    assert!(!sf.users.lock().unwrap().contains_key(&user));
+    // A user made halfway (its grant refused) is dropped again; nothing is handed out.
+    sf.fail_grants.store(true, std::sync::atomic::Ordering::Relaxed);
+    let failed = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:sync" }))).await;
+    sf.fail_grants.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(failed["leases"] == json!([]) && !sf.users.lock().unwrap().keys().any(|u| u.starts_with("ROLL_")), "{failed}");
+    // Code nobody vetted gets no user at all.
+    let check = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "check:fork#1", "untrusted": true }))).await;
+    assert!(check["values"].get("TMP_KEY").is_none() && check["leases"] == json!([]), "{check}");
+    assert!(!sf.users.lock().unwrap().keys().any(|u| u.starts_with("ROLL_")));
+
+    // The admin key is in no answer, audit row or statement.
+    let listed = api.ok(Method::GET, "/snowflake-accounts", None).await;
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    let p = api.project.clone();
+    let rows: Vec<String> = api.db.read(move |c| c.query("SELECT summary || keys || action FROM audit WHERE project_id = ?", [p.as_str()], |r| r.get(0))).unwrap();
+    let statements = sf.statements.lock().unwrap().join("\n");
+    assert!(audit.to_string().contains("snowflake.add") && !format!("{listed}{audit}{rows:?}{statements}").contains("PRIVATE KEY"));
+    // In use, it can't go.
+    let (s, _) = api.call(Method::DELETE, &format!("/snowflake-accounts/{id}"), None).await;
     assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");
 }
 

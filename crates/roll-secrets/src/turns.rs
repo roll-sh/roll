@@ -150,6 +150,11 @@ impl Turns {
 
     /// A fresh state for a new registration.
     pub fn initial() -> String {
-        serde_json::to_string(&State::default()).expect("state")
+        Self::initial_at(0)
+    }
+
+    /// A fresh state whose first issue takes login `next` (the other is in use outside roll).
+    pub fn initial_at(next: usize) -> String {
+        serde_json::to_string(&State { next, ..State::default() }).expect("state")
     }
 }

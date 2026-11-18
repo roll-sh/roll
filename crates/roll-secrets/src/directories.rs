@@ -206,7 +206,7 @@ fn check_url(url: &str) -> Option<&str> {
 /// A password nobody chose, to the flavor's rules: 32 characters with upper- and lowercase
 /// letters and digits, and on Active Directory a symbol too (its complexity policy). The symbols
 /// need no quoting in LDIF, a shell or a URL's query.
-fn password(flavor: Flavor) -> String {
+pub(crate) fn password(flavor: Flavor) -> String {
     const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     const SYMBOLS: &[u8] = b"!#%+-.:=?@^_~";
     let alphabet: Vec<u8> = match flavor {

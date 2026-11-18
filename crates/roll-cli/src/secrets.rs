@@ -347,6 +347,10 @@ pub enum Secrets {
     /// add (the bind password on stdin), remove.
     #[command(subcommand)]
     Directories(DirectoriesCmd),
+    /// Snowflake accounts whose service user's key roll rotates, or that make a user per lease:
+    /// list, add (the admin user's private key from a file), remove.
+    #[command(subcommand)]
+    Snowflake(SnowflakeCmd),
     /// Vendor credentials roll issues and revokes keys with (SendGrid, Twilio, Okta, Entra,
     /// Auth0): list, add (the credential on stdin), remove.
     #[command(subcommand)]
@@ -775,6 +779,42 @@ pub enum SaasCmd {
         /// The Auth0 app whose secret rotates.
         #[arg(long)]
         app_client_id: Option<String>,
+    },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum SnowflakeCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register an account: roll signs in as `--admin-user` with its key pair; a managed user
+    /// (`--user`), the roles dynamic users get (`--role`, the first their default), or both.
+    Add {
+        name: String,
+        /// The account identifier (myorg-myaccount, or a locator such as xy12345.us-east-2.aws).
+        #[arg(long)]
+        account: String,
+        /// Reach it at <account>.privatelink.snowflakecomputing.com.
+        #[arg(long)]
+        privatelink: bool,
+        /// The user roll signs in as (its RSA_PUBLIC_KEY is the key's public half).
+        #[arg(long)]
+        admin_user: String,
+        /// The role roll's statements run as (default: the admin user's default role).
+        #[arg(long)]
+        admin_role: Option<String>,
+        /// The admin user's private key: a PEM file (PKCS#8 unencrypted, or PKCS#1), or - for stdin.
+        #[arg(long)]
+        key: String,
+        /// key_pair (default) or password: how the users roll hands out sign in.
+        #[arg(long, default_value = "key_pair")]
+        auth: String,
+        /// The service user managed links rotate.
+        #[arg(long = "user")]
+        managed_user: Option<String>,
+        /// A role dynamic users are granted.
+        #[arg(long = "role", num_args = 1)]
+        roles: Vec<String>,
     },
     Rm { id: String },
 }
@@ -1997,6 +2037,40 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             DirectoriesCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/directories/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::Snowflake(d) => match d {
+            SnowflakeCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/snowflake-accounts", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for a in v.as_array().into_iter().flatten() {
+                    let roles: Vec<&str> = a["roles"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    let managed = a["managed_user"].as_str().unwrap_or("-");
+                    let roles = if roles.is_empty() { String::new() } else { format!("  dynamic as {}", roles.join(" ")) };
+                    println!("{}  {:<16} {:<40} {:<8} {managed}{roles}", s(&a["id"]), s(&a["name"]), s(&a["host"]), s(&a["auth"]));
+                }
+            }
+            SnowflakeCmd::Add { name, account, privatelink, admin_user, admin_role, key, auth, managed_user, roles } => {
+                // The private key: a file or stdin, never an argument.
+                let mut pem = String::new();
+                if key == "-" {
+                    std::io::stdin().read_to_string(&mut pem).context("reading the private key from stdin")?;
+                } else {
+                    pem = std::fs::read_to_string(&key).with_context(|| format!("reading {key}"))?;
+                }
+                let body = json!({ "name": name, "account": account, "privatelink": privatelink, "admin_user": admin_user, "admin_role": admin_role, "admin_private_key": pem, "auth": auth, "managed_user": managed_user, "roles": roles });
+                let v = c.call(Method::POST, &format!("{}/snowflake-accounts", c.base()), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                let secret = if v["auth"] == "password" { "SNOWFLAKE_PASSWORD" } else { "SNOWFLAKE_PRIVATE_KEY" };
+                println!("Added {} ({}): link SNOWFLAKE_USER, SNOWFLAKE_ACCOUNT and {secret} to it, managed (its user) or dynamic (a user per lease).", s(&v["name"]), s(&v["id"]));
+            }
+            SnowflakeCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/snowflake-accounts/{}", c.base(), enc(&id)), None).await?;
                 println!("Removed {id}");
             }
         },
