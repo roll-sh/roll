@@ -118,6 +118,9 @@ pub struct Docker {
     /// Egress proxies for closed environments ([`super::egress`]), served to them through relays
     /// as links are (so only where links are).
     egress: Option<super::egress::Proxies>,
+    /// How rolld reaches closed web instances ([`super::ingress`]): their networks have no
+    /// address of the host's, so their sandboxes answer on a unix socket instead.
+    ingress: Option<super::ingress::Ingress>,
 }
 
 /// The sandbox holding `instance`'s network, its aliases and its published port.
@@ -155,8 +158,24 @@ impl Docker {
                 && let (Some(_), Some(_)) = (spec.port, &spec.network)
             {
                 let sandbox = sandbox_name(&spec.name);
+                // A closed one answers rolld on a socket ([`super::ingress`]).
+                let ingress = match (self.ingress_for(spec), &self.ingress) {
+                    (true, Some(i)) => Some(i.prepare(&sandbox).context("the closed sandbox's socket directory")?),
+                    _ => None,
+                };
+                let ing = ingress.as_ref().map(|(d, u, g)| (d.as_path(), *u, *g));
                 let made = async {
-                    engine.create(&sandbox, &sandbox_config(spec, host_port, host_gateway.as_deref())).await?;
+                    let config = sandbox_config(spec, host_port, host_gateway.as_deref(), ing);
+                    match engine.create(&sandbox, &config).await {
+                        // The relay's image isn't here yet: pulled once.
+                        Err(e) if ing.is_some() && e.to_string().contains("No such image") => {
+                            docker_within(&["pull", "-q", super::links::IMAGE], Some(Duration::from_secs(300))).await?;
+                            engine.create(&sandbox, &config).await?;
+                        }
+                        r => {
+                            r?;
+                        }
+                    }
                     engine.start(&sandbox).await
                 }
                 .await;
@@ -177,6 +196,11 @@ impl Docker {
                             }
                         }
                     },
+                    // A closed one has no other way to be reached: no instance without it.
+                    Err(e) if ing.is_some() => {
+                        let _ = docker(&["rm", "-f", "-v", &sandbox]).await;
+                        return Err(e.context("the closed instance's network sandbox"));
+                    }
                     // No sandbox (its image isn't here yet, say): the instance holds its own
                     // network, as before.
                     Err(e) => {
@@ -298,7 +322,8 @@ impl Docker {
         // Listed hosts on private addresses too: local development and tests only.
         let private = std::env::var("ROLL_APPS_EGRESS_ALLOW_PRIVATE").is_ok_and(|v| v == "1");
         let egress = relay.then(|| super::egress::Proxies::new(scratch.with_file_name("egress"), private));
-        Docker { known: Mutex::new(Known::default()), scratch, engine, netns, links, egress }
+        let ingress = relay.then(|| super::ingress::Ingress::new(scratch.with_file_name("ingress")));
+        Docker { known: Mutex::new(Known::default()), scratch, engine, netns, links, egress, ingress }
     }
 
     /// With or without network sandboxes, whatever `ROLL_APPS_NETNS` says (a measurement
@@ -314,6 +339,9 @@ impl Docker {
         if let Some(p) = host_port {
             return Ok(Some(SocketAddr::from(([127, 0, 0, 1], p))));
         }
+        if let Some(a) = self.through_ingress(name).await? {
+            return Ok(Some(a));
+        }
         if let Some(e) = &self.engine {
             // In a sandbox the instance has no network of its own: the sandbox's address is its.
             if let Some(a) = e.inspect(name).await?.closed {
@@ -324,6 +352,20 @@ impl Docker {
         let out = docker(&["inspect", "-f", "{{index .Config.Labels \"sh.roll.apps.closed\"}} {{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", name]).await?;
         let mut f = out.split_whitespace();
         Ok(f.next().and_then(|p| p.parse::<u16>().ok()).and_then(|p| Some(SocketAddr::new(f.next()?.parse().ok()?, p))))
+    }
+
+    /// A closed instance's loopback address through its sandbox's socket, when it has one.
+    async fn through_ingress(&self, name: &str) -> anyhow::Result<Option<SocketAddr>> {
+        match &self.ingress {
+            Some(i) if i.has(&sandbox_name(name)) => Ok(Some(i.serve(&sandbox_name(name)).await?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Whether `spec`'s sandbox answers rolld on a socket ([`super::ingress`]): a closed web
+    /// instance in a sandbox, on a node that closes egress.
+    fn ingress_for(&self, spec: &InstanceSpec) -> bool {
+        spec.closed && spec.port.is_some() && self.netns && self.ingress.is_some()
     }
 
     async fn id_and_port(&self, name: &str) -> anyhow::Result<(String, Option<u16>)> {
@@ -382,6 +424,11 @@ impl Docker {
         {
             host.push(g);
         }
+        // Reached through its socket ([`super::ingress`]), rolld's connections come from the
+        // sandbox's own `socat`, on loopback.
+        if self.ingress.as_ref().is_some_and(|g| g.has(&sandbox_name(instance))) {
+            host.extend([std::net::IpAddr::from([127, 0, 0, 1]), std::net::IpAddr::from(std::net::Ipv6Addr::LOCALHOST)]);
+        }
         let s = Sandbox { id: i.id, pid: i.pid?, port: i.exposed?, host };
         self.known.lock().sandboxes.insert(instance.to_string(), s.clone());
         Some(s)
@@ -424,10 +471,13 @@ impl Docker {
                 true
             }
         };
-        // Its published port, or a closed sandbox's address on its network.
+        // Its published port, a closed sandbox's socket, or its address on its network.
         let at = match self.id_and_port(instance).await {
             Ok((_, Some(hp))) => Some(SocketAddr::from(([127, 0, 0, 1], hp))),
-            _ => engine.inspect(&sandbox_name(instance)).await.ok().and_then(|s| s.closed),
+            _ => match self.through_ingress(instance).await.ok().flatten() {
+                Some(a) => Some(a),
+                None => engine.inspect(&sandbox_name(instance)).await.ok().and_then(|s| s.closed),
+            },
         };
         let poked = match at {
             Some(a) => tokio::time::timeout(Duration::from_millis(200), tokio::net::TcpStream::connect(a)).await.is_ok_and(|c| c.is_ok()),
@@ -506,7 +556,8 @@ async fn run_relay(name: &str, args: &[String]) -> anyhow::Result<()> {
 /// A network's gateway: where its containers reach the host (`host.docker.internal` on a closed
 /// network, which has no route to Docker's default one).
 async fn gateway(network: &str) -> Option<String> {
-    docker(&["network", "inspect", "-f", "{{range .IPAM.Config}}{{.Gateway}} {{end}}", network]).await.ok()?.split_whitespace().next().map(str::to_string)
+    // An isolated gateway's is no address (Docker says `invalid IP`): the host isn't there.
+    docker(&["network", "inspect", "-f", "{{range .IPAM.Config}}{{.Gateway}} {{end}}", network]).await.ok()?.split_whitespace().find(|g| g.parse::<std::net::IpAddr>().is_ok()).map(str::to_string)
 }
 
 /// Rewrite loopback hosts in a URL for a container (`host.docker.internal`).
@@ -701,6 +752,9 @@ impl Runtime for Docker {
 
     async fn remove(&self, name: &str) {
         let _ = docker(&["rm", "-f", "-v", name, &waker_name(name), &sandbox_name(name)]).await;
+        if let Some(i) = &self.ingress {
+            i.forget(&sandbox_name(name));
+        }
         let mut k = self.known.lock();
         k.containers.remove(name);
         k.sandboxes.remove(name);
@@ -797,6 +851,12 @@ impl Runtime for Docker {
         let mut args = vec!["network", "create", "--label", &label];
         if closed {
             args.push("--internal");
+        }
+        // No address of the host's on it either (Docker 28's isolated gateway): its code reaches
+        // none of the host's services. rolld then reaches its web instances through their
+        // sandboxes' sockets ([`super::ingress`]), so only where those are.
+        if closed && self.netns && self.ingress.is_some() {
+            args.extend(["-o", "com.docker.network.bridge.gateway_mode_ipv4=isolated", "-o", "com.docker.network.bridge.gateway_mode_ipv6=isolated"]);
         }
         args.push(name);
         match docker(&args).await {
@@ -933,6 +993,37 @@ impl Runtime for Docker {
         Ok(super::egress::proxy_url(network, hosts))
     }
 
+    async fn build_egress(&self, project: &str) -> anyhow::Result<Option<super::BuildEgress>> {
+        if self.egress.is_none() {
+            return Ok(None);
+        }
+        let network = build_network_name(project);
+        // No route out, and no address of the host's on it (Docker 28's isolated gateway): a
+        // step reaches neither the host's services nor its metadata, only the relay.
+        if docker(&["network", "inspect", "-f", "{{.Internal}}", &network]).await.is_err() {
+            let label = format!("{LABEL}.project={project}");
+            let made = docker(&["network", "create", "--internal", "--label", &label, "-o", "com.docker.network.bridge.gateway_mode_ipv4=isolated", "-o", "com.docker.network.bridge.gateway_mode_ipv6=isolated", &network]).await;
+            if let Err(e) = made
+                && !e.to_string().contains("already exists")
+            {
+                return Err(e.context("a closed build's network (Docker 28 or later: its isolated gateway)"));
+            }
+        }
+        let hosts = [super::egress::ANY_PUBLIC.to_string()];
+        self.egress_proxy(&network, "", &hosts).await?;
+        let relay = super::egress::relay_name(&network, &super::egress::digest(&network, &hosts));
+        let ip = docker(&["inspect", "-f", &format!("{{{{(index .NetworkSettings.Networks \"{network}\").IPAddress}}}}"), &relay]).await?;
+        let ip = ip.trim().parse::<std::net::IpAddr>().map_err(|_| anyhow::anyhow!("the closed build's proxy has no address on {network}"))?;
+        Ok(Some(super::BuildEgress { network: network.clone(), proxy: format!("http://{ip}:{}", super::egress::PORT), builder: network }))
+    }
+
+    async fn remove_build_egress(&self, project: &str) {
+        let name = build_network_name(project);
+        // Its builder's container and its cache go with it (`buildx rm`), then its relay.
+        let _ = docker(&["buildx", "rm", "-f", &name]).await;
+        self.remove_network(&name).await;
+    }
+
     fn egress_refused(&self, network: &str, hosts: &[String]) -> Vec<super::egress::Refused> {
         self.egress.as_ref().map(|p| p.refused(network, hosts)).unwrap_or_default()
     }
@@ -982,7 +1073,10 @@ pub const CAP_DROP: [&str; 4] = ["NET_RAW", "MKNOD", "AUDIT_WRITE", "SETFCAP"];
 ///
 /// The sandbox's container: busybox asleep, holding the instance's network, its aliases on the
 /// project network and its published port; nothing else, and allowed nothing else.
-fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>, host_gateway: Option<&str>) -> serde_json::Value {
+/// The sandbox holding an instance's network. `ingress` (a closed web instance's, with the owner
+/// to run as): `socat` joins each caller on `<dir>/s.sock` to the app's port in the sandbox's
+/// network namespace, instead of only sleeping.
+fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>, host_gateway: Option<&str>, ingress: Option<(&std::path::Path, u32, u32)>) -> serde_json::Value {
     use serde_json::json;
     let mut host = json!({
         "Memory": 16i64 << 20,
@@ -1013,6 +1107,17 @@ fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>, host_gateway: Opt
         if spec.closed {
             config["Labels"][format!("{LABEL}.closed")] = json!(p.to_string());
         }
+    }
+    if let (Some((dir, uid, gid)), Some(p)) = (ingress, spec.port) {
+        use super::ingress::{MOUNT, SOCKET};
+        config["Image"] = json!(super::links::IMAGE);
+        // A fork a caller: room for a few hundred at once.
+        config["Cmd"] = json!([format!("UNIX-LISTEN:{MOUNT}/{SOCKET},fork,unlink-early,mode=600"), format!("TCP:127.0.0.1:{p}")]);
+        config["User"] = json!(format!("{uid}:{gid}"));
+        host["Binds"] = json!([format!("{}:{MOUNT}", dir.display())]);
+        host["Memory"] = json!(64i64 << 20);
+        host["MemorySwap"] = json!(64i64 << 20);
+        host["PidsLimit"] = json!(512);
     }
     if let Some(net) = &spec.network {
         host["NetworkMode"] = json!(net);
@@ -1150,6 +1255,36 @@ async fn write_private(path: &std::path::Path, data: &[u8]) -> anyhow::Result<()
 /// where its configuration is, nothing a build's variables could set.
 const CLI_ENV: [&str; 8] = ["PATH", "HOME", "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY", "XDG_RUNTIME_DIR"];
 
+/// A project's closed builds' network, and the name of their builder on it.
+pub fn build_network_name(project: &str) -> String {
+    format!("{}build-{}", super::PREFIX, project.strip_prefix("prj_").unwrap_or(project))
+}
+
+/// The BuildKit that runs a closed build's builder: the one the daemon's own builds use.
+const BUILDKIT_IMAGE: &str = "moby/buildkit:v0.34.0";
+
+/// The project's closed builder on its network, made once for `proxy` (BuildKit pulls base
+/// images through it too); one for an older proxy address goes.
+async fn closed_builder(egress: &super::BuildEgress) -> anyhow::Result<()> {
+    let wanted = format!("env.HTTPS_PROXY={}", egress.proxy);
+    if let Ok(info) = docker(&["buildx", "inspect", &egress.builder]).await {
+        // `Driver Options: … env.HTTPS_PROXY="http://…"`.
+        if info.contains(&format!("env.HTTPS_PROXY=\"{}\"", egress.proxy)) {
+            return Ok(());
+        }
+        let _ = docker(&["buildx", "rm", "-f", &egress.builder]).await;
+    }
+    let net = format!("network={}", egress.network);
+    let http = format!("env.HTTP_PROXY={}", egress.proxy);
+    let image = format!("image={BUILDKIT_IMAGE}");
+    let args = ["buildx", "create", "--name", &egress.builder, "--driver", "docker-container", "--driver-opt", &net, "--driver-opt", &wanted, "--driver-opt", &http, "--driver-opt", &image];
+    match docker(&args).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("existing instance") => Ok(()),
+        Err(e) => Err(e.context("a closed build's builder")),
+    }
+}
+
 /// The small image that reads or writes a volume for a backup or a restore.
 const VOLUME_IMAGE: &str = "busybox:1.37";
 /// A restore: the backup (the tar on stdin) extracts into a staging directory on the volume, and
@@ -1232,12 +1367,24 @@ impl Builder for DockerBuilder {
                 cmd.env(k, v);
             }
         }
-        cmd.env("DOCKER_BUILDKIT", "1")
-            .args(["build", "--progress", "plain", "--file"])
-            .arg(&dockerfile)
-            .args(["--tag", &job.tag, "--label", &format!("{LABEL}={}", job.service), "--label", &format!("{LABEL}.deployment={}", job.deployment)])
+        cmd.env("DOCKER_BUILDKIT", "1");
+        match &job.egress {
+            // A closed build: on its project's builder, whose network reaches only the proxy to
+            // public hosts (its steps get it as the proxy variables every package manager reads),
+            // and loaded into the daemon's images after.
+            Some(e) => {
+                closed_builder(e).await?;
+                cmd.args(["buildx", "build", "--builder", &e.builder, "--load", "--progress", "plain", "--file"]).arg(&dockerfile);
+                for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+                    cmd.arg("--build-arg").arg(format!("{k}={}", e.proxy));
+                }
+            }
             // Links (a database) are reached the way instances reach them.
-            .args(["--add-host", "host.docker.internal:host-gateway"]);
+            None => {
+                cmd.args(["build", "--progress", "plain", "--file"]).arg(&dockerfile).args(["--add-host", "host.docker.internal:host-gateway"]);
+            }
+        }
+        cmd.args(["--tag", &job.tag, "--label", &format!("{LABEL}={}", job.service), "--label", &format!("{LABEL}.deployment={}", job.deployment)]);
         if let Some(t) = &job.target {
             cmd.args(["--target", t]);
         }

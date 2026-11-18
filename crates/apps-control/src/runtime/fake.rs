@@ -76,6 +76,10 @@ pub struct Fake {
     pub pulled_as: Mutex<Option<String>>,
     /// Each build's `no_cache` and its Dockerfile, in order.
     pub built: Mutex<Vec<(bool, String)>>,
+    /// Each build's variables' names, in order.
+    pub build_vars: Mutex<Vec<Vec<String>>>,
+    /// Each build's closed network, in order (none: the default one).
+    pub build_networks: Mutex<Vec<Option<String>>>,
     /// The manifests of the image archives it loaded.
     pub loaded: Mutex<Vec<String>>,
     /// Images removed ([`Builder::remove_image`]).
@@ -612,6 +616,11 @@ impl Runtime for Fake {
         Ok(super::egress::proxy_url(network, hosts))
     }
 
+    async fn build_egress(&self, project: &str) -> anyhow::Result<Option<super::BuildEgress>> {
+        let network = format!("roll-apps-build-{}", project.strip_prefix("prj_").unwrap_or(project));
+        Ok(Some(super::BuildEgress { network: network.clone(), proxy: "http://192.0.2.1:3128".into(), builder: network }))
+    }
+
     fn egress_refused(&self, _network: &str, _hosts: &[String]) -> Vec<super::egress::Refused> {
         self.refused.lock().clone()
     }
@@ -687,6 +696,8 @@ impl Builder for Fake {
         }
         let dockerfile = std::fs::read_to_string(job.context.join(&job.dockerfile)).map_err(|_| anyhow::anyhow!("no Dockerfile in the context"))?;
         self.built.lock().push((job.no_cache, dockerfile));
+        self.build_vars.lock().push(job.env.iter().map(|(k, _)| k.clone()).collect());
+        self.build_networks.lock().push(job.egress.as_ref().map(|e| e.network.clone()));
         log.line("#2 DONE");
         Ok(job.tag.clone())
     }

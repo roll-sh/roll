@@ -37,6 +37,8 @@ pub const RULES: &[Rule] = &[
     // …except where approvals are posted and where the audit log streams: the operator's.
     Rule { route: "/v1/access/notify", access: Access::Operator },
     Rule { route: "/v1/access/audit/sinks", access: Access::Operator },
+    // Which identity providers roll trusts, and the apps they may sign people in to.
+    Rule { route: "/v1/access/enterprise", access: Access::Operator },
     // Health: load balancers and the dashboard's status; nothing a tenant owns.
     Rule { route: "/v1/health", access: Access::Public("health: Postgres control plane version and status") },
     Rule { route: "/v1/code/health", access: Access::Public("health: load balancers") },

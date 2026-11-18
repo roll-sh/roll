@@ -280,9 +280,11 @@ impl Engine {
     /// code's `approve-run` for a Git URL service's preview). Only the head the preview is at; the
     /// next push waits again.
     pub fn approve(&self, id: &str, head: &str, by: &str) -> Result<Preview> {
-        // Roll only holds on roll apps for the instance (apps' #143); the build gets none of its
-        // secrets (#222; rolld's adapter deploys nothing to a closed environment that doesn't say
-        // so), though it runs on an open network. So a fork's head is released under it.
+        // Roll only holds on roll apps for the instance (apps' #143, its gateway isolated from the
+        // host's services since #240) and the build: it gets none of its secrets (#222; rolld's
+        // adapter deploys nothing to a closed environment that doesn't say so) on a network of
+        // its own, out only to public hosts through its proxy (#238). So a fork's head is
+        // released under it.
         self.store.approve_git_pull(id, head, by)?;
         self.store.log(id, &format!("{} approved by {by}", short(head)))?;
         let r = self.store.update(id, |row| {

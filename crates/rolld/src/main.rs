@@ -560,6 +560,8 @@ async fn run() -> anyhow::Result<()> {
         },
         workspace.clone(),
     )?;
+    // People's accounts in the audit log (sign-ins, invites, SSO and SCIM changes).
+    accounts.set_audit(std::sync::Arc::new(accounts::AccessAudit(access.clone())));
     router = router.merge(roll_access::api::router(access.clone()));
     // Users' own tokens act as them, as they are now (docs/permissions.md, "Users' own tokens").
     let _ = access.people.set(sessions);

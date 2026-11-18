@@ -11,6 +11,7 @@ pub mod aws;
 pub mod codebuild;
 pub mod docker;
 pub mod egress;
+pub mod ingress;
 pub mod engine;
 pub mod fake;
 pub mod fargate;
@@ -237,6 +238,14 @@ pub trait Runtime: Send + Sync {
     async fn egress_proxy(&self, _network: &str, _service: &str, _hosts: &[String]) -> anyhow::Result<String> {
         anyhow::bail!("this runtime has no egress proxy")
     }
+    /// Where a closed environment of `project` builds ([`BuildEgress`]): a network of the
+    /// project's own with no route out and no way to the host, whose only way out is an egress
+    /// proxy to public hosts. None: this runtime doesn't close builds.
+    async fn build_egress(&self, _project: &str) -> anyhow::Result<Option<BuildEgress>> {
+        Ok(None)
+    }
+    /// The project's closed builds' builder and network, once it has no service left.
+    async fn remove_build_egress(&self, _project: &str) {}
     /// The hosts closed `network`'s egress proxy for `hosts` refused lately (none: it hasn't, or
     /// isn't here).
     fn egress_refused(&self, _network: &str, _hosts: &[String]) -> Vec<egress::Refused> {
@@ -297,6 +306,18 @@ pub struct Shell {
 }
 
 /// One build: a tree with its Dockerfile, made into an image.
+/// A closed build's network ([`Runtime::build_egress`]): its builder runs there, and its steps
+/// reach out only through `proxy` (an address, not a name: BuildKit's steps resolve with
+/// public DNS, not the network's).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BuildEgress {
+    pub network: String,
+    /// `http://<address>:3128`.
+    pub proxy: String,
+    /// The buildx builder that runs on `network` (the project's own).
+    pub builder: String,
+}
+
 pub struct BuildJob {
     pub service: String,
     pub deployment: String,
@@ -326,6 +347,8 @@ pub struct BuildJob {
     /// [`apps_build::LAYERS_ARG`]'s value on a builder that shares caches: a secret per service
     /// that keeps its `RUN` steps' cached layers its own. Never in argv or a log.
     pub layers: Option<String>,
+    /// A closed environment's build: on this network, through its proxy, not the default one.
+    pub egress: Option<BuildEgress>,
 }
 
 impl std::fmt::Debug for BuildJob {
@@ -436,6 +459,7 @@ mod tests {
             no_cache: false,
             target: None,
             layers: None,
+            egress: None,
         };
         assert_eq!(build_args(&job), ["NPM_TOKEN", "A"]);
         job.own_dockerfile = false;
