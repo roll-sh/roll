@@ -307,6 +307,54 @@ applies: every cluster is this node's.
 - **Metering** per cluster: loaded GB-hours, requests, stored GB-months; the dashboard compares the
   cost with Elastic Cloud and Amazon OpenSearch Service for the same workload.
 
+## Observability
+
+Per cluster, as Elastic Cloud's Performance tab and logs show them: request metrics and the
+search and indexing slow logs, in the dashboard's Performance tab and through
+`GET /v1/search/clusters/{id}/metrics` and `/slowlog`.
+
+- **Recording** (`search-server` `metrics.rs`). Each request admitted to a cluster is counted
+  by kind, from its path (`search`: `_search`, `_msearch`, `_count`, async search, kNN, EQL,
+  ES|QL, SQL, terms enum; `index`: writes through `_bulk`, `_doc`, `_create`, `_update`,
+  by-query; `other`), by response class (below 400, 4xx, 5xx, and 429 apart: the cluster's
+  rate, in-flight and byte limits, which never ran the request, and its thread pools) and by
+  latency, from taking the cluster's permits (queueing included) to the answer being durable.
+  Latency goes into a log histogram of 256 buckets (8 per power of two of microseconds, up to
+  about 4.5 hours: percentiles within about 6%), which merges exactly, so any range's
+  percentiles come from its buckets. A loaded cluster's recorder is a lock and the minute in
+  progress (3 KiB, allocated by its first request of the minute); a request bumps a few
+  counters under the lock and allocates nothing.
+- **Slow logs** (`search-es` `slowlog.rs`). The thresholds are index settings, cached per shard
+  as atomics when the index's settings apply, so with none set a phase costs one relaxed load
+  and is not timed. Entries wait in the cluster's ring (500 entries, 1 MiB), each with its
+  source cut at 1,000 characters (`index.indexing.slowlog.source` for documents) and the
+  client's `X-Opaque-Id`; never a header or credential.
+- **Where it's kept: the catalog, with the metering.** Every metering pass (60 s) takes each
+  cluster's finished and current minutes and new slow log entries
+  (`Node::take_observations`) and writes them to the catalog: `search_metrics` holds two fixed
+  rings per cluster, one row per slot (1,440 one-minute buckets for 24 hours, 336 one-hour
+  buckets for 14 days; a slot's bucket adds up within its minute or hour and is replaced when
+  its time comes round), and `search_slowlog` the newest 500 entries. A cluster that unloads
+  hands its recorder to the node's carry-over, which the next pass empties, so a sleeping
+  cluster holds nothing in memory, has no timer, and writes no row: an idle minute costs
+  nothing anywhere. The routes read the catalog and add what the owner recorded since the
+  last pass.
+- **On a fleet** the owner records (requests run there), and every node's pass writes to the
+  shared catalog, so a cluster that moves (a drain, a takeover) keeps its history: the old
+  owner's last minutes go in with its next pass, or its shutdown's. Two owners writing the same
+  minute during a handoff add up in one transaction. A node killed without a shutdown loses at
+  most the minute or so it hadn't handed on.
+- **Cost.** Memory: nothing for a sleeping cluster; about 3 KiB per loaded cluster with traffic
+  in the current minute (16 finished minutes at most if no pass takes them), plus its slow log
+  ring (empty unless thresholds are set; 1 MiB at most). Catalog: at most 1,776 metric rows and
+  500 slow log rows per cluster, a few hundred bytes each. CPU, on a release `search-dev`
+  answering a `term` search on a 10,000-document index over keep-alive HTTP (2026-11-17,
+  three alternating rounds of 20,000 requests, `perf stat` user instructions of the server):
+  483.3k instructions per request before (480.3k-485.4k) and 485.6k after (484.5k-486.9k),
+  +0.5%, within the rounds' own spread; the recording path alone (classifying the request, the
+  clock reads, the recorder) is 112 ns per request (`metrics::tests::record_cost`, release),
+  about 0.05% of the request's ~600k cycles.
+
 ## Testing
 
 - **Unit tests** in every crate, next to the code.

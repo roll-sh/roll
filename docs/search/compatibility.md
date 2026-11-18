@@ -983,6 +983,19 @@ Checked against Elasticsearch 9.5.5 (captures in
   answers; later heads on a kept-alive connection are hyper's (it closes on the malformed
   ones and frames a `Content-Length` next to `Transfer-Encoding` by the latter); and roll sends
   `Content-Length` where Elasticsearch streams some responses chunked (`_cat`).
+- Slow logs: `index.search.slowlog.threshold.{query,fetch}.*` and
+  `index.indexing.slowlog.threshold.index.*` log a shard's query or fetch phase, or an index
+  operation on the primary, that took longer than a threshold (`took > threshold`, the highest
+  level passed), as Elasticsearch's JSON slow log lines; they are read through
+  `GET /v1/search/clusters/{id}/slowlog` (the newest 500), not from a node's log files. Still
+  different: a search's source is cut at 1,000 characters where Elasticsearch logs all of it
+  (9.5.5 has no `index.search.slowlog.source` and refuses it as unknown, so roll doesn't add
+  one), and is the request body as sent rather than Elasticsearch's re-serialized source (a
+  search with no body logs no source); `index.indexing.slowlog.source: true` keeps at most
+  1,000 characters too; indexing entries don't carry `X-Opaque-Id`;
+  `index.search.slowlog.include.user`, `.level` and `index.indexing.slowlog.reformat` are
+  accepted and have no effect; searches an API runs inside roll (by-query, terms enum, ES|QL's
+  reads) aren't logged.
 - A request waiting for its pool holds no node-wide running slot (`max_running`): the server
   queues it for the pool between the tenant's in-flight permit and the running slot. A pool
   slot is taken per request where Elasticsearch takes one per shard and phase.
