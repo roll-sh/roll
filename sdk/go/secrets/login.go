@@ -22,6 +22,12 @@ func Login(ctx context.Context, api, identity, oidcToken string) (*Client, error
 	return LoginWithIdentity(ctx, api, identity, func(context.Context) (string, error) { return oidcToken, nil })
 }
 
+// LoginFunc is Login with the OIDC token from source, asked again for each login: for a token
+// that changes (a file Kubernetes rotates, one a cloud's API mints on demand).
+func LoginFunc(ctx context.Context, api, identity string, source func(context.Context) (string, error)) (*Client, error) {
+	return LoginWithIdentity(ctx, api, identity, source)
+}
+
 // LoginWithIdentity is a client logged in as the workload identity `identity`, as FromEnv makes
 // one: tokenSource is called for a fresh OIDC token at each login (this first one, then before the
 // roll token ends and when the server refuses it), so a token file that's replaced on disk keeps

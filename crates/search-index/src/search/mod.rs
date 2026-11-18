@@ -570,6 +570,10 @@ pub trait QueryVisitor {
         let m = q.clone();
         self.multi_term(q.field, Arc::new(move |t: &[u8]| m.matches_term(t)));
     }
+    /// A runtime field query's term matcher: runtime fields have no field number, so they
+    /// report by name (Lucene's `consumeTermsMatching` from an `AbstractScriptFieldQuery`).
+    /// Only highlighters care.
+    fn runtime_field(&mut self, _name: &str, _matcher: TermMatcher) {}
     /// Entering a boosted sub-query (`BoostQuery`); paired with [`end_boost`](Self::end_boost).
     fn begin_boost(&mut self, _boost: f32) {}
     fn end_boost(&mut self) {}

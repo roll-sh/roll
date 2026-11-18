@@ -190,6 +190,19 @@ func TestValuesAreCachedAndRevalidatedWithTheirDigest(t *testing.T) {
 	if get() != "2" || get() != "2" || len(asked) != 4 {
 		t.Fatalf("a change, then dynamic credentials read every time: %q", asked)
 	}
+	// CacheSize: past it, the folder read longest ago goes.
+	mu.Lock()
+	dynamic = []string{}
+	mu.Unlock()
+	c = &Client{API: srv.URL, Token: "rlt_x", Project: "prj_1", CacheTTL: 20 * time.Second, CacheSize: 1, Now: func() time.Time { return clock }}
+	for _, env := range []string{"production", "production", "staging", "production"} {
+		if _, err := c.Values(ctx, env, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(asked) != 7 {
+		t.Fatalf("one folder kept: %q", asked)
+	}
 }
 
 // Transit sends bytes as base64 and decrypts back to the same bytes, as @roll/secrets' does.
@@ -329,6 +342,20 @@ func TestSetAndDeleteWriteOneKeyAndDropTheCache(t *testing.T) {
 	var e *Error
 	if !errors.As(err, &e) || e.Code != "approval_required" || e.Status != 409 || strings.Contains(fmt.Sprintf("%v %+v", err, e), "fake-value-2") {
 		t.Fatalf("%#v", err)
+	}
+}
+
+// A Values or a Client printed or logged shows no value and no token.
+func TestPrintingNeverShowsAValueOrTheToken(t *testing.T) {
+	v := Values{Values: map[string]string{"DB_PASSWORD": "fake-pw-not-real"}}
+	c := &Client{API: "https://api.roll.example", Token: "rlt_fake_token_not_real", Project: "prj_1"}
+	for _, s := range []string{fmt.Sprintf("%v", v), fmt.Sprintf("%+v", v), fmt.Sprintf("%#v", v), fmt.Sprintf("%v", c), fmt.Sprintf("%+v", c), fmt.Sprintf("%#v", c)} {
+		if strings.Contains(s, "fake-pw-not-real") || strings.Contains(s, "rlt_fake_token_not_real") {
+			t.Fatalf("printed a secret: %s", s)
+		}
+	}
+	if !strings.Contains(fmt.Sprint(v), "DB_PASSWORD") {
+		t.Fatalf("keys should still show: %s", fmt.Sprint(v))
 	}
 }
 

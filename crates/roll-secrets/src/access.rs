@@ -95,6 +95,12 @@ pub trait Grants: Send + Sync + std::fmt::Debug {
     fn everything(&self) -> bool {
         false
     }
+    /// Whether the caller may `action` encryption key `name` of `project` (roll-access's rules
+    /// can name one key: `{id: "prj_…", index: "<name>"}`). Others answer for the whole project.
+    fn reaches_key(&self, action: Action, project: &str, name: &str) -> bool {
+        let _ = name;
+        self.allows(action, &Scope::project(project))
+    }
 }
 
 /// A signed-in person who isn't an admin (docs/accounts.md): everything on the projects they own,
@@ -241,6 +247,17 @@ pub fn rule(project: &str, environments: Option<Vec<String>>, paths: Option<Vec<
     }
 }
 
+fn scope_action(action: Action) -> roll_auth::scope::Action {
+    use roll_auth::scope;
+    match action {
+        Action::Read => scope::Action::Read,
+        Action::Reveal => scope::Action::Reveal,
+        Action::Write => scope::Action::Write,
+        Action::Delete => scope::Action::Delete,
+        Action::Admin => scope::Action::Admin,
+    }
+}
+
 /// Short-lived roll-access tokens for workload identities' logins (rolld: `Access::mint_workload`).
 /// The login is the proof, so there's no caller to gate: roll-access checks the rule is within the
 /// identity's scope and that its owner can still sign in.
@@ -273,13 +290,7 @@ pub struct GrantGrants(pub roll_auth::Grant);
 impl Grants for GrantGrants {
     fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
         use roll_auth::scope;
-        let action = match action {
-            Action::Read => scope::Action::Read,
-            Action::Reveal => scope::Action::Reveal,
-            Action::Write => scope::Action::Write,
-            Action::Delete => scope::Action::Delete,
-            Action::Admin => scope::Action::Admin,
-        };
+        let action = scope_action(action);
         // A project-wide read that answers per environment and folder (its environments' names,
         // health, findings, the audit log) answers only what the grant reaches in each: a rule
         // limited to some of them takes part in it, as roll-access's `filters_itself` routes do.
@@ -291,6 +302,13 @@ impl Grants for GrantGrants {
         let r = scope::Resource { product: "secrets".into(), id: Some(at.project.into()), project: Some(at.project.into()), environment: at.env.map(Into::into), path: at.path.map(Into::into), filters_itself: filtered, ..Default::default() };
         // `ask` pauses a whole request at the gate; inside the product it's a no.
         self.0.allows(&r, action) == scope::Outcome::Allow
+    }
+
+    /// One key, as rolld's gate judges a request naming it (the project's id, the key as its index).
+    fn reaches_key(&self, action: Action, project: &str, name: &str) -> bool {
+        use roll_auth::scope;
+        let r = scope::Resource { product: "secrets".into(), id: Some(project.into()), project: Some(project.into()), index: Some(name.into()), ..Default::default() };
+        self.allows(action, &Scope::project(project)) || self.0.allows(&r, scope_action(action)) == scope::Outcome::Allow
     }
 
     /// Code read on the repository, as it sits on `project`'s canvas.
@@ -329,6 +347,30 @@ pub struct Caller {
     /// A machine roll runs or trusts (apps, previews, checks, sandboxes, syncs, a workload
     /// identity's login): the only callers a sensitive key's value reaches.
     pub runtime: bool,
+    /// The person's approval that let this request through roll-access's gate (an `ask` approved,
+    /// or a rule an approval remembered for a while), for the audit log.
+    pub approval: Option<Approval>,
+}
+
+/// An approval from roll-access's gate (`roll_auth::Approved`), as the audit log records it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Approval {
+    /// `apr_…`
+    pub id: String,
+    /// Who approved it, in order (`operator`, a person's `usr_…`, a chat approver's `slack:U…`):
+    /// more than one when a policy asks for two people. Empty when it wasn't recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by: Vec<String>,
+    /// Unix ms: the remembered rule that allowed it lasts until then; absent when it was approved
+    /// for this request alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<i64>,
+}
+
+impl From<&roll_auth::Approved> for Approval {
+    fn from(a: &roll_auth::Approved) -> Approval {
+        Approval { id: a.id.to_string(), by: a.by.iter().map(|b| b.to_string()).collect(), until: a.until }
+    }
 }
 
 /// roll previews' in-process consumer: the operator's equal for an environment's branches.
@@ -336,13 +378,13 @@ pub const PREVIEWS: &str = "roll:previews";
 
 impl Caller {
     pub fn operator() -> Caller {
-        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false }
+        Caller { principal: "operator".into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: false, approval: None }
     }
 
     /// An in-process consumer (roll apps, previews, sandboxes, tasks): everything the caller
     /// handing out the call may do, named for the audit log.
     pub fn consumer(name: &str) -> Caller {
-        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true }
+        Caller { principal: name.into(), grants: std::sync::Arc::new(Everything), ip: None, runtime: true, approval: None }
     }
 
     /// Whether this caller may learn anything of a row's value: reveal it, see its fingerprint, or
@@ -360,11 +402,20 @@ impl Caller {
     /// This caller, kept out of `except` (a project's protected environments) whatever it may
     /// otherwise do.
     pub fn without(&self, except: Vec<String>) -> Caller {
-        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime }
+        Caller { principal: self.principal.clone(), grants: std::sync::Arc::new(Narrowed(self.grants.clone(), Except(except))), ip: self.ip.clone(), runtime: self.runtime, approval: self.approval.clone() }
     }
 
     pub fn allows(&self, action: Action, at: &Scope<'_>) -> bool {
         self.grants.allows(action, at)
+    }
+
+    /// As [`Caller::need`], for encryption key `name` of `project`: a grant limited to that key
+    /// reaches it too.
+    pub fn need_key(&self, action: Action, project: &str, name: &str) -> crate::Result<()> {
+        if self.grants.reaches_key(action, project, name) {
+            return Ok(());
+        }
+        self.need(action, &Scope::project(project))
     }
 
     pub fn need(&self, action: Action, at: &Scope<'_>) -> crate::Result<()> {

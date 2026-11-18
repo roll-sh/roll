@@ -20,6 +20,9 @@ v = c.resolve_sealed("production", "app:web", key)
 
 c.watch("production", lambda v: reload(v.values))   # until `stop` (a threading.Event) is set
 
+otp = c.totp("production", "REGISTRY_TOTP")      # a TOTP key's code: otp.code, otp.expires_at
+otp = roll_secrets.totp_at(v.values["REGISTRY_TOTP"])   # or from a seed already resolved
+
 cards = c.transit("cards")                       # an encryption key that stays in roll
 ct = cards.encrypt(card_number, "order:42")
 # Read per request? Keep answers 30 s, then revalidate (a 304 while unchanged).

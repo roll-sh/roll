@@ -71,6 +71,9 @@ pub struct WriteArgs {
     pub list_executed_pipelines: bool,
     /// Who writes (a client's write): the `set_security_user` processor records it.
     pub principal: Option<std::sync::Arc<crate::xpack::security::Principal>>,
+    /// The content type the document came in (JSON when unset): synthetic `_source` encodes
+    /// the objects it keeps verbatim in it (`_ignored_source`).
+    pub source_type: Option<crate::xcontent::XContentType>,
 }
 
 /// The outcome of one write.
@@ -617,7 +620,7 @@ pub async fn prepare_checked(
                     .map_err(|e| EsError::document_parsing(format!("[{l}:{c}] failed to parse: {}", e.reason())).caused_by(e))?;
             }
         }
-        let stored = stored_source(&idx, &table, source, value);
+        let stored = stored_doc(&idx, &table, source, value, args.and_then(|a| a.source_type).unwrap_or(crate::xcontent::XContentType::Json));
         if crate::engine::tsdb::is_time_series(&idx) {
             let (gen_id, tsid, desc) = time_series_id(&idx, &parsed, id, routing).map_err(|e| {
                 // Raised after the document was read: located at its closing brace.
@@ -628,7 +631,7 @@ pub async fn prepare_checked(
                     e
                 }
             })?;
-            let meta = DocMeta { id: &gen_id, routing: None, source: stored, tsid: Some((&tsid, routing.unwrap_or(""))) };
+            let meta = DocMeta { id: &gen_id, routing: None, source: stored.source, ignored_source: stored.ignored_source, tsid: Some((&tsid, routing.unwrap_or(""))) };
             let doc = convert::to_indexable(&table, &parsed, &meta)?;
             let shard_id = crate::meta::routing::shard_for(&idx, &gen_id, routing);
             let shard = engine.shard(shard_id).clone();
@@ -648,7 +651,7 @@ pub async fn prepare_checked(
                 return Err(EsError::document_parsing(format!("[{l}:{c}] failed to parse: {msg}")).caused_by(cause));
             }
         }
-        let meta = DocMeta { id, routing, source: stored, tsid: None };
+        let meta = DocMeta { id, routing, source: stored.source, ignored_source: stored.ignored_source, tsid: None };
         let doc = convert::to_indexable(&table, &parsed, &meta)?;
         let shard_id = crate::meta::routing::shard_for(&idx, id, routing);
         let shard = engine.shard(shard_id).clone();
@@ -717,16 +720,38 @@ pub(crate) fn time_series_id(idx: &IndexMeta, parsed: &crate::document::ParsedDo
 /// disabled.
 pub fn stored_source(idx: &IndexMeta, table: &crate::engine::fields::FieldTable, source: &Bytes, value: &Value) -> Option<Bytes> {
     use crate::engine::synthetic;
+    if synthetic::source_mode(idx) == synthetic::SourceMode::Synthetic {
+        return stored_doc(idx, table, source, value, crate::xcontent::XContentType::Json).source;
+    }
+    kept_source(idx, table, source, value)
+}
+
+/// What an index stores of a document: its `_source` ([`stored_source`]) and, with synthetic
+/// `_source`, the `_ignored_source` entries of the values it kept verbatim (objects encoded in
+/// `ty`, the content type the document came in).
+pub struct StoredDoc {
+    pub source: Option<Bytes>,
+    pub ignored_source: Vec<Bytes>,
+}
+
+pub fn stored_doc(idx: &IndexMeta, table: &crate::engine::fields::FieldTable, source: &Bytes, value: &Value, ty: crate::xcontent::XContentType) -> StoredDoc {
+    use crate::engine::synthetic;
+    if synthetic::source_mode(idx) != synthetic::SourceMode::Synthetic {
+        return StoredDoc { source: kept_source(idx, table, source, value), ignored_source: Vec::new() };
+    }
+    let Value::Obj(m) = value else { return StoredDoc { source: Some(source.clone()), ignored_source: Vec::new() } };
+    let ctx = idx.mapping_ctx();
+    let opts = synthetic::options(idx);
+    let (doc, kept) = synthetic::synthesize_kept(&idx.mapping, &ctx, table, opts, m);
+    StoredDoc { source: Some(Bytes::from(Value::Obj(doc).to_json())), ignored_source: crate::engine::ignored_source::encode(&kept, ty, opts.binary_fallback) }
+}
+
+/// [`stored_source`] of an index that doesn't synthesize it.
+fn kept_source(idx: &IndexMeta, table: &crate::engine::fields::FieldTable, source: &Bytes, value: &Value) -> Option<Bytes> {
+    use crate::engine::synthetic;
     let sc = &idx.mapping.source;
-    match synthetic::source_mode(idx) {
-        synthetic::SourceMode::Disabled => return None,
-        synthetic::SourceMode::Synthetic => {
-            let Value::Obj(m) = value else { return Some(source.clone()) };
-            let ctx = idx.mapping_ctx();
-            let doc = synthetic::synthesize(&idx.mapping, &ctx, table, synthetic::options(idx), m);
-            return Some(Bytes::from(Value::Obj(doc).to_json()));
-        }
-        synthetic::SourceMode::Stored => {}
+    if synthetic::source_mode(idx) == synthetic::SourceMode::Disabled {
+        return None;
     }
     if sc.enabled == Some(false) {
         return None;
@@ -1125,6 +1150,9 @@ pub struct DocCopy {
     pub seq_no: i64,
     pub primary_term: i64,
     pub version: i64,
+    /// The `_ignored_source` entries the copied document had (a snapshot keeps none: they are
+    /// derived again from its synthetic `_source`).
+    pub ignored_source: Vec<Bytes>,
 }
 
 /// The live root documents of `searcher` (global doc ids, in order) in the segments `wanted`
@@ -1182,6 +1210,7 @@ pub fn read_copy(searcher: &search_index::Searcher, vectors: &[Arc<crate::engine
         id,
         routing,
         source,
+        ignored_source: crate::fetch::ignored_source(&stored).into_iter().map(Bytes::copy_from_slice).collect(),
         seq_no: crate::search::hits::meta_dv(seg, local, search_index::schema::SEQ_NO_FIELD),
         primary_term: crate::search::hits::meta_dv(seg, local, search_index::schema::PRIMARY_TERM_FIELD),
         version: crate::search::hits::meta_dv(seg, local, search_index::schema::VERSION_FIELD),
@@ -1210,7 +1239,7 @@ impl<'c> CopyTarget<'c> {
     /// primary term and version, logged like a write.
     pub fn index(&self, copy: &DocCopy) -> EsResult<()> {
         let (cluster, dst, table) = (self.cluster, &self.dst, &self.table);
-        let DocCopy { id, routing, source, seq_no, primary_term, version } = copy;
+        let DocCopy { id, routing, source, seq_no, primary_term, version, ignored_source } = copy;
         let (id, routing, seq_no, primary_term, version) = (id.as_str(), routing.as_deref(), *seq_no, *primary_term, *version);
         let value = crate::fetch::parse_source(source)?;
         let mut parsed = crate::document::parse_document(&dst.mapping, &self.ctx, &value, Some(source), Some(id))?;
@@ -1222,10 +1251,14 @@ impl<'c> CopyTarget<'c> {
             let hash = crate::engine::tsdb::id_routing_hash(dst, id).map(crate::engine::tsdb::encode_hash).unwrap_or_default();
             (tsid, hash)
         });
+        let stored = stored_doc(dst, table, source, &value, crate::xcontent::XContentType::Json);
         let meta = DocMeta {
             id,
             routing: if ts.is_some() { None } else { routing },
-            source: stored_source(dst, table, source, &value),
+            source: stored.source,
+            // The entries as the copied document had them (in their original content type
+            // and order), not as its synthetic `_source` gives them again.
+            ignored_source: if ignored_source.is_empty() { stored.ignored_source } else { ignored_source.clone() },
             tsid: ts.as_ref().map(|(t, h)| (t.as_slice(), h.as_str())),
         };
         let idoc = convert::to_indexable(table, &parsed, &meta)?;

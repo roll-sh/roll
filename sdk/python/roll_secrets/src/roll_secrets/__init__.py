@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
+import hmac as _hmac
 import json
 import os
 import threading
@@ -32,6 +34,8 @@ __all__ = [
     "SecretInfo",
     "Source",
     "SecretsError",
+    "Totp",
+    "totp_at",
     "login",
     "login_with_identity",
     "oidc_token_from_env",
@@ -68,7 +72,7 @@ class Followed:
     field: str
 
 
-@dataclass
+@dataclass(repr=False)
 class Values:
     """An environment's values. ``dynamic`` keys hold a credential that ends with its lease
     (``leases``; ``renew`` keeps it); ``linked`` keys come from a link to a resource; ``followed``
@@ -80,6 +84,10 @@ class Values:
     dynamic: List[str] = field(default_factory=list)
     linked: List[str] = field(default_factory=list)
     followed: List[Followed] = field(default_factory=list)
+
+    def __repr__(self) -> str:
+        # Never a value: a logged or printed Values names its keys only.
+        return f"Values(keys={sorted(self.values)!r}, problems={len(self.problems)}, leases={len(self.leases)})"
 
     @staticmethod
     def _of(d: Dict[str, Any], values: Optional[Dict[str, str]] = None) -> "Values":
@@ -147,16 +155,23 @@ def _q(path: str) -> str:
 class Client:
     """Reads one project's secrets."""
 
-    def __init__(self, api: str, token: str, project: Optional[str] = None, timeout: float = 30.0, cache_ttl: float = 0.0, clock: Callable[[], float] = time.monotonic):
+    def __repr__(self) -> str:
+        # Never the token.
+        return f"Client(api={self.api!r}, project={self.project!r})"
+
+    def __init__(self, api: str, token: str, project: Optional[str] = None, timeout: float = 30.0, cache_ttl: float = 0.0, clock: Callable[[], float] = time.monotonic, cache_size: int = 0):
         """``cache_ttl`` (seconds) keeps ``values`` answers that long and answers from memory
         meanwhile; after that it asks again with the digest they were read against, and an
         unchanged folder costs a 304 that reads, issues and audits nothing. A folder holding dynamic
-        credentials is never kept (they end with their lease). ``clock`` is for tests."""
+        credentials is never kept (they end with their lease). ``cache_size`` caps how many
+        folders are kept (past it, the one read longest ago goes; 0: no cap). ``clock`` is for
+        tests."""
         self.api = api.rstrip("/")
         self.token = token
         self.project = project
         self.timeout = timeout
         self.cache_ttl = cache_ttl
+        self.cache_size = cache_size
         self._clock = clock
         self._cache: Dict[str, Any] = {}
         self._lock = threading.Lock()
@@ -327,6 +342,8 @@ class Client:
             if (v.dynamic and not keep_dynamic) or v.problems:
                 self._cache.pop(url, None)
             else:
+                if url not in self._cache and 0 < self.cache_size <= len(self._cache):
+                    del self._cache[min(self._cache, key=lambda k: self._cache[k][2])]
                 self._cache[url] = (v, etag.removeprefix("W/").strip('"'), self._clock())
         return v
 
@@ -342,9 +359,21 @@ class Client:
         opened = json.loads(open_sealed(r["sealed"], key, r["context"]))
         return Values._of(r, values=opened)
 
-    def digest(self, env: str, path: str = "") -> str:
-        """Moves whenever ``env``'s values under ``path`` would; reads no value."""
-        return self._call("GET", self._env(env) + "/digest" + _q(path))["digest"]
+    def digest(self, env: str, path: str = "", since: Optional[str] = None, wait: float = 0) -> str:
+        """Moves whenever ``env``'s values under ``path`` would; reads no value. With ``since`` and
+        ``wait`` (seconds, at most 60), a long poll: it answers as soon as the digest differs from
+        ``since``, or with the same one when ``wait`` runs out."""
+        q = _q(path)
+        if since and wait >= 1:
+            # Under this client's own timeout, and the server's 25.
+            q += ("&" if q else "?") + "since=" + urllib.parse.quote(since, safe="") + "&wait=" + str(int(max(1, min(wait, 25, self.timeout - 5))))
+        return self._call("GET", self._env(env) + "/digest" + q)["digest"]
+
+    def totp(self, env: str, key: str, path: str = "") -> "Totp":
+        """The current one-time code of ``env``'s TOTP key ``key`` (docs/secrets.md, "TOTP keys").
+        It needs reveal, as reading the seed does, and is audited without the code."""
+        d = self._call("GET", self._env(env) + "/secrets/" + urllib.parse.quote(key, safe="") + "/totp" + _q(path))
+        return Totp(code=d["code"], expires_at=d["expires_at"], period=d["period"])
 
     def transit(self, name: str) -> "Transit":
         """The project's encryption key ``name`` (docs/secrets.md, "Encryption keys"): data is
@@ -375,11 +404,18 @@ class Client:
         fail = on_error or (lambda _e: None)
         last: Optional[str] = None
         leases: List[str] = []
-        renewed = 0.0
-        waited = 0.0
+        renewed = time.monotonic()
         while not stop.is_set():
+            # A long poll: a change arrives within a second or two; ``every`` paces a server
+            # without them. It never outlasts the next renewal.
+            held = False
+            asked = time.monotonic()
             try:
-                now = self.digest(env, path)
+                until_renew = max(1.0, renew_every - (asked - renewed))
+                now = self.digest(env, path, since=last, wait=min(25.0, until_renew)) if last else self.digest(env, path)
+                held = last is not None and (now != last or time.monotonic() - asked >= 1)
+                if stop.is_set():
+                    break  # stopped while the poll was held: nothing more is called back
                 if now != last:
                     v = self.resolve(env, consumer, path) if consumer else self.values(env, path, fresh=True)
                     before, last = last, now
@@ -392,16 +428,67 @@ class Client:
                     on_change(v)
             except Exception as e:  # noqa: BLE001 - the watch goes on, as documented
                 fail(e)
-            if stop.wait(every):
+            if not held and stop.wait(every):
                 break
-            waited += every
-            if waited - renewed >= renew_every:
-                renewed = waited
+            if time.monotonic() - renewed >= renew_every:
+                renewed = time.monotonic()
                 for lease in leases:
                     try:
                         self.renew(lease)
                     except Exception as e:  # noqa: BLE001
                         fail(e)
+
+
+@dataclass(frozen=True)
+class Totp:
+    """A TOTP key's code and when it stops being valid (``expires_at`` in ms since the epoch: the
+    end of its step). The code is a credential: don't log it."""
+
+    code: str = field(repr=False)
+    expires_at: int
+    period: int
+
+
+_TOTP_ALGORITHMS = {"SHA1": hashlib.sha1, "SHA256": hashlib.sha256, "SHA512": hashlib.sha512}
+
+
+def totp_at(seed: str, at: Optional[float] = None) -> Totp:
+    """The code of ``seed`` (an ``otpauth://totp/`` URI or bare base32: SHA1, 6 digits, 30 s) at
+    ``at`` (Unix seconds; now by default), as the server computes it (RFC 6238): for a seed a sealed
+    resolve already gave. Errors never quote the seed."""
+    seed = seed.strip()
+    alg, digits, period, raw = "SHA1", 6, 30, seed
+    if seed[:10].lower() == "otpauth://":
+        if seed[:15].lower() != "otpauth://totp/":
+            raise ValueError("an otpauth URI must be otpauth://totp/… (HOTP isn't supported)")
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(seed).query)
+        raw = (q.get("secret") or [""])[0]
+        if not raw:
+            raise ValueError("an otpauth URI needs ?secret=")
+        alg = (q.get("algorithm") or ["SHA1"])[0].upper()
+        if alg not in _TOTP_ALGORITHMS:
+            raise ValueError("algorithm must be SHA1, SHA256 or SHA512")
+        try:
+            digits = int((q.get("digits") or ["6"])[0])
+            period = int((q.get("period") or ["30"])[0])
+        except ValueError:
+            raise ValueError("digits and period are numbers") from None
+        if not 6 <= digits <= 8:
+            raise ValueError("digits must be 6–8")
+        if not 15 <= period <= 120:
+            raise ValueError("period must be 15–120 seconds")
+    raw = raw.replace(" ", "").upper().rstrip("=")
+    try:
+        secret = base64.b32decode(raw + "=" * (-len(raw) % 8))
+    except (ValueError, TypeError):
+        raise ValueError("a TOTP seed is an otpauth://totp/ URI or base32") from None
+    if not 10 <= len(secret) <= 128:
+        raise ValueError("a TOTP secret is 16–205 base32 characters (80–1024 bits)")
+    unix = int(time.time() if at is None else at)
+    h = _hmac.new(secret, (unix // period).to_bytes(8, "big"), _TOTP_ALGORITHMS[alg]).digest()
+    o = h[-1] & 0x0F
+    n = (int.from_bytes(h[o : o + 4], "big") & 0x7FFFFFFF) % 10**digits
+    return Totp(code=str(n).zfill(digits), expires_at=(unix // period + 1) * period * 1000, period=period)
 
 
 class Transit:

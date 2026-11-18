@@ -18,6 +18,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +41,9 @@ type Client struct {
 	// issues and audits nothing. A folder holding dynamic credentials is never kept (they end with
 	// their lease). Zero: off.
 	CacheTTL time.Duration
+	// CacheSize caps how many folders CacheTTL keeps; past it, the one read longest ago goes. Zero:
+	// no cap.
+	CacheSize int
 	// Now is the clock CacheTTL is measured with (for tests); time.Now when nil.
 	Now func() time.Time
 
@@ -76,6 +81,27 @@ type Values struct {
 	Linked   []string          `json:"linked"`
 	Followed []Followed        `json:"followed,omitempty"`
 }
+
+// String names the keys only, never a value: a Values printed or logged with %v or %+v.
+func (v Values) String() string {
+	keys := make([]string, 0, len(v.Values))
+	for k := range v.Values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return fmt.Sprintf("Values{keys: %v, problems: %d, leases: %d}", keys, len(v.Problems), len(v.Leases))
+}
+
+// GoString is String, for %#v.
+func (v Values) GoString() string { return v.String() }
+
+// String never shows the token: a Client printed or logged with %v or %+v.
+func (c *Client) String() string {
+	return fmt.Sprintf("Client{API: %q, Project: %q}", c.API, c.Project)
+}
+
+// GoString is String, for %#v.
+func (c *Client) GoString() string { return c.String() }
 
 // Followed is a key left out because it links a resource the environment's preview branched.
 type Followed struct {
@@ -590,6 +616,15 @@ func (c *Client) revalidate(ctx context.Context, token, path string, hit cached,
 		if c.cache == nil {
 			c.cache = map[string]cached{}
 		}
+		if _, kept := c.cache[path]; !kept && c.CacheSize > 0 && len(c.cache) >= c.CacheSize {
+			oldest := ""
+			for k, x := range c.cache {
+				if oldest == "" || x.at.Before(c.cache[oldest].at) {
+					oldest = k
+				}
+			}
+			delete(c.cache, oldest)
+		}
 		c.cache[path] = cached{values: &v, etag: etag, at: now()}
 	}
 	c.cacheMu.Unlock()
@@ -639,14 +674,32 @@ func (c *Client) ResolveSealed(ctx context.Context, env, path, consumer string, 
 
 // Digest moves whenever env's values under path would; it reads no value.
 func (c *Client) Digest(ctx context.Context, env, path string) (string, error) {
+	return c.DigestSince(ctx, env, path, "", 0)
+}
+
+// DigestSince long-polls the digest: it answers as soon as it differs from since, or with the same
+// one once wait (at most a minute) runs out. A server without long polls answers at once.
+func (c *Client) DigestSince(ctx context.Context, env, path, since string, wait time.Duration) (string, error) {
 	e, err := c.env(ctx, env)
 	if err != nil {
 		return "", err
 	}
+	q := query(path)
+	// Under the client's own timeout, and the server's 25 s.
+	if c.HTTP != nil && c.HTTP.Timeout > 0 {
+		wait = min(wait, c.HTTP.Timeout-5*time.Second)
+	}
+	if since != "" && wait >= time.Second {
+		sep := "?"
+		if q != "" {
+			sep = "&"
+		}
+		q += sep + "since=" + url.QueryEscape(since) + "&wait=" + strconv.Itoa(int(min(wait, 25*time.Second)/time.Second))
+	}
 	var d struct {
 		Digest string `json:"digest"`
 	}
-	return d.Digest, c.call(ctx, http.MethodGet, e+"/digest"+query(path), nil, &d)
+	return d.Digest, c.call(ctx, http.MethodGet, e+"/digest"+q, nil, &d)
 }
 
 // Renew pushes a dynamic lease's expiry out by ttlMinutes (0: its link's TTL).
@@ -696,7 +749,8 @@ func (c *Client) Watch(ctx context.Context, env string, w Watch) error {
 	var last string
 	var leases []string
 	tick := func() {
-		now, err := c.Digest(ctx, env, w.Path)
+		// A long poll: a change arrives within a second or two (Every paces a server without them).
+		now, err := c.DigestSince(ctx, env, w.Path, last, 25*time.Second)
 		if err != nil {
 			fail(err)
 			return

@@ -86,7 +86,8 @@ struct Daemon {
 
 /// What the stand-in products saw: the operator's marker and a grant.
 fn seen(ext: &axum::http::Extensions) -> Value {
-    json!({ "operator": roll_auth::Operator::on(ext), "grant": roll_auth::Grant::on(ext).map(|g| g.id.to_string()) })
+    let approved = roll_auth::Approved::on(ext).map(|a| json!({ "id": &*a.id, "by": a.by.iter().map(|b| &**b).collect::<Vec<_>>(), "until": a.until }));
+    json!({ "operator": roll_auth::Operator::on(ext), "grant": roll_auth::Grant::on(ext).map(|g| g.id.to_string()), "approved": approved })
 }
 
 fn postgres() -> Router {
@@ -116,6 +117,7 @@ fn postgres() -> Router {
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/apps/services/{id}/environments/{env}", axum::routing::put(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/v1/search/clusters/{id}/indices/{index}/search", post(|| async { axum::Json(json!({ "hits": [] })) }))
+        .route("/v1/search/clusters", post(|| async { axum::Json(json!({ "id": "cl_new", "password": "fresh" })) }))
         .route("/v1/search/clusters/{id}/indices", get(|| async { axum::Json(json!([])) }))
         .route("/v1/search/clusters/{id}/request", post(|| async { axum::Json(json!({})) }))
         .route("/v1/search/clusters/{id}/indices/{index}/bulk", post(|body: String| async move { axum::Json(json!({ "lines": body.lines().count() })) }))
@@ -1285,11 +1287,21 @@ async fn approvals_can_be_remembered() {
     };
     assert_eq!(approve(apr.clone(), json!("forever")).await.0, StatusCode::BAD_REQUEST, "nothing is decided");
     assert_eq!(approve(apr.clone(), json!("1h")).await.0, StatusCode::OK);
-    assert_eq!(d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await.0, StatusCode::OK);
+    // The product is told which approval let the request run, who decided it and, for a
+    // remembered rule, until when (its audit names them).
+    let (s, ran) = d.send(&token, Method::DELETE, "/v1/projects/pa", None, &[("x-roll-approval", &apr)]).await;
+    assert_eq!((s, ran["approved"]["id"].as_str(), ran["approved"]["by"][0].as_str()), (StatusCode::OK, Some(apr.as_str()), Some("operator")), "{ran}");
     let hour = apr.clone();
     // For an hour: the same request runs without asking; another project still asks.
-    assert_eq!(ask("pa").await.0, StatusCode::OK);
-    assert_eq!(ask("pb").await.1["code"], "approval_pending");
+    let (s, ran) = ask("pa").await;
+    assert_eq!((s, ran["approved"]["id"].as_str(), ran["approved"]["until"].is_i64()), (StatusCode::OK, Some(hour.as_str()), true), "{ran}");
+    let (_, pending) = ask("pb").await;
+    assert_eq!(pending["code"], "approval_pending");
+    // Approved once: that request alone (no until).
+    let once = pending["approval"].as_str().unwrap().to_string();
+    assert_eq!(d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{once}/approve"), Some(json!({}))).await.0, StatusCode::OK);
+    let (s, ran) = d.send(&token, Method::DELETE, "/v1/projects/pb", None, &[("x-roll-approval", &once)]).await;
+    assert_eq!((s, ran["approved"]["id"].as_str(), ran["approved"]["until"].is_null()), (StatusCode::OK, Some(once.as_str()), true), "{ran}");
     // A while never becomes for good through a token it makes.
     let child = json!({ "name": "child", "rules": [{ "product": "postgres", "resources": [{ "id": "pa" }], "actions": { "delete": "allow" } }] });
     assert_eq!(d.call(&token, Method::POST, "/v1/access/tokens", Some(child)).await.0, StatusCode::FORBIDDEN);
@@ -1416,6 +1428,40 @@ async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
     assert_eq!(search(token.clone()).await, StatusCode::OK);
     assert_eq!(d.call(&token, Method::GET, "/v1/secrets/projects/prj_a/transit", None).await.0, StatusCode::FORBIDDEN, "only what its rules allow");
     assert_eq!(d.call(&token, Method::GET, "/v1/access/clients", None).await.0, StatusCode::FORBIDDEN, "a client never manages clients");
+    // A token can be asked for narrower: scope=read-only keeps only its rules' reads.
+    let wide = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "write": "allow" } }]);
+    let (_, w) = d.call(OPERATOR, Method::POST, "/v1/access/clients", Some(json!({ "name": "wide", "rules": wide }))).await;
+    let (wid, wsecret) = (w["client_id"].as_str().unwrap().to_string(), w["client_secret"].as_str().unwrap().to_string());
+    let trade = |scope: &'static str| {
+        let (d, wid, wsecret) = (&d, wid.clone(), wsecret.clone());
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", "client_credentials"), ("client_id", &wid), ("client_secret", &wsecret), ("scope", scope)]).await }
+    };
+    let (_, ro) = trade("read-only").await;
+    assert_eq!(ro["scope"], "read-only", "{ro}");
+    let ro = ro["access_token"].as_str().unwrap().to_string();
+    assert_eq!(d.call(&ro, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK);
+    assert_eq!(d.call(&ro, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "nope" }))).await.0, StatusCode::FORBIDDEN, "read-only can't write");
+    let full = trade("granted").await.1["access_token"].as_str().unwrap().to_string();
+    assert_eq!(d.call(&full, Method::POST, "/v1/workspace/projects", Some(json!({ "name": "yes" }))).await.0, StatusCode::CREATED, "its rules otherwise");
+    assert_eq!(trade("full").await.1["error"], "invalid_scope", "never wider");
+    // Each sign-in is in the audit log on the client's grant: who, with what (never a secret);
+    // and its making is too, named for what it was.
+    let wgrant = w["grant"]["id"].as_str().unwrap().to_string();
+    // (Audit rows are written off the request: wait for the making's too, not only the sign-ins.)
+    let log = d
+        .audit_until(&format!("/v1/access/audit?grant={wgrant}"), |l| {
+            let rows = l.as_array().unwrap();
+            rows.iter().filter(|e| e["decision"] == "sign_in").count() >= 2 && rows.iter().any(|e| e["decision"] == "create_client")
+        })
+        .await;
+    let sign_in = log.as_array().unwrap().iter().find(|e| e["decision"] == "sign_in").unwrap();
+    assert_eq!((sign_in["args"]["by"].as_str(), sign_in["args"]["credential"].as_str()), (Some(wid.as_str()), Some("secret")), "{sign_in}");
+    assert!(!log.to_string().contains(&wsecret), "no secret in the log");
+    assert!(log.as_array().unwrap().iter().any(|e| e["decision"] == "create_client"), "{log}");
+    // The list says when it last signed in (never, for one that hasn't).
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/clients", None).await;
+    let seen = |c: &str| list.as_array().unwrap().iter().find(|e| e["client_id"] == c).map(|e| e["last_sign_in"].is_i64());
+    assert_eq!((seen(&wid), seen(&id)), (Some(true), Some(true)), "{list}");
     // Its id is no ordinary OAuth client's: no device or consent flow may hang another grant on
     // it (someone else's, which its sign-ins could then land on).
     let (s, e) = d.form("/v1/access/oauth/device_authorization", &[("client_id", &id)]).await;
@@ -1442,6 +1488,10 @@ async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
     assert_eq!(s, StatusCode::OK, "{signed}");
     assert_eq!(search(signed["access_token"].as_str().unwrap().to_string()).await, StatusCode::OK);
     assert_eq!(assert_with(jwt).await.0, StatusCode::UNAUTHORIZED, "a replayed assertion");
+    // The checkup nudges a client on a secret toward a key (or CI's own identity), not one on a key.
+    let (_, check) = d.call(OPERATOR, Method::GET, "/v1/access/checkup", None).await;
+    let kinds = |grant: &Value| check.as_array().unwrap().iter().find(|c| c["grant"]["id"] == *grant).map(|c| c["findings"].as_array().unwrap().iter().map(|f| f["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>()).unwrap_or_default();
+    assert!(kinds(&made["grant"]["id"]).contains(&"secret_client".to_string()) && !kinds(&keyed["grant"]["id"]).contains(&"secret_client".to_string()), "{check}");
 
     // Rotated, it keeps its id: kept a minute, the old secret works beside the new one; rotated
     // again keeping nothing, the old ones stop at once, and so do the tokens they got.
@@ -1470,6 +1520,89 @@ async fn a_machine_client_trades_its_credential_for_a_token_its_rules_bound() {
     // Revoking one by hand does the same.
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/clients/{kid}"), None).await.0, StatusCode::OK);
     assert_eq!(search(signed["access_token"].as_str().unwrap().to_string()).await, StatusCode::UNAUTHORIZED);
+}
+
+/// A machine client can trust CI's own OIDC token instead of holding a credential (trusted
+/// publishing): a token from its repository and branch signs in for an hour's token within its
+/// rules; anyone else's, another audience, an expired one or one another key signed doesn't, and a
+/// shared issuer's identity must name one repository.
+#[tokio::test]
+async fn a_ci_job_signs_in_with_its_own_oidc_token() {
+    use base64::Engine;
+    use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+    let d = Daemon::new(50);
+    let rng = ring::rand::SystemRandom::new();
+    let pair = |rng: &ring::rand::SystemRandom| {
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, rng).unwrap();
+        let point = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), rng).unwrap().public_key().as_ref().to_vec();
+        (pkcs8.as_ref().to_vec(), point)
+    };
+    let (ci_key, ci_point) = pair(&rng);
+    let (other_key, _) = pair(&rng);
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    // GitHub's issuer, its keys pinned (no fetch in a test).
+    let jwks = json!({ "keys": [{ "kty": "EC", "crv": "P-256", "kid": "gh1", "x": b64(&ci_point[1..33]), "y": b64(&ci_point[33..]) }] }).to_string();
+    let gh = "https://token.actions.githubusercontent.com";
+    let rules = json!([{ "product": "search", "resources": [{ "id": "cl_1" }], "actions": { "read": "allow" } }]);
+    let open = json!({ "name": "deploy", "rules": rules, "oidc": { "issuer": gh, "subject": "repo:*", "jwks": jwks } });
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/clients", Some(open)).await.0, StatusCode::BAD_REQUEST, "a shared issuer's identity names one repository");
+    let body = json!({ "name": "deploy", "rules": rules, "oidc": { "issuer": gh, "subject": "repo:acme/web:ref:refs/heads/main", "claims": { "repository_owner_id": "42" }, "jwks": jwks } });
+    let (s, made) = d.call(OPERATOR, Method::POST, "/v1/access/clients", Some(body)).await;
+    assert!(s == StatusCode::CREATED && made.get("client_secret").is_none(), "{made}");
+    let id = made["client_id"].as_str().unwrap().to_string();
+    let (_, list) = d.call(OPERATOR, Method::GET, "/v1/access/clients", None).await;
+    let trusts = &list.as_array().unwrap().iter().find(|c| c["client_id"] == id.as_str()).unwrap()["trusts"];
+    assert_eq!((trusts["subject"].as_str(), trusts["pinned_keys"].as_u64()), (Some("repo:acme/web:ref:refs/heads/main"), Some(1)), "{trusts}");
+    let aud = trusts["audience"].as_str().unwrap().to_string();
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let mint = |key: &[u8], claims: Value| {
+        let mut h = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        h.kid = Some("gh1".into());
+        jsonwebtoken::encode(&h, &claims, &jsonwebtoken::EncodingKey::from_ec_der(key)).unwrap()
+    };
+    let claims = |sub: &str, aud: &str, exp: i64| json!({ "iss": gh, "sub": sub, "aud": aud, "exp": exp, "iat": now, "repository_owner_id": "42" });
+    let sign_in = |jwt: String| {
+        let (d, id) = (&d, id.clone());
+        async move { d.form("/v1/access/oauth/token", &[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("client_id", &id), ("assertion", &jwt)]).await }
+    };
+    let (s, got) = sign_in(mint(&ci_key, claims("repo:acme/web:ref:refs/heads/main", &aud, now + 300))).await;
+    assert_eq!(s, StatusCode::OK, "{got}");
+    let token = got["access_token"].as_str().unwrap().to_string();
+    assert_eq!(d.call(&token, Method::POST, "/v1/search/clusters/cl_1/indices/logs/search", Some(json!({}))).await.0, StatusCode::OK);
+    assert_eq!(d.call(&token, Method::GET, "/v1/secrets/projects/prj_a/transit", None).await.0, StatusCode::FORBIDDEN, "only what its rules allow");
+    // The audit log says which CI run signed in: the token's subject, never the token.
+    let grant = made["grant"]["id"].as_str().unwrap();
+    let log = d.audit_until(&format!("/v1/access/audit?grant={grant}"), |l| l.as_array().unwrap().iter().any(|e| e["decision"] == "sign_in")).await;
+    let row = log.as_array().unwrap().iter().find(|e| e["decision"] == "sign_in").unwrap();
+    assert_eq!((row["args"]["credential"].as_str(), row["args"]["subject"].as_str()), (Some("oidc"), Some("repo:acme/web:ref:refs/heads/main")), "{row}");
+
+    for (why, jwt) in [
+        ("another repository", mint(&ci_key, claims("repo:evil/web:ref:refs/heads/main", &aud, now + 300))),
+        ("another branch", mint(&ci_key, claims("repo:acme/web:ref:refs/heads/dev", &aud, now + 300))),
+        ("another audience", mint(&ci_key, claims("repo:acme/web:ref:refs/heads/main", "https://elsewhere.example", now + 300))),
+        ("expired", mint(&ci_key, claims("repo:acme/web:ref:refs/heads/main", &aud, now - 600))),
+        ("another key", mint(&other_key, claims("repo:acme/web:ref:refs/heads/main", &aud, now + 300))),
+    ] {
+        let (s, e) = sign_in(jwt).await;
+        assert_eq!((s, e["error"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_grant")), "{why}: {e}");
+    }
+}
+
+/// A refusal says where a person can allow it: the token's own page with the refused rule
+/// proposed (product, action, the resource), which they decide on; nothing widens by itself.
+#[tokio::test]
+async fn a_refusal_links_to_where_a_person_can_allow_it() {
+    let d = Daemon::new(50);
+    let (token, id) = d.token(json!([{ "product": "postgres", "resources": "*", "actions": { "read": "allow" } }]), json!({})).await;
+    let (s, e) = d.call(&token, Method::DELETE, "/v1/projects/prj_a", None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let widen = url::Url::parse(e["widen"].as_str().unwrap_or_else(|| panic!("{e}"))).unwrap();
+    let q: std::collections::HashMap<String, String> = widen.query_pairs().into_owned().collect();
+    assert!(widen.path().ends_with(&format!("/dashboard/access/tokens/{id}")), "{widen}");
+    assert_eq!((q.get("add").map(String::as_str), q.get("id").map(String::as_str)), (Some("postgres:delete"), Some("prj_a")), "{widen}");
+    // Its token stays as it was: the link only proposes.
+    assert_eq!(d.call(&token, Method::DELETE, "/v1/projects/prj_a", None).await.0, StatusCode::FORBIDDEN);
 }
 
 /// A person's own machine client acts as them, as their tokens do: within their account's reach,
@@ -1532,7 +1665,8 @@ async fn a_rule_can_grant_one_encryption_key() {
     };
     assert_eq!(encrypt("payments").await, StatusCode::OK);
     assert_eq!(encrypt("billing").await, StatusCode::FORBIDDEN);
-    assert_eq!(d.call(&pay, Method::GET, "/v1/secrets/projects/prj_a/transit", None).await.0, StatusCode::FORBIDDEN);
+    // The list lets it through: roll secrets shows it only the keys it names (its own test).
+    assert_eq!(d.call(&pay, Method::GET, "/v1/secrets/projects/prj_a/transit", None).await.0, StatusCode::OK);
     // A rule on the whole project still reaches every key.
     let (all, _) = d.token(json!([{ "product": "secrets", "resources": [{ "id": "prj_a" }], "actions": { "write": "allow" } }]), json!({})).await;
     assert_eq!(d.call(&all, Method::POST, "/v1/secrets/projects/prj_a/transit/billing/encrypt", Some(json!({ "plaintext": "aGk=" }))).await.0, StatusCode::OK);
@@ -1640,10 +1774,18 @@ async fn a_link_needs_reveal_on_what_it_links() {
         { "product": "postgres", "resources": [{ "id": "prj_y" }, { "id": "prj_z" }], "actions": { "reveal": "ask" } },
     ]), json!({})).await;
     assert_eq!(link(&both, "postgres", "prj_x").await.0, StatusCode::OK);
-    // The link's reveal is what the token used too: tightening keeps it.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let (_, t) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{both_id}/tighten"), None).await;
-    assert!(t["used"].as_array().unwrap().iter().any(|u| u["product"] == "postgres" && u["action"] == "reveal" && u["resource"] == "prj_x"), "{t}");
+    // The link's reveal is what the token used too: tightening keeps it. Usage is recorded after
+    // the answer, so it's waited for (a fixed 100 ms wasn't enough under a loaded gate).
+    let used = |t: &Value| t["used"].as_array().is_some_and(|u| u.iter().any(|u| u["product"] == "postgres" && u["action"] == "reveal" && u["resource"] == "prj_x"));
+    let mut t = Value::Null;
+    for _ in 0..50 {
+        t = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{both_id}/tighten"), None).await.1;
+        if used(&t) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(used(&t), "{t}");
     let (_, pending) = link(&both, "postgres", "prj_y").await;
     let apr = pending["approval"].as_str().unwrap_or_else(|| panic!("{pending}")).to_string();
     let (_, asked) = d.call(OPERATOR, Method::GET, &format!("/v1/access/approvals/{apr}"), None).await;
@@ -1656,6 +1798,26 @@ async fn a_link_needs_reveal_on_what_it_links() {
     assert_eq!(asked["resource"], "prj_y, prj_z", "{asked}");
     let (s, _) = d.call(OPERATOR, Method::POST, &format!("/v1/access/approvals/{apr}/approve"), Some(json!({ "remember": "1h" }))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+/// A search cluster made with a `parent` is a branch of it, a copy of its indices: it needs `write`
+/// on the parent too, as `…/{id}/branches` does, so a token for one project's clusters can't
+/// branch (and read) any other cluster.
+#[tokio::test]
+async fn a_search_branch_by_parent_needs_write_on_the_parent() {
+    let d = Daemon::new(50);
+    let project = d.workspace.create("", "app", "", None).unwrap();
+    let mine = json!({ "product": "search", "resources": [{ "project": project.id }], "actions": { "write": "allow" } });
+    let (scoped, _) = d.token(json!([mine.clone()]), json!({})).await;
+    let create = |t: &str, body: Value| {
+        let (d, t, p) = (&d, t.to_string(), project.id.clone());
+        async move { d.send(&t, Method::POST, "/v1/search/clusters", Some(body), &[("x-roll-project", &p)]).await }
+    };
+    assert_eq!(create(&scoped, json!({ "name": "fresh" })).await.0, StatusCode::OK);
+    let (s, e) = create(&scoped, json!({ "name": "copy", "parent": "cl_9" })).await;
+    assert_eq!((s, e["needs"]["action"].as_str(), e["needs"]["resource"].as_str()), (StatusCode::FORBIDDEN, Some("write"), Some("cl_9")), "{e}");
+    let (both, _) = d.token(json!([mine, { "product": "search", "resources": [{ "id": "cl_9" }], "actions": { "write": "allow" } }]), json!({})).await;
+    assert_eq!(create(&both, json!({ "name": "copy", "parent": "cl_9" })).await.0, StatusCode::OK);
 }
 
 /// What the gate costs a request: a token's request against the same one by the operator (no

@@ -2,14 +2,14 @@ import { Eye, GitPullRequest, KeyRound, Pencil, RefreshCw, RotateCw, Search, Shi
 import { useEffect, useState } from "react";
 import type { AuditEntry, Environment } from "@/lib/secrets-api";
 import { useSecrets } from "./secrets-page";
-import { ActorMark, ago, button, Chip, ErrorNote, errorText, sized } from "./ui";
+import { ActorMark, ApprovalMark, ago, button, Chip, ErrorNote, errorText, sized } from "./ui";
 
 type Kind = "all" | "changes" | "reads" | "requests" | "syncs" | "alerts";
 
 const KIND_OF = (action: string): Exclude<Kind, "all"> | "other" =>
   action === "secrets.alert"
     ? "alerts"
-    : action.startsWith("secrets.reveal") || action === "secrets.export" || action === "secrets.resolve" || action === "request.reveal" || action.startsWith("share.")
+    : action.startsWith("secrets.reveal") || action === "secrets.export" || action === "secrets.resolve" || action === "secrets.totp" || action === "request.reveal" || action.startsWith("share.")
     ? "reads"
     : action.startsWith("request.")
       ? "requests"
@@ -86,6 +86,7 @@ export function Activity({ env }: { env: Environment }) {
                 {r.keys.length > 6 && <span className="text-[11px] text-subtle">+{r.keys.length - 6}</span>}
                 <span className="ml-auto flex items-center gap-1.5 text-[11px] whitespace-nowrap text-subtle">
                   <ActorMark who={r.actor} />
+                  {r.approval && <ApprovalMark approval={r.approval} />}
                   <span title={new Date(r.at).toLocaleString()}>{ago(r.at)}</span>
                   {r.action.startsWith("secrets.rotate") || r.action.endsWith(".rotate") ? <RotateCw className="size-3" /> : r.action.startsWith("lease.") ? <KeyRound className="size-3" /> : null}
                 </span>
