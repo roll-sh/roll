@@ -984,9 +984,15 @@ pub fn note_read(t: u32, xmin: u64, key: Option<&[u8]>, row: &[Value]) {
 /// The table, column and row version `v` was read from, when it is a stored datum carried
 /// along unchanged.
 fn read_from(v: &Value) -> Option<(u32, usize, RowId)> {
-    let (Value::Text(_) | Value::Json(_) | Value::Bytea(_)) = v else {
-        return None;
+    // (Only values of `READ_MIN..READ_MAX` bytes are noted: another can't be one of them.)
+    let len = match v {
+        Value::Text(s) | Value::Json(s) => s.len(),
+        Value::Bytea(b) => b.len(),
+        _ => return None,
     };
+    if !(READ_MIN..READ_MAX).contains(&len) {
+        return None;
+    }
     READ.with(|q| {
         q.borrow().iter().rev().find_map(|(r, t, i, x)| {
             let same = match (r, v) {
