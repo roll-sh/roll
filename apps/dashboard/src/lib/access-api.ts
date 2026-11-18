@@ -292,6 +292,9 @@ export interface AuditEvent {
   duration_ms: number;
   /** What made it: an MCP client's name and version, else its User-Agent (what it says it is). */
   client?: string;
+  /** The handle of the person who acted / the person it's about, when they're people (`usr_` ids). */
+  actor_handle?: string;
+  resource_handle?: string;
 }
 
 export interface Preset {
@@ -756,6 +759,7 @@ export function grantMatches(g: Pick<Grant, "name" | "id" | "hint" | "client" | 
 
 /** Who an audit row is by: a change's person (`args.by`), else a request's grant, else the operator. */
 export function auditWho(e: AuditEvent): string {
+  if (e.actor_handle) return e.actor_handle;
   const args = e.args && typeof e.args === "object" ? (e.args as { by?: unknown; actor?: unknown }) : {};
   // People's accounts (docs/accounts.md, "Audit"): who acted (a person's id, operator, scim:<connection>).
   if (e.source === "accounts" && typeof args.actor === "string") return args.actor;

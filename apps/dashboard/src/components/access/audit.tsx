@@ -129,7 +129,7 @@ function Row({ e, onResource }: { e: AuditEvent; onResource: (resource: string) 
         <span className="w-28 shrink-0 truncate">{auditWho(e)}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{what}</span>
         <span className="hidden w-40 shrink-0 truncate text-muted sm:block">
-          {e.product ? productName(e.product) : ""} {e.resource ?? ""}
+          {e.product ? productName(e.product) : ""} {e.resource_handle ?? e.resource ?? ""}
         </span>
         <span className={`w-10 shrink-0 text-right font-mono ${e.status >= 400 ? "text-danger" : "text-subtle"}`}>{e.status}</span>
       </button>
