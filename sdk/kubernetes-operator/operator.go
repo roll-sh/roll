@@ -172,6 +172,9 @@ func (o *operator) reconcile(ctx context.Context, rs *rollSecret) rollStatus {
 		return fail(fmt.Errorf("Secret %s/%s exists and isn't this RollSecret's: it isn't touched", ns, name))
 	}
 	if existing != nil && digest == rs.Status.Digest && rs.Status.Error == "" {
+		if rs.Status.PendingRestarts != "" {
+			st.PendingRestarts, st.RestartError = o.restart(ctx, ns, rs, pending(rs.Spec.RolloutRestart, rs.Status.PendingRestarts))
+		}
 		return st
 	}
 
@@ -209,7 +212,94 @@ func (o *operator) reconcile(ctx context.Context, rs *rollSecret) rollStatus {
 	if err != nil {
 		return fail(err)
 	}
-	return rollStatus{Digest: digest, SyncedAt: o.now().UTC().Format(time.RFC3339), Keys: len(data), ObservedGeneration: rs.Metadata.Generation}
+	// A changed Secret restarts what reads it: only when its data changed (not a pass that clears an
+	// earlier error, or a key rewritten with the same value), and never a new one (nothing read it).
+	// Targets a change didn't restart yet are tried again on each pass, until they are.
+	done := rollStatus{Digest: digest, SyncedAt: o.now().UTC().Format(time.RFC3339), Keys: len(data), ObservedGeneration: rs.Metadata.Generation}
+	targets := pending(rs.Spec.RolloutRestart, rs.Status.PendingRestarts)
+	if existing != nil && !sameData(existing.Data, data) {
+		targets = rs.Spec.RolloutRestart
+	}
+	if len(targets) > 0 {
+		done.PendingRestarts, done.RestartError = o.restart(ctx, ns, rs, targets)
+	}
+	return done
+}
+
+// pending is the targets of `all` named in a status's PendingRestarts.
+func pending(all []restartTarget, names string) []restartTarget {
+	var out []restartTarget
+	for _, t := range all {
+		for _, n := range strings.Split(names, ",") {
+			if n == t.Kind+"/"+t.Name {
+				out = append(out, t)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// sameData is whether a Secret's data is as it was.
+func sameData(a, b map[string][]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if w, ok := b[k]; !ok || string(v) != string(w) {
+			return false
+		}
+	}
+	return true
+}
+
+// restartKinds are the workloads a RollSecret may restart, by their API resource.
+var restartKinds = map[string]string{"Deployment": "deployments", "StatefulSet": "statefulsets", "DaemonSet": "daemonsets"}
+
+// restartOptIn is the annotation a workload opts in with: the RollSecrets (names, comma-separated)
+// whose changes may restart it. Creating a RollSecret alone restarts nothing.
+const restartOptIn = "roll.sh/restart-on"
+
+// restart rolls each target's pods, as `kubectl rollout restart` does: a new annotation on the
+// pod template. Only in the RollSecret's own namespace, and only a workload that names the
+// RollSecret in its roll.sh/restart-on annotation. Every target is tried: the ones not restarted
+// ("Kind/name,…") and why.
+func (o *operator) restart(ctx context.Context, ns string, rs *rollSecret, targets []restartTarget) (string, string) {
+	at := o.now().UTC().Format(time.RFC3339)
+	var left, why []string
+	for _, t := range targets {
+		if err := o.restartOne(ctx, ns, rs.Metadata.Name, t, at); err != nil {
+			left = append(left, t.Kind+"/"+t.Name)
+			why = append(why, err.Error())
+		}
+	}
+	return strings.Join(left, ","), strings.Join(why, "; ")
+}
+
+func (o *operator) restartOne(ctx context.Context, ns, rollSecret string, t restartTarget, at string) error {
+	resource, ok := restartKinds[t.Kind]
+	if !ok || t.Name == "" {
+		return fmt.Errorf("spec.rolloutRestart: %s/%s isn't a Deployment, StatefulSet or DaemonSet", t.Kind, t.Name)
+	}
+	path := "/apis/apps/v1/namespaces/" + url.PathEscape(ns) + "/" + resource + "/" + url.PathEscape(t.Name)
+	var w struct {
+		Metadata meta `json:"metadata"`
+	}
+	if err := o.kube.call(ctx, http.MethodGet, path, "", nil, &w); err != nil {
+		return fmt.Errorf("restarting %s %s (the Secret is updated): %w", t.Kind, t.Name, err)
+	}
+	optedIn := false
+	for _, n := range strings.Split(w.Metadata.Annotations[restartOptIn], ",") {
+		optedIn = optedIn || strings.TrimSpace(n) == rollSecret
+	}
+	if !optedIn {
+		return fmt.Errorf("%s %s isn't restarted: its %s annotation doesn't name RollSecret %s", t.Kind, t.Name, restartOptIn, rollSecret)
+	}
+	patch := map[string]any{"spec": map[string]any{"template": map[string]any{"metadata": map[string]any{"annotations": map[string]string{"roll.sh/restartedAt": at}}}}}
+	if err := o.kube.call(ctx, http.MethodPatch, path, "application/merge-patch+json", patch, nil); err != nil {
+		return fmt.Errorf("restarting %s %s (the Secret is updated): %w", t.Kind, t.Name, err)
+	}
+	return nil
 }
 
 // pass reconciles every RollSecret in the cluster once.
@@ -225,6 +315,9 @@ func (o *operator) pass(ctx context.Context) error {
 		st := o.reconcile(ctx, rs)
 		if st == rs.Status {
 			continue
+		}
+		if st.RestartError != "" {
+			log.Printf("rollsecret %s/%s: %s", rs.Metadata.Namespace, rs.Metadata.Name, st.RestartError)
 		}
 		if st.Error != "" {
 			log.Printf("rollsecret %s/%s: %s", rs.Metadata.Namespace, rs.Metadata.Name, st.Error)

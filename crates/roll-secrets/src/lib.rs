@@ -394,6 +394,8 @@ impl Secrets {
         db.add_column("environments", "notify_url", "BLOB")?;
         db.add_column("environments", "notify_host", "TEXT")?;
         db.add_column("syncs", "checked_at", "INTEGER")?;
+        // Syncs a change marked due (checked_at NULL), found every couple of seconds (syncs.rs).
+        db.ensure_schema("CREATE INDEX IF NOT EXISTS syncs_due ON syncs (retry_at) WHERE checked_at IS NULL;")?;
         db.add_column("leases", "path", "TEXT")?;
         // Workload identities (identities.rs); their logins' tokens are roll-access's.
         db.ensure_schema(identities::SCHEMA)?;
@@ -438,6 +440,9 @@ impl Secrets {
         db.ensure_schema(pki::SCHEMA)?;
         db.ensure_schema(ssh::SCHEMA)?;
         db.ensure_schema(aws::SCHEMA)?;
+        // An audit sink's format and its SIEM's token, sealed (sinks.rs): absent is roll's own.
+        db.add_column("audit_sinks", "format", "TEXT")?;
+        db.add_column("audit_sinks", "token", "BLOB")?;
         // How a role trusts roll (aws.rs): absent is the ExternalId, as before there were two.
         db.add_column("aws_roles", "trust", "TEXT")?;
         db.ensure_schema(issuer::SCHEMA)?;

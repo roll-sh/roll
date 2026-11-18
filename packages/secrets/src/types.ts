@@ -110,7 +110,8 @@ export type Problem = { key: string; problem: string };
 /** `withheld`: sensitive keys left out (only roll's runtimes and syncs read them); `sensitive`: those included (a runtime's read), never to be shown. */
 /** `digest` (with `?digest=1`): the folder's `…/digest`, taken just before this read (a watch compares from it). */
 /** `followed`: keys linked to a resource the ephemeral environment's preview branched, left out of `values`. */
-export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; withheld?: string[]; sensitive?: string[]; followed?: Followed[]; digest?: string };
+/** `plain`: of `linked`, keys whose link field isn't a credential (a host, a port): logs may show them; every other value is a secret. */
+export type Values = { values: Record<string, string>; problems: Problem[]; leases: string[]; dynamic: string[]; linked: string[]; plain?: string[]; withheld?: string[]; sensitive?: string[]; followed?: Followed[]; digest?: string };
 export type CellSource = "own" | "import" | "base";
 /** `misfit`: the typed-key rule the stored value breaks (shown only to whoever may reveal it). */
 export type Cell = { fp: string; version: number; updated_at: number; link: Link | null; reference: boolean; source: CellSource; comment: boolean; personal: boolean; misfit?: string; expires_at?: number };
@@ -228,7 +229,9 @@ export type AuditEntry = { id: number; at: number; actor: string; action: string
 export type AuditFilter = { env?: string; key?: string; actor?: string; action?: string; before?: number; since?: number; limit?: number };
 export type AuditFormat = "csv" | "jsonl";
 /** An audit stream to a SIEM: signed batches of new rows, in order. */
-export type Sink = { id: string; url: string; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
+/** `format`: how a batch goes (`roll` signed JSON; `splunk`, `datadog` and `bearer` carry a token that is never shown). */
+export type SinkFormat = "roll" | "splunk" | "datadog" | "bearer";
+export type Sink = { id: string; url: string; format: SinkFormat; status: "new" | "ok" | "error"; error: string | null; cursor: number; delivered_at: number | null; created_at: number; created_by: string };
 export type Imported = Applied & { skipped: string[] };
 /** A local copy against a folder (`POST …/environments/{env}/diff`): names only. */
 export type FileDiff = { added: string[]; changed: string[]; same: string[]; missing: string[]; references: string[]; linked: string[] };

@@ -384,6 +384,22 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     // rows), and deliveries outside it (notices, syncs, sinks), so a slow platform holds up neither.
     sweeper(secrets.clone(), "local", Secrets::sweep_local);
     sweeper(secrets.clone(), "outbound", Secrets::sweep_outbound);
+    // Syncs a change marked due, within seconds rather than at the next 30 s sweep.
+    let s = secrets.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let s = s.clone();
+            match tokio::task::spawn_blocking(move || s.sweep_due_syncs()).await {
+                Ok(Ok((_, failed))) if failed > 0 => tracing::warn!(failed, "roll secrets: some syncs failed"),
+                Ok(Ok(_)) | Ok(Err(Error::Unavailable(_))) => {}
+                Ok(Err(e)) => tracing::warn!("roll secrets: syncing failed: {e}"),
+                Err(e) => tracing::warn!("roll secrets: syncing panicked: {e}"),
+            }
+        }
+    });
     Ok(secrets)
 }
 
@@ -1045,7 +1061,9 @@ impl apps_control::integrations::SecretSource for ForApps {
             // Sensitive keys (and keys holding one through a reference) are flagged: apps seals
             // them and never shows them, not even to whoever may reveal the environment.
             let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
-            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: sensitive.contains(&name), value: value.expose().to_string(), name }).collect())
+            // Link fields that aren't credentials (a host, a port): apps' logs may show these.
+            let plain: std::collections::HashSet<String> = v.plain.into_iter().collect();
+            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect())
         })
         .await?
     }

@@ -2257,6 +2257,7 @@ impl Store {
             title: r.title,
             runs: r.runs,
             head: r.head,
+            reaches: settings.egress_for(r.trusted),
             trusted: r.trusted,
             desired: r.desired,
             state: r.state,

@@ -10,6 +10,7 @@
 pub mod aws;
 pub mod codebuild;
 pub mod docker;
+pub mod egress;
 pub mod engine;
 pub mod fake;
 pub mod fargate;
@@ -44,15 +45,33 @@ pub struct InstanceSpec {
     pub memory_mb: u32,
     /// The project's private network for this environment, and the names it answers to there.
     pub network: Option<String>,
+    /// Its network has no route out (`egress` `roll`): it's reached at its address there, never
+    /// through a published port.
+    pub closed: bool,
     pub aliases: Vec<String>,
     /// A named volume and where it's mounted.
     pub volume: Option<(String, String)>,
     /// After this long with no traffic the instance may end itself (Fargate's guard proxy: a
     /// task whose node went away still stops). None: never (min_instances, workers).
     pub idle_stop_s: Option<u32>,
+    /// Variables kept as files (`files` on the environment's variables): (absolute path,
+    /// contents), written into the instance before it starts. Never in `Debug`.
+    pub files: Vec<(String, String)>,
     /// The private registry login its image pulls with, where the runtime pulls at each start
     /// (Fargate: the task's repository credentials). Never in `Debug`.
     pub registry: Option<RegistryLogin>,
+    /// A worker's health check, run by the runtime in the instance ([`Runtime::unhealthy`]).
+    pub health: Option<HealthCheck>,
+}
+
+/// A command run in an instance every `every`, healthy on exit 0; `failures` in a row make it
+/// unhealthy. `start` is the grace before failures count.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HealthCheck {
+    pub command: String,
+    pub every: Duration,
+    pub failures: u32,
+    pub start: Duration,
 }
 
 impl std::fmt::Debug for InstanceSpec {
@@ -158,6 +177,11 @@ pub trait Runtime: Send + Sync {
     /// Wait for a started instance to exit: its exit code.
     async fn wait(&self, name: &str) -> anyhow::Result<i32>;
     async fn running(&self, name: &str) -> bool;
+    /// Whether its health check ([`InstanceSpec::health`]) failed `failures` times in a row. A
+    /// runtime that runs no checks answers false.
+    async fn unhealthy(&self, _name: &str) -> bool {
+        false
+    }
     /// Take on `spec.name`, still running from another process (a node that died, rolld before
     /// a restart) and of `spec.deployment` (its label or tag says so), as this process's own,
     /// its output followed into `log` from now. None: not running here, another deployment's,
@@ -200,8 +224,24 @@ pub trait Runtime: Send + Sync {
     /// Names of every instance this runtime has for `service` (or for every service), made by
     /// any process of this node.
     async fn list(&self, service: Option<&str>) -> Vec<String>;
-    /// Make the project's private network if it's missing.
-    async fn ensure_network(&self, name: &str, service: &str) -> anyhow::Result<()>;
+    /// Make the project's private network if it's missing; `closed`: one with no route out
+    /// ([`Runtime::closes_egress`]).
+    async fn ensure_network(&self, name: &str, service: &str, closed: bool) -> anyhow::Result<()>;
+    /// Whether it runs environments with no way out but roll (`egress` `roll`): a network with
+    /// no route out, and [`Runtime::egress_proxy`] for the hosts they may still reach.
+    fn closes_egress(&self) -> bool {
+        false
+    }
+    /// The egress proxy for `hosts` serving closed `network`: the URL its instances use as
+    /// `HTTP_PROXY`/`HTTPS_PROXY` ([`egress`]).
+    async fn egress_proxy(&self, _network: &str, _service: &str, _hosts: &[String]) -> anyhow::Result<String> {
+        anyhow::bail!("this runtime has no egress proxy")
+    }
+    /// The hosts closed `network`'s egress proxy for `hosts` refused lately (none: it hasn't, or
+    /// isn't here).
+    fn egress_refused(&self, _network: &str, _hosts: &[String]) -> Vec<egress::Refused> {
+        Vec::new()
+    }
     /// A project environment's network nothing uses any more (its last service there went):
     /// best effort, left if anything is still attached.
     async fn remove_network(&self, _name: &str) {}

@@ -282,7 +282,7 @@ func rulesModel(ctx context.Context, raw []json.RawMessage, was []ruleModel, d *
 			return was
 		}
 		for _, s := range sels {
-			m.Resource = append(m.Resource, selectorModel{ID: optString(s.ID), Index: optString(s.Index), Project: optString(s.Project)})
+			m.Resource = append(m.Resource, selectorModel{ID: stringOrNull(s.ID), Index: stringOrNull(s.Index), Project: stringOrNull(s.Project)})
 		}
 		m.Actions = mapOfStrings(ctx, r.Actions, d)
 		out = append(out, m)
@@ -310,7 +310,7 @@ func mapOfStrings(ctx context.Context, m map[string]string, d *diag.Diagnostics)
 	return v
 }
 
-func optString(s string) types.String {
+func stringOrNull(s string) types.String {
 	if s == "" {
 		return types.StringNull()
 	}
@@ -331,7 +331,7 @@ func expiresMs(v types.String, d *diag.Diagnostics) *int64 {
 	return &ms
 }
 
-func optInt(v types.Int64) *int64 {
+func int64OrNil(v types.Int64) *int64 {
 	if v.IsNull() || v.IsUnknown() {
 		return nil
 	}
@@ -421,7 +421,7 @@ func (r *machineClientResource) Create(ctx context.Context, req resource.CreateR
 	if ips := optStrings(ctx, m.IPAllow, &resp.Diagnostics); ips != nil {
 		body["ip_allow"] = *ips
 	}
-	if n := optInt(m.RatePerMinute); n != nil {
+	if n := int64OrNil(m.RatePerMinute); n != nil {
 		body["rate_per_minute"] = *n
 	}
 	credential(ctx, &m, body, &resp.Diagnostics)
@@ -524,13 +524,13 @@ func (r *machineClientResource) Update(ctx context.Context, req resource.UpdateR
 		change["ip_allow"] = *ips
 	}
 	if !plan.RatePerMinute.Equal(state.RatePerMinute) {
-		change["rate_per_minute"] = optInt(plan.RatePerMinute)
+		change["rate_per_minute"] = int64OrNil(plan.RatePerMinute)
 	}
 	// A new credential rotates it: the client id and the rules stay.
 	rotate := map[string]any{}
 	if !plan.PublicJWK.Equal(state.PublicJWK) || !oidcEqual(plan.OIDC, state.OIDC) {
 		credential(ctx, &plan, rotate, &resp.Diagnostics)
-		if n := optInt(plan.KeepOldForS); n != nil {
+		if n := int64OrNil(plan.KeepOldForS); n != nil {
 			rotate["keep_old_for_s"] = *n
 		}
 	}
