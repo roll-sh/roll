@@ -300,6 +300,10 @@ export const accountsApi = {
   users: () => call<User[]>("GET", "/users"),
   updateUser: (id: string, patch: { admin?: boolean; disabled?: boolean }) => call<User>("PATCH", `/users/${encodeURIComponent(id)}`, patch),
   signOutUser: (id: string) => call<null>("DELETE", `/users/${encodeURIComponent(id)}/sessions`),
+  /** Admins: a person's security log and sessions, and ending one of them. */
+  userActivity: (id: string, before?: number) => call<{ events: Activity[] }>("GET", `/users/${encodeURIComponent(id)}/activity${before ? `?before=${before}` : ""}`),
+  userSessions: (id: string) => call<Session[]>("GET", `/users/${encodeURIComponent(id)}/sessions`),
+  endUserSession: (id: string, session: string) => call<null>("DELETE", `/users/${encodeURIComponent(id)}/sessions/${encodeURIComponent(session)}`),
 
   ssoConnections: () => call<SsoConnection[]>("GET", "/sso"),
   addSso: (c: { name?: string; issuer: string; client_id: string; client_secret: string; domains: string[]; enforce?: boolean; provision?: boolean }) =>

@@ -1659,3 +1659,33 @@ async fn a_person_deletes_their_own_account() {
     let again = env.email_sign_in(&mut Browser::default(), "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json;
     assert_ne!(again["user"]["id"].as_str(), Some(id.as_str()), "{again}");
 }
+
+/// An admin reads a person's security log and sessions from People (Okta's per-user System Log),
+/// and ends one session (a lost laptop) while the others stay; nobody else can.
+#[tokio::test]
+async fn an_admin_reads_a_persons_log_and_ends_one_session() {
+    let env = Env::new().await;
+    env.accounts.set_audit(Arc::new(Events::default()));
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@example.com", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let mut root = Browser::default();
+    env.email_sign_in(&mut root, "root@example.com", Some(&root_invite)).await;
+    let mut laptop = Browser::default();
+    let ada = env.email_sign_in(&mut laptop, "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json["user"]["id"].as_str().unwrap().to_string();
+    let mut phone = Browser::default();
+    env.email_sign_in(&mut phone, "ada@example.com", None).await;
+    let mut bob = Browser::default();
+    env.email_sign_in(&mut bob, "bob@example.com", Some(&env.invite("bob@example.com").await)).await;
+
+    assert_eq!(env.call(&mut bob, Method::GET, &format!("/v1/accounts/users/{ada}/activity"), None).await.status, StatusCode::FORBIDDEN, "not an admin");
+    let log = env.call(&mut root, Method::GET, &format!("/v1/accounts/users/{ada}/activity"), None).await.json;
+    assert_eq!(log["events"].as_array().unwrap().iter().filter(|e| e["action"] == "sign_in" && e["ok"] == true).count(), 2, "{log}");
+    let sessions = env.call(&mut root, Method::GET, &format!("/v1/accounts/users/{ada}/sessions"), None).await.json;
+    let list = sessions.as_array().unwrap();
+    assert!(list.len() == 2 && list.iter().all(|s| s["current"] == false), "{sessions}");
+    // Her laptop's session (the older one) ends; her phone's stays.
+    let oldest = list.iter().min_by_key(|s| s["created_at"].as_i64()).unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(env.call(&mut root, Method::DELETE, &format!("/v1/accounts/users/{ada}/sessions/{oldest}"), None).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(env.call(&mut laptop, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(env.call(&mut phone, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
+    assert_eq!(env.call(&mut root, Method::GET, "/v1/accounts/users/usr_nobody/sessions", None).await.status, StatusCode::NOT_FOUND);
+}
