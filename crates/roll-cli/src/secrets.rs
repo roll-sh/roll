@@ -116,10 +116,11 @@ pub enum Secrets {
         /// A value of your own that replaces the shared one for you only.
         #[arg(long)]
         personal: bool,
-        /// Make each KEY a fresh random value of this many characters (letters and digits), made
-        /// here: `roll secrets set SESSION_SECRET --generate 48`.
-        #[arg(long, value_name = "LENGTH")]
-        generate: Option<usize>,
+        /// Make each KEY a fresh random value, made here: what the key's password policy asks if
+        /// it has one (`roll secrets required`), else LENGTH (default 48) letters and digits:
+        /// `roll secrets set SESSION_SECRET --generate`.
+        #[arg(long, value_name = "LENGTH", num_args = 0..=1)]
+        generate: Option<Option<usize>>,
         /// Open a change request instead of writing (protected environments).
         #[arg(long)]
         request: bool,
@@ -920,6 +921,17 @@ pub enum RequiredCmd {
         /// Who supplies it (a person or team): health and the daily notice name them.
         #[arg(long)]
         owner: Option<String>,
+        /// A password policy's length (8–256): values must be at least this long, and
+        /// `set KEY --generate` makes this many characters.
+        #[arg(long, value_name = "N")]
+        password_length: Option<u16>,
+        /// The policy's character classes, one of each required and nothing else: lower, upper,
+        /// digit, symbol (default lower,upper,digit).
+        #[arg(long, value_delimiter = ',', requires = "password_length")]
+        classes: Vec<String>,
+        /// Which characters `symbol` means (default !#%&*+-=?^_~).
+        #[arg(long, requires = "password_length")]
+        symbols: Option<String>,
     },
     Rm {
         key: String,
@@ -1270,12 +1282,18 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
         }
         Secrets::Set { pairs, comment, tags, personal, generate, request, message, expires } => {
             let expires = expires.as_deref().map(expiry).transpose()?;
+            // Password policies, for --generate (a caller who can't read them gets plain values).
+            let policies = if generate.is_some() { c.call(Method::GET, &format!("{}/required", c.base()), None).await.unwrap_or_default() } else { Value::Null };
             let mut ops = vec![];
             for p in &pairs {
                 let (key, value) = split_pair(p)?;
+                let policy = policies.as_array().into_iter().flatten().find(|r| r["key"] == key && r["path"] == c.at.path.as_str()).map(|r| &r["password"]).filter(|p| p.is_object());
                 let value = match (value, generate) {
                     (Some(_), Some(_)) => bail!("{key}: --generate makes the value; give only the key"),
-                    (None, Some(n)) => random_value(n)?,
+                    (None, Some(n)) => match policy {
+                        Some(p) => policy_value(p, n)?,
+                        None => random_value(n.unwrap_or(48))?,
+                    },
                     (Some(v), None) => v,
                     (None, None) if pairs.len() == 1 => {
                         let mut v = String::new();
@@ -2301,11 +2319,15 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                         return print(&list);
                     }
                     for x in &rows {
-                        let rule = [x["type"].as_str().map(|t| format!("type {t}")), x["pattern"].as_str().map(|p| format!("/{p}/"))].into_iter().flatten().collect::<Vec<_>>().join(" ");
+                        let password = x["password"]["length"].as_u64().map(|n| {
+                            let classes = x["password"]["classes"].as_array().map(|c| c.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(",")).unwrap_or_else(|| "lower,upper,digit".into());
+                            format!("password {n}+ {classes}")
+                        });
+                        let rule = [x["type"].as_str().map(|t| format!("type {t}")), x["pattern"].as_str().map(|p| format!("/{p}/")), password].into_iter().flatten().collect::<Vec<_>>().join(" ");
                         println!("{:<28} {:<12} {:<28} {}{}", s(&x["key"]), s(&x["path"]), rule, x["comment"].as_str().unwrap_or_default(), x["owner"].as_str().map(|o| format!("  (owner {o})")).unwrap_or_default());
                     }
                 }
-                RequiredCmd::Add { key, path, kind, pattern, comment, owner } => {
+                RequiredCmd::Add { key, path, kind, pattern, comment, owner, password_length, classes, symbols } => {
                     rows.retain(|x| !same(x, &key, &path));
                     let mut row = json!({ "key": key, "path": path, "comment": comment });
                     if let Some(k) = kind {
@@ -2316,6 +2338,16 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     }
                     if let Some(o) = owner {
                         row["owner"] = json!(o);
+                    }
+                    if let Some(length) = password_length {
+                        let mut p = json!({ "length": length });
+                        if !classes.is_empty() {
+                            p["classes"] = json!(classes);
+                        }
+                        if let Some(s) = symbols {
+                            p["symbols"] = json!(s);
+                        }
+                        row["password"] = p;
                     }
                     rows.push(row);
                     put(rows).await?;
@@ -2890,6 +2922,41 @@ async fn sinks(c: &Client<'_>, cmd: Sinks, json_out: bool) -> anyhow::Result<()>
         }
     }
     Ok(())
+}
+
+/// A random value by a key's password policy (`{length, classes?, symbols?}`, as the server
+/// checks it): its length (or `n`, if longer), one of each of its classes and nothing else.
+fn policy_value(p: &Value, n: Option<usize>) -> anyhow::Result<String> {
+    let classes: Vec<&str> = p["classes"].as_array().map(|c| c.iter().filter_map(Value::as_str).collect()).filter(|c: &Vec<&str>| !c.is_empty()).unwrap_or_else(|| vec!["lower", "upper", "digit"]);
+    let symbols = p["symbols"].as_str().unwrap_or("!#%&*+-=?^_~");
+    let sets: Vec<&str> = classes
+        .iter()
+        .map(|c| match *c {
+            "lower" => "abcdefghijklmnopqrstuvwxyz",
+            "upper" => "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "digit" => "0123456789",
+            _ => symbols,
+        })
+        .collect();
+    let alphabet: Vec<u8> = sets.concat().into_bytes();
+    let len = n.unwrap_or(0).max(p["length"].as_u64().unwrap_or(48) as usize);
+    anyhow::ensure!((8..=4096).contains(&len) && !alphabet.is_empty() && alphabet.len() <= 256, "--generate is 8–4096 characters");
+    let limit = 256 - 256 % alphabet.len();
+    loop {
+        let mut out = String::with_capacity(len);
+        let mut buf = [0u8; 64];
+        while out.len() < len {
+            getrandom::fill(&mut buf).expect("system randomness");
+            for b in buf {
+                if (b as usize) < limit && out.len() < len {
+                    out.push(alphabet[b as usize % alphabet.len()] as char);
+                }
+            }
+        }
+        if sets.iter().all(|s| out.chars().any(|ch| s.contains(ch))) {
+            return Ok(out);
+        }
+    }
 }
 
 /// A random value of `n` letters and digits (62 symbols, rejection-sampled: no bias).

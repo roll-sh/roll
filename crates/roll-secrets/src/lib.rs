@@ -434,6 +434,7 @@ impl Secrets {
         db.add_column("secrets", "public", "TEXT")?;
         // Who supplies a required key (health and the daily notice name them).
         db.add_column("required", "owner", "TEXT")?;
+        db.add_column("required", "password", "TEXT")?;
         // Scheduled rotations and revocations that fail, for health (health.rs).
         db.add_column("secrets", "rotation_error", "TEXT")?;
         db.add_column("secrets", "rotation_failed_at", "INTEGER")?;

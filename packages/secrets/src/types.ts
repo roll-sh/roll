@@ -196,7 +196,10 @@ export type NewShare = { ciphertext: string; note?: string; views?: number; ttl_
 export type KeyType = "url" | "int" | "port" | "bool" | "json" | "email";
 /** A key every standard environment must define in a folder; typed keys also say what its value must be. */
 /** `owner`: who supplies it (a person or team), named in health and the daily notice. */
-export type Required = { key: string; path: string; comment: string; type?: KeyType; pattern?: string; owner?: string };
+export type PasswordClass = "lower" | "upper" | "digit" | "symbol";
+/** What a key's values must be made of, and what generators make (`classes` defaults to letters and digits; `symbols` to `!#%&*+-=?^_~`). */
+export type PasswordPolicy = { length: number; classes?: PasswordClass[]; symbols?: string };
+export type Required = { key: string; path: string; comment: string; type?: KeyType; pattern?: string; owner?: string; password?: PasswordPolicy };
 /** A workload identity: CI jobs and clusters whose OIDC tokens match log in for a short-lived token. */
 export type Identity = {
   id: string;
