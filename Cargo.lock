@@ -6927,6 +6927,7 @@ dependencies = [
  "code-chat",
  "code-control",
  "code-preview",
+ "code-review",
  "code-sql",
  "curve25519-dalek",
  "futures",

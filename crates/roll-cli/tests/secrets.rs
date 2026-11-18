@@ -196,6 +196,23 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     let scanned = roll(&api, &[], &["secrets", "-p", "shop", "scan", repo.path().to_str().unwrap()], None).await;
     assert!(scanned.code != Some(0) && scanned.stdout.contains("config.yml:3  HOST (production)"), "{}{}", scanned.stdout, scanned.stderr);
 
+    // A credential roll secrets doesn't hold: a pre-commit scan refuses it, `--store` moves it in
+    // from the file and says what to write instead. (Built from pieces: push protection scans
+    // this repo.)
+    let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(repo.path()).status().unwrap().success());
+    git(&["init", "-q"]);
+    let aws = ["AKIA", "ROLLFIXTURE", "23456"].concat();
+    std::fs::write(repo.path().join("deploy.ts"), format!("// deploys\nexport const awsKey = \"{aws}\";\n")).unwrap();
+    git(&["add", "deploy.ts"]);
+    let cwd = [("ROLL_TEST_CWD", repo.path().to_str().unwrap())];
+    let refused = roll(&api, &cwd, &["secrets", "-p", "shop", "scan", "--staged"], None).await;
+    assert!(refused.code != Some(0) && refused.stdout.contains("deploy.ts:2  an AWS access key, not in roll secrets: roll secrets scan --store AWS_KEY=deploy.ts:2") && !refused.stdout.contains(&aws), "{}{}", refused.stdout, refused.stderr);
+    ok(&api, &cwd, &["secrets", "-p", "shop", "scan", "--staged", "--allow-unstored"], None).await;
+    let stored = ok(&api, &cwd, &[&at[..], &["scan", "--store", "deploy.ts:2"]].concat(), None).await;
+    assert!(stored.contains("as AWS_KEY in production:/") && stored.contains("Replace it with process.env.AWS_KEY") && !stored.contains(&aws), "{stored}");
+    let again = roll(&api, &cwd, &["secrets", "-p", "shop", "scan", "--staged"], None).await;
+    assert!(again.code != Some(0) && again.stdout.contains("deploy.ts:2  AWS_KEY (production)") && !again.stdout.contains("not in roll secrets"), "now it's the project's value: {}", again.stdout);
+
     // A config file filled from the environment: `\${…}` and shell syntax stay as written.
     let tpl = "url: http://${HOST}:${PORT}\nliteral: \\${HOST} ${HOME:-x} $PORT\n";
     let filled = ok(&api, &[], &[&at[..], &["render", "-"]].concat(), Some(tpl)).await;
