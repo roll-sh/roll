@@ -15,7 +15,7 @@ export interface PreviewService {
   name: string;
   repo: string;
   url: string;
-  /** `url` with the preview's access token (link access): the link to open and hand out. */
+  /** `url` with the preview's access token (link access; plain otherwise): the link to open and hand out. */
   share_url: string | null;
   /** The changeset it should run. */
   revision: string | null;
@@ -51,6 +51,25 @@ export function unmaskedNote(kind: string, mode: "branch" | "schema" | "skip", m
     return masks > 0 ? null : "Previews get its data as it is: mask what holds people's data, or use Schema only.";
   if (kind === "stream") return "Previews get its messages as they are (they can't be masked): use Schema only, or skip it.";
   return "Previews get its data as it is (it can't be masked): a seed can replace it with made-up data, or skip it.";
+}
+
+/** A column (or search field) of a project's Postgres, NoSQL or search resource that looks like
+ * people's data and has no mask yet (`GET …/mask-suggestions`), with a rule its type and
+ * constraints take. Every such resource is read, whatever its rule; the dialog shows them under
+ * those on `branch`. */
+export interface MaskSuggestion {
+  /** `"postgres:<ref>"`, `"nosql:<ref>"` or `"search:<ref>"`, as `masking` keys it. */
+  resource: string;
+  path: string;
+  rule: string;
+  why: string;
+}
+
+export interface MaskSuggestions {
+  suggestions: MaskSuggestion[];
+  /** Resources whose columns weren't all read, and why: asleep (not woken for this), not read
+   * within 10 s, couldn't be read, or only the first 2,000 read. */
+  unread: { resource: string; why: string }[];
 }
 
 export interface PreviewCost {
@@ -148,6 +167,13 @@ export interface Preview {
 export interface PreviewActivity {
   at: number;
   message: string;
+}
+
+/** Someone signed in to roll who opened a team-access preview: their handle, and when they were
+ * last in it (as of their session's 5-minute recheck). */
+export interface PreviewVisitor {
+  who: string;
+  last_at: number;
 }
 
 export type ResourceRule = "branch" | "schema" | "skip";
@@ -340,8 +366,8 @@ export interface PreviewSettings {
   /** A patch replaces the whole map. */
   env: Record<string, string>;
   github: { comment: boolean; status: boolean; deployment: boolean; screenshot?: boolean; baseline?: boolean; pages?: string[]; hide?: string[]; budget?: SpeedBudget; visual_threshold?: number; widths?: number[]; openapi?: string | null; endpoints?: string[]; states?: PageState[]; browsers?: ("firefox" | "webkit" | "webkit-phone")[] };
-  /** "link": a preview's URLs need its link (its access token once, then a cookie). */
-  access: "link" | "public";
+  /** "link": a preview's URLs need its link (its access token once, then a cookie). "team": only people signed in to roll who may open the project (they sign in on the way; the link's token lets nobody in). */
+  access: "link" | "team" | "public";
   /** Chromatic's UI Review: `check` posts `roll/visual`; `required` also keeps a change waiting for one from landing in roll. */
   visual_review?: "off" | "check" | "required";
   /** `catch` (default): services send mail to roll's catcher, listed on the preview, never delivered; `deliver`: the project's own mail settings. */
@@ -354,7 +380,7 @@ export interface PreviewSettings {
   egress_forks?: "open" | "roll";
   /** Branch the data as of a point in time where the product keeps history: `-24h`, `-30m`, `-7d`, or an RFC 3339 time (30 days back at most). */
   data_at?: string | null;
-  /** A feedback button on its pages for people who came in through roll (link access). */
+  /** A feedback button on its pages for people who came in through roll (link access, or a team session). */
   feedback: boolean;
   /** Variables for a family of branches: a branch glob → `{name: value}`, over `env`. */
   env_for: Record<string, Record<string, string>>;
@@ -463,6 +489,8 @@ export const previewsApi = {
   /** `head`: the screenshot's that was looked at (`visual_review.head`): refused (409) once a newer one came in. `path`: that page only (`""` the first), else every page. */
   /** Let one head of a fork's pull request on a Git URL service run (409 once it moved on). */
   approve: (id: string, head: string) => call<Preview>("POST", `${one(id)}/approve`, { head }),
+  /** As the person signed in (a session, never a token): a one-use URL into a team-access preview's page `to` (one of its service URLs), good for a minute. */
+  visit: (id: string, to: string) => call<{ url: string }>("POST", `${one(id)}/visit`, { to }),
   acceptVisual: (id: string, head?: string, path?: string) =>
     call<Preview>("POST", `${one(id)}/visual/accept`, { ...(head ? { head } : {}), ...(path !== undefined ? { path } : {}) }),
   /** Its share links (never their tokens). */
@@ -503,9 +531,12 @@ export const previewsApi = {
     call<{ service: string; lines: string[] }>("GET", `${one(id)}/logs${query(opts)}`),
   /** Newest first. */
   activity: (id: string) => call<PreviewActivity[]>("GET", `${one(id)}/activity`),
+  visitors: (id: string) => call<PreviewVisitor[]>("GET", `${one(id)}/visitors`),
   settings: (projectId: string) => call<PreviewSettings>("GET", `${project(projectId)}/settings`),
   putSettings: (projectId: string, patch: SettingsPatch) => call<PreviewSettings>("PUT", `${project(projectId)}/settings`, patch),
   usage: (projectId: string) => call<PreviewUsage>("GET", `${project(projectId)}/usage`),
+  /** Columns of the project's branched data that look like people's data and aren't masked. */
+  maskSuggestions: (projectId: string) => call<MaskSuggestions>("GET", `${project(projectId)}/mask-suggestions`),
   bypass: (projectId: string) => call<PreviewBypass>("GET", `${project(projectId)}/bypass`),
   /** A new secret (the old one stops working), shown only in this answer. */
   rotateBypass: (projectId: string) => call<PreviewBypass>("POST", `${project(projectId)}/bypass`),

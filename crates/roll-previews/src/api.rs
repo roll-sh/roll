@@ -26,6 +26,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/{id}/keep", post(keep))
         .route("/v1/previews/{id}/visual/accept", post(accept_visual))
         .route("/v1/previews/{id}/approve", post(approve))
+        .route("/v1/previews/{id}/visit", post(visit))
         .route("/v1/previews/{id}/env", get(vars).put(put_vars))
         .route("/v1/previews/{id}/shares", get(shares).post(share))
         .route("/v1/previews/{id}/shares/{share}", axum::routing::delete(unshare))
@@ -53,8 +54,10 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .with_state(engine.clone()),
         )
         .route("/v1/previews/{id}/activity", get(activity))
+        .route("/v1/previews/{id}/visitors", get(visitors))
         .route("/v1/previews/projects/{project}/settings", get(settings).put(put_settings))
         .route("/v1/previews/projects/{project}/usage", get(usage))
+        .route("/v1/previews/projects/{project}/mask-suggestions", get(mask_suggestions))
         .route("/v1/previews/projects/{project}/bypass", get(bypass).post(rotate_bypass).delete(delete_bypass))
         .route("/v1/previews/projects/{project}/hooks", get(hooks).post(create_hook))
         .route("/v1/previews/projects/{project}/hooks/{hook}", axum::routing::delete(delete_hook))
@@ -199,6 +202,24 @@ async fn create(AxState(e): S, axum::Extension(visible): axum::Extension<Visible
     let (p, made) = e.create(&b.project, &b.repo, b.branch.as_deref(), b.change.as_deref(), &by).await?;
     let status = if made { StatusCode::CREATED } else { StatusCode::OK };
     Ok((status, Json(p)).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VisitBody {
+    to: String,
+}
+
+/// A signed-in person's one-use way into a team-access preview (roll's dashboard asks for it as
+/// them, then sends the browser there). A token isn't a person: only a session gets one.
+async fn visit(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extension<roll_auth::SignedIn>>, b: Bytes) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    let Some(axum::Extension(user)) = who else {
+        return Err(Error::Forbidden("signing in to a preview is for a person signed in to roll, not a token".into()));
+    };
+    let b: VisitBody = body(&b)?;
+    let url = blocking(e, move |e| e.visit_ticket(&id, &user.user, &user.handle, &user.session, &b.to)).await?;
+    Ok(Json(json!({ "url": url })))
 }
 
 async fn one(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Preview>> {
@@ -599,6 +620,16 @@ async fn activity(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<V
     .map(Json)
 }
 
+async fn visitors(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    blocking(e, move |e| {
+        e.store.row(&id)?;
+        Ok(json!(e.store.visitors(&id)?))
+    })
+    .await
+    .map(Json)
+}
+
 async fn settings(AxState(e): S, Path(project): Path<String>) -> crate::Result<Json<crate::Settings>> {
     blocking(e, move |e| {
         e.workspace_project(&project)?;
@@ -606,6 +637,21 @@ async fn settings(AxState(e): S, Path(project): Path<String>) -> crate::Result<J
     })
     .await
     .map(Json)
+}
+
+/// Columns of the project's data that look like people's data and aren't masked yet:
+/// `{suggestions: [{resource, path, rule, why}], unread: [{resource, why}]}`.
+/// A scoped token sees only resources its grant lets it read (the route's own check is
+/// `previews` read on the project): column names are the products' metadata.
+async fn mask_suggestions(AxState(e): S, Path(project): Path<String>, grant: Option<axum::Extension<roll_auth::Grant>>) -> crate::Result<Json<Value>> {
+    use roll_auth::scope::{Action, Outcome, Resource};
+    let may_read = |kind: crate::Kind, r#ref: &str| {
+        grant.as_ref().is_none_or(|axum::Extension(g)| {
+            let resource = Resource { product: kind.as_str().into(), id: Some(r#ref.into()), project: Some(project.clone()), ..Default::default() };
+            g.allows(&resource, Action::Read) == Outcome::Allow
+        })
+    };
+    e.mask_suggestions(&project, may_read).await.map(Json)
 }
 
 async fn put_settings(AxState(e): S, Path(project): Path<String>, b: Bytes) -> crate::Result<Json<crate::Settings>> {

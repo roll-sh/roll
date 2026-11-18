@@ -132,6 +132,8 @@ pub struct FakeData {
     pub masks: Mutex<Vec<(String, std::collections::BTreeMap<String, String>)>>,
     /// Branched from history at (Postgres's fake keeps history; the others don't).
     pub at: Mutex<Vec<i64>>,
+    /// What `columns` answers, by parent (`Err`: it sleeps).
+    pub columns: Mutex<std::collections::HashMap<String, Result<Vec<roll_previews::mask::Column>, roll_previews::ports::Asleep>>>,
 }
 
 impl FakeData {
@@ -145,6 +147,7 @@ impl FakeData {
             schema: Mutex::new(None),
             masks: Mutex::new(Vec::new()),
             at: Mutex::new(Vec::new()),
+            columns: Mutex::new(Default::default()),
         })
     }
 }
@@ -179,6 +182,13 @@ impl Brancher for FakeData {
     }
     async fn schema(&self, _parent: &str, _branch: &str) -> anyhow::Result<Option<(Vec<String>, Vec<String>)>> {
         Ok(self.schema.lock().clone())
+    }
+    async fn columns(&self, parent: &str, max: usize) -> anyhow::Result<Vec<roll_previews::mask::Column>> {
+        match self.columns.lock().get(parent) {
+            Some(Err(_)) => Err(roll_previews::ports::Asleep.into()),
+            Some(Ok(c)) => Ok(c.iter().take(max).cloned().collect()),
+            None => Ok(Vec::new()),
+        }
     }
     async fn reset(&self, parent: &str, branch: &str, _kept: Option<&str>, name: &str, mode: Mode) -> anyhow::Result<Branched> {
         self.delete(parent, branch, name).await?;

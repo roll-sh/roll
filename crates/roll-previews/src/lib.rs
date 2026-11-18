@@ -26,6 +26,7 @@ pub mod runtime;
 pub mod schema;
 pub mod settings;
 pub mod store;
+pub mod visit;
 pub mod visual;
 
 pub use engine::Engine;
@@ -1109,6 +1110,14 @@ impl ResourceState {
             _ => ResourceState::Pending,
         }
     }
+}
+
+/// Someone signed in to roll who opened a team-access preview ([`Store::visitors`]): their
+/// handle, and when they were last in it (ms, as of their session's last recheck).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Visitor {
+    pub who: String,
+    pub last_at: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

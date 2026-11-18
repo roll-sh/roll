@@ -27,6 +27,8 @@ export function Home() {
             const s = spendOf(ws, p.resources);
             // What's failing in it (a crash loop, a failed deploy, a database down): seen before opening it.
             const failing = p.resources.filter((r) => ws.inventory.get(resourceKey(r))?.state === "failed").length;
+            // Services with changes waiting for a redeploy (Railway's staged changes).
+            const changes = p.resources.reduce((n, r) => n + (ws.inventory.get(resourceKey(r))?.toDeploy?.length ?? 0), 0);
             return (
               <Link
                 key={p.id}
@@ -54,6 +56,12 @@ export function Home() {
                   <div className="mt-2 flex items-center gap-1.5 text-[11.5px] text-danger">
                     <i className="size-1.5 rounded-full bg-danger" />
                     {failing} {failing === 1 ? "needs" : "need"} attention
+                  </div>
+                )}
+                {changes > 0 && (
+                  <div className="mt-2 flex items-center gap-1.5 text-[11.5px] text-accent">
+                    <i className="size-1.5 rounded-full bg-accent" />
+                    {changes} {changes === 1 ? "change" : "changes"} to deploy
                   </div>
                 )}
                 <div className="mt-3 flex justify-between border-t border-line pt-2 font-mono text-[11px] text-subtle">

@@ -1,9 +1,13 @@
-//! `roll preview …` against the real `/v1/previews` and `/v1/workspace` routers, on a real
-//! roll code (in process, on a temp dir). The reconciler doesn't run: this checks the commands
-//! against the routes' shapes, not branching (crates/roll-previews/tests/engine.rs does that).
+//! `roll preview …` against the real `/v1/previews`, `/v1/workspace` and `/v1/access` routers,
+//! on a real roll code with its git server (in process, on a temp dir, locked: git and its API
+//! take the operator's token), as a signed-in admin `ana`. The reconciler doesn't run: this checks
+//! the commands against the routes' shapes, not branching (crates/roll-previews/tests/engine.rs
+//! does that).
 
 use serde_json::{Value, json};
 use std::sync::Arc;
+
+const TOKEN: &str = "operator-token-0123456789abcdef";
 
 struct Server {
     api: String,
@@ -17,8 +21,13 @@ fn server() -> Server {
     let home = tempfile::tempdir().unwrap();
     let path = home.path().to_path_buf();
     let api = rt.block_on(async move {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
         let objects = pg_storage::Objects::new(&pg_storage::StorageConfig::Local(path.join("objects"))).unwrap();
-        let code = code_control::Code::open(code_control::Config::local(path.clone()), objects).unwrap();
+        let mut config = code_control::Config::local(path.clone());
+        config.admin_token = Some(TOKEN.into());
+        config.git_url = format!("http://{addr}/git");
+        let code = code_control::Code::open(config, objects).unwrap();
         let caller = code_control::Caller::Admin;
         code.create_owner(&caller, "acme", code_control::model::OwnerKind::Org, None).unwrap();
         let repo = code.create_repo(&caller, &json!({ "owner": "acme", "name": "web" })).await.unwrap();
@@ -42,9 +51,14 @@ fn server() -> Server {
             Box::new(|| false),
         );
         let kept = store_for_test.clone();
-        let router = roll_previews::api::router(engine).merge(roll_workspace::router(ws));
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = l.local_addr().unwrap();
+        let access = roll_access::Access::open(&code_sql::Target::Sqlite(path.join("access.db")), Default::default(), Default::default(), Default::default()).unwrap();
+        // Signed in as rolld's gate leaves it: an admin, `ana`.
+        let ana = roll_auth::SignedIn { user: "usr_ana".into(), handle: "ana".into(), admin: true, code_owner: None, session: "ses_ana".into() };
+        let router = roll_previews::api::router(engine)
+            .merge(roll_workspace::router(ws))
+            .merge(roll_access::api::router(access))
+            .merge(code_control::api::router(code))
+            .layer(axum::Extension(ana));
         tokio::spawn(async move { axum::serve(l, router).await });
         (format!("http://{addr}"), kept)
     });
@@ -54,7 +68,20 @@ fn server() -> Server {
 
 impl Server {
     fn roll(&self, args: &[&str]) -> (bool, String, String) {
-        let o = std::process::Command::new(env!("CARGO_BIN_EXE_roll")).env("ROLL_API_URL", &self.api).arg("preview").args(args).output().unwrap();
+        self.roll_in(self._home.path(), args)
+    }
+
+    /// In `dir` (a checkout), git's config kept to it (`HOME`).
+    fn roll_in(&self, dir: &std::path::Path, args: &[&str]) -> (bool, String, String) {
+        let o = std::process::Command::new(env!("CARGO_BIN_EXE_roll"))
+            .current_dir(dir)
+            .envs(git_env(self._home.path()))
+            .env("ROLL_API_URL", &self.api)
+            .env("ROLL_ADMIN_TOKEN", TOKEN)
+            .arg("preview")
+            .args(args)
+            .output()
+            .unwrap();
         (o.status.success(), String::from_utf8_lossy(&o.stdout).into_owned(), String::from_utf8_lossy(&o.stderr).into_owned())
     }
 
@@ -108,6 +135,151 @@ fn settings_create_list_and_remove_a_branch_preview() {
     assert_eq!(s.json(&["show", &id])["desired"], "deleted");
     let (ok, _, err) = s.roll(&["wait", &id]);
     assert!(!ok && err.contains("being deleted"), "{err}");
+}
+
+/// `roll preview visitors` answers who signed in to a preview lately (nobody here).
+#[test]
+fn visitors_from_the_cli() {
+    let s = server();
+    s.ok(&["settings", "shop", "--set", "enabled=true", "--set", "access=\"team\""]);
+    let created = s.json(&["create", "--project", "shop", "--repo", "acme/web", "--branch", "main"]);
+    let id = created["id"].as_str().unwrap();
+    assert!(s.ok(&["visitors", id]).contains("nobody signed in has opened it"));
+    assert_eq!(s.json(&["visitors", id]).as_array().map(Vec::len), Some(0));
+}
+
+/// git kept to `home`: no system or user config of this machine's, a fixed identity.
+fn git_env(home: &std::path::Path) -> Vec<(&'static str, std::ffi::OsString)> {
+    vec![
+        ("HOME", home.as_os_str().to_owned()),
+        ("XDG_CONFIG_HOME", home.join(".config").into_os_string()),
+        ("GIT_CONFIG_NOSYSTEM", "1".into()),
+        ("GIT_AUTHOR_NAME", "Ana".into()),
+        ("GIT_AUTHOR_EMAIL", "ana@example.com".into()),
+        ("GIT_COMMITTER_NAME", "Ana".into()),
+        ("GIT_COMMITTER_EMAIL", "ana@example.com".into()),
+    ]
+}
+
+impl Server {
+    /// `git <args>` in `dir`; with `auth`, the operator's token for this call only.
+    fn git(&self, dir: &std::path::Path, auth: bool, args: &[&str]) -> String {
+        let mut c = std::process::Command::new("git");
+        c.current_dir(dir).envs(git_env(self._home.path()));
+        if auth {
+            c.args(["-c", &format!("http.extraHeader=Authorization: Bearer {TOKEN}")]);
+        }
+        let out = c.args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// What `branch` holds in roll code: its commit's subject and parents, and `index.html`,
+    /// `new.txt`, `staged.txt` and whether `secret.env` is there. `None`: no such branch.
+    fn pushed(&self, branch: &str) -> Option<(String, String, String, String, bool)> {
+        let dir = tempfile::tempdir_in(self._home.path()).unwrap();
+        let url = format!("{}/git/acme/web.git", self.api);
+        if self.git(dir.path(), true, &["ls-remote", &url, &format!("refs/heads/{branch}")]).is_empty() {
+            return None;
+        }
+        self.git(dir.path(), true, &["clone", "-q", "--branch", branch, &url, "c"]);
+        let c = dir.path().join("c");
+        let read = |f: &str| std::fs::read_to_string(c.join(f)).unwrap_or_default();
+        Some((self.git(&c, false, &["log", "-1", "--format=%s %P"]), read("index.html"), read("new.txt"), read("staged.txt"), c.join("secret.env").exists()))
+    }
+}
+
+#[test]
+fn up_previews_the_working_tree_and_down_removes_it() {
+    let s = server();
+    s.ok(&["settings", "shop", "--set", "enabled=true"]);
+    // A checkout of roll's repo, on a branch, with changes nobody committed: an edit, a new file,
+    // something staged, and a file .gitignore leaves out.
+    let url = format!("{}/git/acme/web.git", s.api);
+    s.git(s._home.path(), true, &["clone", "-q", &url, "work"]);
+    let work = s._home.path().join("work");
+    s.git(&work, false, &["switch", "-q", "-c", "feat/x"]);
+    std::fs::write(work.join("index.html"), "changed").unwrap();
+    std::fs::write(work.join("staged.txt"), "staged").unwrap();
+    s.git(&work, false, &["add", "staged.txt"]);
+    std::fs::write(work.join("new.txt"), "new").unwrap();
+    std::fs::write(work.join(".gitignore"), "secret.env\n").unwrap();
+    std::fs::write(work.join("secret.env"), "KEY=1").unwrap();
+    // A hook that would see the push's environment (husky's way: core.hooksPath).
+    let hooks = s._home.path().join("hooks");
+    let hooked = s._home.path().join("hook-ran");
+    std::fs::create_dir(&hooks).unwrap();
+    std::fs::write(hooks.join("pre-push"), format!("#!/bin/sh\nenv > '{}'\n", hooked.display())).unwrap();
+    std::fs::set_permissions(hooks.join("pre-push"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    s.git(&work, false, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+
+    // An untracked file over 50 MB isn't pushed without --force.
+    std::fs::File::create(work.join("dump.sql")).unwrap().set_len(51 << 20).unwrap();
+    let (ok, _, err) = s.roll_in(&work, &["up", "--no-wait"]);
+    assert!(!ok && err.contains("dump.sql") && err.contains("--force"), "{err}");
+    std::fs::remove_file(work.join("dump.sql")).unwrap();
+    // A config that rewrites roll's URL to another host: refused, and that host gets nothing.
+    let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let other_url = format!("http://{}/", other.local_addr().unwrap());
+    let heard = Arc::new(std::sync::Mutex::new(String::new()));
+    let ear = heard.clone();
+    std::thread::spawn(move || {
+        for c in other.incoming().flatten() {
+            let mut c = c;
+            let mut buf = [0u8; 4096];
+            let n = std::io::Read::read(&mut c, &mut buf).unwrap_or(0);
+            ear.lock().unwrap().push_str(&String::from_utf8_lossy(&buf[..n]));
+            let _ = std::io::Write::write_all(&mut c, b"HTTP/1.1 500 Nope\r\nContent-Length: 0\r\n\r\n");
+        }
+    });
+    let rewrite = format!("url.{other_url}.insteadOf");
+    s.git(&work, false, &["config", &rewrite, &format!("{}/", s.api)]);
+    let (ok, _, err) = s.roll_in(&work, &["up", "--no-wait"]);
+    assert!(!ok && err.contains("insteadof"), "{err}");
+    assert!(!heard.lock().unwrap().to_ascii_lowercase().contains("authorization"), "{}", heard.lock().unwrap());
+    s.git(&work, false, &["config", "--unset", &rewrite]);
+    let mine = |s: &Server| [&["rev-parse", "HEAD"][..], &["ls-files", "--stage"], &["status", "--porcelain"], &["for-each-ref"], &["config", "--list", "--local"]].map(|a| s.git(&work, false, a));
+    let before = mine(&s);
+    let head = before[0].clone();
+
+    let up = |s: &Server| {
+        let (ok, out, err) = s.roll_in(&work, &["--json", "up", "--no-wait"]);
+        assert!(ok, "roll preview up:\n{out}\n{err}");
+        (serde_json::from_str::<Value>(&out).unwrap(), err)
+    };
+    let (p, err) = up(&s);
+    // The untracked files it adds are listed; what .gitignore leaves out isn't one.
+    assert!(err.contains("adding 2 untracked files") && err.contains("new.txt") && !err.contains("secret.env"), "{err}");
+    let id = p["id"].as_str().unwrap().to_string();
+    assert_eq!((p["branch"].as_str(), p["repo"].as_str()), (Some("preview/ana/feat-x"), Some("acme/web")), "{p}");
+    let (log, index, new, staged, secret) = s.pushed("preview/ana/feat-x").expect("the branch");
+    assert_eq!((log, index.as_str(), new.as_str(), staged.as_str(), secret), (format!("roll preview up {head}"), "changed", "new", "staged", false));
+    // Nothing of the user's moved: HEAD, the index, refs, files, config (no credential written).
+    assert_eq!(mine(&s), before);
+    assert!(!hooked.exists(), "no hook runs with the credential in its environment");
+
+    // Again, after another edit: the same preview, its branch moved (forced: both are on HEAD).
+    std::fs::write(work.join("index.html"), "again").unwrap();
+    let (again, _) = up(&s);
+    assert_eq!(again["id"].as_str(), Some(id.as_str()));
+    assert_eq!(s.pushed("preview/ana/feat-x").unwrap().1, "again");
+
+    let (ok, out, err) = s.roll_in(&work, &["--json", "down"]);
+    assert!(ok, "roll preview down:\n{out}\n{err}");
+    assert_eq!(s.json(&["show", &id])["desired"], "deleted");
+    assert!(s.pushed("preview/ana/feat-x").is_none(), "the branch is gone");
+    assert_eq!(s.git(&work, false, &["rev-parse", "HEAD"]), head);
+}
+
+/// `roll preview masks` lists a project's mask suggestions (none here: its canvas holds only a
+/// repo), and `--apply` with none changes nothing.
+#[test]
+fn mask_suggestions_from_the_cli() {
+    let s = server();
+    s.ok(&["settings", "shop", "--set", "enabled=true"]);
+    assert!(s.ok(&["masks", "shop"]).contains("nothing unmasked looks like personal data"));
+    s.ok(&["masks", "shop", "--apply"]);
+    assert_eq!(s.json(&["masks", "shop"])["suggestions"].as_array().map(Vec::len), Some(0));
 }
 
 /// `roll preview errors` answers a preview's grouped errors (none here: nothing runs in this

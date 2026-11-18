@@ -583,6 +583,22 @@ impl Accounts {
         Ok(Some(roll_auth::Session::Full(roll_auth::SignedIn { user, handle, admin, code_owner, session: id })))
     }
 
+    /// Whether session `id` (`ses_…`, not its token) still signs `user` in, as [`Accounts::resolve`]
+    /// would decide for its cookie: full, not expired or idle, its user not disabled. Signing out,
+    /// revoking it and disabling the user all end it. Nothing is cached, and nothing is written.
+    pub fn session_live(&self, user: &str, id: &str) -> Result<bool> {
+        let now = self.db.now_ms()?;
+        let row = self.db.read(|c| {
+            c.query_row(
+                "SELECT s.seen_at, s.expires_at, u.disabled FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND s.user_id = ? AND s.level = 'full'",
+                [id, user],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, bool>(2)?)),
+            )
+            .optional()
+        })?;
+        Ok(row.is_some_and(|(seen_at, expires_at, disabled)| !disabled && expires_at > now && seen_at + SESSION_IDLE_MS > now))
+    }
+
     /// A user as they are now, for a token of theirs (roll-access): `None` once disabled or gone.
     pub fn person(&self, user: &str) -> Result<Option<roll_auth::SignedIn>> {
         let row = self.db.read(|c| {

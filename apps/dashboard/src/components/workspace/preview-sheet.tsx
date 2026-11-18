@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { appsApi } from "@/lib/apps-api";
 import { codeApi } from "@/lib/code-api";
 import { Confirm } from "@/components/ui";
-import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup } from "@/lib/previews-api";
+import { endpointSlower, type EndpointTime, a11yWords, checkSummary, seoWords, duration, followLogs, openUrl, pageLabel, previewsApi, noteCropUrl, qrUrl, screenshotUrl, resourceId, thanMain, type CaughtMail, type PageCheck, type Preview, type TextDiff, type PreviewActivity, type PreviewVisitor, type PreviewKind, type PreviewShare, type RequestLine, type ServiceMetrics, type ErrorGroup } from "@/lib/previews-api";
 import { verdict, type VerdictTarget } from "@/lib/preview-verdict";
 import { formatBytes } from "@/lib/roll-api";
 import { Head, Label, Rows, Stat, Tabs } from "./inspector";
@@ -692,11 +692,13 @@ function Vars({ id }: { id: string }) {
 
 function ActivityList({ id, updated }: { id: string; updated: number }) {
   const [items, setItems] = useState<PreviewActivity[] | null>(null);
+  const [visitors, setVisitors] = useState<PreviewVisitor[]>([]);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
-    previewsApi.activity(id).then(
-      (a) => live && (setItems(a), setError(null)),
+    // The list is a nicety: an older node without it (a 404) leaves the activity as it is.
+    Promise.all([previewsApi.activity(id), previewsApi.visitors(id).catch(() => [])]).then(
+      ([a, v]) => live && (setItems(a), setVisitors(v ?? []), setError(null)),
       (e) => live && setError(errorText(e)),
     );
     return () => {
@@ -705,18 +707,38 @@ function ActivityList({ id, updated }: { id: string; updated: number }) {
   }, [id, updated]);
   if (error) return <p className="text-[11.5px] text-danger">{error}</p>;
   if (!items) return <p className="text-[11.5px] text-subtle">Loading…</p>;
-  if (!items.length) return <p className="text-[11.5px] text-subtle">Nothing yet.</p>;
   return (
-    <ol className="space-y-2">
-      {items.map((a, i) => (
-        <li key={`${a.at}-${i}`} className="flex gap-2.5 text-[12px]">
-          <span className="w-14 shrink-0 pt-px text-right font-mono text-[10.5px] text-subtle" title={new Date(a.at).toLocaleString()}>
-            {since(a.at)}
-          </span>
-          <span className="min-w-0 flex-1 break-words text-soft">{a.message}</span>
-        </li>
-      ))}
-    </ol>
+    <>
+      {visitors.length > 0 && (
+        <section className="mb-4">
+          <Label>Who opened it</Label>
+          <ul className="mt-2 space-y-1.5">
+            {visitors.map((v) => (
+              <li key={v.who} className="flex gap-2.5 text-[12px]">
+                <span className="w-14 shrink-0 pt-px text-right font-mono text-[10.5px] text-subtle" title={new Date(v.last_at).toLocaleString()}>
+                  {since(v.last_at)}
+                </span>
+                <span className="min-w-0 flex-1 truncate font-mono text-soft">{v.who}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {items.length ? (
+        <ol className="space-y-2">
+          {items.map((a, i) => (
+            <li key={`${a.at}-${i}`} className="flex gap-2.5 text-[12px]">
+              <span className="w-14 shrink-0 pt-px text-right font-mono text-[10.5px] text-subtle" title={new Date(a.at).toLocaleString()}>
+                {since(a.at)}
+              </span>
+              <span className="min-w-0 flex-1 break-words text-soft">{a.message}</span>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="text-[11.5px] text-subtle">Nothing yet.</p>
+      )}
+    </>
   );
 }
 
