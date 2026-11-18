@@ -696,7 +696,7 @@ function SimulatedDoc({ doc }: { doc: SimDoc }) {
               value={json ? "both" : "after"}
               options={[
                 { label: "after", value: "after" },
-                { label: "before / after", value: "both" },
+                { label: "both", value: "both" },
               ]}
               onChange={(v) => setJson(v === "both")}
             />
