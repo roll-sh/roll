@@ -50,6 +50,11 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/users", get(list_users))
         .route("/v1/accounts/users/{id}", axum::routing::patch(update_user))
         .route("/v1/accounts/users/{id}/sessions", delete(revoke_user_sessions))
+        .route("/v1/accounts/sso", get(list_sso).post(add_sso))
+        .route("/v1/accounts/sso/start", post(sso_start))
+        .route("/v1/accounts/sso/{id}", axum::routing::patch(update_sso).delete(remove_sso))
+        .route("/v1/accounts/sso/{id}/callback", get(sso_callback))
+        .route("/v1/accounts/sso/{id}/verify", post(verify_sso))
         .route_layer(axum::middleware::from_fn(json_only))
         .with_state(accounts)
 }
@@ -163,7 +168,8 @@ fn signed_in_response(a: &Accounts, user: &str, issued: Issued) -> Result<Respon
 // ── public ──
 
 async fn info(State(a): S) -> Json<Value> {
-    Json(json!({ "providers": { "email": a.mail_on(), "github": a.config.github.is_some(), "google": a.config.google.is_some() } }))
+    let sso = blocking(&a, |a| a.sso_connections()).await.is_ok_and(|c| !c.is_empty());
+    Json(json!({ "providers": { "email": a.mail_on(), "github": a.config.github.is_some(), "google": a.config.google.is_some(), "sso": sso } }))
 }
 
 async fn session(State(a): S, me: Me, owed: Owed, headers: HeaderMap) -> Result<Response> {
@@ -205,6 +211,12 @@ async fn email_start(State(a): S, b: Bytes) -> Result<Response> {
     }
     let EmailStart { email, invite } = body(&b)?;
     let email = crate::normalize_email(&email)?;
+    // A domain whose SSO connection enforces it signs in only there (its domain alone decides:
+    // nothing about whether the address has an account).
+    let e2 = email.clone();
+    if let Some(name) = blocking(&a, move |a| a.sso_required_for(&e2)).await? {
+        return Err(Error::Forbidden(format!("sign in with {name}: your organization requires it"), "sso_required"));
+    }
     let challenge = crate::new_id("chl");
     // Whether the address has an account decides only work done after the answer, off the
     // request (lookups, the throttle, argon2, the write, the mail): the answer's timing can't
@@ -270,30 +282,36 @@ struct Callback {
 }
 
 async fn oauth_callback(State(a): S, Path(p): Path<String>, Query(q): Query<Callback>, headers: HeaderMap) -> Response {
+    let Some(p) = Provider::parse(&p) else { return finish_redirect(&a, &headers, Err(Error::NotFound("no such provider".into())), "/signin".into(), false).await };
+    let (Some(code), Some(state)) = (q.code, q.state) else {
+        // The person said no at the provider, or the provider failed.
+        let _ = q.error;
+        return finish_redirect(&a, &headers, Err(Error::BadRequest("the provider".into(), Some("provider"))), "/signin".into(), false).await;
+    };
+    let browser = roll_auth::cookie(&headers, a.config.oauth_cookie()).map(str::to_string);
+    let (done, back) = a.oauth_callback(p, &code, &state, browser).await;
+    finish_redirect(&a, &headers, done, back, false).await
+}
+
+/// Where a provider's callback sends the browser: the session it signed in (and its cookie), or
+/// back with `?error=`. `sso`: a session for a person their SSO provider signed in.
+async fn finish_redirect(a: &Arc<Accounts>, headers: &HeaderMap, done: Result<Finished>, back: String, sso: bool) -> Response {
     let web = a.config.web_url.clone();
     let redirect = |to: String, cookies: Vec<HeaderValue>| {
         let mut resp = (StatusCode::SEE_OTHER, [(header::LOCATION, HeaderValue::from_str(&to).unwrap_or(HeaderValue::from_static("/")))]).into_response();
-        resp.headers_mut().append(header::SET_COOKIE, cookie(&a, a.config.oauth_cookie(), "", 0));
+        resp.headers_mut().append(header::SET_COOKIE, cookie(a, a.config.oauth_cookie(), "", 0));
         with_cookies(resp, cookies)
     };
     let fail = |back: &str, code: &str| {
         let sep = if back.contains('?') { '&' } else { '?' };
         redirect(format!("{web}{back}{sep}error={code}"), Vec::new())
     };
-    let Some(p) = Provider::parse(&p) else { return fail("/signin", "provider") };
-    let (Some(code), Some(state)) = (q.code, q.state) else {
-        // The person said no at the provider, or the provider failed.
-        let _ = q.error;
-        return fail("/signin", "provider");
-    };
-    let browser = roll_auth::cookie(&headers, a.config.oauth_cookie()).map(str::to_string);
-    let (done, back) = a.oauth_callback(p, &code, &state, browser).await;
     match done {
         Err(e) => fail(&back, e.redirect_code()),
         Ok(Finished::Linked { return_to }) => redirect(format!("{web}{return_to}"), Vec::new()),
         Ok(Finished::SignIn { user, return_to }) => {
-            let ua = user_agent(&headers);
-            match blocking(&a, move |a| a.issue(&user, &ua)).await {
+            let ua = user_agent(headers);
+            match blocking(a, move |a| if sso { a.issue_sso(&user, &ua) } else { a.issue(&user, &ua) }).await {
                 Err(e) => fail("/signin", e.redirect_code()),
                 Ok(issued) => {
                     let ttl = if issued.second_factor { SECOND_FACTOR_TTL_MS } else { SESSION_TTL_MS };
@@ -302,11 +320,79 @@ async fn oauth_callback(State(a): S, Path(p): Path<String>, Query(q): Query<Call
                     } else {
                         format!("{web}{return_to}")
                     };
-                    redirect(to, vec![cookie(&a, a.config.session_cookie(), &issued.token, ttl)])
+                    redirect(to, vec![cookie(a, a.config.session_cookie(), &issued.token, ttl)])
                 }
             }
         }
     }
+}
+
+// ── SSO (docs/accounts.md, "SSO") ──
+
+#[derive(Deserialize)]
+struct SsoStart {
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    intent: Option<String>,
+    invite: Option<String>,
+    return_to: Option<String>,
+}
+
+/// Start a sign-in through the SSO connection that answers for the email's domain (400 `no_sso`
+/// if none does; the dashboard then offers the other ways), or (`intent: "link"`, a session) link
+/// the signed-in person's account through the connection for their own email.
+async fn sso_start(State(a): S, me: Me, b: Bytes) -> Result<Response> {
+    let SsoStart { email, intent, invite, return_to } = body(&b)?;
+    let link_user = match intent.as_deref().unwrap_or("signin") {
+        "signin" => None,
+        "link" => Some(signed_in(me)?.user),
+        other => return Err(Error::BadRequest(format!("intent is signin or link, not {other}"), None)),
+    };
+    let started = a.sso_start(&email, invite.as_deref(), return_to.as_deref(), link_user).await?;
+    let resp = Json(json!({ "url": started.url })).into_response();
+    Ok(with_cookies(resp, [cookie(&a, a.config.oauth_cookie(), &started.browser, 10 * 60_000)]))
+}
+
+async fn sso_callback(State(a): S, Path(id): Path<String>, Query(q): Query<Callback>, headers: HeaderMap) -> Response {
+    let (Some(code), Some(state)) = (q.code, q.state) else {
+        return finish_redirect(&a, &headers, Err(Error::BadRequest("the SSO provider".into(), Some("provider"))), "/signin".into(), true).await;
+    };
+    let browser = roll_auth::cookie(&headers, a.config.oauth_cookie()).map(str::to_string);
+    let done = a.sso_callback(&id, &code, &state, browser).await;
+    if let Err(e) = &done {
+        tracing::info!(connection = %id, error = %e, "accounts: an SSO sign-in failed");
+    }
+    finish_redirect(&a, &headers, done, "/signin".into(), true).await
+}
+
+async fn list_sso(State(a): S, me: Me, op: Op) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    Ok(Json(blocking(&a, |a| a.sso_connections()).await?).into_response())
+}
+
+async fn add_sso(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    let n: crate::sso::NewConnection = body(&b)?;
+    Ok((StatusCode::CREATED, Json(a.add_sso(n).await?)).into_response())
+}
+
+async fn update_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>, b: Bytes) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    let ch: crate::sso::ConnectionChange = body(&b)?;
+    Ok(Json(blocking(&a, move |a| a.update_sso(&id, ch)).await?).into_response())
+}
+
+/// Check the connection's domains' TXT records now; the ones that have it are verified.
+async fn verify_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    Ok(Json(a.verify_sso(&id).await?).into_response())
+}
+
+async fn remove_sso(State(a): S, me: Me, op: Op, Path(id): Path<String>) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    blocking(&a, move |a| a.remove_sso(&id)).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[derive(Deserialize)]
@@ -379,8 +465,12 @@ async fn revoke_my_session(State(a): S, me: Me, Path(id): Path<String>) -> Resul
 
 async fn unlink(State(a): S, me: Me, Path(p): Path<String>) -> Result<StatusCode> {
     let u = signed_in(me)?;
-    let p = provider(&p)?;
-    blocking(&a, move |a| a.unlink(&u.user, p.as_str())).await?;
+    // GitHub, Google, or an SSO connection's link (`sso:<id>`).
+    let p = match p.strip_prefix("sso:") {
+        Some(id) if !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') => p.clone(),
+        _ => provider(&p)?.as_str().to_string(),
+    };
+    blocking(&a, move |a| a.unlink(&u.user, &p)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
