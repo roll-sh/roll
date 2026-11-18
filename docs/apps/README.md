@@ -2475,7 +2475,9 @@ masks its lines and hands them to the drainer (`Apps::drain_preview_lines`, neve
 256 batches waiting one is dropped, counted in the node's log). They go to drains with
 `previews` and the `runtime` source, in the preview's `pv-` environment (an `environments`
 filter applies), with `service_name` the service's and `service`, `instance` and `deployment`
-null, so a drain narrowed to `services` never gets them. docs/previews.md, "Log drains".
+null, so a drain narrowed to `services` never gets them. A preview's jobs' output (`release`,
+`seed`, `teardown`) is the `build` source, the job's name its `service_name`.
+docs/previews.md, "Log drains".
 `a_previews_runtime_lines_reach_only_drains_that_take_previews`.
 
 A drain's `format` (Heroku's and Render's syslog drains, every vendor's OpenTelemetry intake)

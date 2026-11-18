@@ -351,6 +351,10 @@ behind the `Apps` trait:
     every 30 s). A follower after a restart or a redeploy starts at the stamp of the last line
     sent and drops what Docker gives again, so nothing is lost or sent twice. A process's first
     follower starts when the process did, and lines whose masks can't be read aren't sent.
+    A preview's jobs (`release`, `seed`, `teardown`) go to drains of builds (`sources`
+    `build`, where Render and Vercel put deploy-time commands): each job's output tail once it
+    ends, masked with what it was given and then as logs are, the job's name its
+    `service_name`.
     `a_previews_runtime_output_goes_to_the_projects_log_drains_masked`,
     `a_previews_runtime_lines_reach_only_drains_that_take_previews`.
 - The tree is copied into the container, never bind-mounted.
@@ -1983,7 +1987,7 @@ Every feature in review has its `roll preview` command too: `metrics`, `hooks` (
    (`feature/roll-previews-drains`): roll apps' drains with `previews: true` got only roll apps'
    own `pv-` environments, so a team with Datadog on a drain saw half of a preview's output.
    Followed per running service from its last line, masked, through roll apps' drainer (see
-   "Log drains" under Services). Jobs' output (`release`, `seed`, `teardown`) isn't drained yet.
+   "Log drains" under Services); its jobs' output to drains of builds.
 1. **Sign-in access, in review** (#285): `access: "team"` (Vercel Authentication, Netlify's team
    access), so only people signed in to roll who can open the project open its previews, not
    whoever has the link. On roll apps the `pv-` environment gets apps' `access: {signed_in:
