@@ -174,6 +174,15 @@ CREATE TABLE IF NOT EXISTS budget_alerts (
     at INTEGER NOT NULL,
     PRIMARY KEY (project_id, month, max_usd, level)
 );
+CREATE TABLE IF NOT EXISTS hooks (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    branches TEXT NOT NULL,
+    hash TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    fired_at INTEGER
+);
 CREATE TABLE IF NOT EXISTS bypass (
     project_id TEXT PRIMARY KEY,
     hash TEXT NOT NULL,
@@ -301,6 +310,38 @@ pub struct Access {
     /// The project's bypass secret's SHA-256 (hex), for automation (`x-roll-preview-bypass`);
     /// never for a fork's (`trusted: false`) preview.
     pub bypass: Option<String>,
+}
+
+/// The most deploy hooks a project has.
+pub const MAX_HOOKS: i64 = 20;
+
+/// A project's deploy hook (Vercel's and Netlify's): a secret URL that rebuilds its previews of
+/// `branches` at their heads, for a headless CMS's publish webhook.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Hook {
+    pub id: String,
+    pub project: String,
+    pub name: String,
+    pub branches: Vec<String>,
+    pub created_at: i64,
+    /// When it last rebuilt anything.
+    pub fired_at: Option<i64>,
+}
+
+fn hook_row(r: &code_sql::Row<'_>) -> code_sql::Result<Hook> {
+    let globs: String = r.get(3)?;
+    Ok(Hook { id: r.get(0)?, project: r.get(1)?, name: r.get(2)?, branches: serde_json::from_str(&globs).unwrap_or_default(), created_at: r.get(4)?, fired_at: r.get(5)? })
+}
+
+/// A roll secret: `prefix`, 34 random characters of lowercase base32 and 6 of CRC-32 checksum
+/// (`roll_auth::credentials`), so secret scanning finds a leaked one.
+fn roll_access_secret(prefix: &str) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut b = [0u8; 34];
+    getrandom::fill(&mut b).expect("system randomness");
+    let body: String = format!("{prefix}{}", b.iter().map(|x| ALPHABET[(x & 31) as usize] as char).collect::<String>());
+    let sum = roll_auth::credentials::checksum(&body);
+    format!("{body}{sum}")
 }
 
 /// The SHA-256 (hex) a bypass secret is kept as.
@@ -615,6 +656,9 @@ impl Store {
                 db.add_column("previews", col, "INTEGER")?;
             }
         }
+        if !db.has_column("previews", "rebuilds")? {
+            db.add_column("previews", "rebuilds", "INTEGER NOT NULL DEFAULT 0")?;
+        }
         for col in ["release_ms", "prev_release_ms"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "INTEGER")?;
@@ -753,6 +797,7 @@ impl Store {
         self.db.write(|c| {
             c.execute("DELETE FROM settings WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM bypass WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM hooks WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM budget_alerts WHERE project_id = ?", [project])?;
             Ok::<_, Error>(())
         })
@@ -1916,6 +1961,62 @@ impl Store {
             c.execute("DELETE FROM bypass WHERE project_id = ?", [project])?;
             Ok::<_, Error>(())
         })
+    }
+
+    // ── deploy hooks: a secret URL that rebuilds a project's previews of some branches ──
+
+    /// A new hook for `project`'s previews of `branches` (globs): its secret, returned once and
+    /// kept only as its SHA-256 (`rlb_…`, a roll secret leak scanning finds).
+    pub fn create_hook(&self, project: &str, name: &str, branches: &[String]) -> Result<(Hook, String)> {
+        let secret = roll_access_secret("rlb_");
+        let (id, hash, now) = (format!("hk_{}", crate::new_id()), bypass_hash(&secret), self.now_ms()?);
+        let globs = serde_json::to_string(branches).map_err(|e| Error::Internal(e.to_string()))?;
+        self.db.write(|c| {
+            let n: i64 = c.query_row("SELECT COUNT(*) FROM hooks WHERE project_id = ?", [project], |r| r.get(0))?;
+            if n >= MAX_HOOKS {
+                return Err(Error::Conflict(format!("the project has {MAX_HOOKS} deploy hooks: delete one first")));
+            }
+            c.execute("INSERT INTO hooks (id, project_id, name, branches, hash, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![id, project, name, globs, hash, now])?;
+            Ok(())
+        })?;
+        Ok((Hook { id, project: project.to_string(), name: name.to_string(), branches: branches.to_vec(), created_at: now, fired_at: None }, secret))
+    }
+
+    /// `project`'s hooks (never their secrets).
+    pub fn hooks(&self, project: &str) -> Result<Vec<Hook>> {
+        Ok(self.db.read(|c| c.query("SELECT id, project_id, name, branches, created_at, fired_at FROM hooks WHERE project_id = ? ORDER BY created_at, id", [project], hook_row))?)
+    }
+
+    pub fn delete_hook(&self, project: &str, id: &str) -> Result<()> {
+        let n = self.db.write(|c| Ok::<_, Error>(c.execute("DELETE FROM hooks WHERE project_id = ? AND id = ?", [project, id])?))?;
+        if n == 0 {
+            return Err(Error::NotFound("no such deploy hook".into()));
+        }
+        Ok(())
+    }
+
+    /// The hook a secret is, if it's a live one.
+    pub fn hook_by_secret(&self, secret: &str) -> Result<Option<Hook>> {
+        let hash = bypass_hash(secret);
+        Ok(self.db.read(|c| c.query_row("SELECT id, project_id, name, branches, created_at, fired_at FROM hooks WHERE hash = ?", [hash.as_str()], hook_row).optional())?)
+    }
+
+    /// Records a firing at `now` unless the hook fired less than `every` ms ago: whether it
+    /// counts (a CMS that saves often makes one rebuild a minute, not one a save).
+    pub fn fire_hook(&self, id: &str, now: i64, every: i64) -> Result<bool> {
+        Ok(self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE hooks SET fired_at = ?1 WHERE id = ?2 AND (fired_at IS NULL OR fired_at <= ?1 - ?3)", params![now, id, every])?))? > 0)
+    }
+
+    /// One more rebuild asked of a preview (a deploy hook): its services are built again at their
+    /// heads, with nothing cached.
+    pub fn add_rebuild(&self, id: &str) -> Result<()> {
+        self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE previews SET rebuilds = rebuilds + 1, next_at = 0, generation = generation + 1 WHERE id = ?", [id])?))?;
+        Ok(())
+    }
+
+    /// How many rebuilds were asked of a preview.
+    pub fn rebuilds(&self, id: &str) -> Result<i64> {
+        Ok(self.db.read(|c| c.query_row("SELECT rebuilds FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.unwrap_or(0))
     }
 
     /// When `project`'s bypass secret was made, if it has one.

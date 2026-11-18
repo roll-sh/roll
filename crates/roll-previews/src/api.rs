@@ -53,7 +53,11 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/v1/previews/projects/{project}/settings", get(settings).put(put_settings))
         .route("/v1/previews/projects/{project}/usage", get(usage))
         .route("/v1/previews/projects/{project}/bypass", get(bypass).post(rotate_bypass).delete(delete_bypass))
+        .route("/v1/previews/projects/{project}/hooks", get(hooks).post(create_hook))
+        .route("/v1/previews/projects/{project}/hooks/{hook}", axum::routing::delete(delete_hook))
         .route_layer(axum::middleware::from_fn_with_state(engine.clone(), scoped))
+        // A deploy hook: the secret in its path is the credential (rolld's gate lets it through).
+        .route("/v1/previews/hooks/{secret}", axum::routing::post(run_hook))
         .with_state(engine)
 }
 
@@ -634,6 +638,54 @@ async fn delete_bypass(AxState(e): S, Path(project): Path<String>) -> crate::Res
     .await?;
     e.kick();
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `{hooks: [{id, name, branches, created_at, fired_at}]}`: never their secrets.
+async fn hooks(AxState(e): S, Path(project): Path<String>) -> crate::Result<Json<Value>> {
+    let hooks = blocking(e, move |e| {
+        e.workspace_project(&project)?;
+        e.store.hooks(&project)
+    })
+    .await?;
+    Ok(Json(json!({ "hooks": hooks })))
+}
+
+#[derive(Deserialize)]
+struct NewHook {
+    name: String,
+    #[serde(default = "every_branch")]
+    branches: Vec<String>,
+}
+
+fn every_branch() -> Vec<String> {
+    vec!["*".into()]
+}
+
+/// `{name, branches?}` → 201 `{hook, path}`: the path (`/v1/previews/hooks/rlb_…`) is shown
+/// only here.
+async fn create_hook(AxState(e): S, Path(project): Path<String>, b: Bytes) -> crate::Result<Response> {
+    let b: NewHook = serde_json::from_slice(&b).map_err(|err| Error::BadRequest(format!("expected {{name, branches?}}: {err}")))?;
+    let (hook, path) = blocking(e, move |e| e.create_hook(&project, &b.name, &b.branches)).await?;
+    let mut r = (StatusCode::CREATED, Json(json!({ "hook": hook, "path": path }))).into_response();
+    r.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    Ok(r)
+}
+
+async fn delete_hook(AxState(e): S, Path((project, hook)): Path<(String, String)>) -> crate::Result<StatusCode> {
+    blocking(e, move |e| {
+        e.workspace_project(&project)?;
+        e.store.delete_hook(&project, &hook)
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// A deploy hook fired: 202 `{rebuilt: [preview ids], coalesced}`; anything but a live hook is
+/// a 404. The body is ignored (a CMS sends its own payload).
+async fn run_hook(AxState(e): S, Path(secret): Path<String>, from: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>) -> crate::Result<Response> {
+    let from = from.map(|c| c.0.ip().to_string());
+    let (rebuilt, coalesced) = blocking(e, move |e| e.run_hook(&secret, from.as_deref())).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "rebuilt": rebuilt, "coalesced": coalesced }))).into_response())
 }
 
 /// Ask every live preview of `project` to converge again.

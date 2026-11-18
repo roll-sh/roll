@@ -395,6 +395,10 @@ pub struct Target {
     /// With `egress` `roll`: the hosts outside roll it may still reach, through the preview's
     /// egress proxy.
     pub egress_hosts: Vec<String>,
+    /// The `n`th rebuild a deploy hook asked for: built again at the same head with nothing
+    /// cached (a static site reads its content at build time). roll apps builds with `no_cache`;
+    /// the runtime builds at each start anyway.
+    pub rebuild: Option<i64>,
 }
 
 /// A deploy the backend accepted that hasn't finished (a build, a rollout): the converge leaves

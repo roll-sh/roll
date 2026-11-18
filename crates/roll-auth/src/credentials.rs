@@ -8,7 +8,7 @@
 //! message) is refused before it's sent, naming where in its arguments and what kind, never the
 //! value. A prompt-injected agent's way of leaking a secret is writing it somewhere it's read.
 //!
-//! roll's own credentials (`rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_`, each with a checksum, so no
+//! roll's own credentials (`rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlb_`, each with a checksum, so no
 //! false positives) are refused in any product but roll secrets, where keeping one is the point.
 //! Other well-known formats (AWS, GitHub, Slack, Stripe, Google, Anthropic, OpenAI, PEM private
 //! keys) are refused in the products above. Nothing reached its destination, so nothing is revoked.
@@ -16,9 +16,10 @@
 use serde_json::Value;
 
 /// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`), machine
-/// clients' (`rlc_`), and other products' made the same way: apps' deploy hooks (`rlk_`).
+/// clients' (`rlc_`), and other products' made the same way: apps' deploy hooks (`rlk_`) and
+/// previews' (`rlb_`, a rebuild).
 /// (`rlh_` is roll code's automations' inbound webhook secrets: another shape, not ours.)
-pub const SECRET_PREFIXES: [&str; 5] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_"];
+pub const SECRET_PREFIXES: [&str; 6] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlb_"];
 
 /// The last 6 characters a secret ends with: CRC-32 of everything before, as base32 (30 bits).
 pub fn checksum(body: &str) -> String {
@@ -77,7 +78,7 @@ fn kind_of(w: &str) -> Option<&'static str> {
     let rest = |prefix: &str| w.strip_prefix(prefix);
     let all = |s: &str, ok: fn(char) -> bool| s.chars().all(ok);
     let alnum = |c: char| c.is_ascii_alphanumeric();
-    if ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_"].iter().any(|p| w.starts_with(p)) && checksum_ok(w) {
+    if SECRET_PREFIXES.iter().any(|p| w.starts_with(p)) && checksum_ok(w) {
         return Some(ROLL);
     }
     // AWS's documentation keys (`…EXAMPLE`) are in code and docs everywhere.
