@@ -3834,8 +3834,9 @@ inconsistencies are fixed in #264:
    oracle), marked `X-Roll-Guard: 1` (#169 audits it apart). *Waits on roll MCP:* #114 (`roll-oidc`, approved here), the GitHub Action's `client-id` mode
    (their diff, reviewed here), and their `roll_machine_client` Terraform resource (their diff
    comes here first).
-11. *Waits on roll search:* #134 re-review owed (search is rebasing it onto today's main; the pin, delete
-    and cluster-lookup changes, checked against recoverable deletes and allowlists). Approved once its pin covers the endpoint's whole destination
+11. *roll search's #134* (inference keys from roll secrets): re-reviewed and approved 2026-11-18 (a
+    comment on the PR): product-made syncs need `reveal`, every push re-checks its maker, the pin is
+    checked before and after `_update`. Follow-up: show "pushes as <maker>" and warn before it fails. Earlier: approved once its pin covers the endpoint's whole destination
    (`service_settings` but the key, rate limit and allocations; `task_settings` where they route).
 12. *Waits on roll apps:* their redeploys holding `wait_digest` once #79 lands; #191's log
    redaction hiding every value that comes from roll secrets unless #198 marks it `plain`: done
