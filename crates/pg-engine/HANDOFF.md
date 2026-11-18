@@ -8313,7 +8313,18 @@ container name: pick your own).
   (`tools/verification-train.sh`) on origin's head plus every candidate, landing the
   combination with `tools/push.sh` when green and naming the candidate at fault when red (its
   failing stage re-run on halving prefixes), then landing the rest. Only docs-only commits (no
-  file outside `*.md`) still go straight to the branch with `tools/push.sh`.
+  file outside `*.md`) still go straight to the branch with `tools/push.sh`. When the change
+  touches `debug_assert!`/`assert!`s, arithmetic that may overflow, or catalog row counts, run
+  quick-check with `QC_CHECKED=1` (its tests again, built `--profile verify-checked`, as the
+  train's checked stage). The train's result names why a stage failed, keeps every pass's logs
+  (`<run>/pass.<N>/`) and records each flake in `~/.cache/pg-engine-train/flakes.tsv`; three of
+  one test hold the batch until someone looks (batch-train.sh's header).
+- **Benchmark lanes: hold the lock for one pair, through `tools/lane.sh`.** `tools/lane.sh <a|b|c>
+  <max-seconds> <command...>` takes `~/.cache/lane-<x>.lock` for that one command, prints who
+  holds it and who waits, stops the command's process group when it outlives its limit, and
+  prints the foreign load on the lane's CPUs during it (other tenants' cores; the gate leaves
+  out a pair above 1.0). Run one pair (old and new) per hold; builds, setup and analysis go
+  outside it. Agents held the lock across multi-hour gates and others queued for hours.
 - **Start long heavy jobs detached with `tools/heavy-bg.sh <log> <command...>`.** With the slots
   full, a job can wait hours for one, and a session's background command stops at 2 hours queue
   wait included, killing jobs that never ran. heavy-bg.sh runs the job through heavy.sh outside
@@ -8329,7 +8340,10 @@ container name: pick your own).
   It snapshots commits, uncommitted and untracked files to origin's `wip/<agent>` as a
   fast-forward (no force, nothing touched locally) and does nothing when nothing changed.
   A resumed or replacement agent starts from `origin/wip/<agent>` when it is ahead of the
-  shared branch. Delete your `wip/` branch once its work has landed.
+  shared branch. Delete your `wip/` branch once its work has landed. It refuses (exit 3, nothing
+  pushed) untracked build output (anything under a `target*` or `.test-build` directory: a
+  `CARGO_TARGET_DIR` like `target-a249/` sent 220 MB and 434 MB of objects to wip branches) and
+  untracked files over `WIP_MAX_MB` (5): keep your target dir at `<checkout>/.test-build/target`.
 - **Limit concurrent builds, not agents.** Six builds at once (each building, running a debug
   engine and driving Docker) ran a machine out of RAM. Any number of agents can read,
   edit and probe PostgreSQL; the heavy part is capped by `tools/heavy.sh`.
@@ -8361,6 +8375,11 @@ container name: pick your own).
   and two other pairs of agents later collided the same way. So each agent uses only its own
   range: agent NN takes ports 50000 + 20×NN through 50000 + 20×NN + 19 (agent 73: 51460–51479),
   for engines, references and harness ports alike. Still check that the port is free first.
+  Those blocks sit in the kernel's ephemeral range (32768-60999), where any outgoing connection
+  can take a port for a moment: an engine started there fails now and then with os error 98.
+  quick-check, the train and ref-containers.sh take their ports from `tools/ports.sh` (below the
+  range, bind-tested, held while the run lives); use it for your own servers too
+  (`tools/ports.sh take $$ 2` prints two).
 - **Pushing with several agents on one branch:** commit, then rebase onto the branch and push
   (`git push origin HEAD:<branch>`), never with force. Build commits from rebases of real
   commits; never copy files or a tree out of a snapshot worktree. ddffa59 did that, was based on
@@ -13916,6 +13935,121 @@ builds are most of its 78 minutes). (2) The difftest guard is still separate fro
 `PUSH_REMOVAL_REVIEW` after its green train. (4) Quick-check alone on an idle machine is
 unmeasured; the storage case is ~22 minutes under load.
 
+## Verification tooling, round 2: logs, reasons, flakes, ports, lanes (agent 252, 2026-11-18)
+
+Tooling only; no engine change, so nothing to measure for speed. What two days of the batch
+train and quick-check showed, and what changed:
+
+**The batch train lost its evidence.** Run `20261118-025307` failed regress and pg_dump in its
+first pass, passed both when repeated, and landed cand/a246 as a flake; the first pass's logs
+were overwritten by the second (only `status.0` survives: "Newly differing units: ?", dump with
+no count), so the cause is unknown (most likely an engine port taken: both stages failed within
+minutes). Now (`tools/batch-train.sh`, `tools/verification-train.sh`):
+- every pass keeps its logs in `<run>/pass.<N>/`: status, ports, infra, every stage log,
+  `*.fails`, the crate tests' per-binary logs, the regress / isolation / pg_dump reports, the
+  engine logs and the TAP outputs (1.3 MB a pass). The train clears the last train's logs first,
+  so a stage a pass doesn't run leaves nothing stale.
+- the result names why: each failing stage's status line and its first failing tests with their
+  messages (`tools/train-why.py`: the newly differing units by file:unit from REPORT.md, the
+  differing isolation specs, the TAP checks that failed, each crate test's panic message, the
+  crash stages' panic), and "engine did not start (port N in use: os error 98)" or "port N in use
+  before the engine started" (the pg_dump and isolation harnesses' own checks).
+- a reference suite whose engine did not start is infrastructure: `tools/ref-suites.sh` (shared
+  by quick-check's reference chain and the train's lane 3) runs it again on a fresh port within
+  the pass, up to 3 runs, keeps the first run's log as `<suite>.try<N>.log`, says so in the
+  stage's status line, and adds an `infra (pass N): ...` line to the result.
+- a test that fails and then passes on the same combination is a flake: named in the result
+  (`flake <stage> <test>: <message> (<k> in the ledger)`) and appended to
+  `~/.cache/pg-engine-train/flakes.tsv` (date, head, stage, test, message). When a flake brings
+  one test to three uncommented lines (`BT_FLAKE_LIMIT`), the batch lands nothing (`candidate
+  ... held (flake limit)`, exit 1) until someone has looked at it and commented its lines out
+  with `#`. A suite that never got its engine started is not recorded as a flake.
+
+**Ports.** The agents' port blocks (550xx...) and the train's old defaults (54860-54863) sit in
+the kernel's ephemeral range (`ip_local_port_range` 32768-60999): every outgoing connection
+takes a local port from it, so an engine told to listen there fails now and then with os error
+98, also when it restarts mid-suite. `tools/ports.sh take <owner pid> <n> [preferred...]` hands
+out ports from 22000-32700 (above every listener on this machine), each bind-tested (with
+SO_REUSEADDR, as the engine binds) and held for the owner while it lives (a directory per port
+in `~/.cache/pg-engine-ports` with the owner's pid and start time; a dead owner's are free
+again). quick-check (`QC_PORTS` optional, now only preferences: ports in the range or in use are
+replaced and the `ports` line says so; unset, the last run's), the train (`TRAIN_PORTS`,
+`TRAIN_ISO_REF` optional, likewise; the batch train passes none unless `BT_PORTS`) and
+ref-containers.sh (an iref made for another port is made again; one that isn't running starts
+only when its port binds, else exit 3 and the caller takes another; `ref-containers.sh port
+<prefix>` prints a running iref's port, which the harnesses keep) all use it.
+
+**wip-push.sh** refuses (exit 3, nothing pushed) untracked files under a directory named
+`target*` or `.test-build` (a `target-a249/` at the root isn't matched by `/target`: 220 MB and
+434 MB of objects went to wip branches that way), files the ignore rules match, and untracked
+files over `WIP_MAX_MB` (5), listing them.
+
+**tools/lane.sh <a|b|c> <max-seconds> <command...>**: the lane's flock (the same lock file as
+`flock ~/.cache/lane-a.lock`) for one command; while waiting it prints the holder
+(`~/.cache/lane-<x>.holder`, or the pid lslocks names for a holder without lane.sh) and the queue
+(`~/.cache/lane-<x>.queue/`); it runs the command in its own process group and systemd user
+scope, stops the group by pid on overrun (SIGTERM, SIGKILL 10 s later, then the scope; exit
+124), warns about processes the command left running, and prints (and appends to
+`~/.cache/lane-<x>.log`) the foreign load: busy time of the lane's 8 CPUs from /proc/stat minus
+the command's own CPU (its scope's cpu.stat, plus containers named in `LANE_CONTAINERS`), per
+second, as an average, the peak over 5 s and the 2 s before the command. It reads right when the
+command's work runs on the lane's CPUs.
+
+**quick-check `QC_CHECKED=1`**: after the tests (and crash) step, the same test binaries built
+`--profile verify-checked` (started right after the main build, alongside) and run. For changes
+touching assertions, overflow-prone arithmetic or catalog row counts.
+
+**Also fixed:** dash's `kill -TERM -- -<pgid>` fails ("Illegal number: -"): quick-check's
+cleanup never stopped its process groups (clippy, the reference chain, the powerloss build) when
+a step failed. It and lane.sh now use `kill -TERM -<pgid>`.
+
+**Tests run** (all on the real scripts):
+- quick-check on `6bd25b3a7` (the tools commit before rebase) with `QC_CHECKED=1` and
+  `QC_PORTS=55050,55051,55052,55053`: `qc ports ok ... regress 23939, isolation 23940, pg_dump
+  23941, isolation reference 23942 (QC_PORTS ...: ports in the ephemeral range or in use
+  replaced)`, build 935 s, clippy 16 warnings, tests 78 passed, checked 1,305 s (78 passed,
+  verify-checked), regress 51,148 / 51,150 (0 newly differing), isolation 1,647 / 1,648,
+  pg_dump_tap 14,609 / 0 failed; all ok in 2,596 s (load 35-110).
+- a dry batch train (`BT_DRY=1`, scratch `BT_HOME`, prefix a252t) of a throwaway candidate with a
+  test that fails once (`zz_a252_flaky`), stages cut to build, tests (that binary), iso and dump
+  by a `BT_TRAIN_SCRIPT` wrapper whose helper listened on the isolation and pg_dump engine ports
+  right after the train chose them, and a ledger seeded with two hits of that test: pass 0
+  failed tests (named, with the panic message) and isolation; dump's engine port was taken and
+  it passed on a fresh port (`infra (pass 0): dump: port 24418 in use before the engine
+  started ...; ran again on port 25637`); pass 1 (build, iso, tests) green; result: `flake
+  tests zz_a252_flaky::fails_once: a252 forced flake: the first run fails (3 in the ledger)`,
+  `flake limit ...`, `candidate a252-flaketest held (flake limit)`, `pushed nothing`, `exit 1`;
+  `pass.0/` and `pass.1/` both kept. It also showed the isolation harness's own pre-check
+  ("port N is in use (PGISOLATION_PORT picks another)") wasn't read as a start failure: fixed
+  before the candidate.
+- the same on the rebased candidate, with regress added and the helper binding the regress,
+  isolation and pg_dump engine ports without listening (as an outgoing client's socket holds
+  one: the harnesses' checks pass, the engine's bind fails with os error 98), and the ledger's
+  lines commented out ("looked at"): pass 0's status `regress 0 51148/51150 units match, 0
+  newly differing (the engine did not start 1 time(s): ran again on port 31664, ...)`, the same
+  for isolation (1,647 / 1,648) and dump (14,609), and three `infra (pass 0): <suite>: engine
+  did not start (port in use: os error 98), engine port 2441N (log ...<suite>.try1.log); ran
+  again on port ...` lines; only tests failed, pass 1 green; `flake tests
+  zz_a252_flaky::fails_once: ... (1 in the ledger)`, `dry run: would push ...`, `exit 0`.
+  Before, each of those three would have failed the pass and gone into the repeat as a flake.
+- tools/ports.sh: preferred ports in the ephemeral range, held by another live owner, or bound
+  by a listener are skipped; a dead owner's port is taken back. lane.sh off the lanes
+  (`LANE_CPUS=4,5`, a scratch HOME): a 1-core burner pinned to CPU 4 read own 0.91, foreign 1.09
+  (the build CPUs' load); `true` returns at once with a reading; a 2 s limit on `sleep 30` stopped
+  it (exit 124); a holder and two waiters printed the holder and the queue. wip-push.sh in a
+  scratch clone with a scratch origin: a plain change pushed; `target-a252/.../libfoo.rlib` and
+  `crates/x/target/debug/y.o` refused; the same under the ignored `.test-build` pushed; a 5.7 MB
+  file refused, pushed with `WIP_MAX_MB=10`.
+
+**Left.** (1) The engine harnesses wait 180 s for an engine that already exited (bind failed):
+checking the child in that loop would save 3 minutes a clash (test code, not touched here).
+(2) The train's `$TRAIN_DIR/bin/dt-<head>` difftest copies pile up (961 MB in the
+coordinator's train directory). (3) Agents' briefs still hand out port blocks in the ephemeral
+range for their own servers and benchmarks; `tools/ports.sh` is there for them. (4) lane.sh's
+foreign load counts a command's own work off the lane's CPUs as not there (it reads low) and
+can't see work of the command's own that lives outside its scope (a container not named in
+`LANE_CONTAINERS`).
+
 ## Starting prompt for the next agent
 
 Paste this into the new agent, from the repository root on branch
@@ -13943,12 +14077,18 @@ Then:
    caps jobs and slots across agents). Build and test with `--profile verify` (release without
    LTO; `--release` links each test binary for minutes), in your own CARGO_TARGET_DIR.
 4. Before offering a change: rebase on origin's branch and run
-   `QC_PREFIX=aNNN QC_PORTS=<four of your ports> tools/heavy.sh tools/quick-check.sh` (about 20
-   minutes; it prints one line per step and stops at the first failure). Green, push it as
+   `QC_PREFIX=aNNN tools/heavy.sh tools/quick-check.sh` (about 20 minutes; it prints one line
+   per step and stops at the first failure; it takes its own ports with tools/ports.sh; add
+   `QC_CHECKED=1` when you touched assertions, overflow-prone arithmetic or catalog row counts).
+   Green, push it as
    `cand/aNNN` (`git push origin HEAD:cand/aNNN`) and tell the coordinator, who lands it with the
    others in one full train (tools/batch-train.sh). Never run tools/verification-train.sh
    yourself. Docs-only commits go to the branch directly with tools/push.sh. Add your round's
    section to STATUS.md (prose; its numbers come from full runs, HANDOFF "Regression suite").
+5. Benchmarks on a lane: one pair (old and new) per lock hold, through
+   `tools/lane.sh <a|b|c> <max-seconds> <one pair's command>`. Never hold a lane lock across
+   builds, setup, analysis or a whole gate; others wait for it. Record the foreign load it
+   prints with each pair and leave out pairs above 1.0 foreign core.
 ```
 
 ## A152 logical replication resume (2026-11-01)

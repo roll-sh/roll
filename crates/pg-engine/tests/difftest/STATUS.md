@@ -484,7 +484,16 @@ all of it (round 9's seeds too with `GUARD_SEEDS`).
    quick-check. Red, it re-runs the failing stages (and test binaries) on the same combination
    (passing then: a flake, everything lands), else on halving prefixes to name the candidate at
    fault, leaves it out, re-runs the failing stages on the rest and lands them. Result in
-   `<run>/result`.
+   `<run>/result`. Since 2026-11-18 (agent 252) the result says why each failing stage failed
+   (the failing tests and their panics, the newly differing units, "engine did not start"),
+   every pass keeps its logs in `<run>/pass.<N>/`, and a test that fails and then passes on the
+   same combination is a flake: named in the result and appended to
+   `~/.cache/pg-engine-train/flakes.tsv` (date, head, stage, test, message). A flake that brings
+   one test to three uncommented ledger lines holds the batch (nothing lands) until someone has
+   looked and commented the lines out. A reference suite whose engine did not start (a port taken
+   for a moment, os error 98) is infrastructure, not a failure: it runs again on a fresh port
+   within the pass (`infra` lines in the result). Ports come from `tools/ports.sh`, below the
+   kernel's ephemeral range.
 3. `tools/verification-train.sh`, the full suite, now built once per profile and run in three
    lanes: `--profile verify` (release without LTO) builds every test binary once; lane 1 runs
    them, then crash_random 1-30 x 4 and the power stage (`--features powerloss`, built once);
@@ -494,7 +503,7 @@ all of it (round 9's seeds too with `GUARD_SEEDS`).
    re-runs).
 
 What each tier leaves out: quick-check runs no test binary the path map doesn't name, no
-debug-assertion build, no crash or power stage unless storage, WAL or commit paths changed (and
+debug-assertion build unless `QC_CHECKED=1` (then its own tests, built `--profile verify-checked`), no crash or power stage unless storage, WAL or commit paths changed (and
 then 6 crash runs of the train's 360), and no difftest guard. The train has no plain debug
 (opt-level 0) build: a stack overflow that only debug frames reach (crash_bulk's
 `kill_during_compactions_after_deletes`, agent 229) goes unseen, as it would in a shipped
