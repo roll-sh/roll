@@ -1536,24 +1536,51 @@ the rest are skipped by the tests' own prerequisites.
   time, else the creation time) is past the effective retention (`data_retention` within
   `data_streams.lifecycle.retention.max`/`.default`; failure stores keep 30 days unless
   configured). It never deletes a write index, and leaves `index.lifecycle.skip`, ILM-preferred,
-  still-writable time series and downsampling indices alone. Failures go to the error store that
-  `_lifecycle/explain` (`error`) and `_lifecycle/stats` print. Its force merges and downsampling
-  rounds aren't run. ILM moves managed indices through hot, warm, cold, frozen and delete as
+  still-writable time series and downsampling indices alone. It also gives each other managed
+  backing and failure index (a time series one once its end time has passed) the
+  `data_streams.lifecycle.target.merge.policy.floor_segment`/`merge_factor` settings and one
+  force merge, and runs the `downsampling` rounds: a time series backing index whose round is due
+  (`after` counted from its generation date, not before its end time; only rounds coarser than
+  an index already downsampled) is write-blocked and downsampled with the last due round to
+  `downsample-<interval>-<origin index>`, which takes its place among the backing indices with
+  the source's generation date as `index.lifecycle.origination_date`; the source is deleted.
+  Elasticsearch keeps the force merge in the index's custom metadata
+  (`force_merge_completed_timestamp`, shown by `_cluster/state`); roll keeps it with the
+  lifecycle's own state, so `_cluster/state` doesn't show it. Failures go to the error store that
+  `_lifecycle/explain` (`error`) and `_lifecycle/stats` print. ILM moves managed indices through hot, warm, cold, frozen and delete as
   `min_age` passes (from the creation date, the rollover date, or
   `index.lifecycle.origination_date`), with Elasticsearch's step names and order (`unfollow`
   and `migrate` injected as it injects them). It runs `rollover` (all conditions, `min_*`
   included, with the `min_docs: 1` and `max_primary_shard_docs` defaults; aliases and data
   streams), `set_priority`, `readonly`, `forcemerge` (`index_codec` too), `allocate`,
   `migrate`, `delete` (a data stream's last index deletes the stream) and `freeze` (a no-op, as
-  in Elasticsearch 8 and later). `shrink` completes when the index is already at its target
-  shard count. `_ilm/explain` prints the execution state (`phase_execution` with the cached
+  in Elasticsearch 8 and later), and the actions that make a new index and swap it in for the
+  managed one, with Elasticsearch's steps (`xpack/ilm_targets.rs`): `shrink` (to
+  `shrink-<4 random>-<index>` through `_shrink`, `allow_write_after_shrink` too), `downsample` (to
+  `downsample-<interval>-<origin index>` through `_downsample`) and `searchable_snapshot` (a
+  snapshot named `<yyyy.MM.dd>-<index>-<policy>-<random>` in the action's repository, of the index
+  or, when it has replicas, of a force merged `fm-clone-<4 random>-<index>`, mounted as
+  `restored-<index>`, or `partial-<index>` in the frozen phase). The new index takes the
+  execution state (`is-shrunken-index` after a shrink, else the step after the action) and the
+  policy, then the source's place among its data stream's backing indices (the source is deleted
+  after) or its aliases (without `is_write_index`; shrink and searchable snapshot add one named
+  after the source) in the request that deletes the source. Steps that wait on shard allocation,
+  colours or data tiers go on at once, as on a single green node; the delete action's
+  `cleanup-snapshot` deletes the snapshot a mounted index came from. `_ilm/explain` shows
+  `shrink_index_name`, `repository_name`, `snapshot_name` and `force_merge_clone_index_name`.
+  `_ilm/explain` prints the execution state (`phase_execution` with the cached
   phase, `step_info`, `failed_step`, retry counts; a missing policy reads as `ERROR`). Failed
   steps are retried on each poll; `_ilm/retry`, `_ilm/move` and `_ilm/stop` (`STOPPING`, then
   `STOPPED`) act on that state. A new managed index is initialized in the state change that
   made it managed. Steps run as the user who last put the policy. `wait_for_snapshot` waits until
   its snapshot lifecycle policy has taken a snapshot including the index since the action began
-  (a policy it names must exist when the ILM policy is put). Not run: `shrink` to fewer shards,
-  `downsample` and `searchable_snapshot`. These end in the `ERROR` step with the reason. ILM history (`ilm-history-*`) isn't written. Elasticsearch polls
+  (a policy it names must exist when the ILM policy is put). Each run writes the ILM history to
+  the hidden `ilm-history-7` data stream (Elasticsearch's template, 90 days of data stream
+  lifecycle retention; `indices.lifecycle.history_index_enabled`) where Elasticsearch's runner
+  writes it: an item after each step that runs outside a cluster state update, where a row of
+  cluster state steps stopped, at each phase change, at each failure and retry that fails again
+  (`error_details` without Elasticsearch's stack trace), and when a step deletes the index (its
+  state with the step `complete`). Elasticsearch polls
   every `indices.lifecycle.poll_interval` and `data_streams.lifecycle.poll_interval`. roll runs
   time-based work (a phase's `min_age`, a rollover's `max_age`, a retention running out, a time
   series end time) at its due time, and wakes a sleeping cluster for it. It polls at those
@@ -1593,7 +1620,18 @@ the rest are skipped by the tests' own prerequisites.
   snapshot is in the bucket. Not supported: `chunk_size`, `server_side_encryption`,
   `canned_acl`, `storage_class` (accepted, not applied), throttling of bucket traffic, `gcs` and
   `azure`.
-- Searchable snapshots mount through the snapshot restore API; mounted indices keep the
+- Searchable snapshots mount through the snapshot restore API, so a mounted index holds its own
+  copy of the snapshot's documents (as `full_copy` does), not one that reads the snapshot's
+  segments: roll's snapshots already share segments with the index they were taken of, but a
+  restore indexes the documents again. This is how far roll goes for ILM's `searchable_snapshot`
+  too: it runs the whole action as Elasticsearch does (snapshot, mount, swap, delete the source),
+  so clients see what they see there (`index.store.type: snapshot`, the `index.store.snapshot.*`
+  settings, read-only, `_searchable_snapshots/stats`, the snapshot in the repository), and the
+  mounted index costs one restore, not a cheaper tier. Every roll cluster's data already lives in
+  object storage behind a local cache, which is what Elasticsearch's frozen tier buys, so a
+  zero-copy mount would save the restore only. Elasticsearch gates searchable snapshots behind an
+  enterprise licence; roll's licence is always `enterprise`, so the action never fails for it.
+  Mounted indices keep the
   repository from being unregistered or moved (409 `repository_conflict_exception`). The
   statistics list the mounted shards' files by Lucene extension with their sizes but no blob
   cache traffic (roll reads no blobs through a cache), the shared cache reports its configured
