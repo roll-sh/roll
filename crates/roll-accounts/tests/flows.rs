@@ -1409,6 +1409,38 @@ fn rand_hex() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// A second factor for everyone (docs/accounts.md): while it's on, a person without one reaches
+/// only their account, where they set one up; then everything again.
+#[tokio::test]
+async fn a_company_can_require_a_second_factor() {
+    let env = Env::new().await;
+    let invite = env.invite("ada@example.com").await;
+    let mut b = Browser::default();
+    env.email_sign_in(&mut b, "ada@example.com", Some(&invite)).await;
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::OK);
+    let set = env.operator(Method::PUT, "/v1/accounts/policy", json!({ "require_second_factor": true })).await;
+    assert_eq!((set.status, set.json["require_second_factor"].as_bool()), (StatusCode::OK, Some(true)), "{}", set.json);
+
+    let refused = env.call(&mut b, Method::GET, "/v1/workspace/projects", None).await;
+    assert_eq!((refused.status, refused.json["code"].as_str()), (StatusCode::FORBIDDEN, Some("second_factor_required")), "{}", refused.json);
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/session", None).await.json["second_factor_required"], true);
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK, "her account, to set one up");
+    // She sets up an authenticator app: everything again.
+    let t = env.call(&mut b, Method::POST, "/v1/accounts/me/totp", None).await.json;
+    let seed = roll_auth::totp::base32_decode(t["secret"].as_str().unwrap()).unwrap();
+    let step = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 / roll_auth::totp::STEP_S;
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/totp/confirm", Some(json!({ "code": format!("{:06}", roll_auth::totp::totp(&seed, step)) }))).await.status, StatusCode::OK);
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::OK);
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/session", None).await.json["second_factor_required"], false);
+    // Off: nobody's held to it.
+    let invite = env.invite("bob@example.com").await;
+    let mut bob = Browser::default();
+    env.email_sign_in(&mut bob, "bob@example.com", Some(&invite)).await;
+    assert_eq!(env.call(&mut bob, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::FORBIDDEN);
+    env.operator(Method::PUT, "/v1/accounts/policy", json!({ "require_second_factor": false })).await;
+    assert_eq!(env.call(&mut bob, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::OK);
+}
+
 /// Allowed networks (docs/accounts.md): a person's session is used only from the company's
 /// networks; saving a list that leaves the saving admin's own address out is refused; the
 /// operator's token is never held to it.
