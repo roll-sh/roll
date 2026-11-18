@@ -693,16 +693,29 @@ Landed 2026-11-18: deleted clusters recoverable for 7 days (#172: restore, `?del
    main's cache: under the minute, no room for another crate). (`search-store`'s mass-recovery
    WAL test flaked on a loaded host: a replay counted itself in the shared replay cache only
    after listing, so one could finish and empty it while the others listed; it now counts first.
-   12 of 40 runs on one CPU failed before, 0 of 40 after.) The extended `transform` suite's
-   `transforms_start_stop` "start already started transform" can lose a race on a loaded host: a
-   batch transform over a few documents finishes before the second `_start`, which then succeeds
-   (one run in three at load 35; Elasticsearch's own task outlives that window). Low; the suite's
-   minimum holds on reruns. `search-server`'s parked-governor test could spin forever when
-   another test's request woke its parker first (it shared the process-wide flag): it has its own
-   state and a deadline now (#181), and timing tests assert linear work by CPU time
-   (`test_support::assert_linear`), not wall time. Wall-clock bounds left to convert:
-   `search-es` OpenSearch security (100 ms) and dynamic mappings (1 s), `search-painless` grok
-   (5 s), `search-store`'s WAL.
+   12 of 40 runs on one CPU failed before, 0 of 40 after.) `search-server`'s parked-governor
+   test could spin forever when another test's request woke its parker first (it shared the
+   process-wide flag): it has its own state and a deadline now (#181). Timing tests assert work,
+   not wall time: linear work by CPU time at n and 8n (`search_test_support::assert_linear`),
+   bounded work by the thread's CPU time (`cpu_time`), and waits as deadlines that fail with
+   what they saw. `search-store`'s cache test waits for a finished download's task to let go of
+   its map before each budget check (a reader returns before it does, and until then eviction
+   skips the file: a 50 ms hold injected there failed the old test 20 of 20, the new one 0 of
+   20), and its progressive download test counts the parts that landed before a read instead of
+   timing it (14 of 20 runs failed on one CPU next to busy loops, 0 of 20 after).
+   **Known flake under extreme load**: the extended `transform` suite's `transforms_start_stop`
+   "start already started transform" expects a second `_start`, sent right after the first,
+   to be refused. Elasticsearch 9.5.5 refuses it only while the batch transform's task exists:
+   68-201 ms after the first `_start` answered (an empty or five-document source, load 55;
+   accepted from 300 ms). Roll stopped it 26-83 ms after the answer, which a client slowed by
+   load missed (one run in three at load 35). A batch transform now stays started for 200 ms
+   after `_start` answers, or as long as its `_start` took on a slower node (`batch_hold_ms`:
+   Elasticsearch's window is the same kind of cluster work, and stretches with load alike):
+   196-229 ms measured, refused at 150 ms and accepted at 300 as on Elasticsearch. With the
+   suite's search-dev processes and runner pinned to 2 CPUs next to 6 busy loops, a request can
+   take over a second, and the test still lost 1 run in 10 (at host loads 63-81; the old build
+   passed 10 of 10 there, but at loads 18-50). The suite's minimum (108) holds on a rerun, and
+   that load is much harsher than CI's.
 17. **Security**: a second review of what landed since the first (the `_inference` API, `semantic_text`,
    the new retrievers, workflow-restricted keys, service tokens, OpenSearch Security's new
    endpoints, ES|QL's new functions) landed in 7288684b9: `semantic_text` under field level
