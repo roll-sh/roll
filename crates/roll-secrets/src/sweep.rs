@@ -241,9 +241,11 @@ impl Secrets {
             // Give it back to the sweeper, which tries again.
             // Kept for health (`revoke_failing`) while the sweeper retries.
             let why: String = e.to_string().chars().take(300).collect();
+            crate::metrics::Counters::add(&self.counters.revoke_failures, 1);
             self.db.write(|c| c.execute("UPDATE leases SET revoked_at = NULL, expires_at = ?, revoke_error = ? WHERE id = ?", params![now + 60_000, why, id]))?;
             return Err(Error::Link(format!("revoking {id}: {e}")));
         }
+        crate::metrics::Counters::add(&self.counters.leases_revoked, 1);
         Ok(true)
     }
 
@@ -320,6 +322,7 @@ impl Secrets {
     /// A scheduled rotation's failure, kept on the key for health (`rotation_failing`) until one
     /// succeeds; `None` clears it.
     fn note_rotation(&self, project: &str, slug: &str, path: &str, key: &str, failure: Option<&str>) {
+        crate::metrics::Counters::add(if failure.is_some() { &self.counters.rotation_failures } else { &self.counters.rotations }, 1);
         let now = self.db.now_ms().unwrap_or_default();
         let failure = failure.map(|f| f.chars().take(300).collect::<String>());
         let at = failure.as_ref().map(|_| now);
@@ -428,6 +431,9 @@ impl Secrets {
     /// retention and old audit rows.
     pub fn sweep_local(&self) -> Result<Swept> {
         let mut out = Swept::default();
+        if let Err(e) = self.forget_read_counts() {
+            tracing::warn!("forgetting old read counts failed: {e}");
+        }
         let now = self.db.now_ms()?;
         // Expired leases: dynamic credentials and retired managed ones.
         let due = self.db.read(|c| c.query("SELECT id FROM leases WHERE revoked_at IS NULL AND expires_at <= ? LIMIT 200", [now], |r| r.get::<_, String>(0)))?;
@@ -505,6 +511,8 @@ impl Secrets {
         out.synced += synced;
         out.failed += failed;
         let (_, failed) = self.sweep_sinks()?;
+        out.failed += failed;
+        let (_, failed) = self.sweep_backups()?;
         out.failed += failed;
         Ok(out)
     }

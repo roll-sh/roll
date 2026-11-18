@@ -41,11 +41,17 @@ pub fn kinds(api: Api, allow_private: bool) -> Syncs {
     s.register(Arc::new(platforms::Heroku(http.clone())));
     s.register(Arc::new(platforms::GoogleSecrets(http.clone())));
     s.register(Arc::new(platforms::AzureKeyVault(http.clone())));
+    s.register(Arc::new(platforms::AzureDevOps(http.clone())));
     s.register(Arc::new(platforms::CircleCi(http.clone())));
     s.register(Arc::new(platforms::Bitbucket(http.clone())));
     s.register(Arc::new(platforms::TerraformCloud(http.clone())));
     s.register(Arc::new(platforms::DigitalOcean(http.clone())));
     s.register(Arc::new(platforms::SecretsManager(http.clone())));
+    let guarded = platforms::Guarded::new(&http, allow_private);
+    s.register(Arc::new(platforms::Supabase(guarded.clone())));
+    s.register(Arc::new(platforms::CloudflarePages(guarded.clone())));
+    s.register(Arc::new(platforms::AzureAppConfig(guarded.clone())));
+    s.register(Arc::new(platforms::VaultKv(guarded)));
     s.register(Arc::new(platforms::Ssm(http)));
     s.register(Arc::new(platforms::Kubernetes { allow_private }));
     s.register(Arc::new(platforms::GitLab { allow_private }));
@@ -357,6 +363,24 @@ impl AuditDeliver {
 impl roll_secrets::Deliver for AuditDeliver {
     fn check(&self, url: &str) -> Result<()> {
         self.0.url(url).map(|_| ())
+    }
+
+    // Scheduled backups: a roll bucket's objects, through roll storage's own routes in process.
+    fn put_object(&self, bucket: &str, key: &str, body: &Json) -> Result<()> {
+        self.1.call(axum::http::Method::PUT, &format!("/v1/storage/buckets/{}/upload?key={}", urlencoding::encode(bucket), urlencoding::encode(key)), Some(body.clone())).map(|_| ())
+    }
+
+    fn get_object(&self, bucket: &str, key: &str, limit: usize) -> Result<Json> {
+        self.1.get_bounded(&format!("/v1/storage/buckets/{}/download?key={}", urlencoding::encode(bucket), urlencoding::encode(key)), limit)
+    }
+
+    fn list_objects(&self, bucket: &str, prefix: &str) -> Result<Vec<String>> {
+        let v = self.1.call(axum::http::Method::GET, &format!("/v1/storage/buckets/{}/objects?prefix={}&limit=1000", urlencoding::encode(bucket), urlencoding::encode(prefix)), None)?;
+        Ok(v["objects"].as_array().into_iter().flatten().filter_map(|o| o["key"].as_str().map(str::to_string)).collect())
+    }
+
+    fn delete_object(&self, bucket: &str, key: &str) -> Result<()> {
+        self.1.call(axum::http::Method::DELETE, &format!("/v1/storage/buckets/{}/object?key={}", urlencoding::encode(bucket), urlencoding::encode(key)), None).map(|_| ())
     }
 
     fn post(&self, url: &str, id: &str, secret: &Value, body: &Json) -> Result<()> {

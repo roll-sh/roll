@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Totp, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, SaasRotator, NewSaasRotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, AwsUser, CloudAccount, NewCloudAccount, KubernetesCluster, NewKubernetesCluster, SignedCertificate, CaCertificate, Ca, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat } from "@roll/secrets/types";
 import type { Grant } from "./access-api";
 import { withSession } from "./code-token";
 import { grantFor, tokenOf } from "./secrets-tokens";
@@ -17,7 +17,7 @@ import { apiHeaders, onApiStatus, ROLL_API } from "./roll-api";
 export type * from "@roll/secrets/types";
 
 export const ACTIONS: readonly Action[] = ["read", "reveal", "write", "delete", "admin"];
-export const KEY_TYPES: readonly KeyType[] = ["url", "int", "port", "bool", "json", "email"];
+export const KEY_TYPES: readonly KeyType[] = ["url", "int", "port", "bool", "json", "email", "totp"];
 
 /** An answer that isn't 2xx: the API's `error`, its `code` (`approval_required`, `stale`, `conflict`…) and the status. */
 export class SecretsError extends Error {
@@ -140,6 +140,8 @@ export function secretsApi(project: string) {
     /** Reveals one value (audited). `resolve` (default true) expands references. */
     value: (env: string, key: string, path = "/", resolve = true) =>
       req<{ value: string; problems: Problem[] }>("GET", `${K(env, key)}/value${qs({ path, resolve: resolve ? undefined : "false" })}`),
+    /** A TOTP key's current code (audited as `secrets.totp`, without the code). */
+    totp: (env: string, key: string, path = "/") => req<Totp>("GET", `${K(env, key)}/totp${qs({ path })}`),
     versions: (env: string, key: string, path = "/", type?: SecretType) => req<Version[]>("GET", `${K(env, key)}/versions${qs({ path, type })}`),
     versionValue: (env: string, key: string, version: number, path = "/", type?: SecretType) =>
       req<{ value: string }>("GET", `${K(env, key)}/versions/${version}/value${qs({ path, type })}`),
@@ -275,6 +277,10 @@ export function secretsApi(project: string) {
     deleteRotator: (id: string) => req<null>("DELETE", `${P}/rotators/${enc(id)}`),
     updateRotator: (id: string, ch: { name?: string; url?: string }) => req<Rotator>("PATCH", `${P}/rotators/${enc(id)}`, ch),
     rotateRotatorSecret: (id: string) => req<Rotator & { secret: string }>("POST", `${P}/rotators/${enc(id)}/rotate-secret`),
+    saasRotators: () => req<SaasRotator[]>("GET", `${P}/saas`),
+    /** The answer never holds the credential. */
+    addSaasRotator: (r: NewSaasRotator) => req<SaasRotator>("POST", `${P}/saas`, r),
+    deleteSaasRotator: (id: string) => req<null>("DELETE", `${P}/saas/${enc(id)}`),
   };
 }
 

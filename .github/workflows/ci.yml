@@ -87,7 +87,7 @@ jobs:
           filter: dashboard...
       - run: pnpm --filter dashboard exec vitest run --shard=${{ matrix.shard }}/3
 
-  # roll secrets' Go and Python clients (sdk/): the same surface as @roll/secrets.
+  # roll secrets' Go, Python and Ruby clients (sdk/): the same surface as @roll/secrets.
   sdk:
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -115,6 +115,12 @@ jobs:
           test -z "$(gofmt -l .)"
           go vet ./...
           go test -race -count=1 ./...
+      - name: Lambda extension
+        working-directory: sdk/lambda-extension
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race -count=1 ./...
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.4
@@ -130,6 +136,29 @@ jobs:
         run: |
           pip install -q cryptography
           PYTHONPATH=src python -m unittest discover -s tests
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+      - name: Ruby
+        working-directory: sdk/ruby/roll_secrets
+        run: ruby -w -Ilib -Itest -e 'Dir["test/*_test.rb"].each { |f| require_relative f }'
+
+  # roll secrets' Java client (sdk/java/secrets), in its own job so the sdk one stays quick.
+  java:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    defaults:
+      run:
+        working-directory: sdk/java/secrets
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: sdk/java/secrets/pom.xml
+      - run: mvn -B -q test
 
   # The roll Terraform provider (sdk/terraform-provider-roll): Terraform drives it against a fake
   # rolld in memory.
@@ -151,6 +180,23 @@ jobs:
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: TF_ACC=1 go test -count=1 ./...
+
+  # roll secrets' .NET client (sdk/dotnet/secrets), in its own job so the sdk one stays quick.
+  dotnet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    defaults:
+      run:
+        working-directory: sdk/dotnet/secrets
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - run: dotnet test -warnaserror
 
   scripts:
     runs-on: ubuntu-latest
@@ -177,7 +223,7 @@ jobs:
           fi
 
   ci:
-    needs: [rust, web, dashboard, sdk, scripts, terraform]
+    needs: [rust, web, dashboard, sdk, java, dotnet, scripts, terraform]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2
