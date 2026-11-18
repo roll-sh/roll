@@ -185,6 +185,13 @@ CREATE TABLE IF NOT EXISTS git_reports (
     comment_id INTEGER,
     comment_hash TEXT
 );
+CREATE TABLE IF NOT EXISTS pull_comments (
+    service TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    comment_id INTEGER NOT NULL,
+    PRIMARY KEY (service, repo, number)
+);
 CREATE TABLE IF NOT EXISTS git_pulls (
     preview_id TEXT PRIMARY KEY,
     number INTEGER NOT NULL,
@@ -2098,6 +2105,19 @@ impl Store {
             if let Some((cid, hash)) = comment {
                 c.execute("UPDATE git_reports SET comment_id = ?2, comment_hash = ?3 WHERE preview_id = ?1", params![id, cid, hash])?;
             }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The comment a Git URL service's previews keep on pull request `number` of `repo`, whichever
+    /// project's preview posted it: the next project to speak for the service edits the same one.
+    pub fn pull_comment(&self, service: &str, repo: &str, number: i64) -> Result<Option<i64>> {
+        Ok(self.db.read(|c| c.query_row("SELECT comment_id FROM pull_comments WHERE service = ? AND repo = ? AND number = ?", params![service, repo, number], |r| r.get(0)).optional())?)
+    }
+
+    pub fn set_pull_comment(&self, service: &str, repo: &str, number: i64, comment_id: i64) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("INSERT INTO pull_comments (service, repo, number, comment_id) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (service, repo, number) DO UPDATE SET comment_id = excluded.comment_id", params![service, repo, number, comment_id])?;
             Ok::<_, Error>(())
         })
     }

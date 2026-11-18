@@ -1418,3 +1418,43 @@ async fn the_project_that_has_had_a_repo_or_service_longest_speaks_for_it() {
     assert_eq!(e.engine.store.preview(&quiet.id).unwrap().reported_by, None);
     assert!(theirs_posted(), "the branch's preview there speaks");
 }
+
+/// A Git URL service on two projects' canvases keeps one comment on its pull request: when the
+/// project that speaks for it lets it go, the next one edits the same comment, and the first
+/// doesn't say its preview went (that could land after the next one's).
+#[tokio::test]
+async fn a_pull_request_keeps_one_comment_when_another_project_takes_over() {
+    use roll_workspace::{Kind as Res, Scope};
+    struct Ada;
+    impl roll_workspace::Owners for Ada {
+        fn trusts(&self, user: &str, _kind: Res, r: &str) -> bool {
+            user == "usr_ada" && r == "svc_shop"
+        }
+    }
+    let e = env(json!({ "enabled": true }));
+    e.ws.set_owners(Arc::new(Ada));
+    e.ws.place(Scope::All, &e.project, Res::Service, "svc_shop", 0.0, 0.0).unwrap();
+    let theirs = e.ws.create("usr_ada", "ada-shop", "", None).unwrap();
+    e.ws.place(Scope::All, &theirs.id, Res::Service, "svc_shop", 0.0, 0.0).unwrap();
+    e.engine.store.put_settings(&theirs.id, &roll_previews::Settings::default().patched(&json!({ "enabled": true })).unwrap()).unwrap();
+    *e.apps.catalog.lock() = Some(vec![roll_previews::ports::CatalogService { name: "shop".into(), repo: Some("git:svc_shop".into()), root: String::new(), memory_mb: 256 }]);
+    let gr = Arc::new(FakeGitReport::default());
+    let _ = e.engine.git_report.set(gr.clone());
+    let pull = roll_previews::ports::GitPull { number: 3, title: "Cart".into(), url: "https://github.com/acme/shop/pull/3".into(), fork: false };
+    let push = roll_previews::ports::GitPush { service: "svc_shop".into(), url: "https://github.com/acme/shop.git".into(), branch: "feat/cart".into(), sha: Some("a1".into()), message: String::new(), pull: Some(pull) };
+    e.engine.git_push(&push).await.unwrap();
+    for _ in 0..3 {
+        e.engine.pass().await.unwrap();
+    }
+    assert_eq!(gr.comments.lock().first().map(|c| c.1), Some(None), "one project's preview makes the comment");
+    let made = gr.comments.lock().len();
+
+    // The speaking project lets the service go: the other's preview edits that comment.
+    e.ws.remove(Scope::All, &e.project, Res::Service, "svc_shop").unwrap();
+    for _ in 0..3 {
+        e.engine.pass().await.unwrap();
+    }
+    let after: Vec<_> = gr.comments.lock()[made..].to_vec();
+    assert!(!after.is_empty(), "the next project speaks");
+    assert!(after.iter().all(|c| c.1 == Some(77) && !c.2.contains("deleted")), "the same comment, never saying the preview went: {after:?}");
+}

@@ -1107,8 +1107,10 @@ impl Engine {
         // The change hears it went, and how its teardown failed if it did.
         let teardown = self.store.teardown_error(&r.id)?;
         self.source.forget(&view, teardown.as_deref()).await;
-        // A Git URL service's pull request too.
-        if let Ok(s) = self.store.settings(&r.project_id) {
+        // A Git URL service's pull request too, unless another project's preview of it speaks
+        // now (it carries the comment on; saying this one went could land after it).
+        let hands_over = matches!(self.refresh_voice(&r), Ok((_, false)));
+        if !hands_over && let Ok(s) = self.store.settings(&r.project_id) {
             self.report_on_git(&view, &s, Some(teardown.as_deref())).await;
         }
         // What it cost this month stays counted against the project's budget.
@@ -1200,9 +1202,12 @@ impl Engine {
         if last_hash.as_deref() == Some(hash.as_str()) {
             return;
         }
+        // The pull request's comment, whichever project's preview posted it: one per pull request.
+        let comment_id = comment_id.or_else(|| self.store.pull_comment(service, &repo, pull.number).ok().flatten());
         match gr.comment(service, &repo, pull.number as u64, &body.comment, comment_id.map(|i| i as u64)).await {
             Ok(Some(id)) => {
                 let _ = self.store.set_git_report(&p.id, None, Some((id as i64, &hash)));
+                let _ = self.store.set_pull_comment(service, &repo, pull.number, id as i64);
             }
             Ok(None) => {}
             Err(e) => tracing::warn!(preview = %p.id, error = %e, "previews: a Git URL preview's pull request comment"),
