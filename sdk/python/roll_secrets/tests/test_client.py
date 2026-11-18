@@ -67,7 +67,7 @@ class Rolld(BaseHTTPRequestHandler):
         env = "/v1/secrets/projects/prj_a/environments/production"
         if self.headers.get("Authorization") != "Bearer " + Rolld.state["token"]:
             return self.answer(401)
-        if self.path == env + "/digest":
+        if self.path.split("?")[0] == env + "/digest":
             return self.answer(200, {"digest": Rolld.state["digest"]})
         if self.path == env + "/values":
             return self.answer(200, {"values": {"A": Rolld.state["value"]}, "problems": [], "leases": []})

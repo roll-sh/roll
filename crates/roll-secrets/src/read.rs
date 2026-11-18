@@ -625,6 +625,16 @@ impl Secrets {
         Ok((seq, Values { values, problems, leases: vec![], dynamic: vec![], linked, plain, withheld, sensitive: vec![], followed }))
     }
 
+    /// What moves when the project's values may have: its change counter and its resources'
+    /// rotation generations (a long-polled digest is worked out again only when this moves).
+    pub(crate) fn change_marker(&self, project: &str) -> Result<(i64, i64)> {
+        self.db.read(|c| {
+            let seq: i64 = c.query_row("SELECT seq FROM projects WHERE project_id = ?", [project], |r| r.get(0)).optional()?.unwrap_or(0);
+            let generations: i64 = c.query_row("SELECT COALESCE(SUM(generation), 0) FROM source_generations", (), |r| r.get(0))?;
+            Ok::<_, Error>((seq, generations))
+        })
+    }
+
     /// A digest of a folder's effective secrets (keys, where they come from, versions,
     /// fingerprints, links): it changes when what `values` would return changes, except a live
     /// link's resource rotating. Decrypts nothing, issues nothing, isn't audited: what

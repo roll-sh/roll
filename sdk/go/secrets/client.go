@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -410,14 +411,32 @@ func (c *Client) ResolveSealed(ctx context.Context, env, path, consumer string, 
 
 // Digest moves whenever env's values under path would; it reads no value.
 func (c *Client) Digest(ctx context.Context, env, path string) (string, error) {
+	return c.DigestSince(ctx, env, path, "", 0)
+}
+
+// DigestSince long-polls the digest: it answers as soon as it differs from since, or with the same
+// one once wait (at most a minute) runs out. A server without long polls answers at once.
+func (c *Client) DigestSince(ctx context.Context, env, path, since string, wait time.Duration) (string, error) {
 	e, err := c.env(ctx, env)
 	if err != nil {
 		return "", err
 	}
+	q := query(path)
+	// Under the client's own timeout, and the server's 25 s.
+	if c.HTTP != nil && c.HTTP.Timeout > 0 {
+		wait = min(wait, c.HTTP.Timeout-5*time.Second)
+	}
+	if since != "" && wait >= time.Second {
+		sep := "?"
+		if q != "" {
+			sep = "&"
+		}
+		q += sep + "since=" + url.QueryEscape(since) + "&wait=" + strconv.Itoa(int(min(wait, 25*time.Second)/time.Second))
+	}
 	var d struct {
 		Digest string `json:"digest"`
 	}
-	return d.Digest, c.call(ctx, http.MethodGet, e+"/digest"+query(path), nil, &d)
+	return d.Digest, c.call(ctx, http.MethodGet, e+"/digest"+q, nil, &d)
 }
 
 // Renew pushes a dynamic lease's expiry out by ttlMinutes (0: its link's TTL).
@@ -467,7 +486,8 @@ func (c *Client) Watch(ctx context.Context, env string, w Watch) error {
 	var last string
 	var leases []string
 	tick := func() {
-		now, err := c.Digest(ctx, env, w.Path)
+		// A long poll: a change arrives within a second or two (Every paces a server without them).
+		now, err := c.DigestSince(ctx, env, w.Path, last, 25*time.Second)
 		if err != nil {
 			fail(err)
 			return
