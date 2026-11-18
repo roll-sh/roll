@@ -45,7 +45,7 @@ pub fn cpu_time<T>(f: impl FnOnce() -> T) -> (T, Duration) {
 }
 
 #[cfg(unix)]
-fn thread_cpu() -> Duration {
+pub(crate) fn thread_cpu() -> Duration {
     let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     // SAFETY: clock_gettime writes only the struct it is given.
     assert_eq!(unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) }, 0);
@@ -53,7 +53,7 @@ fn thread_cpu() -> Duration {
 }
 
 #[cfg(not(unix))]
-fn thread_cpu() -> Duration {
+pub(crate) fn thread_cpu() -> Duration {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     START.get_or_init(std::time::Instant::now).elapsed()
 }
