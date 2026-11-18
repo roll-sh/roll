@@ -2144,6 +2144,29 @@ async fn roll_up_deploys_an_uploaded_tree_and_cron_runs_on_demand() {
     let (hb, br) = get("/assets/pre.css", Some("gzip, br")).await;
     assert_eq!((hb["content-encoding"].to_str().unwrap(), &br[..]), ("br", &b"BROTLI-BYTES"[..]));
     assert!(get("/index.html", Some("gzip")).await.0.get("content-encoding").is_none(), "too small to bother");
+    // Image optimization (Vercel's, Next.js's `/_next/image`): the site's own image, resized to an
+    // allowed width and made WebP for a browser that takes it, then answered from the node's cache;
+    // never a path elsewhere, an unlisted width, or a file that isn't an image.
+    let image = |q: &str, accept: &str| {
+        let req = Request::builder().uri(format!("/__roll/image?{q}")).header("host", h.as_str()).header("accept", accept).body(Body::empty()).unwrap();
+        let public = w.public.clone();
+        async move {
+            let r = public.oneshot(req).await.unwrap();
+            let (st, hd) = (r.status(), r.headers().clone());
+            (st, hd, r.into_body().collect().await.unwrap().to_bytes())
+        }
+    };
+    let (st, hd, webp) = image("url=/assets/hero.png&w=32", "image/avif,image/webp,*/*").await;
+    assert_eq!((st, hd["content-type"].to_str().unwrap(), hd["vary"].to_str().unwrap(), hd["x-roll-image"].to_str().unwrap()), (StatusCode::OK, "image/webp", "Accept", "miss"), "{hd:?}");
+    assert_eq!(&webp[..4], b"RIFF");
+    assert_eq!(image("url=/assets/hero.png&w=32", "image/webp").await.1["x-roll-image"], "hit");
+    let (_, hd, png) = image("url=/assets/hero.png&w=32", "image/png").await;
+    assert_eq!((hd["content-type"].to_str().unwrap(), &png[1..4]), ("image/png", &b"PNG"[..]), "the source's format without WebP");
+    assert_eq!(image("url=/assets/app.js&w=32", "*/*").await.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(image("url=/nope.png&w=32", "*/*").await.0, StatusCode::NOT_FOUND);
+    for bad in ["url=//elsewhere.example/a.png&w=32", "url=/assets/hero.png&w=33", "url=https%3A%2F%2Felsewhere.example%2Fa.png&w=32"] {
+        assert_eq!(image(bad, "*/*").await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
     // A page loaded before the next deploy still gets its old chunks (skew protection); the new
     // site has its own, and a fingerprinted name no deployment had is still missing.
     let chunk = |image: &Value| {

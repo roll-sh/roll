@@ -34,6 +34,7 @@ pub mod drains;
 pub mod export;
 pub mod git_source;
 pub mod image_upload;
+pub mod images;
 pub mod integrations;
 pub mod jobs;
 pub mod live;
@@ -284,6 +285,8 @@ pub struct Apps {
     github_running: std::sync::atomic::AtomicBool,
     /// Web services' answers a shared cache may keep, per environment (`resp_cache`).
     pub(crate) responses: resp_cache::ResponseCache,
+    /// Images made by `/__roll/image` on this node ([`images::ImageCache`]).
+    pub(crate) images: images::ImageCache,
     /// Static sites' file indexes, by image digest, as this node read them.
     sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Per environment, for the live site's key: its earlier static deployments' site keys.
@@ -489,6 +492,7 @@ impl Apps {
             scaling: std::sync::atomic::AtomicBool::new(false),
             github_running: std::sync::atomic::AtomicBool::new(false),
             responses: resp_cache::ResponseCache::default(),
+            images: images::ImageCache::default(),
             sites: Mutex::new(HashMap::new()),
             earlier_sites: Mutex::new(HashMap::new()),
             site_loads: Mutex::new(HashMap::new()),
