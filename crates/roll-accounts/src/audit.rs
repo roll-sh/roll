@@ -139,11 +139,21 @@ impl Accounts {
     /// A sign-in that ended: well (`user`, `refused: None`; `second_factor`: it still owes one) or
     /// not (the error, and the person when they're known).
     pub(crate) fn record_sign_in(&self, user: Option<&str>, method: &str, refused: Option<&Error>, second_factor: bool, who: &Who) {
+        self.sign_in_event(user.unwrap_or("anonymous"), user, method, refused, second_factor, who);
+    }
+
+    /// A refused code for someone's account (`owner`, when the code was sent to one): in their
+    /// security log, by nobody known, as GitHub shows failed attempts.
+    pub(crate) fn record_code_refused(&self, owner: Option<&str>, method: &str, refused: &Error, who: &Who) {
+        self.sign_in_event("anonymous", owner, method, Some(refused), false, who);
+    }
+
+    fn sign_in_event(&self, actor: &str, target: Option<&str>, method: &str, refused: Option<&Error>, second_factor: bool, who: &Who) {
         self.record(AccountEvent {
-            actor: user.unwrap_or("anonymous").to_string(),
+            actor: actor.to_string(),
             action: "sign_in".into(),
             method: "-".into(),
-            target: user.map(str::to_string),
+            target: target.map(str::to_string),
             ok: refused.is_none(),
             status: refused.map(status_of).unwrap_or(200),
             ip: who.ip,

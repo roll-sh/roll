@@ -3,7 +3,8 @@
 //! none of the host's services, and rolld can't reach its instances at their addresses there
 //! either. Instead, a closed web instance's network sandbox runs `socat` (the links' relay
 //! image): it listens on a unix socket in a directory bind-mounted from
-//! `<home>/apps/ingress/<sandbox>/` and joins each caller to the app's port inside the
+//! `<home>/apps/ingress/<digest>/` (the sandbox's name hashed: a unix socket's path is at most
+//! 107 bytes, and a preview environment's sandbox name alone is near 60) and joins each caller to the app's port inside the
 //! instance's own network namespace (its waker's while it sleeps). rolld answers on a loopback
 //! port of its own for each, joining callers to that socket, so the proxy reaches a closed
 //! instance at `127.0.0.1` as it does any other.
@@ -30,8 +31,12 @@ impl Ingress {
         Ingress { dir, serving: Mutex::new(HashMap::new()) }
     }
 
+    /// The sandbox's socket directory: named by a digest of its name, so the socket's path stays
+    /// short whatever the sandbox is called.
     fn socket_dir(&self, sandbox: &str) -> PathBuf {
-        self.dir.join(sandbox)
+        use sha2::{Digest, Sha256};
+        let h = Sha256::digest(sandbox.as_bytes());
+        self.dir.join(h.iter().take(8).map(|b| format!("{b:02x}")).collect::<String>())
     }
 
     /// The directory a new sandbox's socket goes in (made `0700`, emptied of an earlier one's),
@@ -39,6 +44,11 @@ impl Ingress {
     pub fn prepare(&self, sandbox: &str) -> std::io::Result<(PathBuf, u32, u32)> {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt};
         let d = self.socket_dir(sandbox);
+        // What rolld connects to (`sockaddr_un` holds 108 bytes with its NUL).
+        let path = d.join(SOCKET);
+        if path.as_os_str().len() > 107 {
+            return Err(std::io::Error::other(format!("{} is too long for a unix socket (107 bytes at most): a shorter ROLL_HOME", path.display())));
+        }
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&d)?;
         let _ = std::fs::remove_file(d.join(SOCKET));
         let m = std::fs::metadata(&d)?;
@@ -109,10 +119,13 @@ mod tests {
     async fn a_loopback_caller_reaches_the_sandboxs_socket_even_before_it_is_made() {
         let home = tempfile::tempdir().unwrap();
         let ing = Ingress::new(home.path().join("ingress"));
-        let (dir, _, _) = ing.prepare("sb").unwrap();
-        assert!(ing.has("sb") && !ing.has("other"));
-        let addr = ing.serve("sb").await.unwrap();
-        assert_eq!(ing.serve("sb").await.unwrap(), addr, "one listener a sandbox");
+        // A preview environment's sandbox: its name doesn't make the socket's path too long.
+        let sb = "roll-apps-2jzm7a5uaaec-pv-zfq567oulris-dcskls-1-net";
+        let (dir, _, _) = ing.prepare(sb).unwrap();
+        assert!(dir.join(SOCKET).as_os_str().len() < home.path().as_os_str().len() + 40, "{}", dir.display());
+        assert!(ing.has(sb) && !ing.has("other"));
+        let addr = ing.serve(sb).await.unwrap();
+        assert_eq!(ing.serve(sb).await.unwrap(), addr, "one listener a sandbox");
         let mut caller = tokio::net::TcpStream::connect(addr).await.unwrap();
         caller.write_all(b"ping").await.unwrap();
         // The socket comes after the caller (a sandbox still starting).
@@ -124,7 +137,10 @@ mod tests {
         s.write_all(b"pong").await.unwrap();
         caller.read_exact(&mut got).await.unwrap();
         assert_eq!(&got, b"pong");
-        ing.forget("sb");
-        assert!(!ing.has("sb"));
+        ing.forget(sb);
+        assert!(!ing.has(sb));
+        // A home too long for any socket is said, not a health check that never passes.
+        let long = Ingress::new(home.path().join("x".repeat(120)));
+        assert!(long.prepare("sb").unwrap_err().to_string().contains("too long"));
     }
 }

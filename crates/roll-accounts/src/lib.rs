@@ -414,6 +414,10 @@ impl Accounts {
         if !db.has_column("scim_users", "user_name")? {
             db.add_column("scim_users", "user_name", "TEXT")?;
         }
+        // A SCIM token found leaked: where, and it no longer opens anything.
+        if !db.has_column("scim_tokens", "leaked")? {
+            db.add_column("scim_tokens", "leaked", "TEXT")?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;
@@ -910,6 +914,12 @@ impl Accounts {
         Ok(Some(mail))
     }
 
+    /// Whose account an email code was sent to (`None`: a sign-up's, or no such code): a wrong
+    /// code for it goes in that person's security log.
+    pub(crate) fn code_owner(&self, challenge: &str) -> Option<String> {
+        self.db.read(|c| c.query_row("SELECT user_id FROM email_codes WHERE id = ?", [challenge], |r| r.get::<_, Option<String>>(0)).optional()).ok().flatten().flatten()
+    }
+
     /// Check a challenge's code: the user it signs in (made from the invite on first sign-in).
     /// The person an email code signs in, and whether their account was made now (an invite).
     pub fn email_verify(&self, challenge: &str, code: &str) -> Result<(String, bool)> {
@@ -964,6 +974,18 @@ impl roll_auth::Sessions for Resolver {
 
     fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
         self.0.person(user).map_err(|e| e.to_string())
+    }
+
+    fn sso_trust<'a>(&'a self, id: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SsoTrust>, String>> {
+        let (accounts, id) = (self.0.clone(), id.to_string());
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let all = accounts.sso_connections().map_err(|e| e.to_string())?;
+                Ok(all.into_iter().find(|c| c.id == id).map(|c| roll_auth::SsoTrust { name: c.name, issuer: c.issuer, verified: c.verified }))
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        })
     }
 
     fn person_by_email<'a>(&'a self, email: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SignedIn>, String>> {

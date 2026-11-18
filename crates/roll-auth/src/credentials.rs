@@ -16,9 +16,22 @@
 use serde_json::Value;
 
 /// The secrets roll makes that scanners look for: grants' (`rlt_`, `rlo_`, `rlf_`), machine
-/// clients' (`rlc_`), and other products' made the same way: apps' deploy hooks (`rlk_`).
+/// clients' (`rlc_`), and other products' made the same way: apps' deploy hooks (`rlk_`) and SSO
+/// connections' SCIM tokens (`rlp_`, roll-accounts).
 /// (`rlh_` is roll code's automations' inbound webhook secrets: another shape, not ours.)
-pub const SECRET_PREFIXES: [&str; 5] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_"];
+pub const SECRET_PREFIXES: [&str; 6] = ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_", "rlp_"];
+
+/// A secret: `prefix`, 34 random characters of lowercase base32 (170 bits) and 6 of checksum, so a
+/// scanner can tell a real roll token from look-alike text without asking roll ([`checksum_ok`],
+/// as GitHub's tokens carry a CRC32).
+pub fn new_secret(prefix: &str) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut b = [0u8; 34];
+    getrandom::fill(&mut b).expect("system randomness");
+    let body = format!("{prefix}{}", b.iter().map(|x| ALPHABET[(x & 31) as usize] as char).collect::<String>());
+    let sum = checksum(&body);
+    format!("{body}{sum}")
+}
 
 /// The last 6 characters a secret ends with: CRC-32 of everything before, as base32 (30 bits).
 pub fn checksum(body: &str) -> String {
@@ -77,7 +90,7 @@ fn kind_of(w: &str) -> Option<&'static str> {
     let rest = |prefix: &str| w.strip_prefix(prefix);
     let all = |s: &str, ok: fn(char) -> bool| s.chars().all(ok);
     let alnum = |c: char| c.is_ascii_alphanumeric();
-    if ["rlt_", "rlo_", "rlf_", "rlc_", "rlk_"].iter().any(|p| w.starts_with(p)) && checksum_ok(w) {
+    if SECRET_PREFIXES.iter().any(|p| w.starts_with(p)) && checksum_ok(w) {
         return Some(ROLL);
     }
     // AWS's documentation keys (`…EXAMPLE`) are in code and docs everywhere.
@@ -225,5 +238,18 @@ mod tests {
         assert_eq!(words("NODE_ENV=production region us-east-1 user postgres pw=Tr0ub4dor-Horse-77"), vec!["Tr0ub4dor-Horse-77"]);
         let padding: String = (0..MAX_CANDIDATES + 1).map(|i| format!("Zq{i:06}Hy8Lw3Rt ")).collect();
         assert!(candidates(&json!({ "body": padding })).is_none());
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    /// Every prefix roll makes is one the guard and scanners know, checksummed.
+    #[test]
+    fn every_roll_secret_is_a_credential() {
+        for p in super::SECRET_PREFIXES {
+            let s = super::new_secret(p);
+            assert!(super::checksum_ok(&s), "{p}");
+            assert_eq!(super::kind_in(&format!("token: {s}")), Some(super::ROLL), "{p}");
+        }
     }
 }
