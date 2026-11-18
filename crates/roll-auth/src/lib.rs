@@ -284,6 +284,12 @@ pub trait Sessions: Send + Sync + 'static {
         let _ = (user, session);
         Box::pin(async { Ok(false) })
     }
+    /// Whether `user`'s session may be used from `ip` (`None`: not known): a company's allowed
+    /// networks (docs/accounts.md). True by default. Never cached.
+    fn network_ok<'a>(&'a self, user: &'a str, ip: Option<std::net::IpAddr>) -> BoxFuture<'a, Result<bool, String>> {
+        let _ = (user, ip);
+        Box::pin(async { Ok(true) })
+    }
     /// Whether session `session` (of `user`) proved who it is recently: sudo mode
     /// (docs/accounts.md). A token made from a session needs it, so a stolen cookie can't mint a
     /// long-lived token. True by default: an implementation without sudo mode keeps tokens as
@@ -388,11 +394,16 @@ pub struct Rule {
     pub access: Access,
 }
 
+/// How the gate reads a request's client address (rolld: roll-access's, with its trusted proxies).
+pub type ClientIpFn = Arc<dyn Fn(&Request) -> Option<std::net::IpAddr> + Send + Sync>;
+
 pub struct Gate {
     token: Option<AdminToken>,
     rules: Vec<Rule>,
     authorizer: OnceLock<Arc<dyn Authorizer>>,
     sessions: Option<Arc<dyn Sessions>>,
+    /// The client's address, for a person's session from an allowed network only.
+    client_ip: OnceLock<ClientIpFn>,
     /// Origins a write with a session cookie may come from (the dashboard's, and the API's own).
     origins: Origins,
     own_origin: Option<HeaderValue>,
@@ -400,10 +411,15 @@ pub struct Gate {
 
 impl Gate {
     pub fn new(token: Option<AdminToken>, rules: Vec<Rule>) -> Arc<Self> {
-        Arc::new(Self { token, rules, authorizer: OnceLock::new(), sessions: None, origins: Origins::List(Vec::new()), own_origin: None })
+        Arc::new(Self { token, rules, authorizer: OnceLock::new(), sessions: None, client_ip: OnceLock::new(), origins: Origins::List(Vec::new()), own_origin: None })
     }
 
     /// Scoped tokens' evaluator, set once when it's ready (before serving).
+    /// How to read a request's client address (set once).
+    pub fn set_client_ip(&self, f: ClientIpFn) {
+        let _ = self.client_ip.set(f);
+    }
+
     pub fn set_authorizer(&self, a: Arc<dyn Authorizer>) {
         let _ = self.authorizer.set(a);
     }
@@ -412,7 +428,7 @@ impl Gate {
     /// (`ROLL_DASHBOARD_ORIGIN`); `own`: the API's public URL, whose origin may send writes too.
     pub fn with_sessions(token: Option<AdminToken>, rules: Vec<Rule>, sessions: Arc<dyn Sessions>, origins: Origins, own: &str) -> Arc<Self> {
         let own_origin = origin_of(own).and_then(|o| HeaderValue::from_str(&o).ok());
-        Arc::new(Self { token, rules, authorizer: OnceLock::new(), sessions: Some(sessions), origins, own_origin })
+        Arc::new(Self { token, rules, authorizer: OnceLock::new(), sessions: Some(sessions), client_ip: OnceLock::new(), origins, own_origin })
     }
 
     /// The access of a route pattern (as the router has it): its longest matching rule's, else
@@ -434,6 +450,12 @@ impl Gate {
 /// The middleware: `router.layer(axum::middleware::from_fn_with_state(gate, roll_auth::check))`.
 /// It reads the matched route, so it goes on the router whose routes it guards.
 pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) -> Response {
+    // The client's address, once, for whoever asks after (a session's networks, a product's log).
+    if let Some(ip) = gate.client_ip.get().and_then(|f| f(&req))
+        && req.extensions().get::<ClientIp>().is_none()
+    {
+        req.extensions_mut().insert(ClientIp(ip));
+    }
     let presented = bearer(req.headers());
     if let (Some(token), Some(p)) = (&gate.token, presented)
         && token.matches(p)
@@ -470,6 +492,21 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
         if let Some(session) = session {
             if !safe(req.method()) && !gate.csrf_ok(req.headers(), token) {
                 return error(StatusCode::FORBIDDEN, "this request needs the X-Roll-CSRF header from GET /v1/accounts/session", "csrf");
+            }
+            // A company's allowed networks (docs/accounts.md, "Allowed networks"): a session is
+            // used only from them, whatever it reaches.
+            let user = match &session {
+                Session::Full(s) => s.user.clone(),
+                Session::SecondFactor(s) => s.user.clone(),
+            };
+            let ip = req.extensions().get::<ClientIp>().map(|c| c.0);
+            match sessions.network_ok(&user, ip).await {
+                Ok(true) => {}
+                Ok(false) => return error(StatusCode::FORBIDDEN, "your company lets roll be used only from its own networks, and this one isn't on its list", "network"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "sessions: network check failed");
+                    return error(StatusCode::SERVICE_UNAVAILABLE, "sessions are unavailable; try again", "unavailable");
+                }
             }
             match session {
                 Session::Full(s) => {

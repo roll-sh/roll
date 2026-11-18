@@ -1,6 +1,6 @@
 import { Building2, Check, Copy, Fingerprint, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { accountsApi, activityText, refreshSession, useSession, type Activity, type Invite, type Passkey, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
+import { accountsApi, activityText, refreshSession, useSession, type Activity, type Invite, type NetworkPolicy, type Passkey, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
 import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } from "@/lib/webauthn";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { SsoSection } from "./account-sso";
@@ -49,6 +49,7 @@ export function AccountPage() {
           {user.admin && <Users me={user.id} />}
           {user.admin && <SsoSection />}
           {user.admin && <EveryoneSecondFactor />}
+          {user.admin && <Networks />}
         </div>
       )}
     </AppShell>
@@ -396,6 +397,59 @@ function EveryoneSecondFactor() {
           Require a second factor
         </label>
         {error && <p className="text-[12px] text-danger">{error}</p>}
+      </div>
+    </Section>
+  );
+}
+
+/** Admins: allowed networks (docs/accounts.md): people's sessions work only from the company's networks. */
+function Networks() {
+  const [policy, setPolicy] = useState<NetworkPolicy | null>(null);
+  const [text, setText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    accountsApi.networkPolicy().then(
+      (p) => {
+        setPolicy(p);
+        setText(p.networks.join("\n"));
+      },
+      () => setPolicy(null),
+    );
+  }, []);
+  if (!policy) return null;
+  const save = (on: boolean) =>
+    accountsApi.setNetworkPolicy({ on, networks: text.split(/[\s,]+/).filter(Boolean) }).then(
+      (p) => {
+        setPolicy(p);
+        setText(p.networks.join("\n"));
+        setError(null);
+        setSaved(true);
+      },
+      (e) => setError(errorText(e)),
+    );
+  return (
+    <Section id="networks" title="Allowed networks" lead="People's sessions work only from these networks (your offices, your VPN). The operator's token and roll tokens keep their own lists.">
+      <div className={`${card} space-y-3 p-4`}>
+        <label className="flex items-center gap-2 text-[12.5px]">
+          <input type="checkbox" checked={policy.on} onChange={(e) => void save(e.target.checked)} />
+          Only from these networks
+        </label>
+        <textarea
+          value={text}
+          onChange={(e) => (setText(e.target.value), setSaved(false))}
+          rows={4}
+          spellCheck={false}
+          placeholder={"203.0.113.0/24\n2001:db8::/32"}
+          className="w-full rounded-lg border border-line-2 bg-canvas px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-accent/60"
+        />
+        <div className="flex items-center gap-3">
+          <button onClick={() => void save(policy.on)} className={btn}>
+            Save the list
+          </button>
+          {saved && !error && <span className="text-[11.5px] text-subtle">Saved.</span>}
+          {error && <span className="text-[12px] text-danger">{error}</span>}
+        </div>
       </div>
     </Section>
   );

@@ -62,6 +62,8 @@ struct Browser {
     csrf: Option<String>,
     /// Its User-Agent, if it sends one.
     user_agent: Option<String>,
+    /// Where it calls from (the gate's client address).
+    ip: Option<String>,
 }
 
 struct Answer {
@@ -137,6 +139,8 @@ impl Env {
             Rule { route: "/v1/workspace", access: Access::User("projects") },
         ];
         let gate = Gate::with_sessions(Some(AdminToken::new(OPERATOR).unwrap()), rules, accounts.sessions(), Origins::parse(WEB).unwrap(), API);
+        // The client's address, as rolld's trusted proxies would read it (here: a test header).
+        gate.set_client_ip(Arc::new(|req| req.headers().get("x-test-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok())));
         let router = roll_accounts::router(accounts.clone())
             .route("/v1/projects", get(|| async { Json(json!([])) }).post(|| async { StatusCode::CREATED }))
             .route("/v1/workspace/projects", get(|| async { Json(json!([])) }))
@@ -155,6 +159,9 @@ impl Env {
         }
         if let Some(ua) = &b.user_agent {
             req = req.header(header::USER_AGENT, ua);
+        }
+        if let Some(ip) = &b.ip {
+            req = req.header("x-test-ip", ip);
         }
         let a = self.send(req.body(body.map_or(Body::empty(), |v| Body::from(v.to_string()))).unwrap()).await;
         for c in a.headers.get_all(header::SET_COOKIE) {
@@ -1161,4 +1168,36 @@ async fn a_company_can_require_a_second_factor() {
     assert_eq!(env.call(&mut bob, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::FORBIDDEN);
     env.operator(Method::PUT, "/v1/accounts/policy", json!({ "require_second_factor": false })).await;
     assert_eq!(env.call(&mut bob, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::OK);
+}
+
+/// Allowed networks (docs/accounts.md): a person's session is used only from the company's
+/// networks; saving a list that leaves the saving admin's own address out is refused; the
+/// operator's token is never held to it.
+#[tokio::test]
+async fn sessions_are_used_only_from_allowed_networks() {
+    let env = Env::new().await;
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@example.com", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let mut office = Browser { ip: Some("203.0.113.20".into()), ..Default::default() };
+    env.email_sign_in(&mut office, "root@example.com", Some(&root_invite)).await;
+    let mut cafe = Browser { ip: Some("192.0.2.50".into()), ..Default::default() };
+    env.email_sign_in(&mut cafe, "root@example.com", None).await;
+    assert_eq!(env.call(&mut cafe, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK, "off: anywhere");
+
+    let put = |b: &mut Browser, body: Value| {
+        let env = &env;
+        let mut b = b.clone();
+        async move { env.call(&mut b, Method::PUT, "/v1/accounts/network-policy", Some(body)).await }
+    };
+    assert_eq!(put(&mut office, json!({ "on": true, "networks": [] })).await.json["code"], "networks");
+    assert_eq!(put(&mut office, json!({ "on": true, "networks": ["198.51.100.0/24"] })).await.json["code"], "lockout", "the admin's own address left out");
+    let on = put(&mut office, json!({ "on": true, "networks": ["203.0.113.7/24"] })).await;
+    assert_eq!((on.status, on.json["networks"].clone()), (StatusCode::OK, json!(["203.0.113.0/24"])), "{}", on.json);
+
+    assert_eq!(env.call(&mut office, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
+    let refused = env.call(&mut cafe, Method::GET, "/v1/accounts/me", None).await;
+    assert_eq!((refused.status, refused.json["code"].as_str()), (StatusCode::FORBIDDEN, Some("network")), "{}", refused.json);
+    assert_eq!(env.operator(Method::GET, "/v1/accounts/network-policy", json!({})).await.status, StatusCode::OK, "the operator's token isn't held to it");
+    // Off again, from the office: the café works again.
+    assert_eq!(put(&mut office, json!({ "on": false, "networks": ["203.0.113.0/24"] })).await.status, StatusCode::OK);
+    assert_eq!(env.call(&mut cafe, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
 }
