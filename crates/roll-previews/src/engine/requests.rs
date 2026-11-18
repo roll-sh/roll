@@ -236,7 +236,10 @@ impl Engine {
                 (Some(sha), None) => {
                     let s = self.store.settings(&project.id)?;
                     let skip = [Some(p.message.as_str()), pull_title.as_deref()].into_iter().flatten().any(|t| t.to_ascii_lowercase().contains("[skip preview]"));
-                    if !s.enabled || skip || !crate::glob::any(&s.branches, &p.branch) {
+                    // A dependency bot's pull request (`skip_authors`), unless its title asks.
+                    let asked = pull_title.as_deref().is_some_and(|t| t.to_ascii_lowercase().contains("[preview]"));
+                    let bot = p.pull.as_ref().and_then(|pl| pl.author.as_deref()).is_some_and(|a| crate::glob::any(&s.skip_authors, a));
+                    if !s.enabled || skip || (bot && !asked) || !crate::glob::any(&s.branches, &p.branch) {
                         continue;
                     }
                     // A fork's pull request waiting for approval holds a place too: anyone can open

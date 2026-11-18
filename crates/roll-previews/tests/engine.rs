@@ -1120,7 +1120,7 @@ async fn a_git_url_services_branch_push_makes_its_preview() {
     e.engine.git_push(&push("feat/docs", Some("c3"), "typo [skip preview]")).await.unwrap();
     assert_eq!(rows().len(), 1, "[skip preview] skips one");
     // Its pull request (same repo) names the branch's preview and links it, still trusted.
-    let pull = roll_previews::ports::GitPull { number: 3, title: "Cart\nbadge".into(), url: "https://github.com/acme/shop/pull/3".into(), fork: false };
+    let pull = roll_previews::ports::GitPull { number: 3, title: "Cart\nbadge".into(), url: "https://github.com/acme/shop/pull/3".into(), fork: false, author: None };
     e.engine.git_push(&roll_previews::ports::GitPush { pull: Some(pull), ..push("feat/cart", Some("b2"), "") }).await.unwrap();
     let v = e.engine.store.view(e.engine.store.row(&r[0].id).unwrap()).unwrap();
     assert_eq!((v.title.as_str(), v.pull.as_ref().map(|p| p.number), v.trusted, rows().len()), ("Cart badge", Some(3), true, 1));
@@ -1143,7 +1143,7 @@ async fn a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head()
         branch: "pull/7".into(),
         sha: sha.map(Into::into),
         message: String::new(),
-        pull: Some(roll_previews::ports::GitPull { number: 7, title: "Faster cart".into(), url: "https://github.com/acme/shop/pull/7".into(), fork: true }),
+        pull: Some(roll_previews::ports::GitPull { number: 7, title: "Faster cart".into(), url: "https://github.com/acme/shop/pull/7".into(), fork: true, author: None }),
     };
     let deployed = |id: &str| e.apps.deployed.lock().get(&(id.to_string(), "shop".to_string())).cloned();
     e.engine.git_push(&push(Some("f1"))).await.unwrap();
@@ -1217,7 +1217,7 @@ async fn a_git_url_preview_reports_its_status_and_pull_request_comment() {
         branch: branch.into(),
         sha: Some(sha.into()),
         message: String::new(),
-        pull: Some(roll_previews::ports::GitPull { number, title: "Cart".into(), url: format!("https://github.com/acme/shop/pull/{number}"), fork }),
+        pull: Some(roll_previews::ports::GitPull { number, title: "Cart".into(), url: format!("https://github.com/acme/shop/pull/{number}"), fork, author: None }),
     };
     e.engine.git_push(&push("feat/cart", "a1", 3, false)).await.unwrap();
     for _ in 0..3 {
@@ -1253,6 +1253,19 @@ async fn a_git_url_preview_reports_its_status_and_pull_request_comment() {
     e.engine.git_push(&push("feat/cart", "a2", 3, false)).await.unwrap();
     e.engine.pass().await.unwrap();
     assert_eq!(gr.statuses.lock().len(), n);
+    gr.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+    // A dependency bot's pull request (`skip_authors`) gets no preview, unless its title asks.
+    let bots = e.engine.store.settings(&e.project).unwrap().patched(&json!({ "skip_authors": ["*[bot]"] })).unwrap();
+    e.engine.store.put_settings(&e.project, &bots).unwrap();
+    let bump = |title: &str| roll_previews::ports::GitPush {
+        pull: Some(roll_previews::ports::GitPull { number: 9, title: title.into(), url: "https://github.com/acme/shop/pull/9".into(), fork: false, author: Some("dependabot[bot]".into()) }),
+        ..push("deps/lodash", "d1", 9, false)
+    };
+    let of_bump = || e.engine.store.rows(Some(&e.project)).unwrap().into_iter().any(|r| r.branch.as_deref() == Some("deps/lodash"));
+    e.engine.git_push(&bump("Bump lodash")).await.unwrap();
+    assert!(!of_bump(), "a bot's pull request is skipped");
+    e.engine.git_push(&bump("Bump lodash [preview]")).await.unwrap();
+    assert!(of_bump(), "unless its title asks");
 }
 
 #[tokio::test]
@@ -1406,7 +1419,7 @@ async fn the_project_that_has_had_a_service_longest_speaks_for_its_branches() {
         branch: branch.into(),
         sha: Some("a1".into()),
         message: String::new(),
-        pull: Some(roll_previews::ports::GitPull { number, title: "Cart".into(), url: format!("https://github.com/acme/shop/pull/{number}"), fork: false }),
+        pull: Some(roll_previews::ports::GitPull { number, title: "Cart".into(), url: format!("https://github.com/acme/shop/pull/{number}"), fork: false, author: None }),
     };
     e.engine.git_push(&push("feat/cart", 3)).await.unwrap();
     e.engine.git_push(&push("wip/x", 4)).await.unwrap();
