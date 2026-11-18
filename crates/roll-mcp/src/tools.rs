@@ -1075,6 +1075,7 @@ static TOOLS: &[Tool] = &[
         &[breq("project", Ty::Str, "Workspace project (prj_…)"), breq("repo", Ty::Str, "Repo in the project, owner/name"), b("branch", Ty::Str, "Branch"), b("change", Ty::Str, "Or a change (chg_…)")],
     ),
     t("previews_refresh", "Refresh a preview", "Redeploy a preview now.", "previews", "POST", "/v1/previews/{id}/refresh", &[req("id", "Preview id")]),
+    t("previews_metrics", "Preview metrics", "Each of a preview's services' CPU and memory now: which one is slow or about to run out.", "previews", "GET", "/v1/previews/{id}/metrics", &[req("id", "Preview id")]),
     t("previews_logs", "Preview logs", "A preview's deploy and service logs.", "previews", "GET", "/v1/previews/{id}/logs", &[req("id", "Preview id")]),
     t("previews_requests", "A preview's requests", "A preview's latest 200 requests through roll, newest first: service, method, path (never its query), status and time. Start here to find the request that failed.", "previews", "GET", "/v1/previews/{id}/requests", &[req("id", "Preview id")]),
     t(
