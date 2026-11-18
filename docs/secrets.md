@@ -3013,8 +3013,10 @@ inconsistencies are fixed in #264:
   roll queues checking a default-exchange publish against `""` rather than `amq.default`, fixed
   for every protocol in one place as RabbitMQ does (#279, checked against real RabbitMQ). roll apps
   wires queue links into `RollResources` once #274 is on main: tell them when it lands.
-- R7. **AWS IAM login for EC2/ECS/EKS** (building: `feature/roll-secrets-aws-login`; a signed
-  `GetCallerIdentity` forwarded to a pinned STS, as Vault's): an account to confirm.
+- R7. **AWS IAM login for EC2/ECS/EKS** (#290): a signed `GetCallerIdentity` the server sends only to
+  AWS's own STS hosts (URL rebuilt, body exact, `X-Roll-Server-ID` signed, ±5 min), matched against
+  one role, session prefix or user; CLI, Go and Python sign from the standard credential chain
+  (IRSA, ECS/Pod Identity, IMDSv2). Unconfirmed against real STS: an account (the user's call).
 - R8. **A tamper-evident audit log** (#281): each row hashed onto a per-project chain in its own
   transaction (one head row, a unique seq: no forks, checked with two racing nodes), hourly digests
   signed by roll's issuer key and sent to the sinks, `audit verify` online or offline against an
