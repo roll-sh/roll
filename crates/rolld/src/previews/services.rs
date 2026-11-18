@@ -134,7 +134,9 @@ impl roll_previews::ports::Apps for RollApps {
         // runtime that can't is a 409, which fails the deploy rather than running it open).
         let closed = t.egress == roll_previews::settings::EgressRule::Roll;
         let egress = if closed { json!({ "mode": "roll", "hosts": t.egress_hosts }) } else { json!({ "mode": "open" }) };
-        let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress });
+        // One voice on a pull request: previews posts `roll/preview` and its comment for the
+        // environment, so roll apps posts no commit status or GitHub Deployment of its own (apps' #249).
+        let mut body = json!({ "branch": null, "ephemeral": true, "access": access, "egress": egress, "report": false });
         if self.feedback {
             body["feedback"] = json!(t.feedback);
         }

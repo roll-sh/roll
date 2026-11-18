@@ -132,6 +132,8 @@ for _ in $(seq 1 600); do
   sleep 1
 done
 [ "$(echo "$E" | jq_ "(d.get('egress') or {}).get('mode')")" = roll ] || { echo "the pv- environment should be closed: $(echo "$E" | jq_ "d.get('egress')")"; exit 1; }
+# One voice on the pull request: previews reports the pv- environment, roll apps doesn't (#249).
+[ "$(echo "$E" | jq_ "d.get('report')")" = False ] || { echo "the pv- environment should leave reporting to previews (report: false): $(echo "$E" | jq_ "d.get('report')")"; exit 1; }
 curl -sS -o /dev/null -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 120
 INST=""
 for _ in $(seq 1 60); do INST=$(docker ps --format '{{.Names}}' | grep "^roll-apps-${SVC#svc_}-$ENV-" | head -1); [ -n "$INST" ] && break; sleep 1; done
