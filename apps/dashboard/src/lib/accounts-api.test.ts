@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { accountsApi, activityText, onReauthRequired, type Activity } from "./accounts-api";
+import { accountsApi, activityText, dormant, onReauthRequired, type Activity } from "./accounts-api";
 
 describe("activityText", () => {
   const e = (a: Partial<Activity>): Activity => ({ at: 0, action: "sign_in", actor: "usr_me", ok: true, status: 200, ...a });
@@ -74,5 +74,15 @@ describe("sudo mode", () => {
 describe("a provider's logout in the security log", () => {
   it("says the provider signed the person out", () => {
     expect(activityText({ at: 0, action: "session.end", actor: "sso:sso_okta", ok: true, status: 200 }, "usr_me")).toBe("Your company's provider signed you out (its back-channel logout)");
+  });
+});
+
+describe("dormant", () => {
+  it("is 90 days without using roll, counted from when they were made if never seen", () => {
+    const day = 24 * 3600 * 1000, now = 1000 * day;
+    expect(dormant({ last_active_at: now - 89 * day, created_at: 0, disabled: false }, now)).toBe(false);
+    expect(dormant({ last_active_at: now - 91 * day, created_at: 0, disabled: false }, now)).toBe(true);
+    expect(dormant({ last_active_at: null, created_at: now - 91 * day, disabled: false }, now)).toBe(true);
+    expect(dormant({ last_active_at: null, created_at: now - 91 * day, disabled: true }, now)).toBe(false);
   });
 });
