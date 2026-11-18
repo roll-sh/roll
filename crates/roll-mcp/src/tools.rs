@@ -833,7 +833,8 @@ static TOOLS: &[Tool] = &[
         breq("candidates", Ty::Arr, "Strings from the diff to check (at most 20,000)"),
     ]),
     // ── apps (roll apps) ──
-    t("apps_list_services", "List services", "App services.", "apps", "GET", "/v1/apps/services", &[]),
+    t("apps_list_services", "List services", "App services; with deleted, the ones deleted in the last 48 hours, which apps_restore_service brings back until purge_at.", "apps", "GET", "/v1/apps/services", &[q("project", Ty::Str, "Only this workspace project's"), q("deleted", Ty::Bool, "The deleted services kept for a restore")]),
+    t("apps_restore_service", "Restore a deleted service", "Bring back a service deleted in the last 48 hours, as it was: environments, volumes, domains, links, name, and its live deployments running again (a \"deploy\" action).", "apps", "POST", "/v1/apps/services/{service}/restore", &[SERVICE]),
     t(
         "apps_create_service",
         "Create a service",
@@ -959,12 +960,13 @@ static TOOLS: &[Tool] = &[
     t(
         "apps_set_variables",
         "Set variables",
-        "Set or unset an environment's variables (production is a \"deploy\" action).",
+        "Set or unset an environment's variables, or copy some from another environment (copy_from with copy: their values, never shown; needs reveal on that environment too). Production is a \"deploy\" action.",
         "apps",
         "PATCH",
         "/v1/apps/services/{service}/environments/{env}/variables",
-        &[SERVICE, ENV, b("set", Ty::Obj, "{NAME: value}"), b("unset", Ty::Arr, "Names to remove")],
+        &[SERVICE, ENV, b("set", Ty::Obj, "{NAME: value}"), b("unset", Ty::Arr, "Names to remove"), b("copy_from", Ty::Str, "Another environment to copy values from"), b("copy", Ty::Arr, "Names to copy from copy_from")],
     ),
+    t("apps_diff_environments", "Compare environments", "How an environment differs from another (Railway's environment sync): variables missing, extra or with another value (names only; which differ needs reveal on both), and settings with the body that makes each match. Read on both environments.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/diff", &[SERVICE, ENV, qreq("from", "The environment to compare with")]),
     t("apps_metrics", "Service metrics", "CPU, memory and requests of an environment.", "apps", "GET", "/v1/apps/services/{service}/environments/{env}/metrics", &[SERVICE, ENV, q("minutes", Ty::Int, "Window")]),
     t("apps_plan", "Plan a service", "How roll would build and run a repo (provider, framework, install, build and start commands, port), before making a service: a dry run.", "apps", "POST", "/v1/apps/plan", &[breq("repo", Ty::Str, "owner/name"), b("revision", Ty::Str, "A branch or commit"), b("root", Ty::Str, "The app's folder in the repo")]),
     t("apps_import", "Check a project file", "What a roll.toml or a docker-compose file would make, without making anything: the apps with their source, branch, run settings, links and variables, the databases, notes, and the file as roll.toml (check it before roll up --all).", "apps", "POST", "/v1/apps/import", &[b("roll_toml", Ty::Str, "A roll.toml's text"), b("compose", Ty::Str, "A docker-compose.yml's text")]),

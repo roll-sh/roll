@@ -727,7 +727,8 @@ previews are listed once those products are on.
 | `secrets_findings` | Every project's secrets health findings you may read. | `GET /v1/secrets/findings` |
 | `secrets_find` | Where a key is set across the projects you may read. | `GET /v1/secrets/search` |
 | `secrets_scan` | Which of these values are a project's stored secrets (never the value): check a diff before committing it. | `POST /v1/secrets/projects/{project}/leaks` |
-| `apps_list_services` | App services. | `GET /v1/apps/services` |
+| `apps_list_services` | App services; with `deleted`, those deleted in the last 48 hours (until `purge_at`). | `GET /v1/apps/services` |
+| `apps_restore_service` | A service deleted in the last 48 hours back as it was, its live deployments running again (deploy). | `POST /v1/apps/services/{service}/restore` |
 | `apps_create_service` | A new service in a project, from a repo, an image or an upload. | `POST /v1/apps/projects/{project}/services` |
 | `apps_list_environments` | A service's environments. | `GET /v1/apps/services/{service}/environments` |
 | `apps_get_service` | A service with its environments' summaries. | `GET /v1/apps/services/{service}` |
@@ -754,7 +755,8 @@ previews are listed once those products are on.
 | `apps_cancel_job` | Stop a running job (production: deploy). | `POST /v1/apps/services/{service}/environments/{env}/jobs/{job}/cancel` |
 | `apps_events` | What happened to services, in order after a cursor. | `GET /v1/apps/events` |
 | `apps_list_variables` | An environment's variables, values masked. | `GET /v1/apps/services/{service}/environments/{env}/variables` |
-| `apps_set_variables` | Set or unset an environment's variables (production is a "deploy" action). | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
+| `apps_set_variables` | Set or unset an environment's variables, or copy some from another (`copy_from` with `copy`; reveal on that environment too). Production is a "deploy" action. | `PATCH /v1/apps/services/{service}/environments/{env}/variables` |
+| `apps_diff_environments` | How an environment differs from another: variables missing, extra or different (names only; `differ` needs reveal on both) and settings with the body that matches each. | `GET /v1/apps/services/{service}/environments/{env}/diff` |
 | `apps_metrics` | CPU, memory and requests of an environment. | `GET /v1/apps/services/{service}/environments/{env}/metrics` |
 | `apps_plan` | How roll would build and run a repo, before making a service (a dry run). | `POST /v1/apps/plan` |
 | `apps_vitals` | What visitors' browsers measured on an environment's pages: Web Vitals p75s, rated, overall and per route. | `GET /v1/apps/services/{service}/environments/{env}/vitals` |
