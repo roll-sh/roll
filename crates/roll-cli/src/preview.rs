@@ -177,6 +177,8 @@ pub enum Preview {
     },
     /// What a project's previews cost.
     Usage { project: String },
+    /// Who opened a sign-in (`access: team`) preview lately, latest first.
+    Visitors { preview: String },
     /// The secret CI sends (header `x-roll-preview-bypass`) to reach a project's private
     /// previews: shows whether there is one, `--rotate` makes a new one (printed once), `--off`
     /// removes it.
@@ -697,6 +699,20 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                     }
                     (None, true) => println!("a bypass secret is set (made {}); --rotate makes a new one", s(&v["created_at"])),
                     (None, false) => println!("no bypass secret; --rotate makes one"),
+                }
+                return Ok(());
+            }
+            v
+        }
+        Preview::Visitors { preview } => {
+            let v = api.get(&format!("/v1/previews/{preview}/visitors")).await?;
+            if !as_json {
+                let who = v.as_array().cloned().unwrap_or_default();
+                if who.is_empty() {
+                    println!("nobody signed in has opened it");
+                }
+                for x in who {
+                    println!("{:>8}  {}", ago(x["last_at"].as_i64().unwrap_or(0) / 1000), s(&x["who"]));
                 }
                 return Ok(());
             }

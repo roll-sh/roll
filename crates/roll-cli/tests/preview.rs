@@ -109,3 +109,14 @@ fn settings_create_list_and_remove_a_branch_preview() {
     let (ok, _, err) = s.roll(&["wait", &id]);
     assert!(!ok && err.contains("being deleted"), "{err}");
 }
+
+/// `roll preview visitors` answers who signed in to a preview lately (nobody here).
+#[test]
+fn visitors_from_the_cli() {
+    let s = server();
+    s.ok(&["settings", "shop", "--set", "enabled=true", "--set", "access=\"team\""]);
+    let created = s.json(&["create", "--project", "shop", "--repo", "acme/web", "--branch", "main"]);
+    let id = created["id"].as_str().unwrap();
+    assert!(s.ok(&["visitors", id]).contains("nobody signed in has opened it"));
+    assert_eq!(s.json(&["visitors", id]).as_array().map(Vec::len), Some(0));
+}

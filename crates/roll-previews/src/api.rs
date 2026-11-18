@@ -52,6 +52,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .with_state(engine.clone()),
         )
         .route("/v1/previews/{id}/activity", get(activity))
+        .route("/v1/previews/{id}/visitors", get(visitors))
         .route("/v1/previews/projects/{project}/settings", get(settings).put(put_settings))
         .route("/v1/previews/projects/{project}/usage", get(usage))
         .route("/v1/previews/projects/{project}/bypass", get(bypass).post(rotate_bypass).delete(delete_bypass))
@@ -214,7 +215,7 @@ async fn visit(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extensio
         return Err(Error::Forbidden("signing in to a preview is for a person signed in to roll, not a token".into()));
     };
     let b: VisitBody = body(&b)?;
-    let url = blocking(e, move |e| e.visit_ticket(&id, &user.user, &user.session, &b.to)).await?;
+    let url = blocking(e, move |e| e.visit_ticket(&id, &user.user, &user.handle, &user.session, &b.to)).await?;
     Ok(Json(json!({ "url": url })))
 }
 
@@ -590,6 +591,16 @@ async fn activity(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<V
     blocking(e, move |e| {
         e.store.row(&id)?;
         Ok(json!(e.store.activity(&id)?))
+    })
+    .await
+    .map(Json)
+}
+
+async fn visitors(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    blocking(e, move |e| {
+        e.store.row(&id)?;
+        Ok(json!(e.store.visitors(&id)?))
     })
     .await
     .map(Json)
