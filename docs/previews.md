@@ -1790,17 +1790,23 @@ Ranked by what a person notices first. Done so far:
    made without touching the user's index or HEAD is pushed to a branch of their own
    (`preview/<user>/<name>`) and previewed, the URL printed once it's ready; again moves it,
    `roll preview down` deletes the branch and the preview.
-3. **A project's own preview domain, the wiring** (previews' half #275 is on main): after apps'
+3. **Mask suggestions** (Tonic's and Neon's anonymisation): previews read production's data, and
+   today the rules dialog only says "mask what holds people's data" when a resource has no masks
+   at all. Name the columns and fields that look like personal data (email, phone, name, address,
+   birth date, IP, national ids, tokens) in each branched Postgres, NoSQL and search parent and
+   aren't masked, each with a one-click rule (`email`, `redact`, `hash`, `null`), on the rules
+   dialog and the sheet.
+4. **A project's own preview domain, the wiring** (previews' half #275 is on main): after apps'
    #278, rolld hands apps' `PreviewRouter` previews' `runtime::serve_host`, and
    `scripts/preview-apps.sh` checks a verified domain over plain HTTP, a roll apps service and a
    runtime one by label. TLS waits on wildcard certificates over DNS-01 on the edge.
-4. **Bots on Git URL services** (draft #305, on apps' #282): previews' own `GitPull` carries the
+5. **Bots on Git URL services** (draft #305, on apps' #282): previews' own `GitPull` carries the
    opener and `skip_authors` reaches a Git URL service's pull requests. Undraft once #282 is on
    main.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+6. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
-7. **Watch: a cold start on a Docker name conflict.**
+7. **Watch: pg-control's recovery to a time seconds old** (unowned).
+8. **Watch: a cold start on a Docker name conflict.**
 
 Landed in previews' lock turn of 2026-11-18 (main 440e13ebf; one combined tree, each step
 tagged and gated once with both live checks, then landed one at a time, each identical to its
