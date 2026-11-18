@@ -1,6 +1,6 @@
 import { Pencil, Send, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { appsApi, type DrainSource, type LogDrain } from "@/lib/apps-api";
+import { appsApi, type DrainFormat, type DrainSource, type LogDrain } from "@/lib/apps-api";
 import { btn, CopyButton, input, Panel, primary, useCopy } from "../ui";
 import { since, SureButton, type Runner } from "./shared";
 
@@ -26,11 +26,19 @@ export function parseHeaders(text: string): { headers: Record<string, string>; b
   return { headers, bad };
 }
 
+/** How a drain's lines go, with the URL each takes. */
+const FORMATS: { value: DrainFormat; label: string; placeholder: string; url: RegExp }[] = [
+  { value: "ndjson", label: "NDJSON", placeholder: "https://http-intake.logs.datadoghq.com/api/v2/logs", url: /^https?:\/\/\S+$/ },
+  { value: "otlp", label: "OpenTelemetry", placeholder: "https://otlp.example.com/v1/logs", url: /^https?:\/\/\S+$/ },
+  { value: "syslog", label: "Syslog", placeholder: "syslog+tls://logs.papertrailapp.com:12345", url: /^syslog(\+tls)?:\/\/[^/\s]+:\d+\/?$/ },
+];
+
 /** A project's log drains: HTTPS endpoints its services' output is POSTed to, each with what it's sent and for whom. */
 export function DrainsPanel({ project, projectName, runner }: { project: string; projectName: string; runner: Runner }) {
   const [drains, setDrains] = useState<LogDrain[] | null>(null);
   const [all, setAll] = useState<{ id: string; name: string }[]>([]);
   const [url, setUrl] = useState("");
+  const [format, setFormat] = useState<DrainFormat>("ndjson");
   const [sources, setSources] = useState<DrainSource[]>(["runtime"]);
   const [envs, setEnvs] = useState("");
   const [only, setOnly] = useState<string[]>([]);
@@ -40,6 +48,7 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
   const [tested, setTested] = useState<Record<string, string>>({});
   /** The drain the form edits (its URL fixed: a new URL is a new drain), or null to add one. */
   const [editing, setEditing] = useState<LogDrain | null>(null);
+  const fmt = FORMATS.find((f) => f.value === (editing?.format ?? format)) ?? FORMATS[0];
   const { copied, copy } = useCopy();
   const load = useCallback(() => appsApi.drains(project).then(setDrains, () => setDrains([])), [project]);
   useEffect(() => {
@@ -47,10 +56,11 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
     appsApi.services(project).then((s) => setAll(s.map((x) => ({ id: x.id, name: x.name }))), () => setAll([]));
   }, [load, project]);
   const parsed = parseHeaders(headerText);
-  const ok = (editing !== null || /^https?:\/\/\S+$/.test(url.trim())) && sources.length > 0 && parsed.bad.length === 0;
+  const ok = (editing !== null || fmt.url.test(url.trim())) && sources.length > 0 && parsed.bad.length === 0 && (fmt.value !== "syslog" || !Object.keys(parsed.headers).length);
   const clear = () => {
     setEditing(null);
     setUrl("");
+    setFormat("ndjson");
     setSources(["runtime"]);
     setEnvs("");
     setOnly([]);
@@ -70,15 +80,17 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
     const what = d.sources.map((s) => SOURCES.find((x) => x.value === s)?.label.toLowerCase() ?? s).join(", ");
     const who = d.services.length ? d.services.map((id) => all.find((s) => s.id === id)?.name ?? id).join(", ") : "every service";
     const where = d.environments.length ? d.environments.join(", ") : "every environment";
-    return `${what} · ${who} · ${where}${d.previews ? ", previews too" : ""}${d.headers.length ? ` · headers ${d.headers.join(", ")}` : ""}`;
+    const as = d.format && d.format !== "ndjson" ? `${FORMATS.find((f) => f.value === d.format)?.label ?? d.format} · ` : "";
+    return `${as}${what} · ${who} · ${where}${d.previews ? ", previews too" : ""}${d.headers.length ? ` · headers ${d.headers.join(", ")}` : ""}`;
   };
 
   return (
     <Panel title="Log drains">
       <div className="space-y-3 p-5">
         <p className="text-[13px] text-muted">
-          <span className="text-fg">{projectName}</span>'s services send what each drain asks for, as it's written, to its HTTPS endpoint: batches of NDJSON, signed like webhooks, with the drain's own
-          headers (a vendor's API key). Best effort: a batch that can't be delivered after three tries is dropped.
+          <span className="text-fg">{projectName}</span>'s services send what each drain asks for, as it's written: batches of NDJSON signed like webhooks, OpenTelemetry logs to a collector's or
+          a vendor's <span className="font-mono">/v1/logs</span>, or syslog over TLS (Papertrail, a syslog server), with the drain's own headers (a vendor's API key) where it's HTTP. Best effort: a
+          batch that can't be delivered after three tries is dropped.
         </p>
         {drains && drains.length > 0 && (
           <ul className="divide-y divide-line rounded-lg border border-line">
@@ -97,7 +109,7 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
                   disabled={runner.busy !== null}
                   title="Send one test line now (not retried)"
                   onClick={() =>
-                    void runner.run("drain-test", () => appsApi.testDrain(project, d.id)).then((r) => r && setTested((t) => ({ ...t, [d.id]: r.ok ? `delivered (${r.code})` : `not delivered: ${r.error ?? `answered ${r.code}`}` })))
+                    void runner.run("drain-test", () => appsApi.testDrain(project, d.id)).then((r) => r && setTested((t) => ({ ...t, [d.id]: r.ok ? (r.code ? `delivered (${r.code})` : "delivered") : `not delivered: ${r.error ?? `answered ${r.code}`}` })))
                   }
                 >
                   <Send className="size-3.5" /> Test
@@ -146,6 +158,7 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
               } else {
                 const d = await appsApi.addDrain(project, {
                   url: url.trim(),
+                  ...(format !== "ndjson" ? { format } : {}),
                   sources,
                   ...(environments.length ? { environments } : {}),
                   ...(only.length ? { services: only } : {}),
@@ -160,12 +173,26 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
           }}
         >
           <div className="flex gap-2">
+            <select
+              value={fmt.value}
+              disabled={editing !== null}
+              onChange={(e) => setFormat(e.target.value as DrainFormat)}
+              aria-label="Format"
+              title={editing ? "A drain keeps its format: add a new one for another" : undefined}
+              className={`${input} !w-auto text-[12px]`}
+            >
+              {FORMATS.map((f) => (
+                <option key={f.value} value={f.value}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
             <input
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               readOnly={editing !== null}
               title={editing ? "A drain keeps its URL: add a new one for another" : undefined}
-              placeholder="https://http-intake.logs.datadoghq.com/api/v2/logs"
+              placeholder={fmt.placeholder}
               spellCheck={false}
               className={`${input} min-w-0 flex-1 font-mono text-[12px] ${editing ? "text-muted" : ""}`}
               aria-label="Drain URL"
@@ -220,6 +247,7 @@ export function DrainsPanel({ project, projectName, runner }: { project: string;
             className={`${input} w-full resize-y py-1.5 font-mono text-[12px] ${parsed.bad.length ? "border-danger/60" : ""}`}
           />
           {parsed.bad.length > 0 && <p className="text-[11.5px] text-danger">Not a header (Name: value): {parsed.bad.join(", ")}</p>}
+          {fmt.value === "syslog" && Object.keys(parsed.headers).length > 0 && <p className="text-[11.5px] text-danger">A syslog drain is sent no headers: its token is in its host and port.</p>}
         </form>
       </div>
     </Panel>

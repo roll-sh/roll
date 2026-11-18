@@ -34,6 +34,7 @@ pub mod drains;
 pub mod export;
 pub mod git_source;
 pub mod image_upload;
+pub mod images;
 pub mod integrations;
 pub mod jobs;
 pub mod live;
@@ -278,12 +279,17 @@ pub struct Apps {
     watching: std::sync::atomic::AtomicBool,
     watching_bases: std::sync::atomic::AtomicBool,
     watching_secrets: std::sync::atomic::AtomicBool,
+    /// Environments whose project secrets are long-polled here ([`Apps::watch_secrets_of`]), by
+    /// [`env_key`]: one task each, on the owner.
+    pub(crate) secret_watches: Mutex<std::collections::HashSet<String>>,
     /// Scaling workers' backlogs are being read (on their own task).
     scaling: std::sync::atomic::AtomicBool,
     /// The App's queued events are being run on this node.
     github_running: std::sync::atomic::AtomicBool,
     /// Web services' answers a shared cache may keep, per environment (`resp_cache`).
     pub(crate) responses: resp_cache::ResponseCache,
+    /// Images made by `/__roll/image` on this node ([`images::ImageCache`]).
+    pub(crate) images: images::ImageCache,
     /// Static sites' file indexes, by image digest, as this node read them.
     sites: Mutex<HashMap<String, Arc<sites::Site>>>,
     /// Per environment, for the live site's key: its earlier static deployments' site keys.
@@ -486,9 +492,11 @@ impl Apps {
             watching: std::sync::atomic::AtomicBool::new(false),
             watching_bases: std::sync::atomic::AtomicBool::new(false),
             watching_secrets: std::sync::atomic::AtomicBool::new(false),
+            secret_watches: Mutex::new(std::collections::HashSet::new()),
             scaling: std::sync::atomic::AtomicBool::new(false),
             github_running: std::sync::atomic::AtomicBool::new(false),
             responses: resp_cache::ResponseCache::default(),
+            images: images::ImageCache::default(),
             sites: Mutex::new(HashMap::new()),
             earlier_sites: Mutex::new(HashMap::new()),
             site_loads: Mutex::new(HashMap::new()),
@@ -1033,7 +1041,8 @@ impl Apps {
 
     async fn summary(self: &Arc<Self>, e: &EnvRow) -> Result<EnvironmentSummary> {
         let sid = e.service.clone();
-        let public = self.db(move |s| s.service(&sid)).await.map(|s| s.run.public).unwrap_or(true);
+        let svc_row = self.db(move |s| s.service(&sid)).await.ok();
+        let public = svc_row.as_ref().map(|s| s.run.public).unwrap_or(true);
         let (svc, env) = (e.service.clone(), e.name.clone());
         let recent = self.db(move |s| s.deployments(&svc, &env, 1, None)).await?;
         let active = match &e.active {
@@ -1075,7 +1084,12 @@ impl Apps {
         if latest.as_ref().is_some_and(|l| l.status == DeployStatus::Failed) {
             attention.push("deploy_failed");
         }
-        Ok(EnvironmentSummary { name: e.name.clone(), state, url: public.then(|| self.url(&e.slug)), active, latest, attention })
+        // Cached for a minute per environment ([`Apps::needs_deploy`]), so a list stays cheap.
+        let needs_deploy = match (&e.active, svc_row) {
+            (Some(a), Some(svc)) => self.needs_deploy(&svc.for_env(e).unwrap_or(svc), e, a).await?,
+            _ => false,
+        };
+        Ok(EnvironmentSummary { name: e.name.clone(), state, url: public.then(|| self.url(&e.slug)), active, latest, attention, needs_deploy, ephemeral: e.ephemeral })
     }
 
     pub async fn patch_service(self: &Arc<Self>, id: &str, body: Value) -> Result<Service> {
@@ -1430,10 +1444,6 @@ impl Apps {
             (Some(sched), Some(_)) if svc.run.kind == RunType::Cron => crate::cron::Schedule::parse(sched, svc.run.timezone.as_deref()).ok().and_then(|s| s.next_after(code_sql::now_ms())),
             _ => None,
         };
-        let needs_deploy = match &r.active {
-            Some(a) => self.needs_deploy(&svc, &r, a).await?,
-            None => false,
-        };
         let gate = self.access(&r.service, &r.name).await?;
         let (private, signed_in) = (gate.is_some(), gate.is_some_and(|a| a.signed_in));
         let (sid, e) = (r.service.clone(), r.name.clone());
@@ -1442,12 +1452,10 @@ impl Apps {
             summary,
             service: r.service.clone(),
             branch: r.branch.clone(),
-            ephemeral: r.ephemeral,
             instances,
             domains,
             port: r.port,
             tcp: r.tcp_port.filter(|_| svc.run.tcp && svc.run.public && !private).map(|p| format!("{}:{p}", self.cfg.tcp_host)),
-            needs_deploy,
             private,
             signed_in,
             next_run_at,
@@ -1908,6 +1916,10 @@ impl Apps {
         if let Some(on) = paused {
             let (sid, e) = (service.to_string(), env.to_string());
             self.db(move |s| s.set_paused(&sid, &e, on)).await?;
+            // Resumed: its secrets are watched again (a watch ends itself while it's paused).
+            if !on {
+                self.watch_secrets_of(service).await;
+            }
             // At once on its owner: what runs stops, and the next tick keeps no floor; resumed,
             // the next tick (or request) starts what it wants again.
             let live = self.live(service, env);
@@ -1999,6 +2011,10 @@ impl Apps {
         if let Some(Value::Bool(on)) = o.get("redeploy_on_secrets") {
             let (sid, e, on) = (service.to_string(), env.to_string(), *on);
             self.db(move |s| s.set_redeploy_on_secrets(&sid, &e, on)).await?;
+            // Watched from now on (a watch already running ends itself once it's off).
+            if on {
+                self.watch_secrets_of(service).await;
+            }
         }
         // Traces: a token of the environment's own (kept sealed: it goes into every deploy's
         // variables), or none. Its variables reach instances at the next deploy.

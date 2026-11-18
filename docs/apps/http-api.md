@@ -55,9 +55,9 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/projects/{project}/notifications/{nid}/test` | | `{ ok, code, error }` (sent now, not retried) | write |
 | `GET /v1/apps/projects/{project}/notifications/{nid}/deliveries` | | `Delivery[]`, newest first (50) | read |
 | `GET /v1/apps/projects/{project}/drains` | | `LogDrain[]` (the URL never returned, only its host) | read |
-| `POST /v1/apps/projects/{project}/drains` | `{ url, sources?, environments?, services?, previews?, headers? }` (https, a public host; `sources` some of `runtime` (default), `http`, `build`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`) | 201 `LogDrain` + `secret` once | reveal (its secret comes back) |
-| `PATCH /v1/apps/projects/{project}/drains/{did}` | `{ sources?, environments?, services?, previews?, headers? }` (given ones replace, `headers` all of them; a new URL is a new drain) | `LogDrain` | reveal (it can send more out) |
-| `POST /v1/apps/projects/{project}/drains/{did}/test` | | `{ ok, code, error }` (one line sent now, signed and with its headers, not retried) | write |
+| `POST /v1/apps/projects/{project}/drains` | `{ url, format?, sources?, environments?, services?, previews?, headers? }` (https, a public host, or `syslog+tls://host:port` for `format: "syslog"`, which takes no headers; `sources` some of `runtime` (default), `http`, `build`; services by name or id; `headers` `{name: value}`, at most 10, sealed, never roll's own or `content-type`) | 201 `LogDrain` + `secret` once | reveal (its secret comes back) |
+| `PATCH /v1/apps/projects/{project}/drains/{did}` | `{ sources?, environments?, services?, previews?, headers? }` (given ones replace, `headers` all of them; a new URL or format is a new drain) | `LogDrain` | reveal (it can send more out) |
+| `POST /v1/apps/projects/{project}/drains/{did}/test` | | `{ ok, code, error }` (one line sent now, signed and with its headers, not retried; `code` null for syslog) | write |
 | `DELETE /v1/apps/projects/{project}/drains/{did}` | | 204 | write |
 | `GET /v1/apps/projects/{project}/limits` | | `SpendLimits` | read |
 | `PUT /v1/apps/projects/{project}/limits` | `{ alert_usd: number \| null, hard_usd: number \| null }` | `SpendLimits` (this month's alert and cap are decided again within 30 s) | admin (the hard limit pauses the whole project) |
@@ -118,9 +118,9 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `POST /v1/apps/services/{id}/environments/{env}/runs/{run}/cancel` | | `CronRun` (409 unless it's running) | deploy* |
 | `GET /v1/apps/services/{id}/environments/{env}/files?path=&instance=` | | `application/x-tar`: what's at the absolute `path` in the instance (a shell's, or `instance`), `X-Roll-Instance` naming it; 400 for a relative path, 409 when the runtime couldn't copy | admin (files hold what the app keeps, its secrets too) |
 | `PUT /v1/apps/services/{id}/environments/{env}/files?path=&instance=` | a tar (at most 100 MiB) | `{ instance, path }`: its files written under the directory `path` | admin (what's written runs next) |
-| `GET /v1/apps/services/{id}/environments/{env}/shell?instance=&cols=&rows=` | WebSocket | a terminal: binary both ways, text `{"resize":[cols,rows]}` | admin (a shell runs anything with the environment's variables, as agents' shells) |
+| `GET /v1/apps/services/{id}/environments/{env}/shell?instance=&cols=&rows=&console=&command=&cpu=&memory_mb=` | WebSocket | a terminal: binary both ways, text `{"resize":[cols,rows]}`; `console=true` makes it a fresh container of the live deployment running `command` (a login shell without one), sized by `cpu` (0.25–8) and `memory_mb` (256–16384), removed when it closes (`command`, `cpu`, `memory_mb` without `console`: 400) | admin (a shell runs anything with the environment's variables, as agents' shells) |
 | `GET /v1/apps/services/{id}/environments/{env}/tunnel` | WebSocket | one TCP connection to the web service's own port, binary both ways (`roll apps proxy`); wakes an instance and holds it while open; at most 20 per environment (409); 409 for a worker, a cron service or a static site | admin (it reaches the port past the allow list, access and maintenance) |
-| `POST /v1/apps/services/{id}/environments/{env}/shell/sessions` | `{ instance?, cols?, rows? }` | 201 `{ id }` (a shell over HTTP: the dashboard's terminal) | admin (a shell runs anything with the environment's variables, as agents' shells) |
+| `POST /v1/apps/services/{id}/environments/{env}/shell/sessions` | `{ instance?, cols?, rows?, console?, command?, cpu?, memory_mb? }` (a console as on the WebSocket) | 201 `{ id }` (a shell over HTTP: the dashboard's terminal) | admin (a shell runs anything with the environment's variables, as agents' shells) |
 | `GET /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/screen` | | SSE: base64 chunks (the scrollback first), then `event: closed` | admin (a shell runs anything with the environment's variables, as agents' shells) |
 | `POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/keys` | `{ data }` (base64, at most 64 KiB) | 204 | admin (a shell runs anything with the environment's variables, as agents' shells) |
 | `POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize` | `{ cols, rows }` | 204 | admin (all of a shell session is) |
@@ -309,6 +309,8 @@ type EnvironmentSummary = {
   active: { id: string; revision: string | null; created_at: number } | null;
   latest: { id: string; status: DeployStatus } | null;
   attention?: ("crash_loop" | "capped" | "paused" | "held" | "maintenance" | "deploy_failed")[]; // what wants its owner's eye (absent: nothing)
+  needs_deploy: boolean;     // settings, variables, links or the project's secrets changed since the active deployment (cached a minute per environment)
+  ephemeral: boolean;        // a preview environment
 };
 
 type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
@@ -435,11 +437,9 @@ type EnvironmentPut = {
 type Environment = EnvironmentSummary & {
   service: string;
   branch: string | null;     // deploys on every landing on this branch (repo sources)
-  ephemeral: boolean;        // a preview environment
   instances: Instance[];
   domains: Domain[];
   port: number | null;       // locally, the service's own port (ROLL_APPS_PORTS)
-  needs_deploy: boolean;     // variables or settings changed since the active deployment
   private: boolean;          // its hostnames answer only visitors with its access token, or who signed in
   signed_in?: true;          // people signed in to roll who can open its project get in (access.signed_in)
   next_run_at: number | null; // a cron service's next scheduled run, once deployed
@@ -640,6 +640,7 @@ type LogDrain = {
   services: string[];         // only these services' (ids; empty: every one)
   previews: boolean;          // preview environments' too (a drain made before this field: true)
   headers: string[];          // the names of the headers it's sent with (values sealed, never returned)
+  format: "ndjson" | "otlp" | "syslog"; // ndjson: signed batches of lines; otlp: an OTLP/HTTP JSON ExportLogsServiceRequest to the URL (a collector's /v1/logs); syslog: RFC 5424 over TLS (RFC 5425's octet counting), no headers
 };
 // A batch's line: { t, source, service, service_name, environment, instance, deployment, stream, text }.
 /** A request through the proxy (`stream: "http"` lines' text, JSON). The path has no query string. */

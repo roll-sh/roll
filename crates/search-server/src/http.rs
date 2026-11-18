@@ -445,6 +445,13 @@ pub fn filtered() -> Response<Full<Bytes>> {
 
 async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&str>, origin: Origin, timeouts: (Duration, Duration)) -> Result<Response<Full<Bytes>>, DropConnection> {
     let mut es = head_of(&req);
+    // The client's address for audit entries is the one the allowlist checks: only the node
+    // says it, never a client.
+    use search_es::xpack::security::audit::CLIENT_ADDRESS_HEADER;
+    es.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(CLIENT_ADDRESS_HEADER));
+    if let Origin::Client(ip) = origin {
+        es.headers.push((CLIENT_ADDRESS_HEADER.to_string(), crate::allow::canonical(ip).to_string()));
+    }
     let gzip_ok = accepts_gzip(es.header("accept-encoding")) && es.method != "HEAD";
     if let Some(e) = head_too_long(&req) {
         return Ok(closing(to_hyper(search_es::rest::error_response(&e, &es, search_es::Dialect::Elasticsearch), gzip_ok).await));

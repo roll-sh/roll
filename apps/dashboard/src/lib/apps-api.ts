@@ -137,6 +137,10 @@ export interface EnvironmentSummary {
   latest: { id: string; status: DeployStatus } | null;
   /** What wants its owner's eye: a crash loop, the project capped by its spend limit, paused, maintenance, its latest deploy failed. */
   attention?: ("crash_loop" | "capped" | "paused" | "held" | "maintenance" | "deploy_failed")[];
+  /** Settings, variables, links or the project's secrets changed since the live deployment: a redeploy applies them. */
+  needs_deploy: boolean;
+  /** A preview's (made for a branch or a pull request). */
+  ephemeral: boolean;
 }
 
 /** A deleted service, kept stopped for a restore until `purge_at` (ms), then deleted for good. */
@@ -521,13 +525,11 @@ export interface Egress {
 export interface Environment extends EnvironmentSummary {
   service: string;
   branch: string | null;
-  ephemeral: boolean;
   instances: Instance[];
   domains: Domain[];
   port: number | null;
   /** A TCP service's address (`host:port`), once it has its port. */
   tcp?: string | null;
-  needs_deploy: boolean;
   /** Its hostnames answer only visitors with its access token (a preview). */
   private: boolean;
   /** A cron service's next scheduled run, once deployed. */
@@ -960,9 +962,13 @@ export interface LogDrain {
   previews: boolean;
   /** The names of the headers it's sent with; their values are sealed, never shown. */
   headers: string[];
+  /** How its lines go: roll's signed NDJSON, OpenTelemetry logs (OTLP/HTTP JSON), or syslog (RFC 5424 over TLS). */
+  format: DrainFormat;
   /** Only in the answer that made it. */
   secret?: string;
 }
+
+export type DrainFormat = "ndjson" | "otlp" | "syslog";
 
 /** A project's monthly spend limits (US dollars at roll's prices, the calendar month in UTC). */
 export interface SpendLimits {
@@ -1073,7 +1079,7 @@ export const appsApi = {
   environment: (id: string, e: string) => call<Environment>("GET", env(id, e)),
   notifyTargets: (project: string) => call<NotifyTarget[]>("GET", `/v1/apps/projects/${enc(project)}/notifications`),
   drains: (project: string) => call<LogDrain[]>("GET", `/v1/apps/projects/${enc(project)}/drains`),
-  addDrain: (project: string, body: { url: string } & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
+  addDrain: (project: string, body: { url: string; format?: DrainFormat } & DrainSettings) => call<LogDrain>("POST", `/v1/apps/projects/${enc(project)}/drains`, body),
   /** Its sources, filters and headers (given ones replace; `headers` replaces them all); its URL and secret stay. */
   updateDrain: (project: string, id: string, body: DrainSettings) => call<LogDrain>("PATCH", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}`, body),
   testDrain: (project: string, id: string) => call<{ ok: boolean; code: number | null; error: string | null }>("POST", `/v1/apps/projects/${enc(project)}/drains/${enc(id)}/test`),
@@ -1157,7 +1163,7 @@ export const appsApi = {
     e: string,
     q: { q?: string; where?: string; since?: number; before?: number; instance?: string; deployment?: string; stream?: string; level?: LogLevel; http?: boolean; by?: string; status?: string; min_ms?: number; tail?: number },
   ): Promise<{ lines: LogLine[]; truncated: boolean }> => {
-    const res = await fetch(`${ROLL_API}${env(id, e)}/logs${qs({ ...q, http: q.http || undefined, tail: q.tail ?? 500 })}`, { headers: apiHeaders(), cache: "no-store" });
+    const res = await fetch(`${ROLL_API}${env(id, e)}/logs${qs({ ...q, http: q.http || undefined, tail: q.tail ?? 500 })}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
     onApiStatus(res.status);
     const data = await res.json().catch(() => null);
     if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`.trim());
@@ -1195,7 +1201,7 @@ export const appsApi = {
 
   /** A shell in a running instance over HTTP (a browser can't send the token on a WebSocket). */
   /** `instance`: that one (default: one that's running, or a woken one). */
-  openShell: (id: string, e: string, body: { cols: number; rows: number; instance?: string }) => call<{ id: string }>("POST", `${env(id, e)}/shell/sessions`, body),
+  openShell: (id: string, e: string, body: { cols: number; rows: number; instance?: string; console?: boolean; command?: string; cpu?: number; memory_mb?: number }) => call<{ id: string }>("POST", `${env(id, e)}/shell/sessions`, body),
   /** The environment's last finished minute as Prometheus text, for a scraper with a token that may read it. */
   prometheusUrl: (id: string, e: string) => `${ROLL_API}${env(id, e)}/metrics?format=prometheus`,
   shellKeys: (id: string, e: string, sh: string, data: string) => call<null>("POST", `${env(id, e)}/shell/sessions/${encodeURIComponent(sh)}/keys`, { data }),

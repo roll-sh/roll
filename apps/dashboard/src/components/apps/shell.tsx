@@ -32,10 +32,14 @@ function encode(text: string): string {
  * SSE, keystrokes batched into POSTs, the size sent when the panel changes. A web service asleep is
  * woken and kept up while the shell is open.
  */
+const CONSOLE = "+console";
+
 export function ShellTab({ service, env, instances = [] }: { service: string; env: string; instances?: Instance[] }) {
   const [session, setSession] = useState<string | null>(null);
-  // An instance of its own (empty: one that's running, or a woken one).
+  // An instance of its own (empty: one that's running, or a woken one; CONSOLE: a fresh one).
   const [instance, setInstance] = useState("");
+  const [command, setCommand] = useState("");
+  const console_ = instance === CONSOLE;
   const running = instances.filter((i) => i.state === "running");
   const [state, setState] = useState<"idle" | "opening" | "open" | "ended">("idle");
   const [error, setError] = useState<string | null>(null);
@@ -44,7 +48,8 @@ export function ShellTab({ service, env, instances = [] }: { service: string; en
     setError(null);
     setState("opening");
     try {
-      const { id } = await appsApi.openShell(service, env, { cols: 100, rows: 30, ...(instance && running.some((i) => i.id === instance) ? { instance } : {}) });
+      const where = console_ ? { console: true, ...(command.trim() ? { command: command.trim() } : {}) } : instance && running.some((i) => i.id === instance) ? { instance } : {};
+      const { id } = await appsApi.openShell(service, env, { cols: 100, rows: 30, ...where });
       setSession(id);
       setState("open");
     } catch (e) {
@@ -70,16 +75,19 @@ export function ShellTab({ service, env, instances = [] }: { service: string; en
             </button>
           ) : (
             <span className="flex items-center gap-2">
-              {running.length > 1 && (
-                <select value={instance} onChange={(e) => setInstance(e.target.value)} aria-label="Instance" className={`${input} !w-auto font-mono text-[12px]`}>
-                  <option value="">Any instance</option>
-                  {running.map((i) => (
+              {console_ && (
+                <input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="rails console" aria-label="Command" className={`${input} !w-48 font-mono text-[12px]`} />
+              )}
+              <select value={instance} onChange={(e) => setInstance(e.target.value)} aria-label="Where" className={`${input} !w-auto font-mono text-[12px]`}>
+                <option value="">{running.length > 1 ? "Any instance" : "A running instance"}</option>
+                {running.length > 1 &&
+                  running.map((i) => (
                     <option key={i.id} value={i.id}>
                       {i.id}
                     </option>
                   ))}
-                </select>
-              )}
+                <option value={CONSOLE}>A new console</option>
+              </select>
             <button type="button" className={primary} disabled={state === "opening"} onClick={() => void open()}>
               <SquareTerminal className="size-3.5" /> {state === "opening" ? "Opening…" : state === "ended" ? "Open another" : "Open a shell"}
             </button>
@@ -94,8 +102,12 @@ export function ShellTab({ service, env, instances = [] }: { service: string; en
           }} />
         ) : (
           <div className="px-5 py-4 text-[13px] text-muted">
-            {state === "ended" ? "The shell ended." : "bash (or sh) in a running instance, with the environment's variables. A service that's asleep is woken while it's open."}{" "}
-            From a terminal: <code className="font-mono text-fg">roll apps ssh -s {service} -e {env}</code>.
+            {state === "ended"
+              ? "The shell ended."
+              : console_
+                ? "A fresh container of the live deployment, with the environment's variables and no traffic: what you type runs there (a login shell when no command is given), and the container goes when you close it."
+                : "bash (or sh) in a running instance, with the environment's variables. A service that's asleep is woken while it's open."}{" "}
+            From a terminal: <code className="font-mono text-fg">{console_ ? `roll apps run -i -s ${service} -e ${env}${command.trim() ? ` -- ${command.trim()}` : ""}` : `roll apps ssh -s ${service} -e ${env}`}</code>.
           </div>
         )}
       </Panel>
