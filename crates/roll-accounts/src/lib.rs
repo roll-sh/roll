@@ -732,6 +732,16 @@ impl Accounts {
         Ok(self.db.read(|c| c.query_row("SELECT code_owner_id FROM users WHERE id = ?", [user], |r| r.get::<_, Option<String>>(0)).optional())?.flatten())
     }
 
+    /// The handles of the people `ids` name (at most 500), whatever their state.
+    pub fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>> {
+        let ids = &ids[..ids.len().min(500)];
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; ids.len()].join(", ");
+        Ok(self.db.read(|c| c.query(&format!("SELECT id, handle FROM users WHERE id IN ({marks})"), ids, |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?)
+    }
+
     pub fn users(&self) -> Result<Vec<User>> {
         let ids = self.db.read(|c| c.query("SELECT id FROM users WHERE deleted_at IS NULL ORDER BY created_at, id", (), |r| r.get::<_, String>(0)))?;
         ids.iter().map(|id| self.user(id)).collect()
@@ -1102,6 +1112,10 @@ impl roll_auth::Sessions for Resolver {
 
     fn person_now(&self, user: &str) -> Result<Option<roll_auth::SignedIn>, String> {
         self.0.person(user).map_err(|e| e.to_string())
+    }
+
+    fn handles(&self, ids: &[String]) -> Result<Vec<(String, String)>, String> {
+        self.0.handles(ids).map_err(|e| e.to_string())
     }
 
     fn sso_trust<'a>(&'a self, id: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SsoTrust>, String>> {
