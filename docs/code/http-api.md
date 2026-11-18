@@ -162,7 +162,7 @@ Preview = {state: "creating" | "running" | "sleeping" | "failed", url: string | 
                           pages?: [{path, errors, percent: number | null, base_percent: number | null}] /* the project's other pages (github.pages): errors while each loaded, its change since the push before, against the default branch */,
                           speed_budget?: {load_ms, bytes} /* the project's github.budget (0: no limit), for roll/speed */,
                           visual_review?: {state: 'unchanged' | 'changed' | 'accepted', branch, percent, by: string | null, required, head?, pages?: {path /* '': the first page */, percent, by: string | null}[] /* each page that differs, accepted per page */} /* the roll/visual status (the project's visual_review; required: a visual blocker too) */,
-                          notes?: {path, note, by, crop_url?}[] /* the preview page's open notes, newest first, at most 10; untrusted text; crop_url: a public preview's signed picture of the note's element */} /* roll previews (docs/previews.md) */}
+                          notes?: {path, note, by, crop_url?}[] /* the preview page's open notes, newest first, at most 10; untrusted text; crop_url: a public preview's signed picture of the note's element */, issues?: string[] /* the Linear issues the change names: `ENG-123` in its title, or at the start of its branch's last part (`ada/eng-123-fix`); at most 3 */} /* roll previews (docs/previews.md) */}
 Change  = {id, repo_id, repo /* full name */, number /* per-repo, from 1 */, title, body, author,
            state: "open" | "queued" | "landed" | "conflict" | "closed",
            base, head, revision, work_item: string | null, branch: string | null /* git branch it was pushed as */,
@@ -487,7 +487,11 @@ dashboard_url}`: the repo's workspace project's previews passed that share of th
 (docs/previews.md). A `preview` event is `{change, preview}`, with `preview: null` once it's gone; a
 preview environment that went with the project's `teardown` failing adds `teardown` (what the job
 said: its exit code and its output's tail, the change's code's words), and the pull request's
-comment says so too.
+comment says so too. `became` lists what the update reached that the change's preview wasn't
+already at, at that head: `ready` (up; once a push, and again only after it went down, never when
+it wakes from sleep or its screenshot or cost changes), `failed` (once a push: its retries stay
+failed) and `visual_change` (a visual change waits for a review). It's absent when there's nothing new, so an automation that posts "the preview is
+ready" filters on it.
 
 **Stream limits.** Each caller may hold at most 32 event streams open at once
 (`--code-max-streams-per-caller`, `ROLL_CODE_MAX_STREAMS_PER_CALLER`), and the server 10,000 in total
@@ -503,7 +507,7 @@ same slots.
 
 ```
 landed  = {changeset, git_commit: sha | null, ref, generation, message, author, change: string | null, files: number, at, count}
-change  = Change      work = WorkItem      preview = {change, preview: Preview}
+change  = Change      work = WorkItem      preview = {change, preview: Preview, became?: ("ready" | "failed" | "visual_change")[]}
 check   = {change, check: Check}  |  {changeset, status: Status} /* a commit status was posted */
 queue   = {state, paused, depth, batch: Queue.batch}   a summary: refetch GET …/queue for the entries
 review  = Review      thread = Thread

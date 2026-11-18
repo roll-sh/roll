@@ -200,6 +200,7 @@ impl CodeSource {
                     .then(|| p.diff_link.clone())
                     .flatten()
                     .map(|(exp, sig)| format!("{}/v1/previews/{}/screenshot.png?diff=base&exp={exp}&sig={sig}", self.code.config.api_url.trim_end_matches('/'), p.id)),
+                issues: linear_issues(&p.title, p.branch.as_deref()),
                 notes: p
                     .notes
                     .iter()
@@ -388,11 +389,11 @@ impl Trees for CodeSource {
         iso.prepare(job, tree.path()).await
     }
 
-    async fn run(&self, iso: &Arc<dyn Isolation>, spec: &code_preview::config::CheckSpec, repo: &str, revision: &str, env: &[(String, String)]) -> anyhow::Result<code_preview::runner::RunOutput> {
+    async fn run(&self, iso: &Arc<dyn Isolation>, spec: &code_preview::config::CheckSpec, repo: &str, revision: &str, env: &[(String, String)], network: Option<code_preview::isolation::Network>) -> anyhow::Result<code_preview::runner::RunOutput> {
         let r = self.repo(repo)?;
         let cs = self.code.store.resolve_or_404(&r.id, revision)?;
         let tree = self.code.checkout(&r.id, &cs).await?;
-        Ok(code_preview::runner::run_check(iso, spec, tree.path(), env).await)
+        Ok(code_preview::runner::run_check_on(iso, spec, tree.path(), env, network).await)
     }
 }
 
@@ -450,5 +451,52 @@ impl PreviewBackend for Backend {
             },
             _ => self.inner.delete(repo, change).await,
         }
+    }
+}
+
+/// The Linear issues a change names: `ENG-123` (a team key of 1 to 7 capital letters or digits,
+/// starting with a letter, a dash, a number) anywhere in its title, and one at the start of its
+/// branch's last part in any case (`ada/eng-123-fix-cart`, Linear's own branch names), given in
+/// capitals. At most 3, once each, the title's first.
+pub fn linear_issues(title: &str, branch: Option<&str>) -> Vec<String> {
+    fn issue(key: &str, n: &str) -> Option<String> {
+        let key_ok = (1..=7).contains(&key.len()) && key.starts_with(|c: char| c.is_ascii_alphabetic()) && key.bytes().all(|b| b.is_ascii_alphanumeric());
+        let n_ok = (1..=7).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_digit()) && !n.starts_with('0');
+        (key_ok && n_ok).then(|| format!("{}-{n}", key.to_ascii_uppercase()))
+    }
+    let mut out: Vec<String> = Vec::new();
+    for word in title.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')) {
+        let parts: Vec<&str> = word.split('-').collect();
+        for w in parts.windows(2) {
+            if w[0].bytes().all(|b| !b.is_ascii_lowercase())
+                && let Some(i) = issue(w[0], w[1])
+                && !out.contains(&i)
+            {
+                out.push(i);
+            }
+        }
+    }
+    if let Some(last) = branch.and_then(|b| b.rsplit('/').next()) {
+        let mut parts = last.split('-');
+        if let (Some(k), Some(n)) = (parts.next(), parts.next())
+            && let Some(i) = issue(k, n)
+            && !out.contains(&i)
+        {
+            out.push(i);
+        }
+    }
+    out.truncate(3);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_changes_linear_issues_from_its_title_and_branch() {
+        let i = super::linear_issues;
+        assert_eq!(i("ENG-123: Fix the cart", None), ["ENG-123"], "roll's Linear agent's changes");
+        assert_eq!(i("Fix the cart (fixes ENG-12, WEB-7)", Some("ada/eng-123-fix-cart")), ["ENG-12", "WEB-7", "ENG-123"], "Linear's branch names, in any case");
+        assert_eq!(i("bump covid-19 data, ENG-0", Some("feat/cart-badge")), Vec::<String>::new(), "lowercase in a title, a zero, a branch without one");
+        assert_eq!(i("A-1 B-2 C-3 D-4", None).len(), 3, "at most 3");
     }
 }

@@ -14,7 +14,7 @@
 //! - [`Access::Product`] routes decide everything themselves, anonymous callers included (roll
 //!   code's owners, tokens and public repositories; signed internal hops).
 //! - [`Access::User`] routes take the operator or any signed-in user; the product scopes what a
-//!   user sees (workspace projects).
+//!   user sees (workspace projects, search clusters).
 //! - [`Access::UserOrCredential`] routes take both: a signed-in user, whom the product scopes, or a
 //!   request with an `Authorization` header the product verifies (roll secrets: a person's own
 //!   projects, or a secrets token).
@@ -153,6 +153,28 @@ impl Grant {
 impl fmt::Debug for Grant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Grant").field("id", &self.id).field("name", &self.name).field("kind", &self.kind).field("user", &self.user).finish()
+    }
+}
+
+/// In a grant's request when a person's approval is what let it run: this one request approved
+/// (`until: None`), or a rule an approval allowed for a while (`until`: when that rule lapses). A
+/// product's audit names it ("revealed by token X, approved by Y"). Set only by the gate, on the
+/// node that decided: a request forwarded to an owner after the decision doesn't carry it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Approved {
+    /// `apr_…`
+    pub id: Arc<str>,
+    /// Who approved it, in order, as the approvals page names them (`operator`, a person's
+    /// `usr_…`, a chat approver's `slack:U…`): more than one when roll's policy asks for two
+    /// people. Empty when it wasn't recorded.
+    pub by: Vec<Arc<str>>,
+    /// Unix ms: the remembered rule that allowed it lasts until then. `None`: this request alone.
+    pub until: Option<i64>,
+}
+
+impl Approved {
+    pub fn on(extensions: &axum::http::Extensions) -> Option<&Approved> {
+        extensions.get::<Approved>()
     }
 }
 
@@ -434,7 +456,7 @@ pub async fn check(State(gate): State<Arc<Gate>>, mut req: Request, next: Next) 
         Access::UserOrCredential(_) if authorization || signed_in.is_some() => next.run(req).await,
         _ if signed_in.is_some() => error(
             StatusCode::FORBIDDEN,
-            "your account can use roll code, agents and projects; this API is for roll's admins for now",
+            "your account can use roll code, agents, projects and search; this API is for roll's admins for now",
             "operator_only",
         ),
         _ => unauthorized(),

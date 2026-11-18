@@ -669,16 +669,25 @@ fn runs_searches(api: Api) -> bool {
     )
 }
 
+/// By-query runs: they scan with a query, and run its scripts, synchronously between their
+/// writes. Off the reactor like searches, but a client that disconnects doesn't cancel them
+/// (Elasticsearch's by-query REST actions aren't cancellable by their channel).
+fn runs_by_query(api: Api) -> bool {
+    matches!(api, Api::DeleteByQuery | Api::UpdateByQuery | Api::Reindex)
+}
+
 /// Whether this thread is a tokio worker that may hand its other tasks to another thread.
 fn can_block_in_place() -> bool {
     tokio::runtime::Handle::try_current().is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
 }
 
-/// Runs the API handler. A search runs with its worker thread taken out of the reactor
-/// (`block_in_place`): the worker's other connections move to another thread, so a long
-/// search doesn't stall `GET /`, `_cluster/health` or other searches behind it.
+/// Runs the API handler. A search or by-query run runs with its worker thread taken out of the
+/// reactor (`block_in_place`): the worker's other connections move to another thread, so a
+/// long search doesn't stall `GET /`, `_cluster/health` or other searches behind it. Run on the
+/// worker itself, it would also stall the runtime's I/O and timers when that worker was the
+/// last to poll them: other workers take the I/O driver over only when there is work to steal.
 async fn dispatch_off_reactor(ctx: &Ctx<'_>) -> EsResult<Reply> {
-    if runs_searches(ctx.api) && can_block_in_place() {
+    if (runs_searches(ctx.api) || runs_by_query(ctx.api)) && can_block_in_place() {
         return tokio::task::block_in_place(|| {
             // Registered on the thread the search runs on (the task is thread-bound).
             let _task = crate::tasks::RequestTask::start(ctx);

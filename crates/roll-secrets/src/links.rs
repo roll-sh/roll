@@ -213,7 +213,7 @@ impl Links {
             return Err(Error::BadRequest(format!("{} {} is {}, not {}", l.kind, l.field, f.modes.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(" or "), l.mode.as_str())));
         }
         for k in l.options.keys() {
-            if !["ttl_minutes", "grace_minutes", "rotate_days", "branch", "permission", "names", "principals", "roles"].contains(&k.as_str()) {
+            if !["ttl_minutes", "grace_minutes", "rotate_days", "branch", "permission", "names", "principals", "roles", "repositories", "permissions"].contains(&k.as_str()) {
                 return Err(Error::BadRequest(format!("unknown link option {k}")));
             }
         }
@@ -271,6 +271,9 @@ impl crate::Secrets {
         }
         if let Some(provider) = self.links.0.get(crate::pki::KIND) {
             out.extend(self.ca_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::pki::KIND.into(), r#ref: id.clone(), name, fields: provider.fields_for(&id) }));
+        }
+        if let Some(provider) = self.links.0.get(crate::github_app::KIND) {
+            out.extend(self.github_app_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::github_app::KIND.into(), r#ref: id, name, fields: provider.fields().to_vec() }));
         }
         if let Some(provider) = self.links.0.get(crate::ssh::KIND) {
             out.extend(self.ssh_ca_refs(project)?.into_iter().map(|(id, name)| Target { kind: crate::ssh::KIND.into(), r#ref: id.clone(), name, fields: provider.fields_for(&id) }));

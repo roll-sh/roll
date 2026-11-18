@@ -73,9 +73,11 @@ impl Apps {
             }
             let sid = svc.id.clone();
             let Ok(envs) = self.db(move |s| s.environments(&sid)).await else { continue };
-            // Held after a rollback: a moved tag waits for a person, as a push does.
-            for env in envs.into_iter().filter(|e| e.follow_tag && !e.paused && e.held_by.is_none()) {
-                match self.check_tag(&svc.id, &env.name, image, env.active.as_deref(), env.tag_seen.as_deref()).await {
+            // Held: a moved tag waits for a person, as a push does (after a rollback, not made;
+            // held by a person, built to `ready`).
+            for env in envs.into_iter().filter(|e| e.follow_tag && !e.paused && !matches!(crate::deploy::hold_of(&svc, e), crate::deploy::Held::Skip(_))) {
+                let ready = matches!(crate::deploy::hold_of(&svc, &env), crate::deploy::Held::Ready);
+                match self.check_tag(&svc.id, &env.name, image, env.active.as_deref(), env.tag_seen.as_deref(), ready).await {
                     Ok(Some(d)) => started.push(d),
                     Ok(None) => {}
                     Err(e) => self.logs.sink(format!("env:{}/{}", svc.id, env.name), crate::logs::Stream::System).line(format!("watching {image}: {e}")),
@@ -85,7 +87,7 @@ impl Apps {
         started
     }
 
-    async fn check_tag(self: &Arc<Self>, service: &str, env: &str, image: &str, active: Option<&str>, seen: Option<&str>) -> Result<Option<String>> {
+    async fn check_tag(self: &Arc<Self>, service: &str, env: &str, image: &str, active: Option<&str>, seen: Option<&str>, ready: bool) -> Result<Option<String>> {
         let Some(active) = active else { return Ok(None) };
         let (sid, a) = (service.to_string(), active.to_string());
         let (live, pending) = self.db(move |s| Ok((s.deployment(&a)?, s.pending_deployments(&sid)?))).await?;
@@ -115,7 +117,7 @@ impl Apps {
         }
         let short: String = now.trim_start_matches("sha256:").chars().take(12).collect();
         let d = self
-            .deploy(service, env, json!({ "message": format!("{image} moved to {short}") }), By { trigger: Trigger::Api, actor: Some("tag watch".into()) }, None, None)
+            .deploy(service, env, json!({ "message": format!("{image} moved to {short}"), "no_traffic": ready }), By { trigger: Trigger::Api, actor: Some("tag watch".into()) }, None, None)
             .await?;
         Ok(Some(d.id))
     }
