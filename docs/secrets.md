@@ -140,6 +140,14 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    builder.Configuration.AddRollSecrets("production", s => s.ReloadOnChange = true);
    var ct = await c.Transit("cards").EncryptAsync(cardNumber, $"order:{id}");
    ```
+
+   In Ruby, `sdk/ruby/roll_secrets` (`roll_secrets`, the standard library only, sealed resolves
+   included; its README loads values into a Rails app at boot):
+
+   ```ruby
+   c = RollSecrets.from_env
+   c.watch("production") { |v| reload(v.values) }
+   ```
 8. **When something goes wrong**: `roll secrets history`, `roll secrets rollback --at 2h`, the
    audit log (`roll secrets audit`, or streamed to your SIEM), and `roll secrets share KEY` to hand
    one value to someone outside roll through a link that works once.
