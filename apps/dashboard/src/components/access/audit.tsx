@@ -77,6 +77,7 @@ export function Audit({ grant }: { grant?: string }) {
             <option value="mcp">MCP tool calls</option>
             <option value="api">API requests</option>
             <option value="access">Changes to tokens and access</option>
+            <option value="accounts">Sign-ins and accounts</option>
           </select>
           <button onClick={() => void download("csv")} className={`${btn} ml-auto`} title="The newest 1,000 matching events, a row each, for a spreadsheet">
             Export CSV

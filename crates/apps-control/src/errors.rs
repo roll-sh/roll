@@ -19,6 +19,8 @@ const FRAMES: usize = 3;
 const MAX_SAMPLE: usize = 8 << 10;
 /// The most lines one trace joins.
 pub(crate) const MAX_TRACE_LINES: usize = 200;
+/// New errors said (`error.new`) an environment a pass, at most.
+const NEW_PER_PASS: usize = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -265,8 +267,15 @@ impl Apps {
         // A little before, so a trace that began just before the last look is read whole.
         let (lines, _) = self.logs.read(&format!("env:{}/{}", l.service, l.env), |x| matches!(x.stream, Stream::Stdout | Stream::Stderr), Some(since - 30_000), None, 20_000).await;
         let mut said = BTreeSet::new();
+        // At most a few new ones said a pass: an error line whose words vary (a name in it) must
+        // not become a flood of events and notifications.
+        let (mut told, mut more) = (0, 0);
         for o in occurrences(&lines).into_iter().filter(|o| o.at >= since) {
             if !said.insert(o.fingerprint.clone()) {
+                continue;
+            }
+            if told >= NEW_PER_PASS {
+                more += 1;
                 continue;
             }
             let name = name_of(&o);
@@ -278,6 +287,10 @@ impl Apps {
             let data = json!({ "fingerprint": o.fingerprint, "kind": o.kind.name(), "name": name });
             let _ = self.db(move |s| s.add_event("error.new", &sid, &e, dep.as_deref(), &data)).await;
             l.log.stream(Stream::System).line(format!("a new error: {name} ({})", o.fingerprint));
+            told += 1;
+        }
+        if more > 0 {
+            l.log.stream(Stream::System).line(format!("and {more} more errors new in the last minute, not said one by one (the Metrics tab's Errors has them)"));
         }
     }
 

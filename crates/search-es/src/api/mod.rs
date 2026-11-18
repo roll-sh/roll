@@ -298,7 +298,7 @@ handlers! { ctx;
     SnapshotGetRepository => snapshots::get_repository(ctx),
     SnapshotDeleteRepository => snapshots::delete_repository(ctx).await,
     SnapshotVerifyRepository => snapshots::verify_repository(ctx).await,
-    SnapshotRepositoryAnalyze => snapshots::analyze_repository(ctx),
+    SnapshotRepositoryAnalyze => snapshots::analyze_repository(ctx).await,
     SnapshotRepositoryVerifyIntegrity => snapshots::verify_integrity(ctx).await,
     SnapshotCleanupRepository => snapshots::cleanup_repository(ctx).await,
     SnapshotCreate => snapshots::create(ctx).await,

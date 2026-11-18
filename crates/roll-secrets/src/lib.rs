@@ -23,6 +23,7 @@ pub mod github_app;
 pub mod aws;
 pub mod iam;
 pub mod rotators;
+pub mod saas;
 mod strength;
 mod audit;
 pub mod backup;
@@ -42,8 +43,11 @@ pub mod pki;
 pub mod ssh;
 pub mod clouds;
 pub mod issuer;
+pub mod kubernetes;
 mod oidc;
 mod read;
+mod metrics;
+pub mod backup_schedule;
 pub mod reach;
 pub mod refs;
 mod notices;
@@ -54,6 +58,7 @@ mod shares;
 pub mod sinks;
 pub mod suggestions;
 mod sweep;
+pub mod totp;
 pub mod syncs;
 mod caller;
 pub mod kms;
@@ -66,6 +71,7 @@ pub use audit::{AuditEntry, AuditFilter};
 pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
 pub use links::{Link, LinkProvider, Links, Mode};
+pub use metrics::Metrics;
 pub use read::{Followed, Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
 pub use exports::Export;
@@ -368,12 +374,16 @@ pub struct Secrets {
     oidc: oidc::Keys,
     /// Logins per identity and per client address in the last minute.
     logins: oidc::Window,
+    /// How many reads of values a principal may make a minute (read.rs, `read_quota`; 0: no limit).
+    reads_per_minute: std::sync::atomic::AtomicU32,
     /// roll code's search, once rolld has it (health's `code` check).
     code_refs: std::sync::OnceLock<Arc<dyn health::CodeRefs>>,
     /// Where clients reach rolld's API, once rolld says (certificates' CRL distribution point).
     public_api: Arc<std::sync::OnceLock<String>>,
     /// Signed CRLs by CA, with when they were made (pki.rs): the public route signs one a minute.
     crls: pki::Crls,
+    /// What rolld's metrics count (metrics.rs).
+    counters: metrics::Counters,
     /// Live links' fingerprints as last read (read.rs): what digests count.
     live_fps: read::LiveFps,
 }
@@ -396,6 +406,7 @@ impl Secrets {
     pub fn new(db: Db, workspace: Arc<roll_workspace::Workspace>, opts: Options) -> Result<Secrets> {
         db.ensure_schema(SCHEMA)?;
         db.ensure_schema(shares::SCHEMA)?;
+        db.ensure_schema(read::READS_SCHEMA)?;
         db.ensure_schema(syncs::SCHEMA)?;
         db.ensure_schema(sinks::SCHEMA)?;
         db.ensure_schema(folder_policy::SCHEMA)?;
@@ -441,6 +452,7 @@ impl Secrets {
         db.add_column("secrets", "public", "TEXT")?;
         // Who supplies a required key (health and the daily notice name them).
         db.add_column("required", "owner", "TEXT")?;
+        db.add_column("required", "password", "TEXT")?;
         // Scheduled rotations and revocations that fail, for health (health.rs).
         db.add_column("secrets", "rotation_error", "TEXT")?;
         db.add_column("secrets", "rotation_failed_at", "INTEGER")?;
@@ -453,6 +465,7 @@ impl Secrets {
         db.ensure_schema(notices::SCHEMA)?;
         db.ensure_schema(alerts::SCHEMA)?;
         db.ensure_schema(rotators::SCHEMA)?;
+        db.ensure_schema(saas::SCHEMA)?;
         db.ensure_schema(transit::SCHEMA)?;
         db.ensure_schema(pki::SCHEMA)?;
         db.ensure_schema(ssh::SCHEMA)?;
@@ -483,8 +496,11 @@ impl Secrets {
                 links.register(Arc::new(clouds::Provider { kind, db: db.clone(), keys: keys.clone(), clouds: c.clone() }));
             }
         }
+        db.ensure_schema(kubernetes::SCHEMA)?;
         if let (Some(deliver), Ok(keys)) = (&opts.deliver, &opts.keyring) {
             links.register(Arc::new(rotators::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone() }));
+            links.register(Arc::new(saas::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone() }));
+            links.register(Arc::new(kubernetes::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), deliver: deliver.clone() }));
         }
         // A project's CAs are roll secrets' own: nothing to reach outside.
         let public_api: Arc<std::sync::OnceLock<String>> = Default::default();
@@ -494,6 +510,7 @@ impl Secrets {
             links.register(Arc::new(ssh::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone() }));
         }
         db.ensure_schema(outside::SCHEMA)?;
+        db.ensure_schema(backup_schedule::SCHEMA)?;
         // A rotation's new admin URL, kept until the server took it (outside.rs).
         db.add_column("outside_dbs", "url_next", "BLOB")?;
         db.add_column("outside_dbs", "url_next_at", "INTEGER")?;
@@ -516,7 +533,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, gateway_links: opts.gateways, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, directory: opts.directory, github: opts.github, oidc: Default::default(), logins: Default::default(), reads_per_minute: read::READS_PER_MINUTE.into(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default(), counters: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -555,7 +572,11 @@ impl Secrets {
                 })?
             }
         };
-        let inner = self.unwrap.inner(project, &sealed)?;
+        let inner = self.unwrap.inner(project, &sealed).inspect_err(|e| {
+            if matches!(e, Error::KeyDenied(_)) {
+                metrics::Counters::add(&self.counters.kms_refusals, 1);
+            }
+        })?;
         let (dek, resealed) = keys.open_dek(project, &inner)?;
         // Sealed by the previous deployment key (a rotation): resealed with the current one. A
         // wrapped key stays wrapped by the same customer key; if KMS won't wrap it now, the key
@@ -658,7 +679,7 @@ impl Secrets {
 }
 
 /// Registries of the project's own resources (rotators…): a lease's revocation reads them.
-const REGISTRIES: &[&str] = &["rotators", "outside_dbs", "directories", "aws_users", "aws_roles", "cloud_accounts", "cas", "ca_certs", "ssh_cas", "github_apps"];
+const REGISTRIES: &[&str] = &["rotators", "saas_rotators", "outside_dbs", "directories", "aws_users", "aws_roles", "cloud_accounts", "kubernetes_clusters", "cas", "ca_certs", "ssh_cas", "github_apps", "backup_schedules"];
 
 /// Drop a forgotten project's key and registries once no lease of its waits to be revoked, and no
 /// certificate its CAs revoked is still within its lifetime (their CRLs, signed with the CA's key,
