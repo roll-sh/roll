@@ -1729,6 +1729,8 @@ impl Apps {
                 }
             }
         }
+        // Its environments that follow the project's secrets: watched here now.
+        self.watch_secrets_of(service).await;
     }
 
     async fn release_service(self: &Arc<Self>, service: &str) {
@@ -1994,6 +1996,8 @@ impl Apps {
             }
             if n.is_multiple_of(60) && !self.watching_secrets.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 let this = self.clone();
+                // A safety net: each watched environment has a long poll of its own; this starts
+                // any that isn't running (a resumed environment) and checks once.
                 tokio::spawn(async move {
                     this.watch_secrets().await;
                     this.watching_secrets.store(false, std::sync::atomic::Ordering::SeqCst);
