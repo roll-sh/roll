@@ -766,11 +766,11 @@
     },
     "/v1/apps/services": {
       "get": {
-        "description": "Answers `Service[]`.",
+        "description": "Answers `Service[]`; `deleted=true`: `{id, project, name, deleted_at, purge_at}[]` (unix ms, newest first), the deleted services kept for a restore until `purge_at`, 48 hours after the delete.",
         "operationId": "getServices",
         "responses": {
           "200": {
-            "description": "`Service[]`"
+            "description": "`Service[]`; `deleted=true`: `{id, project, name, deleted_at, purge_at}[]` (unix ms, newest first), the deleted services kept for a restore until `purge_at`, 48 hours after the delete"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -812,7 +812,7 @@
     },
     "/v1/apps/services/{id}": {
       "delete": {
-        "description": "Answers 204.",
+        "description": "Answers 204: the service stops (pending deploys cancelled, instances removed) and is hidden, kept 48 hours for a restore with its environments, volumes, images, backups, domains, links and name; every other route of it is a 404. A deleted service's `DELETE` deletes it for good now (frees its name); the prune sweep does after 48 hours.",
         "operationId": "deleteServicesId",
         "parameters": [
           {
@@ -826,7 +826,7 @@
         ],
         "responses": {
           "204": {
-            "description": "204"
+            "description": "204: the service stops (pending deploys cancelled, instances removed) and is hidden, kept 48 hours for a restore with its environments, volumes, images, backups, domains, links and name; every other route of it is a 404. A deleted service's `DELETE` deletes it for good now (frees its name); the prune sweep does after 48 hours"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -3978,6 +3978,35 @@
           "services"
         ],
         "x-roll-action": "write"
+      }
+    },
+    "/v1/apps/services/{id}/restore": {
+      "post": {
+        "description": "Answers `Service`: a deleted service back as it was, its live deployments loaded again and its card placed on the canvas; 409 when it isn't deleted.",
+        "operationId": "postServicesIdRestore",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`Service`: a deleted service back as it was, its live deployments loaded again and its card placed on the canvas; 409 when it isn't deleted"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Restore service",
+        "tags": [
+          "services"
+        ],
+        "x-roll-action": "deploy"
       }
     }
   },

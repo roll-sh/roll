@@ -727,12 +727,12 @@ export function SettingsTab({
                   if (await runner.run("delete", () => appsApi.remove(service.id).then(() => true))) onDeleted();
                 }}
               >
-                Deletes every environment, instance, deployment and image of <span className="font-mono text-fg">{service.name}</span>. Its URLs stop answering.
-                {service.run.volume ? " Its volume goes too, after a last backup kept for a week." : ""}
+                Stops every environment of <span className="font-mono text-fg">{service.name}</span>: its URLs stop answering. For 48 hours it can be restored as it was from {projectName}'s settings; then its deployments, images
+                {service.run.volume ? " and volume (after a last backup kept for a week)" : ""} are deleted for good.
               </Confirm>
             ) : (
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <p className="text-[13px] text-muted">Delete the service, its environments, deployments and images.</p>
+                <p className="text-[13px] text-muted">Delete the service, its environments, deployments and images (restorable for 48 hours).</p>
                 <button className={danger} onClick={() => setDeleting(true)}>
                   <Trash2 className="size-3.5" /> Delete
                 </button>

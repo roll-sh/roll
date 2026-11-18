@@ -136,6 +136,15 @@ export interface EnvironmentSummary {
   attention?: ("crash_loop" | "capped" | "paused" | "held" | "maintenance" | "deploy_failed")[];
 }
 
+/** A deleted service, kept stopped for a restore until `purge_at` (ms), then deleted for good. */
+export interface DeletedService {
+  id: string;
+  project: string;
+  name: string;
+  deleted_at: number;
+  purge_at: number;
+}
+
 export interface Service {
   id: string;
   project: string;
@@ -1006,7 +1015,10 @@ export const appsApi = {
   create: (body: NewService) => call<Service>("POST", "/v1/apps/services", body),
   service: (id: string) => call<Service>("GET", svc(id)),
   update: (id: string, patch: ServicePatch) => call<Service>("PATCH", svc(id), patch),
+  /** Deletes it until it's restored (48 hours); a deleted service's delete deletes it for good. */
   remove: (id: string) => call<null>("DELETE", svc(id)),
+  deletedServices: (project?: string) => call<DeletedService[]>("GET", `/v1/apps/services${qs({ project, deleted: "true" })}`),
+  restoreService: (id: string) => call<Service>("POST", `${svc(id)}/restore`),
 
   links: (id: string) => call<Link[]>("GET", `${svc(id)}/links`),
   /** `all`: every kind of event (its timeline), not only what people changed. */

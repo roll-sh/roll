@@ -436,13 +436,22 @@ pub enum AppsCmd {
         #[arg(long, conflicts_with = "service")]
         clear: bool,
     },
-    /// Delete a service: its environments, instances, deployments and images (asks first;
-    /// `--yes` doesn't).
+    /// Delete a service: it stops, and can be restored for 48 hours (`roll apps restore`); then
+    /// its environments, deployments and images are deleted for good. A deleted service's delete
+    /// deletes it for good now. Asks first; `--yes` doesn't.
     Delete {
         #[command(flatten)]
         target: Target,
         #[arg(long, short = 'y')]
         yes: bool,
+    },
+    /// Restore a deleted service as it was (within 48 hours of its delete); `--list`: the
+    /// deleted services, and when each goes for good.
+    Restore {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long)]
+        list: bool,
     },
     /// Deployments, newest first; `--commits DEP`: what a repo deployment brings over the one
     /// live before it, newest first.
@@ -1173,6 +1182,24 @@ async fn service(api: &Api, t: &Target) -> anyhow::Result<Value> {
         [one] => Ok((*one).clone()),
         [] => bail!("no service named {key}"),
         _ => bail!("{} services are named {key}: pass --project", found.len()),
+    }
+}
+
+/// The deleted service a target names (by id or name, among the deleted ones).
+async fn deleted_service(api: &Api, t: &Target) -> anyhow::Result<Option<Value>> {
+    let Some(key) = t.service.clone().or_else(|| std::env::current_dir().ok().and_then(|d| find_link(&d)).map(|l| s(&l["service"]))) else {
+        bail!("which service? pass --service (`roll apps restore --list` lists the deleted ones)");
+    };
+    let path = match &t.project {
+        Some(p) => format!("/v1/apps/services?deleted=true&project={}", enc(&project_id(api, p).await?)),
+        None => "/v1/apps/services?deleted=true".into(),
+    };
+    let all = api.get(&path).await?;
+    let found: Vec<&Value> = all.as_array().into_iter().flatten().filter(|x| x["id"] == key.as_str() || x["name"] == key.as_str()).collect();
+    match found.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some((*one).clone())),
+        _ => bail!("{} deleted services are named {key}: pass its id (`roll apps restore --list`)", found.len()),
     }
 }
 
@@ -2844,10 +2871,44 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             return Ok(());
         }
         AppsCmd::Delete { target, yes } => {
-            let svc = service(api, &target).await?;
-            confirm(yes, &s(&svc["name"]), "every environment, instance, deployment and image of the service")?;
+            // A name that's only a deleted service's: delete it for good.
+            let (svc, gone) = match service(api, &target).await {
+                Ok(svc) => (svc, false),
+                Err(e) => match deleted_service(api, &target).await {
+                    Ok(Some(d)) => (d, true),
+                    _ => return Err(e),
+                },
+            };
+            let what = if gone {
+                "the deleted service's environments, deployments, images and volume, for good"
+            } else {
+                "every environment of the service (it stops; `roll apps restore` brings it back within 48 hours)"
+            };
+            confirm(yes, &s(&svc["name"]), what)?;
             api.call(reqwest::Method::DELETE, &format!("/v1/apps/services/{}", enc(&s(&svc["id"]))), None).await?;
-            json!({ "deleted": svc["id"] })
+            json!({ "deleted": svc["id"], "for_good": gone })
+        }
+        AppsCmd::Restore { target, list: true } => {
+            let path = match &target.project {
+                Some(p) => format!("/v1/apps/services?deleted=true&project={}", enc(&project_id(api, p).await?)),
+                None => "/v1/apps/services?deleted=true".into(),
+            };
+            let all = api.get(&path).await?;
+            if !json_out {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+                for d in all.as_array().into_iter().flatten() {
+                    let left = (d["purge_at"].as_i64().unwrap_or(0) - now).max(0) / 60_000;
+                    println!("{}  {}  gone for good in {}h{:02}m", s(&d["id"]), s(&d["name"]), left / 60, left % 60);
+                }
+                return Ok(());
+            }
+            all
+        }
+        AppsCmd::Restore { target, list: false } => {
+            let Some(d) = deleted_service(api, &target).await? else {
+                bail!("no deleted service named {} (`roll apps restore --list` lists them)", target.service.as_deref().unwrap_or("that"));
+            };
+            api.post(&format!("/v1/apps/services/{}/restore", enc(&s(&d["id"]))), json!({})).await?
         }
         AppsCmd::Deploys { target, commits: Some(dep) } => {
             let svc = service(api, &target).await?;

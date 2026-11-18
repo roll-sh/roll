@@ -58,6 +58,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
     let env = "/v1/apps/services/{id}/environments/{env}";
     let service_routes = Router::new()
         .route("/v1/apps/services/{id}", get(get_service).patch(patch_service).delete(delete_service))
+        .route("/v1/apps/services/{id}/restore", post(restore_service))
         .route("/v1/apps/services/{id}/links", get(links))
         .route("/v1/apps/services/{id}/activity", get(activity))
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", put(put_link).delete(delete_link))
@@ -145,6 +146,15 @@ async fn on_owner(State(apps): S, req: Request, next: Next) -> Response {
     let Some(id) = req.uri().path().strip_prefix("/v1/apps/services/").map(|r| r.split('/').next().unwrap_or("").to_string()) else {
         return next.run(req).await;
     };
+    // A deleted service is no service but to restore it or delete it for good.
+    let root = req.uri().path().trim_end_matches('/') == format!("/v1/apps/services/{id}");
+    let keeps = (root && req.method() == axum::http::Method::DELETE) || req.uri().path() == format!("/v1/apps/services/{id}/restore");
+    if !keeps {
+        let sid = id.clone();
+        if let Ok((_, Some(_))) = apps.db(move |s| s.service_any(&sid)).await {
+            return Error::NotFound(format!("no service {id}")).into_response();
+        }
+    }
     let cluster = apps.deps.cluster.clone();
     cluster.dispatch(&lease_key(&id), req, |req, _guard| next.run(req)).await
 }
@@ -374,9 +384,14 @@ async fn plan(State(apps): S, b: Bytes) -> R {
 #[derive(Deserialize)]
 struct ProjectQuery {
     project: Option<String>,
+    /// The deleted services instead, kept for a restore.
+    deleted: Option<bool>,
 }
 
 async fn list_services(State(apps): S, Query(q): Query<ProjectQuery>) -> R {
+    if q.deleted == Some(true) {
+        return ok(apps.deleted_services(q.project).await?);
+    }
     ok(apps.services(q.project).await?)
 }
 
@@ -440,9 +455,13 @@ async fn patch_service(State(apps): S, Path(id): Path<String>, ext: Extensions, 
     ok(s)
 }
 
-async fn delete_service(State(apps): S, Path(id): Path<String>) -> R {
-    apps.delete_service(&id).await?;
+async fn delete_service(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    apps.delete_service(&id, actor(&ext)).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn restore_service(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    ok(apps.restore_service(&id, actor(&ext)).await?)
 }
 
 async fn links(State(apps): S, Path(id): Path<String>) -> R {
