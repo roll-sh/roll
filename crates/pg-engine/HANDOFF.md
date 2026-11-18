@@ -10623,6 +10623,39 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 17: VACUUM leaves marked files to compaction (agent 257)
+
+BENCH.md "Bulk writes, round 17" has the measurements (joined windows, plain dist, lane C).
+`cand/a257`: one commit on origin's `c4ad9402d`. No format change.
+
+**VACUUM no longer writes files a compaction marked** (`session::ddl::vacuum`; the call of
+`Store::reclaim_dead` is gone). Since agent 253's reclaim trigger, VACUUM of a table wrote its
+store files with dead entries (`Store::mark_dead`) again without them, "as PostgreSQL's VACUUM
+returns a table's space". PostgreSQL's VACUUM doesn't return it: it prunes the heap, removes the
+index entries of dead tuples and records the freed space in the free space map for later
+inserts; the files keep their size (only empty pages at the end go, `lazy_truncate_heap`). The
+engine's marked entries are unreadable already (every reader of the file sees it as a rewrite
+without them would be), so the rewrite only gave disk space back. Now it is left to what
+gives PostgreSQL's freed space back too, the table's later writes: the next compaction that
+meets a marked file (any write into its range) writes it without its dead entries, and the
+store's reclaim thread does on pressure (`--reclaim-dead-percent`, default 20) or once the store
+is idle (`--reclaim-idle-secs`, default 300), as before. VACUUM FULL rewrites the table as
+before. The bulk script's VACUUM wrote both index files again (3.7 G, the zstd and merge of
+1.5M entries): VACUUM 5.500 -> 1.786 G (-67.5% in every pair), every other step level, all
+steps 56.63 -> 52.92 G (-6.6% in every pair; PostgreSQL 52.24). VACUUM writes 2.0 MB instead
+of 17.3. What it costs is disk until then: after VACUUM the database's store is 44.73 MB
+(the two index files 5.15 + 3.38 MB with their quarter of dead entries and 0.30 MB of sets)
+against 43.91 MB (+1.9%, the same as agent 253 measured between the DELETE and the VACUUM).
+Peak memory the same (VmHWM 269-298 against 271-292 MB).
+
+Verification: `tools/quick-check.sh` on `be33ae2fb` (this commit on `c4ad9402d`): Clippy 16
+warnings, none new in a changed file; 387 tests in 22 binaries; crash_random seeds 1-3 x 2,
+power_cut_at_every_point; regress 51,148 / 51,150, 0 newly differing; isolation 1,647 / 1,648;
+pg_dump_tap 14,609 passed. No checked build (the change removes a call; no assertion or catalog
+count is on its path). No new test: nothing asserted that VACUUM rewrote marked files; the
+reclaim paths it leaves are tested as before (`reclaim_thread_waits_for_pressure_or_idle_and_no_statement`,
+`deletions_mark_dead_entries_instead_of_rewriting`, `power_cut_at_every_point`).
+
 ## Bulk writes, round 16: the reclaim trigger, COPY's line and field splitting (agent 253)
 
 BENCH.md "Bulk writes, round 16" has the measurements (joined windows, plain dist, lane C).

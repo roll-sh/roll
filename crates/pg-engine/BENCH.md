@@ -439,6 +439,37 @@ HANDOFF "MultiXact"). User instructions per operation first.
 | short transactions, 8 clients | no clean pair | -1.31% (4 pairs) / -1.7% / +8.9% |
 | short transactions, 32 clients | +0.89% (4 pairs) / -1.3% / +0.1% | -0.49% / +0.4% / -0.8% |
 
+## Bulk writes, round 17: VACUUM leaves marked files to compaction (2026-11-18, agent 257)
+
+HANDOFF "Bulk writes, round 17" has what changed. Lane C, the 1M-row bulk script, joined windows
+(agent 246's `bulkx.sh` with `JOIN=1`, copied to `~/.cache/a257/bench`), plain dist builds
+(`tools/dist.sh`) of **b0**, origin's `3d30eb71e`, and **v1**, b0 with the VACUUM commit
+(`cand/a257`). G user instructions of the server's cgroup; every counter ran 100% of its window.
+Each pair held lane C through `tools/lane.sh` alone. **Foreign load was over 1.0 core in every
+run** (wall-weighted 1.5-3.8 cores: other agents' builds and TPC-H runs, host load 40-120); the
+instruction counts repeat within 0.1% regardless, cycles don't (VACUUM 1.97-2.94 G on b0, 0.73-1.14
+on v1). Rows equal in every run (count and sums of every column of both tables).
+
+### b0 against v1 (5 alternating pairs, % per pair)
+
+| step | b0 | v1 | % per pair |
+|---|---|---|---|
+| COPY in | 9.488 | 9.488 | +0.0 x5 |
+| CREATE INDEX | 5.292 | 5.292 | -0.0 to +0.1 |
+| CREATE UNIQUE INDEX | 3.472 | 3.472 | -0.6 to +0.6 |
+| COPY out | 3.088 | 3.088 | +0.0 x5 |
+| INSERT … SELECT | 6.822 | 6.824 | -0.2 to +0.1 |
+| UPDATE half | 11.993 | 11.993 | +0.0 x5 |
+| DELETE a quarter, with its compaction | 10.125 | 10.125 | +0.0 x5 |
+| VACUUM | 5.500 | 1.786 | -67.5 x5 |
+| ANALYZE, `count(*), sum(c)`, scans | | | -0.3 to +0.0 |
+| **all steps** | 56.63 | 52.92 | -6.6 / -6.6 / -6.5 / -6.6 / -6.6 |
+
+VACUUM's bytes written 17.3 -> 2.0 MB. The database's store after VACUUM (one run each, `ls`):
+b0 43.91 MB, v1 44.73 MB (the bulk table's two index files keep their dead entries: 5.15 + 3.38 MB
+and 0.30 MB of sets, against 4.06 + 3.94 MB written again). Peak memory: VmHWM b0 271-292, v1
+269-298 MB; cgroup peak b0 346-403, v1 327-402 MB.
+
 ## Bulk writes, round 16: the reclaim trigger, COPY's splitting (2026-11-18, agent 253)
 
 HANDOFF "Bulk writes, round 16" has what changed. Lane C, the 1M-row bulk script, joined windows
