@@ -106,9 +106,11 @@ tests_for() {
         drop_storage index_key_format twophase txn_spill app_concurrency ;;
     crates/pg-engine/src/catalog/btsim*|crates/pg-engine/src/catalog/heapsim*|crates/pg-engine/src/exec/sizing*|crates/pg-engine/src/catalog/relsize.rs)
       echo models_kept big_tables heap_order_scan kept_plans ;;
-    crates/pg-engine/src/catalog/*) echo catalog_format catalog_storage catalog_lazy_snapshot ddl_scaling poisoned_caches models_kept ;;
+    crates/pg-engine/src/catalog/*) echo catalog_format catalog_storage catalog_lazy_snapshot ddl_scaling poisoned_caches models_kept session_state ;;
     crates/pg-engine/src/sql/paths*|crates/pg-engine/src/sql/costs.rs|crates/pg-engine/src/sql/plan.rs|crates/pg-engine/src/sql/joins.rs|crates/pg-engine/src/session/litplan.rs|crates/pg-engine/src/session/prepared.rs)
-      echo kept_plans models_kept parallel_scan heap_order_scan big_tables query_spill ;;
+      echo kept_plans models_kept parallel_scan heap_order_scan big_tables query_spill session_state ;;
+    # (System catalogs' estimates, `explain::sys_rel_size`: session_state's catalog_estimates_follow_ddl.)
+    crates/pg-engine/src/sql/explain.rs) echo session_state ;;
     crates/pg-engine/src/exec/parscan.rs|crates/pg-engine/src/exec/parallel_part.rs|crates/pg-engine/src/exec/partial.rs) echo parallel_scan ;;
     crates/pg-engine/src/exec/spill.rs|crates/pg-engine/src/exec/hashspill.rs|crates/pg-engine/src/exec/extsort.rs|crates/pg-engine/src/exec/workmem.rs|crates/pg-engine/src/exec/tuplestore.rs)
       echo query_spill txn_spill memory_load ;;

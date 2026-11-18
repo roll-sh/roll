@@ -17783,9 +17783,10 @@ pub(crate) fn sys_tuples(table: crate::catalog::system::SysTable, ctx: &ExecCtx)
 }
 
 /// A system catalog's size as estimate_rel_size sees it, cached for the catalog version. A
-/// catalog initdb filled has its fresh pg_class relpages and reltuples: its tuple density
-/// over its current pages (initdb's, more once its rows outgrow them); one initdb left empty
-/// (relpages 0), the density its columns' widths give. A view's, its rows now.
+/// catalog initdb filled starts from its fresh pg_class relpages and reltuples: its pages are
+/// initdb's, more once its rows outgrow them, and its tuples its live rows (initdb's density
+/// over the pages they take), following DDL; one initdb left empty (relpages 0) has the
+/// density its columns' widths give. A view's, its rows now.
 pub(crate) fn sys_rel_size(table: crate::catalog::system::SysTable, ctx: &ExecCtx) -> costs::RelSize {
     // (By the catalog's address, with a `Weak` to it: that keeps the allocation, so a later
     // catalog can't take the address and find this one's size.)
@@ -17838,7 +17839,11 @@ pub(crate) fn sys_rel_size(table: crate::catalog::system::SysTable, ctx: &ExecCt
             // keeps a density of 0.)
             let fill = density.max(by_width());
             let pages = relpages.max((n / fill).ceil());
-            costs::RelSize { pages, tuples: (density * pages).round_ties_even() }
+            // (estimate_rel_size's density times the current pages: the pages its live rows
+            // take at initdb's density, so the tuples are its rows now, and a fresh
+            // database's reltuples; a density of 0 stays 0 tuples.)
+            let tuples = if density > 0.0 { n } else { 0.0 };
+            costs::RelSize { pages, tuples }
         }
         None => {
             let tuples = n.max(1.0);

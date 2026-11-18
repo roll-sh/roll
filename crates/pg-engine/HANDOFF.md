@@ -15427,10 +15427,13 @@ binary, `fset*.sql` FROM functions; `../cmpcat.sh` runs one in a new database on
   through f64.
 - **System catalogs' estimates as a fresh database's** (`explain::sys_rel_size`,
   `paths/syscat.rs`). A catalog's tuples were its row count now and its pages a width model;
-  now estimate_rel_size's over initdb's pg_class relpages and reltuples (`data/pg_class.tsv`,
-  `static_rows::initdb_class_sizes`): the density over its pages (initdb's, more once its rows
-  outgrow them; an empty-at-initdb catalog the width density, pg_shdepend's 0), so a fresh
-  database's are PostgreSQL's (pg_class 415 rows over 14 pages, pg_trigger 0). Its indexes have
+  now start from initdb's pg_class relpages and reltuples (`data/pg_class.tsv`,
+  `static_rows::initdb_class_sizes`), as estimate_rel_size does: its pages initdb's, more once
+  its rows outgrow them (an empty-at-initdb catalog at the width density), and its tuples
+  initdb's density over the pages its live rows take, which is its rows now (pg_shdepend's
+  density 0 stays 0), so they follow DDL (`session_state::catalog_estimates_follow_ddl`; a
+  first version rounded the tuples up to whole pages and failed it in the batch train) and a
+  fresh database's are PostgreSQL's (pg_class 415 rows over 14 pages, pg_trigger 0). Its indexes have
   initdb's pages (pg_statistic_relid_att_inh_index the 4 it has, relpages says 1), growing in
   proportion. A lone catalog scan is planned as a table's (sequential, index, index-only or
   bitmap, `sys_plain_scan`; it was a heuristic "Index Scan" with the sequential scan's cost and
