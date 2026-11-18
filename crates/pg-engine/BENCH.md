@@ -402,6 +402,30 @@ and poll instructions grow with contention); medians over both runs: c1 plain +0
 +0.1%; c1b plain -0.3%, PGO +1.5%. Agent 225's dropped `e7ac6709b` (handlers out of line) cost
 PGO 1.8%.
 
+**Shared locks a read only counts under (c2, `cand/a250-2`)**, prepared point selects, plain
+dist, lane A, alternating pairs against base (user instructions of the connection threads a
+read):
+
+| pair | clients | ops/s | Δ | instructions | cycles | CPU/op | p99 ms | foreign cores |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 32 | 78,524 -> 71,539 | -8.9% | -3.95% | +2.62% | +4.2% | 4.53 -> 2.56 | 0.34 |
+| 2 | 32 | 60,958 -> 70,272 | +15.3% | -4.28% | -5.18% | -5.7% | 6.31 -> 2.40 | 0.55 |
+| 3 | 32 | 74,106 -> 85,800 | +15.8% | -0.41% | -1.03% | -11.8% | 4.72 -> 1.75 | 0.17 |
+| 4 | 32 | 94,293 -> 70,075 | -25.7% | +0.98% | +18.93% | +28.1% | 2.06 -> 4.02 | 0.23 |
+| 5 | 32 | 77,807 -> 73,290 | -5.8% | -0.19% | +2.10% | +3.9% | 7.10 -> 1.88 | 0.21 |
+| 6 | 32 | 60,284 -> 75,957 | +26.0% | -2.97% | -6.21% | -7.3% | 7.86 -> 1.61 | 0.72 |
+| 7 | 32 | 89,481 -> 89,946 | +0.5% | -1.58% | -2.99% | +0.3% | 2.22 -> 0.98 | 0.12 |
+| 5 pairs | 8 | median | +13.4% | +1.53% (-4.09 to +3.67) | +3.25% | -6.1% | 0.284 -> 0.236 | |
+
+**Dropped: the error constructors cold (c3)**, alternating pairs against base, 8 clients:
+
+| build | workload | pairs | instructions | cycles | CPU/op | ops/s |
+|---|---|---:|---|---:|---:|---:|
+| plain dist | range read (lane B) | 5 | -0.56% (-4.98 to -0.20) | -1.82% | -5.5% | +9.4% |
+| plain dist | point select (lane A) | 4 | -0.69% (-3.82 to +3.37) | -4.31% | -4.0% | +12.4% |
+| PGO | range read (lane B) | 3 | +2.00% (+1.56 to +4.56) | +1.66% | +0.4% | -1.9% |
+| PGO | point select (lane B) | 3 | +1.04% (-2.23 to +7.57) | -0.31% | -0.0% | -0.9% |
+
 ## MultiXact (2026-11-18, agent 249)
 
 Lane A, agent 243's harness (plain dist builds, 10 s runs, a fresh server and 100,000-row fixture

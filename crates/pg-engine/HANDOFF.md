@@ -12014,7 +12014,7 @@ fewer cycles (IPC 0.48 -> 0.64): most of the gain is layout and the front end, n
 and PGO inlines most of a read into a few functions, so per-function comparisons show code
 moving. The one function whose own cost halves under PGO is `Block::seek` (storage, agents
 245/247's: worth a look at its comparisons and bounds checks). Tried for the plain build: the
-error constructors cold and out of line (c3 below).
+error constructors cold and out of line (c3, dropped below).
 
 **Kept: an idle session gives back the stack below its wait** (lead 4; c1, `server.rs`,
 `bin/roll-engine.rs`, `stack.rs`). The binary's idle hook (`server::set_idle_hook`, run once a
@@ -12033,20 +12033,30 @@ Agent 225's `e7ac6709b` (each handler out of line) had cost PGO 1.8%. Test: `tes
 with a 300-deep expression before and after the idle period. A statement after 2 s of idleness
 faults its stack pages in again (a few µs).
 
-**Dropped** (patches in `~/.cache/a250/patches/`): c1b, the same with one call per batch of
+**Dropped**: c1b, the same with one call per batch of
 buffered messages (`messages`) instead of one per message: plain -0.44% / -0.58%, PGO +2.23% /
 +0.16% instructions; the same memory.
 
-**Not landed here, measured** (candidates of their own if they gate, else dropped):
-- c2, no lock every session shares where a read only counts: notifications taken through the
-  session's own listener (`ListenerHandle::take`), a relation's shared statistics entry made
-  once per prune (`Pending::ensured`, valid while `Database::pgstat_pruned_at` stays: only a
-  prune removes entries), `Hot::note_scan` by `try_lock` (a count missed only delays keeping a
-  range). 32 clients, 4 pairs: p99 4.6 -> 2.5 ms (3 of 4), instructions -2.2%, ops/s ±25%
-  between pairs; 8 clients 5 pairs too noisy to call.
-- c3, the error constructors (`Error::new`, `internal`, `unsupported`, `From<io::Error>`)
-  `#[cold] #[inline(never)]`: `.text` -200 KB; range reads at 8 clients -0.56% instructions
-  (every pair), -1.8% cycles, -5.5% CPU a read; point selects -0.69% (mixed), -4.3% cycles.
+**Kept (`cand/a250-2`): a read takes no lock every session shares where it only counts**
+(lead 2; c2). Notifications are taken through the session's own listener
+(`ListenerHandle::take`, `Hub::take` gone), not the hub's map under its mutex at every
+ReadyForQuery; a relation's shared statistics entry is made once per prune (`Pending::ensured`,
+valid while `Database::pgstat_pruned_at` stays: only a prune removes entries), not looked up
+under the database's statistics mutex for each relation of each transaction; and
+`Hot::note_scan` counts a unique-key probe with `try_lock` (a count missed while another thread
+counts only delays keeping the range, a heuristic). 32 clients, plain dist, 7 alternating
+pairs on lane A: p99 lower in 6 (4.53 -> 2.56, 6.31 -> 2.40, 4.72 -> 1.75, 7.10 -> 1.88,
+7.86 -> 1.61, 2.22 -> 0.98 ms; once 2.06 -> 4.02), user instructions a read -1.6% at the median
+(-4.3% to +1.0%), ops/s +0.5% at the median (-26% to +26% between pairs: not resolved on these
+days); 8 clients, 5 pairs, +1.5% instructions (-4.1% to +3.7%), -6.1% CPU a read. The block
+cache's mutex (70% of the yields) is untouched (agent 247's).
+
+**Dropped** (patches in `~/.cache/a250/patches/`): c3, the error constructors (`Error::new`,
+`internal`, `unsupported`, `From<io::Error>`) `#[cold] #[inline(never)]`, so that every branch
+making an error is laid out as the unlikely one in the plain build as PGO learns from counts:
+`.text` -200 KB; plain dist range reads -0.56% instructions (every one of 5 pairs), -1.8%
+cycles, point selects -0.69% (mixed); but PGO range reads +2.0% instructions (3 pairs, +1.6% to
++4.6%) and point selects +1.0%: an inlining change, PGO decides.
 
 **Left:** (1) the block cache's lock and hit-path copy (agent 247): the largest 32-client tail
 and 2% of a plain read's cycles; (2) `Block::seek` under plain dist; (3) the transaction object
@@ -12054,7 +12064,7 @@ and 2% of a plain read's cycles; (2) `Block::seek` under plain dist; (3) the tra
 1.5-2% of a read (agent 243's commit path); (4) a lane whose foreign load stays under a core:
 instruction gates at 1% need 10+ pairs on these days.
 
-Verification: quick-check on the candidate over origin's `2ab7c7c54` (`483a7f4cb`): build and Clippy (16 warnings, none new in a changed file), 344 tests in 12 binaries (golden, wire, wire_waits, deep_input, the lib's), regress 51,148/51,150 (none newly differing), isolation 1,647/1,648, pg_dump_tap 14,609 passed. The c1b variant passed it too (over `fec3375ea`).
+Verification: c2's quick-check over origin's `2ab7c7c54` (`69b7710cd`): 422 tests in 25 binaries, the crash step (seeds 1-3 x 2, power cut), regress 0 newly differing, isolation 1,647/1,648, pg_dump_tap 14,609. c1's over the same head (`483a7f4cb`): build and Clippy (16 warnings, none new in a changed file), 344 tests in 12 binaries (golden, wire, wire_waits, deep_input, the lib's), regress 51,148/51,150 (none newly differing), isolation 1,647/1,648, pg_dump_tap 14,609 passed. The c1b variant passed it too (over `fec3375ea`).
 
 ## Point reads, round 5 (agent 230)
 
