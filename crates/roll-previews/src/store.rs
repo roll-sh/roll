@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS visit_tickets (
     preview_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
+    roll_session TEXT NOT NULL,
     expires_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS visit_sessions (
@@ -99,6 +100,7 @@ CREATE TABLE IF NOT EXISTS visit_sessions (
     preview_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
+    roll_session TEXT NOT NULL,
     expires_at INTEGER NOT NULL,
     checked_at INTEGER NOT NULL
 ) WITHOUT ROWID;
@@ -341,6 +343,8 @@ pub fn bypass_hash(secret: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VisitSession {
     pub user: String,
+    /// The roll session (`ses_…`) that got its ticket: the visit lasts no longer than it does.
+    pub roll_session: String,
     pub project: String,
     pub expires_at: i64,
     pub checked_at: i64,
@@ -787,6 +791,13 @@ impl Store {
             if before.access != s.access {
                 c.execute("DELETE FROM visit_sessions WHERE project_id = ?", [project])?;
                 c.execute("DELETE FROM visit_tickets WHERE project_id = ?", [project])?;
+            }
+            // Leaving link access retires every link handed out: back on `link`, its previews
+            // have new ones.
+            if before.access == crate::settings::Access::Link && s.access != crate::settings::Access::Link {
+                for id in c.query("SELECT id FROM previews WHERE project_id = ?", [project], |r| r.get::<_, String>(0))? {
+                    c.execute("UPDATE previews SET token = ? WHERE id = ?", params![new_token(), id])?;
+                }
             }
             Ok::<_, Error>(())
         })?;
@@ -2185,34 +2196,44 @@ impl Store {
 
     // ── signed-in visitors (`access: team`, `visit.rs`) ──
 
-    /// A one-use ticket for `user` into preview `id`, kept by its SHA-256.
-    pub fn put_visit_ticket(&self, hash: &str, id: &str, project: &str, user: &str, expires_at: i64) -> Result<()> {
+    /// A one-use ticket for `user` (signed in as roll session `roll_session`) into preview `id`,
+    /// kept by its SHA-256. `false`, and nothing kept, unless the project has team access: read
+    /// in the same write, so a change of access (which deletes tickets) can't miss it.
+    pub fn put_visit_ticket(&self, hash: &str, id: &str, project: &str, user: &str, roll_session: &str, expires_at: i64) -> Result<bool> {
         self.db.write(|c| {
-            c.execute("INSERT INTO visit_tickets (hash, preview_id, project_id, user_id, expires_at) VALUES (?, ?, ?, ?, ?)", params![hash, id, project, user, expires_at])?;
-            Ok::<_, Error>(())
+            if !team_access(c, project)? {
+                return Ok(false);
+            }
+            c.execute(
+                "INSERT INTO visit_tickets (hash, preview_id, project_id, user_id, roll_session, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+                params![hash, id, project, user, roll_session, expires_at],
+            )?;
+            Ok::<_, Error>(true)
         })
     }
 
-    /// A ticket used: its person and project, if it was this preview's and still good. It goes
-    /// either way (and every expired one with it).
-    pub fn take_visit_ticket(&self, hash: &str, id: &str, now: i64) -> Result<Option<(String, String)>> {
+    /// A ticket used: it goes either way (and every expired one with it), and if it was this
+    /// preview's, still good, and its project still has team access, a session (`session`, by
+    /// its SHA-256, until `expires_at`) takes its place in the same write. The session's
+    /// person, roll session and project.
+    pub fn open_visit_session(&self, ticket: &str, session: &str, id: &str, expires_at: i64, now: i64) -> Result<Option<VisitSession>> {
         self.db.write(|c| {
-            let row: Option<(String, String, String, i64)> =
-                c.query_row("SELECT preview_id, project_id, user_id, expires_at FROM visit_tickets WHERE hash = ?", [hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
-            c.execute("DELETE FROM visit_tickets WHERE hash = ? OR expires_at < ?", params![hash, now])?;
-            Ok::<_, Error>(row.filter(|(p, _, _, exp)| p == id && *exp >= now).map(|(_, project, user, _)| (user, project)))
-        })
-    }
-
-    /// A signed-in visitor's session in preview `id`, kept by its SHA-256 (expired ones go).
-    pub fn put_visit_session(&self, hash: &str, id: &str, project: &str, user: &str, expires_at: i64, now: i64) -> Result<()> {
-        self.db.write(|c| {
+            let row: Option<(String, String, String, String, i64)> = c
+                .query_row("SELECT preview_id, project_id, user_id, roll_session, expires_at FROM visit_tickets WHERE hash = ?", [ticket], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })
+                .optional()?;
+            c.execute("DELETE FROM visit_tickets WHERE hash = ? OR expires_at < ?", params![ticket, now])?;
+            let Some((_, project, user, roll_session, _)) = row.filter(|(p, _, _, _, exp)| p == id && *exp >= now) else { return Ok(None) };
+            if !team_access(c, &project)? {
+                return Ok(None);
+            }
             c.execute("DELETE FROM visit_sessions WHERE expires_at < ?", [now])?;
             c.execute(
-                "INSERT INTO visit_sessions (hash, preview_id, project_id, user_id, expires_at, checked_at) VALUES (?, ?, ?, ?, ?, ?)",
-                params![hash, id, project, user, expires_at, now],
+                "INSERT INTO visit_sessions (hash, preview_id, project_id, user_id, roll_session, expires_at, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![session, id, project, user, roll_session, expires_at, now],
             )?;
-            Ok::<_, Error>(())
+            Ok::<_, Error>(Some(VisitSession { user, roll_session, project, expires_at, checked_at: now }))
         })
     }
 
@@ -2220,8 +2241,8 @@ impl Store {
     /// asked about.
     pub fn visit_session(&self, hash: &str, id: &str) -> Result<Option<VisitSession>> {
         Ok(self.db.read(|c| {
-            c.query_row("SELECT user_id, project_id, expires_at, checked_at FROM visit_sessions WHERE hash = ? AND preview_id = ?", [hash, id], |r| {
-                Ok(VisitSession { user: r.get(0)?, project: r.get(1)?, expires_at: r.get(2)?, checked_at: r.get(3)? })
+            c.query_row("SELECT user_id, roll_session, project_id, expires_at, checked_at FROM visit_sessions WHERE hash = ? AND preview_id = ?", [hash, id], |r| {
+                Ok(VisitSession { user: r.get(0)?, roll_session: r.get(1)?, project: r.get(2)?, expires_at: r.get(3)?, checked_at: r.get(4)? })
             })
             .optional()
         })?)
@@ -2411,6 +2432,12 @@ impl Store {
             updated_at: r.updated_at,
         })
     }
+}
+
+/// Whether `project`'s previews let people in by signing in (`access: team`), inside a write.
+fn team_access(c: &code_sql::Conn<'_>, project: &str) -> Result<bool> {
+    let json: Option<String> = c.query_row("SELECT json FROM settings WHERE project_id = ?", [project], |r| r.get(0)).optional()?;
+    Ok(json.and_then(|j| serde_json::from_str::<Settings>(&j).ok()).is_some_and(|s| s.access == crate::settings::Access::Team))
 }
 
 /// A preview's access token: 24 random characters of lowercase base32 (120 bits).

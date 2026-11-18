@@ -209,7 +209,7 @@ async fn visit(AxState(e): S, Path(id): Path<String>, who: Option<axum::Extensio
         return Err(Error::Forbidden("signing in to a preview is for a person signed in to roll, not a token".into()));
     };
     let b: VisitBody = body(&b)?;
-    let url = blocking(e, move |e| e.visit_ticket(&id, &user.user, &b.to)).await?;
+    let url = blocking(e, move |e| e.visit_ticket(&id, &user.user, &user.session, &b.to)).await?;
     Ok(Json(json!({ "url": url })))
 }
 

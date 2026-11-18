@@ -43,7 +43,8 @@ pub struct Running {
     pub internal: Option<axum::Router>,
 }
 
-/// Who may open a team-access project's previews: an account that still signs in and is an
+/// Who may open a team-access project's previews: an account that still signs in, through the
+/// roll session that asked for the ticket (signed out, revoked or expired is a no), and is an
 /// admin or owns the project now (a disabled or deleted one, or one whose project went to
 /// someone else, is a no at once). A failed lookup is a no.
 pub struct AccountsVisitors {
@@ -52,7 +53,10 @@ pub struct AccountsVisitors {
 }
 
 impl roll_previews::ports::Visitors for AccountsVisitors {
-    fn may_open(&self, user: &str, project: &str) -> bool {
+    fn may_open(&self, user: &str, session: &str, project: &str) -> bool {
+        if !self.accounts.session_live(user, session).unwrap_or(false) {
+            return false;
+        }
         match self.accounts.user(user) {
             Ok(u) if !u.disabled => u.admin || self.workspace.get(roll_workspace::Scope::All, project).is_ok_and(|p| !p.owner.is_empty() && p.owner == user),
             _ => false,

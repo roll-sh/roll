@@ -372,16 +372,22 @@ async fn revocation_is_immediate() {
 
     let a = env.call(&mut laptop, Method::GET, "/v1/accounts/me/sessions", None).await;
     assert_eq!(a.json.as_array().unwrap().len(), 2);
+    let laptop_session = a.json.as_array().unwrap().iter().find(|s| s["current"] == true).unwrap()["id"].as_str().unwrap().to_string();
+    let user = env.call(&mut laptop, Method::GET, "/v1/accounts/me", None).await.json["id"].as_str().unwrap().to_string();
+    // What a team-access preview's session asks by the session's id (roll previews' visitors).
+    assert!(env.accounts.session_live(&user, &phone_session).unwrap());
     let a = env.call(&mut laptop, Method::DELETE, &format!("/v1/accounts/me/sessions/{phone_session}"), None).await;
     assert_eq!(a.status, StatusCode::NO_CONTENT);
     assert_eq!(env.call(&mut phone, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
     assert_eq!(env.call(&mut phone, Method::GET, "/v1/accounts/session", None).await.json["status"], "anonymous");
+    assert!(!env.accounts.session_live(&user, &phone_session).unwrap());
 
     // Disabling the user ends the rest, on the next request.
-    let user = env.call(&mut laptop, Method::GET, "/v1/accounts/me", None).await.json["id"].as_str().unwrap().to_string();
+    assert!(env.accounts.session_live(&user, &laptop_session).unwrap());
     let a = env.operator(Method::PATCH, &format!("/v1/accounts/users/{user}"), json!({ "disabled": true })).await;
     assert_eq!((a.status, a.json["disabled"].as_bool()), (StatusCode::OK, Some(true)));
     assert_eq!(env.call(&mut laptop, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::UNAUTHORIZED);
+    assert!(!env.accounts.session_live(&user, &laptop_session).unwrap());
 }
 
 #[tokio::test]

@@ -528,9 +528,11 @@ pub trait Apps: Send + Sync {
 
 /// Who may open a project's previews under `access: "team"` (rolld fills it from roll's
 /// accounts and the workspace): asked when a ticket is given and again every few minutes of a
-/// session. A failed lookup is a no.
+/// session. `session` is the roll session (`ses_…`) that asked for the ticket: once it no longer
+/// signs its person in (signed out, revoked, expired), the answer is no. A failed lookup is a
+/// no. It may read a database: it's called off the async workers.
 pub trait Visitors: Send + Sync {
-    fn may_open(&self, user: &str, project: &str) -> bool;
+    fn may_open(&self, user: &str, session: &str, project: &str) -> bool;
 }
 
 /// A project's secrets, per environment (roll secrets; docs/secrets.md).

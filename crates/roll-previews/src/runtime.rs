@@ -593,18 +593,26 @@ impl Runtime {
     /// A link's way in: its token becomes a cookie (`cookie`, for `max_age` seconds) and the
     /// visitor is sent to the same URL without `param`.
     fn enter(&self, req: &Request, param: &str, cookie: &str, value: &str, max_age: i64) -> Response {
+        let mut r = self.without(req, param);
+        let secure = if self.cfg.scheme == "https" { "; Secure" } else { "" };
+        let set = format!("{cookie}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}");
+        if let Ok(c) = HeaderValue::from_str(&set) {
+            r.headers_mut().insert(header::SET_COOKIE, c);
+        }
+        r
+    }
+
+    /// A redirect to the URL `req` asked for without the query parameter `param`.
+    fn without(&self, req: &Request, param: &str) -> Response {
         let query = req.uri().query().unwrap_or("");
         let prefix = format!("{param}=");
         let rest: Vec<&str> = query.split('&').filter(|kv| !kv.starts_with(&prefix) && !kv.is_empty()).collect();
         // Only a path on this host: `//evil.example/` would be another site.
         let path = format!("/{}", req.uri().path().trim_start_matches(['/', '\\']));
         let location = if rest.is_empty() { path } else { format!("{path}?{}", rest.join("&")) };
-        let secure = if self.cfg.scheme == "https" { "; Secure" } else { "" };
-        let set = format!("{cookie}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}");
         let mut r = (StatusCode::FOUND, "").into_response();
-        if let (Ok(l), Ok(c)) = (HeaderValue::from_str(&location), HeaderValue::from_str(&set)) {
+        if let Ok(l) = HeaderValue::from_str(&location) {
             r.headers_mut().insert(header::LOCATION, l);
-            r.headers_mut().insert(header::SET_COOKIE, c);
             r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         }
         r
@@ -627,9 +635,9 @@ impl Runtime {
     /// Link access: a request carries the preview's token in its query (it gets a cookie and is
     /// sent to the same URL without it) or in that cookie. Team access: a session of the
     /// preview's own, from a ticket roll's dashboard gave a person signed in (`visit.rs`); the
-    /// link's token lets nobody in. Either way a share link and the CI bypass do; anything else
-    /// is refused. `None`: let it through.
-    fn gate(&self, preview: &str, service: &str, req: &mut Request) -> Option<Response> {
+    /// link's token lets nobody in (a URL carrying it is sent on without it). Either way a share
+    /// link and the CI bypass do; anything else is refused. `None`: let it through.
+    async fn gate(&self, preview: &str, service: &str, req: &mut Request) -> Option<Response> {
         let access = match self.store.access(preview) {
             Ok(Some(a)) => a,
             Ok(None) => return None,
@@ -647,17 +655,24 @@ impl Runtime {
             return None;
         }
         let team = access.mode == crate::settings::Access::Team;
+        let query = req.uri().query().unwrap_or("").to_string();
+        let given = |name: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v);
         if team {
             // A ticket from roll's dashboard, coming back: the session it opens.
             if req.uri().path() == crate::visit::PATH {
                 return Some(self.land_visit(preview, req));
             }
-            if let Some(t) = take_cookie(req, &crate::visit::cookie(preview))
-                && self.visitor(preview, &t)
-            {
-                // In: a link token they also hold stays roll's, as the session does.
-                take_cookie(req, &format!("roll_access_{preview}"));
-                return None;
+            // An old link's token opens nothing here and never reaches the app: the same URL
+            // without it.
+            if given("roll_access").is_some() {
+                return Some(self.without(req, "roll_access"));
+            }
+            // Any of the cookies by that name (a sibling preview can set junk on the parent
+            // domain, and the browser sends both): one live session lets them in.
+            for t in take_cookies(req, &crate::visit::cookie(preview)) {
+                if self.visitor(preview, &t).await {
+                    return None;
+                }
             }
         }
         let token = access.link_token().unwrap_or_default().to_string();
@@ -671,8 +686,6 @@ impl Runtime {
         if cookie_value(req, &share_cookie).is_some_and(|t| self.store.share_ends(preview, t).ok().flatten().is_some()) {
             return None;
         }
-        let query = req.uri().query().unwrap_or("");
-        let given = |name: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v);
         if !token.is_empty() && given("roll_access").is_some_and(|v| same(v, &token)) {
             return Some(self.enter(req, "roll_access", &cookie, &token, 2_592_000));
         }
@@ -736,12 +749,12 @@ impl Runtime {
         // Where it goes, checked before the ticket is used.
         let Ok(location) = HeaderValue::from_str(&to) else { return expired() };
         let Ok(now) = self.store.now_ms() else { return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response() };
-        let Some((user, project)) = ticket.and_then(|t| self.store.take_visit_ticket(&crate::store::bypass_hash(&t), preview, now).ok().flatten()) else {
-            return expired();
-        };
+        let Some(ticket) = ticket else { return expired() };
         let session = format!("rls_{}", crate::store::new_token());
-        if self.store.put_visit_session(&crate::store::bypass_hash(&session), preview, &project, &user, now + crate::visit::SESSION_S * 1000, now).is_err() {
-            return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response();
+        match self.store.open_visit_session(&crate::store::bypass_hash(&ticket), &crate::store::bypass_hash(&session), preview, now + crate::visit::SESSION_S * 1000, now) {
+            Ok(Some(_)) => {}
+            Ok(None) => return expired(),
+            Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "try again").into_response(),
         }
         let secure = if self.cfg.scheme == "https" { "; Secure" } else { "" };
         let set = format!("{}={session}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax{secure}", crate::visit::cookie(preview), crate::visit::SESSION_S);
@@ -753,17 +766,20 @@ impl Runtime {
         r
     }
 
-    /// Whether `token` is a live session in `preview` whose person may still open the project,
-    /// asked again once it was last asked `visitor_recheck` ago; a session whose person may not
+    /// Whether `token` is a live session in `preview` whose person may still open the project
+    /// and whose roll session still signs them in, asked again (off the async workers: it reads
+    /// roll's accounts) once it was last asked `visitor_recheck` ago; a session that may not
     /// ends now.
-    fn visitor(&self, preview: &str, token: &str) -> bool {
+    async fn visitor(&self, preview: &str, token: &str) -> bool {
         let hash = crate::store::bypass_hash(token);
         let (Ok(Some(s)), Ok(now)) = (self.store.visit_session(&hash, preview), self.store.now_ms()) else { return false };
         if s.expires_at <= now {
             return false;
         }
         if s.checked_at <= now - self.cfg.visitor_recheck.as_millis() as i64 {
-            if !self.engine().is_ok_and(|e| e.may_open(&s.user, &s.project)) {
+            let Ok(engine) = self.engine() else { return false };
+            let may = tokio::task::spawn_blocking(move || engine.may_open(&s.user, &s.roll_session, &s.project)).await.unwrap_or(false);
+            if !may {
                 let _ = self.store.end_visit_session(&hash);
                 return false;
             }
@@ -992,19 +1008,22 @@ fn has_access_cookie(preview: &str, token: &str, req: &Request) -> bool {
     !token.is_empty() && cookie_value(req, &format!("roll_access_{preview}")).is_some_and(|v| same(v, token))
 }
 
-/// Cookie `name` taken off `req`: its value, and the rest of the cookies kept.
-fn take_cookie(req: &mut Request, name: &str) -> Option<String> {
-    let mut found = None;
+/// Every cookie `name` taken off `req` (a browser sends one per domain and path that set it):
+/// their values, and the rest of the cookies kept.
+fn take_cookies(req: &mut Request, name: &str) -> Vec<String> {
+    let mut found = Vec::new();
     let mut kept = Vec::new();
     for v in req.headers().get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()) {
         for c in v.split(';').map(str::trim).filter(|c| !c.is_empty()) {
             match c.split_once('=') {
-                Some((k, v)) if k == name => found = Some(v.to_string()),
+                Some((k, v)) if k == name => found.push(v.to_string()),
                 _ => kept.push(c.to_string()),
             }
         }
     }
-    found.as_ref()?;
+    if found.is_empty() {
+        return found;
+    }
     req.headers_mut().remove(header::COOKIE);
     if !kept.is_empty()
         && let Ok(v) = HeaderValue::from_str(&kept.join("; "))
@@ -1695,11 +1714,13 @@ pub async fn route(State(rt): State<Arc<Runtime>>, req: Request, next: Next) -> 
 
 /// A request for a preview's service: through its gate, then to the service.
 async fn serve(rt: Arc<Runtime>, preview: String, service: String, mut req: Request) -> Response {
-    if let Some(r) = rt.gate(&preview, &service, &mut req) {
+    if let Some(r) = rt.gate(&preview, &service, &mut req).await {
         return r;
     }
     // The feedback button: its script, and pages (a browser's GET for HTML) that load it.
     let target = rt.feedback_target(&preview, &req);
+    // The link's token is roll's: the app never sees it, whichever way they came in.
+    take_cookies(&mut req, &format!("roll_access_{preview}"));
     if req.uri().path() == FEEDBACK_PATH
         && let Some(t) = &target
     {

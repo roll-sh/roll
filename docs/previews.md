@@ -737,23 +737,38 @@ as a private address.
     - *A session of its own.* The ticket goes back to the preview's host (`/__roll/visit`),
       which trades it for a host-only `HttpOnly`, `SameSite=Lax` cookie, `roll_visit_<preview>`,
       for 12 hours, and redirects to a path on the same host (no `//`, `/\` or control
-      characters). The service never sees the cookie. Tickets and sessions are kept by their
-      SHA-256.
+      characters). The ticket's URL is the service's own (its scheme, host and port, as roll
+      runs it); only the path and query come from `to`, so a crafted `to` can't send the ticket
+      over plain HTTP or to another port. A ticket only opens a session on its own preview. The
+      service never sees the cookie; when a browser sends several by that name (a sibling
+      preview's host can set one on the parent domain), any live one lets them in. Tickets and
+      sessions are kept by their SHA-256, and only while the project has team access: the write
+      that keeps one reads the project's access, so a change of access can't miss it.
     - *Who.* rolld's `AccountsVisitors` (`crates/rolld/src/previews/mod.rs`) is the one place
-      that says: an account that still signs in and is an admin or owns the project now. rolld's
+      that says for services roll runs itself: an account that still signs in and is an admin or
+      owns the project now, through the same roll session that asked for the ticket. rolld's
       gate lets only admins into `/v1/previews` today, so today it's an admin. A ticket is only
-      given to them, and each session asks again every 5 minutes (`visitor_recheck`): an account
-      disabled, deleted or that lost the project is turned away at its next request after that,
-      and its session is gone. Changing the project's access ends every session.
+      given to them, and each session asks again every 5 minutes (`visitor_recheck`, off the
+      async workers): a roll session signed out, revoked or expired, or an account disabled,
+      deleted or that lost the project, is turned away at its next request after that, and its
+      session is gone. Changing the project's access ends every session.
     - *The link's token lets nobody in.* The links roll hands out (`share_url`) are the plain
-      URLs, as the change's and the pull request's are. Share links and the bypass header for CI
-      still work. Services on roll apps get `access: {signed_in: true, bypass_sha256}` on their
-      `pv-` environment, so roll apps' own sign-in flow gates them (and its
-      `/dashboard/apps/visit`).
+      URLs, as the change's and the pull request's are. A URL that still carries
+      `?roll_access=` is redirected to the same URL without it, and the `roll_access_<preview>`
+      cookie never reaches a service under any access. Leaving `link` gives each of the
+      project's previews a new token, so going back to `link` doesn't revive the old links.
+      Share links and the bypass header for CI still work.
+    - *Services on roll apps.* They get `access: {signed_in: true, bypass_sha256}` on their `pv-`
+      environment, so roll apps' own sign-in flow and its own check decide (its
+      `AccountsVisitors` and `/dashboard/apps/visit`: admins only today), not previews'. roll
+      apps refuses `signed_in` on a node without roll's dashboard address (`web_url`), which
+      fails the deploy. Share links don't open services on roll apps, as under `link`.
     - `visit.rs::a_signed_in_person_gets_into_a_team_preview` follows a page load to the
-      dashboard, a ticket only for a person and only to the preview's hosts, the ticket used
-      once, the session the app never sees, the person losing the project ending it, and a new
-      access ending it.
+      dashboard, a ticket only for a person, only to the preview's hosts and only on its own
+      preview, its URL at the service's scheme and port whatever `to` said, the ticket used
+      once, the session the app never sees (nor junk cookies by its name shutting it out), the
+      link's token taken off the URL, signing out of roll and the person losing the project each
+      ending it, and a new access ending it and replacing the link's token.
   - Never indexed: every response through a preview's host, the service's own and roll's 401
     alike, carries `X-Robots-Tag: noindex` (as Vercel's previews do), whatever the service
     sends, so a public preview, a share link or an earlier push's URL isn't what a search
