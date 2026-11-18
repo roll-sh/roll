@@ -96,6 +96,17 @@ impl Engine {
         for p in &mut shot.pages {
             mask_strings(&mut p.report, &values);
         }
+        // Masked whole, then cut to what's shown: a value a cut splits isn't left half shown.
+        let report_cut = |a11y: &mut Option<crate::PageA11y>, links: &mut Option<crate::PageLinks>, text: &mut Option<String>| {
+            a11y.iter_mut().for_each(crate::PageA11y::cut);
+            links.iter_mut().for_each(crate::PageLinks::cut);
+            text.iter_mut().for_each(crate::cut_page_text);
+        };
+        shot.health.iter_mut().for_each(crate::PageHealth::cut);
+        report_cut(&mut shot.a11y, &mut shot.links, &mut shot.text);
+        for p in &mut shot.pages {
+            report_cut(&mut p.report.a11y, &mut p.report.links, &mut p.report.text);
+        }
         Ok(())
     }
 }
@@ -197,6 +208,14 @@ mod tests {
         mask_strings(&mut health, &["sk_test_51Hx9".to_string()]);
         let h = health.unwrap();
         assert_eq!((h.first_error.as_deref(), h.first_failed.as_deref(), h.errors), (Some("TypeError: key *** rejected"), Some("GET /api?token=*** → 401"), 1));
+        // A value the shown 200 characters would split: parsed wide, masked whole, then cut.
+        let long = format!("{{\"errors\": [\"{}hunter2pass\"], \"failed\": []}}", "x".repeat(195));
+        let mut h = crate::PageHealth::parse(&long);
+        mask_strings(&mut h, &["hunter2pass".to_string()]);
+        let mut h = h.unwrap();
+        h.cut();
+        let shown = h.first_error.unwrap();
+        assert!(shown.ends_with("***") && !shown.contains("hunte"), "{shown}");
     }
 
     #[test]

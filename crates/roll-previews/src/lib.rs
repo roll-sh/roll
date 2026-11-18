@@ -366,11 +366,34 @@ impl PageHealth {
         }
         let r: Raw = serde_json::from_str(json.trim()).ok()?;
         let line = |s: &String| -> String {
-            let one: String = s.lines().next().unwrap_or("").chars().filter(|c| !c.is_control() && *c != '`').take(200).collect();
+            let one: String = s.lines().next().unwrap_or("").chars().filter(|c| !c.is_control() && *c != '`').take(PAGE_WORDS_WIDE).collect();
             one.trim().to_string()
         };
         Some(PageHealth { errors: r.errors.len().min(50) as u32, first_error: r.errors.first().map(line), failed: r.failed.len().min(50) as u32, first_failed: r.failed.first().map(line), unstable: r.unstable })
     }
+
+    /// Cut to what's shown (200 characters), once it's masked.
+    pub fn cut(&mut self) {
+        for s in [&mut self.first_error, &mut self.first_failed].into_iter().flatten() {
+            cut(s, 200);
+        }
+    }
+}
+
+/// How wide a page's own words are kept until they're masked (a value a cut splits would be left
+/// half shown): then they're cut to what's shown (`cut`).
+pub const PAGE_WORDS_WIDE: usize = 2000;
+
+/// `s` to its first `n` characters.
+pub fn cut(s: &mut String, n: usize) {
+    if let Some((i, _)) = s.char_indices().nth(n) {
+        s.truncate(i);
+    }
+}
+
+/// A page's text (`page_text`) to lines of what's shown (200 characters), once it's masked.
+pub fn cut_page_text(t: &mut String) {
+    *t = t.lines().map(|l| l.chars().take(200).collect::<String>().trim().to_string()).collect::<Vec<_>>().join("\n");
 }
 
 /// What a screen reader can't name on the page, and what the document misses, counted by the
@@ -442,6 +465,18 @@ pub struct A11yIssue {
 }
 
 impl PageA11y {
+    /// Cut to what's shown (an element's markup 120 characters, the help 200), once it's masked.
+    pub fn cut(&mut self) {
+        for i in &mut self.issues {
+            if let Some(s) = i.first.as_mut() {
+                cut(s, 120);
+            }
+            if let Some(s) = i.help.as_mut() {
+                cut(s, 200);
+            }
+        }
+    }
+
     /// How many problems this page has: every issue, a missing language and a missing title.
     pub fn problems(&self) -> u32 {
         self.issues.iter().map(|i| i.count).sum::<u32>() + u32::from(!self.lang) + u32::from(!self.title)
@@ -496,7 +531,7 @@ impl PageA11y {
                 let issues = issues
                     .into_iter()
                     .filter(|r| r.count > 0)
-                    .filter_map(|r| Some(A11yIssue { kind: rule_id(&r.kind)?, count: r.count.min(10_000), first: text(r.first, 120), impact: impact(r.impact), help: text(r.help, 200) }))
+                    .filter_map(|r| Some(A11yIssue { kind: rule_id(&r.kind)?, count: r.count.min(10_000), first: text(r.first, PAGE_WORDS_WIDE), impact: impact(r.impact), help: text(r.help, PAGE_WORDS_WIDE) }))
                     .take(50)
                     .collect();
                 Some(PageA11y { issues, lang, title, seo })
@@ -505,7 +540,7 @@ impl PageA11y {
                 let issues = [("images", images), ("fields", fields), ("buttons", buttons), ("links", links)]
                     .into_iter()
                     .filter(|(_, k)| k.count > 0)
-                    .map(|(kind, k)| A11yIssue { kind: kind.into(), count: k.count.min(10_000), first: text(k.first, 120), impact: None, help: None })
+                    .map(|(kind, k)| A11yIssue { kind: kind.into(), count: k.count.min(10_000), first: text(k.first, PAGE_WORDS_WIDE), impact: None, help: None })
                     .collect();
                 Some(PageA11y { issues, lang, title, seo })
             }
@@ -779,6 +814,13 @@ pub struct BrokenLink {
 }
 
 impl PageLinks {
+    /// Cut to what's shown (a path 200 characters), once it's masked.
+    pub fn cut(&mut self) {
+        for b in &mut self.broken {
+            cut(&mut b.path, 200);
+        }
+    }
+
     /// From what the browser wrote (its `links`), if it wrote that: printable paths, bounded.
     pub fn parse(json: &str) -> Option<PageLinks> {
         #[derive(serde::Deserialize)]
@@ -790,7 +832,7 @@ impl PageLinks {
             .broken
             .into_iter()
             .filter(|b| b.path.starts_with('/') && b.status < 1000)
-            .map(|b| BrokenLink { path: b.path.chars().filter(|c| !c.is_control() && *c != '`').take(200).collect(), status: b.status })
+            .map(|b| BrokenLink { path: b.path.chars().filter(|c| !c.is_control() && *c != '`').take(PAGE_WORDS_WIDE).collect(), status: b.status })
             .take(20)
             .collect();
         Some(PageLinks { checked: r.checked.min(50), broken })
@@ -819,7 +861,7 @@ pub fn page_text(json: &str) -> Option<String> {
     let t = v.get("text")?.as_str()?;
     let lines: Vec<String> = t
         .lines()
-        .map(|l| l.chars().map(|c| if c.is_control() { ' ' } else { c }).take(200).collect::<String>().trim().to_string())
+        .map(|l| l.chars().map(|c| if c.is_control() { ' ' } else { c }).take(PAGE_WORDS_WIDE).collect::<String>().trim().to_string())
         .filter(|l| !l.is_empty())
         .take(400)
         .collect();
