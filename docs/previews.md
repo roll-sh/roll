@@ -1509,10 +1509,12 @@ type Settings = {
     - **Then** it makes the branch's preview, or reuses the one it has (`create --branch`'s),
       waits until it's ready (unless `--no-wait`) and prints its URL, as `wait` does.
     - **The branch's change.** A pushed branch is a roll code change, as any is, and its checks
-      run, on the uncommitted work. It gets no preview of its own: a branch with a preview of its
-      own (`up`'s, or one made with `create --branch`) has the one, so the rules make none for a
-      change of it, and one they made just before (roll code nudges the engine on the push, before
-      `up` asks for the branch's preview) is deleted.
+      run, on the uncommitted work. It gets no preview of its own: a `preview/…` branch with a
+      preview of its own (`up`'s) has the one, so the rules make none for a change of it, and one
+      they made just before (roll code nudges the engine on the push, before `up` asks for the
+      branch's preview) is deleted. Both have to hold: a team's own `preview/new-nav` keeps its
+      change's preview, and a preview made by hand of a pull request's branch never takes that pull
+      request's preview, or its reports, away.
   - `roll preview down [--name N] [--repo owner/name]` deletes that preview and the
     `preview/<handle>/<name>` branch: a delete push, as `up`'s, always sent (a branch already
     gone is gone).

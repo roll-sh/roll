@@ -441,5 +441,8 @@ impl Engine {
 /// Whether `c`'s branch has a preview of its own among `rows` (`roll preview up`'s, or one made by
 /// hand): then that one stands for the change, which gets no second.
 fn has_own_preview(rows: &[Row], c: &ChangeInfo) -> bool {
-    rows.iter().any(|r| r.change_id.is_none() && r.desired == Desired::Active && r.repo == c.repo && r.branch.is_some() && r.branch == c.branch)
+    // Only `roll preview up`'s branches (`preview/<who>/<name>`): a preview made by hand of a pull
+    // request's own branch never takes that pull request's preview (and its reports) away.
+    c.branch.as_deref().is_some_and(|b| b.starts_with("preview/"))
+        && rows.iter().any(|r| r.change_id.is_none() && r.desired == Desired::Active && r.repo == c.repo && r.branch.is_some() && r.branch == c.branch)
 }
