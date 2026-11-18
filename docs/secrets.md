@@ -3005,8 +3005,10 @@ cache waited out. Ranked now:
    identities disabled, leases ended, shares and exports cut, syncs paused, an optional freeze (423).
    Fixing: a project admin could revoke the operator's all-projects tokens (a cross-project denial
    of service); only tokens confined to the project are revoked, the rest listed as skipped.
-4. **The dashboard's "Store in roll"** for #303's notices, and **R5, `roll://` wherever another roll
-   product takes a key** (with each product's thread).
+4. **The dashboard's "Store in roll"** for #303's notices (building, on #303), and **R5, `roll://`
+   wherever another roll product takes a key** (building: `feature/roll-secrets-product-refs`, the
+   shared resolver plus storage's replication targets first; then search's snapshot repositories,
+   the reviewer's provider keys and the gateway's upstreams, each with its thread).
 5. **A sealed start for the deployment key** (#276's follow-up: holders unseal over the API, on a fleet).
 6. **R10's other decoys** (database roles, IAM users) once #270's tokens are wired to secrets' alerts;
    **R4** (GCP KMS, Azure Key Vault, HSM) and confirming #290, #284, #227, #229 on real accounts: the
