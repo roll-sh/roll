@@ -3631,8 +3631,9 @@ cache waited out. Ranked now:
    `batch-4-notes.txt`).
 3. **R2, cut off everything that reaches a folder** (#304): tokens through roll-access's bulk revoke,
    identities disabled, leases ended, shares and exports cut, syncs paused, an optional freeze (423).
-   Fixing: a project admin could revoke the operator's all-projects tokens (a cross-project denial
-   of service); only tokens confined to the project are revoked, the rest listed as skipped.
+   Fixed (3b1757d45): a project admin could revoke the operator's all-projects tokens (a cross-project
+   denial of service); now only grants whose every rule names this project are revoked, the rest are
+   listed as `skipped` ("the operator revokes it"); the operator and roll admins revoke all.
 4. **The dashboard's "Store in roll"** for #303's notices (building, on #303), and **R5, `roll://`
    wherever another roll product takes a key** (building: `feature/roll-secrets-product-refs`, the
    shared resolver plus storage's replication targets first; then search's snapshot repositories,
