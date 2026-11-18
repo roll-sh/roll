@@ -250,7 +250,7 @@ async fn email_verify(State(a): S, ip: Ip, headers: HeaderMap, b: Bytes) -> Resu
     let ua = user_agent(&headers);
     let who = Who::of(ip, &headers);
     blocking(&a, move |a| {
-        let (user, made) = a.email_verify(&challenge, &code).inspect_err(|e| a.record_sign_in(None, "email", Some(e), false, &who))?;
+        let (user, made) = a.email_verify(&challenge, &code).inspect_err(|e| a.record_code_refused(a.code_owner(&challenge).as_deref(), "email", e, &who))?;
         if made {
             a.record_new(&user, "invite", "email", &who);
         }
