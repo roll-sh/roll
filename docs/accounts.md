@@ -713,6 +713,10 @@ which downloads as CSV for a spreadsheet or JSON lines for a log tool. An admin'
 it as the operator does (an admin carries `Operator`); its downloads send the session like every
 other call (`withSession`: `lib/session-fetch.test.ts` fails on a fetch to rolld without it).
 
+The audit log names people by handle as well as id (`actor_handle`, `resource_handle`; the CSV's
+last two columns), disabled and deleted people too, so filtered to accounts it reads as Okta's
+and Google Workspace's sign-in reports do.
+
 Each person reads their own (`GET /v1/accounts/me/activity`, "Recent activity" on the account
 page, as GitHub's security log): their sign-ins, refused ones too, with the method, address and
 device, and every change to their account, whoever made it (them, an admin, SCIM). An event is
