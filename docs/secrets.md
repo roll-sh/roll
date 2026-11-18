@@ -3638,9 +3638,14 @@ cache waited out. Ranked now:
    denial of service); now only grants whose every rule names this project are revoked, the rest are
    listed as `skipped` ("the operator revokes it"); the operator and roll admins revoke all.
 4. **The dashboard's "Store in roll"** for #303's notices (building, on #303), and **R5, `roll://`
-   wherever another roll product takes a key** (building: `feature/roll-secrets-product-refs`, the
-   shared resolver plus storage's replication targets first; then search's snapshot repositories,
-   the reviewer's provider keys and the gateway's upstreams, each with its thread).
+   wherever another roll product takes a key** (#329): `Secrets::resolve_for(resource, roll://…)`, the
+   project from the resource's trusted canvas (a reference may only name that one), read as that
+   project's runtime (an untrusted ephemeral environment never reaches a protected one; dynamic
+   credentials refused), audited as the resource; `digest_for` to notice a rotation. Storage's
+   replication targets take references first (resolved per client, rebuilt when the digest moves;
+   operator-only to set, for now). Next: let whoever may `reveal` the key set the reference, then
+   search's snapshot repositories, the reviewer's provider keys and the gateway's upstreams, each
+   with its thread.
 5. **A sealed start for the deployment key** (#276's follow-up: holders unseal over the API, on a fleet).
 6. **R10's other decoys** (database roles, IAM users) once #270's tokens are wired to secrets' alerts;
    **R4** (GCP KMS, Azure Key Vault, HSM) and confirming #290, #284, #227, #229 on real accounts: the
