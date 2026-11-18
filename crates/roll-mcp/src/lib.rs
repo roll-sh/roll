@@ -77,7 +77,9 @@ const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 /// An answer read at most.
 const MAX_ANSWER: usize = 32 << 20;
 /// Text returned to the model at most; longer answers are cut (the structured content stays whole).
-const MAX_TEXT: usize = 256 << 10;
+/// 64 KiB is about 16k tokens: inside Claude Code's default 25,000-token limit on a tool's answer
+/// (`MAX_MCP_OUTPUT_TOKENS`), which refuses a longer one outright rather than cutting it.
+const MAX_TEXT: usize = 64 << 10;
 /// Images a tool answers come back as MCP image content, up to this size (a screenshot).
 const IMAGES: [&str; 3] = ["image/png", "image/jpeg", "image/webp"];
 const MAX_IMAGE: usize = 4 << 20;
@@ -1384,7 +1386,12 @@ fn cut(text: String) -> String {
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}\n… ({} bytes; the structured content has all of it)", &text[..end], text.len())
+    format!(
+        "{}\n… (cut at {} KiB of {} bytes: ask for less, as most list tools take a limit, a filter or a page cursor; the structured content has all of it)",
+        &text[..end],
+        MAX_TEXT >> 10,
+        text.len()
+    )
 }
 
 async fn run(ctx: &Arc<Ctx>, t: &tools::Tool, args: &Value, ext: Extensions) -> Value {
@@ -1478,6 +1485,18 @@ async fn outcome(tool: &str, resp: Response) -> Value {
         text
     };
     json!({ "content": [{ "type": "text", "text": text }], "structuredContent": structured, "isError": false })
+}
+
+#[cfg(test)]
+mod cut_tests {
+    /// A long answer's text fits a client's limit and says how to get less; a short one is whole.
+    #[test]
+    fn long_answers_are_cut_to_fit_a_clients_limit() {
+        let long = "x".repeat(super::MAX_TEXT * 3);
+        let text = super::cut(long);
+        assert!(text.len() < super::MAX_TEXT + 300 && text.contains("ask for less"), "{}", &text[text.len() - 200..]);
+        assert_eq!(super::cut("short".into()), "short");
+    }
 }
 
 #[cfg(test)]
