@@ -460,7 +460,20 @@ Landed 2026-11-18: deleted clusters recoverable for 7 days (#172: restore, `?del
    (`roll-retention-<stream>`: roll over, then delete each backing index once it has been rolled
    over for the retention, so the write index is never deleted; new backing indices join through
    its `ism_template`). The console keeps each cluster's recent requests in the
-   browser (credentials redacted), as Dev Tools keeps its history; named saves are left, low. Signed-in users who aren't admins see and manage their own clusters (#127), within their caps (#162).
+   browser (credentials redacted), as Dev Tools keeps its history; named saves are left, low. Signed-in users who aren't admins see and manage their own clusters (#127), within their caps (#162). Also landed: a
+   Snapshots tab, as Kibana's Snapshot and Restore does it: repositories (roll's own, managed by
+   roll, plus `s3`, `fs` and `url`, and `gcs` and `azure` with #293, registered with their settings, verified and
+   unregistered), snapshots (state, indices, size from `index_details`, duration, failed shards
+   and failures; taken by hand, deleted), restores (all or picked indices, a rename pattern,
+   aliases, global state, partial; a name that would land on an open index is caught before the
+   request) followed through `_recovery` to the end, and snapshot lifecycle policies (schedule in
+   words, retention, next run, last success and failure, run now, edit, and starting a stopped
+   SLM), every request shown and a click from the console. Checked against Elasticsearch 9.5.5:
+   SLM's readable times now carry milliseconds as `XContentBuilder.timeField` writes them
+   (`2026-11-19T01:30:00.000Z`). Left: OpenSearch's snapshot management policies
+   (`_plugins/_sm`) aren't served, so OpenSearch-flavor clusters take snapshots by hand or from an
+   ISM `snapshot` action; their snapshots show no size (OpenSearch has no `index_details`); `fs`
+   repositories need `path.repo`, which roll's clusters don't set.
 9. **Compatibility gaps** from the extended suites (5,083 of the 5,541 Elasticsearch passes, 5,244 in all, 46 suites at 100%; #187),
    largest first. Landed: ent-search's last 5 (a `rule` retriever over `rrf`/`linear`, inference
    inside a rule query's organic, workflow-restricted API keys), ES|QL's last 5 (`TOP_SNIPPETS`,
