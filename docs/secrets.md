@@ -3020,8 +3020,10 @@ inconsistencies are fixed in #264:
 - R10. **Honeytokens** (M): decoy `rlt_` tokens are roll-access's (roll MCP's #270, `decoy: true`);
   database roles and IAM users that alert on use are this side's, once those land.
 - R11. **Moving in from 1Password, Bitwarden SM, Parameter Store, GCP, Azure and Akeyless** (S each).
-- R12. **A split deployment key** (building: `feature/roll-secrets-key-shares`; Shamir N of M,
-  checksummed shares, backups recoverable without one holder). R13. **A FIPS build** (L).
+- R12. **A split deployment key** (#276): `roll secrets key split/combine`, Shamir N of M in a small
+  I/O-free crate (`roll-keyshares`), checksummed `rlks_` shares with a set id and a key check (a
+  wrong mix is an error, never a wrong key); backup keys split the same way. Next: a Vault-style
+  sealed start (`ROLL_SECRET_KEY_SEALED`, holders unseal over the API), designed for fleets. R13. **A FIPS build** (L).
   R14. **Format-preserving encryption** (M, low). R15. Clearing a copied value from the clipboard: not
   done, since a page can't read the clipboard without a prompt and clearing blindly could wipe
   what was copied since.
