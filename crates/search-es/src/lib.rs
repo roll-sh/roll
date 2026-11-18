@@ -15,12 +15,15 @@
 
 pub mod analysis;
 pub mod api;
+pub mod azure;
+pub mod blob;
 pub mod breaker;
 pub mod cluster;
 pub mod document;
 pub mod engine;
 pub mod error;
 pub mod failure_store;
+pub mod gcs;
 pub mod fetch;
 pub mod ingest;
 pub mod join;
