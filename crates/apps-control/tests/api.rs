@@ -5392,10 +5392,19 @@ async fn saturation_is_counted_and_alerted() {
     let id = svc["id"].as_str().unwrap().to_string();
     let d = settled(&w, &id, "production", svc["environments"][0]["latest"]["id"].as_str().unwrap()).await;
     let host = host(&svc["environments"][0]["url"]);
-    visit_deployment(&w, &host, d["id"].as_str().unwrap()).await;
-    let all = futures::future::join_all((0..10).map(|_| visit(&w, &host, "/"))).await;
-    assert!(all.iter().all(|(st, _)| *st == StatusCode::OK), "{all:?}");
-    let (_, m) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/metrics?minutes=5"), None).await;
+    // Ten at once on one instance taking one. On a loaded host the instance can be asleep again
+    // by the time they come (then they wait for its wake, not for a busy instance): sent again,
+    // awake first, until they're counted.
+    let mut m = Value::Null;
+    for _ in 0..5 {
+        visit_deployment(&w, &host, d["id"].as_str().unwrap()).await;
+        let all = futures::future::join_all((0..10).map(|_| visit(&w, &host, "/"))).await;
+        assert!(all.iter().all(|(st, _)| *st == StatusCode::OK), "{all:?}");
+        m = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/metrics?minutes=5"), None).await.1;
+        if m["over_capacity"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum::<f64>() >= 5.0 {
+            break;
+        }
+    }
     let over: f64 = m["over_capacity"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).sum();
     assert!(over >= 5.0, "ten at once on one instance taking one: {m}");
     // Five minutes with 30% of requests over capacity: one alert, saying what to raise.
