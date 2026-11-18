@@ -2,12 +2,14 @@
 # roll secrets' databases outside roll against real servers (docs/secrets.md, "Databases outside
 # roll"): Elasticsearch, OpenSearch, Cassandra and ScyllaDB in Docker, each with authentication on
 # and TLS from a CA made here, then rolld's ignored tests for them (register, rotate, a dynamic
-# login with its group's grants, delete). Containers are named roll-secrets-outside-check-… and
+# login with its group's grants, delete; for CQL, that tracing and ScyllaDB's audit log keep no
+# password roll sent). Containers are named roll-secrets-outside-check-… and
 # removed at the end; images are used as they are (pulled if missing, never removed here).
 #
 #   scripts/secrets-outside-check.sh [es] [os] [cassandra] [scylla]   (all four by default)
 #
-# Docker needs the docker group (`sg docker -c`); cargo honours CARGO_TARGET_DIR.
+# Docker needs the docker group (`sg docker -c`); cargo honours CARGO_TARGET_DIR; CHECK_PREFIX
+# renames the containers.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -17,7 +19,7 @@ CASSANDRA_IMAGE=${CASSANDRA_IMAGE:-cassandra:5.0.9}
 SCYLLA_IMAGE=${SCYLLA_IMAGE:-scylladb/scylla:2026.3.3}
 WHICH=("${@:-es os cassandra scylla}")
 WHICH=(${WHICH[*]})
-PREFIX=roll-secrets-outside-check
+PREFIX=${CHECK_PREFIX:-roll-secrets-outside-check}
 # OpenSearch's demo installer wants a strong password with a symbol, unlike the user name.
 PW=Tq7-vW2pLx9_mZ4rKc8s
 DIR=$(mktemp -d)
@@ -131,13 +133,18 @@ fi
 cql_up() { # name: the superuser logs in over TLS (ScyllaDB listens on the container's address only)
   dk exec "$PREFIX-$1" sh -c "printf '[connection]\nfactory = cqlshlib.ssl.ssl_transport_factory\n[ssl]\nvalidate = false\n' >/tmp/cqlshrc; cqlsh --cqlshrc /tmp/cqlshrc --ssl -u cassandra -p cassandra -e 'SELECT now() FROM system.local' \$(hostname -i) 9042"
 }
+# Every request traced (system_traces.sessions keeps the statement whole on both): the tests check
+# what a statement roll sent holds.
+trace_all() { dk exec "$PREFIX-$1" nodetool settraceprobability 1; }
 if want cassandra; then
   wait_for cassandra "CQL with TLS and the default superuser" cql_up cassandra
+  trace_all cassandra
   export ROLL_E2E_CASSANDRA_URL="cassandra://cassandra:cassandra@localhost:$(port cassandra 9042)"
   TESTS+=(a_real_cassandra)
 fi
 if want scylla; then
   wait_for scylla "CQL with TLS and the default superuser" cql_up scylla
+  trace_all scylla
   export ROLL_E2E_SCYLLA_URL="cassandra://cassandra:cassandra@localhost:$(port scylla 9042)"
   TESTS+=(a_real_scylla)
 fi

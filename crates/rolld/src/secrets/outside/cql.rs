@@ -4,9 +4,14 @@
 //! that would go looking for the cluster's other nodes. Frames are nosql-proto's (bounded
 //! decoding), capped at [`FRAME_MAX`]; rows are walked lazily, at most [`ROWS_MAX`].
 //!
-//! Roles are `CREATE ROLE … WITH LOGIN = true AND PASSWORD = '…'` and `ALTER ROLE … WITH PASSWORD =
-//! '…'`: neither database takes a password as a bound value, so it goes in the statement, over
-//! TLS (roll-secrets' passwords are letters and digits, checked again here). A dynamic login is
+//! Roles are `CREATE ROLE … WITH LOGIN = true AND HASHED PASSWORD = '…'` and `ALTER ROLE … WITH
+//! HASHED PASSWORD = '…'`: neither database takes a password as a bound value, and a statement is
+//! kept whole in tracing (`system_traces.sessions`) on both, so the statement holds bcrypt's hash
+//! of the password (`$2a$`, cost 10, Cassandra's own), never the password. Only when the server
+//! won't take that (a syntax error from one without `HASHED PASSWORD`; ScyllaDB 2026.3's refusal of
+//! it from anyone but a superuser, and its server error on `ALTER ROLE … WITH HASHED PASSWORD`) does
+//! the password go in the statement, over TLS (roll-secrets' passwords are letters and digits,
+//! checked again here). A dynamic login is
 //! granted the group. Neither has an expiry for a role: a dynamic login lasts until roll ends its
 //! lease, which drops it. Names roll checked (letters, digits, _) are quoted, so their case holds.
 
@@ -74,6 +79,20 @@ fn literal(password: &str) -> Result<String, String> {
         return Err("a password roll didn't make".into());
     }
     Ok(format!("'{password}'"))
+}
+
+/// bcrypt's `$2a$` hash of `password` at cost 10: Cassandra's default cost, and the only prefix it
+/// takes (`$2b$` and `$2y$` are "Invalid hashed password value. Please use jBcrypt."); ScyllaDB
+/// takes any of them. Its characters (`$./`, letters, digits) need no quoting.
+fn hashed(password: &str) -> Result<String, String> {
+    literal(password)?;
+    bcrypt::hash_with_result(password, 10).map(|h| h.format_for_version(bcrypt::Version::TwoA)).map_err(|e| format!("bcrypt: {e}"))
+}
+
+/// [`hashed`] off the runtime's threads (cost 10 is tens of milliseconds).
+async fn hashed_blocking(password: &str) -> Result<String, String> {
+    let password = password.to_string();
+    tokio::task::spawn_blocking(move || hashed(&password)).await.map_err(|e| format!("bcrypt: {e}"))?
 }
 
 type Io = tokio_rustls::client::TlsStream<TcpStream>;
@@ -161,16 +180,33 @@ pub(super) async fn run<T>(u: Url, ca: Option<String>, allow_private: bool, work
     .map_err(|_| "timed out".to_string())?
 }
 
-/// One statement with text values; `secret` is a password it holds (kept out of errors).
-async fn query(c: &mut Conn, cql: String, values: &[&str], secret: Option<&str>) -> Result<ResultBody, String> {
+/// One statement with text values: its result, or the server's refusal.
+async fn ask(c: &mut Conn, cql: String, values: &[&str]) -> Result<Result<ResultBody, ErrorBody>, String> {
     let mut params = QueryParams::new(Consistency::LocalQuorum);
     params.values = values.iter().map(|v| Value::Set(Bytes::copy_from_slice(v.as_bytes()))).collect();
-    let host = c.host.clone();
     match exchange(c, Request::Query(Query { query: cql, params })).await? {
-        Response::Result(r) => Ok(r),
-        Response::Error(e) => Err(format!("{host}: {}", refused(&e, secret))),
-        _ => Err(format!("{host}: an answer that isn't a result")),
+        Response::Result(r) => Ok(Ok(r)),
+        Response::Error(e) => Ok(Err(e)),
+        _ => Err(format!("{}: an answer that isn't a result", c.host)),
     }
+}
+
+/// One statement with text values; `secret` is a password it holds (kept out of errors).
+async fn query(c: &mut Conn, cql: String, values: &[&str], secret: Option<&str>) -> Result<ResultBody, String> {
+    ask(c, cql, values).await?.map_err(|e| format!("{}: {}", c.host, refused(&e, secret)))
+}
+
+/// `statement` with `HASHED PASSWORD = '<bcrypt>'` in it (see the module's doc), or with
+/// `PASSWORD = '…'` once the server answers that with a syntax error, a server error or a refusal
+/// (the hashed statement changed nothing then; a refusal for want of a permission comes again).
+async fn with_password(c: &mut Conn, statement: impl Fn(&str) -> String, password: &str) -> Result<(), String> {
+    let hash = hashed_blocking(password).await?;
+    match ask(c, statement(&format!("HASHED PASSWORD = '{hash}'")), &[]).await? {
+        Ok(_) => return Ok(()),
+        Err(e) if [code::SYNTAX_ERROR, code::SERVER_ERROR, code::UNAUTHORIZED].contains(&e.code) => {}
+        Err(e) => return Err(format!("{}: {}", c.host, refused(&e, Some(&hash)))),
+    }
+    query(c, statement(&format!("PASSWORD = {}", literal(password)?)), &[], Some(password)).await.map(|_| ())
 }
 
 /// Whether `role` exists, and whether it can log in (`LIST ROLES OF` refuses a role that doesn't).
@@ -213,12 +249,13 @@ pub(super) async fn check(c: &mut Conn, roles: &[String], group: Option<&str>) -
 }
 
 pub(super) async fn set_password(c: &mut Conn, role: &str, password: &str) -> Result<(), String> {
-    query(c, format!("ALTER ROLE {} WITH PASSWORD = {}", ident(role)?, literal(password)?), &[], Some(password)).await.map(|_| ())
+    let who = ident(role)?;
+    with_password(c, |p| format!("ALTER ROLE {who} WITH {p}"), password).await
 }
 
 pub(super) async fn create_login(c: &mut Conn, name: &str, password: &str, group: &str) -> Result<(), String> {
     let (who, group) = (ident(name)?, ident(group)?);
-    query(c, format!("CREATE ROLE {who} WITH LOGIN = true AND PASSWORD = {}", literal(password)?), &[], Some(password)).await?;
+    with_password(c, |p| format!("CREATE ROLE {who} WITH LOGIN = true AND {p}"), password).await?;
     if let Err(e) = query(c, format!("GRANT {group} TO {who}"), &[], None).await {
         let _ = query(c, format!("DROP ROLE IF EXISTS {who}"), &[], None).await;
         return Err(e);
@@ -233,7 +270,7 @@ pub(super) async fn drop_login(c: &mut Conn, name: &str) -> Result<(), String> {
     // within 5 s of the role's last change on Cassandra 5, and for a role that's gone already;
     // the drop goes ahead either way.
     let unknown = unknown_password();
-    let _ = query(c, format!("ALTER ROLE {who} WITH PASSWORD = {}", literal(&unknown)?), &[], Some(&unknown)).await;
+    let _ = with_password(c, |p| format!("ALTER ROLE {who} WITH {p}"), &unknown).await;
     query(c, format!("DROP ROLE IF EXISTS {who}"), &[], None).await.map(|_| ())
 }
 
@@ -257,7 +294,9 @@ mod tests {
         assert_eq!(refused(&syntax, Some(pw)), "syntax error");
         let other = ErrorBody::new(code::INVALID, format!("bad {pw}"));
         assert!(!refused(&other, Some(pw)).contains(pw));
-        assert!(literal("it's").is_err() && ident("a\"b").is_err());
+        assert!(literal("it's").is_err() && ident("a\"b").is_err() && hashed("it's").is_err());
+        let h = hashed(pw).unwrap();
+        assert!(h.starts_with("$2a$10$") && !h.contains(pw) && bcrypt::verify(pw, &h).unwrap());
         assert!(parse("cassandra://a:b@db.example.com:9142/app?ssl=false").err().unwrap().contains("ssl"));
         assert!(parse("cassandra://a:b@db.example.com/a-b").is_err());
         assert_eq!(parse("cassandra://a:b@db.example.com").unwrap().port, 9142);
@@ -306,6 +345,19 @@ mod tests {
         .await
     }
 
+    /// Every cell of `select`'s rows as text, as whoever `url` names, at consistency ONE (the trace
+    /// and audit keyspaces' replication outnumbers one node).
+    async fn cells(url: &str, ca: &str, select: &str) -> Vec<String> {
+        let select = select.to_string();
+        run(parse(url).unwrap(), Some(ca.to_string()), true, async move |c| {
+            let req = Request::Query(Query { query: select, params: QueryParams::new(Consistency::One) });
+            let Response::Result(ResultBody::Rows(rows)) = exchange(c, req).await? else { return Err("no rows".into()) };
+            Ok(rows.rows().flat_map(|row| row.take(rows.column_count()).collect::<Vec<_>>()).flatten().map(|b| String::from_utf8_lossy(&b).into_owned()).collect())
+        })
+        .await
+        .unwrap()
+    }
+
     async fn real(var: &str) {
         let env = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k}"));
         let (root, ca) = (env(var), std::fs::read_to_string(env("ROLL_E2E_OUTSIDE_CA")).unwrap());
@@ -334,7 +386,9 @@ mod tests {
         .await
         .unwrap();
         let admin = as_user(&root, "roll_admin", &admin_pw, "app");
-        tokio::task::spawn_blocking(move || {
+        let scylla = var == "ROLL_E2E_SCYLLA_URL";
+        let (root2, ca2, root) = (root.clone(), ca.clone(), root);
+        let sent = tokio::task::spawn_blocking(move || {
             let g = super::super::Guarded { allow_private: true };
             let roles = ["app_blue".to_string(), "app_green".to_string()];
             let rt = tokio::runtime::Handle::current();
@@ -375,8 +429,30 @@ mod tests {
             g.drop_login(&admin, Some(&ca), name).unwrap();
             assert!(logs_in(name, &upw).is_err(), "a dropped role is refused");
             g.drop_login(&admin, Some(&ca), name).unwrap();
+            // One made by the superuser, whom ScyllaDB lets send a hashed password.
+            let (name, rootpw) = ("roll_fakefakefakeroot", pw());
+            g.create_login(&root, Some(&ca), name, &rootpw, "reader", 0).unwrap();
+            logs_in(name, &rootpw).unwrap();
+            g.drop_login(&root, Some(&ca), name).unwrap();
+            (first, second, upw, rootpw)
         })
         .await
         .unwrap();
+        // What the servers kept of the statements: the script turns on tracing for every request,
+        // which keeps a statement whole on both. Every one went hashed on Cassandra. ScyllaDB 2026.3
+        // takes a hashed password only from a superuser and only in CREATE ROLE (ALTER ROLE's is a
+        // server error), so the rest went plain, which its audit log (on by default for DCL) masks.
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let traces = cells(&root2, &ca2, "SELECT parameters FROM system_traces.sessions").await.join("\n");
+        assert!(traces.contains("HASHED PASSWORD = '$2a$10$"), "tracing is on and saw a hashed password");
+        let (first, second, upw, rootpw) = sent;
+        assert!(!traces.contains(&rootpw), "the superuser's login's password isn't in a statement");
+        if scylla {
+            let audit = cells(&root2, &ca2, "SELECT operation FROM audit.audit_log").await.join("\n");
+            assert!(audit.contains("ALTER ROLE \"app_blue\" WITH PASSWORD = '***'"), "{audit}");
+            assert!(![&first, &second, &upw].iter().any(|p| audit.contains(p.as_str())), "ScyllaDB's audit log masks passwords");
+        } else {
+            assert!(![&first, &second, &upw].iter().any(|p| traces.contains(p.as_str())), "no password roll sent is in a statement");
+        }
     }
 }

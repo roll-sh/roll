@@ -962,12 +962,24 @@ TLS (`cassandra://admin:…@host:9142/keyspace`; the keyspace is optional and ch
 registration; no settings). rolld speaks the protocol itself through nosql-proto's bounded frames
 (capped at 256 KiB), on one connection to the address it checked, with the certificate verified
 against the URL's host: no driver goes looking for the cluster's other nodes. Rotation is `ALTER
-ROLE "<name>" WITH PASSWORD = '…'` on two roles that take turns; a dynamic login is `CREATE ROLE
-"<name>" WITH LOGIN = true AND PASSWORD = '…'` and `GRANT "<group>" TO "<name>"` (the group is a
-role), dropped if the grant fails. Neither database takes a password as a bound value, so it goes
-in the statement, over TLS; roll's passwords are letters and digits, so nothing needs escaping, and
-names are quoted (their case holds). A refused statement holding a password reports a syntax error
-by its kind alone (the server quotes the statement in one) and any other with the password cut out.
+ROLE "<name>" WITH HASHED PASSWORD = '…'` on two roles that take turns; a dynamic login is `CREATE
+ROLE "<name>" WITH LOGIN = true AND HASHED PASSWORD = '…'` and `GRANT "<group>" TO "<name>"` (the
+group is a role), dropped if the grant fails. Neither database takes a password as a bound value,
+and both keep a traced statement whole (`system_traces.sessions`, for a client that asks or under
+`nodetool settraceprobability`), so the statement holds rolld's bcrypt of the password, never the
+password: `$2a$` at cost 10, Cassandra's default and the only prefix it takes (`$2b$` and `$2y$` are
+"Invalid hashed password value. Please use jBcrypt."; ScyllaDB takes all three, at any cost).
+Cassandra 5.0.9 takes the hashed form in both statements, from the narrower admin below too.
+ScyllaDB 2026.3.3 takes it only from a superuser ("Only superusers can create a role with a hashed
+password.") and only in `CREATE ROLE`: it answers `ALTER ROLE … WITH HASHED PASSWORD` with a server
+error (`std::get: wrong index for variant`, nothing changed) even then. So a refusal, a server error
+or a syntax error (a server without `HASHED PASSWORD`) sends the statement again with `PASSWORD =
+'…'`, over TLS: on ScyllaDB rotations and a lease's end always go plain, and dynamic logins do
+unless the admin is a superuser. Its audit log (`audit: "table"` with DCL, on by default) masks that as
+`PASSWORD = '***'`, as Cassandra's audit and full-query logs do; its traces don't. roll's passwords
+are letters and digits, so nothing needs escaping, and names are quoted (their case holds). A
+refused statement holding a password reports a syntax error by its kind alone (the server quotes
+the statement in one) and any other with the password, or its hash, cut out.
 Neither has an expiry for a role: ending the lease gives the role a password nobody knows, then
 `DROP ROLE IF EXISTS` (Cassandra keeps a dropped role's credentials cached for up to
 `credentials_validity`, 2 s by default, but takes a new password at once). Registering checks that
@@ -997,7 +1009,9 @@ authentication on and TLS from a CA it makes): registering as the narrower admin
 for a missing user, role or keyspace, a wrong admin password (never echoed) and an untrusted
 certificate; rotation (the new password logs in, the old one is refused, the user keeps its roles);
 a dynamic login that reads with the group's grants and can't write or read elsewhere; and its
-deletion (refused at once, twice is fine).
+deletion (refused at once, twice is fine). For CQL it traces every request and checks what the
+servers kept: no password roll sent in Cassandra's traces, none of a login the superuser made in
+ScyllaDB's, and ScyllaDB's audit log masking the rest.
 
 ### Directories (LDAP and Active Directory)
 
