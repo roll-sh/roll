@@ -457,6 +457,13 @@ impl Accounts {
         if !db.has_column("sessions", "verified_at")? {
             db.add_column("sessions", "verified_at", "INTEGER")?;
         }
+        // An SSO connection's session length, and the cap a session of it carries.
+        if !db.has_column("sso_connections", "session_hours")? {
+            db.add_column("sso_connections", "session_hours", "INTEGER")?;
+        }
+        if !db.has_column("sessions", "cap_ms")? {
+            db.add_column("sessions", "cap_ms", "INTEGER")?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;
@@ -542,9 +549,11 @@ impl Accounts {
         self.issue_session(user, user_agent, None, false)
     }
 
-    /// A session for a person their company's SSO provider just signed in.
-    pub(crate) fn issue_sso(&self, user: &str, user_agent: &str) -> Result<Issued> {
-        self.issue_session(user, user_agent, Some("sso"), false)
+    /// A session for a person their company's SSO provider (connection `connection`) just signed
+    /// in: no longer than the connection's session length.
+    pub(crate) fn issue_sso(&self, user: &str, user_agent: &str, connection: &str) -> Result<Issued> {
+        let cap = self.db.read(|c| c.query_row("SELECT session_hours FROM sso_connections WHERE id = ?", [connection], |r| r.get::<_, Option<i64>>(0)).optional())?.flatten().filter(|h| *h > 0);
+        self.issue_capped(user, user_agent, Some("sso"), false, cap.map(|h| h * 3_600_000))
     }
 
     /// A session for a person a passkey signed in on its own: the authenticator verified them
@@ -555,6 +564,12 @@ impl Accounts {
     }
 
     fn issue_session(&self, user: &str, user_agent: &str, method: Option<&str>, both_factors: bool) -> Result<Issued> {
+        self.issue_capped(user, user_agent, method, both_factors, None)
+    }
+
+    /// [`Self::issue_session`], its whole session lasting at most `cap_ms` (an SSO connection's
+    /// session length), kept on the session so finishing a second factor keeps it.
+    fn issue_capped(&self, user: &str, user_agent: &str, method: Option<&str>, both_factors: bool, cap_ms: Option<i64>) -> Result<Issued> {
         self.provision_owner(user);
         let now = self.db.now_ms()?;
         let token = new_token("rls");
@@ -567,12 +582,12 @@ impl Accounts {
                 Some(false) => {}
             }
             let mfa = !both_factors && c.query_row("SELECT 1 FROM totp WHERE user_id = ? AND enabled = 1", [user], |_| Ok(())).optional()?.is_some();
-            let (level, ttl) = if mfa { ("mfa", SECOND_FACTOR_TTL_MS) } else { ("full", SESSION_TTL_MS) };
+            let (level, ttl) = if mfa { ("mfa", SECOND_FACTOR_TTL_MS) } else { ("full", cap_ms.map_or(SESSION_TTL_MS, |c| c.min(SESSION_TTL_MS))) };
             // The user's sessions that ended go with each new one: no sweeper needed.
             c.execute("DELETE FROM sessions WHERE user_id = ? AND (expires_at <= ? OR (level = 'full' AND seen_at <= ?))", params![user, now, now - SESSION_IDLE_MS])?;
             c.execute(
-                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![sha256_hex(&token), id, user, level, now, now, now + ttl, user_agent, method],
+                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method, cap_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![sha256_hex(&token), id, user, level, now, now, now + ttl, user_agent, method, cap_ms],
             )?;
             Ok(mfa)
         })?;
@@ -583,7 +598,10 @@ impl Accounts {
     pub(crate) fn complete(&self, owed: &roll_auth::SecondFactorOwed, user_agent: &str) -> Result<Issued> {
         // A sign-in that began some other way while SSO was enforced (or before it was) doesn't
         // finish: the provider signs those people in.
-        let method = self.db.read(|c| c.query_row("SELECT method FROM sessions WHERE id = ?", [owed.session.as_str()], |r| r.get::<_, Option<String>>(0)).optional())?.flatten();
+        let row = self.db.read(|c| c.query_row("SELECT method, cap_ms FROM sessions WHERE id = ?", [owed.session.as_str()], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?))).optional())?;
+        let (method, cap_ms) = row.unwrap_or((None, None));
+        // An SSO connection's session length holds past the second factor too.
+        let ttl = cap_ms.map_or(SESSION_TTL_MS, |c| c.min(SESSION_TTL_MS));
         if method.as_deref() != Some("sso") {
             self.sso_not_enforced(&owed.user)?;
         }
@@ -596,8 +614,8 @@ impl Accounts {
                 return Err(Error::signed_out());
             }
             c.execute(
-                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method) VALUES (?, ?, ?, 'full', ?, ?, ?, ?, ?)",
-                params![sha256_hex(&token), id, owed.user, now, now, now + SESSION_TTL_MS, user_agent, method],
+                "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method, cap_ms) VALUES (?, ?, ?, 'full', ?, ?, ?, ?, ?, ?)",
+                params![sha256_hex(&token), id, owed.user, now, now, now + ttl, user_agent, method, cap_ms],
             )?;
             Ok(())
         })?;

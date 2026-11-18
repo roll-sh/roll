@@ -20,7 +20,7 @@ export function SsoSection() {
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(() => accountsApi.ssoConnections().then(setList, (e) => setError(errorText(e))), []);
   useEffect(() => void load(), [load]);
-  const change = (id: string, c: { enforce?: boolean; provision?: boolean }) => accountsApi.updateSso(id, c).then(load, (e) => setError(errorText(e)));
+  const change = (id: string, c: { enforce?: boolean; provision?: boolean; session_hours?: number }) => accountsApi.updateSso(id, c).then(load, (e) => setError(errorText(e)));
   return (
     <section id="sso" className="rise scroll-mt-16">
       <div className="flex items-end gap-3">
@@ -121,6 +121,17 @@ export function SsoSection() {
               <label className="flex items-center gap-1.5">
                 <input type="checkbox" checked={c.provision} onChange={(e) => void change(c.id, { provision: e.target.checked })} />
                 Make accounts for new people (never admins)
+              </label>
+              <label className="flex items-center gap-1.5">
+                Sessions last
+                <select value={c.session_hours ?? 0} onChange={(e) => void change(c.id, { session_hours: Number(e.target.value) })} className="rounded-md border border-line-2 bg-canvas px-1.5 py-0.5 text-[12px]">
+                  {[0, 1, 8, 12, 24, 72, 168].map((h) => (
+                    <option key={h} value={h}>
+                      {h === 0 ? "30 days" : h < 24 ? `${h} hours` : h === 24 ? "1 day" : `${h / 24} days`}
+                    </option>
+                  ))}
+                </select>
+                then sign in through it again
               </label>
               <span className="flex min-w-0 items-center gap-1.5">
                 redirect URI <span className="truncate font-mono text-[11.5px] text-fg">{c.redirect_uri}</span>

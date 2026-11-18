@@ -77,6 +77,9 @@ pub struct Connection {
     pub scim: bool,
     /// Its SCIM token was found leaked and revoked: where (until an admin makes a new one).
     pub scim_leaked: Option<String>,
+    /// How long a session it signs in lasts at most, in hours (none: roll's 30 days), as Okta's
+    /// and Google Workspace's session lengths: then the person signs in through it again.
+    pub session_hours: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -115,6 +118,9 @@ pub struct ConnectionChange {
     pub enforce: Option<bool>,
     #[serde(default)]
     pub provision: Option<bool>,
+    /// The longest a session it signs in lasts, in hours (1 to 720); 0 takes the cap off.
+    #[serde(default)]
+    pub session_hours: Option<u32>,
 }
 
 /// TXT records, for proving domains (DNS over HTTPS by default; a table in tests).
@@ -196,7 +202,7 @@ fn is_entra(issuer: &str) -> bool {
     url::Url::parse(issuer).ok().and_then(|u| u.host_str().map(str::to_ascii_lowercase)).is_some_and(|h| h == "login.microsoftonline.com" || h == "sts.windows.net")
 }
 
-const COLUMNS: &str = "id, name, issuer, client_id, domains, verified, enforce, provision, created_at, challenge, (SELECT COUNT(*) FROM scim_tokens t WHERE t.connection_id = sso_connections.id AND t.leaked IS NULL) AS scim, (SELECT leaked FROM scim_tokens t WHERE t.connection_id = sso_connections.id) AS scim_leaked";
+const COLUMNS: &str = "id, name, issuer, client_id, domains, verified, enforce, provision, created_at, challenge, (SELECT COUNT(*) FROM scim_tokens t WHERE t.connection_id = sso_connections.id AND t.leaked IS NULL) AS scim, (SELECT leaked FROM scim_tokens t WHERE t.connection_id = sso_connections.id) AS scim_leaked, session_hours";
 
 impl Accounts {
     fn sso_redirect_uri(&self, id: &str) -> String {
@@ -221,6 +227,7 @@ impl Accounts {
             dns: DnsRecord { name: "_roll-sso.<domain>".into(), value: format!("roll-sso={challenge}") },
             scim: r.get::<_, i64>(10)? > 0,
             scim_leaked: r.get(11)?,
+            session_hours: r.get::<_, Option<i64>>(12)?.and_then(|h| u32::try_from(h).ok()).filter(|h| *h > 0),
         })
     }
 
@@ -346,6 +353,21 @@ impl Accounts {
             }
             if let Some(p) = ch.provision {
                 c.execute("UPDATE sso_connections SET provision = ? WHERE id = ?", params![p, id])?;
+            }
+            if let Some(h) = ch.session_hours {
+                if h > 720 {
+                    return Err(Error::BadRequest("a session lasts 1 to 720 hours (0 takes the cap off)".into(), None));
+                }
+                c.execute("UPDATE sso_connections SET session_hours = ? WHERE id = ?", params![(h > 0).then_some(h as i64), id])?;
+                // A shorter cap applies to the sessions it already signed in, now.
+                if h > 0 {
+                    let cap = h as i64 * 3_600_000;
+                    c.execute(
+                        "UPDATE sessions SET cap_ms = ?, expires_at = CASE WHEN created_at + ? < expires_at THEN created_at + ? ELSE expires_at END \
+                         WHERE method = 'sso' AND user_id IN (SELECT user_id FROM identities WHERE provider = ?)",
+                        params![cap, cap, cap, provider],
+                    )?;
+                }
             }
             if let Some(e) = ch.enforce {
                 c.execute("UPDATE sso_connections SET enforce = ? WHERE id = ?", params![e, id])?;
