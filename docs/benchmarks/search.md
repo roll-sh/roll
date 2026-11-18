@@ -70,6 +70,204 @@ over rounds with the min–max spread; trust a difference only where the spreads
   request (sum of the process's threads' `schedstat` run time) of two binaries loaded with the
   same data and measured interleaved.
 
+## Round 10: vectors (2026-11-18, `c1765cfae`)
+
+This round reruns `so_vector` and `dense_vector` against Elasticsearch 9.5.5 at origin/main
+`c1765cfae`. Since Round 9 (`807396e0b`), that adds #156 (request fields' source locations
+computed only for the messages that print them) and #180 (knn CPU on merged segments).
+`search-dev` is built in release (line tables). The harness, subsets and parameters are Round 9's
+(`bench-search-rerun.sh`, so_vector `RALLY_DOCS=200000`, dense_vector `1000000` on the float
+corpora, lane b: server `10,11,28,29`, Rally `12,13,30,31`, under the lane's lock, 4 GiB each,
+roll and Elasticsearch alternating with the order rotating). There is one change: Elasticsearch
+now starts with `indices.merge.disk.check_interval=0`, because its merges were being held (below).
+The tracks' `knn-recall-*` and `script-score-*` tasks fail on both engines, as in Rounds 6-9, and
+are left out. Raw outputs: `~/.cache/rsearch/vectors-r10/` on the machine that ran them
+(`out-fix/` and `out-fix2/`; `out/` holds the discarded runs).
+
+**Elasticsearch's merges were held by its merge disk check, in this round's first runs and in
+Round 9.** The harness turns the allocation watermarks off
+(`cluster.routing.allocation.disk.threshold_enabled=false`, a node setting passed at start;
+`GET _cluster/settings?include_defaults=true&filter_path=**.disk*` returns `"false"`). No race log
+or Rally log of either round has a watermark, flood-stage, `read_only_allow_delete` or
+`cluster_block` line. But Elasticsearch 9.1+ has a second, separate check: its merge scheduler runs
+no merge, force-merges included, while the available disk space is below
+`indices.merge.disk.watermark.high` (95%, at most 100 GB of headroom: about 93.5 GB on this
+1.87 TB disk), checked every 5 s (`indices.merge.disk.check_interval`). The shared disk was
+91-97% used during both rounds (the cleanup timer's journal), so free space hovered around that
+line. The evidence:
+
+- This round's first runs (before the fix) had force-merges of 1,433 s and 3,763 s, against
+  10-91 s otherwise. The one Elasticsearch log still readable (the containers are `--rm`)
+  repeats "There are merge tasks enqueued but there's insufficient disk space available to
+  execute them" (82 times, at 42-45 GB available).
+- A private Elasticsearch 9.5.5 with the harness's settings, at 50 GB available: 40 refreshed
+  bulks stayed at 41 segments, and a force-merge didn't finish in 120 s (26 of those warnings).
+  With `indices.merge.disk.check_interval=0`, the index merged to 2 segments in the background,
+  force-merged in 0.36 s, and logged no warnings.
+- With the fix, every Elasticsearch race of both tracks merged (so_vector: 6 merges per race,
+  against 4 in the first race after a container start before the fix), and force-merges took
+  10-91 s.
+
+`scripts/bench-search.sh` now starts Elasticsearch with `indices.merge.disk.check_interval=0`.
+Every number below is from runs with it. This round's earlier runs are discarded.
+
+**Round 9's Elasticsearch numbers taken under the hold.** All of Round 9's Elasticsearch races
+ran with the check on. These show it held. Their Elasticsearch server logs weren't kept, so the
+cause is inferred, not logged:
+
+- Round 9 vectors: so_vector's first Elasticsearch race (4 merges against 6; force-merge
+  1,315 s, ending 70 s after the cleanup timer freed 46 GB at 00:17; `default-match-all` 14 ms
+  against 6 ms in the next race), and dense_vector's races 0 and 2 (force-merges of 320 s and
+  730 s against 10 s). The force-merged tasks ran after the force-merge finished, on one segment
+  per shard.
+- Round 9 fixed tracks: in 4 of noaa's 6 Elasticsearch races (the first set's race 2 and all of
+  the second set), 0 merges and 62-65 segments at the end, against 6-7 merges and 11-12 segments
+  in races 0 and 1 of the first set. noaa has no force-merge, so those races searched about five
+  times the segments; their p50s (8.6-15.5 ms) don't separate cleanly from the merged races'
+  (8.6-10.2). In nyc_taxis' races 1 and 2, 0 merges and 9-10 segments, against 1 merge and 4
+  segments in race 0. nested shows no sign (6-7 merges and 7-13 segments in every race). geonames
+  merged 0-1 times in every race of Rounds 8 and 9 alike, so its numbers can't tell. OpenSearch
+  has no such check.
+- Round 8's merge counts (27-31 per race on these tracks) are not a baseline: its Elasticsearch
+  indices were larger at the end (so_vector 2.43 GB and 43 segments, against 0.77 GB and 2), so
+  those races ran a different load.
+
+**The work happened.** A poller logged each engine's document count every 5 s: every race ended
+with so_vector's 200,000 documents and dense_vector's 250,000 (200,000 loaded, then 50,000 by the
+update task) on both engines. Every task other than `knn-recall-*` and `script-score-*` had a 0%
+error rate in every race. (Rounds 8 and 9 counted documents under `<track>*`, which these tracks'
+index, `vectors`, doesn't match: their count lines were empty.)
+
+**Load.** The host's 1-minute load ran 14-86, and other sessions' unpinned builds and tests
+(`rustc`, `tsc`, `cc1`, browsers) ran on the lane's CPUs throughout, even at load 21. The lane's
+server CPUs, sampled every 5 s, minus the race's own container CPU, give each race's "foreign"
+share, in %:
+
+| track | roll | Elasticsearch |
+|---|---|---|
+| so_vector | 47, 21, 36 | 62, 50, 56 (reruns: 62, 68) |
+| dense_vector, set 1 | 56, 82, 65 | 53, 59, 54 |
+| dense_vector, set 2 | 40, 63, 45 | 57, 59, 60 |
+
+Round 9's rule was to rerun a race above 50%. dense_vector ran a second whole set (gated on a
+5-minute load under 25, which came at 04:04), and so_vector's two Elasticsearch races over 50% ran
+again alone at 06:02. Neither came in under 50%. The tables therefore give medians over the races
+as run (so_vector: the first set's 3 rounds; dense_vector: both sets, 6 rounds), and a ratio
+adjusted for foreign load. For each task, a least-squares fit of log(p50) against the engine and
+the race's foreign cores, over every race with the fix (so_vector 3 roll and 5 Elasticsearch
+races, the reruns included; dense_vector 6 and 6), gives roll / Elasticsearch at equal foreign
+load, with its standard error as a factor. "tie" is where the ranges overlap.
+
+`dense_vector` (6 rounds each). The first row is the whole load's rate (200,000 / the bulk task's
+time in Rally's log), as in Round 9:
+
+| task | Round 9 roll | Round 10 roll | Round 9 Elasticsearch | Round 10 Elasticsearch | roll / Elasticsearch, Round 9 → 10 | at equal foreign load (×/÷ s.e.) | verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `index-append`, docs/s | 12.1k (10.4k-13.3k) | 12.4k (9.0k-16.8k) | 3.9k (3.4k-4.9k) | 5.3k (4.4k-5.6k) | 0.32 → 0.43 | - | roll faster |
+| `10-100_multiple_segments` | 4.76 (4.00-5.75) | 4.20 (3.25-5.08) | 6.93 (4.34-12.72) | 4.83 (3.60-6.23) | 0.69 (tie) → 0.87 (tie) | 0.84 (1.13) | tie |
+| `100-1000_multiple_segments` | 14.00 (12.97-15.50) | 14.23 (8.20-19.60) | 9.30 (6.54-16.56) | 6.19 (5.65-7.49) | 1.51 (tie) → 2.30 | 2.08 (1.16) | Elasticsearch faster |
+| `10-100` | 2.92 (2.59-2.97) | 2.24 (2.08-2.42) | 3.55 (3.53-3.96) | 3.64 (3.18-4.40) | 0.82 → 0.62 | 0.61 (1.06) | roll faster |
+| `100-1000` | 7.13 (6.88-7.37) | 6.22 (5.52-6.89) | 6.11 (5.94-6.22) | 5.56 (5.27-6.65) | 1.17 → 1.12 (tie) | 1.08 (1.05) | tie |
+
+`so_vector` (3 rounds each; p50 ms, `index-append` docs/s first):
+
+| task | Round 9 roll | Round 10 roll | Round 9 Elasticsearch | Round 10 Elasticsearch | roll / Elasticsearch, Round 9 → 10 | at equal foreign load (×/÷ s.e.) | verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `index-append`, docs/s | 1680 (1587-1890) | 1971 (1779-2181) | 914.4 (832.4-1397) | 1201 (1004-1354) | 0.54 → 0.61 | - | roll faster |
+| `index-append`, p50 | 239.7 (206.5-241.6) | 190.7 (182.6-194.4) | 532.3 (395.9-600.3) | 504.2 (473.8-505.9) | 0.45 → 0.38 | - | roll faster |
+| `default-match-all` | 5.32 (4.85-5.66) | 4.36 (3.68-4.60) | 14.39 (6.30-19.55) | 5.93 (5.73-8.10) | 0.37 → 0.74 | 0.59 (1.68) | roll faster |
+| `default-match-all-multi-client` | 7.69 (7.65-9.83) | 5.31 (3.30-6.07) | 27.45 (9.51-31.00) | 14.22 (9.22-15.07) | 0.28 (tie) → 0.37 | 0.52 (1.47) | roll faster |
+| `10-50-match-all` | 6.59 (6.57-7.39) | 5.71 (5.37-6.01) | 9.39 (6.48-10.85) | 6.56 (6.00-7.53) | 0.70 (tie) → 0.87 (tie) | 0.76 (1.34) | tie |
+| `100-300-match-all` | 16.10 (14.78-19.86) | 13.38 (13.14-17.08) | 19.70 (15.36-24.87) | 13.51 (12.76-18.71) | 0.82 (tie) → 0.99 (tie) | 0.87 (1.36) | tie |
+| `100-300-match-all-multi-client` | 45.51 (32.90-51.41) | 31.96 (27.49-36.94) | 54.40 (31.34-56.69) | 32.65 (30.30-33.61) | 0.84 (tie) → 0.98 (tie) | 1.23 (1.17) | tie |
+| `10-50-acceptedAnswerId` | 9.05 (9.00-9.60) | 6.09 (5.40-6.31) | 11.10 (6.46-13.08) | 6.76 (6.47-7.16) | 0.81 (tie) → 0.90 | 0.83 (1.35) | roll faster |
+| `10-50-java` | 9.76 (8.72-10.49) | 8.13 (5.74-8.16) | 11.12 (8.56-11.50) | 7.89 (7.31-9.33) | 0.88 (tie) → 1.03 (tie) | 0.91 (1.34) | tie |
+| `10-50-css` | 9.57 (7.93-9.87) | 6.70 (5.36-7.50) | 8.43 (5.35-9.74) | 5.90 (4.30-6.63) | 1.13 (tie) → 1.13 (tie) | 1.05 (1.40) | tie |
+| `10-50-concurrency` | 7.06 (6.10-8.20) | 3.32 (2.82-4.13) | 8.73 (5.40-9.44) | 4.86 (4.34-6.83) | 0.81 (tie) → 0.68 | 0.54 (1.40) | roll faster |
+| `10-50-concurrency-multi-client` | 15.66 (9.62-20.97) | 2.91 (2.61-4.35) | 14.20 (7.23-21.30) | 7.87 (6.99-9.90) | 1.10 (tie) → 0.37 | 0.52 (1.40) | roll faster |
+| `10-50-random-10-percent` | 6.73 (6.64-9.26) | 5.11 (4.38-6.24) | 9.15 (6.18-13.45) | 7.31 (5.91-9.58) | 0.74 (tie) → 0.70 (tie) | 0.54 (1.35) | tie |
+| `10-50-random-10-percent-multi-client` | 17.60 (13.20-19.32) | 7.39 (7.13-13.04) | 22.90 (14.51-30.60) | 16.20 (12.00-30.02) | 0.77 (tie) → 0.46 (tie) | 0.43 (1.69) | tie |
+| `default-random-20-percent` | 5.17 (5.11-7.45) | 4.39 (3.60-4.87) | 7.74 (5.98-8.88) | 7.03 (6.14-8.25) | 0.67 (tie) → 0.62 | 0.52 (1.23) | roll faster |
+| `10-50-random-20-percent` | 7.44 (6.74-8.92) | 5.66 (4.51-6.36) | 8.15 (6.54-8.89) | 6.62 (6.34-9.94) | 0.91 (tie) → 0.86 (tie) | 0.58 (1.26) | tie |
+| `100-300-random-10-percent` | 17.34 (16.00-18.72) | 13.36 (12.30-15.57) | 16.95 (15.23-17.90) | 13.16 (12.29-19.79) | 1.02 (tie) → 1.02 (tie) | 0.71 (1.27) | tie |
+| `100-300-random-20-percent` | 18.80 (14.92-19.53) | 13.70 (12.42-15.72) | 14.54 (14.41-17.20) | 15.02 (11.59-17.94) | 1.29 (tie) → 0.91 (tie) | 0.94 (1.27) | tie |
+| `default-match-all-force-merge` | 3.68 (3.21-3.99) | 2.52 (2.19-3.08) | 4.76 (4.59-7.99) | 4.47 (3.91-4.90) | 0.77 → 0.56 | 0.50 (1.22) | roll faster |
+| `default-match-all-multi-client-force-merge` | 8.02 (5.68-9.33) | 3.45 (2.94-6.89) | 4.78 (4.02-13.23) | 6.59 (3.51-9.01) | 1.68 (tie) → 0.52 (tie) | 1.37 (1.57) | tie |
+| `10-50-match-all-force-merge` | 5.38 (4.56-6.08) | 2.95 (2.82-3.26) | 4.81 (4.58-5.65) | 4.73 (4.33-5.01) | 1.12 (tie) → 0.62 | 0.59 (1.14) | roll faster |
+| `100-300-match-all-force-merge` | 11.30 (10.55-11.33) | 8.39 (7.90-10.85) | 12.17 (11.52-14.04) | 14.05 (10.78-15.33) | 0.93 → 0.60 (tie) | 0.54 (1.21) | tie |
+| `100-300-match-all-multi-client-force-merge` | 22.02 (22.02-22.64) | 14.29 (11.94-19.99) | 19.79 (19.52-31.51) | 21.28 (16.75-28.19) | 1.11 (tie) → 0.67 (tie) | 1.15 (1.33) | tie |
+| `10-50-acceptedAnswerId-force-merge` | 5.75 (5.03-5.95) | 3.00 (2.89-3.82) | 5.08 (4.50-6.21) | 4.99 (4.80-5.13) | 1.13 (tie) → 0.60 | 0.58 (1.16) | roll faster |
+| `10-50-java-force-merge` | 5.84 (5.65-7.37) | 4.98 (3.74-5.04) | 5.65 (5.24-6.73) | 5.11 (5.10-5.59) | 1.03 (tie) → 0.98 | 0.69 (1.13) | roll faster |
+| `10-50-css-force-merge` | 6.71 (6.51-9.21) | 5.04 (4.47-5.44) | 5.58 (4.97-6.88) | 5.38 (5.22-5.43) | 1.20 (tie) → 0.94 (tie) | 0.83 (1.15) | tie |
+| `10-50-concurrency-force-merge` | 7.60 (6.86-7.83) | 3.25 (2.56-3.52) | 5.23 (4.89-5.96) | 5.93 (5.20-6.02) | 1.45 → 0.55 | 0.44 (1.13) | roll faster |
+| `10-50-concurrency-multi-client-force-merge` | 17.07 (11.73-18.62) | 3.78 (2.93-4.13) | 6.09 (6.09-9.69) | 6.78 (6.40-12.06) | 2.80 → 0.56 | 0.46 (1.51) | roll faster |
+| `10-50-random-10-percent-force-merge` | 5.17 (5.02-7.14) | 3.02 (2.86-3.34) | 4.66 (4.32-4.75) | 4.79 (4.25-4.88) | 1.11 → 0.63 | 0.63 (1.19) | roll faster |
+| `10-50-random-10-percent-multi-client-force-merge` | 13.40 (11.55-15.13) | 4.36 (2.77-6.45) | 5.79 (4.81-8.47) | 6.49 (3.86-8.92) | 2.32 → 0.67 (tie) | 1.48 (1.37) | tie |
+| `default-random-20-percent-force-merge` | 4.31 (4.09-5.29) | 2.67 (2.53-2.96) | 4.63 (4.12-4.75) | 4.43 (3.77-5.49) | 0.93 (tie) → 0.60 | 0.72 (1.21) | roll faster |
+| `10-50-random-20-percent-force-merge` | 6.11 (4.88-6.17) | 3.63 (3.02-3.70) | 4.90 (3.82-5.53) | 4.97 (3.88-5.66) | 1.25 (tie) → 0.73 | 0.67 (1.25) | roll faster |
+| `100-300-random-10-percent-force-merge` | 12.03 (12.03-12.04) | 10.34 (8.86-10.91) | 11.10 (10.19-12.97) | 14.09 (11.56-15.00) | 1.08 (tie) → 0.73 | 0.66 (1.16) | roll faster |
+| `100-300-random-20-percent-force-merge` | 9.86 (9.83-12.38) | 9.48 (8.65-9.94) | 11.97 (9.91-14.36) | 14.60 (12.42-15.58) | 0.82 (tie) → 0.65 | 0.67 (1.15) | roll faster |
+
+The so_vector fit's standard errors are wide (×/÷ 1.13-1.69): roll has only three races, at 21-47%
+foreign, and Elasticsearch five at 50-68%, so the fit leans on a short stretch of foreign load.
+Where it and the medians disagree, the verdict stays a tie.
+
+**Server CPU per race** (the container's CPU over the whole race, seconds, median (min-max)),
+Round 9 → Round 10: so_vector roll 583 (537-594) → **473** (434-475), Elasticsearch 741 (514-793)
+→ 541 (531-634); dense_vector roll 287 (283-289) → **273** (269-286), Elasticsearch 396
+(347-536) → 338 (313-441). **RSS at the end of a race**: so_vector roll 815-824 MiB against
+Elasticsearch's 3,338-3,347; dense_vector roll 234-278 against 1,780-2,662.
+
+**Numbers that moved, explained:**
+
+- **Elasticsearch's unmerged so_vector tasks are about twice as fast as in Round 9**
+  (`default-match-all` 14.39 → 5.93 ms, `-multi-client` 27.45 → 14.22): Round 9's first
+  Elasticsearch race ran under the merge hold (14 ms in that race against 6 in the next).
+- **roll's `100-1000_multiple_segments` splits in two** (8.2-10.8 ms in three rounds, 17.7-19.6
+  in the other three): the slow rounds ran while the lane was 94-100% busy during that task (roll's
+  own two search threads are about half of it), and the fast ones at 55-87%. Ruled out: roll's
+  segment layout (off the lane, 6-8 segments after the load gave 12.7-17.0 ms, not a 2x split)
+  and background merges hidden from Rally's wait (after the load, `merges.current` stayed 0, the
+  segments didn't change, and the server was idle for 90 s). In its unsaturated rounds roll still
+  loses, at 8.2-10.8 ms against Elasticsearch's 5.65-7.49.
+- **Elasticsearch's dense_vector `_multiple_segments` rows sit at the low end of Round 9's range**
+  (`100-1000` 9.30 (6.54-16.56) → 6.19 (5.65-7.49)), so the task is now a loss with the ranges
+  apart. Its Round 9 races merged as often as these (8 merges each), so this isn't the hold; Round
+  9's spread came with 44-64% foreign load. Not further explained.
+- **roll's `100-300-match-all-force-merge`** (11.30 → 8.39 ms) moved more than #180 explains (its
+  A/B measured this task a tie). The same binary measured 11.15 ms in this round's discarded first
+  set, so the move is run-to-run variation, not code.
+- **roll's dense_vector RSS** is 234-278 MiB against Round 9's 184-231. Off the lane, Round 9's
+  binary and this one end the same track at 333-359 and 313-362 MiB. About 179 MiB of that is
+  mapped segment files (`RssFile`), and the anonymous part varies by about 50 MiB between runs of
+  one binary. Not a code change.
+
+The other moves match the A/Bs of #156 and #180: so_vector `concurrency` (force-merged, 8 clients)
+17.07 → 3.78 ms, `random-10-percent` (force-merged, 8 clients) 13.40 → 4.36, `concurrency`
+(unmerged, 8 clients) 15.66 → 2.91, and less CPU per race.
+
+**Where roll still loses** (ranked; the first is the only one with the ranges apart):
+
+1. dense_vector `knn-search-100-1000_multiple_segments`: 2.30x Elasticsearch (14.23 against 6.19
+   ms; 2.08x at equal foreign load, ×/÷ 1.16; roll's unsaturated rounds 8.2-10.8 ms against
+   5.65-7.49). roll's index has 3-4 segments per shard there, each searched with a 1,000-candidate
+   beam.
+2. Ties that the fit puts above 1, all on 8-client tasks: so_vector
+   `random-10-percent-multi-client-force-merge` (median 0.67, fit 1.48 ×/÷ 1.37),
+   `default-match-all-multi-client-force-merge` (0.52, fit 1.37 ×/÷ 1.57),
+   `100-300-match-all-multi-client` (0.98, fit 1.23 ×/÷ 1.17) and
+   `100-300-match-all-multi-client-force-merge` (0.67, fit 1.15 ×/÷ 1.33). The 8-client
+   Elasticsearch races drew more foreign load (50-68%) than roll's (21-47%), and the fit's errors
+   are wide, so these are undecided, not wins.
+3. Ties with the median above 1: dense_vector `100-1000` (1.12, fit 1.08 ×/÷ 1.05), so_vector
+   `10-50-css` (1.13, fit 1.05) and `10-50-java` (1.03, fit 0.91), `100-300-random-10-percent`
+   (1.02, fit 0.71).
+
+Round 9's three losses with the ranges apart on the force-merged index (`concurrency` 1.45x,
+`concurrency-multi-client` 2.80x, `random-10-percent-multi-client` 2.32x) are gone: 0.55, 0.56 and
+0.67 (tie). roll is faster with the ranges apart on 18 of the 36 search rows (17 ties) and indexes faster
+on both tracks.
+
 ## knn on merged segments (2026-11-17)
 
 Round 9's remaining vector losses were so_vector's 8-client tasks on the force-merged index
@@ -512,7 +710,6 @@ force-merged losses should shrink with it (lane b: 2.6x less CPU per query on
 segment per shard, so one thread per shard), with the knn exact-path change above once code
 placement can be controlled.
 
-||||||| cf37ad251
 ## Round 8: every Rally track again (2026-11-14, `83fac5982`)
 
 The branch head `83fac5982` (sort by bands, `auto_date_histogram` counted from the points tree,

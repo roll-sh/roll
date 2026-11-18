@@ -47,7 +47,10 @@ use crate::rest::{Ctx, Reply};
 use crate::xcontent::filter::glob_match;
 use std::sync::Arc;
 
+mod analyze;
 mod s3;
+mod transfer;
+pub use analyze::analyze_repository;
 pub use s3::ALLOW_PRIVATE as S3_ALLOW_PRIVATE;
 
 /// The shard contents of this process's snapshots, by snapshot uuid and index name (one
@@ -64,6 +67,28 @@ pub struct SnapshotData {
     /// Snapshots being taken here, as `GET _snapshot` and `_status` show them until they are
     /// recorded (Elasticsearch's `SnapshotsInProgress`).
     running: parking_lot::Mutex<Vec<Arc<Running>>>,
+    /// Each repository's bucket traffic here, by name: throttles and counters.
+    io: parking_lot::Mutex<std::collections::HashMap<String, Arc<transfer::RepoIo>>>,
+    /// The cluster's `indices.recovery.max_bytes_per_sec`, which restores also pay.
+    recovery: transfer::RateLimiter,
+}
+
+impl SnapshotData {
+    /// Repository `name`'s traffic, its limits set from `r`'s settings.
+    fn repo_io(&self, name: &str, r: &Repository, st: &ClusterState) -> Arc<transfer::RepoIo> {
+        let io = self.io.lock().entry(name.to_string()).or_default().clone();
+        transfer::apply_rates(&io, &r.settings);
+        self.recovery.set(transfer::recovery_rate(st));
+        io
+    }
+
+    /// `_nodes/stats` `repositories.<name>`.
+    pub fn repository_stats(&self, name: &str, human: bool) -> Value {
+        match self.io.lock().get(name) {
+            Some(io) => io.stats(human),
+            None => transfer::idle_stats(human),
+        }
+    }
 }
 
 /// A snapshot being taken: what it will record, and how far each shard got.
@@ -562,6 +587,10 @@ fn validate_repository(ctx: &Ctx, name: &str, ty: &str, settings: &Settings) -> 
         Ok(())
     };
     let failed = |e: EsError| repository_exception(name, "failed to create repository").caused_by(e);
+    // `BlobStoreRepository`'s constructor reads the throttles before the type's own settings.
+    if matches!(ty, "fs" | "url" | "source" | "s3") {
+        transfer::validate_rates(settings).map_err(failed)?;
+    }
     match ty {
         "fs" => fs_location(settings).map_err(failed),
         "source" => {
@@ -2095,158 +2124,6 @@ mod tests {
     }
 }
 
-/// `POST /_snapshot/{repository}/_analyze` (`RepositoryAnalyzeAction`): writes, reads, lists and
-/// deletes test blobs to check that a repository behaves as snapshots need.
-///
-/// roll's repositories keep snapshot contents in the cluster's own storage (the repository is
-/// a namespace), so there is no third-party store whose consistency could be in doubt: the
-/// analysis validates the request as Elasticsearch does, plans the same blob counts and sizes
-/// and reports a clean result in Elasticsearch's shape. The repository's throttles still
-/// bound it: an analysis whose writes (`max_snapshot_bytes_per_sec`) or reads
-/// (`max_restore_bytes_per_sec`, when set) couldn't finish within `timeout` times out as
-/// Elasticsearch's does. `human` defaults to true, as `RestRepositoryAnalyzeAction` sets it.
-pub fn analyze_repository(ctx: &Ctx) -> EsResult<Reply> {
-    use crate::units::ByteSize;
-    let name = ctx.path_param("repository").unwrap_or_default();
-    let st = ctx.state();
-    let Some(repo) = st.metadata.repositories.get(name) else { return Err(repository_missing(name)) };
-    let blob_count = ctx.int_param("blob_count", 100)?;
-    let concurrency = ctx.int_param("concurrency", 10)?;
-    let register_ops = ctx.int_param("register_operation_count", 10)?;
-    let read_node_count = ctx.int_param("read_node_count", 10)?;
-    let early_read_node_count = ctx.int_param("early_read_node_count", 2)?;
-    let size = |p: &str, d: i64| -> EsResult<ByteSize> { ctx.query(p).map_or(Ok(ByteSize(d)), |v| ByteSize::parse(v, p)) };
-    let max_blob = size("max_blob_size", 10 << 20)?;
-    let max_total = size("max_total_data_size", 1 << 30)?;
-    let rare: f64 = match ctx.query("rare_action_probability") {
-        Some(v) => v.parse().map_err(|_| EsError::new(400, "number_format_exception", format!("For input string: \"{v}\"")))?,
-        None => 0.02,
-    };
-    let detailed = ctx.bool_param("detailed", false)?;
-    let _ = ctx.bool_param("rarely_abort_writes", true)?;
-    let timeout = ctx.time_param("timeout", crate::units::TimeValue::seconds(30))?;
-    let human = ctx.bool_param("human", true)?;
-    let seed = match ctx.query("seed") {
-        Some(v) => crate::units::parse_java_long(v).ok_or_else(|| EsError::illegal_argument(format!("Failed to parse long parameter [seed] with value [{v}]")))?,
-        None => i64::from(rand_seed()),
-    };
-    // `RepositoryAnalyzeAction.Request.validate` order.
-    let positive = |what: &str, v: i64| if v <= 0 { Err(EsError::illegal_argument(format!("{what} must be >0, but was [{v}]"))) } else { Ok(()) };
-    positive("blobCount", blob_count)?;
-    positive("concurrency", concurrency)?;
-    positive("registerOperationCount", register_ops)?;
-    positive("readNodeCount", read_node_count)?;
-    positive("earlyReadNodeCount", early_read_node_count)?;
-    if max_blob.bytes() <= 0 {
-        return Err(EsError::illegal_argument(format!("maxBlobSize must be >0, but was [{}]", max_blob.human())));
-    }
-    if !(0.0..=1.0).contains(&rare) {
-        return Err(EsError::illegal_argument(format!("rareActionProbability must be between 0 and 1, but was [{rare:?}]")));
-    }
-    let min_total = max_blob.bytes() + blob_count - 1;
-    if max_total.bytes() < min_total {
-        return Err(EsError::illegal_argument(format!(
-            "cannot satisfy max total bytes [{}B/{}]: must write at least one byte per blob and at least one max-sized blob which is [{min_total}B] in total",
-            max_total.bytes(),
-            max_total.human()
-        )));
-    }
-    if repo.read_only() {
-        return Err(EsError::illegal_argument(format!("repository [{name}] is read-only")));
-    }
-    // One max-sized blob, the rest sharing what the total leaves (each at least one byte).
-    let rest = blob_count - 1;
-    let each = if rest > 0 { ((max_total.bytes() - max_blob.bytes()) / rest).clamp(1, max_blob.bytes()) } else { 0 };
-    let sizes: Vec<i64> = std::iter::once(max_blob.bytes()).chain(std::iter::repeat_n(each, rest as usize)).collect();
-    let total: i64 = sizes.iter().sum();
-    // Every blob is written once and read back by `read_node_count` nodes at most (one here).
-    let throttle = |key: &str| repo.settings.get(key).and_then(|v| ByteSize::parse(v, key).ok()).map(|b| b.bytes()).filter(|b| *b > 0);
-    let too_slow = |rate: Option<i64>| rate.is_some_and(|r| i128::from(total) * 1_000_000_000 / i128::from(r) > timeout.nanos());
-    if too_slow(throttle("max_snapshot_bytes_per_sec")) || too_slow(throttle("max_restore_bytes_per_sec")) {
-        let cause = EsError::new(500, "repository_verification_exception", format!("[{name}] analysis timed out after [{}]", timeout.string_rep()));
-        return Err(EsError::new(
-            500,
-            "repository_verification_exception",
-            format!("[{name}] Repository analysis timed out. Consider specifying a longer timeout using the [?timeout] request parameter."),
-        )
-        .caused_by(cause));
-    }
-    let node = &ctx.cluster.node;
-    let zero_time = |m: &mut Map, k: &str| {
-        if human {
-            m.insert(k.into(), Value::from("0s"));
-        }
-        m.insert(format!("{k}_nanos"), Value::from(0));
-    };
-    let sized = |m: &mut Map, k: &str, v: i64| {
-        if human {
-            m.insert(k.into(), Value::from(ByteSize(v).human()));
-        }
-        m.insert(format!("{k}_bytes"), Value::from(v));
-    };
-    let mut write = obj! { "count" => blob_count };
-    let mut read = obj! { "count" => blob_count };
-    if let (Value::Obj(w), Value::Obj(r)) = (&mut write, &mut read) {
-        sized(w, "total_size", total);
-        sized(r, "total_size", total);
-        zero_time(w, "total_throttled");
-        zero_time(w, "total_elapsed");
-        zero_time(r, "total_wait");
-        zero_time(r, "max_wait");
-        zero_time(r, "total_throttled");
-        zero_time(r, "total_elapsed");
-    }
-    let mut out = obj! {
-        "coordinating_node" => obj! { "id" => node.id.clone(), "name" => node.name.clone() },
-        "repository" => name,
-        "blob_count" => blob_count,
-        "concurrency" => concurrency,
-        "read_node_count" => read_node_count,
-        "early_read_node_count" => early_read_node_count,
-    };
-    if let Value::Obj(m) = &mut out {
-        sized(m, "max_blob_size", max_blob.bytes());
-        sized(m, "max_total_data_size", max_total.bytes());
-        m.insert("seed".into(), Value::from(seed));
-        m.insert("rare_action_probability".into(), Value::from(rare));
-        m.insert("blob_path".into(), Value::from(format!("temp-analysis-{}", crate::meta::names::random_uuid())));
-        m.insert("check_overwrite_protection".into(), Value::Bool(true));
-        m.insert("issues_detected".into(), Value::Arr(Vec::new()));
-        m.insert("summary".into(), obj! { "write" => write, "read" => read });
-        if detailed {
-            let details: Vec<Value> = sizes
-                .iter()
-                .enumerate()
-                .map(|(i, &s)| {
-                    let mut blob = obj! { "name" => format!("test-blob-{i}-{}", crate::meta::names::random_uuid()) };
-                    let mut read = obj! { "node" => obj! { "id" => node.id.clone(), "name" => node.name.clone() }, "found" => true };
-                    if let (Value::Obj(b), Value::Obj(r)) = (&mut blob, &mut read) {
-                        sized(b, "size", s);
-                        b.insert("read_start".into(), Value::from(0));
-                        b.insert("read_end".into(), Value::from(s));
-                        b.insert("read_early".into(), Value::Bool(false));
-                        b.insert("overwritten".into(), Value::Bool(false));
-                        zero_time(r, "first_byte_time");
-                        zero_time(r, "elapsed");
-                        zero_time(r, "throttled");
-                    }
-                    let mut entry = obj! { "blob" => blob, "writer_node" => obj! { "id" => node.id.clone(), "name" => node.name.clone() } };
-                    if let Value::Obj(e) = &mut entry {
-                        zero_time(e, "write_elapsed");
-                        zero_time(e, "write_throttled");
-                        e.insert("reads".into(), Value::Arr(vec![read]));
-                    }
-                    entry
-                })
-                .collect();
-            m.insert("details".into(), Value::Arr(details));
-        }
-        zero_time(m, "listing_elapsed");
-        zero_time(m, "delete_elapsed");
-    }
-    Reply::ok(out)
-}
-
 /// `POST _snapshot/{repository}/_verify_integrity` (`RepositoryVerifyIntegrityTask`): checks
 /// that every shard of every index each snapshot of the repository records still has its
 /// contents. The `log` lists each verified snapshot, each missing shard as an anomaly, and
@@ -2336,10 +2213,4 @@ pub async fn verify_integrity(ctx: &Ctx<'_>) -> EsResult<Reply> {
             "result" => if anomalies == 0 { "pass" } else { "fail" },
         },
     })
-}
-
-/// A seed for the analysis (`Randomness.get().nextLong()` in Elasticsearch; any value will do).
-fn rand_seed() -> i32 {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
-    (nanos >> 1) as i32
 }
