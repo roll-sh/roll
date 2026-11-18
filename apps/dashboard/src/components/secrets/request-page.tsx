@@ -87,7 +87,7 @@ export function RequestPage({ id, peek, now }: { id: string; peek: ValuePeek; no
             </div>
             <p className="mt-4 flex items-start gap-2 text-[12.5px] leading-relaxed text-muted">
               <ShieldCheck className="mt-0.5 size-4 shrink-0" />
-              Your browser encrypts {peek.keys.length === 1 ? "it" : "each one"} before sending, to a key only this request has. It goes straight to whoever asked; nothing is shown back.
+              Your browser encrypts {peek.keys.length === 1 ? "it" : "each one"} before sending, to a key only this request has. roll opens it only to store it in the project that asked; nothing is shown back.
             </p>
             {error && (
               <p className="mt-3 text-[13px] text-danger" role="alert">
