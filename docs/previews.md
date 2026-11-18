@@ -1781,13 +1781,17 @@ Ranked by what a person notices first. Done so far:
    true}`; on roll's runtime previews' gate does the same ticket handshake. Being fixed after an
    independent review: signing out of roll must end a preview session, the ticket URL keeps the
    service's own scheme and port, a racing access change, the link token stripped under `team`.
-   Then: the feedback button under `team` (today only under link access).
+   Review findings fixed (914b738b5); main merged in (c256d4eaf). The feedback button under
+   `team` is #300 on it: a visitor let in through roll (link or a live team session) gets it, and
+   a note is posted from roll's dashboard as the signed-in person; a team preview's services on
+   roll apps get no button yet (apps adds it only for link visitors).
 2. **A project's own preview domain, the wiring** (previews' half #275 is on main): after apps'
    #278, rolld hands apps' `PreviewRouter` previews' `runtime::serve_host`, and
    `scripts/preview-apps.sh` checks a verified domain over plain HTTP, a roll apps service and a
    runtime one by label. TLS waits on wildcard certificates over DNS-01 on the edge.
-3. **Bots on Git URL services:** after apps' #282 (`GitPull.author`), previews' own `GitPull`
-   carries it and `skip_authors` reaches a Git URL service's pull requests.
+3. **Bots on Git URL services** (draft #305, on apps' #282): previews' own `GitPull` carries the
+   opener and `skip_authors` reaches a Git URL service's pull requests. Undraft once #282 is on
+   main.
 4. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
    2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
 5. **Watch: pg-control's recovery to a time seconds old** (unowned).
