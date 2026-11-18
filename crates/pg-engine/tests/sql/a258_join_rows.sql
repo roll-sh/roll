@@ -30,5 +30,8 @@ SELECT x.id, d.name, d.w FROM a258_k x LEFT JOIN a258_dim d ON d.k = x.k + 100 W
 SELECT count(*), sum(length(d.pad)), sum(x.q) FROM a258_k x JOIN a258_dim d ON d.k = x.k WHERE x.id < 3000;
 RESET enable_hashjoin;
 RESET enable_mergejoin;
+SELECT x.f, count(*), sum(x.q) FROM a258_k x WHERE x.d >= date '1993-01-01' AND x.d < timestamp '1994-01-01' AND EXISTS (SELECT 1 FROM a258_dim d WHERE d.k = x.k AND d.w > 10) GROUP BY x.f ORDER BY x.f;
+SELECT x.s, count(d.name), sum(x.p) FROM a258_k x LEFT JOIN a258_dim d ON d.k = x.k + 1 AND d.w < 5 WHERE x.q > 30 AND x.id < 60000 GROUP BY x.s ORDER BY x.s;
+SELECT x.f, count(*) FROM a258_k x WHERE x.q < 0 AND NOT EXISTS (SELECT 1 FROM a258_dim d WHERE d.k = x.k AND d.name LIKE 'n1%') GROUP BY x.f ORDER BY x.f;
 DROP TABLE a258_dim;
 DROP TABLE a258_k;
