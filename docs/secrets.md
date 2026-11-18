@@ -2992,6 +2992,23 @@ outside roll, on #132), #166 (a gateway into private networks, on #132), #169 (a
 guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on #136), #194
 (TOTP keys).
 
+**State, 2026-11-18 13:25.** Built today, each green and mergeable: #248 (the polling path), #262
+(Terraform for batch 1's kinds), #264 (doc fixes), #274 (queue links), #276 (a split deployment key),
+#277 (secret requests), #279 (queues' default-exchange permission), #281 (a tamper-evident audit log),
+#284 (six more import sources), #290 (AWS IAM login), #303 (credentials roll doesn't hold yet); and
+on the #132 stack, #165/#166's engines through the gateway, their `rotate-admin`, and Cassandra's
+cache waited out. Ranked now:
+1. **The thirty-first security review** (running): today's PRs above, read cold, before they land.
+2. **Land batch 2** (24 PRs, gated; waiter `rs79-lock` behind search and apps' #295), then batch 3
+   (the #132 stack, #144, #86) and batch 4 (today's PRs).
+3. **R2, cut off everything that reaches a folder** (building on roll MCP's #267).
+4. **The dashboard's "Store in roll"** for #303's notices, and **R5, `roll://` wherever another roll
+   product takes a key** (with each product's thread).
+5. **A sealed start for the deployment key** (#276's follow-up: holders unseal over the API, on a fleet).
+6. **R10's other decoys** (database roles, IAM users) once #270's tokens are wired to secrets' alerts;
+   **R4** (GCP KMS, Azure Key Vault, HSM) and confirming #290, #284, #227, #229 on real accounts: the
+   user's call.
+
 **The thirtieth product review** (2026-11-18, against Vault/OpenBao, Infisical, Doppler, AWS, 1Password,
 Akeyless, GitGuardian and Bitwarden SM, open PRs checked first) ranked these gaps; its four doc
 inconsistencies are fixed in #264:
