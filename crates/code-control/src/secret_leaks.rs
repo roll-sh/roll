@@ -546,7 +546,8 @@ fn credentials_in(path: &str, patch: &str, out: &mut Vec<Added>) {
                 None => run = Some((line.to_string(), next)),
             }
             next += 1;
-        } else if l.starts_with(' ') {
+        } else if l.starts_with(' ') || l.is_empty() {
+            // A context line (diffy writes a blank one as an empty line, without its space).
             flush(&mut run, out);
             next += 1;
         } else if l.starts_with('-') {
@@ -632,6 +633,16 @@ mod tests {
         }
         let found: Vec<&str> = found.iter().map(String::as_str).collect();
         assert_eq!(found, ["API_KEY", "DATABASE_URL", "REDIS_URL", "SENTRY_DSN", "STRIPE_KEY", "TOKEN"]);
+    }
+
+    #[test]
+    fn a_credential_is_on_its_line_of_the_new_file_past_blank_context() {
+        let key = ["AKIA", "ROLLFIXTURE", "23456"].concat();
+        // diffy's patch: the blank context line is empty, without a leading space.
+        let patch = format!("--- a/deploy.py\n+++ b/deploy.py\n@@ -1,3 +1,4 @@\n import os\n\n REGION = 1\n+aws_access_key_id = \"{key}\"\n");
+        let mut out = Vec::new();
+        super::credentials_in("deploy.py", &patch, &mut out);
+        assert_eq!(out.iter().map(|a| a.unstored.line).collect::<Vec<_>>(), [4]);
     }
 
     #[test]
