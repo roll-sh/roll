@@ -20,6 +20,8 @@ export interface User {
   disabled: boolean;
   created_at: number;
   totp: boolean;
+  /** How many passkeys they have (with `totp`: whether they have a second factor). */
+  passkeys?: number;
   /** GitHub, Google, or an SSO connection's link (`sso:<id>`). */
   identities: { provider: Provider | `sso:${string}`; login: string; email: string }[];
 }

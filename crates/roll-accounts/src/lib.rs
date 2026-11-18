@@ -369,6 +369,8 @@ pub struct User {
     pub disabled: bool,
     pub created_at: i64,
     pub totp: bool,
+    /// How many passkeys they have (with `totp`: whether they have a second factor).
+    pub passkeys: u32,
     pub identities: Vec<Identity>,
 }
 
@@ -1167,12 +1169,14 @@ fn load_user(c: &code_sql::Conn<'_>, id: &str) -> code_sql::Result<Option<User>>
                 disabled: r.get(5)?,
                 created_at: r.get(6)?,
                 totp: false,
+                passkeys: 0,
                 identities: Vec::new(),
             })
         })
         .optional()?;
     let Some(mut user) = user else { return Ok(None) };
     user.totp = c.query_row("SELECT 1 FROM totp WHERE user_id = ? AND enabled = 1", [id], |_| Ok(())).optional()?.is_some();
+    user.passkeys = c.query_row("SELECT COUNT(*) FROM passkeys WHERE user_id = ?", [id], |r| r.get::<_, i64>(0))?.clamp(0, u32::MAX as i64) as u32;
     user.identities = c.query("SELECT provider, login, email FROM identities WHERE user_id = ? ORDER BY provider", [id], |r| {
         Ok(Identity { provider: r.get(0)?, login: r.get(1)?, email: r.get(2)? })
     })?;

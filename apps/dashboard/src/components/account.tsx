@@ -755,10 +755,20 @@ function Users({ me }: { me: string }) {
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(() => accountsApi.users().then(setList, (e) => setError(errorText(e))), []);
   useEffect(() => void load(), [load]);
+  const [required, setRequired] = useState(false);
+  useEffect(() => {
+    accountsApi.accountPolicy().then((p) => setRequired(p.require_second_factor), () => setRequired(false));
+  }, []);
   const act = (p: Promise<unknown>) => p.then(load, (e) => setError(errorText(e)));
+  const without = (list ?? []).filter((u) => !u.disabled && !u.totp && !u.passkeys).length;
   return (
     <Section title="People" lead="Everyone with an account. Turning someone off signs them out everywhere at once.">
       {error && <p className="mb-2 text-[12px] text-danger">{error}</p>}
+      {list && without > 0 && (
+        <p className={`mb-2 text-[12px] ${required ? "text-danger" : "text-muted"}`}>
+          {without === 1 ? "One person has" : `${without} people have`} no second factor{required ? ": they can use only their account page until they set one up." : "."}
+        </p>
+      )}
       <div className={card}>
         {(list ?? []).map((u) => (
           <div key={u.id} className={`flex items-center gap-3 border-t border-line px-4 py-2.5 first:border-t-0 ${u.disabled ? "opacity-60" : ""}`}>
@@ -768,7 +778,8 @@ function Users({ me }: { me: string }) {
               </span>
               <span className="block truncate text-[11px] text-subtle">
                 {u.email}
-                {u.totp ? " · 2FA" : ""}
+                {u.totp || u.passkeys ? ` · ${[u.totp ? "authenticator app" : "", u.passkeys ? `${u.passkeys} passkey${u.passkeys === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ")}` : ""}
+                {!u.totp && !u.passkeys && <span className={required ? "text-danger" : ""}> · no second factor</span>}
               </span>
             </span>
             {u.id !== me && (
