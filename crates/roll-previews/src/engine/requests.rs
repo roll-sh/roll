@@ -280,11 +280,14 @@ impl Engine {
     /// code's `approve-run` for a Git URL service's preview). Only the head the preview is at; the
     /// next push waits again.
     pub fn approve(&self, id: &str, head: &str, by: &str) -> Result<Preview> {
-        // Roll only doesn't reach roll apps yet (its egress, the apps thread's): a fork's code
-        // there would run with branched data and the open internet, so it isn't released.
+        // roll apps holds a pv- environment's instance to Roll only (apps' #143), not its build:
+        // the build sees the environment's variables on an open network, so a fork's head there
+        // would send its branched data wherever it liked. Not released under Roll only.
         let row = self.store.row(id)?;
-        if row.repo.starts_with("git:") && self.store.settings(&row.project_id)?.egress == crate::settings::EgressRule::Roll {
-            return Err(Error::Conflict("this project limits what previews may reach (Roll only), which doesn't cover services hosted on roll apps yet: a fork's code isn't approved to run there".into()));
+        if row.repo.starts_with("git:") && self.store.settings(&row.project_id)?.egress_for(row.trusted) == crate::settings::EgressRule::Roll {
+            return Err(Error::Conflict(
+                "this project's forks reach roll only (egress_forks), and roll apps builds a fork's head with its variables on an open network: it isn't approved to run there (open forks' egress to run it)".into(),
+            ));
         }
         self.store.approve_git_pull(id, head, by)?;
         self.store.log(id, &format!("{} approved by {by}", short(head)))?;
@@ -440,6 +443,9 @@ impl Engine {
                 return Err(Error::BadRequest(format!("{k}: at most {MAX_VAR_BYTES} bytes")));
             }
         }
+        // Masked from now on, before its services (or roll apps) are given it.
+        self.add_masks(id, masks::secret_values(&[], &[], &changes.values().flatten().map(|v| (String::new(), v.clone())).collect::<Vec<_>>(), &[]));
+        self.stale_masks(id);
         let vars = self.store.update_vars(id, |vars| {
             for (k, v) in &changes {
                 match v {
@@ -517,13 +523,29 @@ impl Engine {
         self.store.preview(id)
     }
 
+    /// Its latest requests through roll, newest first (on its holder, which serves them).
+    /// Its paths masked as its logs are: a path is its code's to choose (`/x/<secret>`).
+    pub async fn requests(&self, id: &str) -> Result<Vec<crate::RequestLine>> {
+        self.store.row(id)?;
+        let mut lines = self.apps.requests(id);
+        if lines.is_empty() {
+            return Ok(lines);
+        }
+        let paths = self.masked(id, lines.iter().map(|l| l.path.clone()).collect()).await?;
+        for (l, p) in lines.iter_mut().zip(paths) {
+            l.path = p;
+        }
+        Ok(lines)
+    }
+
     pub async fn logs(&self, id: &str, service: Option<&str>, lines: usize) -> Result<(String, Vec<String>)> {
         let services = self.store.services(id)?;
         let svc = match service {
             Some(name) => services.into_iter().find(|s| s.name == name).ok_or_else(|| Error::NotFound(format!("the preview has no service {name}")))?,
             None => services.into_iter().next().ok_or_else(|| Error::NotFound("the preview has no services".into()))?,
         };
-        Ok((svc.name.clone(), self.apps.logs(id, &svc.name, lines).await))
+        let got = self.apps.logs(id, &svc.name, lines).await;
+        Ok((svc.name.clone(), self.masked(id, got).await?))
     }
 
     /// A service's last `lines` and then its output as it comes. Where the product can't follow,
@@ -531,11 +553,20 @@ impl Engine {
     /// dropped (or the service's output does).
     pub async fn follow(self: &Arc<Self>, id: &str, service: Option<&str>, lines: usize) -> Result<(String, tokio::sync::mpsc::Receiver<String>)> {
         let (name, _) = self.logs(id, service, 1).await?;
-        if let Some(rx) = self.apps.follow(id, &name, lines).await {
-            return Ok((name, rx));
-        }
         let (tx, rx) = tokio::sync::mpsc::channel(256);
         let (me, id, svc) = (self.clone(), id.to_string(), name.clone());
+        // Every line masked on its way out (`masks.rs`), with the masks read again as they age.
+        if let Some(mut from) = self.apps.follow(&id, &name, lines).await {
+            tokio::spawn(async move {
+                while let Some(l) = from.recv().await {
+                    let Ok(l) = me.masked(&id, vec![l]).await else { return };
+                    if tx.send(l.into_iter().next().unwrap_or_default()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            return Ok((name, rx));
+        }
         tokio::spawn(async move {
             // The first read is what was asked for; later ones read wide, so a burst between two
             // reads isn't lost.
@@ -549,8 +580,9 @@ impl Engine {
                         0
                     }
                 };
-                for l in &now[from..] {
-                    if tx.send(l.clone()).await.is_err() {
+                let Ok(shown) = me.masked(&id, now[from..].to_vec()).await else { return };
+                for l in shown {
+                    if tx.send(l).await.is_err() {
                         return;
                     }
                 }

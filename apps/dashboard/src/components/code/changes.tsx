@@ -485,6 +485,7 @@ export function CodeChange({ fullName, id }: { fullName: string; id: string }) {
                         reviews={review.reviews}
                         status={review.status}
                         threads={review.threads ?? []}
+                        previewId={c.preview?.environment?.id}
                         canDismiss={writer}
                         busy={busy}
                         onDismiss={(rv, reason) => run(`dismiss-${rv.id}`, () => codeApi.dismissReview(c.id, rv.id, reason || undefined))}
