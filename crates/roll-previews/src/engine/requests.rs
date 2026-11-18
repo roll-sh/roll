@@ -181,8 +181,13 @@ impl Engine {
             // (`Workspace::trusts`) gets its pushes (its branches, titles and commits).
             .filter(|pr| pr.resources.iter().any(|r| r.kind == roll_workspace::Kind::Service && r.r#ref == p.service) && self.workspace.trusts(pr, roll_workspace::Kind::Service, &p.service))
             .collect();
+        // What the pull request's title says (`[preview]` asks, `[skip preview]`/`[no preview]`
+        // skips), and whether its opener is a dependency bot the project skips (`skip_authors`).
+        let says = pull_title.as_deref().and_then(title_says);
         for project in projects {
             let rows = self.store.rows(Some(&project.id))?;
+            let s = self.store.settings(&project.id)?;
+            let bot = p.pull.as_ref().and_then(|pl| pl.author.as_deref()).is_some_and(|a| crate::glob::any(&s.skip_authors, a)) && says != Some(true);
             // A fork's pull request's preview is its number's (never a writer's branch that happens
             // to be named `pull/7`); a branch's is the branch's that no fork's pull request holds.
             let fork_of = |r: &Row| self.store.git_pull(&r.id).ok().flatten().filter(|g| g.fork).map(|g| g.number);
@@ -198,6 +203,21 @@ impl Engine {
                         }
                 })
                 .cloned();
+            // A bot's branch is pushed before its pull request opens: that push made a preview the
+            // pull event takes back, and later pushes to the branch make none until it closes.
+            if p.sha.is_none() || says == Some(true) {
+                self.store.set_git_skip(&project.id, &repo, &p.branch, false)?;
+            } else if bot {
+                self.store.set_git_skip(&project.id, &repo, &p.branch, true)?;
+                if let Some(r) = &existing {
+                    self.mark_deleted(&r.id, "its pull request's opener is in skip_authors")?;
+                }
+                continue;
+            } else if self.store.git_skipped(&project.id, &repo, &p.branch)? {
+                // A later push, or a pull event that names no opener (GitLab's when someone else
+                // acted: unknown, not a person), keeps what the opening event decided.
+                continue;
+            }
             match (&p.sha, existing) {
                 (None, Some(r)) => {
                     let why = match &p.pull {
@@ -234,8 +254,7 @@ impl Engine {
                     }
                 }
                 (Some(sha), None) => {
-                    let s = self.store.settings(&project.id)?;
-                    let skip = [Some(p.message.as_str()), pull_title.as_deref()].into_iter().flatten().any(|t| t.to_ascii_lowercase().contains("[skip preview]"));
+                    let skip = [Some(p.message.as_str()), pull_title.as_deref()].into_iter().flatten().any(|t| title_says(t) == Some(false));
                     if !s.enabled || skip || !crate::glob::any(&s.branches, &p.branch) {
                         continue;
                     }
