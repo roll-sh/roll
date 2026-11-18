@@ -213,6 +213,17 @@ pub struct StartupReport {
 /// order: the backends table, then an entry.
 pub type ActivitySlot = Arc<Mutex<Activity>>;
 
+/// Whether a client backend of database `oid` runs a statement (pg_stat_activity's
+/// "active"): a store's reclaim thread waits until none does. A lock another thread holds
+/// counts as running (the thread looks again later; it never waits on a lock here).
+fn statement_running(backends: &Mutex<HashMap<i32, Backend>>, oid: u32) -> bool {
+    let Some(map) = backends.try_lock() else { return true };
+    map.values().any(|b| {
+        b.database == oid
+            && b.activity.try_lock().is_none_or(|a| a.backend_type.is_none() && matches!(a.state.as_str(), "active" | "fastpath function call"))
+    })
+}
+
 /// A backend's cancel key (MyCancelKey): 4 random bytes for a protocol 3.0 or 3.1 client,
 /// 32 (MAX_CANCEL_KEY_LENGTH) for 3.2 and later; none for a backend without a client.
 #[derive(Clone, Copy)]
@@ -300,7 +311,8 @@ pub struct Engine {
     stats: crate::exec::pgstat::ClusterStats,
     /// WAL positions and replication slots.
     repl: Arc<crate::repl::Repl>,
-    backends: Mutex<HashMap<i32, Backend>>,
+    /// (Shared with the stores' reclaim threads: `statement_running`.)
+    backends: Arc<Mutex<HashMap<i32, Backend>>>,
     /// The proc array's slots (virtual transaction ids).
     procs: Arc<crate::txn::procs::Procs>,
     /// max_connections and autovacuum_worker_slots (where the launchers' slots are).
@@ -590,7 +602,7 @@ impl Engine {
                 twophase,
                 repl,
                 index_upgrade: Mutex::new(()),
-                backends: Mutex::new(HashMap::new()),
+                backends: Arc::new(Mutex::new(HashMap::new())),
                 procs,
                 proc_sizes,
                 next_pid: AtomicI32::new(1000 + (std::process::id() as i32 % 1000) * 10),
@@ -746,12 +758,17 @@ impl Engine {
         self.opts.data_dir.join("base").join(oid.to_string())
     }
 
-    fn store_options(&self) -> StoreOptions {
+    fn store_options(&self, oid: u32) -> StoreOptions {
+        let backends = self.backends.clone();
         StoreOptions {
             memtable_bytes: self.opts.memtable_bytes,
             sync: self.opts.sync,
             cache: self.cache.clone(),
             txn_spill_bytes: self.txn_spill_bytes,
+            reclaim: crate::storage::Reclaim {
+                busy: Some(Arc::new(move || statement_running(&backends, oid))),
+                ..Default::default()
+            },
             ..StoreOptions::default()
         }
     }
@@ -783,7 +800,7 @@ impl Engine {
             )
             .fatal());
         }
-        let store = Store::open(&self.db_dir(entry.oid), self.store_options())?;
+        let store = Store::open(&self.db_dir(entry.oid), self.store_options(entry.oid))?;
         let db = Database::open(&entry.name, entry.oid, store, &entry.owner)?;
         // CheckMyDatabase: its default collation must open (ICU rules may not).
         let locale = DbDefault::open(entry.locale()).map_err(Error::fatal)?;
@@ -2351,7 +2368,7 @@ impl Cluster for Engine {
             copy_dir(&self.db_dir(src.oid), &dir, self.opts.sync)?;
         } else {
             // Bootstrap now; it gets the cluster-wide catalogs when it's first opened.
-            let store = Store::open(&dir, self.store_options())?;
+            let store = Store::open(&dir, self.store_options(oid))?;
             let db = Database::open(name, oid, store, owner)?;
             db.store.close()?;
         }

@@ -66,6 +66,16 @@ struct Args {
     /// Close a database this many seconds after its last session ends (default: keep open).
     #[arg(long)]
     idle_close_secs: Option<u64>,
+    /// A database writes its files holding dead entries (a big DELETE's, marked by the
+    /// compaction after it) again by itself once their dead entries are this percent of all
+    /// its entries, at a moment no statement runs (default 20; 0: not for that alone).
+    /// VACUUM of a table always writes the table's files again, as PostgreSQL's returns space.
+    #[arg(long, value_name = "PERCENT")]
+    reclaim_dead_percent: Option<u32>,
+    /// ... or once it has had no commit and no running statement for this many seconds
+    /// (default 300; 0: never).
+    #[arg(long, value_name = "SECS")]
+    reclaim_idle_secs: Option<u64>,
     /// Don't fsync the WAL on commit (faster, loses the last commits on a crash).
     #[arg(long)]
     no_sync: bool,
@@ -249,6 +259,15 @@ fn main() -> anyhow::Result<()> {
     });
     let data_dir = a.data.clone();
     pg_engine::lru::set_plan_cache_bytes(profile.plan_cache_bytes);
+    let defaults = pg_engine::storage::Reclaim::default();
+    pg_engine::storage::set_reclaim(
+        a.reclaim_dead_percent.unwrap_or(defaults.dead_percent),
+        match a.reclaim_idle_secs {
+            None => defaults.idle,
+            Some(0) => Duration::MAX,
+            Some(s) => Duration::from_secs(s),
+        },
+    );
     let engine = Engine::open(EngineOptions {
         data_dir: a.data,
         cache_bytes: profile.cache_bytes,

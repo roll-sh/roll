@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use tracing::{debug, info, warn};
 use wal::WalWriter;
 use crate::counter::Padded;
@@ -156,6 +156,45 @@ pub struct StoreOptions {
     /// The file format the store's files are written in (`sst::FORMAT`; tests write format 1,
     /// as builds before format 2 did, to test reading and upgrading such a store).
     pub format: u32,
+    /// When the store writes files with dead entries again by itself (`schedule_reclaim`).
+    pub reclaim: Reclaim,
+}
+
+/// When a store writes its marked files (`Store::mark_dead`) again without their dead
+/// entries by itself; VACUUM of a table always does it for the table's files
+/// (`Store::reclaim_dead`). Never while a client statement runs (`busy`).
+#[derive(Clone)]
+pub struct Reclaim {
+    /// Pressure: the dead entries of the store's files are at least this percent of their
+    /// entries (0: never for pressure alone).
+    pub dead_percent: u32,
+    /// The store idle: no commit and no client statement for this long (`Duration::MAX`:
+    /// never).
+    pub idle: std::time::Duration,
+    /// Whether a client statement runs on the store's database now (None: none ever does,
+    /// as far as the store can tell).
+    pub busy: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+
+/// `Reclaim`'s defaults for the stores opened from now on (`set_reclaim`).
+static RECLAIM_DEAD_PERCENT: AtomicU32 = AtomicU32::new(20);
+static RECLAIM_IDLE_SECS: AtomicU64 = AtomicU64::new(300);
+
+/// The server's settings for when stores reclaim by themselves (`roll-engine
+/// --reclaim-dead-percent`, `--reclaim-idle-secs`): taken by every store opened after.
+pub fn set_reclaim(dead_percent: u32, idle: std::time::Duration) {
+    RECLAIM_DEAD_PERCENT.store(dead_percent, Ordering::Relaxed);
+    RECLAIM_IDLE_SECS.store(idle.as_secs(), Ordering::Relaxed);
+}
+
+impl Default for Reclaim {
+    fn default() -> Self {
+        let idle = match RECLAIM_IDLE_SECS.load(Ordering::Relaxed) {
+            u64::MAX => std::time::Duration::MAX,
+            s => std::time::Duration::from_secs(s),
+        };
+        Reclaim { dead_percent: RECLAIM_DEAD_PERCENT.load(Ordering::Relaxed), idle, busy: None }
+    }
 }
 
 thread_local! {
@@ -195,6 +234,7 @@ impl Default for StoreOptions {
             background: true,
             txn_spill_bytes: default_spill_bytes(),
             format: sst::FORMAT,
+            reclaim: Reclaim::default(),
         }
     }
 }
@@ -407,7 +447,8 @@ pub struct Store {
     horizon_seen: AtomicU64,
     bg: Mutex<()>,
     bg_running: AtomicBool,
-    /// A thread waits for a quiet moment to write marked files again (`schedule_reclaim`).
+    /// A thread waits for pressure or an idle store to write marked files again
+    /// (`schedule_reclaim`).
     reclaim_running: AtomicBool,
     /// Held while a marked file is written again (`reclaim_one`, outside `bg`): `close`
     /// takes it first (after `closing`, which stops a rewrite at its next block), so no file
@@ -711,7 +752,7 @@ impl Store {
         if store.view().l0.len() >= store.opts.l0_compaction_trigger {
             store.schedule_background();
         }
-        // (Marked files a session before left: written again at the first quiet moment.)
+        // (Marked files a session before left: written again on pressure or once idle.)
         store.schedule_reclaim();
         // Older WAL files are fully covered now.
         for seq in wal_seqs {
@@ -2442,7 +2483,7 @@ impl Store {
     /// Write again the L1 files whose range meets [start, end) (an empty `end`: unbounded)
     /// that have dead entries (`mark_dead`) making up at least `RECLAIM_DEAD` of them: what a
     /// compaction would have written of them, so their dead entries' space is returned (VACUUM
-    /// of a table, as PostgreSQL's returns a table's space; and at a quiet moment,
+    /// of a table, as PostgreSQL's returns a table's space; and on pressure or when idle,
     /// `schedule_reclaim`). One file at a time, each written outside `bg` (`reclaim_one`).
     /// Returns how many were written again.
     pub fn reclaim_dead(&self, start: &[u8], end: &[u8]) -> Result<usize> {
@@ -2454,15 +2495,16 @@ impl Store {
             }
             let next = self.view().l1.iter().find(|s| reclaimable(s) && s.overlaps(start, end) && tried.insert(s.meta.id)).cloned();
             let Some(f) = next else { return Ok(n) };
-            n += self.reclaim_one(&f)? as usize;
+            n += self.reclaim_one(&f, None)? as usize;
         }
     }
 
     /// L1 file `f` (marked) written again without its dead entries, then put in its place
     /// unless a compaction replaced it meanwhile (marked it again or merged it: the new file
     /// is dropped). Written without holding `bg`, so flushes and compactions don't wait for
-    /// it (the reclaim thread runs at the lowest priority); only the swap holds it.
-    fn reclaim_one(&self, f: &Arc<SstReader>) -> Result<bool> {
+    /// it (the reclaim thread runs at the lowest priority); only the swap holds it. `stop`
+    /// (the reclaim thread's: a client statement started) abandons it as closing does.
+    fn reclaim_one(&self, f: &Arc<SstReader>, stop: Option<&dyn Fn() -> bool>) -> Result<bool> {
         let _r = self.reclaim.lock();
         if self.closing.load(Ordering::Acquire) {
             return Ok(false);
@@ -2472,7 +2514,7 @@ impl Store {
         let mut n = 0u32;
         while let Some(i) = merge.min()? {
             n = n.wrapping_add(1);
-            if n.is_multiple_of(1024) && self.closing.load(Ordering::Acquire) {
+            if n.is_multiple_of(1024) && (self.closing.load(Ordering::Acquire) || (n.is_multiple_of(8192) && stop.is_some_and(|s| s()))) {
                 w.abandon();
                 return Ok(false);
             }
@@ -2526,31 +2568,59 @@ impl Store {
         Ok(true)
     }
 
-    /// When L1 has marked files, a thread (at the lowest CPU priority, `SCHED_IDLE`: it runs
-    /// only on CPUs nothing else wants) writes them again once no commit has come for
-    /// `RECLAIM_QUIET`, one at a time, looking again before each; it ends when none is left
-    /// or the store closes.
+    /// When L1 has marked files worth writing again (`reclaimable`), a thread (at the lowest
+    /// CPU priority, `SCHED_IDLE`: it runs only on CPUs nothing else wants) writes them again
+    /// on real pressure or once the store is idle (`opts.reclaim`), never while a client
+    /// statement runs: a rewrite a statement's start finds running is abandoned. It looks
+    /// every `RECLAIM_TICK`, and ends when no such file is left or the store closes. VACUUM
+    /// reclaims a table's files itself (`reclaim_dead`), so a script that vacuums after a
+    /// bulk DELETE pays for the rewrite once, in its VACUUM, as PostgreSQL's returns pages.
     fn schedule_reclaim(self: &Arc<Self>) {
-        if !self.opts.background || !self.view().l1.iter().any(|s| reclaimable(s)) || self.reclaim_running.swap(true, Ordering::AcqRel) {
+        let r = &self.opts.reclaim;
+        let never = r.dead_percent == 0 && r.idle == std::time::Duration::MAX;
+        if !self.opts.background || never || !self.view().l1.iter().any(|s| reclaimable(s)) || self.reclaim_running.swap(true, Ordering::AcqRel) {
             return;
         }
         let weak = Arc::downgrade(self);
         let spawned = std::thread::Builder::new().name("roll-reclaim".into()).spawn(move || {
             idle_priority();
             let mut seen = (u64::MAX, std::time::Instant::now());
+            let mut wait = true;
             loop {
-                std::thread::sleep(RECLAIM_TICK);
+                if wait {
+                    std::thread::sleep(RECLAIM_TICK);
+                }
                 let Some(this) = weak.upgrade() else { return };
+                let busy = || this.opts.reclaim.busy.as_ref().is_some_and(|b| b());
                 let ts = this.assigned_ts();
-                if ts != seen.0 {
+                // (A commit or a statement running: not idle from now on.)
+                if ts != seen.0 || busy() {
                     seen = (ts, std::time::Instant::now());
                 }
-                let next = this.view().l1.iter().find(|s| reclaimable(s)).cloned();
+                let next = {
+                    let v = this.view();
+                    let (dead, entries) = v.l1.iter().fold((0u64, 0u64), |(d, e), s| (d + s.meta.dead, e + s.meta.entries));
+                    let pressure = this.opts.reclaim.dead_percent > 0 && dead * 100 >= entries * this.opts.reclaim.dead_percent as u64;
+                    let due = pressure || seen.1.elapsed() >= this.opts.reclaim.idle;
+                    let worst = v.l1.iter().filter(|s| reclaimable(s)).max_by_key(|s| s.meta.dead).cloned();
+                    worst.map(|f| (f, due))
+                };
+                wait = true;
                 let done = match next {
                     _ if this.closed.load(Ordering::Acquire) => true,
                     None => true,
-                    Some(_) if seen.1.elapsed() < RECLAIM_QUIET => false,
-                    Some(f) => this.reclaim_one(&f).inspect_err(|e| warn!(dir = %this.dir.display(), error = %e, "writing a marked file again failed")).is_err(),
+                    Some((_, false)) => false,
+                    Some((f, true)) => match this.reclaim_one(&f, Some(&busy)) {
+                        Ok(written) => {
+                            // (The next at once, unless a statement stopped this one.)
+                            wait = !written;
+                            false
+                        }
+                        Err(e) => {
+                            warn!(dir = %this.dir.display(), error = %e, "writing a marked file again failed");
+                            true
+                        }
+                    },
                 };
                 if done {
                     this.reclaim_running.store(false, Ordering::Release);
@@ -3188,10 +3258,9 @@ pub struct Scan {
 /// A marked file is written again (`Store::reclaim_dead`) once its dead entries are at least
 /// 1 / `RECLAIM_DEAD` of its entries.
 const RECLAIM_DEAD: u64 = 16;
-/// No commit for this long is a quiet moment (`Store::schedule_reclaim`), looked at every
-/// `RECLAIM_TICK`.
-const RECLAIM_QUIET: std::time::Duration = std::time::Duration::from_secs(2);
-const RECLAIM_TICK: std::time::Duration = std::time::Duration::from_millis(500);
+/// How often the reclaim thread looks at the store's pressure and idleness
+/// (`Store::schedule_reclaim`).
+const RECLAIM_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn reclaimable(s: &SstReader) -> bool {
     s.meta.dv.is_some() && s.meta.dead * RECLAIM_DEAD >= s.meta.entries
@@ -4524,6 +4593,65 @@ mod tests {
         assert_eq!(s.get(b"a0001", s.visible_ts()).unwrap().as_deref(), Some(&b"x"[..]));
     }
 
+    /// The reclaim thread writes marked files again on pressure (dead entries past
+    /// `dead_percent` of the store's) or once the store is idle, and never while a client
+    /// statement runs (`busy`).
+    #[test]
+    fn reclaim_thread_waits_for_pressure_or_idle_and_no_statement() {
+        let marked_store = || {
+            let dir = tempfile::tempdir().unwrap();
+            let s = Store::open(dir.path(), StoreOptions { sync: false, background: false, target_file_bytes: 1 << 20, ..Default::default() }).unwrap();
+            let key = |i: u32| format!("table001{i:07}").into_bytes();
+            s.commit((0..40_000).map(|i| (key(i), Some(Bytes::from(format!("{:032x}", (i as u128 + 7).pow(3)))))).collect(), |_| Ok(())).unwrap();
+            s.flush_memtables().unwrap();
+            s.compact().unwrap();
+            s.commit((0..40_000).filter(|i| i % 4 == 0).map(|i| (key(i), None)).collect(), |_| Ok(())).unwrap();
+            s.flush_memtables().unwrap();
+            s.compact().unwrap();
+            assert!(s.view().l1.iter().any(|f| reclaimable(f)));
+            s.close().unwrap();
+            dir
+        };
+        let busy = Arc::new(AtomicBool::new(true));
+        let open = |dir: &Path, dead_percent: u32, idle: std::time::Duration| {
+            let b = busy.clone();
+            let reclaim = Reclaim { dead_percent, idle, busy: Some(Arc::new(move || b.load(Ordering::Relaxed))) };
+            Store::open(dir, StoreOptions { sync: false, target_file_bytes: 1 << 20, reclaim, ..Default::default() }).unwrap()
+        };
+        let marked = |s: &Store| s.view().l1.iter().filter(|f| f.meta.dv.is_some()).count();
+        let written_within = |s: &Store, secs: u64| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+            while marked(s) > 0 && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            marked(s) == 0
+        };
+        let rows = |s: &Store| s.scan(b"", b"", s.visible_ts()).count();
+        // Pressure (a quarter dead) under the threshold: kept; over it: written again once no
+        // statement runs.
+        let dir = marked_store();
+        busy.store(false, Ordering::Relaxed);
+        let s = open(dir.path(), 50, std::time::Duration::MAX);
+        assert!(!written_within(&s, 2));
+        s.close().unwrap();
+        busy.store(true, Ordering::Relaxed);
+        let s = open(dir.path(), 20, std::time::Duration::MAX);
+        assert!(!written_within(&s, 2));
+        busy.store(false, Ordering::Relaxed);
+        assert!(written_within(&s, 10));
+        assert_eq!(rows(&s), 30_000);
+        s.close().unwrap();
+        // Idle: no commit and no statement for `idle`.
+        let dir = marked_store();
+        busy.store(true, Ordering::Relaxed);
+        let s = open(dir.path(), 0, std::time::Duration::from_secs(1));
+        assert!(!written_within(&s, 3));
+        busy.store(false, Ordering::Relaxed);
+        assert!(written_within(&s, 10));
+        assert_eq!(rows(&s), 30_000);
+        s.close().unwrap();
+    }
+
     /// A compaction of L0 deletions alone over a big L1 file marks the entries they delete
     /// (and the versions under them) dead instead of writing the file again: the same file,
     /// read as before at every snapshot, after a reopen too; a snapshot older than a deletion
@@ -4597,7 +4725,7 @@ mod tests {
         assert_eq!(rows(&s, s.visible_ts()), want);
         let sets = || std::fs::read_dir(dir.path()).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "dv")).count();
         assert_eq!(sets(), s.view().l1.iter().filter(|f| f.meta.dv == Some(2)).count());
-        // VACUUM's (and a quiet moment's) rewrite: the marked files written again without
+        // VACUUM's (and the reclaim thread's) rewrite: the marked files written again without
         // their dead entries, the rows the same, their sets gone, the store smaller.
         let marked: Vec<u64> = s.view().l1.iter().filter(|f| f.meta.dv.is_some()).map(|f| f.meta.id).collect();
         let (bytes, live) = (|s: &Store| s.view().l1.iter().map(|f| f.meta.size).sum::<u64>(), s.view().l1.iter().map(|f| f.live_entries()).sum::<u64>());
