@@ -1672,32 +1672,31 @@ Ranked by what a person notices first. Done so far:
   runtime runs, printable schema lines, budget alerts that can't be lost or silenced, followed
   logs that say when lines were missed and stop with a hidden tab).
 
-1. **Roll only on roll apps' builds** (after apps' #222): roll apps builds a closed environment
-   without its secret values and says `build_closed: true`. Previews' side is built (branch
-   `feature/roll-previews-closed-builds`, gated): rolld's adapter deploys nothing to a closed
-   environment that doesn't say so, and a Git URL fork's head is approved under Roll only again.
-   Draft #234; its live check runs once #222 is on main.
-2. **A Git URL service's preview reported to its repository, in review (#232):** `roll/preview` and
-   the pull request comment through roll's GitHub App (apps' #138). The live check against a fake
-   GitHub (`scripts/lib/fake-github.py`) saw the fork's `roll/preview` go pending, then success,
-   with one comment edited in place.
-3. **Masking's leftovers, in review (#233):** a page's own words are parsed 2,000 characters wide,
-   masked whole and only then cut to what's shown, so a value the cut splits isn't left half
-   shown. Looked at and kept as it is: a preview's own variables and the project's `env` stay
-   masked whole even when a value is plain (a region). They're revealed only by `reveal` routes
-   and can be named anything, and under-masking is worse than an unreadable host.
-4. **Deploy a preview's roll apps services at once** (measured twice and not landed; branch
-   `feature/roll-previews-deploy-at-once`). With cold builds (2026-11-17), it was within the noise:
-   two Docker builds of one repo share the CPU. With a second push's cached builds (2026-11-18,
-   two services, load 49–57), both were live again in 4.7 and 4.9 s on main, and 4.9 and 3.4 s on
-   the branch: one faster run in two, not a win. Try it on an idle host, or with more services.
-5. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
-   2026-11-17): a 1.4 GB pgbench parent branched in 0.97 s against 3.5 s for a copy, but a write
-   copies the whole table file (764 MB after 30 s of pgbench). It needs a base per parent and a
-   WAL replay per branch. The fleet's XFS volumes already share blocks.
-6. **Watch: pg-control's recovery to a time seconds old** (unowned).
-7. **Watch: a cold start on a Docker name conflict**: if it comes back, log both starts'
-   container ids.
+1. **What a preview's services use, in review** (branch `feature/roll-previews-metrics`): CPU and
+   memory against what each runs with, `GET …/metrics` and the sheet, as Render and Railway show.
+   From `docker stats` for roll's runtime and roll apps' metrics for its instances.
+2. **Roll only on roll apps' builds** (draft #234, after apps' #222, #238, #240 and #242): a closed
+   environment's build gets none of its secrets and, with #238, no way out but the egress relay.
+   rolld's adapter deploys nothing to a closed environment that doesn't say `build_closed`, and
+   sends `closed: true` on each deploy, so an older node refuses it. A Git URL fork's head is
+   approved under Roll only again.
+3. **In review:** #232 (a Git URL preview reported on GitHub through roll's GitHub App) and #233 (a
+   page's words masked whole before they're cut).
+4. **One GitHub voice per pull request** (with the apps thread): on a Git URL service's pull
+   request, roll apps posts its own `roll/apps/<svc>/pv-…` statuses and a Deployment next to
+   previews' `roll/preview`, where Vercel shows one. Have roll apps leave a `pv-` environment's
+   GitHub reporting to previews (a flag on the environment's PUT).
+5. **One project speaks for a service:** a service on two projects' canvases (the operator's and
+   an admin's) gets a preview in each, and both post `roll/preview` and a comment. Let only the
+   project the service was made in post, and the other say so on its sheet.
+6. **Deploy a preview's roll apps services at once** (measured twice and not landed; branch
+   `feature/roll-previews-deploy-at-once`). With cold builds it was within the noise, and with a
+   second push's cached builds one run in two was faster. Try it on an idle host, or with more
+   services.
+7. **Cheap Postgres branches on ext4: overlay volumes over a frozen base** (pg-control; measured
+   2026-11-17): 0.97 s against 3.5 s for a 1.4 GB copy, but a write copies the whole table file.
+8. **Watch: pg-control's recovery to a time seconds old** (unowned).
+9. **Watch: a cold start on a Docker name conflict.**
 
 Landed in previews' lock turn of 2026-11-17 (main 42a3bbe1b, one combined gate with both live
 checks):
