@@ -449,6 +449,11 @@ pub async fn start(ctx: &Ctx<'_>) -> EsResult<Reply> {
             let v = with_roll_state(t, |r| {
                 r.insert("state".into(), "started".into());
                 r.insert("next_run".into(), now.into());
+                // Counted from when it is stored as started, just before the answer, as
+                // Elasticsearch's task exists from the end of `_start`.
+                let stored = crate::time::now_millis();
+                r.insert("hold_until".into(), (stored + batch_hold_ms(stored - now)).into());
+                r.shift_remove("finished");
                 r.shift_remove("failure_count");
                 r.shift_remove("reason");
                 match from {
