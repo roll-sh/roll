@@ -460,9 +460,14 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   A sleeping cluster records that earliest time as its `wake_at`, so it is loaded only when a
   scheduled sync is due; between syncs it costs nothing. A sync is a task of its own
   (one per connector at a time; others wait as `pending`): the scheduler starts it and goes
-  back to sleep. While one runs the cluster is pinned loaded (`Syncs::busy`), and every write it
-  makes goes through the cluster, so a node that lost the cluster fails its next write and the
-  sync stops there.
+  back to sleep. At most two run at once per cluster and four per node (a node-wide semaphore);
+  while every slot is taken a pending job isn't due (a slot freeing wakes the scheduler). While
+  one runs the cluster is pinned loaded (`Syncs::busy`), and every write it makes goes through
+  the cluster, so a node that lost the cluster fails its next write and the sync stops there. A
+  supervisor task runs each sync as a task of its own: however it ends (a panic included) the
+  slot and the node's permit are freed, a job it left unfinished is settled (`error`, or
+  `canceled` when it was canceling), and the scheduler is woken, so no bug can pin a cluster or
+  strand a job.
 - **A run.** Claim the job (`in_progress`, `worker_hostname: roll`, `started_at`), read the
   source a page at a time, apply the active sync rules, and bulk-index each page into
   `index_name` through the connector's `pipeline` when that pipeline exists, as the user who
@@ -479,13 +484,24 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   failures that are also over a tenth of the documents fail the job.
 - **Limits.** A sync reads at most `roll.connectors.max_docs_per_second` documents (1,000) and
   `roll.connectors.max_bytes_per_second` bytes (10 MiB) per second (node settings), sleeping
-  between pages to stay under them; a page is at most 500 rows or objects, and aims at 20 MiB
-(a bucket's page is cut there; a table's next fetch is sized from its last rows). A table
-  is read through a server-side cursor in one `REPEATABLE READ READ ONLY` transaction, and a
-  bucket a listing page at a time, so neither is ever loaded whole. A row over 10 MiB is
-  skipped and counted; an object over 10 MiB is indexed without its text (Elastic's default
-  extraction limit). Postgres sessions get `statement_timeout` and
-  `idle_in_transaction_session_timeout` so a stuck sync can't hold a transaction open.
+  between pages to stay under them. A page is at most 500 rows or objects and is held in memory
+  only while it is indexed:
+  - A table is read in one `REPEATABLE READ READ ONLY` transaction, a keyset page at a time
+    (`WHERE (key) > (last key) ORDER BY key LIMIT n`). The server cuts each page once its rows'
+    sizes pass 20 MiB (a running sum in the query), and a row over 10 MiB comes back as NULL
+    (skipped and counted), so an honest page is at most about 30 MiB. `n` follows the largest
+    row seen, starting from 10 MiB.
+  - The connection counts the bytes it reads: a page's answer past 64 MiB (twice the page, plus
+    framing) fails the sync, so a server ignoring the cut can't grow memory.
+  - A bucket is listed a page at a time (4 MiB of listing at most) and a page is indexed once
+    its objects' text passes 20 MiB; an object over 10 MiB is indexed without its text
+    (Elastic's default extraction limit).
+  - Postgres sessions get `statement_timeout` (5 min) and `idle_in_transaction_session_timeout`
+    so a stuck sync can't hold a transaction open; on the client every statement times out a
+    little after that, the socket has TCP keepalives, and every wait on a database or a bucket
+    races the job's cancel, so a silent server or a dead network can't hold a slot.
+  - A full sync keeps the ids it saw as 64-bit hashes (at most 20 million, 160 MB, per sync;
+    four syncs per node at most).
 - **`postgresql`** (Elastic's configuration fields: `host`, `port`, `username`, `password`,
   `database`, `schema`, `tables` (`*` or a comma list), `ssl_enabled`, `ssl_ca`, `fetch_size`,
   `retry_count`; plus roll's `incremental_column`). Each table with a primary key is read in
@@ -497,7 +513,12 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   at or after the cursor of the last sync; the cursor is the column's maximum seen at that
   sync's snapshot, per table, in the connector's `sync_cursor`. Without the column, an
   incremental sync reads every row and upserts. Incremental syncs never delete; the next full
-  sync removes what was deleted. Not yet: advanced sync rules (custom SQL with `id_columns`).
+  sync removes what was deleted. A timestamp cursor can miss a row: one whose transaction
+  commits after the sync's snapshot with an `incremental_column` value below the recorded
+  maximum (`now()` taken early in a long transaction) is never read by an incremental sync.
+  That's inherent to timestamp cursors; use a column set at commit time (a trigger on a sequence,
+  for example) or schedule a periodic full sync, which reads everything. Not yet: advanced sync
+  rules (custom SQL with `id_columns`).
 - **`s3`** (Elastic's fields: `buckets`, `aws_access_key_id`, `aws_secret_access_key`,
   `read_timeout`, `connect_timeout`, `max_attempts`, `page_size`; plus roll's `endpoint` and
   `region`, so any S3-compatible store works, path-style when an endpoint is given). Objects are
@@ -507,7 +528,9 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   (scripts and styles dropped, entities decoded). roll has no `attachment` processor yet, so
   other formats (PDF, Office) are indexed by their metadata only. Advanced sync rules follow
   Elastic's (`[{"bucket", "prefix", "extension"}]`, replacing `buckets`). Incremental syncs
-  fetch only objects modified after the last sync's newest `LastModified`.
+  fetch only objects modified at or after the last sync's newest `LastModified`: listings give
+  whole seconds on AWS, so objects in the cursor's own second are read again rather than an
+  object written later in that second being missed.
 - **Sync rules.** Basic rules (`field`, `policy`, `rule`, `value`, in `order`, the first match
   deciding, the default rule including the rest) are applied to each document before it is
   indexed, as Elastic's framework does; a full sync deletes what they exclude. roll validates a
@@ -520,12 +543,30 @@ both with Elasticsearch 9.5.5's shapes, validation and state machines
   redirects, bounded reads). `roll.connectors.allow_private_hosts`
   (`ROLL_SEARCH_CONNECTORS_ALLOW_PRIVATE`) lifts that for local development only.
 - **Credentials.** Fields the schema marks `sensitive` (`password`, `aws_secret_access_key`) of a
-  connector roll runs are sealed when written (`seal.rs`, kind `connector configuration`, under
-  `ROLL_SECRET_KEY`), opened only by the sync, and never returned: `GET _connector`, its list
-  and job documents' connector snapshots show `********`, and writing `********` back keeps the
-  stored value, so a client can round-trip a configuration. Errors never carry them (a source's
-  message is scrubbed of every configured secret before it is recorded). Self-managed
-  connectors keep Elasticsearch's behaviour (their service reads values through the API).
+  connector roll runs are sealed when written (`seal.rs`, under `ROLL_SECRET_KEY`), opened only
+  by the sync, and never returned:
+  - `GET _connector`, its list and job documents' connector snapshots show `********`, and
+    writing `********` back keeps the stored value, so a client can round-trip a
+    configuration. A sealed value shows as `********` on every connector, self-managed ones
+    included.
+  - A value's associated data is `connector configuration:<connector id>:<field>`, so a sealed
+    value copied into another connector or field doesn't open. It isn't bound to the cluster:
+    a branch and a snapshot restore carry the connector to a cluster with another uuid, and
+    its syncs must keep working there.
+  - When roll starts running a connector (created native, made native, or given a service roll
+    runs) every sensitive value it holds is sealed as given, even one that looks sealed: a value
+    sealed elsewhere is only ever text to it, and a password written while the connector was
+    self-managed doesn't stay in the clear.
+  - Changing where a credential goes (Postgres `host`, `port`, `username`, `database`,
+    `ssl_enabled`, `ssl_ca`; S3 `endpoint`, `region`, `aws_access_key_id`, `buckets`) without
+    giving it again in the same write clears it and puts the connector back to
+    `needs_configuration`, as Elastic's UI asks for the password again: a stored password is
+    never sent to a host its owner didn't pair it with.
+  - Errors never carry them (a source's message is scrubbed of every configured secret before
+    it is recorded).
+
+  Self-managed connectors otherwise keep Elasticsearch's behaviour: their values are stored as
+  given, since their service reads them through the API.
 - **roll's own Postgres and storage** (next step; not in the first slice). A person points a
   connector at their own roll Postgres project or roll storage bucket without copying a
   credential: `POST /v1/search/clusters/{id}/connectors/{connector}/link`

@@ -45,6 +45,14 @@ pub async fn sync(v: &Values, sink: &mut Sink<'_>, full: bool, cursor: &Value, a
     Ok(crate::obj! { "buckets" => Value::Obj(next) })
 }
 
+/// Whether an object modified at `last_modified` is read by an incremental sync after `cursor`
+/// (the newest `LastModified` the last sync listed). Listings give whole seconds on AWS, so an
+/// object written in the cursor's own second after that listing has the cursor's time: it's
+/// read again rather than missed (indexing it twice is harmless).
+fn changed_since(last_modified: &str, cursor: &str) -> bool {
+    last_modified >= cursor
+}
+
 /// Elastic's id of an object: the MD5 of `bucket/key`, in hex.
 fn doc_id(bucket: &str, key: &str) -> String {
     md5::Md5::digest(format!("{bucket}/{key}").as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
@@ -55,7 +63,11 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
     let mut token: Option<String> = None;
     let mut newest: Option<String> = None;
     loop {
-        let (objects, next) = client.list_page(&t.prefix, token.as_deref(), page_size).await.map_err(|e| Stop::Failed(format!("listing bucket [{}] failed: {e}", t.bucket)))?;
+        let listed = tokio::select! {
+            r = client.list_page(&t.prefix, token.as_deref(), page_size) => r,
+            _ = sink.canceled() => return Err(Stop::Canceled),
+        };
+        let (objects, next) = listed.map_err(|e| Stop::Failed(format!("listing bucket [{}] failed: {e}", t.bucket)))?;
         let mut docs = Vec::new();
         let mut bytes = 0usize;
         for o in objects {
@@ -70,7 +82,7 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
                 newest = Some(o.last_modified.clone());
             }
             // An incremental sync reads only what changed since the last one.
-            if since.is_some_and(|s| o.last_modified.as_str() <= s) {
+            if since.is_some_and(|s| !changed_since(&o.last_modified, s)) {
                 continue;
             }
             let mut doc = Map::new();
@@ -80,7 +92,11 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
             doc.insert("filename".into(), o.key.clone().into());
             doc.insert("size_in_bytes".into(), (o.size as i64).into());
             if let Some(kind) = extract::kind_of(&o.key).filter(|_| o.size as usize <= DOC_BYTES_MAX) {
-                match client.get(&o.key, DOC_BYTES_MAX).await {
+                let got = tokio::select! {
+                    r = client.get(&o.key, DOC_BYTES_MAX) => r,
+                    _ = sink.canceled() => return Err(Stop::Canceled),
+                };
+                match got {
                     Ok(Some(body)) => {
                         sink.read(body.len() as u64);
                         bytes += body.len();
@@ -103,5 +119,15 @@ async fn read_bucket(client: &Client, sink: &mut Sink<'_>, t: &S3Rule, since: Op
             Some(n) => token = Some(n),
             None => return Ok(newest),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn incremental_syncs_reread_the_cursors_second() {
+        assert!(super::changed_since("2026-11-18T10:00:00.000Z", "2026-11-18T10:00:00.000Z"));
+        assert!(super::changed_since("2026-11-18T10:00:01.000Z", "2026-11-18T10:00:00.000Z"));
+        assert!(!super::changed_since("2026-11-18T09:59:59.000Z", "2026-11-18T10:00:00.000Z"));
     }
 }

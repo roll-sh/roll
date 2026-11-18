@@ -538,7 +538,7 @@ pub(crate) fn hex(b: &[u8]) -> String {
 }
 
 /// SigV4's URI encoding: unreserved characters kept, `/` kept unless `slash`, the rest `%XX`.
-fn uri_encode(s: &str, slash: bool) -> String {
+pub(crate) fn uri_encode(s: &str, slash: bool) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         match b {

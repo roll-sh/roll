@@ -40,6 +40,13 @@ const HEARTBEAT: Duration = Duration::from_secs(10);
 const STALE_MS: i64 = 5 * 60_000;
 /// Syncs running at once on one cluster.
 const MAX_RUNNING: usize = 2;
+/// Syncs running at once on this node (every cluster): each holds a page and, in a full sync,
+/// up to [`MAX_SEEN`] ids' hashes.
+const NODE_MAX_RUNNING: usize = 4;
+static NODE_SYNCS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(NODE_MAX_RUNNING);
+/// How often a pending job is looked at again while the node's syncs are all taken (another
+/// cluster's sync ending doesn't wake this cluster's scheduler).
+const NODE_FULL_RETRY_MS: i64 = 5_000;
 /// Documents a full sync remembers seeing (8 bytes each).
 const MAX_SEEN: usize = 20_000_000;
 /// A page of a source: rows or objects, and bytes.
@@ -67,6 +74,11 @@ impl Syncs {
     fn begin(&self, connector: &str) -> bool {
         let mut r = self.running.lock();
         r.len() < MAX_RUNNING && r.insert(connector.to_string())
+    }
+
+    /// Whether this cluster has a slot free.
+    fn has_room(&self) -> bool {
+        self.running.lock().len() < MAX_RUNNING
     }
 
     fn end(&self, connector: &str) {
@@ -122,8 +134,10 @@ fn draft_edited(c: &Value) -> bool {
     c.get("filtering").and_then(Value::as_array).and_then(|f| f.first()).and_then(|f| f.pointer(&["draft", "validation", "state"])).and_then(Value::as_str) == Some("edited")
 }
 
-/// When the scheduler must run [`run_due`] next (Unix ms; `0`: now).
-pub fn next_due(st: &crate::meta::ClusterState) -> Option<i64> {
+/// When the scheduler must run [`run_due`] next (Unix ms; `0`: now). `syncs` is the loaded
+/// cluster's running syncs (`None` for an unloaded one, which runs none): a pending job isn't due
+/// while every slot is taken, since a slot freeing wakes the scheduler.
+pub fn next_due(st: &crate::meta::ClusterState, syncs: Option<&Syncs>) -> Option<i64> {
     let mut due: Option<i64> = None;
     let mut at = |t: i64| due = Some(due.map_or(t, |d| d.min(t)));
     let busy = busy_connectors(st);
@@ -150,7 +164,11 @@ pub fn next_due(st: &crate::meta::ClusterState) -> Option<i64> {
     for (_, j) in st.metadata.xpack.iter(SYNC_JOBS) {
         let cid = connector_of(j);
         match str_of(j, "status") {
-            "pending" if runnable.contains(cid) && !busy.contains(cid) => at(0),
+            "pending" if runnable.contains(cid) && !busy.contains(cid) && syncs.is_none_or(|s| !s.is_running(cid)) => match syncs {
+                Some(s) if !s.has_room() => {}
+                Some(_) if NODE_SYNCS.available_permits() == 0 => at(crate::time::now_millis() + NODE_FULL_RETRY_MS),
+                _ => at(0),
+            },
             s if active(s) && str_of(j, "worker_hostname") == WORKER => at(instant_ms(j.get("last_seen")).unwrap_or(0) + STALE_MS),
             _ => {}
         }
@@ -261,17 +279,48 @@ pub async fn run_due(cluster: &Cluster, now: i64) {
     pending.sort();
     drop(st);
     for (_, job, cid) in pending {
+        let Ok(permit) = NODE_SYNCS.try_acquire() else { break };
         if !syncs.begin(&cid) {
             continue;
         }
         let c = handle.clone();
-        tokio::spawn(async move {
-            run(&c, &job, &cid).await;
-            c.xpack.connector_syncs.end(&cid);
-            // The next pending job of this connector, if any.
-            c.jobs.kick(&c);
-        });
+        let (j, id) = (job.clone(), cid.clone());
+        tokio::spawn(supervise(handle.clone(), job, cid, Some(permit), async move { run(&c, &j, &id).await }));
     }
+}
+
+/// Runs a claimed slot's sync (`work`) as a task of its own and, however it ends (a panic
+/// included), frees the slot and the node's permit, settles a job it left unfinished, and wakes
+/// the scheduler for the next pending job.
+async fn supervise(cluster: Arc<Cluster>, job: String, cid: String, permit: Option<tokio::sync::SemaphorePermit<'static>>, work: impl std::future::Future<Output = ()> + Send + 'static) {
+    /// Frees the slot even if this task is dropped (the runtime shutting down).
+    struct Slot(Arc<Cluster>, String);
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            self.0.xpack.connector_syncs.end(&self.1);
+        }
+    }
+    let slot = Slot(cluster.clone(), cid.clone());
+    if let Err(e) = tokio::spawn(work).await {
+        let why = if e.is_panic() { "the sync stopped on an internal error" } else { "the sync was stopped" };
+        let _ = cluster
+            .update(move |st| {
+                let Some(Value::Obj(mut j)) = st.metadata.xpack.get(SYNC_JOBS, &job).cloned() else { return Ok(()) };
+                let status = j.get("status").and_then(Value::as_str).unwrap_or_default().to_string();
+                if matches!(status.as_str(), "completed" | "error" | "canceled") {
+                    return Ok(());
+                }
+                let outcome = if status == "canceling" { Outcome::Canceled } else { Outcome::Failed(why.into()) };
+                let (now, t) = (crate::time::now_millis(), now_nanos_string());
+                settle_job(&mut j, &outcome, &t);
+                store::put(st, SYNC_JOBS, &job, Value::Obj(j), now)?;
+                settle_connector(st, &cid, &outcome, None, &t, now)
+            })
+            .await;
+    }
+    drop(permit);
+    drop(slot);
+    cluster.jobs.kick(&cluster);
 }
 
 /// How a sync ended.
@@ -405,6 +454,7 @@ async fn run(cluster: &Arc<Cluster>, job_id: &str, cid: &str) {
 /// The documents in a connector's index after its sync.
 async fn count(cluster: &Cluster, cid: &str) -> Option<i64> {
     let index = cluster.state().metadata.xpack.get(CONNECTORS, cid)?.get("index_name")?.as_str()?.to_string();
+    let index = enc(&index);
     internal::call(cluster, "POST", &format!("/{index}/_refresh"), None).await.ok()?;
     internal::call(cluster, "GET", &format!("/{index}/_count"), None).await.ok()?.get("count")?.as_i64()
 }
@@ -430,7 +480,7 @@ async fn sync(cluster: &Arc<Cluster>, job_id: &str, cid: &str, principal: Option
     let rules = rules::Rules::compile(&filtering).map_err(|p| Stop::Failed(format!("the active sync rules don't parse: {}", p.into_iter().map(|p| p.message).collect::<Vec<_>>().join("; "))))?;
     ensure_index(cluster, &index).await?;
     let pipeline = match connector.pointer(&["pipeline", "name"]).and_then(Value::as_str) {
-        Some(p) if internal::call(cluster, "GET", &format!("/_ingest/pipeline/{p}"), None).await.is_ok() => Some(p.to_string()),
+        Some(p) if internal::call(cluster, "GET", &format!("/_ingest/pipeline/{}", enc(p)), None).await.is_ok() => Some(p.to_string()),
         _ => None,
     };
     let setting = |k: &str, d: u64| cluster.config.node_setting(k).and_then(|v| v.parse::<u64>().ok()).filter(|n| *n > 0).unwrap_or(d);
@@ -465,10 +515,16 @@ async fn sync(cluster: &Arc<Cluster>, job_id: &str, cid: &str, principal: Option
     Ok(cursor)
 }
 
+/// A name as one segment of an internal URI's path or query.
+fn enc(name: &str) -> String {
+    crate::s3::uri_encode(name, true)
+}
+
 async fn ensure_index(cluster: &Cluster, index: &str) -> Result<(), Stop> {
-    match internal::call(cluster, "GET", &format!("/{index}"), None).await {
+    let path = format!("/{}", enc(index));
+    match internal::call(cluster, "GET", &path, None).await {
         Ok(_) => Ok(()),
-        Err(e) if e.kind == "index_not_found_exception" => match internal::call(cluster, "PUT", &format!("/{index}"), None).await {
+        Err(e) if e.kind == "index_not_found_exception" => match internal::call(cluster, "PUT", &path, None).await {
             Ok(_) => Ok(()),
             Err(e) if e.kind == "resource_already_exists_exception" => Ok(()),
             Err(e) => Err(Stop::Failed(format!("creating the index [{index}] failed: {}", e.reason()))),
@@ -571,7 +627,7 @@ impl Sink<'_> {
         }
         if !sizes.is_empty() {
             let uri = match &self.pipeline {
-                Some(p) => format!("/_bulk?pipeline={p}"),
+                Some(p) => format!("/_bulk?pipeline={}", enc(p)),
                 None => "/_bulk".to_string(),
             };
             let resp = internal::call_ndjson(self.cluster, "POST", &uri, body).await.map_err(|e| Stop::Failed(format!("indexing into [{}] failed: {}", self.index, e.reason())))?;
@@ -603,10 +659,21 @@ impl Sink<'_> {
         }
     }
 
+    /// Whether the job is still running (not canceled, not deleted).
+    fn running(&self) -> bool {
+        self.cluster.state().metadata.xpack.get(SYNC_JOBS, &self.job).is_some_and(|j| str_of(j, "status") == "in_progress")
+    }
+
+    /// Resolves once the job was canceled (or deleted): sources race their I/O against it.
+    pub async fn canceled(&self) {
+        while self.running() {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
     /// Stops when the job was canceled (or deleted); writes its counters every [`HEARTBEAT`].
     pub async fn check(&mut self) -> Result<(), Stop> {
-        let status = self.cluster.state().metadata.xpack.get(SYNC_JOBS, &self.job).map(|j| str_of(j, "status").to_string());
-        if status.as_deref() != Some("in_progress") {
+        if !self.running() {
             return Err(Stop::Canceled);
         }
         if self.beat.elapsed() < HEARTBEAT {
@@ -634,7 +701,7 @@ impl Sink<'_> {
         self.seen.sort_unstable();
         let listing = |index: &str, e: crate::error::EsError| Stop::Failed(format!("listing [{index}] for deletes failed: {}", e.reason()));
         let first = obj! { "size" => 1000, "_source" => false, "sort" => crate::arr!["_doc"] };
-        let mut page = internal::call(self.cluster, "POST", &format!("/{}/_search?scroll=2m", self.index), Some(&first)).await.map_err(|e| listing(&self.index, e))?;
+        let mut page = internal::call(self.cluster, "POST", &format!("/{}/_search?scroll=2m", enc(&self.index)), Some(&first)).await.map_err(|e| listing(&self.index, e))?;
         let mut scroll_id = page.get("_scroll_id").and_then(Value::as_str).map(str::to_string);
         let result = loop {
             let hits = page.pointer(&["hits", "hits"]).and_then(Value::as_array).cloned().unwrap_or_default();
@@ -672,5 +739,32 @@ impl Sink<'_> {
             let _ = internal::call(self.cluster, "DELETE", "/_search/scroll", Some(&obj! { "scroll_id" => crate::arr![sid] })).await;
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cluster::{ClusterConfig, MemoryStore};
+
+    async fn call(c: &Cluster, method: &str, uri: &str, body: &str) -> Value {
+        let req = if body.is_empty() { crate::EsRequest::new(method, uri) } else { crate::EsRequest::json(method, uri, body.to_string()) };
+        crate::json::parse(&crate::rest::handle(c, req).await.body).ok().flatten().unwrap_or(Value::Null)
+    }
+
+    /// A sync that panics still frees its slot (the cluster isn't pinned loaded) and leaves its
+    /// job failed, not `in_progress` forever.
+    #[tokio::test]
+    async fn a_panicking_sync_frees_its_slot_and_fails_its_job() {
+        let c = Arc::new(Cluster::open(ClusterConfig::new("c"), Arc::new(MemoryStore::new())).await.unwrap());
+        call(&c, "PUT", "/_connector/x", r#"{"index_name":"content-x","is_native":true,"service_type":"s3"}"#).await;
+        let job = call(&c, "POST", "/_connector/_sync_job", r#"{"id":"x"}"#).await.get("id").and_then(Value::as_str).unwrap().to_string();
+        assert!(c.xpack.connector_syncs.begin("x"));
+        supervise(c.clone(), job.clone(), "x".into(), None, async { panic!("a bug in a source") }).await;
+        assert!(!c.xpack.connector_syncs.busy(), "the slot is free");
+        let j = call(&c, "GET", &format!("/_connector/_sync_job/{job}"), "").await;
+        assert_eq!(j.get("status").and_then(Value::as_str), Some("error"), "{j:?}");
+        let conn = call(&c, "GET", "/_connector/x", "").await;
+        assert_eq!(conn.get("last_sync_status").and_then(Value::as_str), Some("error"));
     }
 }

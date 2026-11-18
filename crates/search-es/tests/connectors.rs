@@ -2,7 +2,8 @@
 //! Postgres and MinIO and sets `ROLL_E2E_CONNECTORS_PG` / `ROLL_E2E_CONNECTORS_S3`; without them
 //! these tests skip): full and incremental PostgreSQL syncs, deletes found by a full sync, an S3
 //! bucket's objects and their text, cancel, the job's counters, and no credential in what the
-//! API returns or records.
+//! API returns or records. The tests against a fake Postgres (where a credential is sent, a
+//! silent server) need no Docker and always run.
 
 use search_es::json::{Value, parse};
 use search_es::{Cluster, ClusterConfig, EsRequest, MemoryStore};
@@ -22,6 +23,7 @@ async fn cluster(settings: &[(&str, &str)]) -> Arc<Cluster> {
     cfg.sealer = search_es::seal::Sealer::from_secret("0123456789abcdef0123456789abcdef-connectors");
     cfg.node_settings.push(("roll.connectors.allow_private_hosts".into(), "true".into()));
     cfg.node_settings.push(("roll.connectors.max_docs_per_second".into(), "100000".into()));
+    cfg.node_settings.push(("roll.connectors.max_bytes_per_second".into(), (1u64 << 30).to_string()));
     for (k, v) in settings {
         cfg.node_settings.push((k.to_string(), v.to_string()));
     }
@@ -282,9 +284,155 @@ async fn s3_bucket_objects_and_text() {
     tokio::time::sleep(Duration::from_millis(1100)).await;
     bucket.put("notes/new.txt", bytes::Bytes::from("brand new")).await.unwrap();
     let job = finished(&c, &start(&c, "files", "incremental").await).await;
-    assert_eq!((at(&job, "status").as_str(), num(&job, "indexed_document_count")), (Some("completed"), 1), "{job:?}");
+    // The new object, and those in the cursor's own instant again (read rather than risk missing
+    // one written in that second).
+    let n = num(&job, "indexed_document_count");
+    assert!(at(&job, "status").as_str() == Some("completed") && (2..5).contains(&n), "{job:?}");
+    let (_, v, _) = call(&c, "POST", "/content-files/_refresh", None).await;
+    assert_eq!(at(&v, "_shards.failed"), &Value::from(0));
+    let (_, v, _) = call(&c, "POST", "/content-files/_search", Some(r#"{"query":{"match":{"body":"brand"}}}"#)).await;
+    assert_eq!(num(&v, "hits.total.value"), 1, "{v:?}");
     bucket.delete("old/gone.txt").await.unwrap();
     let job = finished(&c, &start(&c, "files", "full").await).await;
     assert_eq!((num(&job, "deleted_document_count"), num(&job, "total_document_count")), (1, 5), "{job:?}");
     assert!(!visible(&c).await.contains(S3_SECRET), "the secret key is visible");
+}
+
+#[tokio::test]
+async fn postgres_pages_are_bounded_by_bytes() {
+    let Some(addr) = env("ROLL_E2E_CONNECTORS_PG") else {
+        eprintln!("skipped: ROLL_E2E_CONNECTORS_PG isn't set");
+        return;
+    };
+    let db = pg_client(&addr).await;
+    // 40 rows of 1.5 MiB under a two-column key, and one over the 10 MiB limit: pages are cut by
+    // their bytes, and the large row is skipped and counted.
+    db.batch_execute(
+        "DROP TABLE IF EXISTS wide; CREATE TABLE wide (region text, id int, body text, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (region, id)); \
+         INSERT INTO wide (region, id, body) SELECT CASE WHEN g % 2 = 0 THEN 'eu' ELSE 'us' END, g, repeat(md5(g::text), 49152) FROM generate_series(1, 40) g; \
+         INSERT INTO wide (region, id, body) VALUES ('eu', 1000, repeat('y', 11 << 20));",
+    )
+    .await
+    .unwrap();
+    let c = cluster(&[]).await;
+    pg_connector(&c, &addr, "pg", "content-wide", "wide", PG_PASSWORD).await;
+    let job = finished(&c, &start(&c, "pg", "full").await).await;
+    assert_eq!(at(&job, "status").as_str(), Some("completed"), "{job:?}");
+    assert_eq!((num(&job, "indexed_document_count"), num(&job, "metadata.skipped_document_count"), num(&job, "total_document_count")), (40, 1, 40), "{job:?}");
+    db.batch_execute("DROP TABLE wide").await.unwrap();
+}
+
+/// A fake Postgres: asks for a cleartext password, records what it gets, refuses it. With
+/// `silent`, it accepts connections and never answers.
+async fn fake_postgres(silent: bool) -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let got = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = got.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = listener.accept().await else { return };
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let mut held = Vec::new();
+                if silent {
+                    let _ = s.read_to_end(&mut held).await;
+                    return;
+                }
+                // The startup message (no SSLRequest: the connectors here don't use TLS).
+                let Ok(len) = s.read_i32().await else { return };
+                let mut rest = vec![0; len as usize - 4];
+                if s.read_exact(&mut rest).await.is_err() {
+                    return;
+                }
+                let _ = s.write_all(&[b'R', 0, 0, 0, 8, 0, 0, 0, 3]).await;
+                let (Ok(kind), Ok(len)) = (s.read_u8().await, s.read_i32().await) else { return };
+                let mut body = vec![0; len as usize - 4];
+                if kind == b'p' && s.read_exact(&mut body).await.is_ok() {
+                    seen.lock().unwrap().push(String::from_utf8_lossy(&body).trim_end_matches('\0').to_string());
+                }
+                let fields = b"SFATAL\0C28P01\0Mpassword authentication failed\0\0";
+                let mut e = vec![b'E'];
+                e.extend_from_slice(&((fields.len() + 4) as i32).to_be_bytes());
+                e.extend_from_slice(fields);
+                let _ = s.write_all(&e).await;
+            });
+        }
+    });
+    (port, got)
+}
+
+/// Pointing a connector somewhere else without giving the password again clears it: the new host
+/// never receives the stored one.
+#[tokio::test]
+async fn a_retargeted_connector_never_sends_the_stored_password() {
+    let (first, first_got) = fake_postgres(false).await;
+    let (second, second_got) = fake_postgres(false).await;
+    let c = cluster(&[]).await;
+    pg_connector(&c, &format!("127.0.0.1:{first}"), "pg", "content-rt", "*", "pw-retarget-41").await;
+    let job = finished(&c, &start(&c, "pg", "full").await).await;
+    assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
+    assert_eq!(*first_got.lock().unwrap(), ["pw-retarget-41"], "the host it was configured with gets it");
+
+    let (s, _, t) = call(&c, "PUT", "/_connector/pg/_configuration", Some(&format!(r#"{{"values":{{"port":{second}}}}}"#))).await;
+    assert_eq!(s, 200, "{t}");
+    let (_, v, _) = call(&c, "GET", "/_connector/pg", None).await;
+    assert_eq!((at(&v, "status").as_str(), at(&v, "configuration.password.value").as_str()), (Some("needs_configuration"), Some("")), "{v:?}");
+    let job = finished(&c, &start(&c, "pg", "full").await).await;
+    assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
+    assert!(second_got.lock().unwrap().is_empty(), "the new host got a password: {:?}", second_got.lock().unwrap());
+
+    // Giving it again with the new target works.
+    let body = format!(r#"{{"values":{{"port":{second},"password":"pw-retarget-42"}}}}"#);
+    assert_eq!(call(&c, "PUT", "/_connector/pg/_configuration", Some(&body)).await.0, 200);
+    finished(&c, &start(&c, "pg", "full").await).await;
+    assert_eq!(*second_got.lock().unwrap(), ["pw-retarget-42"]);
+}
+
+/// A sealed value copied into a self-managed connector isn't shown, and once the connector is
+/// run by roll it's only text: the sync sends the ciphertext, never what it seals.
+#[tokio::test]
+async fn a_planted_sealed_value_opens_to_nothing() {
+    let (victim_port, _) = fake_postgres(false).await;
+    let (port, got) = fake_postgres(false).await;
+    let c = cluster(&[]).await;
+    pg_connector(&c, &format!("127.0.0.1:{victim_port}"), "victim", "content-victim", "*", "victim-pw-77").await;
+    let stolen = at(c.state().metadata.xpack.get("connector", "victim").unwrap(), "configuration.password.value").as_str().unwrap().to_string();
+    assert!(stolen.starts_with("::roll_sealed::") && !stolen.contains("victim-pw-77"));
+
+    let (s, _, t) = call(&c, "PUT", "/_connector/planted", Some(r#"{"index_name":"content-planted","service_type":"postgresql"}"#)).await;
+    assert_eq!(s, 201, "{t}");
+    let configuration = format!(
+        r#"{{"configuration":{{"host":{{"label":"Host","value":"127.0.0.1"}},"port":{{"label":"Port","value":{port}}},"username":{{"label":"Username","value":"roll"}},"database":{{"label":"Database","value":"shop"}},"ssl_enabled":{{"label":"SSL","value":false}},"password":{{"label":"Password","sensitive":true,"value":"{stolen}"}}}}}}"#
+    );
+    let (s, _, t) = call(&c, "PUT", "/_connector/planted/_configuration", Some(&configuration)).await;
+    assert_eq!(s, 200, "{t}");
+    let (_, v, _) = call(&c, "GET", "/_connector/planted", None).await;
+    assert_eq!(at(&v, "configuration.password.value").as_str(), Some("********"), "a sealed value is never shown: {v:?}");
+
+    assert_eq!(call(&c, "PUT", "/_connector/planted/_native", Some(r#"{"is_native":true}"#)).await.0, 200);
+    let job = finished(&c, &start(&c, "planted", "full").await).await;
+    assert_eq!(at(&job, "status").as_str(), Some("error"), "{job:?}");
+    assert_eq!(*got.lock().unwrap(), [stolen], "the planted value is sent as the text it is");
+}
+
+/// A server that accepts the connection and never answers doesn't hold the sync: cancel ends it
+/// at once.
+#[tokio::test]
+async fn cancel_stops_a_sync_waiting_on_a_silent_server() {
+    let (port, _) = fake_postgres(true).await;
+    let c = cluster(&[]).await;
+    pg_connector(&c, &format!("127.0.0.1:{port}"), "pg", "content-silent", "*", "pw-silent-1").await;
+    let id = start(&c, "pg", "full").await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while call(&c, "GET", &format!("/_connector/_sync_job/{id}"), None).await.1.get("status").and_then(Value::as_str) != Some("in_progress") {
+        assert!(std::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let canceled_at = std::time::Instant::now();
+    assert_eq!(call(&c, "PUT", &format!("/_connector/_sync_job/{id}/_cancel"), None).await.0, 200);
+    let job = finished(&c, &id).await;
+    assert_eq!(at(&job, "status").as_str(), Some("canceled"), "{job:?}");
+    assert!(canceled_at.elapsed() < Duration::from_secs(5), "took {:?}", canceled_at.elapsed());
 }

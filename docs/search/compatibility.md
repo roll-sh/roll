@@ -1175,7 +1175,10 @@ roll runs the syncs of Elastic-managed (`is_native: true`) `postgresql` and `s3`
 
 - Its `sensitive` configuration values (`password`, `aws_secret_access_key`) are sealed at rest
   and shown as `********` in `GET _connector`, its list and job snapshots; writing `********`
-  back keeps the stored value. Elasticsearch returns them in the clear.
+  back keeps the stored value. Elasticsearch returns them in the clear. Changing where a
+  credential goes (a Postgres `host`, `port`, `username`, `database` or TLS setting; an S3
+  `endpoint`, `region`, access key id or `buckets`) without giving it again clears it and sets
+  the connector to `needs_configuration`.
 - `postgresql` has incremental syncs (Elastic's has none) through roll's `incremental_column`;
   advanced sync rules (custom SQL) aren't supported yet and make a draft `invalid`.
 - `s3` takes roll's `endpoint` and `region` (any S3-compatible store), not `buckets: *`, and

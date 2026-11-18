@@ -991,13 +991,11 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
             match api {
                 // The service now runs on roll (or another service does): its schema.
                 Api::ConnectorUpdateServiceType | Api::ConnectorUpdateNative => sync::config::fill_schema(&mut m),
-                Api::ConnectorUpdateConfiguration => {
-                    sync::config::seal_written(&mut m, &before, sealer.as_deref());
-                    // The sync runs as whoever configured the connector last.
-                    remember_user(st, &id, &m, user, now_ms)?;
-                }
+                // The sync runs as whoever configured the connector last.
+                Api::ConnectorUpdateConfiguration => remember_user(st, &id, &m, user, now_ms)?,
                 _ => {}
             }
+            sync::config::protect(&mut m, &before, sealer.as_deref());
             store::put(st, CONNECTORS, &id, updated_doc(m), now_ms).map(|_| false)
         })
         .await?;
@@ -1145,6 +1143,9 @@ pub(crate) fn insert_job(st: &mut crate::meta::ClusterState, cid: &str, job_type
     let mut snap = Value::Obj(snap);
     if sync::config::runs(&c) {
         sync::config::redact_configuration(&mut snap);
+    } else {
+        // Only a sealed value, which means nothing to a client.
+        sync::config::redact(&mut snap);
     }
     let job = obj! {
         "id" => id, "connector" => snap, "created_at" => now.clone(), "deleted_document_count" => 0,

@@ -109,7 +109,9 @@ fn decode_entities(s: &str) -> String {
     while let Some(p) = rest.find('&') {
         out.push_str(&rest[..p]);
         rest = &rest[p..];
-        let end = rest[..rest.len().min(12)].find(';');
+        // The `;` within an entity's longest name, found by byte (`;` is ASCII, so the slice
+        // before it ends on a character boundary whatever follows the `&`).
+        let end = rest.as_bytes()[..rest.len().min(12)].iter().position(|&b| b == b';');
         let decoded = end.and_then(|e| {
             let name = &rest[1..e];
             let c = match name {
@@ -151,5 +153,14 @@ mod tests {
         assert_eq!(text(Kind::Json, br#"{"a":"one","b":[2,{"c":"three"}],"d":null}"#), "one\n2\nthree");
         assert_eq!(kind_of("docs/Read.Me.HTML"), Some(Kind::Markup));
         assert_eq!(kind_of("x.pdf"), None);
+    }
+
+    /// A `&` followed by multi-byte characters within an entity's length (accented or CJK
+    /// text) is text, not a panic.
+    #[test]
+    fn ampersands_before_multibyte_text() {
+        assert_eq!(text(Kind::Markup, "x &aaaaaaaaaaé y".as_bytes()), "x &aaaaaaaaaaé y");
+        assert_eq!(text(Kind::Markup, "<p>A&B 東京都の天気 &amp; 予報</p>".as_bytes()), "A&B 東京都の天気 & 予報");
+        assert_eq!(text(Kind::Markup, "&é".as_bytes()), "&é");
     }
 }

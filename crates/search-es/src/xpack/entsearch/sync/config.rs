@@ -141,48 +141,91 @@ fn sensitive(entry: &Value) -> bool {
     entry.get("sensitive").and_then(Value::as_bool) == Some(true)
 }
 
-/// Seals the sensitive values a configuration write left in the clear (a connector roll runs):
-/// [`REDACTED`] or the stored sealed value written back keeps what was stored.
-pub fn seal_written(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>) {
+/// What a connector's sensitive field is sealed as: bound to the connector and the field, so a
+/// sealed value moved into another connector's (or another field's) slot doesn't open. Not bound
+/// to the cluster: a branch and a snapshot restore carry the connector to a cluster with another
+/// uuid, and its syncs must keep working there.
+fn kind_of(connector: &str, field: &str) -> String {
+    format!("{SECRET_KIND}:{connector}:{field}")
+}
+
+/// The fields a credential is sent to, per service: changing one without giving the credential
+/// again clears it, so a stored password is never sent to a host its owner didn't pair it with.
+fn target_fields(service: &str) -> &'static [&'static str] {
+    match service {
+        "postgresql" => &["host", "port", "username", "database", "ssl_enabled", "ssl_ca"],
+        _ => &["endpoint", "region", "aws_access_key_id", "buckets"],
+    }
+}
+
+fn value_of<'a>(m: &'a Map, field: &str) -> Option<&'a Value> {
+    m.get("configuration")?.get(field)?.get("value")
+}
+
+/// Keeps a connector roll runs safe after any update (`before` is the stored connector, empty for
+/// a new one):
+/// - When roll starts running it (created native, or made native, or given a service roll runs),
+///   every non-empty sensitive value is sealed as given, even one that looks sealed: a value
+///   sealed elsewhere (another cluster, another connector) is only ever text here.
+/// - Otherwise a written sensitive value is sealed; [`REDACTED`] or the stored value written back
+///   keeps the stored one.
+/// - A change to where the credential goes ([`target_fields`]) without giving it again clears it
+///   and puts the connector back to `needs_configuration`, as Elastic's UI asks for the password
+///   again.
+pub fn protect(m: &mut Map, before: &Map, sealer: Option<&crate::seal::Sealer>) {
     if !runs(&Value::Obj(m.clone())) {
         return;
     }
+    let started = !runs(&Value::Obj(before.clone()));
+    let id = m.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+    let service = m.get("service_type").and_then(Value::as_str).unwrap_or_default().to_string();
+    // A target that was set and changed (filling one in for the first time moves nothing).
+    let set = |v: Option<&Value>| v.is_some_and(|v| !v.is_null() && v.as_str() != Some(""));
+    let retargeted = !started && target_fields(&service).iter().any(|f| set(value_of(before, f)) && value_of(m, f) != value_of(before, f));
     let old = before.get("configuration").and_then(Value::as_object).cloned().unwrap_or_default();
+    let mut cleared = false;
     let Some(Value::Obj(cfg)) = m.get_mut("configuration") else { return };
     for (k, entry) in cfg.iter_mut() {
         if !sensitive(entry) {
             continue;
         }
         let Value::Obj(e) = entry else { continue };
-        let stored = old.get(k).and_then(|o| o.get("value")).cloned();
-        let v = match e.get("value") {
-            Some(Value::Str(s)) => s.clone(),
-            _ => continue,
-        };
+        let Some(Value::Str(v)) = e.get("value").cloned() else { continue };
         if v.is_empty() {
             continue;
         }
-        let kept = (v == REDACTED || stored.as_ref().and_then(Value::as_str) == Some(v.as_str())).then_some(stored).flatten();
-        let next = match kept {
-            Some(s) => s,
-            // Writing the placeholder with nothing stored keeps nothing.
-            None if v == REDACTED => Value::from(""),
-            None => Value::from(crate::seal::seal_given_with(sealer, SECRET_KIND, &v)),
+        let stored = (!started).then(|| old.get(k).and_then(|o| o.get("value")).cloned()).flatten();
+        let unchanged = v == REDACTED || stored.as_ref().and_then(Value::as_str) == Some(v.as_str());
+        let next = if unchanged && retargeted {
+            cleared = true;
+            Value::from("")
+        } else if unchanged {
+            // The placeholder with nothing stored keeps nothing.
+            stored.unwrap_or_else(|| Value::from(""))
+        } else {
+            Value::from(crate::seal::seal_given_with(sealer, &kind_of(&id, k), &v))
         };
         e.insert("value".into(), next);
+    }
+    if cleared {
+        m.insert("status".into(), "needs_configuration".into());
     }
 }
 
 /// A connector (or a job's snapshot of one) as it is shown: the sensitive values of one roll
-/// runs replaced by [`REDACTED`].
+/// runs replaced by [`REDACTED`], and a sealed value of any connector too (one roll ran before it
+/// became self-managed: its ciphertext means nothing to a client).
 pub fn redact(c: &mut Value) {
-    if runs(c) {
-        redact_configuration(c);
-    }
+    let all = runs(c);
+    redact_where(c, |v| all || crate::seal::is_sealed(v));
 }
 
 /// Replaces every non-empty sensitive value of `c`'s configuration.
 pub fn redact_configuration(c: &mut Value) {
+    redact_where(c, |_| true);
+}
+
+fn redact_where(c: &mut Value, hide: impl Fn(&str) -> bool) {
     let Some(Value::Obj(cfg)) = (match c {
         Value::Obj(m) => m.get_mut("configuration"),
         _ => None,
@@ -190,11 +233,11 @@ pub fn redact_configuration(c: &mut Value) {
         return;
     };
     for entry in cfg.values_mut() {
-        if !sensitive(entry) {
-            continue;
-        }
-        if let Value::Obj(e) = entry
-            && e.get("value").and_then(Value::as_str).is_some_and(|s| !s.is_empty())
+        let Value::Obj(e) = entry else { continue };
+        let secret = e.get("sensitive").and_then(Value::as_bool) == Some(true);
+        if let Some(Value::Str(v)) = e.get("value")
+            && !v.is_empty()
+            && (crate::seal::is_sealed(v) || (secret && hide(v)))
         {
             e.insert("value".into(), REDACTED.into());
         }
@@ -210,13 +253,14 @@ pub struct Values {
 
 impl Values {
     pub fn open(cluster: &Cluster, connector: &Value) -> EsResult<Values> {
+        let id = connector.get("id").and_then(Value::as_str).unwrap_or_default();
         let mut values = Map::new();
         let mut secrets = Vec::new();
         for (k, e) in connector.get("configuration").and_then(Value::as_object).into_iter().flatten() {
             let v = e.get("value").cloned().unwrap_or(Value::Null);
             let v = match (&v, sensitive(e)) {
                 (Value::Str(s), true) if !s.is_empty() => {
-                    let plain = crate::seal::open(cluster, SECRET_KIND, s)?;
+                    let plain = crate::seal::open(cluster, &kind_of(id, k), s)?;
                     secrets.push(plain.clone());
                     Value::from(plain)
                 }
