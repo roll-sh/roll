@@ -790,3 +790,22 @@ fn a_static_sites_functions_are_named_not_dropped() {
     assert!(p.notes.iter().any(|n| n.starts_with("netlify/functions/ has 1 Netlify Functions")), "{:?}", p.notes);
     assert!(p.notes.iter().any(|n| n.starts_with("api/ has 1 Vercel functions")), "{:?}", p.notes);
 }
+
+#[test]
+fn a_dockerfiles_base_images_are_its_froms_not_its_stages() {
+    let df = "FROM node:22-slim AS base\nFROM base AS build\nRUN x\nFROM --platform=linux/amd64 python:3.12 AS py\nFROM scratch\nFROM gcr.io/distroless/static@sha256:abc\nFROM ${IMG}\nFROM base\n";
+    assert_eq!(crate::base_images(df), ["node:22-slim", "python:3.12"]);
+}
+
+
+#[test]
+fn a_static_sites_functions_are_a_service_of_their_own() {
+    let files = [("index.html", "<h1>hi</h1>"), ("netlify/functions/hello.mjs", "export default () => new Response('hi')"), ("api/ping.js", "module.exports = (req, res) => res.send('pong')")];
+    let site = plan(&tree(&files), &Overrides::default()).unwrap();
+    assert_eq!(site.functions, ["netlify/functions", "api"], "{:?}", site.notes);
+    let o = Overrides { builder: crate::Builder::Functions, ..Default::default() };
+    let p = plan(&tree(&files), &o).unwrap();
+    assert_eq!(p.provider, crate::Provider::Functions);
+    has(&p, &["FROM node:22-slim", "COPY <<'ROLL_FUNCTIONS' /roll/functions.mjs", "--experimental-strip-types"]);
+    assert!(plan(&tree(&[("index.html", "x")]), &o).is_err(), "no functions, nothing to build");
+}

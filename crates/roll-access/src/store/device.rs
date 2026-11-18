@@ -176,7 +176,7 @@ impl Store {
             }
             if let Some(grant_id) = grant_id {
                 c.execute("DELETE FROM oauth_devices WHERE hash = ?", [&h])?;
-                insert_oauth_secrets(c, &grant_id, client_id, &access, &refresh, now)?;
+                insert_oauth_secrets(c, &grant_id, client_id, &access, &refresh, None, now)?;
                 return Ok(Poll::Ready(grant_id));
             }
             c.execute("UPDATE oauth_devices SET polled_at = ? WHERE hash = ?", params![now, h])?;

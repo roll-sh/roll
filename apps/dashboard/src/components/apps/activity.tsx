@@ -35,6 +35,10 @@ export function describe(e: AppEvent): string {
       return `set the registry login${d.server ? ` for ${String(d.server)}` : ""}`;
     case "audit.registry.removed":
       return "removed the registry login";
+    case "audit.deleted":
+      return "deleted the service";
+    case "audit.restored":
+      return "restored the service";
     // What roll did or saw (its timeline).
     case "deploy.active":
       return `put a deployment live${where}`;
@@ -58,6 +62,8 @@ export function describe(e: AppEvent): string {
       const what = { "alert.memory": "memory", "alert.errors": "5xx answers", "alert.latency": "p95 latency", "alert.capacity": "requests over capacity", "alert.log": `lines matching ${String(d.pattern ?? "")}` }[e.kind];
       return `alerted: ${what} at ${String(d.value ?? d.count ?? "")}${unit} (the alert is at ${String(d.threshold ?? "")}${unit})${where}`;
     }
+    case "deploy.base_updated":
+      return `saw its base image ${String(d.image ?? "")} updated${where}`;
     case "rollout.waiting":
       return `held a rollout at ${String(d.share ?? "")}% for someone to decide${where}`;
     case "deploy.ready":
