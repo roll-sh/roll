@@ -436,13 +436,22 @@ pub enum AppsCmd {
         #[arg(long, conflicts_with = "service")]
         clear: bool,
     },
-    /// Delete a service: its environments, instances, deployments and images (asks first;
-    /// `--yes` doesn't).
+    /// Delete a service: it stops, and can be restored for 48 hours (`roll apps restore`); then
+    /// its environments, deployments and images are deleted for good. A deleted service's delete
+    /// deletes it for good now. Asks first; `--yes` doesn't.
     Delete {
         #[command(flatten)]
         target: Target,
         #[arg(long, short = 'y')]
         yes: bool,
+    },
+    /// Restore a deleted service as it was (within 48 hours of its delete); `--list`: the
+    /// deleted services, and when each goes for good.
+    Restore {
+        #[command(flatten)]
+        target: Target,
+        #[arg(long)]
+        list: bool,
     },
     /// Deployments, newest first; `--commits DEP`: what a repo deployment brings over the one
     /// live before it, newest first.
@@ -1099,6 +1108,18 @@ pub enum AppsCmd {
         #[arg(long, conflicts_with_all = ["error_page", "maintenance_page"])]
         roll_pages: bool,
     },
+    /// How this environment differs from another (Railway's environment sync): variables
+    /// missing, extra or with another value (never a value), and settings; `--sync` makes it the
+    /// other's (every variable that can be copied, every setting).
+    EnvDiff {
+        /// The environment to compare with.
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        sync: bool,
+        #[command(flatten)]
+        target: Target,
+    },
     /// Tear an environment down (asks first; `--yes` doesn't).
     EnvDelete {
         #[command(flatten)]
@@ -1173,6 +1194,24 @@ async fn service(api: &Api, t: &Target) -> anyhow::Result<Value> {
         [one] => Ok((*one).clone()),
         [] => bail!("no service named {key}"),
         _ => bail!("{} services are named {key}: pass --project", found.len()),
+    }
+}
+
+/// The deleted service a target names (by id or name, among the deleted ones).
+async fn deleted_service(api: &Api, t: &Target) -> anyhow::Result<Option<Value>> {
+    let Some(key) = t.service.clone().or_else(|| std::env::current_dir().ok().and_then(|d| find_link(&d)).map(|l| s(&l["service"]))) else {
+        bail!("which service? pass --service (`roll apps restore --list` lists the deleted ones)");
+    };
+    let path = match &t.project {
+        Some(p) => format!("/v1/apps/services?deleted=true&project={}", enc(&project_id(api, p).await?)),
+        None => "/v1/apps/services?deleted=true".into(),
+    };
+    let all = api.get(&path).await?;
+    let found: Vec<&Value> = all.as_array().into_iter().flatten().filter(|x| x["id"] == key.as_str() || x["name"] == key.as_str()).collect();
+    match found.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some((*one).clone())),
+        _ => bail!("{} deleted services are named {key}: pass its id (`roll apps restore --list`)", found.len()),
     }
 }
 
@@ -2011,8 +2050,8 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
             dbs.insert(("redis".to_string(), s(&d["name"])), s(&d["id"]));
         }
     }
-    // Buckets go by their name; streams and NoSQL databases by their id.
-    for (kind, path, id) in [("bucket", "/v1/storage/buckets", "name"), ("stream", "/v1/streams", "id"), ("nosql", "/v1/nosql/databases", "id")] {
+    // Buckets go by their name; streams, NoSQL databases and search clusters by their id.
+    for (kind, path, id) in [("bucket", "/v1/storage/buckets", "name"), ("stream", "/v1/streams", "id"), ("nosql", "/v1/nosql/databases", "id"), ("search", "/v1/search/clusters", "id")] {
         if wants(kind) {
             for d in api.get(path).await?.as_array().into_iter().flatten().filter(|d| placed.contains(&(kind.to_string(), s(&d[id])))) {
                 dbs.insert((kind.to_string(), s(&d["name"])), s(&d[id]));
@@ -2056,11 +2095,16 @@ async fn up_all(api: &Api, json_out: bool, dir: &Path, u: &Up) -> anyhow::Result
             "redis" => api.post("/v1/redis/databases", json!({ "name": n })).await?,
             "bucket" => api.post("/v1/storage/buckets", json!({ "name": n })).await?,
             "stream" => api.post("/v1/streams", json!({ "name": n })).await?,
+            "search" => api.post("/v1/search/clusters", json!({ "name": n })).await?,
             _ => api.post("/v1/nosql/databases", json!({ "name": n })).await?,
         };
         let r = if d.kind == "bucket" { s(&made["name"]) } else { s(&made["id"]) };
         let _ = api.call(reqwest::Method::PUT, &format!("/v1/workspace/projects/{}/resources/{}/{}", enc(&project), d.kind, enc(&r)), Some(json!({ "x": 48 + 320 * i as i64, "y": 340 }))).await;
-        eprintln!("made {} {n}", if d.kind == "bucket" || d.kind == "stream" { d.kind.clone() } else { format!("{} database", d.kind) });
+        eprintln!("made {} {n}", match d.kind.as_str() {
+            "bucket" | "stream" => d.kind.clone(),
+            "search" => "search cluster".into(),
+            k => format!("{k} database"),
+        });
         dbs.insert((d.kind.clone(), n.clone()), r);
     }
     let mut out = Vec::new();
@@ -2844,10 +2888,44 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
             return Ok(());
         }
         AppsCmd::Delete { target, yes } => {
-            let svc = service(api, &target).await?;
-            confirm(yes, &s(&svc["name"]), "every environment, instance, deployment and image of the service")?;
+            // A name that's only a deleted service's: delete it for good.
+            let (svc, gone) = match service(api, &target).await {
+                Ok(svc) => (svc, false),
+                Err(e) => match deleted_service(api, &target).await {
+                    Ok(Some(d)) => (d, true),
+                    _ => return Err(e),
+                },
+            };
+            let what = if gone {
+                "the deleted service's environments, deployments, images and volume, for good"
+            } else {
+                "every environment of the service (it stops; `roll apps restore` brings it back within 48 hours)"
+            };
+            confirm(yes, &s(&svc["name"]), what)?;
             api.call(reqwest::Method::DELETE, &format!("/v1/apps/services/{}", enc(&s(&svc["id"]))), None).await?;
-            json!({ "deleted": svc["id"] })
+            json!({ "deleted": svc["id"], "for_good": gone })
+        }
+        AppsCmd::Restore { target, list: true } => {
+            let path = match &target.project {
+                Some(p) => format!("/v1/apps/services?deleted=true&project={}", enc(&project_id(api, p).await?)),
+                None => "/v1/apps/services?deleted=true".into(),
+            };
+            let all = api.get(&path).await?;
+            if !json_out {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+                for d in all.as_array().into_iter().flatten() {
+                    let left = (d["purge_at"].as_i64().unwrap_or(0) - now).max(0) / 60_000;
+                    println!("{}  {}  gone for good in {}h{:02}m", s(&d["id"]), s(&d["name"]), left / 60, left % 60);
+                }
+                return Ok(());
+            }
+            all
+        }
+        AppsCmd::Restore { target, list: false } => {
+            let Some(d) = deleted_service(api, &target).await? else {
+                bail!("no deleted service named {} (`roll apps restore --list` lists them)", target.service.as_deref().unwrap_or("that"));
+            };
+            api.post(&format!("/v1/apps/services/{}/restore", enc(&s(&d["id"]))), json!({})).await?
         }
         AppsCmd::Deploys { target, commits: Some(dep) } => {
             let svc = service(api, &target).await?;
@@ -4027,6 +4105,43 @@ pub async fn run(api: &Api, json_out: bool, cmd: AppsCmd) -> anyhow::Result<()> 
                 return Ok(());
             }
             e
+        }
+        AppsCmd::EnvDiff { from, sync, target } => {
+            let svc = service(api, &target).await?;
+            let path = format!("{}/diff?from={}", env_path(&svc, &target.env), enc(&from));
+            let mut d = api.get(&path).await?;
+            if sync {
+                let v = &d["variables"];
+                let names: Vec<Value> = v["missing"].as_array().into_iter().flatten().filter(|m| m["sealed"] != true).map(|m| m["name"].clone()).chain(v["differ"].as_array().into_iter().flatten().cloned()).collect();
+                if !names.is_empty() {
+                    api.call(reqwest::Method::PATCH, &format!("{}/variables", env_path(&svc, &target.env)), Some(json!({ "copy_from": from, "copy": names }))).await?;
+                }
+                for x in d["settings"].as_array().into_iter().flatten() {
+                    api.call(reqwest::Method::PUT, &env_path(&svc, &target.env), Some(x["put"].clone())).await?;
+                }
+                d = api.get(&path).await?;
+            }
+            if !json_out {
+                let (v, to) = (&d["variables"], &target.env);
+                let names = |x: &Value| x.as_array().into_iter().flatten().filter_map(|n| n.as_str().map(str::to_string)).collect::<Vec<_>>();
+                for m in v["missing"].as_array().into_iter().flatten() {
+                    println!("variable {}  only in {from}{}", s(&m["name"]), if m["sealed"] == true { " (sealed: set it by hand)" } else { "" });
+                }
+                for n in names(&v["differ"]) {
+                    println!("variable {n}  another value in {to}");
+                }
+                for n in names(&v["extra"]) {
+                    println!("variable {n}  only in {to}");
+                }
+                for x in d["settings"].as_array().into_iter().flatten() {
+                    println!("{}  {} in {to}, {} in {from}", s(&x["field"]), x["to"], x["from"]);
+                }
+                if v["differ"].is_null() {
+                    eprintln!("values weren't compared: that needs reveal on both environments");
+                }
+                return Ok(());
+            }
+            d
         }
         AppsCmd::EnvDelete { target, yes } => {
             let svc = service(api, &target).await?;

@@ -176,8 +176,10 @@ export interface SsoConnection {
   verified: string[];
   /** The TXT record that proves a domain (`name` with the domain in place of `<domain>`). */
   dns: { name: string; value: string };
-  /** Its provider provisions people over SCIM (it has a token). */
+  /** Its provider provisions people over SCIM (it has a live token). */
   scim: boolean;
+  /** Its SCIM token was found leaked and revoked: where (until an admin makes a new one). */
+  scim_leaked: string | null;
 }
 
 export const accountsApi = {

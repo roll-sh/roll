@@ -1389,7 +1389,10 @@ async fn a_link_puts_its_variables_in_the_instances() {
     // Unlinking revokes them, and so does deleting the service.
     assert_eq!(call(&w.api, "DELETE", &format!("{links}/search/logs"), None).await.0, StatusCode::NO_CONTENT);
     call(&w.api, "PUT", &format!("{links}/search/logs"), Some(json!({}))).await;
-    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
+    // (Deleted, it's kept for a restore with its credentials; deleted again, they go.)
+    for _ in 0..2 {
+        assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
+    }
     assert_eq!(*MINTED.lock(), [format!("link {id} key0"), "unlink key0".into(), format!("link {id} key2"), "unlink key2".into()]);
     // Linked when it's made, the first deploy has them; a link that doesn't resolve makes nothing.
     let (st, made) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "worker", "source": {"kind": "image", "image": "nginx:1.27"}, "run": {"port": 80}, "links": [{"kind": "postgres", "ref": "main"}], "variables": {"FAKE_ECHO": "DATABASE_URL"} }))).await;
@@ -1657,6 +1660,53 @@ async fn a_project_over_its_spend_limit_is_paused_until_the_limit_is_raised() {
     let before = call(&w.api, "GET", &limits, None).await.1["month_usd"].as_f64().unwrap();
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{id}"), None).await.0, StatusCode::NO_CONTENT);
     assert!(call(&w.api, "GET", &limits, None).await.1["month_usd"].as_f64().unwrap() >= before);
+}
+
+/// Two environments compared (Railway's environment sync): variables missing, extra or with
+/// another value (never a value, nor a sealed one's), and each differing setting with the body
+/// that makes it the other's; copied through the usual routes, nothing differs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_environments_are_compared_and_synced() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "api", json!({"port": 80, "max_instances": 4})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let base = format!("/v1/apps/services/{id}/environments");
+    call(&w.api, "PUT", &format!("{base}/staging"), Some(json!({}))).await;
+    call(&w.api, "PATCH", &format!("{base}/production/variables"), Some(json!({"set": {"API_KEY": "k1", "MODE": "live", "TOKEN": "t"}, "seal": ["TOKEN"]}))).await;
+    call(&w.api, "PATCH", &format!("{base}/staging/variables"), Some(json!({"set": {"MODE": "test", "DEBUG": "1"}}))).await;
+    let prod = json!({"run": {"max_instances": 2}, "rate_limit": {"per_minute": 60, "burst": 2}, "headers": [{"set": {"x-frame-options": "DENY"}}], "allow_ips": [{"cidr": "203.0.113.0/24"}], "pages": {"error": "<h1>sorry</h1>"}, "vitals": true});
+    assert_eq!(call(&w.api, "PUT", &format!("{base}/production"), Some(prod)).await.0, StatusCode::OK);
+    let (st, d) = call(&w.api, "GET", &format!("{base}/staging/diff?from=production"), None).await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["variables"], json!({"missing": [{"name": "API_KEY", "sealed": false}, {"name": "TOKEN", "sealed": true}], "extra": ["DEBUG"], "differ": ["MODE"]}));
+    assert!(!d.to_string().contains("live") && !d.to_string().contains("k1"), "no variable's value: {d}");
+    // A token that reads both but reveals neither isn't told which values differ (setting one
+    // here and comparing would tell production's).
+    let scope: roll_auth::scope::Scope = serde_json::from_value(json!([{"product": "apps", "resources": "*", "actions": {"read": "allow", "write": "allow"}}])).unwrap();
+    let grant = roll_auth::Grant { id: "tok_t".into(), name: "ci".into(), kind: roll_auth::GrantKind::Token, scope: Arc::new(scope), user: None, ask_otherwise: false };
+    let mut req = Request::builder().uri(format!("{base}/staging/diff?from=production")).body(Body::empty()).unwrap();
+    req.extensions_mut().insert(grant);
+    req.extensions_mut().insert(roll_auth::Operator);
+    let resp = w.api.clone().oneshot(req).await.unwrap();
+    let narrowed: Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!((&narrowed["variables"]["differ"], &narrowed["variables"]["extra"]), (&Value::Null, &json!(["DEBUG"])), "{narrowed}");
+    let fields: Vec<&str> = d["settings"].as_array().unwrap().iter().filter_map(|x| x["field"].as_str()).collect();
+    assert_eq!(fields, ["run.max_instances", "vitals", "allow_ips", "rate_limit", "headers", "pages.error"], "{d}");
+    // Synced: each setting's body, and the variables that can be copied (a sealed one can't).
+    for x in d["settings"].as_array().unwrap() {
+        let (st, e) = call(&w.api, "PUT", &format!("{base}/staging"), Some(x["put"].clone())).await;
+        assert_eq!(st, StatusCode::OK, "{x} {e}");
+    }
+    let vars = format!("{base}/staging/variables");
+    let (st, e) = call(&w.api, "PATCH", &vars, Some(json!({"copy_from": "production", "copy": ["TOKEN"]}))).await;
+    assert!(st == StatusCode::BAD_REQUEST && e["error"].as_str().unwrap().contains("sealed"), "{st} {e}");
+    assert_eq!(call(&w.api, "PATCH", &vars, Some(json!({"copy_from": "production", "copy": ["API_KEY", "MODE"], "unset": ["DEBUG"]}))).await.0, StatusCode::OK);
+    let (_, vals) = call(&w.api, "GET", &format!("{vars}/values"), None).await;
+    assert_eq!((&vals["API_KEY"], &vals["MODE"], &vals["DEBUG"]), (&json!("k1"), &json!("live"), &Value::Null), "{vals}");
+    let (_, d) = call(&w.api, "GET", &format!("{base}/staging/diff?from=production"), None).await;
+    assert_eq!((&d["variables"], &d["settings"]), (&json!({"missing": [{"name": "TOKEN", "sealed": true}], "extra": [], "differ": []}), &json!([])), "{d}");
+    assert_eq!(call(&w.api, "GET", &format!("{base}/staging/diff?from=staging"), None).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(&w.api, "GET", &format!("{base}/staging/diff?from=nope"), None).await.0, StatusCode::NOT_FOUND);
 }
 
 /// A new environment starts with another's variables, and promoting deploys what another
@@ -2982,8 +3032,9 @@ async fn a_moved_base_image_is_said_and_built_again() {
     assert!(w.fake.built.lock().last().unwrap().0, "without the cache");
 }
 
-/// A closed environment's build gets none of its secret values (a build has the default network,
-/// so a fork's build step can't send them out), only the rest; its instances still get them all.
+/// A closed environment builds on its project's closed build network (out only through roll's
+/// proxy, to public hosts) and gets none of its secret values, only the rest; its instances still
+/// get them all. An open one builds on the default network.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_closed_environments_build_gets_no_secret_values() {
     let w = world().await;
@@ -2994,12 +3045,18 @@ async fn a_closed_environments_build_gets_no_secret_values() {
     let env = format!("/v1/apps/services/{id}/environments/production");
     let (st, b) = call(&w.api, "PATCH", &format!("{env}/variables"), Some(json!({"set": {"API_TOKEN": "tok_9f8e7d6c5b", "DATABASE_URL": "postgres://app:tok_9f8e7d6c5b@db/app", "GREETING": "hello-world"}, "seal": ["API_TOKEN"]}))).await;
     assert!(st.is_success(), "{b}");
+    // A deploy that asks to be built closed (roll previews' for a fork's head) is refused while
+    // the environment is open; a node without the field refuses it as unknown.
+    assert_eq!(call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"closed": true}))).await.0, StatusCode::CONFLICT);
     let (st, e) = call(&w.api, "PUT", &env, Some(json!({"egress": {"mode": "roll"}}))).await;
     assert_eq!((st, e["build_closed"].as_bool()), (StatusCode::OK, Some(true)), "{e}");
-    let (_, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({}))).await;
+    let (st, d) = call(&w.api, "POST", &format!("{env}/deploys"), Some(json!({"closed": true}))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{d}");
     settled(&w, &id, "production", d["id"].as_str().unwrap()).await;
     let vars = w.fake.build_vars.lock().last().cloned().unwrap();
     assert!(vars.contains(&"GREETING".to_string()) && !vars.contains(&"API_TOKEN".to_string()) && !vars.contains(&"DATABASE_URL".to_string()), "{vars:?}");
+    let nets = w.fake.build_networks.lock().clone();
+    assert_eq!((nets.first(), nets.last()), (Some(&None), Some(&Some(format!("roll-apps-build-{}", w.project.strip_prefix("prj_").unwrap_or(&w.project))))), "{nets:?}");
 }
 
 /// A build whose inputs were built before in the project is skipped (Railway's skipped builds):
@@ -3200,8 +3257,10 @@ async fn a_service_link_gives_another_services_urls() {
     // Private, it has no public URL to give.
     call(&w.api, "PATCH", &format!("/v1/apps/services/{aid}"), Some(json!({"run": {"public": false}}))).await;
     assert_eq!(call(&w.api, "GET", &links, None).await.1[0]["vars"], json!(["API_URL"]));
-    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{aid}"), None).await.0, StatusCode::NO_CONTENT);
-    assert_eq!(call(&w.api, "GET", &links, None).await.1, json!([]), "gone with the service");
+    for _ in 0..2 {
+        assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{aid}"), None).await.0, StatusCode::NO_CONTENT);
+    }
+    assert_eq!(call(&w.api, "GET", &links, None).await.1, json!([]), "gone with the service, for good");
 }
 
 /// A wildcard domain serves every name one label under it once its DNS points at roll, after
@@ -3465,8 +3524,17 @@ async fn a_web_service_scales_on_its_cpu() {
         panic!("never {n} running: {:?}", w.fake.instances(id));
     }
     until(&w, &id, 1).await;
-    w.fake.set_busy(&running(&w, &id)[0], 0.9);
+    let busy = running(&w, &id)[0].clone();
+    w.fake.set_busy(&busy, 0.9);
     until(&w, &id, 2).await;
+    // Each instance's own CPU and memory, its last hour by minute (Railway's per replica).
+    let (_, m) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/metrics?minutes=60"), None).await;
+    let each = m["by_instance"].as_array().unwrap_or_else(|| panic!("{m}"));
+    let of = |n: &str| each.iter().find(|x| x["instance"] == n).cloned().unwrap_or_else(|| panic!("{n} in {m}"));
+    let hot = of(&busy);
+    assert!(hot["cpu"].as_array().unwrap().last().unwrap().as_f64().unwrap() > 0.1, "{hot}");
+    assert_eq!(hot["memory_bytes"].as_array().unwrap().last().unwrap().as_u64(), Some(64 << 20), "{hot}");
+    assert_eq!(hot["minutes"].as_array().unwrap().len(), hot["cpu"].as_array().unwrap().len());
     for n in running(&w, &id) {
         w.fake.set_busy(&n, 0.05);
     }
@@ -4248,22 +4316,62 @@ async fn requests_and_cpu_through_the_proxy_are_billed() {
     assert!((today["usd"].as_f64().unwrap() - usd).abs() < 1e-12, "priced as configured: {today}");
 }
 
-/// Deleting a service leaves nothing running or kept for it: its volume goes (after a last
-/// backup), and the project's network once no other service uses it.
+/// A deleted service stops and is hidden, kept 48 hours for a restore (Railway's): its name,
+/// volume and hostname wait, and a restore brings it back as it was. Deleted again, or once the
+/// prune sweep finds it past 48 hours, it goes for good and leaves nothing running or kept: its
+/// volume goes (after a last backup), and the project's network once no other service uses it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_deleted_service_leaves_nothing_behind() {
+async fn a_deleted_service_is_restored_or_goes_for_good() {
     let w = world_full(|_| {}, true, |_| {}).await;
     let (db, _) = image_service(&w, "db", json!({"type": "worker", "volume": {"mount": "/data", "size_gb": 1}})).await;
     let (web, _) = image_service(&w, "web", json!({"port": 80, "min_instances": 1})).await;
+    let url = host(&web["environments"][0]["url"]);
     let (db, web) = (db["id"].as_str().unwrap().to_string(), web["id"].as_str().unwrap().to_string());
     let volume = apps_control::volume_name(&db, "production");
     w.fake.put_volume(&volume, b"rows");
     let net = apps_control::network_name(&w.project, "production");
     assert!(w.fake.networks().contains(&net), "{:?}", w.fake.networks());
-    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{db}"), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(visit(&w, &url, "/").await.0, StatusCode::OK);
+    // Deleted: stopped, answering nothing, listed only as deleted; its name is still its own.
+    assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{web}"), None).await.0, StatusCode::NO_CONTENT);
+    assert!(w.fake.instances(&web).iter().all(|(_, _, st)| *st != FakeState::Running), "{:?}", w.fake.instances(&web));
+    assert_eq!(visit(&w, &url, "/").await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&w.api, "GET", &format!("/v1/apps/services/{web}"), None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&w.api, "GET", &format!("/v1/apps/services/{web}/environments/production/deploys"), None).await.0, StatusCode::NOT_FOUND);
+    let (_, list) = call(&w.api, "GET", &format!("/v1/apps/services?project={}", w.project), None).await;
+    assert!(list.as_array().unwrap().iter().all(|s| s["id"] != web.as_str()), "{list}");
+    let (_, gone) = call(&w.api, "GET", &format!("/v1/apps/services?project={}&deleted=true", w.project), None).await;
+    assert_eq!((gone[0]["id"].as_str(), gone[0]["purge_at"].as_i64().unwrap() - gone[0]["deleted_at"].as_i64().unwrap()), (Some(web.as_str()), 48 * 3600 * 1000), "{gone}");
+    let (st, e) = call(&w.api, "POST", "/v1/apps/services", Some(json!({ "project": w.project, "name": "web", "source": {"kind": "image", "image": "nginx:1.27"} }))).await;
+    assert!(st == StatusCode::CONFLICT && e["error"].as_str().unwrap().contains("restore it"), "{st} {e}");
+    // Restored: as it was, answering at the same name.
+    let (st, back) = call(&w.api, "POST", &format!("/v1/apps/services/{web}/restore"), None).await;
+    assert_eq!((st, back["name"].as_str()), (StatusCode::OK, Some("web")), "{back}");
+    let mut answered = StatusCode::NOT_FOUND;
+    for _ in 0..200 {
+        answered = visit(&w, &url, "/").await.0;
+        if answered == StatusCode::OK {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(answered, StatusCode::OK);
+    let (_, trail) = call(&w.api, "GET", &format!("/v1/apps/services/{web}/activity"), None).await;
+    let kinds: Vec<&str> = trail.as_array().unwrap().iter().filter_map(|e| e["kind"].as_str()).collect();
+    assert_eq!(kinds[..2], ["audit.restored", "audit.deleted"], "{trail}");
+    // Deleted twice: gone for good, its volume (after a last backup) and instances with it.
+    for _ in 0..2 {
+        assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{db}"), None).await.0, StatusCode::NO_CONTENT);
+    }
     assert_eq!((w.fake.volume(&volume), w.fake.instances(&db).len()), (None, 0), "its volume and instances");
     assert!(w.fake.networks().contains(&net), "web still uses the network");
+    assert_eq!(call(&w.api, "POST", &format!("/v1/apps/services/{db}/restore"), None).await.0, StatusCode::NOT_FOUND);
+    // Past 48 hours, the prune sweep deletes it for good.
     assert_eq!(call(&w.api, "DELETE", &format!("/v1/apps/services/{web}"), None).await.0, StatusCode::NO_CONTENT);
+    w.apps.store.set_deleted(&web, None).unwrap();
+    w.apps.store.set_deleted(&web, Some(code_sql::now_ms() - 49 * 3600 * 1000)).unwrap();
+    w.apps.prune().await;
+    assert_eq!(call(&w.api, "GET", &format!("/v1/apps/services?project={}&deleted=true", w.project), None).await.1, json!([]));
     assert!(!w.fake.networks().contains(&net) && w.fake.instances(&web).is_empty(), "{:?}", w.fake.networks());
 }
 
@@ -4835,6 +4943,17 @@ async fn a_git_url_service_connects_to_rolls_github_app() {
     assert_eq!(*gh.deployments.lock(), vec![(1, "production".to_string(), true)]);
     let states: Vec<_> = gh.deployment_states.lock().iter().map(|(id, s, u)| (*id, s.clone(), u.is_some())).collect();
     assert_eq!(states, vec![(1, "in_progress".to_string(), false), (1, "success".to_string(), true)]);
+    // An environment someone else reports (roll previews' `pv-` ones, `report: false`): its
+    // deploys post no status and no Deployment; reporting again, they do.
+    let prod = format!("/v1/apps/services/{id}/environments/production");
+    let (st, e) = call(&w.api, "PUT", &prod, Some(json!({"report": false}))).await;
+    assert_eq!((st, &e["report"]), (StatusCode::OK, &json!(false)), "{e}");
+    let before = (gh.statuses.lock().len(), gh.deployments.lock().len());
+    let (_, q) = call(&w.api, "POST", &format!("{prod}/deploys"), Some(json!({}))).await;
+    settled(&w, &id, "production", q["id"].as_str().unwrap()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!((gh.statuses.lock().len(), gh.deployments.lock().len()), before, "nothing reported");
+    assert_eq!(call(&w.api, "PUT", &prod, Some(json!({"report": true}))).await.0, StatusCode::OK);
     // The App's own (verified) push reaches it with no hook set: run on its owner, it deploys the
     // pushed head; another installation's, or another repository's, doesn't.
     let second = git.commit_saying(&[("package.json", r#"{"name":"site","scripts":{"start":"node server.js"}}"#), ("server.js", "require('http') // v2")], "via the App");
