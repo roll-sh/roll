@@ -256,6 +256,20 @@ impl roll_previews::ports::Apps for RollApps {
         Ok(())
     }
 
+    /// The `pv-` environment's latest minute (roll apps' metrics): cores, and resident bytes.
+    /// None while nothing ran that minute (asleep).
+    async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
+        let (id, env) = self.find(preview, service).await.ok()??;
+        let m = self.api.get(&format!("{}/metrics?minutes=5", Self::env_path(&id, &env))).await.ok()?;
+        // The last finished minute: the one under way counts its CPU over the whole minute, so it
+        // reads low (and its memory is 0 in its first second). Memory is summed over instances, and
+        // shown against what one runs with: one instance's, on average.
+        let at = |k: &str| m[k].as_array().and_then(|a| a.get(a.len().saturating_sub(2)).cloned());
+        let (cpu, mem) = (at("cpu")?.as_f64()?, at("memory_bytes")?.as_u64()?);
+        let instances = at("instances").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+        (mem > 0).then_some((cpu, mem / instances))
+    }
+
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String> {
         let Ok(Some((id, env))) = self.find(preview, service).await else { return Vec::new() };
         let v = self.api.get(&format!("{}/logs?tail={lines}", Self::env_path(&id, &env))).await.unwrap_or(Value::Null);
@@ -552,6 +566,10 @@ impl roll_previews::ports::Apps for Services {
     /// The requests roll's runtime proxied (roll apps' instances are served by roll apps' own).
     fn requests(&self, preview: &str) -> Vec<roll_previews::RequestLine> {
         self.runtime.requests(preview)
+    }
+
+    async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.metrics(preview, service).await } else { self.runtime.metrics(preview, service).await }
     }
 
     async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {

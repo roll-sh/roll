@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// How long a preview's metrics are kept before they're read again (ms).
+const METRICS_FOR: i64 = 10_000;
+
 impl Engine {
     // ── what the API asks for ──
 
@@ -536,6 +539,30 @@ impl Engine {
             l.path = p;
         }
         Ok(lines)
+    }
+
+    /// What its services use right now (on its holder, which runs them): the running ones. Read
+    /// at most once per [`METRICS_FOR`] (each read is a `docker stats` or a roll apps call per
+    /// service), whoever asks.
+    pub async fn metrics(&self, id: &str) -> Result<Vec<crate::ServiceMetrics>> {
+        self.store.row(id)?;
+        let now = self.store.now_ms()?;
+        if let Some((at, m)) = self.metrics_read.lock().get(id)
+            && now - at < METRICS_FOR
+        {
+            return Ok(m.clone());
+        }
+        let services = self.store.services(id)?;
+        let got = futures::future::join_all(services.iter().map(|s| self.apps.metrics(id, &s.name))).await;
+        let m: Vec<crate::ServiceMetrics> = services
+            .into_iter()
+            .zip(got)
+            .filter_map(|(s, m)| m.map(|(cpu, memory_bytes)| crate::ServiceMetrics { service: s.name, cpu, memory_bytes, memory_mb: s.memory_mb }))
+            .collect();
+        let mut read = self.metrics_read.lock();
+        read.retain(|_, (at, _)| now - *at < METRICS_FOR);
+        read.insert(id.to_string(), (now, m.clone()));
+        Ok(m)
     }
 
     pub async fn logs(&self, id: &str, service: Option<&str>, lines: usize) -> Result<(String, Vec<String>)> {

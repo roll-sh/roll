@@ -481,6 +481,8 @@ export const previewsApi = {
   reset: (id: string, resources?: string[]) => call<Preview>("POST", `${one(id)}/reset`, resources?.length ? { resources } : {}),
   /** Its latest requests through roll, newest first (roll's runtime; a roll apps instance's are roll apps'). */
   requests: (id: string) => call<{ requests: RequestLine[] }>("GET", `${one(id)}/requests`),
+  /** What its running services use right now (cores of CPU, resident memory, the memory each runs with). */
+  metrics: (id: string) => call<{ services: ServiceMetrics[] }>("GET", `${one(id)}/metrics`),
   logs: (id: string, opts: { service?: string; lines?: number } = {}) =>
     call<{ service: string; lines: string[] }>("GET", `${one(id)}/logs${query(opts)}`),
   /** Newest first. */
@@ -515,6 +517,9 @@ export function parseSse(rest: string, text: string): { events: { event: string;
   });
   return { events, rest: left };
 }
+
+/** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */
+export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };
 
 /** A request to a preview's service through roll: when (ms), the method, the path (never the query), the status, ms until the answer's headers. */
 export type RequestLine = { at: number; service: string; method: string; path: string; status: number; ms: number };

@@ -326,6 +326,21 @@ async fn a_visual_change_waits_for_someone_to_accept_it_at_each_head() {
     assert!(b.api_unread && b.api.is_none(), "{b:?}");
 }
 
+/// What a preview's services use right now (Render's metrics): the running ones, with the memory
+/// each runs with; a service that isn't running has none.
+#[tokio::test]
+async fn a_previews_metrics_are_what_its_running_services_use() {
+    let e = env(json!({ "enabled": true }));
+    e.code.open(change("chg_u", 4));
+    e.engine.pass().await.unwrap();
+    let p = e.engine.store.row_by_change("chg_u").unwrap().unwrap();
+    let web = e.engine.store.services(&p.id).unwrap().into_iter().next().unwrap();
+    e.apps.metrics.lock().insert(web.name.clone(), (0.25, 96 << 20));
+    let m = e.engine.metrics(&p.id).await.unwrap();
+    assert_eq!(m, [roll_previews::ServiceMetrics { service: web.name.clone(), cpu: 0.25, memory_bytes: 96 << 20, memory_mb: web.memory_mb }], "only the running one, against what it runs with");
+    assert!(matches!(e.engine.metrics("pv_nope").await, Err(roll_previews::Error::NotFound(_))));
+}
+
 /// A preview's output is read by anyone who can read the preview, and its code (a fork's too) can
 /// print what it was given: its services' logs, its jobs' output and what its page said in a
 /// screenshot run (the pull request's comment) show a secret's value as `***` (as checks'

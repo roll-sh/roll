@@ -222,6 +222,8 @@ pub struct FakeApps {
     /// The variables each service was last deployed with.
     pub vars: Mutex<HashMap<(String, String), Vars>>,
     pub removed: Mutex<Vec<(String, String)>>,
+    /// What each service uses, by name (unset: not running).
+    pub metrics: Mutex<HashMap<String, (f64, u64)>>,
     /// What every service's log holds.
     pub log: Mutex<Vec<String>>,
     /// What each seed or release job was run able to reach.
@@ -310,6 +312,9 @@ impl Apps for FakeApps {
         self.deployed.lock().remove(&(p.to_string(), s.to_string()));
         self.removed.lock().push((p.to_string(), s.to_string()));
         Ok(())
+    }
+    async fn metrics(&self, _: &str, service: &str) -> Option<(f64, u64)> {
+        self.metrics.lock().get(service).copied()
     }
     async fn logs(&self, _: &str, _: &str, _: usize) -> Vec<String> {
         self.log.lock().clone()
