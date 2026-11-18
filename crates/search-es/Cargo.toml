@@ -32,7 +32,6 @@ indexmap.workspace = true
 jsonwebtoken.workspace = true
 itoa.workspace = true
 # The `gcs` snapshot repository's service account tokens (RS256 JWTs).
-jsonwebtoken.workspace = true
 libc.workspace = true
 memchr.workspace = true
 parking_lot.workspace = true
