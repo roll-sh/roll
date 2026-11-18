@@ -3023,12 +3023,13 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
    and Go's `Values` printed every value and their `Client` the token (#213 fixes both).
    Transit is now in the Java (#105, 5570f5b11) and .NET (#110, 7c91476c7) clients too, its errors
    and printing checked to hold no plaintext; next, TOTP for Java, .NET and Ruby once #194 is on main.
-0b. **The polling path at scale** (building: `feature/roll-secrets-poll-path`): measured on main at
-   9,900 keys, a 304 costs ~140–165 ms on Postgres and `digest` ~138 ms, so 1,000 pods polling every
-   30 s spend ~4–5 cores saying "nothing changed". The digest's folder read and reference walk are
-   the cost; two variants (one read instead of two, then only the columns the digest needs) are
-   measured against main, and a digest cache keyed on the database's counters comes next if
-   tens of milliseconds remain.
+0b. **The polling path at scale** (#248): a 304 or an unchanged `digest` at 9,900 keys now takes
+   0.1 ms on SQLite and 3 ms on Postgres (was 99 and 169 ms), so 1,000 pods polling every 30 s cost
+   ~0.1 core, not ~5.6. A digest reads only the columns it hashes and each folder once, and each node
+   keeps it while one read of the database's state (the project's change number, environments,
+   imports, required keys, shared folders' projects) says the same, every permission it asked
+   answers the same, and live links' generations and fingerprints hold. Next: the first digest after
+   a write (~70–100 ms per polling identity) if a fleet's numbers call for it.
 1. **Land the queue**, one at a time when the merge lock is free (the order is in "Landing"):
    four threads share it, so each gate runs before the lock is taken and only main's newest change
    is merged under it.
