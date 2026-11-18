@@ -849,6 +849,18 @@ export interface Metrics {
   egress_bytes: number[];
   /** Requests a minute that found every instance busy at `max_instances` (saturation). */
   over_capacity: number[];
+  /** Each instance's own last hour by minute (those it has now), whatever the range. */
+  by_instance?: InstanceSeries[];
+}
+
+/** One instance's last hour (Railway's per replica): cores in use on average each minute, and
+ *  the minute's peak memory. */
+export interface InstanceSeries {
+  instance: string;
+  deployment: string;
+  minutes: number[];
+  cpu: number[];
+  memory_bytes: number[];
 }
 
 export interface Usage {

@@ -590,6 +590,10 @@ type Metrics = {
   cold_start_ms: number[];   // average of the minute's cold starts (0 when none)
   egress_bytes: number[];    // bytes answered (what egress is billed by); format=prometheus: roll_apps_egress_bytes_per_minute
   over_capacity: number[];   // requests that found every instance busy at max_instances (saturation); roll_apps_over_capacity_per_minute
+  by_instance: {             // each instance it has now, its own last hour whatever `minutes` asks (on its owner, in memory)
+    instance: string; deployment: string;
+    minutes: number[]; cpu: number[] /* cores, average over the minute */; memory_bytes: number[] /* the minute's peak */;
+  }[];
 };
 
 type Usage = {

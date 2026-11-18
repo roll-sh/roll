@@ -3175,6 +3175,10 @@ impl Apps {
             out.entry("over_capacity").or_default().push(r.over_capacity.into());
         }
         out.extend(series.into_iter().map(|(k, v)| (k, Value::Array(v))));
+        // Each instance's own last hour (on its owner, from the reaper's samples).
+        let live = self.lives.lock().get(&env_key(service, env)).cloned();
+        let by_instance = live.map(|l| l.by_instance()).unwrap_or_default();
+        out.insert("by_instance", serde_json::to_value(by_instance).expect("JSON"));
         Ok(serde_json::to_value(out).expect("JSON"))
     }
 
