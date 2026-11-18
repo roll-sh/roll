@@ -78,6 +78,9 @@ pub const RULES: &[Rule] = &[
     Rule { route: "/v1/secrets", access: Access::UserOrCredential("a roll token (rlt_…), decided by roll-access") },
     // The deployment key's state is about the whole server: never a person's session.
     Rule { route: "/v1/secrets/health", access: Access::Credential("a roll token (rlt_…); the operator's answer") },
+    // A gateway's link (docs/secrets.md, "Gateways"): only its own token or a workload identity's
+    // login opens it, never a person's session (a WebSocket upgrade is a GET with no CSRF check).
+    Rule { route: "/v1/secrets/gateways/{id}/connect", access: Access::Credential("a gateway's own roll token (rlt_…) or a workload identity's login; the operator's token is refused (403)") },
     // A one-time share's link: the value is encrypted with a key only the link holds, and opens
     // a few times at most (docs/secrets.md, "Sharing a value once").
     Rule { route: "/v1/secrets/shares", access: Access::Public("a one-time share's link: ciphertext only, the key stays in the link") },

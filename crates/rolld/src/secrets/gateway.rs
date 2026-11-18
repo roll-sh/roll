@@ -532,8 +532,10 @@ async fn accept(hub: Arc<Gateways>, id: String, req: Request, guard: Guard) -> R
     // identity's login. Never a person's session (a WebSocket upgrade is a GET, with no CSRF check,
     // and a session would be checked once and then outlive a sign-out) nor the operator's token
     // (make the gateway its token instead). A grant is looked up again on every stream.
+    // A session or the operator's token is a credential this link refuses (403); no credential is a 401.
     if grant.is_none() {
-        return refuse(StatusCode::UNAUTHORIZED, "a gateway connects with its own token or a workload identity's login, never a session or the operator's token");
+        let status = if operator || user.is_some() { StatusCode::FORBIDDEN } else { StatusCode::UNAUTHORIZED };
+        return refuse(status, "a gateway connects with its own token or a workload identity's login, never a session or the operator's token");
     }
     let (s, i, u, g) = (secrets.clone(), id.clone(), user.clone(), grant.clone());
     match tokio::task::spawn_blocking(move || s.gateway_link(&i, operator, u.as_ref(), g.as_ref())).await {
