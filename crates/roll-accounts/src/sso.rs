@@ -603,7 +603,7 @@ impl Accounts {
         let now = self.db.now_ms()?;
         let linked_elsewhere = || Error::BadRequest("that SSO identity belongs to another roll account".into(), Some("linked_elsewhere"));
         enum Next {
-            SignIn(String),
+            SignIn(String, Option<&'static str>),
             Linked,
             Create { provision: bool },
         }
@@ -638,7 +638,7 @@ impl Accounts {
                 if !theirs.as_deref().is_some_and(in_domain) {
                     return Err(Error::BadRequest("that account's email isn't in this SSO connection's domains".into(), Some("domain")));
                 }
-                return Ok(Next::SignIn(user));
+                return Ok(Next::SignIn(user, None));
             }
             let Some((user, admin)) = c.query_row("SELECT id, admin FROM users WHERE email = ?", [email], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))).optional()? else {
                 return Ok(Next::Create { provision });
@@ -652,21 +652,21 @@ impl Accounts {
                 return Err(linked_elsewhere());
             }
             c.execute("INSERT INTO identities (provider, subject, user_id, email, login, created_at) VALUES (?, ?, ?, ?, ?, ?)", params![provider, subject, user, email, email, now])?;
-            Ok(Next::SignIn(user))
+            Ok(Next::SignIn(user, Some("linked")))
         })?;
         match next {
-            Next::SignIn(user) => {
+            Next::SignIn(user, new) => {
                 tracing::info!(user = %user, connection = %id, "accounts: SSO sign-in");
-                Ok(Finished::SignIn { user, return_to: st.return_to })
+                Ok(Finished::SignIn { user, return_to: st.return_to, new })
             }
             Next::Linked => Ok(Finished::Linked { return_to: st.return_to }),
             Next::Create { provision } => {
-                let user = match &st.invite_id {
-                    Some(i) => self.create_user(NewUser { invite_id: i, email, hint: None, name, identity: Some((&provider, subject, email)) })?,
-                    None if provision => self.provision_user(email, name, Some((&provider, subject)), &provider)?,
+                let (user, new) = match &st.invite_id {
+                    Some(i) => (self.create_user(NewUser { invite_id: i, email, hint: None, name, identity: Some((&provider, subject, email)) })?, "invite"),
+                    None if provision => (self.provision_user(email, name, Some((&provider, subject)), &provider)?, "provisioned"),
                     None => return Err(Error::BadRequest("no account has this email, and there was no invite".into(), Some("not_invited"))),
                 };
-                Ok(Finished::SignIn { user, return_to: st.return_to })
+                Ok(Finished::SignIn { user, return_to: st.return_to, new: Some(new) })
             }
         }
     }

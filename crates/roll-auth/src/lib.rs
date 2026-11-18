@@ -181,7 +181,8 @@ impl Approved {
 
 /// In an allowed grant's request: the client's address as the gate saw it. Requests a product
 /// makes on the caller's behalf (roll code's agents relay) carry it on, so an IP allowlist holds
-/// for them too. Set only by the gate: extensions never come from the wire.
+/// for them too. Set only by the gate, and by roll-accounts' audit layer on its own routes (the
+/// same reading, through rolld's hook, for its events): extensions never come from the wire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClientIp(pub std::net::IpAddr);
 
