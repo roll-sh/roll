@@ -484,6 +484,11 @@ pub trait Apps: Send + Sync {
     fn requests(&self, _preview: &str) -> Vec<crate::RequestLine> {
         Vec::new()
     }
+    /// What the service uses right now, `(cores, resident bytes)`: `None` when it isn't running
+    /// (or the backend can't tell).
+    async fn metrics(&self, _preview: &str, _service: &str) -> Option<(f64, u64)> {
+        None
+    }
     /// The service's output as it comes, after its last `lines`: `None` where it can't be
     /// followed (the engine reads `logs` again every few seconds instead).
     async fn follow(&self, _preview: &str, _service: &str, _lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {

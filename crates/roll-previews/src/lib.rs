@@ -508,6 +508,38 @@ impl PageA11y {
     }
 }
 
+/// What a preview's service uses right now (Render's and Railway's metrics): cores of CPU and
+/// resident memory, against the memory it runs with. Only a running service has any.
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
+pub struct ServiceMetrics {
+    pub service: String,
+    pub cpu: f64,
+    pub memory_bytes: u64,
+    pub memory_mb: i64,
+}
+
+/// `docker stats --no-stream --format '{{.CPUPerc}}|{{.MemUsage}}'` (`1.23%|84.2MiB / 256MiB`):
+/// cores and resident bytes.
+pub fn parse_docker_stats(line: &str) -> Option<(f64, u64)> {
+    let (cpu, mem) = line.trim().split_once('|')?;
+    let cpu: f64 = cpu.trim().trim_end_matches('%').parse().ok()?;
+    let used = mem.split('/').next()?.trim();
+    let split = used.find(|c: char| c.is_ascii_alphabetic())?;
+    let (n, unit) = used.split_at(split);
+    let n: f64 = n.trim().parse().ok()?;
+    let mult = match unit.trim() {
+        "B" => 1.0,
+        "kB" | "KB" => 1e3,
+        "KiB" => 1024.0,
+        "MB" => 1e6,
+        "MiB" => 1024.0 * 1024.0,
+        "GB" => 1e9,
+        "GiB" => 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some((cpu / 100.0, (n * mult) as u64))
+}
+
 /// A request to a preview's service through roll (Vercel's request log): when, which service,
 /// the method and path (never the query: it can carry a token), the status, and how long until
 /// the answer's headers.
@@ -1025,6 +1057,14 @@ pub fn label_part(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn docker_stats_read_as_cores_and_bytes() {
+        assert_eq!(parse_docker_stats("1.50%|84MiB / 256MiB"), Some((0.015, 84 * 1024 * 1024)));
+        assert_eq!(parse_docker_stats("212.00%|1.5GiB / 4GiB\n"), Some((2.12, (1.5 * 1024.0 * 1024.0 * 1024.0) as u64)));
+        assert_eq!(parse_docker_stats("0.00%|0B / 0B"), Some((0.0, 0)));
+        assert_eq!(parse_docker_stats("--|-- / --"), None, "a container that just stopped");
+    }
 
     /// Production data reaches a preview only as it's masked, or as it is, and that's said.
     #[test]

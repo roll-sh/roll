@@ -538,6 +538,17 @@ impl Engine {
         Ok(lines)
     }
 
+    /// What its services use right now (on its holder, which runs them): the running ones.
+    pub async fn metrics(&self, id: &str) -> Result<Vec<crate::ServiceMetrics>> {
+        let services = self.store.services(id)?;
+        let got = futures::future::join_all(services.iter().map(|s| self.apps.metrics(id, &s.name))).await;
+        Ok(services
+            .into_iter()
+            .zip(got)
+            .filter_map(|(s, m)| m.map(|(cpu, memory_bytes)| crate::ServiceMetrics { service: s.name, cpu, memory_bytes, memory_mb: s.memory_mb }))
+            .collect())
+    }
+
     pub async fn logs(&self, id: &str, service: Option<&str>, lines: usize) -> Result<(String, Vec<String>)> {
         let services = self.store.services(id)?;
         let svc = match service {

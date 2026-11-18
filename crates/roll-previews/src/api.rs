@@ -46,6 +46,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
                 .route("/v1/previews/{id}/wake", post(wake))
                 .route("/v1/previews/{id}/logs", get(logs))
                 .route("/v1/previews/{id}/requests", get(requests))
+                .route("/v1/previews/{id}/metrics", get(metrics))
                 .route_layer(axum::middleware::from_fn_with_state(engine.clone(), on_leader))
                 .with_state(engine.clone()),
         )
@@ -533,6 +534,11 @@ struct LogsQuery {
 
 /// A service's last lines; with `follow`, server-sent events: `event: service` (its name), then
 /// one event per line as it comes, with keep-alives.
+async fn metrics(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
+    check_id(&id)?;
+    Ok(Json(json!({ "services": e.metrics(&id).await? })))
+}
+
 async fn requests(AxState(e): S, Path(id): Path<String>) -> crate::Result<Json<Value>> {
     check_id(&id)?;
     Ok(Json(json!({ "requests": e.requests(&id).await? })))

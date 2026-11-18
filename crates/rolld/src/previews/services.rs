@@ -256,6 +256,16 @@ impl roll_previews::ports::Apps for RollApps {
         Ok(())
     }
 
+    /// The `pv-` environment's latest minute (roll apps' metrics): cores, and resident bytes.
+    /// None while nothing ran that minute (asleep).
+    async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
+        let (id, env) = self.find(preview, service).await.ok()??;
+        let m = self.api.get(&format!("{}/metrics?minutes=5", Self::env_path(&id, &env))).await.ok()?;
+        let last = |k: &str| m[k].as_array().and_then(|a| a.iter().rev().find(|v| !v.is_null()).cloned());
+        let (cpu, mem) = (last("cpu")?.as_f64()?, last("memory_bytes")?.as_u64()?);
+        (mem > 0).then_some((cpu, mem))
+    }
+
     async fn logs(&self, preview: &str, service: &str, lines: usize) -> Vec<String> {
         let Ok(Some((id, env))) = self.find(preview, service).await else { return Vec::new() };
         let v = self.api.get(&format!("{}/logs?tail={lines}", Self::env_path(&id, &env))).await.unwrap_or(Value::Null);
@@ -511,6 +521,10 @@ impl roll_previews::ports::Apps for Services {
     /// The requests roll's runtime proxied (roll apps' instances are served by roll apps' own).
     fn requests(&self, preview: &str) -> Vec<roll_previews::RequestLine> {
         self.runtime.requests(preview)
+    }
+
+    async fn metrics(&self, preview: &str, service: &str) -> Option<(f64, u64)> {
+        if matches!(self.apps.find(preview, service).await, Ok(Some(_))) { self.apps.metrics(preview, service).await } else { self.runtime.metrics(preview, service).await }
     }
 
     async fn follow(&self, preview: &str, service: &str, lines: usize) -> Option<tokio::sync::mpsc::Receiver<String>> {
