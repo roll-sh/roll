@@ -19,6 +19,8 @@ v = c.resolve_sealed("production", "app:web", key)
 
 c.watch("production", lambda v: reload(v.values))   # until `stop` (a threading.Event) is set
 
+cards = c.transit("cards")                       # an encryption key that stays in roll
+ct = cards.encrypt(card_number, "order:42")
 # Read per request? Keep answers 30 s, then revalidate (a 304 while unchanged).
 c = roll_secrets.Client(api, token, cache_ttl=30)
 ```

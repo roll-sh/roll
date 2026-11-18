@@ -1,9 +1,25 @@
 import { Bot } from "lucide-react";
 import { useEffect, useState } from "react";
-import { accessApi, catalogFor, EXPIRIES, KEEP_OLD, presetRules, publicJwk, statusOf, type Catalog, type MachineClient, type MadeMachineClient, type Rule } from "@/lib/access-api";
+import {
+  accessApi,
+  catalogFor,
+  EXPIRIES,
+  githubIdentity,
+  githubStep,
+  KEEP_OLD,
+  presetRules,
+  publicJwk,
+  statusOf,
+  trustedLabel,
+  type Catalog,
+  type MachineClient,
+  type MadeMachineClient,
+  type Rule,
+} from "@/lib/access-api";
 import { btn, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 import { Builder } from "./builder";
 import { GrantRow } from "./overview";
+import { relative } from "./shell";
 
 /**
  * Machine clients (docs/permissions.md, "Machine clients"): automation with no person (CI, a
@@ -35,15 +51,16 @@ export function MachineClients({ clients, refresh }: { clients: MachineClient[];
       }
     >
       <p className="border-b border-line px-5 py-2.5 text-[12px] text-muted">
-        Automation with no person (CI, a scheduled agent) signs in with OAuth client credentials: it trades a JWT signed with its key,
-        or a secret, for an hour&apos;s token that can do only what its rules allow. Revoking one ends its tokens at once.
+        Automation with no person (CI, a scheduled agent) signs in with OAuth client credentials: it trades CI&apos;s own OIDC token
+        (GitHub Actions: nothing to store), a JWT signed with its key, or a secret, for an hour&apos;s token that can do only what its
+        rules allow. Revoking one ends its tokens at once.
       </p>
       {made && <Made made={made} />}
       {making && <NewClient onMade={done} onCancel={() => setMaking(false)} />}
       {live.length === 0 && !making && !made && (
         <div className="flex items-center gap-3 px-5 py-4 text-[12px] text-subtle">
           <Bot className="size-4" strokeWidth={1.5} />
-          None yet. A key is better than a secret: roll keeps nothing secret for it.
+          None yet. CI&apos;s own identity or a key is better than a secret: roll keeps nothing secret for either.
         </div>
       )}
       <ul className="divide-y divide-line">
@@ -51,10 +68,11 @@ export function MachineClients({ clients, refresh }: { clients: MachineClient[];
           <li key={c.client_id}>
             <div className="flex items-center gap-3 px-5 pt-3 text-[12px]">
               <span className="font-mono text-subtle">{c.client_id}</span>
-              <RotateClient client={c} refresh={refresh} />
+              <span className="text-subtle">{c.last_sign_in ? `signed in ${relative(c.last_sign_in)}` : "never signed in"}</span>
+              {c.trusts ? <span className="text-muted">{trustedLabel(c.trusts)}</span> : <RotateClient client={c} refresh={refresh} />}
             </div>
             <ul>
-              <GrantRow g={c.grant} refresh={refresh} kindLabel={c.signs_with_key ? "signs with a key" : "signs with a secret"} />
+              <GrantRow g={c.grant} refresh={refresh} kindLabel={c.trusts ? "trusts CI's identity" : c.signs_with_key ? "signs with a key" : "signs with a secret"} />
             </ul>
           </li>
         ))}
@@ -70,15 +88,25 @@ export function MachineClients({ clients, refresh }: { clients: MachineClient[];
 function RotateClient({ client, refresh }: { client: MachineClient; refresh: () => Promise<void> }) {
   const [open, setOpen] = useState(false);
   const [keep, setKeep] = useState(0);
+  // What it rotates to: a new secret, a key, or CI's own identity (the checkup's fix).
+  const [to, setTo] = useState<"github" | "key" | "secret">("github");
   const [key, setKey] = useState("");
+  const [repo, setRepo] = useState("");
+  const [ref, setRef] = useState("refs/heads/main");
   const [secret, setSecret] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { copied, copy } = useCopy();
-  const parsed = key.trim() ? publicJwk(key) : null;
+  const parsed = to === "key" && key.trim() ? publicJwk(key) : null;
+  const github = to === "github" ? githubIdentity(repo, ref) : null;
+  const problem = (parsed && "problem" in parsed && parsed.problem) || (github && "problem" in github && github.problem) || (to === "key" && !key.trim() ? "Paste the new public key" : null);
   const rotate = async () => {
     setError(null);
     try {
-      const r = await accessApi.rotateMachineClient(client.client_id, { public_jwk: parsed && "jwk" in parsed ? parsed.jwk : null, keep_old_for_s: KEEP_OLD[keep].s });
+      const r = await accessApi.rotateMachineClient(client.client_id, {
+        public_jwk: parsed && "jwk" in parsed ? parsed.jwk : null,
+        oidc: github && "identity" in github ? github.identity : null,
+        keep_old_for_s: KEEP_OLD[keep].s,
+      });
       setSecret(r.client_secret ?? null);
       setOpen(false);
       setKey("");
@@ -103,13 +131,24 @@ function RotateClient({ client, refresh }: { client: MachineClient; refresh: () 
     );
   return (
     <span className="rise flex min-w-0 flex-1 flex-wrap items-center gap-2">
-      {client.signs_with_key && (
+      <select value={to} onChange={(e) => setTo(e.target.value as typeof to)} aria-label="Rotate to" className={`${input} text-[12px]`}>
+        <option value="github">To GitHub Actions</option>
+        <option value="key">To a new key</option>
+        <option value="secret">To a new secret</option>
+      </select>
+      {to === "github" && (
+        <>
+          <input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="owner/repo" spellCheck={false} className={`${input} w-40 font-mono text-[12px]`} />
+          <input value={ref} onChange={(e) => setRef(e.target.value)} placeholder="any ref" spellCheck={false} className={`${input} w-40 font-mono text-[12px]`} />
+        </>
+      )}
+      {to === "key" && (
         <textarea
           value={key}
           onChange={(e) => setKey(e.target.value)}
           rows={1}
           spellCheck={false}
-          placeholder="The new public key (PEM or JWK); empty: switch to a secret"
+          placeholder="The new public key (PEM or JWK)"
           className={`${input} min-w-64 flex-1 resize-y font-mono text-[12px]`}
         />
       )}
@@ -123,13 +162,13 @@ function RotateClient({ client, refresh }: { client: MachineClient; refresh: () 
           ))}
         </select>
       </label>
-      <button onClick={rotate} disabled={!!parsed && "problem" in parsed} className={btn}>
-        {parsed && "jwk" in parsed ? "Use this key" : "New secret"}
+      <button onClick={rotate} disabled={!!problem} className={btn}>
+        Rotate
       </button>
       <button onClick={() => setOpen(false)} className="text-muted hover:text-fg">
         Cancel
       </button>
-      {parsed && "problem" in parsed && <span className="text-subtle">{parsed.problem}</span>}
+      {problem && <span className="text-subtle">{problem}</span>}
       {error && <span className="text-danger">{error}</span>}
     </span>
   );
@@ -141,6 +180,10 @@ function NewClient({ onMade, onCancel }: { onMade: (m: MadeMachineClient) => Pro
   const [rules, setRules] = useState<Rule[]>([]);
   const [expiry, setExpiry] = useState(1);
   const [key, setKey] = useState("");
+  const [how, setHow] = useState<"github" | "key">("github");
+  const [repo, setRepo] = useState("");
+  const [ref, setRef] = useState("refs/heads/main");
+  const [environment, setEnvironment] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -154,11 +197,13 @@ function NewClient({ onMade, onCancel }: { onMade: (m: MadeMachineClient) => Pro
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
-  const parsed = key.trim() ? publicJwk(key) : null;
+  const parsed = how === "key" && key.trim() ? publicJwk(key) : null;
+  const github = how === "github" ? githubIdentity(repo, ref, environment) : null;
   const problems = [
     ...(name.trim() ? [] : ["Name the client"]),
     ...(rules.length ? [] : ["Allow at least one action"]),
     ...(parsed && "problem" in parsed ? [parsed.problem] : []),
+    ...(github && "problem" in github ? [github.problem] : []),
   ];
   const create = async () => {
     setBusy(true);
@@ -166,7 +211,9 @@ function NewClient({ onMade, onCancel }: { onMade: (m: MadeMachineClient) => Pro
     try {
       const ms = EXPIRIES[expiry].ms;
       const public_jwk = parsed && "jwk" in parsed ? parsed.jwk : null;
-      await onMade(await accessApi.createMachineClient({ name: name.trim(), rules, expires_at: ms === null ? null : Date.now() + ms, public_jwk }));
+      const oidc = github && "identity" in github ? github.identity : null;
+      const made = await accessApi.createMachineClient({ name: name.trim(), rules, expires_at: ms === null ? null : Date.now() + ms, public_jwk, oidc });
+      await onMade({ ...made, github: !!oidc });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -193,23 +240,59 @@ function NewClient({ onMade, onCancel }: { onMade: (m: MadeMachineClient) => Pro
           </select>
         </label>
       </div>
-      <label className="block space-y-1.5">
-        <span className="block text-[12px] text-subtle">
-          Public key (optional: an Ed25519 or P-256 PEM, or a JWK). Without one, roll makes a secret and shows it once.
-        </span>
-        <textarea
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
-          rows={3}
-          spellCheck={false}
-          placeholder={"-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----"}
-          className={`${input} w-full resize-y font-mono text-[12px]`}
-        />
-      </label>
+      <div className="space-y-2">
+        <span className="block text-[12px] text-subtle">How it signs in</span>
+        <div className="flex gap-1 text-[12px]" role="radiogroup" aria-label="How it signs in">
+          {(
+            [
+              ["github", "GitHub Actions"],
+              ["key", "A key or a secret"],
+            ] as const
+          ).map(([v, label]) => (
+            <button key={v} role="radio" aria-checked={how === v} onClick={() => setHow(v)} className={`${btn} ${how === v ? "border-line-2 bg-panel-2 font-medium text-fg" : "text-muted"}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {how === "github" ? (
+        <div className="grid gap-4 sm:grid-cols-3">
+          <label className="block space-y-1.5">
+            <span className="block text-[12px] text-subtle">Repository</span>
+            <input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="acme/web" spellCheck={false} className={`${input} w-full font-mono text-[12px]`} />
+          </label>
+          <label className="block space-y-1.5">
+            <span className="block text-[12px] text-subtle">Only on ref (empty: any)</span>
+            <input value={ref} onChange={(e) => setRef(e.target.value)} disabled={!!environment.trim()} spellCheck={false} className={`${input} w-full font-mono text-[12px]`} />
+          </label>
+          <label className="block space-y-1.5">
+            <span className="block text-[12px] text-subtle">Or only in environment</span>
+            <input value={environment} onChange={(e) => setEnvironment(e.target.value)} placeholder="production" spellCheck={false} className={`${input} w-full font-mono text-[12px]`} />
+          </label>
+          <p className="text-[12px] text-muted sm:col-span-3">
+            The repository&apos;s jobs sign in with the OIDC token GitHub gives them: nothing is stored in GitHub, and a fork&apos;s or
+            another repository&apos;s job can&apos;t.
+          </p>
+        </div>
+      ) : (
+        <label className="block space-y-1.5">
+          <span className="block text-[12px] text-subtle">
+            Public key (optional: an Ed25519 or P-256 PEM, or a JWK). Without one, roll makes a secret and shows it once.
+          </span>
+          <textarea
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            rows={3}
+            spellCheck={false}
+            placeholder={"-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----"}
+            className={`${input} w-full resize-y font-mono text-[12px]`}
+          />
+        </label>
+      )}
       <ErrorNote error={error} />
       <div className="flex items-center gap-3">
         <button onClick={create} disabled={busy || problems.length > 0} className={primary}>
-          {busy ? <span className="shimmer">Creating…</span> : parsed && "jwk" in parsed ? "Create with this key" : "Create with a secret"}
+          {busy ? <span className="shimmer">Creating…</span> : how === "github" ? "Create for GitHub Actions" : parsed && "jwk" in parsed ? "Create with this key" : "Create with a secret"}
         </button>
         <button onClick={onCancel} className={btn}>
           Cancel
@@ -223,7 +306,9 @@ function NewClient({ onMade, onCancel }: { onMade: (m: MadeMachineClient) => Pro
 function Made({ made }: { made: MadeMachineClient }) {
   const { copied, copy } = useCopy();
   const secret = made.client_secret;
-  const curl = secret
+  const curl = made.github
+    ? githubStep(made.client_id, made.token_endpoint)
+    : secret
     ? `curl -s ${made.token_endpoint} -u "${made.client_id}:$ROLL_CLIENT_SECRET" -d grant_type=client_credentials`
     : `curl -s ${made.token_endpoint} -d grant_type=client_credentials \\\n  -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer \\\n  -d client_assertion="$JWT"`;
   const field = (label: string, id: string, text: string) => (
@@ -244,11 +329,18 @@ function Made({ made }: { made: MadeMachineClient }) {
       </div>
       {secret && field("Client secret: copy it now, it isn't shown again", "client-secret", secret)}
       <p className="text-[12px] text-muted">
-        {secret
+        {made.github
+          ? "Nothing to store in GitHub. Add this step to the workflow; later steps get ROLL_TOKEN:"
+          : secret
           ? "Trade it for a token with client_secret_basic (or client_secret_post):"
           : "Sign a JWT with its private key (iss and sub the client id, aud the token endpoint, a new jti, at most 5 minutes to live), then trade it:"}
       </p>
-      <pre className="overflow-x-auto rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px]">{curl}</pre>
+      <div className="relative">
+        <pre className="overflow-x-auto rounded-lg border border-line bg-bg py-2 pl-3 pr-10 font-mono text-[12px]">{curl}</pre>
+        <span className="absolute right-2 top-2">
+          <CopyButton id="trade" text={curl} copied={copied} onCopy={copy} />
+        </span>
+      </div>
     </div>
   );
 }

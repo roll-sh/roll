@@ -549,6 +549,7 @@ async fn blockers_keep_changes_out_of_the_queue() {
             speed_budget: None,
             visual_review: Some(code_control::model::PreviewVisualReview { state: state.into(), branch: "main".into(), percent: 8.0, by: by.map(Into::into), required: true, head: None, pages: Vec::new() }),
             notes: Vec::new(),
+            issues: Vec::new(),
         }),
     };
     a.code.report_environment(&id(&c), Some(&preview("changed", None))).unwrap();

@@ -13,6 +13,7 @@ POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/cancel
 GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/commits
 GET /v1/apps/services/{id}/environments/{env}/deploys/{dep}/logs
 POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollback
+POST /v1/apps/services/{id}/environments/{env}/deploys/{dep}/rollout
 GET /v1/apps/services/{id}/environments/{env}/domains
 POST /v1/apps/services/{id}/environments/{env}/domains
 PATCH /v1/apps/services/{id}/environments/{env}/domains/{host}
@@ -29,8 +30,15 @@ GET /v1/apps/services/{id}/environments/{env}/metrics
 POST /v1/apps/services/{id}/environments/{env}/promote
 POST /v1/apps/services/{id}/environments/{env}/redeploy
 POST /v1/apps/services/{id}/environments/{env}/restart
+POST /v1/apps/services/{id}/environments/{env}/cache/purge
 POST /v1/apps/services/{id}/environments/{env}/rollback
 GET /v1/apps/services/{id}/environments/{env}/routes
+GET /v1/apps/services/{id}/environments/{env}/analytics
+GET /v1/apps/services/{id}/environments/{env}/vitals
+GET /v1/apps/services/{id}/environments/{env}/app-metrics
+GET /v1/apps/services/{id}/environments/{env}/errors
+GET /v1/apps/services/{id}/environments/{env}/traces
+GET /v1/apps/services/{id}/environments/{env}/traces/{trace}
 GET /v1/apps/services/{id}/environments/{env}/runs
 POST /v1/apps/services/{id}/environments/{env}/runs
 POST /v1/apps/services/{id}/environments/{env}/shell/sessions/{sh}/resize
@@ -172,6 +180,7 @@ POST /v1/previews/{id}/notes/{note}/resolve
 GET /v1/previews/{id}/notes/{note}/crop
 GET /v1/previews/{id}/logs
 POST /v1/previews/{id}/refresh
+GET /v1/previews/{id}/requests
 GET /v1/previews/{id}/screenshot
 GET /v1/previews/{id}/shares
 DELETE /v1/previews/{id}/shares/{share}

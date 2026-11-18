@@ -126,6 +126,11 @@ pub(super) async fn check(c: &mut Conn, roles: &[String], group: Option<&str>) -
     Ok(())
 }
 
+/// The connected account's own password (its host part is the server's to know).
+pub(super) async fn set_own_password(c: &mut Conn, password: &str) -> Result<(), String> {
+    exec(c, &format!("ALTER USER CURRENT_USER() IDENTIFIED BY {}", literal(password)?)).await
+}
+
 pub(super) async fn set_password(c: &mut Conn, role: &str, password: &str) -> Result<(), String> {
     exec(c, &format!("ALTER USER {} IDENTIFIED BY {}", account(role)?, literal(password)?)).await
 }

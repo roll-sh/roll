@@ -94,6 +94,44 @@ pub fn principal_of(u: &Value) -> Option<crate::xpack::security::Principal> {
     Some(p)
 }
 
+/// Why the principal a job stored ([`principal_of`]) may no longer act, checked before each of
+/// its runs with the lookups authentication makes: its API key is gone, invalidated or expired;
+/// its file, native or reserved user (an OpenSearch internal user, on that dialect) is gone or
+/// disabled. `None`: it may act. Service accounts, other realms and roll's index scopes
+/// ([`INDEX_SCOPE_KEY`](crate::xpack::security::INDEX_SCOPE_KEY)) pass: nothing in the cluster
+/// revokes them. The reason names the user or key, never a credential.
+pub fn principal_problem(cluster: &Cluster, p: &crate::xpack::security::Principal) -> Option<String> {
+    use crate::xpack::security::{AuthKind, INDEX_SCOPE_KEY, api_keys, opensearch, users};
+    if let AuthKind::ApiKey(a) = &p.kind {
+        if a.id == INDEX_SCOPE_KEY {
+            return None;
+        }
+        let st = cluster.state();
+        let key = format!("API key [{}] of user [{}], which this job runs as,", a.id, p.username);
+        let Some(k) = st.metadata.xpack.get(api_keys::KEYS, &a.id) else { return Some(format!("{key} no longer exists")) };
+        if k.get("invalidated").and_then(Value::as_bool) == Some(true) {
+            return Some(format!("{key} has been invalidated"));
+        }
+        if k.get("expiration").and_then(Value::as_i64).is_some_and(|exp| exp <= crate::time::now_millis()) {
+            return Some(format!("{key} has expired"));
+        }
+        return None;
+    }
+    let gone = match (cluster.dialect, p.realm_type) {
+        (crate::cluster::Dialect::OpenSearch, _) => opensearch::lookup_user(cluster, &p.username).is_none(),
+        (_, "native" | "file" | "reserved") => users::lookup_user(cluster, &p.username).is_none(),
+        _ => false,
+    };
+    gone.then(|| format!("user [{}], which this job runs as, no longer exists or is disabled", p.username))
+}
+
+/// The error a job's run fails with when [`principal_problem`] finds its principal can no longer
+/// act (`None`: no principal, or one that can). The 401 marks it: a job's internal calls carry no
+/// credentials, so nothing else they return is one.
+pub fn principal_refusal(cluster: &Cluster, p: Option<&crate::xpack::security::Principal>) -> Option<EsError> {
+    principal_problem(cluster, p?).map(|reason| EsError::security(401, reason))
+}
+
 /// Marks a [`call_system`] request, which keeps the cluster's authority inside
 /// [`as_principal`] too. A client sending it gains nothing: outside `as_principal` it changes
 /// nothing.
