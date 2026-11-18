@@ -109,3 +109,14 @@ fn settings_create_list_and_remove_a_branch_preview() {
     let (ok, _, err) = s.roll(&["wait", &id]);
     assert!(!ok && err.contains("being deleted"), "{err}");
 }
+
+/// `roll preview masks` lists a project's mask suggestions (none here: its canvas holds only a
+/// repo), and `--apply` with none changes nothing.
+#[test]
+fn mask_suggestions_from_the_cli() {
+    let s = server();
+    s.ok(&["settings", "shop", "--set", "enabled=true"]);
+    assert!(s.ok(&["masks", "shop"]).contains("nothing unmasked looks like personal data"));
+    s.ok(&["masks", "shop", "--apply"]);
+    assert_eq!(s.json(&["masks", "shop"])["suggestions"].as_array().map(Vec::len), Some(0));
+}
