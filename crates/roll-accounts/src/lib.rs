@@ -380,6 +380,9 @@ pub struct User {
     pub admin: bool,
     pub disabled: bool,
     pub created_at: i64,
+    /// When they last used roll: a sign-in, or a session's use (noted every five minutes).
+    /// `None`: not since roll began keeping it.
+    pub last_active_at: Option<i64>,
     pub totp: bool,
     /// How many passkeys they have (with `totp`: whether they have a second factor).
     pub passkeys: u32,
@@ -521,6 +524,12 @@ impl Accounts {
         if !db.has_column("users", "deleted_at")? {
             db.add_column("users", "deleted_at", "INTEGER")?;
         }
+        // When each person last used roll (a sign-in, or a session's use): GitHub Enterprise's
+        // dormant users. Started from the sessions still open; unknown (null) for the rest.
+        if !db.has_column("users", "last_active_at")? {
+            db.add_column("users", "last_active_at", "INTEGER")?;
+            db.write(|c| c.execute("UPDATE users SET last_active_at = (SELECT MAX(seen_at) FROM sessions WHERE sessions.user_id = users.id)", ()))?;
+        }
         // How each session began (`sso`, or not): enforcing SSO ends the others.
         if !db.has_column("sessions", "method")? {
             db.add_column("sessions", "method", "TEXT")?;
@@ -585,7 +594,10 @@ impl Accounts {
             return Ok(Some(roll_auth::Session::SecondFactor(roll_auth::SecondFactorOwed { user, session: id })));
         }
         if now - seen_at >= SEEN_EVERY_MS {
-            self.db.write(|c| c.execute("UPDATE sessions SET seen_at = ? WHERE token_hash = ?", params![now, hash]))?;
+            self.db.write(|c| {
+                c.execute("UPDATE sessions SET seen_at = ? WHERE token_hash = ?", params![now, hash])?;
+                c.execute("UPDATE users SET last_active_at = ? WHERE id = ?", params![now, user])
+            })?;
         }
         Ok(Some(roll_auth::Session::Full(roll_auth::SignedIn { user, handle, admin, code_owner, session: id })))
     }
@@ -655,6 +667,7 @@ impl Accounts {
                 "INSERT INTO sessions (token_hash, id, user_id, level, created_at, seen_at, expires_at, user_agent, method, cap_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![sha256_hex(&token), id, user, level, now, now, now + ttl, user_agent, method, cap_ms],
             )?;
+            c.execute("UPDATE users SET last_active_at = ? WHERE id = ?", params![now, user])?;
             Ok(mfa)
         })?;
         Ok(Issued { token, id, second_factor })
@@ -1220,7 +1233,7 @@ fn session_row(r: &code_sql::Row<'_>, current: &str) -> code_sql::Result<Session
 
 fn load_user(c: &code_sql::Conn<'_>, id: &str) -> code_sql::Result<Option<User>> {
     let user = c
-        .query_row("SELECT id, email, handle, name, admin, disabled, created_at FROM users WHERE id = ?", [id], |r| {
+        .query_row("SELECT id, email, handle, name, admin, disabled, created_at, last_active_at FROM users WHERE id = ?", [id], |r| {
             Ok(User {
                 id: r.get(0)?,
                 email: r.get(1)?,
@@ -1229,6 +1242,7 @@ fn load_user(c: &code_sql::Conn<'_>, id: &str) -> code_sql::Result<Option<User>>
                 admin: r.get(4)?,
                 disabled: r.get(5)?,
                 created_at: r.get(6)?,
+                last_active_at: r.get(7)?,
                 totp: false,
                 passkeys: 0,
                 identities: Vec::new(),

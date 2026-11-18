@@ -19,6 +19,8 @@ export interface User {
   admin: boolean;
   disabled: boolean;
   created_at: number;
+  /** When they last used roll (a sign-in or a session's use); `null`: not since roll began keeping it. */
+  last_active_at?: number | null;
   totp: boolean;
   /** How many passkeys they have (with `totp`: whether they have a second factor). */
   passkeys?: number;
@@ -168,6 +170,14 @@ export function activityText(e: Activity, me: string): string {
   if (e.action.endsWith("/me/email")) return was("A move to another address was started", "Starting a move to another address");
   if (e.action === "PATCH /v1/accounts/me") return was("Your profile was changed", "A change to your profile");
   return e.ok ? `${e.action} by ${by}` : `${e.action} by ${by} was refused`;
+}
+
+/** How long without using roll makes someone dormant (GitHub Enterprise's 90 days). */
+export const DORMANT_DAYS = 90;
+
+/** Whether `u` hasn't used roll in DORMANT_DAYS (by their last activity, else since they were made). */
+export function dormant(u: Pick<User, "last_active_at" | "created_at" | "disabled">, now = Date.now()): boolean {
+  return !u.disabled && (u.last_active_at ?? u.created_at) < now - DORMANT_DAYS * 24 * 3600 * 1000;
 }
 
 /** Which sign-ins this roll offers (`sso`: a company's provider answers for some domains). */

@@ -705,7 +705,7 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 | `POST /v1/accounts/invites` | `{email, admin?, handle?}` | 201 `Invite & {token, url}` (the token is shown once, and mailed when mail is on); 409 an account has the email |
 | `GET /v1/accounts/invites` | | `Invite[]`, newest first |
 | `DELETE /v1/accounts/invites/{id}` | | 204 (unused invites only; 409 once used) |
-| `GET /v1/accounts/users` | | `User[]`, oldest first |
+| `GET /v1/accounts/users` | | `User[]`, oldest first; each with `last_active_at` (a sign-in or a session's use, noted every five minutes; `null` if not since roll began keeping it). People marks anyone with none in 90 days as dormant, as GitHub Enterprise's dormant users report does: turning off accounts nobody uses closes a way in |
 | `PATCH /v1/accounts/users/{id}` | `{admin?, disabled?}` | `User`; disabling deletes the user's sessions and cuts off their roll code owner (its tokens are revoked and its machines' links closed; turning the account back on gives none of them back) |
 | `DELETE /v1/accounts/users/{id}/sessions` | | 204: signs the user out everywhere |
 | `GET /v1/accounts/users/{id}/sessions` | | `Session[]`: the person's sessions (none `current`) |
