@@ -3,7 +3,7 @@ import { ArrowLeft, LoaderCircle, Mail } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "@/components/link";
-import { acceptSignIn, accountsApi, AccountsError, useSession, type Provider, type SignInAnswer } from "@/lib/accounts-api";
+import { acceptSignIn, accountsApi, AccountsError, useSession, type Provider, type Providers, type SignInAnswer } from "@/lib/accounts-api";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { TokenButton } from "./code/sign-in";
 import { useMarkState } from "./mark-state";
@@ -18,6 +18,8 @@ const ERRORS: Record<string, string> = {
   link_required: "You have an account with that email. Sign in another way, then link it in your account settings.",
   linked_elsewhere: "That identity belongs to another roll account.",
   disabled: "This account is disabled.",
+  domain: "Your company's sign-in vouched for an address outside its domains.",
+  sso_required: "Your organization signs you in through its own provider: continue with your work email.",
 };
 
 /** Where to go after: a path on this site only (not `//host` or `/\\host`, which browsers take as another host). */
@@ -25,12 +27,13 @@ const safeReturn = (r: string | undefined) => (r && r.startsWith("/") && !/^\/[/
 
 type Step = { kind: "start" } | { kind: "code"; email: string; challenge: string } | { kind: "mfa"; recovery: boolean };
 
-/** `/signin`: GitHub, Google or a code by email, then the second factor when the account has one. */
+/** `/signin`: GitHub, Google, a company's SSO (by the email's domain) or a code by email, then the
+ *  second factor when the account has one. */
 export function SignInPage({ invite, step, returnTo, error }: { invite?: string; step?: string; returnTo?: string; error?: string }) {
   const navigate = useNavigate();
   const session = useSession();
   const { play, state } = useMarkState();
-  const [providers, setProviders] = useState<{ email: boolean; github: boolean; google: boolean } | null>(null);
+  const [providers, setProviders] = useState<Providers | null>(null);
   const [invited, setInvited] = useState<{ email: string } | "invalid" | null>(null);
   const [current, setCurrent] = useState<Step>(step === "second_factor" ? { kind: "mfa", recovery: false } : { kind: "start" });
   const [problem, setProblem] = useState<string | null>(error ? (ERRORS[error] ?? "That didn't work. Try again.") : null);
@@ -104,6 +107,16 @@ export function SignInPage({ invite, step, returnTo, error }: { invite?: string;
               onOauth={oauth}
               onEmail={(email) =>
                 run(async () => {
+                  // A domain with SSO goes to the company's provider; any other gets a code.
+                  if (providers?.sso) {
+                    try {
+                      const { url } = await accountsApi.ssoStart(email, { invite, return_to: to });
+                      window.location.assign(url);
+                      return;
+                    } catch (e) {
+                      if (!(e instanceof AccountsError && e.code === "no_sso") || !providers.email) throw e;
+                    }
+                  }
                   const { challenge } = await accountsApi.emailStart(email, invite);
                   setCurrent({ kind: "code", email, challenge });
                 })
@@ -160,7 +173,7 @@ function Start({
   onOauth,
   onEmail,
 }: {
-  providers: { email: boolean; github: boolean; google: boolean } | null;
+  providers: Providers | null;
   busy: boolean;
   defaultEmail: string;
   onOauth: (p: Provider) => void;
@@ -175,7 +188,9 @@ function Start({
       </div>
     );
   const social = providers.github || providers.google;
-  if (!social && !providers.email) return <p className="text-[12.5px] leading-relaxed text-muted">Sign-in isn't set up on this roll yet. An admin can still use their token below.</p>;
+  // The email box serves a code, a company's SSO, or both.
+  const byEmail = providers.email || Boolean(providers.sso);
+  if (!social && !byEmail) return <p className="text-[12.5px] leading-relaxed text-muted">Sign-in isn't set up on this roll yet. An admin can still use their token below.</p>;
   return (
     <div className="space-y-2.5">
       {providers.github && (
@@ -188,12 +203,12 @@ function Start({
           <GoogleMark className="size-4" /> Continue with Google
         </button>
       )}
-      {social && providers.email && (
+      {social && byEmail && (
         <div className="flex items-center gap-3 py-1 text-[11px] text-subtle">
           <span className="h-px flex-1 bg-line" /> or <span className="h-px flex-1 bg-line" />
         </div>
       )}
-      {providers.email && (
+      {byEmail && (
         <form
           className="space-y-2.5"
           onSubmit={(e) => {
@@ -211,7 +226,7 @@ function Start({
             className="h-10 w-full rounded-lg border border-line-2 bg-canvas px-3 text-[13px] outline-none transition-colors focus:border-accent/60"
           />
           <button type="submit" disabled={busy || !email.includes("@")} className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-fg text-[13px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-40">
-            <Mail className="size-4" /> Email me a code
+            <Mail className="size-4" /> {providers.sso ? "Continue with email" : "Email me a code"}
           </button>
         </form>
       )}

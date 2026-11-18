@@ -194,6 +194,29 @@ const bugTriage = spec({
   ],
 });
 
+/** A change's preview, linked on the Linear issue the change names (Vercel's Linear integration). */
+const previewOnIssue = spec({
+  name: "Preview on the Linear issue",
+  description: "A change's preview, once ready, is linked on the Linear issue its title or branch names (ENG-123), with how its pages compare with main's.",
+  trigger: { type: "code", events: ["preview"] },
+  filters: [
+    { field: "event.data.preview.environment.state", op: "equals", value: "ready" },
+    { field: "event.data.preview.environment.issues.0", op: "exists" },
+  ],
+  steps: [
+    {
+      id: "link",
+      kind: "linear.attach",
+      config: {
+        issue: "{{event.data.preview.environment.issues.0}}",
+        url: "{{event.data.preview.url}}",
+        title: "Preview: {{event.data.preview.environment.slug}}",
+        subtitle: "Pages against {{event.data.preview.environment.visual_review.branch | default:\"main\"}}: {{event.data.preview.environment.visual_review.state | default:\"not compared yet\"}}",
+      },
+    },
+  ],
+});
+
 export const linearTemplates: LinearTemplate[] = [
   {
     id: "linear-agent",
@@ -224,5 +247,11 @@ export const linearTemplates: LinearTemplate[] = [
     title: "Triage new bugs",
     description: "New Bug issues get an agent's read on the cause and a proposed fix, as a comment.",
     spec: bugTriage,
+  },
+  {
+    id: "linear-preview-on-issue",
+    title: "A change's preview on its Linear issue",
+    description: "The preview of a change that names ENG-123 is linked on that issue once it's ready, with its visual review.",
+    spec: previewOnIssue,
   },
 ];
