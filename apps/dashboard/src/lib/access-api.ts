@@ -4,6 +4,7 @@
  * the OAuth consent screen's answer. Change both together.
  */
 
+import { withSession } from "./code-token";
 import { apiHeaders, call, ROLL_API } from "./roll-api";
 
 export const ACTIONS = ["read", "write", "delete", "reveal", "deploy", "admin"] as const;
@@ -709,7 +710,7 @@ export const accessApi = {
   audit: (f: AuditFilter = {}) => call<AuditEvent[]>("GET", `/v1/access/audit${query(f)}`),
   /** The log as CSV (a spreadsheet) or JSON lines (a log tool), for a download. */
   auditExport: async (f: AuditFilter = {}, format: "csv" | "jsonl" = "csv") => {
-    const res = await fetch(`${ROLL_API}/v1/access/audit${query({ ...f, format })}`, { headers: apiHeaders(), cache: "no-store" });
+    const res = await fetch(`${ROLL_API}/v1/access/audit${query({ ...f, format })}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     return res.blob();
   },

@@ -2,6 +2,7 @@ import { Building2, Check, Copy, Fingerprint, KeyRound, LoaderCircle, Monitor, S
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { accountsApi, activityText, refreshSession, useSession, type Activity, type Invite, type Passkey, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
 import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } from "@/lib/webauthn";
+import { Link } from "./link";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { SsoSection } from "./account-sso";
 import { AppShell } from "./app-shell";
@@ -585,6 +586,13 @@ function Users({ me }: { me: string }) {
   const act = (p: Promise<unknown>) => p.then(load, (e) => setError(errorText(e)));
   return (
     <Section title="People" lead="Everyone with an account. Turning someone off signs them out everywhere at once.">
+      <p className="-mt-1 mb-2 text-[12px] text-muted">
+        Everyone&apos;s sign-ins and account changes are in the{" "}
+        <Link href="/dashboard/access/audit?product=accounts" className="text-accent hover:underline">
+          sign-in report
+        </Link>{" "}
+        (the audit log, as CSV for a spreadsheet).
+      </p>
       {error && <p className="mb-2 text-[12px] text-danger">{error}</p>}
       <div className={card}>
         {(list ?? []).map((u) => (

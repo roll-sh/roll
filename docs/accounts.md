@@ -562,6 +562,12 @@ and the SIEM sinks), as Okta's System Log and GitHub's audit log keep them:
 Never a body: no code, token, secret or password is in an event. Starting a sign-in isn't
 recorded (its end is).
 
+The sign-in report, as Okta's and Google Workspace's: an admin's account page links the People
+section to the audit log narrowed to accounts (`/dashboard/access/audit?product=accounts`),
+which downloads as CSV for a spreadsheet or JSON lines for a log tool. An admin's session reads
+it as the operator does (an admin carries `Operator`); its downloads send the session like every
+other call (`withSession`: `lib/session-fetch.test.ts` fails on a fetch to rolld without it).
+
 Each person reads their own (`GET /v1/accounts/me/activity`, "Recent activity" on the account
 page, as GitHub's security log): their sign-ins, refused ones too, with the method, address and
 device, and every change to their account, whoever made it (them, an admin, SCIM). An event is
