@@ -236,6 +236,8 @@ pub struct Gate {
     pub traces: bool,
     /// Its pages carry roll's Web Vitals tag.
     pub vitals: bool,
+    /// Its challenge rules' key ([`crate::challenge`]), when it has such a rule.
+    pub challenge_key: Option<Vec<u8>>,
 }
 
 /// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's) and whose.
@@ -247,6 +249,8 @@ pub enum Verdict {
     Allow,
     Deny,
     Limit(u16, crate::model::RateLimit),
+    /// In with a pass ([`crate::challenge`]); else its page.
+    Challenge,
 }
 
 /// Clients a rate limit remembers at most (a full bucket is the same as none, so those go first).
@@ -262,6 +266,7 @@ impl Gate {
             None => Verdict::Allow,
             Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
             Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(i as u16 + 1, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
+            Some((_, r)) if r.action == crate::model::FirewallAction::Challenge => Verdict::Challenge,
             Some(_) => Verdict::Deny,
         }
     }

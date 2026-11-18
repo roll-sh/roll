@@ -977,9 +977,49 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
     }
     // Its firewall rules (a 403 that says nothing of them).
     let ua = req.headers().get(header::USER_AGENT).map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned()).unwrap_or_default();
+    // A challenge page's answer, on the environment's own host: checked, then a pass.
+    if !ours && req.uri().path() == crate::challenge::PATH && req.method() == axum::http::Method::POST
+        && let Some(key) = &gate.challenge_key
+    {
+        let net = crate::challenge::network(crate::live::client_ip(client.as_deref()));
+        let Ok(body) = axum::body::to_bytes(req.into_body(), 1024).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
+        let (mut seed, mut nonce) = (String::new(), String::new());
+        for (k, v) in url::form_urlencoded::parse(&body) {
+            match k.as_ref() {
+                "seed" => seed = v.into_owned(),
+                "nonce" => nonce = v.into_owned(),
+                _ => {}
+            }
+        }
+        if !crate::challenge::answers(key, &net, code_sql::now_ms(), &seed, &nonce) {
+            return by("challenge", StatusCode::FORBIDDEN.into_response());
+        }
+        let until = code_sql::now_ms() / 1000 + crate::challenge::PASS_S;
+        let secure = if apps.cfg.scheme == "https" { "; Secure" } else { "" };
+        let cookie = format!("{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}", crate::challenge::cookie(env), crate::challenge::pass(key, &net, until), crate::challenge::PASS_S);
+        let mut r = StatusCode::NO_CONTENT.into_response();
+        if let Ok(c) = HeaderValue::from_str(&cookie) {
+            r.headers_mut().insert(header::SET_COOKIE, c);
+        }
+        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return by("challenge", r);
+    }
     if !ours && !gate.firewall.is_empty() {
         match gate.firewall_verdict(req.method().as_str(), &crate::model::normal_path(req.uri().path()), &ua) {
             crate::live::Verdict::Allow => {}
+            // A browser with this hour's pass goes on (the cookie is roll's: the app never sees it);
+            // anything else gets the page that earns one.
+            crate::live::Verdict::Challenge => {
+                let key = gate.challenge_key.clone().unwrap_or_default();
+                let net = crate::challenge::network(crate::live::client_ip(client.as_deref()));
+                let passed = take_cookie(&mut req, &crate::challenge::cookie(env)).is_some_and(|c| crate::challenge::passes(&key, &net, code_sql::now_ms() / 1000, &c));
+                if !passed {
+                    let to = crate::visit::local_path(req.uri().path_and_query().map_or("/", |p| p.as_str()));
+                    let mut r = (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], crate::challenge::page(&crate::challenge::seed(&key, &net, code_sql::now_ms()), &to)).into_response();
+                    r.extensions_mut().insert(RollPage::Error);
+                    return by("challenge", r);
+                }
+            }
             crate::live::Verdict::Deny => return by("firewall", page(StatusCode::FORBIDDEN, "Not allowed", "This service doesn't answer this request.")),
             // A rule's own limit (Vercel's rate-limit rules): its bucket per client, before anything wakes.
             crate::live::Verdict::Limit(bucket, limit) => {

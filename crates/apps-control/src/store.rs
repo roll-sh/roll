@@ -2621,6 +2621,17 @@ impl Store {
         Ok(self.db.write(|c| c.execute("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", [key, value]))? == 1)
     }
 
+    /// `key`'s value, set to `value` first if it has none (two nodes asking at once read the same).
+    pub fn state_or(&self, key: &str, value: &str) -> Result<String> {
+        self.db.write(|c| {
+            if let Some(v) = c.query_row("SELECT value FROM state WHERE key = ?", [key], |r| r.get::<_, String>(0)).optional()? {
+                return Ok(v);
+            }
+            c.execute("INSERT INTO state (key, value) VALUES (?, ?)", [key, value])?;
+            Ok(value.to_string())
+        })
+    }
+
     pub fn set_state(&self, key: &str, value: &str) -> Result<()> {
         self.db.write(|c| {
             c.execute("DELETE FROM state WHERE key = ?", [key])?;

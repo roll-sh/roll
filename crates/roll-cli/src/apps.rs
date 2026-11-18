@@ -4025,7 +4025,7 @@ pub(crate) fn new_token() -> String {
 /// A firewall rule as typed: `<allow|deny> [/path] [method=A,B] [ua=the rest of the line]`.
 fn firewall_rule(line: &str) -> anyhow::Result<Value> {
     let mut words = line.split_whitespace();
-    let action = words.next().filter(|a| ["allow", "deny", "limit"].contains(a)).ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow, deny or limit: {line:?}"))?;
+    let action = words.next().filter(|a| ["allow", "deny", "limit", "challenge"].contains(a)).ok_or_else(|| anyhow::anyhow!("a firewall rule starts with allow, deny, limit or challenge: {line:?}"))?;
     let mut rule = json!({ "action": action });
     // `limit N[:BURST] …`: N a minute a client through the rule.
     if action == "limit" {

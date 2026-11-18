@@ -411,7 +411,7 @@ type EnvironmentPut = {
    *  `path` exact or a prefix ending in `*`, matched on the path as an app reads it (decoded,
    *  `//` and dot segments resolved); `methods` any of; `user_agent` contained, case aside.
    *  Checked after allow_ips, before the rate limit and any wake; HTTP only. null: none. */
-  firewall?: { action: "allow" | "deny" | "limit"; path?: string; methods?: string[]; user_agent?: string; per_minute?: number /* limit's: 1–100000 a client */; burst?: number /* limit's (default a minute's worth) */ }[] | null;
+  firewall?: { action: "allow" | "deny" | "limit" | "challenge"; path?: string; methods?: string[]; user_agent?: string; per_minute?: number /* limit's: 1–100000 a client */; burst?: number /* limit's (default a minute's worth) */ }[] | null;
   headers?: { path?: string; set: Record<string, string>; replace?: boolean }[] | null; // at most 20; the app's own header wins unless replace; no framing or x-roll-* names
   routes?: { path: string; service: string }[] | null; // at most 20: a path (a prefix ends in *) another service of the project answers, by name (not this one; 400 for one the project hasn't), its environment of the same name, the path and query as they came; the first that takes a path decides; checked after this environment's gates, past the target's
   /** Its own size and scale over the service's (min_instances, max_instances, cpu, memory_mb,
@@ -452,7 +452,7 @@ type Environment = EnvironmentSummary & {
   allow_ips: { cidr: string; description?: string }[]; // only these networks get in through its public names ([]: anyone)
   tcp: string | null; // a TCP service's address, host:port (null until it has its port)
   rate_limit: { per_minute: number; burst: number | null } | null; // each client's requests a minute (null: no limit)
-  firewall: { action: "allow" | "deny" | "limit"; path?: string; methods?: string[]; user_agent?: string; per_minute?: number; burst?: number }[]; // its rules, in order
+  firewall: { action: "allow" | "deny" | "limit" | "challenge"; path?: string; methods?: string[]; user_agent?: string; per_minute?: number; burst?: number }[]; // its rules, in order
   headers?: { path?: string; set: Record<string, string>; replace?: boolean }[]; // headers its answers carry (names lower case)
   routes?: { path: string; service: string }[]; // paths another service of the project answers
   scaling: { backlog: number | null; wanted: number } | null; // a worker following its work: the backlog last read (every 10 s) and the instances it wants
