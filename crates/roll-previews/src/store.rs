@@ -188,6 +188,19 @@ CREATE TABLE IF NOT EXISTS bypass (
     hash TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS git_reports (
+    preview_id TEXT PRIMARY KEY,
+    status TEXT,
+    comment_id INTEGER,
+    comment_hash TEXT
+);
+CREATE TABLE IF NOT EXISTS pull_comments (
+    service TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    comment_id INTEGER NOT NULL,
+    PRIMARY KEY (service, repo, number)
+);
 CREATE TABLE IF NOT EXISTS git_pulls (
     preview_id TEXT PRIMARY KEY,
     number INTEGER NOT NULL,
@@ -653,7 +666,7 @@ impl Store {
                 db.add_column("previews", col, "INTEGER")?;
             }
         }
-        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head", "teardown_error", "schema_risks"] {
+        for col in ["released", "schema_head", "schema_changes", "runs", "ran_head", "teardown_error", "schema_risks", "reported_by"] {
             if !db.has_column("previews", col)? {
                 db.add_column("previews", col, "TEXT")?;
             }
@@ -919,7 +932,7 @@ impl Store {
     /// Remove a preview's rows (after its branches and services are gone).
     pub fn remove(&self, id: &str) -> Result<()> {
         self.db.write(|c| {
-            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "previews"] {
+            for t in ["resources", "services", "pinned", "shares", "activity", "screenshots", "page_shots", "visual_page_accepts", "mail", "resolved_notes", "base_history", "leases", "note_crops", "git_pulls", "git_reports", "previews"] {
                 let col = if t == "previews" { "id" } else { "preview_id" };
                 c.execute(&format!("DELETE FROM {t} WHERE {col} = ?"), [id])?;
             }
@@ -1151,6 +1164,26 @@ impl Store {
     /// warning; `None`: not close).
     pub fn goes_at(&self, id: &str) -> Result<Option<i64>> {
         Ok(self.db.read(|c| c.query_row("SELECT goes_at FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    /// The name of the project that reports this preview's change (or pull request) when it's
+    /// another project's (roll previews' `refresh_voice`); `None`: this one reports it.
+    pub fn reported_by(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.db.read(|c| c.query_row("SELECT reported_by FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.flatten())
+    }
+
+    /// Sets [`Store::reported_by`]: whether it changed (written only then).
+    pub fn set_reported_by(&self, id: &str, by: Option<&str>) -> Result<bool> {
+        if self.reported_by(id)?.as_deref() == by {
+            return Ok(false);
+        }
+        Ok(self.db.write(|c| Ok::<_, Error>(c.execute("UPDATE previews SET reported_by = ? WHERE id = ? AND reported_by IS NOT ?", params![by, id, by])?))? > 0)
+    }
+
+    /// The active previews of `repo`'s `branch` in every project (a Git URL service's branch has
+    /// one in each project whose canvas holds the service).
+    pub fn branch_rows(&self, repo: &str, branch: Option<&str>) -> Result<Vec<Row>> {
+        Ok(self.db.read(|c| c.query(&format!("SELECT {COLUMNS} FROM previews WHERE repo = ? AND branch IS ? AND desired = 'active' ORDER BY id"), params![repo, branch], row))?)
     }
 
     pub fn set_goes_at(&self, id: &str, at: Option<i64>) -> Result<()> {
@@ -2147,6 +2180,38 @@ impl Store {
         })
     }
 
+    /// What was last posted on a Git URL service's repository for a preview: the status (its sha,
+    /// state and description, as one string), the pull request comment's id and its body's hash.
+    pub fn git_report(&self, id: &str) -> Result<(Option<String>, Option<i64>, Option<String>)> {
+        Ok(self.db.read(|c| c.query_row("SELECT status, comment_id, comment_hash FROM git_reports WHERE preview_id = ?", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional())?.unwrap_or((None, None, None)))
+    }
+
+    pub fn set_git_report(&self, id: &str, status: Option<&str>, comment: Option<(i64, &str)>) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("INSERT INTO git_reports (preview_id) VALUES (?1) ON CONFLICT (preview_id) DO NOTHING", [id])?;
+            if let Some(s) = status {
+                c.execute("UPDATE git_reports SET status = ?2 WHERE preview_id = ?1", params![id, s])?;
+            }
+            if let Some((cid, hash)) = comment {
+                c.execute("UPDATE git_reports SET comment_id = ?2, comment_hash = ?3 WHERE preview_id = ?1", params![id, cid, hash])?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    /// The comment a Git URL service's previews keep on pull request `number` of `repo`, whichever
+    /// project's preview posted it: the next project to speak for the service edits the same one.
+    pub fn pull_comment(&self, service: &str, repo: &str, number: i64) -> Result<Option<i64>> {
+        Ok(self.db.read(|c| c.query_row("SELECT comment_id FROM pull_comments WHERE service = ? AND repo = ? AND number = ?", params![service, repo, number], |r| r.get(0)).optional())?)
+    }
+
+    pub fn set_pull_comment(&self, service: &str, repo: &str, number: i64, comment_id: i64) -> Result<()> {
+        self.db.write(|c| {
+            c.execute("INSERT INTO pull_comments (service, repo, number, comment_id) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (service, repo, number) DO UPDATE SET comment_id = excluded.comment_id", params![service, repo, number, comment_id])?;
+            Ok::<_, Error>(())
+        })
+    }
+
     // ── leases: the dynamic credentials a service started with (roll secrets'; ids only) ──
 
     /// Lease ids a start of `service` was given, each thought to end `expires_at` (ms) until a
@@ -2289,8 +2354,15 @@ impl Store {
         let share_url = url.as_deref().map(share);
         let (schema_changes, schema_risks, release) = self.release_facts(&r.id)?;
         let kept_until = self.kept_until(&r.id)?;
-        let pull = self.git_pull(&r.id)?;
+        // Its page as a link only when it's `https://` (it's kept whole to tell its repository).
+        let pull = self.git_pull(&r.id)?.map(|mut g| {
+            if !g.url.starts_with("https://") {
+                g.url.clear();
+            }
+            g
+        });
         let goes_at = self.goes_at(&r.id)?;
+        let reported_by = self.reported_by(&r.id)?;
         // The screenshot row in one read, without its images.
         let f = self.shot_facts(&r.id)?;
         let screenshot_at = f.at;
@@ -2375,6 +2447,7 @@ impl Store {
             kept_until,
             pull,
             goes_at,
+            reported_by,
             earlier,
             screenshot_at,
             visual_change,

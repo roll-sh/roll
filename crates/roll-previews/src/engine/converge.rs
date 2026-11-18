@@ -1113,7 +1113,14 @@ impl Engine {
         }
         let view = self.store.preview(&r.id)?;
         // The change hears it went, and how its teardown failed if it did.
-        self.source.forget(&view, self.store.teardown_error(&r.id)?.as_deref()).await;
+        let teardown = self.store.teardown_error(&r.id)?;
+        self.source.forget(&view, teardown.as_deref()).await;
+        // A Git URL service's pull request too, unless another project's preview of it speaks
+        // now (it carries the comment on; saying this one went could land after it).
+        let hands_over = matches!(self.refresh_voice(r), Ok((_, false)));
+        if !hands_over && let Ok(s) = self.store.settings(&r.project_id) {
+            self.report_on_git(&view, &s, Some(teardown.as_deref())).await;
+        }
         // What it cost this month stays counted against the project's budget.
         self.store.add_spend(&r.project_id, crate::store::month_start(self.store.now_ms()?), view.cost.month_to_date_usd)?;
         self.store.remove(&r.id)?;
@@ -1123,6 +1130,7 @@ impl Engine {
         self.usage_read.lock().remove(&r.id);
         self.secrets_told.lock().remove(&r.id);
         self.egress_told.lock().remove(&r.id);
+        self.git_reporting.lock().remove(&r.id);
         self.forget_masks(&r.id);
         info!(preview = %r.id, "previews: deleted");
         Ok(())
@@ -1130,6 +1138,9 @@ impl Engine {
 
     pub(super) async fn report(&self, row: Row) {
         let Ok(s) = self.store.settings(&row.project_id) else { return };
+        // Who speaks for a Git URL service's branch as of now: another project's preview of it
+        // stays on its own sheet (`report_on_git`).
+        let _ = self.refresh_voice(&row);
         if let Ok(mut p) = self.store.view(row) {
             // The open notes, newest first (a few), for the pull request's comment.
             if p.change.is_some() {
@@ -1142,7 +1153,127 @@ impl Engine {
                 }).collect();
             }
             self.source.report(&p, &s).await;
+            self.report_on_git(&p, &s, None).await;
         }
     }
 
+    /// A Git URL service's preview on its repository (Vercel's status and comment): the
+    /// `roll/preview` status on its head and, for a pull request's, the comment edited in place,
+    /// each posted only when it changed (what was posted is kept, so a restart posts nothing new).
+    /// `deleted`: the preview went (its comment says so). Best effort: a failure is logged and
+    /// tried at the next report.
+    pub(super) async fn report_on_git(&self, p: &Preview, s: &crate::Settings, deleted: Option<Option<&str>>) {
+        let (Some(gr), Some(service)) = (self.git_report.get(), p.repo.strip_prefix("git:")) else { return };
+        // Another project speaks for the service: its own preview posts (and says it went).
+        if p.reported_by.is_some() {
+            return;
+        }
+        // One report at a time per preview (what's posted, and the comment's id, read and kept
+        // in turn).
+        let turn = self.git_reporting.lock().entry(p.id.clone()).or_default().clone();
+        let _turn = turn.lock().await;
+        // Only a project that stands for the service speaks for it on its repository (anyone may
+        // put any service on their own canvas: `Workspace::trusts`).
+        let stands = self.workspace.get(roll_workspace::Scope::All, &p.project).is_ok_and(|project| self.workspace.trusts(&project, roll_workspace::Kind::Service, service));
+        if !stands {
+            return;
+        }
+        let Some(mut body) = self.source.git_report_body(p, s, deleted) else { return };
+        // A fork's pull request waits for a writer in roll's sheet (not roll code's
+        // `approve-run`), and nothing of it is linked: it hasn't run.
+        if deleted.is_none() && p.state == State::AwaitingApproval {
+            body.description = "Waiting for a writer to approve running this fork (Approve and run, in roll)".into();
+            body.target_url = None;
+        }
+        let Ok((last_status, comment_id, last_hash)) = self.store.git_report(&p.id) else { return };
+        // The project's own switches, as for a roll code change's (`github.status`, `.comment`).
+        if let Some(state) = body.state.as_ref().filter(|_| s.github.status) {
+            let key = format!("{}:{state}:{}", p.head, body.description);
+            if last_status.as_deref() != Some(key.as_str()) {
+                match gr.status(service, &p.head, state, &body.description, body.target_url.as_deref()).await {
+                    Ok(true) => {
+                        let _ = self.store.set_git_report(&p.id, Some(&key), None);
+                    }
+                    Ok(false) => return,
+                    Err(e) => tracing::warn!(preview = %p.id, error = %e, "previews: a Git URL preview's status"),
+                }
+            }
+        }
+        let Ok(Some(pull)) = self.store.git_pull(&p.id) else { return };
+        if !s.github.comment {
+            return;
+        }
+        // Its repository, as roll apps named it in the pull request's page: the comment's number
+        // and id are that repository's, whatever the service is connected to later.
+        let Some(repo) = pull_repo(&pull.url) else { return };
+        let hash = format!("{:016x}", body.comment.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, x| (h ^ x as u64).wrapping_mul(0x0100_0000_01b3)));
+        if last_hash.as_deref() == Some(hash.as_str()) {
+            return;
+        }
+        // The pull request's comment, whichever project's preview posted it: one per pull request.
+        let comment_id = comment_id.or_else(|| self.store.pull_comment(service, &repo, pull.number).ok().flatten());
+        match gr.comment(service, &repo, pull.number as u64, &body.comment, comment_id.map(|i| i as u64)).await {
+            Ok(Some(id)) => {
+                let _ = self.store.set_git_report(&p.id, None, Some((id as i64, &hash)));
+                let _ = self.store.set_pull_comment(service, &repo, pull.number, id as i64);
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(preview = %p.id, error = %e, "previews: a Git URL preview's pull request comment"),
+        }
+    }
+
+}
+
+impl Engine {
+    /// The project roll code's `POST …/preview` makes a change's preview in, as `(id, name)`: of
+    /// the projects with previews on that stand for `kind r#ref` (`Workspace::trusts`), the one
+    /// that has had it on its canvas longest, then by id.
+    pub fn speaker(&self, kind: roll_workspace::Kind, r#ref: &str) -> Option<(String, String)> {
+        self.workspace
+            .projects_of(kind.as_str(), r#ref)
+            .ok()?
+            .iter()
+            .filter_map(|id| self.workspace.get(roll_workspace::Scope::All, id).ok())
+            .filter(|p| self.workspace.trusts(p, kind, r#ref) && self.store.settings(&p.id).is_ok_and(|s| s.enabled))
+            .filter_map(|p| p.resources.iter().find(|x| x.kind == kind && x.r#ref == r#ref).map(|x| (x.added_at, p.id.clone(), p.name.clone())))
+            .min()
+            .map(|(_, id, name)| (id, name))
+    }
+
+    /// Keeps `row`'s [`crate::Preview::reported_by`] up to date: `(changed, it speaks)`. With no
+    /// speaker at all (its project's previews just turned off) it speaks for itself. Only a Git
+    /// URL service's previews can be quiet: each project with the service on its canvas has its
+    /// own preview of a branch, where a change has one preview (made by its repo's speaker).
+    /// An error (the workspace or the store unread) changes nothing: the voice stored stays.
+    pub(super) fn refresh_voice(&self, row: &Row) -> anyhow::Result<(bool, bool)> {
+        let Some(svc) = row.repo.strip_prefix("git:") else { return Ok((false, true)) };
+        // Of the projects with an active preview of this branch (each stands for the service, or
+        // its preview would be gone), the one that has had the service on its canvas longest:
+        // a project whose rules skip the branch has no preview, so it never silences one that does.
+        let mut speaker: Option<(i64, String, String)> = None;
+        let mut operators = false;
+        for r in self.store.branch_rows(&row.repo, row.branch.as_deref())? {
+            let p = self.workspace.get(roll_workspace::Scope::All, &r.project_id)?;
+            if r.id == row.id {
+                operators = p.owner.is_empty();
+            }
+            let Some(added) = p.resources.iter().find(|x| x.kind == roll_workspace::Kind::Service && x.r#ref == svc).map(|x| x.added_at) else { continue };
+            let key = (added, p.id.clone(), p.name.clone());
+            if speaker.as_ref().is_none_or(|s| key < *s) {
+                speaker = Some(key);
+            }
+        }
+        // Named only on the operator's projects, which see every project: a person's project
+        // never learns another owner's project's name (they're 404s to them).
+        let by = speaker.filter(|(_, id, _)| *id != row.project_id).map(|(_, _, name)| if operators { name } else { "another project".into() });
+        Ok((self.store.set_reported_by(&row.id, by.as_deref())?, by.is_none()))
+    }
+}
+
+/// `owner/name` of a pull request's page (`https://<host>/<owner>/<name>/pull/<n>`).
+fn pull_repo(url: &str) -> Option<String> {
+    let path = url.split_once("://")?.1.split_once('/')?.1;
+    let mut parts = path.split('/');
+    let (owner, name, kind) = (parts.next()?, parts.next()?, parts.next()?);
+    (kind == "pull" && !owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}"))
 }

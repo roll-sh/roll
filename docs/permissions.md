@@ -895,6 +895,10 @@ a SIEM", `roll mcp sinks add https://…`, or `POST /v1/access/audit/sinks {url,
 With accounts (docs/accounts.md), a signed-in person who isn't an admin makes tokens and connects
 MCP clients for themselves, as GitHub's fine-grained tokens act for the person who made them:
 
+- Sudo mode (docs/accounts.md): a token made from a session (a person's, or an admin's) needs a
+  sign-in or a confirmation in the last two hours, else 403 `{code: "reauth_required"}`; the
+  dashboard asks "Confirm it's you" and makes it then. The operator's token and a token's own
+  tokens have no session to prove.
 - `POST /v1/access/tokens` with their session makes a grant with `user: "usr_…"`, and so does the
   consent screen. A token theirs makes is theirs too.
 - **An admin approves what reaches far** (GitHub's organization approval of fine-grained tokens).
@@ -1043,6 +1047,30 @@ and Google mail a sign-in from somewhere new): a leaked token is used from somew
   OAuth client put in a name (Slack's `<!channel>`, Discord's `[label](url)`) is dropped, and Slack
   text is escaped.
 
+## Revoking at once
+
+An incident's cut-off revokes many tokens in one write: `POST /v1/access/tokens/revoke {ids, why}`
+(the operator's; at most 500 ids) revokes every listed token or none (an unknown id refuses the
+lot), puts `why` on each (`revoked_why`), and writes an audit row per token naming who and why.
+roll secrets' reach chooses the ids (the tokens and identities that can read a folder) and calls
+`Access::revoke_many` in process; roll-access never matches scopes a second way for it.
+
+## Decoy tokens
+
+A decoy (a honeytoken, as Thinkst's canary tokens are) is a token made to be found: `POST
+/v1/access/tokens {…, decoy: true}` (the builder's "A decoy"). Plant it where only an intruder would
+look (an old repo, a wiki page, a backup's config):
+
+- It never allows anything, whatever its rules say, and never waits for an admin's approval.
+- Any use answers exactly as a revoked or made-up token does (401 `invalid_token`), so whoever
+  holds it learns nothing, and the gate checks it before anything else (the idle-token rule would
+  otherwise retire a token nobody uses).
+- Each use is written on the token (`last_used_at`, `last_used_ip`), to the audit log
+  (`source: "decoy"`, the route and the client), and mailed to its owner and every admin (once an
+  hour per decoy and person). A decoy can't be turned into a working token.
+- It's checksummed like any `rlt_`, so scanners report a leaked decoy too (roll revokes it, which
+  ends the trap: plant another).
+
 ## Leaked tokens
 
 Other products' secrets made the same way are found and revoked the same way: apps' deploy hooks
@@ -1118,10 +1146,11 @@ Under `/v1/access`. Bodies are JSON; errors are `{"error": string, "code"?: stri
 | `GET /v1/access/catalog` | any grant | products, actions, presets and every classified route |
 | `POST /v1/access/check` | any grant | `{method, path, body?, token?}` → `{decision, product, action, resource, route}`: what the evaluator would decide, without running it (a grant checks itself; the operator names `token`) |
 | `GET /v1/access/tokens` | access read | grants, newest first (no secrets), each with `activity`: its last day's requests `{allowed, denied, asked}`; `?product=` (and `&resource=`) only those with a rule on that product by name (naming that `{id}` or `{project}`), as a product's page lists its own tokens; `?kind=workload` the workload tokens instead |
-| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?}` → 201 `{grant, token}`; `token` is shown this once |
+| `POST /v1/access/tokens` | access admin | `{name, rules, expires_at?, ip_allow?, rate_per_minute?, decoy?}` → 201 `{grant, token}`; `token` is shown this once; `decoy`: a honeytoken ("Decoy tokens"); 403 `reauth_required` from a session without a recent proof |
 | `GET /v1/access/tokens/{id}` | access read | a grant |
 | `PATCH /v1/access/tokens/{id}` | access admin | `{name?, rules?, expires_at?, ip_allow?, rate_per_minute?}`: narrow or widen (within the caller's own); `rate_per_minute: null` takes the limit off |
 | `DELETE /v1/access/tokens/{id}` | access admin | revoke, at once |
+| `POST /v1/access/tokens/revoke` | operator | `{ids, why}`: every listed token revoked at once, all or none (404 for an unknown id), `why` on each → `{revoked: Grant[]}` |
 | `POST /v1/access/requests` | the token itself | `{product, action, resource?, environment?, path?, index?, for, reason}`: ask for one more rule for a while ("Access requests"); `202` the pending approval |
 | `DELETE /v1/access/tokens/{id}/temporary/{approval}` | operator | take back what an approval allowed it for a while, and the approval if its request hasn't used it |
 | `POST /v1/access/tokens/{id}/tighten` | operator | `{from, days?}`: apply the proposal, made again now, if its rules are still `from` (else 409) → the grant |

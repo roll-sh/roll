@@ -390,6 +390,23 @@ phished: a passkey works only on roll's own site.
 - A refused passkey sign-in is in the passkey owner's security log (by `anonymous` when no
   session owed a second factor); adding, renaming and removing one are there too.
 
+### Recovery
+
+Someone who lost their authenticator app and their recovery codes asks an admin to reset their
+second factor, as Okta's and Google Workspace's admins reset factors (`src/recovery.rs`):
+
+- They sign in with their first factor (an email code, GitHub, Google), then, on the
+  second-factor step, ask with a reason: `POST /v1/accounts/signin/reset-request {reason}` (a
+  session owing a second factor; 1–500 characters). Their one pending request is answered again
+  rather than a second made; three a day at most.
+- Every other admin is mailed the request and its reason, with a link to the account page's
+  "Second-factor resets". An admin checks it's them some other way (a call, in person: the email
+  code alone got them this far), then approves or declines (sudo mode; never their own).
+- Approving takes their TOTP and recovery codes away and ends their sign-ins waiting for one;
+  their next sign-in is whole and they set it up again. They're mailed either way, and each step
+  is in their security log (`recovery.request`, `recovery.approve`, `recovery.deny`).
+- Passkeys aren't taken: one still works on its own.
+
 ### New sign-ins
 
 As GitHub does, the first whole sign-in (nothing more owed) from a browser and network a person
@@ -416,7 +433,9 @@ or make someone an admin.
   a sign-in method. From an admin's session: changing a person's `admin` or `disabled`, an invite
   that makes an admin, and adding, changing or removing an SSO connection or its SCIM token. The
   operator's token has no session: it's exempt. Turning TOTP off and new recovery codes already
-  take a code.
+  take a code. Making a roll token from a session (`POST /v1/access/tokens`, a person's or an
+  admin's) needs it too: roll-access asks `roll_auth::Sessions::fresh`, so a stolen cookie can't
+  mint a long-lived token (a token a token makes is within that token).
 - Without a recent proof: 403 `{code: "reauth_required"}`. `GET /v1/accounts/me/reauth` says
   until when the session is fresh and how its person can confirm (`totp`, `passkey`, `email`),
   and `POST /v1/accounts/me/reauth` takes `{code}` (TOTP or a recovery code), `{challenge, code}`
@@ -424,7 +443,8 @@ or make someone an admin.
   proves nothing) or `{id, credential}` (a passkey, from `POST /me/reauth/passkey/options`, only
   their own). It's fresh for another two hours (`sessions.verified_at`).
 - The dashboard asks in place: the change's call answers `reauth_required`, a "Confirm it's you"
-  dialog takes the proof, and the call runs once more (`onReauthRequired` in `accounts-api.ts`).
+  dialog (mounted by the app shell) takes the proof, and the call runs once more (`withReauth` in
+  `lib/reauth.ts`, used by the accounts client and every product's `call` in `roll-api.ts`).
 - Each confirmation, and each refused one, is in the person's security log (`reauth`).
 
 ## Routes
@@ -464,6 +484,7 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | `GET /v1/accounts/sso/{id}/callback` | query `code`, `state` (or `error`) | 303 to the dashboard; `?error=` `unverified_email`, `domain`, `not_invited`, `link_required`, `linked_elsewhere`, `link_email`, `state` or `provider` |
 | `POST /v1/accounts/signin/passkey/options` | | `{id, publicKey}` for `navigator.credentials.get`: with a session owing a second factor, that person's passkeys; without, any (throttled per address); 503 `{code: "passkeys_off"}` |
 | `POST /v1/accounts/signin/passkey` | `{id, credential}` | 200 `SignedIn`, with `Set-Cookie`; 400 `{code: "passkey"}` (unknown, wrong site, unverified, copied, a used or another sign-in's challenge); 403 `{code: "sso_required"}` |
+| `POST /v1/accounts/signin/reset-request` | `{reason}` (a session owing a second factor) | 202 `{id, state, created_at}`: admins are mailed; 401 without a first factor |
 | `POST /v1/accounts/signout` | | 204, clears the cookie and deletes the session (any level; csrf) |
 
 ### Second factor (a session at level `mfa`, csrf)
@@ -504,6 +525,9 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 
 | Route | Body | Answer |
 | --- | --- | --- |
+| `GET /v1/accounts/reset-requests` | | `ResetRequest[]`: `{id, user, email, handle, reason, ip, user_agent, created_at, state, decided_by, decided_at}`, pending first |
+| `POST /v1/accounts/reset-requests/{id}/approve` | | `ResetRequest`: TOTP and recovery codes gone (sudo mode; 403 `own_request` for your own; 409 decided) |
+| `POST /v1/accounts/reset-requests/{id}/deny` | | `ResetRequest` (sudo mode) |
 | `POST /v1/accounts/invites` | `{email, admin?, handle?}` | 201 `Invite & {token, url}` (the token is shown once, and mailed when mail is on); 409 an account has the email |
 | `GET /v1/accounts/invites` | | `Invite[]`, newest first |
 | `DELETE /v1/accounts/invites/{id}` | | 204 (unused invites only; 409 once used) |

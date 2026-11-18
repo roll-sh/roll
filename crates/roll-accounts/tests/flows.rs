@@ -1069,3 +1069,64 @@ async fn a_sign_in_from_somewhere_new_mails_the_person() {
     assert_eq!(mails.len(), 1, "one mail, for the one new place: {mails:?}");
     assert!(mails[0].contains("Firefox on Windows, from 203.0.113.7") && mails[0].contains(&format!("{WEB}/dashboard/account#activity")), "{}", mails[0]);
 }
+
+/// Second-factor recovery (docs/accounts.md, "Recovery"): someone who lost their authenticator app
+/// and recovery codes asks after their email code, admins are mailed, and an admin's approval
+/// takes their TOTP away: their next sign-in is whole and they set it up again. Asked twice it's
+/// one request; decided once; each step in their security log.
+#[tokio::test]
+async fn an_admin_resets_a_lost_second_factor() {
+    let env = Env::new().await;
+    let events = Arc::new(Events::default());
+    env.accounts.set_audit(events.clone());
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@example.com", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let mut root = Browser::default();
+    let root_id = env.email_sign_in(&mut root, "root@example.com", Some(&root_invite)).await.json["user"]["id"].as_str().unwrap().to_string();
+    let bob_invite = env.invite("bob@example.com").await;
+    let mut b = Browser::default();
+    let bob = env.email_sign_in(&mut b, "bob@example.com", Some(&bob_invite)).await.json["user"]["id"].as_str().unwrap().to_string();
+    let t = env.call(&mut b, Method::POST, "/v1/accounts/me/totp", None).await.json;
+    let seed = roll_auth::totp::base32_decode(t["secret"].as_str().unwrap()).unwrap();
+    let step = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 / roll_auth::totp::STEP_S;
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/totp/confirm", Some(json!({ "code": format!("{:06}", roll_auth::totp::totp(&seed, step)) }))).await.status, StatusCode::OK);
+
+    // Bob lost his phone and his codes: his email code gets him as far as the second factor.
+    let mut lost = Browser::default();
+    assert_eq!(env.email_sign_in(&mut lost, "bob@example.com", None).await.json["status"], "mfa_required");
+    let ask = json!({ "reason": "Lost my phone and my codes. Call me on the desk phone." });
+    assert_eq!(env.call(&mut Browser::default(), Method::POST, "/v1/accounts/signin/reset-request", Some(ask.clone())).await.status, StatusCode::UNAUTHORIZED, "a first factor first");
+    let r = env.call(&mut lost, Method::POST, "/v1/accounts/signin/reset-request", Some(ask.clone())).await;
+    assert_eq!((r.status, r.json["state"].as_str()), (StatusCode::ACCEPTED, Some("pending")), "{}", r.json);
+    let id = r.json["id"].as_str().unwrap().to_string();
+    assert_eq!(env.call(&mut lost, Method::POST, "/v1/accounts/signin/reset-request", Some(ask)).await.json["id"], id.as_str(), "one pending request");
+    // Admins are told; Bob can't see or decide requests.
+    let mut told = false;
+    for _ in 0..100 {
+        told = std::fs::read_dir(&env.outbox).unwrap().filter_map(|e| e.ok()).any(|e| {
+            let m: Value = serde_json::from_slice(&std::fs::read(e.path()).unwrap()).unwrap();
+            m["to"] == "root@example.com" && m["subject"] == "bob asks for a second-factor reset" && m["text"].as_str().unwrap().contains("desk phone")
+        });
+        if told {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(told, "the admin was mailed the request and its reason");
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/reset-requests", None).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(env.call(&mut b, Method::POST, &format!("/v1/accounts/reset-requests/{id}/approve"), None).await.status, StatusCode::FORBIDDEN);
+    let listed = env.call(&mut root, Method::GET, "/v1/accounts/reset-requests", None).await.json;
+    assert_eq!((listed[0]["id"].as_str(), listed[0]["handle"].as_str(), listed[0]["state"].as_str()), (Some(id.as_str()), Some("bob"), Some("pending")), "{listed}");
+
+    // Approved: his TOTP is gone, the sign-in waiting for it ends, the next one is whole.
+    let ok = env.call(&mut root, Method::POST, &format!("/v1/accounts/reset-requests/{id}/approve"), None).await;
+    assert_eq!((ok.status, ok.json["state"].as_str(), ok.json["decided_by"].as_str()), (StatusCode::OK, Some("approved"), Some(root_id.as_str())), "{}", ok.json);
+    assert_eq!(env.call(&mut root, Method::POST, &format!("/v1/accounts/reset-requests/{id}/deny"), None).await.status, StatusCode::CONFLICT, "decided once");
+    assert_eq!(env.call(&mut lost, Method::GET, "/v1/accounts/session", None).await.json["status"], "anonymous");
+    let mut again = Browser::default();
+    let whole = env.email_sign_in(&mut again, "bob@example.com", None).await.json;
+    assert_eq!((whole["status"].as_str(), whole["user"]["totp"].as_bool()), (Some("signed_in"), Some(false)), "{whole}");
+
+    let got = events.0.lock().unwrap().clone();
+    let steps: Vec<(String, String, Option<String>)> = got.iter().filter(|e| e.action.starts_with("recovery.")).map(|e| (e.action.clone(), e.actor.clone(), e.target.clone())).collect();
+    assert_eq!(steps, [("recovery.request".to_string(), bob.clone(), Some(bob.clone())), ("recovery.approve".to_string(), root_id.clone(), Some(bob.clone()))]);
+}

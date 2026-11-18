@@ -100,6 +100,8 @@ export interface Preview {
   pull?: { number: number; url: string; fork: boolean; approved_head: string | null; approved_by: string | null };
   /** When it goes (its TTL, or a keep, running out), once that's close (a day ahead). */
   goes_at?: number | null;
+  /** The project that reports a Git URL service's pull request, when another one does (the service is on both canvases; the one that has had it longest speaks). */
+  reported_by?: string | null;
   /** How much the page changed since the screenshot at an earlier head (`since`). */
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
   /** How much its page differs from the project's preview of the default branch. */
@@ -320,6 +322,8 @@ export interface PreviewSettings {
   paths: string[];
   /** …that none of these match. */
   ignore_paths: string[];
+  /** Globs on a change's author (a pull request's GitHub login, `*[bot]`): skipped unless asked. */
+  skip_authors?: string[];
   /** `"<kind>:<ref>"` → mode; resources not listed get `data`. A patch replaces the whole map. */
   resources: Record<string, ResourceRule>;
   data: "branch" | "schema";
@@ -488,6 +492,8 @@ export const previewsApi = {
   reset: (id: string, resources?: string[]) => call<Preview>("POST", `${one(id)}/reset`, resources?.length ? { resources } : {}),
   /** Its latest requests through roll, newest first (roll's runtime; a roll apps instance's are roll apps'). */
   requests: (id: string) => call<{ requests: RequestLine[] }>("GET", `${one(id)}/requests`),
+  /** What its running services use right now (cores of CPU, resident memory, the memory each runs with). */
+  metrics: (id: string) => call<{ services: ServiceMetrics[] }>("GET", `${one(id)}/metrics`),
   logs: (id: string, opts: { service?: string; lines?: number } = {}) =>
     call<{ service: string; lines: string[] }>("GET", `${one(id)}/logs${query(opts)}`),
   /** Newest first. */
@@ -526,6 +532,9 @@ export function parseSse(rest: string, text: string): { events: { event: string;
   });
   return { events, rest: left };
 }
+
+/** A running service's use right now: cores of CPU, resident bytes (an instance's, on roll apps), and the MB it runs with. */
+export type ServiceMetrics = { service: string; cpu: number; memory_bytes: number; memory_mb: number };
 
 /** A request to a preview's service through roll: when (ms), the method, the path (never the query), the status, ms until the answer's headers. */
 export type RequestLine = { at: number; service: string; method: string; path: string; status: number; ms: number };

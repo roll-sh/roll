@@ -53,6 +53,9 @@ pub enum Error {
     Conflict(String),
     #[error("{0}")]
     TooMany(String),
+    /// Sudo mode: the session must prove who it is again first (403 `reauth_required`).
+    #[error("{0}")]
+    ReauthRequired(String),
     /// An OAuth error (RFC 6749 §5.2): its code and description.
     #[error("{1}")]
     OAuth(&'static str, String),
@@ -71,6 +74,7 @@ impl IntoResponse for Error {
             Error::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             Error::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             Error::TooMany(_) => (StatusCode::TOO_MANY_REQUESTS, "too_many"),
+            Error::ReauthRequired(_) => (StatusCode::FORBIDDEN, "reauth_required"),
             Error::OAuth(code, desc) => {
                 let status = if *code == "invalid_client" { StatusCode::UNAUTHORIZED } else { StatusCode::BAD_REQUEST };
                 return (status, [("cache-control", "no-store")], Json(serde_json::json!({ "error": code, "error_description": desc }))).into_response();
@@ -128,6 +132,7 @@ mod policy_tests {
             approved_at: None,
             decided_by: None,
             hint: None,
+            decoy: false,
             ip_allow: vec![],
             created_by: "operator".into(),
             created_at: created,
@@ -845,6 +850,47 @@ impl Access {
                 tracing::warn!(error = %e, "mailing a token's person");
             }
         });
+    }
+
+    /// A decoy token was used (docs/permissions.md, "Decoy tokens"): when and from where on the
+    /// token, an audit row, and its owner and the admins told (once an hour per decoy and person).
+    pub fn decoy_tripped(self: &Arc<Self>, g: &store::Grant, ip: Option<String>, route: &str, client: Option<String>) {
+        tracing::warn!(grant = %g.id, route = %route, "a decoy token was used");
+        if let Err(e) = self.store.tripped(&g.id, ip.as_deref()) {
+            tracing::warn!(error = %e, "noting a decoy's use");
+        }
+        self.store.audit(&store::AuditEvent {
+            id: new_id("aud"),
+            at: code_sql::now_ms(),
+            grant_id: Some(g.id.clone()),
+            grant_name: Some(g.name.clone()),
+            source: "decoy".into(),
+            tool: None,
+            method: "-".into(),
+            route: route.chars().take(200).collect(),
+            product: None,
+            action: None,
+            resource: None,
+            decision: "decoy".into(),
+            approval: None,
+            status: 401,
+            args: None,
+            ip: ip.clone(),
+            duration_ms: 0,
+            client: client.clone(),
+        });
+        let name = mail_name(&g.name);
+        let from = ip.as_deref().map(|i| format!(" from {i}")).unwrap_or_default();
+        let subject = format!("A decoy token was used: \"{name}\"");
+        let text = format!(
+            "Someone used roll's decoy token \"{name}\" ({}){from}, calling {route}. Nobody should ever use it: whoever did found it where it was planted. Nothing was allowed, and they were told it isn't a valid token.\n\nIts page has when and from where: {}/dashboard/access/tokens/{}\n",
+            g.id,
+            self.web_url(),
+            g.id,
+        );
+        let key = format!("decoy:{}", g.id);
+        self.tell(g.user.as_deref(), Some((&key, 3_600_000)), subject.clone(), text.clone());
+        self.tell_admins(&key, subject, text);
     }
 
     /// A token used from a network it hasn't been before, told where approvals go (GitHub and

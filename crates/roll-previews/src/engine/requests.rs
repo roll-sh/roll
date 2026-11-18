@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// How long a preview's metrics are kept before they're read again (ms).
+const METRICS_FOR: i64 = 10_000;
+
 /// The least time between two rebuilds by one deploy hook (ms).
 pub const HOOK_EVERY: i64 = 60_000;
 
@@ -69,7 +72,9 @@ impl Engine {
     /// A preview for `branch` of `repo` (or for change `change`), made by hand.
     pub async fn create(&self, project_id: &str, repo: &str, branch: Option<&str>, change: Option<&str>, by: &str) -> Result<(Preview, bool)> {
         let project = self.workspace.get(roll_workspace::Scope::All, project_id)?;
-        if !project.resources.iter().any(|r| r.kind == roll_workspace::Kind::Repo && r.r#ref == repo) {
+        // Only a repo the project stands for (`Workspace::trusts`), as for the previews it makes
+        // itself: anyone may put any repo on their own canvas, and a preview builds and runs it.
+        if !project.resources.iter().any(|r| r.kind == roll_workspace::Kind::Repo && r.r#ref == repo) || !self.workspace.trusts(&project, roll_workspace::Kind::Repo, repo) {
             return Err(Error::NotFound(format!("{repo} isn't in project {}", project.name)));
         }
         let s = self.store.settings(project_id)?;
@@ -86,7 +91,12 @@ impl Engine {
                 if !c.open {
                     return Err(Error::Conflict(format!("change {id} has landed or closed")));
                 }
+                // A change has one preview: this project's is answered, another's never (it's
+                // another project's, perhaps another owner's).
                 if let Some(existing) = self.store.row_by_change(id)? {
+                    if existing.project_id != project_id {
+                        return Err(Error::Conflict(format!("change {id} already has a preview in another project")));
+                    }
                     return Ok((self.store.view(existing)?, false));
                 }
                 self.store.undismiss(id)?;
@@ -199,7 +209,7 @@ impl Engine {
                 (None, None) => {}
                 (Some(sha), Some(r)) => {
                     if let Some(pl) = &p.pull {
-                        self.store.set_git_pull(&r.id, pl.number as i64, https_only(&pl.url), pl.fork, sha)?;
+                        self.store.set_git_pull(&r.id, pl.number as i64, kept_url(&pl.url), pl.fork, sha)?;
                     }
                     let title = pull_title.clone().filter(|t| !t.is_empty() && *t != r.title);
                     if r.head != *sha || title.is_some() || (fork && r.trusted) {
@@ -258,7 +268,7 @@ impl Engine {
                     };
                     let (row, _) = self.store.create(&n)?;
                     if let Some(pl) = &p.pull {
-                        self.store.set_git_pull(&row.id, pl.number as i64, https_only(&pl.url), pl.fork, sha)?;
+                        self.store.set_git_pull(&row.id, pl.number as i64, kept_url(&pl.url), pl.fork, sha)?;
                     }
                     if fork {
                         self.store.log(&row.id, &format!("pull request #{} is from a fork: it runs once a writer approves {}", p.pull.as_ref().map_or(0, |pl| pl.number), short(sha)))?;
@@ -589,6 +599,30 @@ impl Engine {
         Ok(lines)
     }
 
+    /// What its services use right now (on its holder, which runs them): the running ones. Read
+    /// at most once per [`METRICS_FOR`] (each read is a `docker stats` or a roll apps call per
+    /// service), whoever asks.
+    pub async fn metrics(&self, id: &str) -> Result<Vec<crate::ServiceMetrics>> {
+        self.store.row(id)?;
+        let now = self.store.now_ms()?;
+        if let Some((at, m)) = self.metrics_read.lock().get(id)
+            && now - at < METRICS_FOR
+        {
+            return Ok(m.clone());
+        }
+        let services = self.store.services(id)?;
+        let got = futures::future::join_all(services.iter().map(|s| self.apps.metrics(id, &s.name))).await;
+        let m: Vec<crate::ServiceMetrics> = services
+            .into_iter()
+            .zip(got)
+            .filter_map(|(s, m)| m.map(|(cpu, memory_bytes)| crate::ServiceMetrics { service: s.name, cpu, memory_bytes, memory_mb: s.memory_mb }))
+            .collect();
+        let mut read = self.metrics_read.lock();
+        read.retain(|_, (at, _)| now - *at < METRICS_FOR);
+        read.insert(id.to_string(), (now, m.clone()));
+        Ok(m)
+    }
+
     pub async fn logs(&self, id: &str, service: Option<&str>, lines: usize) -> Result<(String, Vec<String>)> {
         let services = self.store.services(id)?;
         let svc = match service {
@@ -678,8 +712,11 @@ pub fn resume_at(before: &[String], now: &[String]) -> Option<usize> {
 
 /// A pull request's link as the sheet may show it: `https://` only (`""` otherwise), so a link
 /// can't run script.
-fn https_only(url: &str) -> &str {
-    if url.starts_with("https://") && !url.chars().any(char::is_whitespace) { url } else { "" }
+/// A pull request's page as roll apps built it (from the service's source and the number), kept
+/// to tell its repository (`pull_repo`): whole when it's one printable URL of at most 500
+/// bytes. Shown as a link only when `https://` (the preview's view).
+fn kept_url(url: &str) -> &str {
+    if url.len() <= 500 && url.contains("://") && !url.chars().any(|c| c.is_whitespace() || c.is_control()) { url } else { "" }
 }
 
 #[cfg(test)]

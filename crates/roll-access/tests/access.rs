@@ -34,7 +34,7 @@ impl Resolver for DefaultBranch {
 /// Signed-in people: a cookie `rls_<user>` is that user's session; a user taken out is disabled.
 /// The people accounts knows, what they've been mailed (`user: subject`), and its SSO connections.
 #[derive(Default)]
-struct People(std::sync::Mutex<std::collections::HashMap<String, roll_auth::SignedIn>>, std::sync::Mutex<Vec<String>>, std::sync::Mutex<std::collections::HashMap<String, roll_auth::SsoTrust>>);
+struct People(std::sync::Mutex<std::collections::HashMap<String, roll_auth::SignedIn>>, std::sync::Mutex<Vec<String>>, std::sync::Mutex<std::collections::HashMap<String, roll_auth::SsoTrust>>, std::sync::Mutex<std::collections::HashSet<String>>);
 
 impl People {
     fn add(&self, user: &str, handle: &str) {
@@ -82,6 +82,11 @@ impl roll_auth::Sessions for People {
     fn sso_trust<'a>(&'a self, id: &'a str) -> roll_auth::BoxFuture<'a, Result<Option<roll_auth::SsoTrust>, String>> {
         let t = self.2.lock().unwrap().get(id).cloned();
         Box::pin(async move { Ok(t) })
+    }
+    /// Fresh unless the test made the person's sessions stale.
+    fn fresh<'a>(&'a self, user: &'a str, _session: &'a str) -> roll_auth::BoxFuture<'a, Result<bool, String>> {
+        let stale = self.3.lock().unwrap().contains(user);
+        Box::pin(async move { Ok(!stale) })
     }
     fn admins(&self) -> roll_auth::BoxFuture<'_, Result<Vec<String>, String>> {
         Box::pin(async { Ok(vec!["usr_root".to_string()]) })
@@ -2429,4 +2434,79 @@ async fn an_enterprise_idp_signs_a_person_in_to_an_app() {
     // Removing the app ends its people's tokens (alice's and root's; bob's was revoked already).
     assert_eq!(d.call(OPERATOR, Method::DELETE, &format!("/v1/access/enterprise/apps/{client_id}"), None).await.1["revoked"], 2);
     assert_eq!(d.call(&token2, Method::GET, "/v1/access", None).await.0, StatusCode::UNAUTHORIZED);
+}
+
+/// Sudo mode (docs/accounts.md): a token made from a person's session needs a recent proof; the
+/// operator's token, which has no session, doesn't.
+#[tokio::test]
+async fn a_token_from_a_session_needs_a_recent_proof() {
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
+    d.people.3.lock().unwrap().insert("usr_alice".into());
+    let (s, e) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "ci", "rules": rules }))).await;
+    assert_eq!((s, e["code"].as_str()), (StatusCode::FORBIDDEN, Some("reauth_required")), "{e}");
+    assert_eq!(d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": "ci", "rules": rules }))).await.0, StatusCode::CREATED);
+    d.people.3.lock().unwrap().clear();
+    assert_eq!(d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "ci", "rules": rules }))).await.0, StatusCode::CREATED);
+}
+
+/// An incident's cut-off (docs/permissions.md, "Revoking at once"): every listed token at once,
+/// with why, all or none; the operator's only.
+#[tokio::test]
+async fn tokens_are_revoked_at_once_or_not_at_all() {
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow" } }]);
+    let mut made = Vec::new();
+    for name in ["ci", "deploy", "kept"] {
+        let (_, g) = d.call(OPERATOR, Method::POST, "/v1/access/tokens", Some(json!({ "name": name, "rules": rules }))).await;
+        made.push((g["grant"]["id"].as_str().unwrap().to_string(), g["token"].as_str().unwrap().to_string()));
+    }
+    let ids = |i: &[usize]| json!(i.iter().map(|&n| made[n].0.clone()).collect::<Vec<_>>());
+    // An unknown id refuses the lot.
+    let (s, _) = d.call(OPERATOR, Method::POST, "/v1/access/tokens/revoke", Some(json!({ "ids": [made[0].0, "grt_nope"], "why": "incident 42" }))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(d.call(&made[0].1, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK, "nothing was revoked");
+    // Not a person's, not a token's.
+    assert_eq!(d.as_user("usr_alice", Method::POST, "/v1/access/tokens/revoke", Some(json!({ "ids": ids(&[0]), "why": "x" }))).await.0, StatusCode::FORBIDDEN);
+    let (s, r) = d.call(OPERATOR, Method::POST, "/v1/access/tokens/revoke", Some(json!({ "ids": ids(&[0, 1]), "why": "incident 42: the CI box leaked" }))).await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert!(r["revoked"].as_array().unwrap().iter().all(|g| g["revoked_why"] == "incident 42: the CI box leaked" && g["revoked_at"].is_i64()), "{r}");
+    assert_eq!(d.call(&made[0].1, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(d.call(&made[1].1, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(d.call(&made[2].1, Method::GET, "/v1/workspace/projects", None).await.0, StatusCode::OK, "only the listed ones");
+}
+
+/// A decoy token (docs/permissions.md, "Decoy tokens"): it never allows anything, answers as an
+/// unknown token does, and its use is in the audit log, on the token, and in the admins' mail.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_decoy_token_allows_nothing_and_gives_its_user_away() {
+    let d = Daemon::new(50);
+    d.people.add("usr_alice", "alice");
+    // A person's decoy never waits for an admin, whatever its rules (they're never used).
+    assert_eq!(d.call(OPERATOR, Method::PUT, "/v1/access/policy", Some(json!({ "approve_people": ["reveal", "admin"] }))).await.0, StatusCode::OK);
+    let rules = json!([{ "product": "workspace", "resources": "*", "actions": { "read": "allow", "admin": "allow" } }]);
+    let (s, g) = d.as_user("usr_alice", Method::POST, "/v1/access/tokens", Some(json!({ "name": "aws creds in the old wiki", "rules": rules, "decoy": true }))).await;
+    assert_eq!(s, StatusCode::CREATED, "{g}");
+    assert_eq!((g["grant"]["decoy"].as_bool(), g["grant"].get("pending")), (Some(true), None), "{g}");
+    let (id, token) = (g["grant"]["id"].as_str().unwrap().to_string(), g["token"].as_str().unwrap().to_string());
+    // Used: refused as a revoked or made-up token is, word for word.
+    let (s, used) = d.call(&token, Method::GET, "/v1/workspace/projects", None).await;
+    let (_, unknown) = d.call(&roll_access::new_secret("rlt_"), Method::GET, "/v1/workspace/projects", None).await;
+    assert_eq!((s, &used), (StatusCode::UNAUTHORIZED, &unknown));
+    // It's on the token and in the audit log; the admins and its owner are told.
+    let (_, got) = d.call(OPERATOR, Method::GET, &format!("/v1/access/tokens/{id}"), None).await;
+    assert!(got["last_used_at"].is_i64(), "{got}");
+    let (_, log) = d.call(OPERATOR, Method::GET, "/v1/access/audit?limit=50", None).await;
+    assert!(log.as_array().unwrap().iter().any(|e| e["source"] == "decoy" && e["grant_id"] == id.as_str() && e["route"] == "/v1/workspace/projects"), "{log}");
+    let mut told = Vec::new();
+    for _ in 0..100 {
+        told = d.people.1.lock().unwrap().clone();
+        if told.iter().any(|t| t.starts_with("usr_root: A decoy token was used")) && told.iter().any(|t| t.starts_with("usr_alice: A decoy token was used")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(told.iter().any(|t| t.starts_with("usr_root: A decoy token was used")) && told.iter().any(|t| t.starts_with("usr_alice: A decoy token was used")), "{told:?}");
 }

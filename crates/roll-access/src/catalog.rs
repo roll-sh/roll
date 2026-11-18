@@ -284,6 +284,7 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/policy", "the rules for every token are the operator's"),
     ("/v1/access/enterprise", "which identity providers roll trusts is the operator's"),
     ("/v1/access/enterprise/idps", "which identity providers roll trusts is the operator's"),
+    ("/v1/access/tokens/revoke", "an incident's cut-off of many tokens at once is the operator's"),
     ("/v1/access/enterprise/apps", "which apps an identity provider may sign people in to is the operator's"),
     ("/v1/access/enterprise/apps/{id}", "which apps an identity provider may sign people in to is the operator's"),
     ("/v1/access/enterprise/apps/{id}/rotate", "an enterprise app's credential is the operator's"),
