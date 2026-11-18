@@ -1195,7 +1195,7 @@ export const appsApi = {
 
   /** A shell in a running instance over HTTP (a browser can't send the token on a WebSocket). */
   /** `instance`: that one (default: one that's running, or a woken one). */
-  openShell: (id: string, e: string, body: { cols: number; rows: number; instance?: string }) => call<{ id: string }>("POST", `${env(id, e)}/shell/sessions`, body),
+  openShell: (id: string, e: string, body: { cols: number; rows: number; instance?: string; console?: boolean; command?: string; cpu?: number; memory_mb?: number }) => call<{ id: string }>("POST", `${env(id, e)}/shell/sessions`, body),
   /** The environment's last finished minute as Prometheus text, for a scraper with a token that may read it. */
   prometheusUrl: (id: string, e: string) => `${ROLL_API}${env(id, e)}/metrics?format=prometheus`,
   shellKeys: (id: string, e: string, sh: string, data: string) => call<null>("POST", `${env(id, e)}/shell/sessions/${encodeURIComponent(sh)}/keys`, { data }),

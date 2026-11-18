@@ -2376,6 +2376,33 @@ async fn a_shell_wakes_the_service_and_carries_the_terminal_both_ways() {
     assert_eq!(call(&w.api, "DELETE", &format!("{base}/{sh}"), None).await.0, StatusCode::NO_CONTENT);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(call(&w.api, "POST", &format!("{base}/{sh}/keys"), Some(json!({"data": b64.encode("x")}))).await.0, StatusCode::NOT_FOUND, "closed");
+    // A one-off console (Heroku's `heroku run bash`): a fresh container of the live deployment
+    // with what's asked running in it, the serving instances untouched, gone when it closes.
+    let before: Vec<String> = w.fake.instances(&id).into_iter().map(|(n, _, _)| n).collect();
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"command": "rails console"}))).await.0, StatusCode::BAD_REQUEST, "a command is a console's");
+    assert_eq!(call(&w.api, "POST", &base, Some(json!({"console": true, "memory_mb": 64}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, open) = call(&w.api, "POST", &base, Some(json!({"console": true, "command": "rails console", "memory_mb": 1024}))).await;
+    assert_eq!(st, StatusCode::CREATED, "{open}");
+    let sh = open["id"].as_str().unwrap().to_string();
+    let resp = w.api.clone().oneshot(Request::get(format!("{base}/{sh}/screen")).body(Body::empty()).unwrap()).await.unwrap();
+    let mut body = resp.into_body();
+    let banner = sse_chunk(&mut body).await;
+    assert!(banner.contains("-console") && banner.contains("running rails console"), "{banner}");
+    let console = w.fake.instances(&id).into_iter().map(|(n, _, _)| n).find(|n| n.contains("console")).expect("its own container");
+    assert_eq!(w.fake.spec(&console).map(|s| (s.memory_mb, s.port)), Some((1024, None)), "its size, no port");
+    assert!(before.iter().all(|n| w.fake.instances(&id).iter().any(|(m, _, _)| m == n)), "the serving instances are untouched");
+    assert_eq!(call(&w.api, "DELETE", &format!("{base}/{sh}"), None).await.0, StatusCode::NO_CONTENT);
+    let mut gone = false;
+    for _ in 0..100 {
+        if !w.fake.instances(&id).iter().any(|(n, _, _)| *n == console) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(gone, "the console's container goes with it");
+    let (_, trail) = call(&w.api, "GET", &format!("/v1/apps/services/{id}/activity"), None).await;
+    assert!(trail.to_string().contains("audit.console.opened") && !trail.to_string().contains("rails console"), "{trail}");
 }
 
 /// The next base64 event of an SSE body, decoded.
