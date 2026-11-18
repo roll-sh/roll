@@ -1481,7 +1481,7 @@ type Settings = {
   last seen, the service and its title, opening to its newest sample; the last hour, 6 or 24),
   plus a "Previews" overlay on the canvas that draws each
   preview's branches next to their parents.
-- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|activity|settings|usage|bypass|wait`.
+- **CLI**: `roll preview ls|show|open|create|rm|sleep|wake|refresh|reset|keep|logs [-f]|errors|activity|settings|usage|bypass|wait`.
   For CI outside GitHub, `roll preview wait --change chg_…` (or `create … --wait`) blocks until
   the preview is ready and prints its URL (`--service` for another), exiting 1 if it fails, is
   deleted or isn't ready within `--timeout` (600 s): the next step tests that URL with the

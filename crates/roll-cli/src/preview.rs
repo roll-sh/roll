@@ -177,6 +177,13 @@ pub enum Preview {
     },
     /// What a project's previews cost.
     Usage { project: String },
+    /// A preview's errors, grouped (stack traces joined, the same error counted once), newest
+    /// first, masked as its logs are. `--minutes`: how far back (default 60, up to 1440).
+    Errors {
+        preview: String,
+        #[arg(long, default_value_t = 60)]
+        minutes: u32,
+    },
     /// The secret CI sends (header `x-roll-preview-bypass`) to reach a project's private
     /// previews: shows whether there is one, `--rotate` makes a new one (printed once), `--off`
     /// removes it.
@@ -697,6 +704,20 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                     }
                     (None, true) => println!("a bypass secret is set (made {}); --rotate makes a new one", s(&v["created_at"])),
                     (None, false) => println!("no bypass secret; --rotate makes one"),
+                }
+                return Ok(());
+            }
+            v
+        }
+        Preview::Errors { preview, minutes } => {
+            let v = api.get(&format!("/v1/previews/{preview}/errors?minutes={minutes}")).await?;
+            if !as_json {
+                let groups = v["groups"].as_array().cloned().unwrap_or_default();
+                if groups.is_empty() {
+                    println!("no errors in the last {} minutes", v["minutes"].as_u64().unwrap_or(minutes as u64));
+                }
+                for g in groups {
+                    println!("{:>5}x  {:>8}  {:<12} {}", g["count"], ago(g["last_seen"].as_i64().unwrap_or(0) / 1000), s(&g["service"]), s(&g["title"]));
                 }
                 return Ok(());
             }
