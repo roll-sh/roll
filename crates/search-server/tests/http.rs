@@ -316,9 +316,12 @@ async fn the_nodes_service_token_file_signs_in_only_to_the_clusters_it_names() {
     let t = start(NodeConfig { domain: Some("search.test".into()), node_settings, ..NodeConfig::default() }, ListenOptions::default()).await;
     let addr = t.addr;
     let authenticate = |cluster: &str| {
-        let host = format!("{cluster}.search.test");
-        let bearer = format!("Bearer {token}");
-        async move { send(addr, "GET", "/_security/_authenticate", &[("Host", &host), ("Authorization", &bearer)], b"").await }
+        let raw = format!("GET /_security/_authenticate HTTP/1.1\r\nHost: {cluster}.search.test\r\nAuthorization: Bearer {token}\r\n\r\n");
+        async move {
+            let mut s = TcpStream::connect(addr).await.unwrap();
+            s.write_all(raw.as_bytes()).await.unwrap();
+            read_response(&mut s, &mut Vec::new(), false).await
+        }
     };
     let r = authenticate("c1").await;
     assert_eq!(r.status, 200, "{}", r.text());
