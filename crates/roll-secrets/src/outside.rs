@@ -121,47 +121,8 @@ struct Opened {
     group: Option<String>,
 }
 
-/// Which role is handed out next, and each role's generation.
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct State {
-    next: usize,
-    generation: BTreeMap<String, u64>,
-    /// Roles an issue or a retirement is changing right now, until (unix ms): nothing else takes them.
-    #[serde(default)]
-    held: BTreeMap<String, i64>,
-}
-
-/// How long an issue or a retirement holds a role: past its connection's timeout (15 s) and the
-/// write that stores what it issued, after which the stored credential or lease keeps it busy. A
-/// hold outlives a crash between the two by no more than this.
-const HOLD_MS: i64 = 2 * 60_000;
-
-/// The roles nobody may take now: the one a stored credential uses, any an unrevoked lease still
-/// covers (a retired one in its grace), and any held by an issue or retirement in flight.
-fn busy(c: &code_sql::Conn<'_>, id: &str, st: &State, now: i64) -> Result<std::collections::BTreeSet<String>> {
-    let like = (format!("%\"kind\":\"{KIND}\"%"), format!("%\"ref\":\"{id}\"%"));
-    let mut out: std::collections::BTreeSet<String> = st.held.iter().filter(|(_, until)| **until > now).map(|(r, _)| r.clone()).collect();
-    let stored: Vec<String> = c.query("SELECT link_state FROM secrets WHERE link_state IS NOT NULL AND link LIKE ? AND link LIKE ?", params![like.0, like.1], |r| r.get(0))?;
-    let leased: Vec<String> = c.query("SELECT handle FROM leases WHERE revoked_at IS NULL AND link LIKE ? AND link LIKE ?", params![like.0, like.1], |r| r.get(0))?;
-    for (text, inner) in stored.iter().map(|t| (t, true)).chain(leased.iter().map(|t| (t, false))) {
-        let v: Json = serde_json::from_str(text).unwrap_or_default();
-        let handle = if inner { &v["handle"] } else { &v };
-        if let Some(role) = handle["role"].as_str() {
-            out.insert(role.to_string());
-        }
-    }
-    Ok(out)
-}
-
-fn state_of(c: &code_sql::Conn<'_>, id: &str) -> Result<State> {
-    let s: String = c.query_row("SELECT state FROM outside_dbs WHERE id = ?", [id], |r| r.get(0))?;
-    Ok(serde_json::from_str(&s).unwrap_or_default())
-}
-
-fn save(c: &code_sql::Conn<'_>, id: &str, st: &State) -> Result<()> {
-    c.execute("UPDATE outside_dbs SET state = ? WHERE id = ?", params![serde_json::to_string(st).expect("state"), id])?;
-    Ok(())
-}
+/// Its two roles take turns (turns.rs), named `role` in a credential's handle.
+const TURNS: crate::turns::Turns = crate::turns::Turns { table: "outside_dbs", kind: KIND, key: "role" };
 
 /// Where a URL points (`host:port`, or a list for MongoDB), cut the way the drivers cut it. A user
 /// name or password holding `/`, `?` or `#` unencoded is refused (parsers disagree on where it
@@ -326,24 +287,6 @@ impl Provider {
         let parts = BTreeMap::from([("username".to_string(), Value::new(name.clone())), ("password".to_string(), pw)]);
         Ok(Issued { parts, handle: json!({ "login": name }) })
     }
-
-    fn state(&self, id: &str) -> Result<State> {
-        self.db.read(|c| state_of(c, id))
-    }
-
-    /// `role` (at `generation`, unless another issue took it since) is next to hand out.
-    fn free(&self, id: &str, role: &str, generation: u64, idx: usize, to: u64) -> Result<()> {
-        self.db.write(|c| {
-            let mut st = state_of(c, id)?;
-            if st.generation.get(role).copied() == Some(generation) {
-                st.next = idx;
-                st.generation.insert(role.to_string(), to);
-                st.held.remove(role);
-                save(c, id, &st)?;
-            }
-            Ok(())
-        })
-    }
 }
 
 impl LinkProvider for Provider {
@@ -377,33 +320,9 @@ impl LinkProvider for Provider {
         if roles.len() != 2 {
             return Err(Error::Link(format!("database {ref} needs two roles to take turns", ref = r#ref)));
         }
-        // Claim a free role first (the database only): never the one in use, one still in its
-        // grace, or one another issue or retirement is changing.
-        let now = self.db.now_ms()?;
-        let (idx, role, generation) = self.db.write(|c| {
-            let mut st = state_of(c, r#ref)?;
-            let busy = busy(c, r#ref, &st, now)?;
-            let idx = [st.next % 2, (st.next + 1) % 2].into_iter().find(|i| !busy.contains(&roles[*i])).ok_or_else(|| {
-                Error::Conflict("in_use", format!("both of {}'s roles are in use: one serves the current login, the other is still in its grace period (or another rotation is running). Rotate again once the grace ends", roles.join(" and ")))
-            })?;
-            let role = roles[idx].clone();
-            st.next = (idx + 1) % 2;
-            let g = st.generation.entry(role.clone()).or_default();
-            *g += 1;
-            let generation = *g;
-            st.held.insert(role.clone(), now + HOLD_MS);
-            save(c, r#ref, &st)?;
-            Ok::<_, Error>((idx, role, generation))
-        })?;
-        let pw = Value::new(password());
-        if let Err(why) = self.outside.set_password(url.expose(), ca.as_deref(), &role, pw.expose()) {
-            // The role kept its password: give the turn back, or the next issue would take the
-            // role in use.
-            self.free(r#ref, &role, generation, idx, generation - 1)?;
-            return Err(Error::Link(format!("setting {role}'s password: {why}")));
-        }
-        let parts = BTreeMap::from([("username".to_string(), Value::new(role.clone())), ("password".to_string(), pw)]);
-        Ok(Issued { parts, handle: json!({ "role": role, "generation": generation }) })
+        let (role, pw, handle) = TURNS.issue(&self.db, r#ref, &roles, password, |role, pw| self.outside.set_password(url.expose(), ca.as_deref(), role, pw))?;
+        let parts = BTreeMap::from([("username".to_string(), Value::new(role)), ("password".to_string(), pw)]);
+        Ok(Issued { parts, handle })
     }
 
     /// After the grace period: the old role's password replaced by one nobody knows, unless the
@@ -413,37 +332,8 @@ impl LinkProvider for Provider {
             let o = self.open(r#ref)?;
             return self.outside.drop_login(o.url.expose(), o.ca.as_deref(), login).map_err(|why| Error::Link(format!("dropping {login}: {why}")));
         }
-        let (Some(role), Some(generation)) = (handle["role"].as_str(), handle["generation"].as_u64()) else { return Ok(()) };
-        if self.state(r#ref)?.generation.get(role).copied() != Some(generation) {
-            return Ok(());
-        }
         let Opened { url, ca, roles, .. } = self.open(r#ref)?;
-        // Hold it while its password changes, so no issue takes it halfway.
-        let now = self.db.now_ms()?;
-        let held = self.db.write(|c| {
-            let mut st = state_of(c, r#ref)?;
-            if st.generation.get(role).copied() != Some(generation) {
-                return Ok::<_, Error>(false);
-            }
-            st.held.insert(role.to_string(), now + HOLD_MS);
-            save(c, r#ref, &st)?;
-            Ok(true)
-        })?;
-        if !held {
-            return Ok(());
-        }
-        if let Err(why) = self.outside.set_password(url.expose(), ca.as_deref(), role, &password()) {
-            self.db.write(|c| {
-                let mut st = state_of(c, r#ref)?;
-                st.held.remove(role);
-                save(c, r#ref, &st)
-            })?;
-            return Err(Error::Link(format!("retiring {role}'s password: {why}")));
-        }
-        // Its latest handout is gone (a grace that ended, or an issue whose write failed): it's
-        // the role to hand out next, never the other, which may be in use.
-        let idx = roles.iter().position(|r| r == role).unwrap_or(0);
-        self.free(r#ref, role, generation, idx, generation)
+        TURNS.retire(&self.db, r#ref, &roles, handle, password, |role, pw| self.outside.set_password(url.expose(), ca.as_deref(), role, pw))
     }
 
     /// A dynamic login lives as long as its renewed lease.
@@ -503,7 +393,7 @@ impl Secrets {
             }
             c.execute(
                 "INSERT INTO outside_dbs (id, project_id, name, host, url, ca, roles, grp, state, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![id, project, d.name, d.host, sealed, d.ca, serde_json::to_string(&d.roles).expect("roles"), d.group, serde_json::to_string(&State::default()).expect("state"), now, d.created_by],
+                params![id, project, d.name, d.host, sealed, d.ca, serde_json::to_string(&d.roles).expect("roles"), d.group, crate::turns::Turns::initial(), now, d.created_by],
             )?;
             audit::record(c, project, caller, "outside_db.add", None, None, &[], &format!("added database {} ({})", d.name, d.host), now)
         })?;

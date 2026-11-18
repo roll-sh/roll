@@ -389,6 +389,68 @@ impl roll_secrets::github_app::GitHubApps for FakeGitHub {
     }
 }
 
+/// A fake directory's entry: its password, groups and description.
+type Entry = (String, Vec<String>, String);
+
+/// An LDAP directory outside roll: its entries (DN → password, groups, description), the binds it
+/// proved, and a flag that fails a new user's group membership after making the user.
+#[derive(Default)]
+struct FakeDirectory {
+    entries: Mutex<BTreeMap<String, Entry>>,
+    binds: std::sync::atomic::AtomicUsize,
+    fail_groups: std::sync::atomic::AtomicBool,
+}
+
+impl FakeDirectory {
+    fn bound(&self, b: &roll_secrets::directories::Bind<'_>) -> Result<(), String> {
+        if b.url != "ldaps://ldap.example:636" || b.bind_password != "fake-bind-pw" {
+            return Err("invalid credentials (49)".into());
+        }
+        Ok(())
+    }
+    fn password(&self, dn: &str) -> Option<String> {
+        self.entries.lock().unwrap().get(dn).map(|e| e.0.clone())
+    }
+}
+
+impl roll_secrets::directories::Directory for FakeDirectory {
+    fn check(&self, b: &roll_secrets::directories::Bind<'_>, accounts: &[String], groups: &[String], base: Option<&str>) -> Result<(), String> {
+        self.binds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.bound(b)?;
+        let entries = self.entries.lock().unwrap();
+        match accounts.iter().chain(groups).map(String::as_str).chain(base).find(|dn| !entries.contains_key(*dn)) {
+            Some(dn) => Err(format!("no such object: {dn}")),
+            None => Ok(()),
+        }
+    }
+    fn set_password(&self, b: &roll_secrets::directories::Bind<'_>, dn: &str, password: &str) -> Result<(), String> {
+        self.bound(b)?;
+        self.entries.lock().unwrap().get_mut(dn).ok_or("no such object")?.0 = password.into();
+        Ok(())
+    }
+    fn create_user(&self, b: &roll_secrets::directories::Bind<'_>, dn: &str, password: &str, groups: &[String], description: &str, _: i64) -> Result<(), String> {
+        self.bound(b)?;
+        self.entries.lock().unwrap().insert(dn.into(), (password.into(), vec![], description.into()));
+        if self.fail_groups.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("insufficient access to the group (50)".into());
+        }
+        self.entries.lock().unwrap().get_mut(dn).unwrap().1 = groups.to_vec();
+        Ok(())
+    }
+    fn extend_user(&self, _: &roll_secrets::directories::Bind<'_>, _: &str, _: i64) -> Result<(), String> {
+        Ok(())
+    }
+    fn delete_user(&self, b: &roll_secrets::directories::Bind<'_>, dn: &str, _: &[String]) -> Result<(), String> {
+        self.bound(b)?;
+        self.entries.lock().unwrap().remove(dn);
+        Ok(())
+    }
+    fn account_names(&self, b: &roll_secrets::directories::Bind<'_>, dns: &[String]) -> Result<Vec<roll_secrets::directories::AccountNames>, String> {
+        self.bound(b)?;
+        Ok(dns.iter().map(|dn| roll_secrets::directories::AccountNames { account_name: dn[3..dn.find(',').unwrap()].into(), upn: format!("{}@corp.example", &dn[3..dn.find(',').unwrap()]) }).collect())
+    }
+}
+
 /// An ES256 key of the fake issuer, its JWKS, and tokens it signs.
 struct Issuer(ring::signature::EcdsaKeyPair);
 
@@ -613,6 +675,7 @@ struct Api {
     sync: Arc<FakeSync>,
     clouds: Arc<FakeClouds>,
     outside: Arc<Outside>,
+    directory: Arc<FakeDirectory>,
     github: Arc<FakeGitHub>,
     project: String,
     _dir: tempfile::TempDir,
@@ -634,16 +697,17 @@ impl Api {
         let people = Arc::new(People::default());
         let kms = Arc::new(FakeKms::default());
         let outside = Arc::new(Outside::default());
+        let directory = Arc::new(FakeDirectory::default());
         let github = Arc::new(FakeGitHub::default());
         let sts = Arc::new(FakeSts::default());
         ws.set_owners(people.clone());
         let clouds = Arc::new(FakeClouds::default());
         let gate = Arc::new(Gate::default());
         let granted: Arc<dyn roll_auth::Grants> = Arc::new(Granted { gate: gate.clone(), people: people.clone() });
-        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), github: Some(github.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }) };
+        let opts = Options { keyring: Ok(Keyring::new(&"k".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links, syncs, open: true, trust_forwarded_for: false, web_url: None, deliver: Some(sent.clone()), grants: Some(granted), people: Some(people.clone()), workloads: Some(gate.clone()), kms: Some(kms.clone()), sts: Some(sts.clone()), outside: Some(outside.clone()), directory: Some(directory.clone()), github: Some(github.clone()), clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: clouds.clone() }) };
         let secrets = Arc::new(Secrets::new(db.clone(), ws.clone(), opts).unwrap());
         let router = roll_workspace::router(ws.clone()).merge(roll_secrets::router(secrets.clone())).layer(axum::middleware::from_fn_with_state(gate.clone(), fake_gate));
-        let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, outside, github, clouds, project: String::new(), _dir: dir };
+        let mut api = Api { sent, gate, kms, sts, ws: ws.clone(), people, router, secrets, db, fake, sync, outside, directory, github, clouds, project: String::new(), _dir: dir };
         let (_, p) = api.call(Method::POST, "/v1/workspace/projects", Some(json!({ "name": "shop" }))).await;
         api.project = p["id"].as_str().unwrap().to_string();
         api
@@ -2135,6 +2199,115 @@ async fn a_kubernetes_link_with_role_rules_makes_a_service_account_per_lease_and
 }
 
 #[tokio::test]
+async fn a_directory_hands_out_accounts_in_turn_and_a_user_per_lease() {
+    let api = Api::new().await;
+    let (blue, green, base, group) = ("cn=app-blue,ou=svc,dc=example,dc=com", "cn=app-green,ou=svc,dc=example,dc=com", "ou=roll,dc=example,dc=com", "cn=readers,ou=groups,dc=example,dc=com");
+    for dn in [blue, green, base, group] {
+        api.directory.entries.lock().unwrap().insert(dn.into(), ("set-by-hand".into(), vec![], String::new()));
+    }
+    let new = |pw: &str| json!({ "name": "corp", "url": "ldaps://ldap.example:636", "bind_dn": "cn=roll,dc=example,dc=com", "bind_password": pw, "flavor": "openldap", "user_base_dn": base, "managed_accounts": [blue, green], "groups": [group] });
+    // Registering binds once to prove the credentials; a refusal says why, never the password.
+    let (s, e) = api.call(Method::POST, "/directories", Some(new("fake-wrong-pw"))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("invalid credentials") && !e.to_string().contains("fake-wrong-pw"), "{e}");
+    let d = api.ok(Method::POST, "/directories", Some(new("fake-bind-pw"))).await;
+    assert_eq!(api.directory.binds.load(std::sync::atomic::Ordering::Relaxed), 2);
+    let id = d["id"].as_str().unwrap().to_string();
+    assert!(id.starts_with("dir_") && d.get("bind_password").is_none(), "{d}");
+
+    // Managed: two accounts take turns; the one in use keeps its password through the grace.
+    let link = |field: &str| json!({ "kind": "directory", "ref": id, "field": field, "mode": "managed" });
+    api.ok(Method::POST, "/environments/production/changes", Some(json!({ "ops": [{ "op": "set", "key": "LDAP_BIND_DN", "link": link("username") }, { "op": "set", "key": "LDAP_PASSWORD", "link": link("password") }] }))).await;
+    let login = || async {
+        let v = api.values("production", "/").await["values"].clone();
+        (v["LDAP_BIND_DN"].as_str().unwrap().to_string(), v["LDAP_PASSWORD"].as_str().unwrap().to_string())
+    };
+    let first = login().await;
+    assert_eq!((first.0.as_str(), api.directory.password(blue)), (blue, Some(first.1.clone())));
+    let rotate = || api.call(Method::POST, "/environments/production/secrets/LDAP_PASSWORD/rotate", None);
+    assert!(rotate().await.0.is_success());
+    let second = login().await;
+    assert_eq!((second.0.as_str(), api.directory.password(green), api.directory.password(blue)), (green, Some(second.1.clone()), Some(first.1.clone())));
+    let unhold = || {
+        let id = id.clone();
+        api.db
+            .write(move |c| {
+                let s: String = c.query_row("SELECT state FROM directories WHERE id = ?", [id.as_str()], |r| r.get(0))?;
+                let mut v: Value = serde_json::from_str(&s).unwrap();
+                v["held"] = json!({});
+                c.execute("UPDATE directories SET state = ? WHERE id = ?", [v.to_string().as_str(), id.as_str()])
+            })
+            .unwrap()
+    };
+    unhold();
+    assert_eq!(rotate().await.0, StatusCode::CONFLICT, "blue is still in its grace");
+    let expire = || {
+        let p = api.project.clone();
+        api.db.write(move |c| c.execute("UPDATE leases SET expires_at = 0 WHERE project_id = ? AND kind = 'retired'", [p.as_str()])).unwrap();
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep().unwrap()).await.unwrap() }
+    };
+    expire().await;
+    assert_ne!(api.directory.password(blue), Some(first.1.clone()), "its grace over, blue's password is one nobody knows");
+    assert_eq!(api.directory.password(green), Some(second.1.clone()));
+
+    // Dynamic: each lease is a user of its own under the base, in the groups, named after the
+    // lease; ending the lease deletes it.
+    let dynamic = |field: &str| json!({ "kind": "directory", "ref": id, "field": field, "mode": "dynamic", "options": { "ttl_minutes": 15 } });
+    api.ok(Method::POST, "/environments/staging/changes", Some(json!({ "ops": [{ "op": "set", "key": "TMP_DN", "link": dynamic("username") }, { "op": "set", "key": "TMP_PASSWORD", "link": dynamic("password") }] }))).await;
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:sync" }))).await;
+    let lease = r["leases"][0].as_str().unwrap().to_string();
+    let user = r["values"]["TMP_DN"].as_str().unwrap().to_string();
+    assert_eq!(user, format!("cn=roll-{lease},{base}"));
+    let (pw, groups, description) = api.directory.entries.lock().unwrap()[&user].clone();
+    assert!(Some(pw.as_str()) == r["values"]["TMP_PASSWORD"].as_str() && groups == [group] && description.contains(&lease), "{groups:?} {description}");
+    api.ok(Method::DELETE, &format!("/leases/{lease}"), None).await;
+    assert!(api.directory.password(&user).is_none());
+    // A user made halfway (its group refused) is deleted again; nothing is handed out.
+    api.directory.fail_groups.store(true, std::sync::atomic::Ordering::Relaxed);
+    let failed = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:sync" }))).await;
+    api.directory.fail_groups.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(failed["leases"] == json!([]) && !api.directory.entries.lock().unwrap().keys().any(|dn| dn.starts_with("cn=roll-")), "{failed}");
+    // Code nobody vetted gets no user at all.
+    let check = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "check:fork#1", "untrusted": true }))).await;
+    assert!(check["values"].get("TMP_PASSWORD").is_none() && check["leases"] == json!([]), "{check}");
+    assert!(!api.directory.entries.lock().unwrap().keys().any(|dn| dn.starts_with("cn=roll-")));
+
+    // Active Directory's logins also have an account name and a UPN (OpenLDAP's don't).
+    let (s, e) = api.call(Method::PUT, "/environments/production/secrets/LDAP_UPN", Some(json!({ "link": link("upn") }))).await;
+    assert!(s == StatusCode::BAD_REQUEST && e.to_string().contains("only Active Directory"), "{e}");
+    let svc = "cn=svc-reports,ou=svc,dc=example,dc=com";
+    api.directory.entries.lock().unwrap().insert(svc.into(), ("set-by-hand".into(), vec![], String::new()));
+    let ad = api.ok(Method::POST, "/directories", Some(json!({ "name": "ad", "url": "ldaps://ldap.example:636", "bind_dn": "cn=roll,dc=example,dc=com", "bind_password": "fake-bind-pw", "flavor": "active_directory", "user_base_dn": base, "managed_accounts": [svc] }))).await;
+    // "Link a resource" offers what each directory issues: an account name and a UPN only on AD.
+    let targets = api.ok(Method::GET, "/links", None).await;
+    let fields = |r: &str| targets.as_array().unwrap().iter().find(|t| t["ref"] == r).unwrap()["fields"].as_array().unwrap().iter().map(|f| f["field"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    assert_eq!((fields(&id), fields(ad["id"].as_str().unwrap())), (vec!["username".to_string(), "password".into()], vec!["username".to_string(), "password".into(), "upn".into(), "account_name".into()]));
+    let ad_link = |field: &str, mode: &str| json!({ "kind": "directory", "ref": ad["id"], "field": field, "mode": mode, "options": if mode == "dynamic" { json!({ "ttl_minutes": 15 }) } else { json!({}) } });
+    let ops = |mode: &str| {
+        let ops: Vec<Value> = ["username", "password", "upn", "account_name"].iter().map(|f| json!({ "op": "set", "key": format!("AD_{}_{}", mode.to_uppercase(), f.to_uppercase()), "link": ad_link(f, mode) })).collect();
+        json!({ "ops": ops })
+    };
+    api.ok(Method::POST, "/environments/production/changes", Some(ops("managed"))).await;
+    let v = api.values("production", "/").await["values"].clone();
+    assert_eq!((v["AD_MANAGED_USERNAME"].as_str(), v["AD_MANAGED_ACCOUNT_NAME"].as_str(), v["AD_MANAGED_UPN"].as_str()), (Some(svc), Some("svc-reports"), Some("svc-reports@corp.example")));
+    api.ok(Method::POST, "/environments/staging/changes", Some(ops("dynamic"))).await;
+    let r = api.ok(Method::POST, "/environments/staging/resolve", Some(json!({ "consumer": "job:sync" }))).await;
+    let lease = r["leases"].as_array().unwrap().iter().map(|l| l.as_str().unwrap()).find(|l| r["values"]["AD_DYNAMIC_USERNAME"].as_str().unwrap().contains(l)).unwrap();
+    let sam = format!("roll-{}", &lease[4..19]);
+    assert_eq!((r["values"]["AD_DYNAMIC_ACCOUNT_NAME"].as_str(), r["values"]["AD_DYNAMIC_UPN"].as_str()), (Some(sam.as_str()), Some(format!("{sam}@example.com").as_str())));
+
+    // The bind password is in no answer and no audit row.
+    let listed = api.ok(Method::GET, "/directories", None).await;
+    let audit = api.ok(Method::GET, "/audit", None).await;
+    let p = api.project.clone();
+    let rows: Vec<String> = api.db.read(move |c| c.query("SELECT summary || keys || action FROM audit WHERE project_id = ?", [p.as_str()], |r| r.get(0))).unwrap();
+    assert!(audit.to_string().contains("directory.add") && !format!("{listed}{audit}{rows:?}").contains("fake-bind-pw"));
+    // In use, it can't go.
+    let (s, _) = api.call(Method::DELETE, &format!("/directories/{id}"), None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "its keys keep it");
+}
+
+#[tokio::test]
 async fn a_cloud_account_trusts_one_projects_token() {
     use base64::Engine;
     let api = Api::new().await;
@@ -2179,7 +2352,7 @@ async fn a_cloud_account_trusts_one_projects_token() {
     // The deployment key rotates: the issuer's key is resealed with the new one (health says when
     // the previous key can go), and keeps signing once the previous key is gone.
     let reopen = |current: &str, previous: Option<&str>| {
-        let opts = Options { keyring: Ok(Keyring::new(current, previous).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: api.clouds.clone() }), kms: None, sts: None, outside: None, github: None, workloads: None };
+        let opts = Options { keyring: Ok(Keyring::new(current, previous).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, clouds: Some(roll_secrets::clouds::Clouds { issuer: ISSUER_URL.into(), tokens: api.clouds.clone() }), kms: None, sts: None, outside: None, directory: None, github: None, workloads: None };
         Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap()
     };
     let (old, new) = ("k".repeat(32), "n".repeat(32));
@@ -2829,7 +3002,7 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
     let cert = api.values("production", "/").await["values"]["TLS_CERT"].clone();
     assert!(cert.as_str().is_some_and(|c| c.starts_with("-----BEGIN CERTIFICATE-----")), "{cert}");
     let node = |keyring: Keyring| {
-        let opts = Options { keyring: Ok(keyring), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, github: None, clouds: None, workloads: None };
+        let opts = Options { keyring: Ok(keyring), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, directory: None, github: None, clouds: None, workloads: None };
         Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap())
     };
     // The deployment key rotates: health counts the wrapped project as not resealed until the
@@ -2856,7 +3029,7 @@ async fn a_customer_managed_key_wraps_the_data_key_and_revoking_it_locks_roll_ou
     assert_eq!(roll_secrets::router(fresh).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::LOCKED);
     // Back with roll alone: no KMS needed any more.
     *api.kms.revoked.lock().unwrap() = false;
-    let opts = Options { keyring: Ok(Keyring::new(&"n".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, github: None, clouds: None, workloads: None };
+    let opts = Options { keyring: Ok(Keyring::new(&"n".repeat(32), None).unwrap()), key_source: roll_secrets::KeySource::Env, links: Default::default(), syncs: Default::default(), open: true, trust_forwarded_for: false, web_url: None, deliver: None, grants: None, people: None, kms: Some(api.kms.clone()), sts: None, outside: None, directory: None, github: None, clouds: None, workloads: None };
     let after = Arc::new(Secrets::new(api.db.clone(), api.ws.clone(), opts).unwrap());
     assert!(roll_secrets::router(after.clone()).oneshot(Request::delete(format!("/v1/secrets/projects/{}/kms", api.project)).body(Body::empty()).unwrap()).await.unwrap().status().is_success());
     *api.kms.revoked.lock().unwrap() = true;

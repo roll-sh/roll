@@ -330,7 +330,7 @@ fn port(c: &tokio_postgres::Config) -> u16 {
 }
 
 /// The host's first address, refusing a private one.
-async fn resolve(host: &str, port: u16, allow_private: bool) -> Result<SocketAddr, String> {
+pub(super) async fn resolve(host: &str, port: u16, allow_private: bool) -> Result<SocketAddr, String> {
     let addrs: Vec<SocketAddr> = match host.parse::<IpAddr>() {
         Ok(ip) => vec![SocketAddr::new(ip, port)],
         Err(_) => tokio::net::lookup_host((host, port)).await.map_err(|_| format!("{host} doesn't resolve"))?.collect(),
@@ -342,7 +342,7 @@ async fn resolve(host: &str, port: u16, allow_private: bool) -> Result<SocketAdd
     Ok(addr)
 }
 
-fn tls_config(ca: Option<&str>) -> Result<rustls::ClientConfig, String> {
+pub(super) fn tls_config(ca: Option<&str>) -> Result<rustls::ClientConfig, String> {
     let mut roots = rustls::RootCertStore::empty();
     for c in rustls_native_certs::load_native_certs().certs {
         let _ = roots.add(c);
