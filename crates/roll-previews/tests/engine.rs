@@ -1261,9 +1261,16 @@ async fn a_git_url_preview_reports_its_status_and_pull_request_comment() {
         pull: Some(roll_previews::ports::GitPull { number: 9, title: title.into(), url: "https://github.com/acme/shop/pull/9".into(), fork: false, author: Some("dependabot[bot]".into()) }),
         ..push("deps/lodash", "d1", 9, false)
     };
-    let of_bump = || e.engine.store.rows(Some(&e.project)).unwrap().into_iter().any(|r| r.branch.as_deref() == Some("deps/lodash"));
+    let of_bump = || e.engine.store.rows(Some(&e.project)).unwrap().into_iter().any(|r| r.branch.as_deref() == Some("deps/lodash") && r.desired == Desired::Active);
+    // The bot pushes its branch first (no pull request yet, no opener): that makes a preview…
+    let branch_push = || roll_previews::ports::GitPush { pull: None, ..push("deps/lodash", "d1", 9, false) };
+    e.engine.git_push(&branch_push()).await.unwrap();
+    assert!(of_bump());
+    // …which its pull request takes back, and the branch's next push makes none.
     e.engine.git_push(&bump("Bump lodash")).await.unwrap();
     assert!(!of_bump(), "a bot's pull request is skipped");
+    e.engine.git_push(&roll_previews::ports::GitPush { sha: Some("d2".into()), ..branch_push() }).await.unwrap();
+    assert!(!of_bump(), "and so are its branch's later pushes");
     e.engine.git_push(&bump("Bump lodash [preview]")).await.unwrap();
     assert!(of_bump(), "unless its title asks");
 }

@@ -189,6 +189,12 @@ CREATE TABLE IF NOT EXISTS project_domains (
     base TEXT NOT NULL UNIQUE,
     https INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS git_skips (
+    project_id TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    PRIMARY KEY (project_id, repo, branch)
+);
 CREATE TABLE IF NOT EXISTS bypass (
     project_id TEXT PRIMARY KEY,
     hash TEXT NOT NULL,
@@ -806,8 +812,8 @@ impl Store {
             c.execute("DELETE FROM settings WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM bypass WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM hooks WHERE project_id = ?", [project])?;
-
             c.execute("DELETE FROM project_domains WHERE project_id = ?", [project])?;
+            c.execute("DELETE FROM git_skips WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM budget_alerts WHERE project_id = ?", [project])?;
             Ok::<_, Error>(())
         })
@@ -2047,6 +2053,23 @@ impl Store {
     /// How many rebuilds were asked of a preview.
     pub fn rebuilds(&self, id: &str) -> Result<i64> {
         Ok(self.db.read(|c| c.query_row("SELECT rebuilds FROM previews WHERE id = ?", [id], |r| r.get(0)).optional())?.unwrap_or(0))
+    }
+
+    /// A Git URL service's branch whose pull request's opener the project skips (`skip_authors`):
+    /// its pushes make no preview until the pull request closes, the branch goes or a title asks.
+    pub fn set_git_skip(&self, project: &str, repo: &str, branch: &str, on: bool) -> Result<()> {
+        self.db.write(|c| {
+            if on {
+                c.execute("INSERT INTO git_skips (project_id, repo, branch) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", [project, repo, branch])?;
+            } else {
+                c.execute("DELETE FROM git_skips WHERE project_id = ? AND repo = ? AND branch = ?", [project, repo, branch])?;
+            }
+            Ok::<_, Error>(())
+        })
+    }
+
+    pub fn git_skipped(&self, project: &str, repo: &str, branch: &str) -> Result<bool> {
+        Ok(self.db.read(|c| c.query_row("SELECT 1 FROM git_skips WHERE project_id = ? AND repo = ? AND branch = ?", [project, repo, branch], |_| Ok(())).optional())?.is_some())
     }
 
     /// When `project`'s bypass secret was made, if it has one.
