@@ -1128,11 +1128,9 @@ impl Engine {
 
     pub(super) async fn report(&self, row: Row) {
         let Ok(s) = self.store.settings(&row.project_id) else { return };
-        // Only the project that speaks for its repo or service tells the change: another's
-        // preview of it stays on its own sheet.
-        if !matches!(self.refresh_voice(&row), Ok((_, true))) {
-            return;
-        }
+        // Who speaks for a Git URL service's branch as of now: another project's preview of it
+        // stays on its own sheet (`report_on_git`).
+        let _ = self.refresh_voice(&row);
         if let Ok(mut p) = self.store.view(row) {
             // The open notes, newest first (a few), for the pull request's comment.
             if p.change.is_some() {
@@ -1231,12 +1229,12 @@ impl Engine {
     }
 
     /// Keeps `row`'s [`crate::Preview::reported_by`] up to date: `(changed, it speaks)`. With no
-    /// speaker at all (its project's previews just turned off) it speaks for itself.
+    /// speaker at all (its project's previews just turned off) it speaks for itself. Only a Git
+    /// URL service's previews can be quiet: each project with the service on its canvas has its
+    /// own preview of a branch, where a change has one preview (made by its repo's speaker).
     pub(super) fn refresh_voice(&self, row: &Row) -> Result<(bool, bool)> {
-        let (kind, of) = match row.repo.strip_prefix("git:") {
-            Some(svc) => (roll_workspace::Kind::Service, svc),
-            None => (roll_workspace::Kind::Repo, row.repo.as_str()),
-        };
+        let Some(of) = row.repo.strip_prefix("git:") else { return Ok((false, true)) };
+        let kind = roll_workspace::Kind::Service;
         // Named only on the operator's projects, which see every project: a person's project
         // never learns another owner's project's name (they're 404s to them).
         let operators = self.workspace.get(roll_workspace::Scope::All, &row.project_id).is_ok_and(|p| p.owner.is_empty());

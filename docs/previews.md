@@ -86,15 +86,20 @@ idle instances. Only Neon branches cheaply, and only Postgres. roll previews:
     `PATCH /v1/code/changes/{id} {labels}`); a skip, from the title or a label, wins.
   - `roll preview create --repo acme/web --branch feat-x` (or `POST /v1/previews`) makes one for a
     branch with no change. It lives until it is deleted or its TTL passes.
-- **One voice per change**: a repo or service on two projects' canvases (the operator's and an
-  admin's, each standing for it) gets a preview in each, but only one project reports to the
-  change or pull request: its `roll/preview` status, its comment, roll code's preview
-  environment. That's the project that has had it on its canvas longest (then by id), among those
-  with previews on. roll apps puts a service on the canvas of the project it's made in, so a
-  service's is its own. The other preview says so on its sheet (`reported_by`: the project's
-  name on the operator's projects, "another project" on a person's, which never learns another
-  owner's project) and says nothing. When the speaker takes it off its canvas, or turns previews off, the next one in line
-  reports at once (`Engine::speaker`, checked before every report).
+- **One voice per change**: a repo or service can be on two projects' canvases, the operator's
+  and an admin's, with each project standing for it. Then the project that has had it on its
+  canvas longest speaks for it, among those with previews on (`Engine::speaker`; ties go by id).
+  roll apps puts a service on the canvas of the project it's made in, so a service's speaker is
+  its own project.
+  - A change has one preview, and the speaker makes it. Before this, whichever project looked
+    first took it, at random. roll code's `POST /v1/code/changes/{id}/preview` asks the same
+    rule.
+  - A Git URL service's branch gets a preview in each project, but only the speaker's preview
+    posts `roll/preview` and the pull request's comment. The other preview says so on its sheet
+    (`reported_by`). On the operator's projects that's the speaker's name; on a person's project
+    it's "another project", since a person never learns another owner's project.
+  - When the speaker takes it off its canvas, or turns previews off, the next project in line
+    takes over at once.
 - **Update**: every new head redeploys the services of the change's repo at that head. Services
   from the project's other repos run at their own branch of the same name when they have one (a
   feature split across a front end and a back end previews as one, as Signadot, Bunnyshell and

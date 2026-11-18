@@ -77,6 +77,11 @@ impl Engine {
             if existing.iter().any(|r| r.change_id.as_deref() == Some(&c.id)) || self.store.dismissed(&c.id, &c.head)? {
                 continue;
             }
+            // A change has one preview: the project that speaks for its repo makes it (with the
+            // repo on two canvases, the first project to look would otherwise take it at random).
+            if self.speaker(roll_workspace::Kind::Repo, &c.repo).is_some_and(|(id, _)| id != project_id) {
+                continue;
+            }
             let key = match c.github_pr {
                 Some(n) => format!("pr{n}"),
                 None => format!("c{}", c.number),

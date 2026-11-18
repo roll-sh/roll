@@ -100,7 +100,7 @@ export interface Preview {
   pull?: { number: number; url: string; fork: boolean; approved_head: string | null; approved_by: string | null };
   /** When it goes (its TTL, or a keep, running out), once that's close (a day ahead). */
   goes_at?: number | null;
-  /** The project that reports its change or pull request when it's another one (the repo or service is on both canvases; the one that has had it longest speaks). */
+  /** The project that reports a Git URL service's pull request, when another one does (the service is on both canvases; the one that has had it longest speaks). */
   reported_by?: string | null;
   /** How much the page changed since the screenshot at an earlier head (`since`). */
   visual_change?: { since: string; percent: number; phone_percent?: number | null } | null;
