@@ -3684,8 +3684,9 @@ cache waited out. Ranked now:
      MCP's #353 (rollback's `bypass` left out); secret requests and cut-off when batch 4 lands; the
      development preset change (#354) was closed after roll MCP's review: `roll login` is an ordinary
      OAuth client, so a looser preset would loosen every approved agent too. The first run is fixed in
-     the CLI instead (the approval link at once, then a remembered "allow from now on"); asked of roll
-     MCP: remembered approvals up to ~30 days, per project and environment, tied to the client.
+     the CLI instead (the approval link at once, then a remembered "allow from now on"); remembered
+     approvals are already per environment and folder and tied to the asking client (revocable on the
+     token page); roll MCP adds 7- and 30-day choices next.
    - P7–P8, **tests** (building: `feature/roll-secrets-test-gaps`): `roll run --watch`, the six links
      to roll's own products, and a `pnpm test:secrets` gate.
    - P9–P11, apps' variables, search's connectors and previews' variables as `roll://` references
