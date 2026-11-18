@@ -584,13 +584,15 @@ async fn run() -> anyhow::Result<()> {
     workspace.set_owners(std::sync::Arc::new(people.clone()));
     // Its tokens are roll-access's: grants for syncs a token made, workload tokens for identities.
     let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people)?;
+    // Its counters and gauges, a line a minute beside the cluster's (JSON logs only).
+    let _secrets_metrics = logs::SecretsMetrics::start(cluster.node_id().to_string(), secrets.clone());
     code_secrets.set(secrets.clone(), workspace.clone());
     apps_secrets.set(secrets.clone(), workspace.clone());
     let _ = secrets_envs.0.set(secrets.clone());
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }
-    router = router.merge(roll_secrets::router(secrets.clone()));
+    router = router.merge(roll_secrets::router(secrets.clone()).layer(axum::middleware::map_request(secrets::guard_header)));
     // roll search's inference endpoints keyed by a project's secret (a sync rotations follow).
     if search.is_some() {
         router = router.merge(secrets::search_inference(secrets.clone(), workspace.clone(), products_api.clone()));

@@ -4,6 +4,7 @@
  * the OAuth consent screen's answer. Change both together.
  */
 
+import { withSession } from "./code-token";
 import { apiHeaders, call, ROLL_API } from "./roll-api";
 
 export const ACTIONS = ["read", "write", "delete", "reveal", "deploy", "admin"] as const;
@@ -292,6 +293,9 @@ export interface AuditEvent {
   duration_ms: number;
   /** What made it: an MCP client's name and version, else its User-Agent (what it says it is). */
   client?: string;
+  /** The handle of the person who acted / the person it's about, when they're people (`usr_` ids). */
+  actor_handle?: string;
+  resource_handle?: string;
 }
 
 export interface Preset {
@@ -612,6 +616,20 @@ export interface Enterprise {
   token_endpoint: string;
 }
 
+/**
+ * People's SSO connection as an enterprise identity provider too (one provider, set up once): the
+ * idps with it added, its issuer and verified domains coming from the connection (#252's `sso`).
+ */
+export function tieForAgents(idps: EnterpriseIdp[], c: { id: string; name: string; issuer: string }): EnterpriseIdp[] {
+  if (idps.some((i) => i.sso === c.id)) return idps;
+  return [...idps.filter((i) => i.issuer.replace(/\/$/, "") !== c.issuer.replace(/\/$/, "") || i.tenant), { issuer: c.issuer, name: c.name, matching: "email", sso: c.id }];
+}
+
+/** The idps without the one tied to SSO connection `id`. */
+export function untieForAgents(idps: EnterpriseIdp[], id: string): EnterpriseIdp[] {
+  return idps.filter((i) => i.sso !== id);
+}
+
 /** The trust-a-provider form as a provider, or what's wrong with it (the API checks it again). */
 export function idpFromForm(f: { issuer: string; name: string; matching: "email" | "aud_sub"; domains: string; jwks: string; admins: boolean; tenant?: string; sso?: string }): { idp: EnterpriseIdp } | { problem: string } {
   const issuer = f.issuer.trim();
@@ -709,7 +727,7 @@ export const accessApi = {
   audit: (f: AuditFilter = {}) => call<AuditEvent[]>("GET", `/v1/access/audit${query(f)}`),
   /** The log as CSV (a spreadsheet) or JSON lines (a log tool), for a download. */
   auditExport: async (f: AuditFilter = {}, format: "csv" | "jsonl" = "csv") => {
-    const res = await fetch(`${ROLL_API}/v1/access/audit${query({ ...f, format })}`, { headers: apiHeaders(), cache: "no-store" });
+    const res = await fetch(`${ROLL_API}/v1/access/audit${query({ ...f, format })}`, withSession({ headers: apiHeaders(), cache: "no-store" }));
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     return res.blob();
   },
@@ -756,6 +774,7 @@ export function grantMatches(g: Pick<Grant, "name" | "id" | "hint" | "client" | 
 
 /** Who an audit row is by: a change's person (`args.by`), else a request's grant, else the operator. */
 export function auditWho(e: AuditEvent): string {
+  if (e.actor_handle) return e.actor_handle;
   const args = e.args && typeof e.args === "object" ? (e.args as { by?: unknown; actor?: unknown }) : {};
   // People's accounts (docs/accounts.md, "Audit"): who acted (a person's id, operator, scim:<connection>).
   if (e.source === "accounts" && typeof args.actor === "string") return args.actor;

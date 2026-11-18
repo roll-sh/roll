@@ -44,11 +44,17 @@ pub fn kinds(api: Api, allow_private: bool) -> Syncs {
     s.register(Arc::new(platforms::Heroku(http.clone())));
     s.register(Arc::new(platforms::GoogleSecrets(http.clone())));
     s.register(Arc::new(platforms::AzureKeyVault(http.clone())));
+    s.register(Arc::new(platforms::AzureDevOps(http.clone())));
     s.register(Arc::new(platforms::CircleCi(http.clone())));
     s.register(Arc::new(platforms::Bitbucket(http.clone())));
     s.register(Arc::new(platforms::TerraformCloud(http.clone())));
     s.register(Arc::new(platforms::DigitalOcean(http.clone())));
     s.register(Arc::new(platforms::SecretsManager(http.clone())));
+    let guarded = platforms::Guarded::new(&http, allow_private);
+    s.register(Arc::new(platforms::Supabase(guarded.clone())));
+    s.register(Arc::new(platforms::CloudflarePages(guarded.clone())));
+    s.register(Arc::new(platforms::AzureAppConfig(guarded.clone())));
+    s.register(Arc::new(platforms::VaultKv(guarded)));
     s.register(Arc::new(platforms::Ssm(http)));
     s.register(Arc::new(platforms::Kubernetes { allow_private }));
     s.register(Arc::new(platforms::GitLab { allow_private }));
@@ -362,6 +368,24 @@ impl roll_secrets::Deliver for AuditDeliver {
         self.0.url(url).map(|_| ())
     }
 
+    // Scheduled backups: a roll bucket's objects, through roll storage's own routes in process.
+    fn put_object(&self, bucket: &str, key: &str, body: &Json) -> Result<()> {
+        self.1.call(axum::http::Method::PUT, &format!("/v1/storage/buckets/{}/upload?key={}", urlencoding::encode(bucket), urlencoding::encode(key)), Some(body.clone())).map(|_| ())
+    }
+
+    fn get_object(&self, bucket: &str, key: &str, limit: usize) -> Result<Json> {
+        self.1.get_bounded(&format!("/v1/storage/buckets/{}/download?key={}", urlencoding::encode(bucket), urlencoding::encode(key)), limit)
+    }
+
+    fn list_objects(&self, bucket: &str, prefix: &str) -> Result<Vec<String>> {
+        let v = self.1.call(axum::http::Method::GET, &format!("/v1/storage/buckets/{}/objects?prefix={}&limit=1000", urlencoding::encode(bucket), urlencoding::encode(prefix)), None)?;
+        Ok(v["objects"].as_array().into_iter().flatten().filter_map(|o| o["key"].as_str().map(str::to_string)).collect())
+    }
+
+    fn delete_object(&self, bucket: &str, key: &str) -> Result<()> {
+        self.1.call(axum::http::Method::DELETE, &format!("/v1/storage/buckets/{}/object?key={}", urlencoding::encode(bucket), urlencoding::encode(key)), None).map(|_| ())
+    }
+
     fn post(&self, url: &str, id: &str, secret: &Value, body: &Json) -> Result<()> {
         // A retried batch is the same delivery: the same object, written again.
         if let Some(bucket) = url.strip_prefix(roll_secrets::sinks::BUCKET) {
@@ -437,12 +461,58 @@ impl roll_secrets::Deliver for AuditDeliver {
         self.0.post_plain(&u, content_type, &[header, ("x-roll-sink", id.to_string())], payload)
     }
 
+    /// A Kubernetes API server (roll_secrets::kubernetes): with its own CA, [`Self::request`]
+    /// through a client of its own that trusts only that CA, with the same guards (HTTPS, public,
+    /// no redirects, the timeout, a bounded answer). Nothing else's calls trust it.
+    fn request_trusting(&self, ca: Option<&str>, method: &str, url: &str, headers: &[(&str, &Value)], body: Option<(&str, &Value)>, limit: usize) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        let Some(pem) = ca else { return self.request(method, url, headers, body, limit) };
+        let host = self.0.url(url)?.host_str().unwrap_or_default().to_string();
+        let roots = reqwest::Certificate::from_pem_bundle(pem.as_bytes()).ok().filter(|c| !c.is_empty()).ok_or_else(|| bad(format!("the CA for {host} isn't PEM certificates")))?;
+        let mut b = reqwest::Client::builder().timeout(Duration::from_secs(15)).redirect(reqwest::redirect::Policy::none()).user_agent("roll-secrets-sync").tls_certs_only(roots);
+        if !self.0.allow_private {
+            b = b.dns_resolver(roll_net::PublicOnly).no_proxy();
+        }
+        let client = b.build().map_err(|_| bad(format!("the CA for {host} isn't one roll can use")))?;
+        AuditDeliver(Hooks { client, allow_private: self.0.allow_private }, self.1.clone()).request(method, url, headers, body, limit)
+    }
+
     /// A rotator's call: the same guards and signature, and its answer. Each call is its own
     /// delivery: issuing twice makes two values.
     fn call(&self, url: &str, id: &str, secret: &Value, body: &Json, limit: usize) -> Result<zeroize::Zeroizing<Vec<u8>>> {
         let u = self.0.url(url)?;
         let delivery = roll_secrets::names::new_id("dlv", 16);
         self.0.send_signed(&u, ("x-roll-rotator", id), &delivery, secret, body, Some(limit))
+    }
+
+    /// A vendor's API (roll_secrets::saas): the same guards (HTTPS, public, no redirects, the
+    /// timeout), any status, at most `limit` bytes of answer. Headers, body and answer may hold
+    /// credentials: an error names the host and what failed, never them.
+    fn request(&self, method: &str, url: &str, headers: &[(&str, &Value)], body: Option<(&str, &Value)>, limit: usize) -> Result<(u16, zeroize::Zeroizing<Vec<u8>>)> {
+        let u = self.0.url(url)?;
+        let host = u.host_str().unwrap_or_default().to_string();
+        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| Error::Internal(format!("{method} isn't an HTTP method")))?;
+        let mut req = self.0.client.request(method, u);
+        for (name, value) in headers {
+            let mut v = reqwest::header::HeaderValue::from_str(value.expose()).map_err(|_| bad(format!("a {name} header roll can't send to {host}")))?;
+            v.set_sensitive(true);
+            req = req.header(*name, v);
+        }
+        req = match body {
+            Some((content_type, b)) => req.header("content-type", content_type).body(b.expose().as_bytes().to_vec()),
+            None => req.header("content-length", "0"),
+        };
+        block_on(async {
+            let mut resp = req.send().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))?;
+            let status = resp.status().as_u16();
+            let mut out = zeroize::Zeroizing::new(Vec::new());
+            while let Some(c) = resp.chunk().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))? {
+                if out.len() + c.len() > limit {
+                    return Err(Error::Link(format!("{host}: an answer over {limit} bytes")));
+                }
+                out.extend_from_slice(&c);
+            }
+            Ok((status, out))
+        })
     }
 
     /// An OIDC issuer's documents: the same guards, a 2xx only, at most `limit` bytes.
@@ -633,5 +703,67 @@ mod tests {
         let (key, _, _, datadog) = &seen[1];
         let logs: Json = serde_json::from_str(datadog).unwrap();
         assert_eq!((key.as_str(), logs[0]["message"].as_str(), logs[1]["ddtags"].as_str()), ("dd-key", Some("set A"), Some("project:prj_a,action:secrets.export")));
+    }
+}
+
+/// A cluster's own CA (`request_trusting`).
+#[cfg(test)]
+mod cluster_ca_tests {
+    use super::*;
+    use roll_secrets::Deliver;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::rustls;
+
+    /// A CA, and a TLS server on localhost with a certificate it signed that answers `{}`.
+    async fn tls_server() -> (String, u16) {
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = rcgen::CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap().signed_by(&key, &ca).unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()))
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    // A client that doesn't trust the certificate ends the handshake: nothing to answer.
+                    let Ok(mut tls) = acceptor.accept(tcp).await else { return };
+                    let mut buf = [0u8; 4096];
+                    let _ = tls.read(&mut buf).await;
+                    let _ = tls.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").await;
+                    let _ = tls.shutdown().await;
+                });
+            }
+        });
+        (ca.pem(), port)
+    }
+
+    /// A Kubernetes cluster's own CA (roll secrets' `kubernetes` links) is trusted for that
+    /// cluster's calls, and only for them: neither another CA nor the system roots take it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_clusters_own_ca_is_trusted_for_its_calls_only() {
+        let (ca, port) = tls_server().await;
+        let (other, _) = tls_server().await;
+        // Private addresses allowed: the server is on localhost.
+        let d = AuditDeliver::new(true, Api::default());
+        let url = format!("https://localhost:{port}/api");
+        let (own, with_other, with_roots) = tokio::task::spawn_blocking(move || {
+            let call = |ca: Option<&str>| d.request_trusting(ca, "GET", &url, &[], None, 1024).map(|(s, b)| (s, b.to_vec()));
+            (call(Some(&ca)), call(Some(&other)), call(None))
+        })
+        .await
+        .unwrap();
+        assert_eq!(own.unwrap(), (200, b"{}".to_vec()));
+        assert!(with_other.is_err(), "another CA");
+        assert!(with_roots.is_err(), "the system roots");
     }
 }
