@@ -1,11 +1,11 @@
 import { Building2, Check, Copy, Fingerprint, KeyRound, LoaderCircle, Monitor, ShieldCheck, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { accountsApi, activityText, refreshSession, useSession, type Activity, type Invite, type Passkey, type Provider, type Session, type User } from "@/lib/accounts-api";
+import { accountsApi, activityText, refreshSession, useSession, type AccountPolicy, type Activity, type Invite, type NetworkPolicy, type Passkey, type PasskeyPolicy, type Provider, type ResetRequest, type Session, type User } from "@/lib/accounts-api";
 import { creationOptions, credentialJSON, passkeyProblem, passkeysSupported } from "@/lib/webauthn";
+import { Link } from "./link";
 import { GitHubMark, GoogleMark } from "./agents/brand-icons";
 import { SsoSection } from "./account-sso";
 import { AppShell } from "./app-shell";
-import { ReauthDialog } from "./reauth-dialog";
 
 const card = "rounded-xl border border-line-2 bg-sheet inset-shadow-highlight";
 const btn = "flex h-7 items-center gap-1.5 rounded-md border border-line-2 bg-raised px-2.5 text-[12px] font-medium inset-shadow-highlight transition-colors hover:border-line-3 disabled:opacity-50";
@@ -45,10 +45,15 @@ export function AccountPage() {
           <Passkeys />
           <Sessions />
           <RecentActivity me={user.id} />
+          <YourData handle={user.handle} />
+          <DeleteAccount user={user} />
           {user.admin && <Invites />}
+          {user.admin && <Resets me={user.id} />}
           {user.admin && <Users me={user.id} />}
           {user.admin && <SsoSection />}
-          <ReauthDialog />
+          {user.admin && <HardwareKeys />}
+          {user.admin && <EveryoneSecondFactor />}
+          {user.admin && <Networks />}
         </div>
       )}
     </AppShell>
@@ -59,6 +64,7 @@ function Profile({ user, onChange }: { user: User; onChange: (u: User) => void }
   const [name, setName] = useState(user.name);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [moving, setMoving] = useState(false);
   return (
     <Section title="Profile">
       <div className={`${card} flex flex-wrap items-end gap-3 p-4`}>
@@ -68,7 +74,12 @@ function Profile({ user, onChange }: { user: User; onChange: (u: User) => void }
         </label>
         <div className="text-[12px] leading-relaxed text-muted">
           <div>
-            <span className="text-subtle">Email</span> {user.email}
+            <span className="text-subtle">Email</span> {user.email}{" "}
+            {!moving && (
+              <button onClick={() => setMoving(true)} className="ml-1 text-accent hover:underline">
+                Change
+              </button>
+            )}
           </div>
           <div>
             <span className="text-subtle">Handle</span> <span className="font-mono">{user.handle}</span>
@@ -93,6 +104,97 @@ function Profile({ user, onChange }: { user: User; onChange: (u: User) => void }
           Save
         </button>
       </div>
+      {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+      {moving && (
+        <EmailChange
+          onDone={(u) => {
+            setMoving(false);
+            if (u) {
+              onChange(u);
+              void refreshSession();
+            }
+          }}
+        />
+      )}
+    </Section>
+  );
+}
+
+/** Move the account to another address: a code goes there, and the old address is told. */
+function EmailChange({ onDone }: { onDone: (u: User | null) => void }) {
+  const [email, setEmail] = useState("");
+  const [challenge, setChallenge] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = async (f: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await f();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <form
+      className={`${card} mt-3 p-4`}
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!challenge) void run(async () => setChallenge((await accountsApi.changeEmail(email.trim())).challenge));
+        else void run(async () => onDone(await accountsApi.confirmEmail(challenge, code.trim())));
+      }}
+    >
+      <p className="text-[12.5px] text-muted">
+        {challenge ? `We sent a code to ${email.trim()} (unless it has a roll account already). It works once, for 10 minutes.` : "Sign-in codes and roll's mail go to the new address once you confirm a code sent there. Your current address is told."}
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {challenge ? (
+          <input autoFocus inputMode="numeric" autoComplete="one-time-code" aria-label="Code from the new address" placeholder="Code from the new address" value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))} className={`${field} min-w-48 flex-1 font-mono tracking-[0.15em]`} />
+        ) : (
+          <input autoFocus type="email" required aria-label="New email address" placeholder="new@address.com" value={email} onChange={(e) => setEmail(e.target.value)} className={`${field} min-w-48 flex-1`} />
+        )}
+        <button type="submit" disabled={busy || (challenge ? code.length !== 6 : !email.includes("@"))} className={primary}>
+          {challenge ? "Confirm" : "Send code"}
+        </button>
+        <button type="button" onClick={() => onDone(null)} className="px-1 text-[12px] text-muted hover:text-fg">
+          Cancel
+        </button>
+      </div>
+      {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+    </form>
+  );
+}
+
+/** Delete your own account: typed handle, then sudo mode's confirmation; signed out after. */
+function DeleteAccount({ user }: { user: User }) {
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <Section title="Delete your account" lead="Your sessions, sign-in links, second factors, passkeys and tokens stop at once, and this address no longer signs in. It can't be undone: download your data first if you want it.">
+      <form
+        className={`${card} flex flex-wrap items-center gap-2 p-4`}
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setBusy(true);
+          setError(null);
+          try {
+            await accountsApi.deleteMe(typed.trim());
+            window.location.assign("/signin");
+          } catch (err) {
+            setError(errorText(err));
+            setBusy(false);
+          }
+        }}
+      >
+        <input aria-label="Type your handle to confirm" placeholder={`Type ${user.handle} to confirm`} value={typed} onChange={(e) => setTyped(e.target.value)} className={`${field} min-w-48 flex-1 font-mono`} />
+        <button type="submit" disabled={busy || typed.trim() !== user.handle} className="h-8 rounded-lg border border-danger/50 px-3.5 text-[12.5px] font-medium text-danger transition-colors hover:bg-danger/10 disabled:opacity-40">
+          Delete my account
+        </button>
+      </form>
       {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
     </Section>
   );
@@ -349,7 +451,7 @@ function Passkeys() {
                   <span className="block truncate text-[12.5px]">{p.name}</span>
                 )}
                 <span className="block text-[11px] text-subtle">
-                  {p.synced ? "Synced across your devices" : "On one device"} · added {when(p.created_at)}
+                  {p.model ? `${p.model} (verified)` : p.synced ? "Synced across your devices" : "On one device"} · added {when(p.created_at)}
                   {p.last_used_at ? ` · last used ${when(p.last_used_at)}` : " · not used yet"}
                 </span>
               </span>
@@ -371,6 +473,168 @@ function Passkeys() {
           <span className="text-[11.5px] text-subtle">{list?.length ? "With one, you can skip the authenticator app's code too." : "Your browser or phone keeps it, synced if you use iCloud Keychain or Google Password Manager."}</span>
         </div>
         {error && <p className="px-4 pb-3 text-[12px] text-danger">{error}</p>}
+      </div>
+    </Section>
+  );
+}
+
+/** Admins: hardware keys only (docs/accounts.md, "Passkeys"): only listed models, proved by their maker. */
+function HardwareKeys() {
+  const [policy, setPolicy] = useState<PasskeyPolicy | null>(null);
+  const [draft, setDraft] = useState({ aaguid: "", name: "", root: "" });
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    accountsApi.passkeyPolicy().then(setPolicy, () => setPolicy(null));
+  }, []);
+  if (!policy) return null;
+  const save = (p: PasskeyPolicy) =>
+    accountsApi.setPasskeyPolicy(p).then(
+      (saved) => {
+        setPolicy(saved);
+        setError(null);
+      },
+      (e) => setError(errorText(e)),
+    );
+  return (
+    <Section id="hardware-keys" title="Hardware keys only" lead="Require your people's passkeys to be on authenticator models you choose, proved by their maker's attestation. Off: any passkey works.">
+      <div className={`${card} space-y-3 p-4`}>
+        <label className="flex items-center gap-2 text-[12.5px]">
+          <input type="checkbox" checked={policy.require} onChange={(e) => void save({ ...policy, require: e.target.checked })} />
+          Only the models below (passkeys on anything else stop working for sign-in)
+        </label>
+        {policy.models.map((m) => (
+          <div key={m.aaguid} className="flex items-center gap-3 text-[12.5px]">
+            <KeyRound className="size-4 text-muted" />
+            <span className="flex-1">
+              {m.name} <span className="font-mono text-[11px] text-subtle">{m.aaguid}</span>
+            </span>
+            <button onClick={() => void save({ ...policy, models: policy.models.filter((x) => x.aaguid !== m.aaguid) })} className={`${btn} text-danger`}>
+              Remove
+            </button>
+          </div>
+        ))}
+        <div className="grid gap-2 sm:grid-cols-2">
+          <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="YubiKey 5 NFC" className={field} />
+          <input value={draft.aaguid} onChange={(e) => setDraft({ ...draft, aaguid: e.target.value })} placeholder="its AAGUID (8-4-4-4-12)" spellCheck={false} className={`${field} font-mono`} />
+          <textarea
+            value={draft.root}
+            onChange={(e) => setDraft({ ...draft, root: e.target.value })}
+            rows={3}
+            spellCheck={false}
+            placeholder="-----BEGIN CERTIFICATE----- its maker's attestation root"
+            className="rounded-lg border border-line-2 bg-canvas px-2.5 py-1.5 font-mono text-[11.5px] outline-none focus:border-accent/60 sm:col-span-2"
+          />
+        </div>
+        <button
+          disabled={!draft.name.trim() || !draft.aaguid.trim() || !draft.root.trim()}
+          onClick={() => void save({ ...policy, models: [...policy.models, { aaguid: draft.aaguid.trim(), name: draft.name.trim(), roots: [draft.root.trim()] }] }).then(() => setDraft({ aaguid: "", name: "", root: "" }))}
+          className={btn}
+        >
+          Add a model
+        </button>
+        {error && <p className="text-[12px] text-danger">{error}</p>}
+      </div>
+    </Section>
+  );
+}
+
+/** Admins: the company's session policy (docs/accounts.md): a second factor for everyone, an idle timeout. */
+function EveryoneSecondFactor() {
+  const [policy, setPolicy] = useState<AccountPolicy | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    accountsApi.accountPolicy().then(setPolicy, () => setPolicy(null));
+  }, []);
+  if (!policy) return null;
+  const save = (p: AccountPolicy) => accountsApi.setAccountPolicy(p).then((saved) => (setPolicy(saved), setError(null)), (err) => setError(errorText(err)));
+  return (
+    <Section id="require-2fa" title="Sessions and second factors" lead="For everyone signed in: a second factor (people without one can use only their account page until they set one up; SSO sign-ins are its provider's to check), and how long an unused session lasts.">
+      <div className={`${card} space-y-2 p-4`}>
+        <label className="flex items-center gap-2 text-[12.5px]">
+          <input type="checkbox" checked={policy.require_second_factor} onChange={(e) => void save({ ...policy, require_second_factor: e.target.checked })} />
+          Require a second factor
+        </label>
+        <label className="flex items-center gap-2 text-[12.5px]">
+          Phishing-resistant sign-in (a passkey, or your SSO) for
+          <select
+            value={policy.phishing_resistant ?? ""}
+            onChange={(e) => void save({ ...policy, phishing_resistant: (e.target.value || undefined) as AccountPolicy["phishing_resistant"] })}
+            className="rounded-md border border-line-2 bg-canvas px-1.5 py-0.5 text-[12px]"
+          >
+            <option value="">nobody</option>
+            <option value="admins">admins</option>
+            <option value="everyone">everyone</option>
+          </select>
+        </label>
+        <label className="flex items-center gap-2 text-[12.5px]">
+          A session unused for
+          <select
+            value={policy.idle_minutes ?? 0}
+            onChange={(e) => void save({ ...policy, idle_minutes: Number(e.target.value) || undefined })}
+            className="rounded-md border border-line-2 bg-canvas px-1.5 py-0.5 text-[12px]"
+          >
+            {[15, 30, 60, 240, 480, 1440, 0].map((m) => (
+              <option key={m} value={m}>
+                {m === 0 ? "a week" : m < 60 ? `${m} minutes` : m === 60 ? "an hour" : m < 1440 ? `${m / 60} hours` : "a day"}
+              </option>
+            ))}
+          </select>
+          ends
+        </label>
+        {error && <p className="text-[12px] text-danger">{error}</p>}
+      </div>
+    </Section>
+  );
+}
+
+/** Admins: allowed networks (docs/accounts.md): people's sessions work only from the company's networks. */
+function Networks() {
+  const [policy, setPolicy] = useState<NetworkPolicy | null>(null);
+  const [text, setText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    accountsApi.networkPolicy().then(
+      (p) => {
+        setPolicy(p);
+        setText(p.networks.join("\n"));
+      },
+      () => setPolicy(null),
+    );
+  }, []);
+  if (!policy) return null;
+  const save = (on: boolean) =>
+    accountsApi.setNetworkPolicy({ on, networks: text.split(/[\s,]+/).filter(Boolean) }).then(
+      (p) => {
+        setPolicy(p);
+        setText(p.networks.join("\n"));
+        setError(null);
+        setSaved(true);
+      },
+      (e) => setError(errorText(e)),
+    );
+  return (
+    <Section id="networks" title="Allowed networks" lead="People's sessions work only from these networks (your offices, your VPN). The operator's token and roll tokens keep their own lists.">
+      <div className={`${card} space-y-3 p-4`}>
+        <label className="flex items-center gap-2 text-[12.5px]">
+          <input type="checkbox" checked={policy.on} onChange={(e) => void save(e.target.checked)} />
+          Only from these networks
+        </label>
+        <textarea
+          value={text}
+          onChange={(e) => (setText(e.target.value), setSaved(false))}
+          rows={4}
+          spellCheck={false}
+          placeholder={"203.0.113.0/24\n2001:db8::/32"}
+          className="w-full rounded-lg border border-line-2 bg-canvas px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-accent/60"
+        />
+        <div className="flex items-center gap-3">
+          <button onClick={() => void save(policy.on)} className={btn}>
+            Save the list
+          </button>
+          {saved && !error && <span className="text-[11.5px] text-subtle">Saved.</span>}
+          {error && <span className="text-[12px] text-danger">{error}</span>}
+        </div>
       </div>
     </Section>
   );
@@ -418,6 +682,37 @@ const browser = (ua: string) => {
   return os ? `${name} on ${os}` : name;
 };
 
+/** Your data (docs/accounts.md, "Your data"): everything roll keeps about you, as a file. */
+function YourData({ handle }: { handle: string }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await accountsApi.exportData();
+      const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+      const a = Object.assign(document.createElement("a"), { href: url, download: `roll-account-${handle}.json` });
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Section title="Your data" lead="Everything roll keeps about your account, as one JSON file: your sign-in methods, sessions, passkeys, security log and tokens. Never a secret.">
+      <div className={`${card} flex flex-wrap items-center gap-3 p-4`}>
+        <button disabled={busy} onClick={save} className={btn}>
+          Export your data
+        </button>
+        {error && <span className="text-[12px] text-danger">{error}</span>}
+      </div>
+    </Section>
+  );
+}
+
 /** Your security log (GitHub's): sign-ins, refused ones too, and changes to your account. */
 function RecentActivity({ me }: { me: string }) {
   const [list, setList] = useState<Activity[] | null>(null);
@@ -444,7 +739,7 @@ function RecentActivity({ me }: { me: string }) {
           {list.map((e, i) => (
             <div key={`${e.at}-${i}`} className="flex items-baseline gap-3 border-t border-line px-4 py-2.5 first:border-t-0 text-[12.5px]">
               <span className={`min-w-0 flex-1 ${e.ok ? "" : "text-danger"}`}>{activityText(e, me)}</span>
-              <span className="hidden truncate font-mono text-[11px] text-subtle sm:inline">{[e.ip, e.user_agent?.split(" ")[0]].filter(Boolean).join(" · ")}</span>
+              <span className="hidden truncate font-mono text-[11px] text-subtle sm:inline">{[e.ip, e.user_agent ? browser(e.user_agent) : null].filter(Boolean).join(" · ")}</span>
               <span className="shrink-0 text-[11px] text-subtle">{when(e.at)}</span>
             </div>
           ))}
@@ -531,15 +826,79 @@ function Invites() {
   );
 }
 
+/** Admins: second-factor resets people asked for (docs/accounts.md, "Recovery"). Shown when any were. */
+function Resets({ me }: { me: string }) {
+  const [list, setList] = useState<ResetRequest[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => accountsApi.resetRequests().then(setList, () => setList([])), []);
+  useEffect(() => void load(), [load]);
+  if (list.length === 0) return null;
+  const decide = (id: string, approve: boolean) => accountsApi.decideReset(id, approve).then(load, (e) => setError(errorText(e)));
+  return (
+    <Section id="recovery" title="Second-factor resets" lead="People who lost their authenticator app and recovery codes. Check it's them some other way first (a call, in person): their email code alone got them this far.">
+      <div className={card}>
+        {list.map((r) => (
+          <div key={r.id} className="flex flex-wrap items-start gap-3 border-t border-line px-4 py-3 first:border-t-0">
+            <ShieldCheck className={`mt-0.5 size-4 ${r.state === "pending" ? "text-accent" : "text-subtle"}`} />
+            <span className="min-w-0 flex-1 leading-snug">
+              <span className="block text-[12.5px]">
+                {r.handle} <span className="text-subtle">{r.email}</span>
+              </span>
+              <span className="mt-0.5 block whitespace-pre-wrap text-[12px] text-muted">{r.reason}</span>
+              <span className="mt-0.5 block text-[11px] text-subtle">
+                Asked {when(r.created_at)}
+                {r.ip ? ` from ${r.ip}` : ""}
+                {r.user_agent ? ` · ${browser(r.user_agent)}` : ""}
+                {r.state !== "pending" && r.decided_at ? ` · ${r.state} ${when(r.decided_at)}` : ""}
+              </span>
+            </span>
+            {r.state === "pending" &&
+              (r.user === me ? (
+                <span className="text-[11.5px] text-subtle">Another admin decides yours</span>
+              ) : (
+                <span className="flex gap-2">
+                  <button onClick={() => decide(r.id, true)} className={primary}>
+                    Reset it
+                  </button>
+                  <button onClick={() => decide(r.id, false)} className={btn}>
+                    Decline
+                  </button>
+                </span>
+              ))}
+          </div>
+        ))}
+        {error && <p className="px-4 pb-3 text-[12px] text-danger">{error}</p>}
+      </div>
+    </Section>
+  );
+}
+
 function Users({ me }: { me: string }) {
   const [list, setList] = useState<User[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(() => accountsApi.users().then(setList, (e) => setError(errorText(e))), []);
   useEffect(() => void load(), [load]);
+  const [required, setRequired] = useState(false);
+  useEffect(() => {
+    accountsApi.accountPolicy().then((p) => setRequired(p.require_second_factor), () => setRequired(false));
+  }, []);
   const act = (p: Promise<unknown>) => p.then(load, (e) => setError(errorText(e)));
+  const without = (list ?? []).filter((u) => !u.disabled && !u.totp && !u.passkeys).length;
   return (
     <Section title="People" lead="Everyone with an account. Turning someone off signs them out everywhere at once.">
+      <p className="-mt-1 mb-2 text-[12px] text-muted">
+        Everyone&apos;s sign-ins and account changes are in the{" "}
+        <Link href="/dashboard/access/audit?product=accounts" className="text-accent hover:underline">
+          sign-in report
+        </Link>{" "}
+        (the audit log, as CSV for a spreadsheet).
+      </p>
       {error && <p className="mb-2 text-[12px] text-danger">{error}</p>}
+      {list && without > 0 && (
+        <p className={`mb-2 text-[12px] ${required ? "text-danger" : "text-muted"}`}>
+          {without === 1 ? "One person has" : `${without} people have`} no second factor{required ? ": they can use only their account page until they set one up." : "."}
+        </p>
+      )}
       <div className={card}>
         {(list ?? []).map((u) => (
           <div key={u.id} className={`flex items-center gap-3 border-t border-line px-4 py-2.5 first:border-t-0 ${u.disabled ? "opacity-60" : ""}`}>
@@ -549,7 +908,8 @@ function Users({ me }: { me: string }) {
               </span>
               <span className="block truncate text-[11px] text-subtle">
                 {u.email}
-                {u.totp ? " · 2FA" : ""}
+                {u.totp || u.passkeys ? ` · ${[u.totp ? "authenticator app" : "", u.passkeys ? `${u.passkeys} passkey${u.passkeys === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ")}` : ""}
+                {!u.totp && !u.passkeys && <span className={required ? "text-danger" : ""}> · no second factor</span>}
               </span>
             </span>
             {u.id !== me && (

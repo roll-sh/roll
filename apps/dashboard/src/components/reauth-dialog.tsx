@@ -1,6 +1,7 @@
 import { Fingerprint, LoaderCircle, Mail, ShieldCheck } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { accountsApi, onReauthRequired } from "@/lib/accounts-api";
+import { accountsApi } from "@/lib/accounts-api";
+import { onReauthRequired } from "@/lib/reauth";
 import { credentialJSON, passkeyProblem, passkeysSupported, requestOptions } from "@/lib/webauthn";
 
 const btn = "flex h-8 items-center justify-center gap-2 rounded-lg border border-line-2 bg-raised px-3 text-[12.5px] font-medium inset-shadow-highlight transition-colors hover:border-line-3 disabled:opacity-50";
@@ -13,7 +14,7 @@ type Methods = ("totp" | "passkey" | "email")[];
 /**
  * Sudo mode (docs/accounts.md): when a change to how the account is reached needs a recent proof,
  * this asks the person to confirm it's them (a passkey, their authenticator app, or an email
- * code), then the change runs again on its own. Mounted once, on the account page.
+ * code), then the change runs again on its own. Mounted once, by the app shell.
  */
 export function ReauthDialog() {
   const [pending, setPending] = useState<Pending | null>(null);

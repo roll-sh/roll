@@ -116,7 +116,7 @@ secret: by writing it somewhere it's read.
 - Found: AWS access keys (not AWS's documentation `…EXAMPLE` keys), GitHub tokens (`ghp_`…, `github_pat_`), Slack tokens, Stripe live keys,
   Google API keys, Anthropic and OpenAI keys, PEM private keys (a block with a base64 body, not
   a bare header in code that parses keys), and roll's own credentials (`rlt_`,
-  `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_`, by their checksum, so never a false positive). roll's are refused
+  `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_`, `rlb_`, by their checksum, so never a false positive). roll's are refused
   in every product but roll secrets, where keeping one is the point; the others only in the
   products above (a database, a queue or apps' variables are where credentials belong).
 - The values of the project's own roll secrets too, for a token that may reveal them (the one that
@@ -662,9 +662,11 @@ previews are listed once those products are on.
 | `search_get_cluster` | A cluster's settings, state, indices, size, URL and branches. | `GET /v1/search/clusters/{cluster}` |
 | `search_create_cluster` | A new cluster, or a branch of one (its password once, to tokens that may reveal). | `POST /v1/search/clusters` |
 | `search_branch_cluster` | A copy-on-write branch of a cluster. | `POST /v1/search/clusters/{cluster}/branches` |
-| `search_update_cluster` | A cluster's idle timeout, request limits, flavor. | `PATCH /v1/search/clusters/{id}` |
+| `search_update_cluster` | A cluster's idle timeout, request limits, flavor, IP allowlist (admin). | `PATCH /v1/search/clusters/{id}` |
 | `search_delete_cluster` | Delete a cluster (its branches keep working); kept for the restore window. | `DELETE /v1/search/clusters/{id}` |
 | `search_restore_cluster` | A deleted cluster back as it was, within its restore window (write). | `POST /v1/search/clusters/{id}/restore` |
+| `search_cluster_metrics` | A cluster's request rate, latency percentiles and answers by kind (`range` 1h, 24h, 14d). | `GET /v1/search/clusters/{id}/metrics` |
+| `search_slowlog` | A cluster's slowest recent requests. | `GET /v1/search/clusters/{id}/slowlog` |
 | `search_usage` | A cluster's metering and cost against Elastic Cloud and Amazon OpenSearch. | `GET /v1/search/clusters/{cluster}/usage` |
 | `search_get_index` | An index's mappings, settings and aliases. | `GET /v1/search/clusters/{cluster}/indices/{index}` |
 | `search_create_index` | Create an index with mappings and settings. | `PUT /v1/search/clusters/{cluster}/indices/{index}` |
@@ -693,6 +695,9 @@ previews are listed once those products are on.
 | `secrets_list_cloud_accounts` | A project's GCP and Azure accounts for dynamic credentials (no secrets; adding one is admin, in the dashboard). | `GET /v1/secrets/projects/{project}/cloud-accounts` |
 | `secrets_list_cas` | A project's own certificate authorities (public certificates, domains, limits; never a key; adding one is admin). | `GET /v1/secrets/projects/{project}/cas` |
 | `secrets_list_ssh_cas` | A project's SSH CAs (public keys, principals, limits; never a private key; adding one is admin). | `GET /v1/secrets/projects/{project}/ssh-cas` |
+| `secrets_totp` | The current one-time code from a secret holding an authenticator seed (a reveal; never the seed). | `GET /v1/secrets/projects/{project}/environments/{env}/secrets/{name}/totp` |
+| `secrets_list_saas` | A project's rotators for third-party API keys: vendor and the account each rotates for (never a credential). | `GET /v1/secrets/projects/{project}/saas` |
+| `secrets_list_kubernetes` | The Kubernetes clusters a project issues service-account tokens for: names and API servers (never a token). | `GET /v1/secrets/projects/{project}/kubernetes` |
 | `secrets_list_github_apps` | A project's GitHub Apps for short-lived installation tokens (ids, repositories, permissions; never the private key; adding one is admin). | `GET /v1/secrets/projects/{project}/github-apps` |
 | `secrets_changes` | What changed in an environment (who, when, which keys; never values). | `GET …/environments/{env}/changes` |
 | `secrets_versions` | A secret's history (fingerprints, never values). | `GET …/environments/{env}/secrets/{name}/versions` |
@@ -805,6 +810,7 @@ previews are listed once those products are on.
 | `previews_get` | A preview with its branched resources and its schema changes. | `GET /v1/previews/{id}` |
 | `previews_create` | A preview environment for a change or a branch: the project's resources branched, its services deployed. | `POST /v1/previews` |
 | `previews_refresh` | Redeploy a preview now. | `POST /v1/previews/{id}/refresh` |
+| `previews_metrics` | Each of a preview's services' CPU and memory now. | `GET /v1/previews/{id}/metrics` |
 | `previews_logs` | A preview's deploy and service logs. | `GET /v1/previews/{id}/logs` |
 | `previews_requests` | A preview's latest 200 requests through roll (service, method, path, status, time), to find the one that failed. | `GET /v1/previews/{id}/requests` |
 | `previews_reset` | Branch a preview's resources again from their parents. | `POST /v1/previews/{id}/reset` |
@@ -832,23 +838,27 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Accounts as GitHub has them, built 2026-11-18, stacked for the next turn:** #254 (refused
-   codes in the security log) → #256 passkeys → #257 sudo mode → #258 new-sign-in mail → #260
-   tokens from a session behind sudo mode, the dialog app-wide (checked end to end in a real
-   Chromium's virtual authenticator, `users-live/passkeys-shot.sh`) → #263 second-factor resets an
-   admin decides. Land them in one turn, in that order (each PR's base is the one before; retarget
-   each to main after its base squashes).
-2. **For roll secrets' incident tools (asked 2026-11-18; after the merge turn):**
-   `Access::revoke_many(ids, why)` and `POST /v1/access/tokens/revoke {ids, why}` (one write, all or
-   none, an admin row, an audit row per grant naming the incident; secrets' reach chooses the ids,
-   never a second scope matcher); `roll_auth::credentials::kind_in` public plus a bounded
-   `find_all(text)` with each match's kind and range, for roll code's landing blocker and
-   `roll secrets scan`; honeytokens (`decoy: true` grants: never allow, any use is a leak-style
-   audit row with mail to admins and the owner).
-3. **Accounts, after that:** WebAuthn attestation for companies that require hardware keys (an
-   AAGUID allowlist per roll, off by default, with the FIDO metadata's names shown on each
-   passkey); then a person's own data export (GitHub's account data export: their account, its
-   sessions, security log and tokens' names, as JSON).
+1. **Built 2026-11-18, for the next turn (after secrets #79 and search's turn):** a person's own
+   data export (#283, this PR), hardware keys only (#286), one provider for people and agents
+   (#287), an SSO connection's session length (#289) with back-channel logout on it (#292),
+   allowed networks (#294) with a second factor for everyone (#298), who has one (#299) and an
+   idle timeout (#302) on it; moving an account to another address (#306) with deleting your own
+   account on it (#309); downloads that send the session (signed-in people got 401s on the audit
+   export, apps' logs and previews' QR codes, screenshots, mail and logs) and the sign-in report
+   link (#307); the audit log naming people by handle, the CSV too (#313); tools for search's
+   metrics, slow log and IP allowlist and previews' metrics (#310). #306, #307 and #309 were
+   checked together in a real Chromium (`users-live/review306-shot.sh`). Conflicts: appended
+   tests (keep both), #287×#289 in `account-sso.tsx`, #306/#309×#302's stack in `account.tsx`,
+   `api.rs` and docs/accounts.md, #307×#313 in the audit page; build land commits up front as the
+   last turn did.
+2. **Next, ranked (now):** the email change's and deletion's SCIM and SSO refusals in the SSO and
+   SCIM flow tests; what a removed person owned (their roll code owner's repositories) handed to
+   someone else when an admin disables or a person deletes the account (GitHub's transfer on
+   removal; roll code's routes, so asked of no thread until a code thread runs); tools for
+   search's audit and analytics once #247 and #291 are on main.
+3. **Landed 2026-11-18 (main 1a60b43be):** passkeys (#256), sudo mode (#257, #260), new-sign-in mail
+   (#258), second-factor resets (#263), refused codes in the security log (#254); for roll secrets,
+   `revoke_many` and the public detectors (#267) and decoy tokens (#270).
 4. **Enterprise:** a provider made once in the dashboard for both people and agents (#252 picks
    an existing connection today).
 5. **People's accounts, enterprise-grade:** on main since 2026-11-18: SSO (#225), SCIM
@@ -913,7 +923,7 @@ waits on a sibling PR reaching main is last.
    were found this way). #24 and #25 are on main, so `feature/mcp-on-landing` is retired:
    secrets' #64 lands on main directly.
 14. **The operator's steps:** only if a load balancer that terminates HTTP sits in front of rolld (not
-   roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_` and `rlp_` (`[a-z2-7]{40}` with a
+   roll's own edge, which needs nothing), set `ROLL_TRUSTED_PROXIES` to its addresses; and register `rlt_`, `rlo_`, `rlf_`, `rlc_`, `rlk_`, `rlp_` and `rlb_` (`[a-z2-7]{40}` with a
    checksum) with GitHub's secret scanning partner program, so leaks on GitHub reach
    `/v1/access/leaks/github`.
 15. **Postgres e2e:** five history/replica e2e tests fail on this server because computes can't

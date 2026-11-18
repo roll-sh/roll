@@ -60,6 +60,10 @@ struct Env {
 struct Browser {
     cookies: HashMap<String, String>,
     csrf: Option<String>,
+    /// Its User-Agent, if it sends one.
+    user_agent: Option<String>,
+    /// Where it calls from (the gate's client address).
+    ip: Option<String>,
 }
 
 struct Answer {
@@ -135,6 +139,8 @@ impl Env {
             Rule { route: "/v1/workspace", access: Access::User("projects") },
         ];
         let gate = Gate::with_sessions(Some(AdminToken::new(OPERATOR).unwrap()), rules, accounts.sessions(), Origins::parse(WEB).unwrap(), API);
+        // The client's address, as rolld's trusted proxies would read it (here: a test header).
+        gate.set_client_ip(Arc::new(|req| req.headers().get("x-test-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok())));
         let router = roll_accounts::router(accounts.clone())
             .route("/v1/projects", get(|| async { Json(json!([])) }).post(|| async { StatusCode::CREATED }))
             .route("/v1/workspace/projects", get(|| async { Json(json!([])) }))
@@ -150,6 +156,12 @@ impl Env {
         }
         if let Some(c) = b.csrf.as_ref().filter(|_| method != Method::GET) {
             req = req.header("x-roll-csrf", c);
+        }
+        if let Some(ua) = &b.user_agent {
+            req = req.header(header::USER_AGENT, ua);
+        }
+        if let Some(ip) = &b.ip {
+            req = req.header("x-test-ip", ip);
         }
         let a = self.send(req.body(body.map_or(Body::empty(), |v| Body::from(v.to_string()))).unwrap()).await;
         for c in a.headers.get_all(header::SET_COOKIE) {
@@ -596,6 +608,12 @@ async fn sso_signs_people_in_by_their_domain() {
     assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/sso/{id}"), json!({ "enforce": true })).await.status, StatusCode::OK);
     assert_eq!(env.call(&mut ada, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED, "the email-code session ended");
     assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK, "the SSO session stays");
+    // Her company's sign-in decides who she is: she can't move her address off the domain or
+    // delete her account (her admin removes her).
+    // (The session answer carries the CSRF token, as the dashboard reads it after a redirect.)
+    let ada_handle = env.call(&mut b, Method::GET, "/v1/accounts/session", None).await.json["user"]["handle"].as_str().unwrap().to_string();
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/email", Some(json!({ "email": "ada@elsewhere.test" }))).await.json["code"], "sso_required");
+    assert_eq!(env.call(&mut b, Method::DELETE, "/v1/accounts/me", Some(json!({ "confirm": ada_handle }))).await.json["code"], "sso_required");
     for who in ["ada@acme.test", "nobody@acme.test"] {
         let a = env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/start", Some(json!({ "email": who }))).await;
         assert_eq!((a.status, a.json["code"].as_str()), (StatusCode::FORBIDDEN, Some("sso_required")), "{}", a.json);
@@ -657,7 +675,10 @@ async fn scim_provisions_and_deactivates_people() {
     // Carol signs in; deactivated by the provider (Entra's string), her session ends at once.
     let mut b = Browser::default();
     env.email_sign_in(&mut b, "carol@acme.test", None).await;
-    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
+    let carol_handle = env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.json["handle"].as_str().unwrap().to_string();
+    // The provider manages her: she can't move her account to another address or delete it.
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/email", Some(json!({ "email": "carol@elsewhere.test" }))).await.json["code"], "managed");
+    assert_eq!(env.call(&mut b, Method::DELETE, "/v1/accounts/me", Some(json!({ "confirm": carol_handle }))).await.json["code"], "managed");
     let off = scim(Method::PATCH, format!("/Users/{carol_id}"), Some(json!({ "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{ "op": "Replace", "path": "active", "value": "False" }] })), token.clone()).await;
     assert_eq!((off.status, off.json["active"].as_bool()), (StatusCode::OK, Some(false)), "{}", off.json);
     assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED, "her session ended");
@@ -797,6 +818,8 @@ struct Authenticator {
     count: u32,
     /// Flags besides user presence: `UV` (0x04), `BS` (0x10, synced).
     flags: u8,
+    /// Its model (AAGUID).
+    aaguid: [u8; 16],
 }
 
 impl Authenticator {
@@ -805,7 +828,7 @@ impl Authenticator {
         let rng = ring::rand::SystemRandom::new();
         let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
         let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng).unwrap();
-        Authenticator { key, credential: (0..32).map(|i| i as u8 ^ 0x5a).collect(), count: 0, flags }
+        Authenticator { key, credential: (0..32).map(|i| i as u8 ^ 0x5a).collect(), count: 0, flags, aaguid: [0; 16] }
     }
     fn b64(b: &[u8]) -> String {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
@@ -825,7 +848,7 @@ impl Authenticator {
         d.push(0x01 | self.flags | if new { 0x40 } else { 0 });
         d.extend_from_slice(&self.count.to_be_bytes());
         if new {
-            d.extend_from_slice(&[0; 16]);
+            d.extend_from_slice(&self.aaguid);
             d.extend_from_slice(&(self.credential.len() as u16).to_be_bytes());
             d.extend_from_slice(&self.credential);
             d.extend_from_slice(&self.cose());
@@ -848,6 +871,43 @@ impl Authenticator {
         let id = Self::b64(&self.credential);
         json!({ "id": id, "rawId": id, "type": "public-key", "response": { "clientDataJSON": Self::b64(&Self::client("webauthn.create", options, WEB)), "attestationObject": Self::b64(&att) } })
     }
+    /// `navigator.credentials.create` with a `packed` attestation signed by `signer`, whose
+    /// certificate is `cert` (a hardware key proving its model).
+    fn create_packed(&mut self, options: &Value, signer: &ring::signature::EcdsaKeyPair, cert: &[u8]) -> Value {
+        let rp = options["publicKey"]["rp"]["id"].as_str().unwrap().to_string();
+        let data = self.auth_data(&rp, true);
+        let client = Self::client("webauthn.create", options, WEB);
+        let mut msg = data.clone();
+        msg.extend_from_slice(&Sha256::digest(&client));
+        let sig = signer.sign(&ring::rand::SystemRandom::new(), &msg).unwrap();
+        let bytes = |b: &[u8]| {
+            let mut v = if b.len() < 24 { vec![0x40 | b.len() as u8] } else if b.len() < 256 { vec![0x58, b.len() as u8] } else { let mut h = vec![0x59]; h.extend_from_slice(&(b.len() as u16).to_be_bytes()); h };
+            v.extend_from_slice(b);
+            v
+        };
+        let text = |t: &str| {
+            let mut v = vec![0x60 | t.len() as u8];
+            v.extend_from_slice(t.as_bytes());
+            v
+        };
+        let mut att = vec![0xa3];
+        att.extend(text("fmt"));
+        att.extend(text("packed"));
+        att.extend(text("attStmt"));
+        att.push(0xa3);
+        att.extend(text("alg"));
+        att.push(0x26);
+        att.extend(text("sig"));
+        att.extend(bytes(sig.as_ref()));
+        att.extend(text("x5c"));
+        att.push(0x81);
+        att.extend(bytes(cert));
+        att.extend(text("authData"));
+        att.extend(bytes(&data));
+        let id = Self::b64(&self.credential);
+        json!({ "id": id, "rawId": id, "type": "public-key", "response": { "clientDataJSON": Self::b64(&client), "attestationObject": Self::b64(&att) } })
+    }
+
     /// `navigator.credentials.get` at `origin`: the count goes up, the data is signed.
     fn get(&mut self, options: &Value, origin: &str) -> Value {
         self.count += 1;
@@ -1024,4 +1084,578 @@ async fn sudo_mode_asks_for_a_recent_proof() {
 
     let got = events.0.lock().unwrap().clone();
     assert_eq!(got.iter().filter(|e| e.action == "reauth").map(|e| (e.ok, e.detail["method"].as_str().unwrap().to_string())).collect::<Vec<_>>(), [(false, "email".into()), (false, "totp".into()), (true, "email".into())]);
+}
+
+/// The mails "a new sign-in to your roll account" sent to `to`.
+fn new_sign_in_mails(outbox: &std::path::Path, to: &str) -> Vec<String> {
+    let mut out: Vec<(String, String)> = std::fs::read_dir(outbox)
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| (e.file_name().to_string_lossy().into_owned(), serde_json::from_slice::<Value>(&std::fs::read(e.path()).unwrap()).unwrap())).filter(|(_, m)| m["to"] == to && m["subject"] == "A new sign-in to your roll account").map(|(n, m)| (n, m["text"].as_str().unwrap().to_string())).collect())
+        .unwrap_or_default();
+    out.sort();
+    out.into_iter().map(|(_, t)| t).collect()
+}
+
+/// A whole sign-in from a browser and network a person hasn't signed in from before mails them
+/// (docs/accounts.md, "New sign-ins"); their first sign-in, and the same place again, don't.
+#[tokio::test]
+async fn a_sign_in_from_somewhere_new_mails_the_person() {
+    let env = Env::new().await;
+    env.accounts.set_audit(Arc::new(Events::default()));
+    let mac = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36";
+    let windows = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0";
+    let invite = env.invite("ada@example.com").await;
+    let mut b = Browser { user_agent: Some(mac.into()), ..Default::default() };
+    env.email_sign_in(&mut b, "ada@example.com", Some(&invite)).await;
+    let mut again = Browser { user_agent: Some(mac.into()), ..Default::default() };
+    assert_eq!(env.email_sign_in(&mut again, "ada@example.com", None).await.json["status"], "signed_in");
+    let mut elsewhere = Browser { user_agent: Some(windows.into()), ..Default::default() };
+    assert_eq!(env.email_sign_in(&mut elsewhere, "ada@example.com", None).await.json["status"], "signed_in");
+    let mut twice = Browser { user_agent: Some(windows.into()), ..Default::default() };
+    env.email_sign_in(&mut twice, "ada@example.com", None).await;
+    // The mail goes out off the request: wait for it, then a moment for any wrong second one.
+    for _ in 0..100 {
+        if !new_sign_in_mails(&env.outbox, "ada@example.com").is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mails = new_sign_in_mails(&env.outbox, "ada@example.com");
+    assert_eq!(mails.len(), 1, "one mail, for the one new place: {mails:?}");
+    assert!(mails[0].contains("Firefox on Windows, from 203.0.113.7") && mails[0].contains(&format!("{WEB}/dashboard/account#activity")), "{}", mails[0]);
+}
+
+/// Second-factor recovery (docs/accounts.md, "Recovery"): someone who lost their authenticator app
+/// and recovery codes asks after their email code, admins are mailed, and an admin's approval
+/// takes their TOTP away: their next sign-in is whole and they set it up again. Asked twice it's
+/// one request; decided once; each step in their security log.
+#[tokio::test]
+async fn an_admin_resets_a_lost_second_factor() {
+    let env = Env::new().await;
+    let events = Arc::new(Events::default());
+    env.accounts.set_audit(events.clone());
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@example.com", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let mut root = Browser::default();
+    let root_id = env.email_sign_in(&mut root, "root@example.com", Some(&root_invite)).await.json["user"]["id"].as_str().unwrap().to_string();
+    let bob_invite = env.invite("bob@example.com").await;
+    let mut b = Browser::default();
+    let bob = env.email_sign_in(&mut b, "bob@example.com", Some(&bob_invite)).await.json["user"]["id"].as_str().unwrap().to_string();
+    let t = env.call(&mut b, Method::POST, "/v1/accounts/me/totp", None).await.json;
+    let seed = roll_auth::totp::base32_decode(t["secret"].as_str().unwrap()).unwrap();
+    let step = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 / roll_auth::totp::STEP_S;
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/totp/confirm", Some(json!({ "code": format!("{:06}", roll_auth::totp::totp(&seed, step)) }))).await.status, StatusCode::OK);
+
+    // Bob lost his phone and his codes: his email code gets him as far as the second factor.
+    let mut lost = Browser::default();
+    assert_eq!(env.email_sign_in(&mut lost, "bob@example.com", None).await.json["status"], "mfa_required");
+    let ask = json!({ "reason": "Lost my phone and my codes. Call me on the desk phone." });
+    assert_eq!(env.call(&mut Browser::default(), Method::POST, "/v1/accounts/signin/reset-request", Some(ask.clone())).await.status, StatusCode::UNAUTHORIZED, "a first factor first");
+    let r = env.call(&mut lost, Method::POST, "/v1/accounts/signin/reset-request", Some(ask.clone())).await;
+    assert_eq!((r.status, r.json["state"].as_str()), (StatusCode::ACCEPTED, Some("pending")), "{}", r.json);
+    let id = r.json["id"].as_str().unwrap().to_string();
+    assert_eq!(env.call(&mut lost, Method::POST, "/v1/accounts/signin/reset-request", Some(ask)).await.json["id"], id.as_str(), "one pending request");
+    // Admins are told; Bob can't see or decide requests.
+    let mut told = false;
+    for _ in 0..100 {
+        told = std::fs::read_dir(&env.outbox).unwrap().filter_map(|e| e.ok()).any(|e| {
+            let m: Value = serde_json::from_slice(&std::fs::read(e.path()).unwrap()).unwrap();
+            m["to"] == "root@example.com" && m["subject"] == "bob asks for a second-factor reset" && m["text"].as_str().unwrap().contains("desk phone")
+        });
+        if told {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(told, "the admin was mailed the request and its reason");
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/reset-requests", None).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(env.call(&mut b, Method::POST, &format!("/v1/accounts/reset-requests/{id}/approve"), None).await.status, StatusCode::FORBIDDEN);
+    let listed = env.call(&mut root, Method::GET, "/v1/accounts/reset-requests", None).await.json;
+    assert_eq!((listed[0]["id"].as_str(), listed[0]["handle"].as_str(), listed[0]["state"].as_str()), (Some(id.as_str()), Some("bob"), Some("pending")), "{listed}");
+
+    // Approved: his TOTP is gone, the sign-in waiting for it ends, the next one is whole.
+    let ok = env.call(&mut root, Method::POST, &format!("/v1/accounts/reset-requests/{id}/approve"), None).await;
+    assert_eq!((ok.status, ok.json["state"].as_str(), ok.json["decided_by"].as_str()), (StatusCode::OK, Some("approved"), Some(root_id.as_str())), "{}", ok.json);
+    assert_eq!(env.call(&mut root, Method::POST, &format!("/v1/accounts/reset-requests/{id}/deny"), None).await.status, StatusCode::CONFLICT, "decided once");
+    assert_eq!(env.call(&mut lost, Method::GET, "/v1/accounts/session", None).await.json["status"], "anonymous");
+    let mut again = Browser::default();
+    let whole = env.email_sign_in(&mut again, "bob@example.com", None).await.json;
+    assert_eq!((whole["status"].as_str(), whole["user"]["totp"].as_bool()), (Some("signed_in"), Some(false)), "{whole}");
+
+    let got = events.0.lock().unwrap().clone();
+    let steps: Vec<(String, String, Option<String>)> = got.iter().filter(|e| e.action.starts_with("recovery.")).map(|e| (e.action.clone(), e.actor.clone(), e.target.clone())).collect();
+    assert_eq!(steps, [("recovery.request".to_string(), bob.clone(), Some(bob.clone())), ("recovery.approve".to_string(), root_id.clone(), Some(bob.clone()))]);
+}
+
+/// A person's own data (docs/accounts.md, "Your data"): one JSON download of their account,
+/// sessions, passkeys, security log and more, behind sudo mode, with no secret or hash in it.
+#[tokio::test]
+async fn a_person_exports_their_own_data() {
+    let env = Env::new().await;
+    env.accounts.set_audit(Arc::new(Events::default()));
+    let invite = env.invite("ada@example.com").await;
+    let mut b = Browser::default();
+    env.email_sign_in(&mut b, "ada@example.com", Some(&invite)).await;
+    let t = env.call(&mut b, Method::POST, "/v1/accounts/me/totp", None).await.json;
+    let seed = t["secret"].as_str().unwrap().to_string();
+    let a = env.call(&mut b, Method::POST, "/v1/accounts/me/export", None).await;
+    assert_eq!(a.status, StatusCode::OK, "{}", a.json);
+    assert_eq!(a.headers.get(header::CONTENT_DISPOSITION).and_then(|v| v.to_str().ok()), Some("attachment; filename=\"roll-account-ada.json\""));
+    let d = &a.json;
+    assert_eq!(d["account"]["email"], "ada@example.com");
+    assert_eq!(d["sessions"].as_array().map(Vec::len), Some(1), "{d}");
+    assert!(d["security_log"].as_array().unwrap().iter().any(|e| e["action"] == "sign_in"), "{d}");
+    assert!(d["passkeys"].is_array() && d["tokens"].is_array() && d["sign_in_places"].is_array());
+    let all = d.to_string();
+    assert!(!all.contains(&seed) && !all.contains("token_hash") && !all.contains("code_hash") && !all.contains(&invite), "no secret in an export");
+    // Sudo mode: an old session can't take it.
+    env.accounts.set_sudo_window(1);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/export", None).await.json["code"], "reauth_required");
+}
+
+/// A maker's root and an attestation certificate it signed for model `aaguid` (OU "Authenticator
+/// Attestation", FIDO's AAGUID extension), with the certificate's signing key: the root's PEM, the
+/// certificate's DER, the key.
+fn attestation_chain(maker: &str, aaguid: [u8; 16]) -> (String, Vec<u8>, ring::signature::EcdsaKeyPair) {
+    use rcgen::{BasicConstraints, CertificateParams, CustomExtension, DnType, IsCa, Issuer, KeyPair};
+    let root_key = KeyPair::generate().unwrap();
+    let mut root = CertificateParams::new(Vec::<String>::new()).unwrap();
+    root.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    root.distinguished_name.push(DnType::CommonName, format!("{maker} Attestation Root"));
+    let root_cert = root.self_signed(&root_key).unwrap();
+    let issuer = Issuer::from_params(&root, &root_key);
+    let leaf_key = KeyPair::generate().unwrap();
+    let mut leaf = CertificateParams::new(Vec::<String>::new()).unwrap();
+    leaf.is_ca = IsCa::ExplicitNoCa;
+    leaf.distinguished_name.push(DnType::OrganizationName, maker);
+    leaf.distinguished_name.push(DnType::OrganizationalUnitName, "Authenticator Attestation");
+    leaf.distinguished_name.push(DnType::CommonName, format!("{maker} Key"));
+    let mut ext = vec![0x04, 16];
+    ext.extend_from_slice(&aaguid);
+    leaf.custom_extensions.push(CustomExtension::from_oid_content(&[1, 3, 6, 1, 4, 1, 45724, 1, 1, 4], ext));
+    let leaf_cert = leaf.signed_by(&leaf_key, &issuer).unwrap();
+    let signer = ring::signature::EcdsaKeyPair::from_pkcs8(&ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING, &leaf_key.serialize_der(), &ring::rand::SystemRandom::new()).unwrap();
+    (root_cert.pem(), leaf_cert.der().to_vec(), signer)
+}
+
+/// Hardware keys only (docs/accounts.md, "Passkeys"): with the policy on, registration asks for
+/// attestation and keeps only a listed model whose `packed` statement chains to its maker's root;
+/// no attestation, another model, or another maker's chain is refused, and an older passkey that
+/// proved nothing stops signing in. Off, nothing changes.
+#[tokio::test]
+async fn hardware_keys_only_takes_verified_listed_models() {
+    let env = Env::new().await;
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@example.com", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let mut b = Browser::default();
+    env.email_sign_in(&mut b, "root@example.com", Some(&root_invite)).await;
+    // Off: any passkey, no attestation asked.
+    let o = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys/options", None).await.json;
+    assert_eq!(o["publicKey"]["attestation"], "none");
+    let mut phone = Authenticator::new(0x04);
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys", Some(json!({ "id": o["id"], "name": "phone", "credential": phone.create(&o) }))).await.status, StatusCode::CREATED);
+
+    // On: one model, with its maker's root.
+    let yk: [u8; 16] = *b"yubikey-5-model!";
+    let (root_pem, cert, signer) = attestation_chain("Yubico", yk);
+    let model_id = roll_accounts::attestation::uuid(&yk);
+    let bad = env.call(&mut b, Method::PUT, "/v1/accounts/passkey-policy", Some(json!({ "require": true, "models": [] }))).await;
+    assert_eq!((bad.status, bad.json["code"].as_str()), (StatusCode::BAD_REQUEST, Some("policy")), "at least one model");
+    let set = env.call(&mut b, Method::PUT, "/v1/accounts/passkey-policy", Some(json!({ "require": true, "models": [{ "aaguid": model_id, "name": "YubiKey 5", "roots": [root_pem] }] }))).await;
+    assert_eq!(set.status, StatusCode::OK, "{}", set.json);
+
+    // A listed model, attested by its maker: kept, with its model's name.
+    let o = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys/options", None).await.json;
+    assert_eq!(o["publicKey"]["attestation"], "direct");
+    let mut key = Authenticator::new(0x04);
+    key.credential = vec![7; 32];
+    key.aaguid = yk;
+    let made = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys", Some(json!({ "id": o["id"], "name": "my key", "credential": key.create_packed(&o, &signer, &cert) }))).await;
+    assert_eq!((made.status, made.json["model"].as_str()), (StatusCode::CREATED, Some("YubiKey 5")), "{}", made.json);
+    // Refused: no attestation, an unlisted model, a chain to another maker's root.
+    let mut none = Authenticator::new(0x04);
+    none.credential = vec![8; 32];
+    none.aaguid = yk;
+    let o = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys/options", None).await.json;
+    let a = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys", Some(json!({ "id": o["id"], "name": "x", "credential": none.create(&o) }))).await;
+    assert!(a.json["error"].as_str().is_some_and(|e| e.contains("doesn't prove its model")), "no attestation: {}", a.json);
+    let mut other = Authenticator::new(0x04);
+    other.credential = vec![9; 32];
+    other.aaguid = *b"another-model-xx";
+    let (_, other_cert, other_signer) = attestation_chain("Yubico", other.aaguid);
+    let o = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys/options", None).await.json;
+    let a = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys", Some(json!({ "id": o["id"], "name": "x", "credential": other.create_packed(&o, &other_signer, &other_cert) }))).await;
+    assert!(a.json["error"].as_str().is_some_and(|e| e.contains("isn't one")), "unlisted model: {}", a.json);
+    let mut fake = Authenticator::new(0x04);
+    fake.credential = vec![10; 32];
+    fake.aaguid = yk;
+    let (_, fake_cert, fake_signer) = attestation_chain("Counterfeit", yk);
+    let o = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys/options", None).await.json;
+    let a = env.call(&mut b, Method::POST, "/v1/accounts/me/passkeys", Some(json!({ "id": o["id"], "name": "x", "credential": fake.create_packed(&o, &fake_signer, &fake_cert) }))).await;
+    assert!(a.json["error"].as_str().is_some_and(|e| e.contains("isn't from this model's maker")), "another maker's chain: {}", a.json);
+
+    // Signing in: the attested key works; the phone's passkey, which proved nothing, doesn't.
+    let mut c = Browser::default();
+    let o = env.call(&mut c, Method::POST, "/v1/accounts/signin/passkey/options", None).await.json;
+    assert_eq!(env.call(&mut c, Method::POST, "/v1/accounts/signin/passkey", Some(json!({ "id": o["id"], "credential": key.get(&o, WEB) }))).await.json["status"], "signed_in");
+    let mut d = Browser::default();
+    let o = env.call(&mut d, Method::POST, "/v1/accounts/signin/passkey/options", None).await.json;
+    let a = env.call(&mut d, Method::POST, "/v1/accounts/signin/passkey", Some(json!({ "id": o["id"], "credential": phone.get(&o, WEB) }))).await;
+    assert!(a.json["error"].as_str().is_some_and(|e| e.contains("isn't on one")), "{}", a.json);
+}
+
+/// An SSO connection's session length (docs/accounts.md, "SSO"): what it signs in lasts at most
+/// that long, a shorter one applies at once to its running sessions, and a sign-in another way
+/// keeps roll's 30 days.
+#[tokio::test]
+async fn an_sso_connection_caps_its_sessions() {
+    let env = Env::new().await;
+    let idp = fake_idp().await;
+    let issuer = idp.base.lock().unwrap().clone();
+    let txt = Arc::new(Txt::default());
+    env.accounts.set_txt_lookup(txt.clone());
+    let mut by_code = Browser::default();
+    env.email_sign_in(&mut by_code, "ada@acme.test", Some(&env.invite("ada@acme.test").await)).await;
+    let conn = env.operator(Method::POST, "/v1/accounts/sso", json!({ "name": "Acme Okta", "issuer": issuer, "client_id": "roll-sso", "client_secret": "s3cret", "domains": ["acme.test"] })).await.json;
+    let id = conn["id"].as_str().unwrap().to_string();
+    txt.0.lock().unwrap().insert("_roll-sso.acme.test".into(), vec![conn["dns"]["value"].as_str().unwrap().to_string()]);
+    env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/verify"), json!({})).await;
+    assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/sso/{id}"), json!({ "session_hours": 721 })).await.status, StatusCode::BAD_REQUEST);
+    let set = env.operator(Method::PATCH, &format!("/v1/accounts/sso/{id}"), json!({ "session_hours": 12 })).await;
+    assert_eq!(set.json["session_hours"], 12, "{}", set.json);
+
+    let hours = |b: &mut Browser| {
+        let env = &env;
+        let mut b = b.clone();
+        async move {
+            let s = env.call(&mut b, Method::GET, "/v1/accounts/session", None).await.json;
+            (s["session"]["expires_at"].as_i64().unwrap() - s["session"]["created_at"].as_i64().unwrap()) / 3_600_000
+        }
+    };
+    let mut by_sso = Browser::default();
+    env.sso(&idp, &mut by_sso, "ada@acme.test", json!({ "sub": "00u-ada", "email": "ada@acme.test" })).await;
+    assert_eq!(hours(&mut by_sso).await, 12, "an SSO session lasts the connection's length");
+    assert_eq!(hours(&mut by_code).await, 30 * 24, "a sign-in another way keeps roll's 30 days");
+    // Shorter: its running sessions shorten now; the email-code one doesn't.
+    assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/sso/{id}"), json!({ "session_hours": 1 })).await.status, StatusCode::OK);
+    assert_eq!(hours(&mut by_sso).await, 1);
+    assert_eq!(hours(&mut by_code).await, 30 * 24);
+}
+
+/// OIDC Back-Channel Logout (docs/accounts.md, "SSO"): the provider posts a signed logout token
+/// and the sessions it names end: by the provider's session (`sid`), else the person (`sub`).
+/// A replayed, unsigned, nonce-bearing or event-less token is refused; other sign-ins stay.
+#[tokio::test]
+async fn an_sso_providers_logout_ends_its_sessions() {
+    let env = Env::new().await;
+    let idp = fake_idp().await;
+    let issuer = idp.base.lock().unwrap().clone();
+    let txt = Arc::new(Txt::default());
+    env.accounts.set_txt_lookup(txt.clone());
+    let mut by_code = Browser::default();
+    env.email_sign_in(&mut by_code, "ada@acme.test", Some(&env.invite("ada@acme.test").await)).await;
+    let conn = env.operator(Method::POST, "/v1/accounts/sso", json!({ "name": "Acme Okta", "issuer": issuer, "client_id": "roll-sso", "client_secret": "s3cret", "domains": ["acme.test"] })).await.json;
+    let id = conn["id"].as_str().unwrap().to_string();
+    assert!(conn["backchannel_logout_uri"].as_str().unwrap().ends_with(&format!("/v1/accounts/sso/{id}/backchannel-logout")), "{conn}");
+    txt.0.lock().unwrap().insert("_roll-sso.acme.test".into(), vec![conn["dns"]["value"].as_str().unwrap().to_string()]);
+    env.operator(Method::POST, &format!("/v1/accounts/sso/{id}/verify"), json!({})).await;
+    let mut laptop = Browser::default();
+    env.sso(&idp, &mut laptop, "ada@acme.test", json!({ "sub": "00u-ada", "email": "ada@acme.test", "sid": "okta-sid-1" })).await;
+    let mut phone = Browser::default();
+    env.sso(&idp, &mut phone, "ada@acme.test", json!({ "sub": "00u-ada", "email": "ada@acme.test", "sid": "okta-sid-2" })).await;
+
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let sign = |claims: Value, key: &[u8]| {
+        use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
+        let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        let input = format!("{}.{}", b64(json!({ "alg": "ES256", "kid": "k1", "typ": "logout+jwt" }).to_string().as_bytes()), b64(claims.to_string().as_bytes()));
+        let k = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, key, &ring::rand::SystemRandom::new()).unwrap();
+        format!("{input}.{}", b64(k.sign(&ring::rand::SystemRandom::new(), input.as_bytes()).unwrap().as_ref()))
+    };
+    let token = |extra: Value| {
+        let mut c = json!({ "iss": issuer, "aud": "roll-sso", "iat": now, "exp": now + 120, "jti": format!("j-{}", rand_hex()), "events": { "http://schemas.openid.net/event/backchannel-logout": {} } });
+        for (k, v) in extra.as_object().unwrap() {
+            if v.is_null() {
+                c.as_object_mut().unwrap().remove(k);
+            } else {
+                c[k] = v.clone();
+            }
+        }
+        c
+    };
+    let post = |t: String| {
+        let (env, id) = (&env, id.clone());
+        async move {
+            let req = Request::builder().method(Method::POST).uri(format!("/v1/accounts/sso/{id}/backchannel-logout")).header("content-type", "application/x-www-form-urlencoded");
+            env.send(req.body(Body::from(format!("logout_token={t}"))).unwrap()).await
+        }
+    };
+    let status = |b: &Browser| {
+        let env = &env;
+        let mut b = b.clone();
+        async move { env.call(&mut b, Method::GET, "/v1/accounts/session", None).await.json["status"].as_str().unwrap().to_string() }
+    };
+    // Its session, by sid: the laptop's SSO session ends; the phone's and the email code's stay.
+    let first = sign(token(json!({ "sid": "okta-sid-1" })), &idp.key);
+    let a = post(first.clone()).await;
+    assert_eq!(a.status, StatusCode::OK, "{}", a.json);
+    assert_eq!(a.headers.get(header::CACHE_CONTROL).and_then(|v| v.to_str().ok()), Some("no-store"));
+    assert_eq!((status(&laptop).await, status(&phone).await, status(&by_code).await), ("anonymous".into(), "signed_in".into(), "signed_in".into()));
+    // Refused: a replay, a nonce, no logout event, another key's signature.
+    assert_eq!(post(first).await.status, StatusCode::BAD_REQUEST, "used once");
+    assert_eq!(post(sign(token(json!({ "sub": "00u-ada", "nonce": "n" })), &idp.key)).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(post(sign(token(json!({ "sub": "00u-ada", "events": null })), &idp.key)).await.status, StatusCode::BAD_REQUEST);
+    let other = ring::signature::EcdsaKeyPair::generate_pkcs8(&ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING, &ring::rand::SystemRandom::new()).unwrap();
+    assert_eq!(post(sign(token(json!({ "sub": "00u-ada" })), other.as_ref())).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(status(&phone).await, "signed_in");
+    // The person, by sub: every session this connection signed in for them ends; the code's stays.
+    assert_eq!(post(sign(token(json!({ "sub": "00u-ada" })), &idp.key)).await.status, StatusCode::OK);
+    assert_eq!((status(&phone).await, status(&by_code).await), ("anonymous".into(), "signed_in".into()));
+}
+
+fn rand_hex() -> String {
+    let mut b = [0u8; 8];
+    getrandom::fill(&mut b).unwrap();
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// A second factor for everyone (docs/accounts.md): while it's on, a person without one reaches
+/// only their account, where they set one up; then everything again.
+#[tokio::test]
+async fn a_company_can_require_a_second_factor() {
+    let env = Env::new().await;
+    let invite = env.invite("ada@example.com").await;
+    let mut b = Browser::default();
+    env.email_sign_in(&mut b, "ada@example.com", Some(&invite)).await;
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::OK);
+    let set = env.operator(Method::PUT, "/v1/accounts/policy", json!({ "require_second_factor": true })).await;
+    assert_eq!((set.status, set.json["require_second_factor"].as_bool()), (StatusCode::OK, Some(true)), "{}", set.json);
+
+    let refused = env.call(&mut b, Method::GET, "/v1/workspace/projects", None).await;
+    assert_eq!((refused.status, refused.json["code"].as_str()), (StatusCode::FORBIDDEN, Some("second_factor_required")), "{}", refused.json);
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/session", None).await.json["second_factor_required"], true);
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK, "her account, to set one up");
+    // She sets up an authenticator app: everything again.
+    let t = env.call(&mut b, Method::POST, "/v1/accounts/me/totp", None).await.json;
+    let seed = roll_auth::totp::base32_decode(t["secret"].as_str().unwrap()).unwrap();
+    let step = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 / roll_auth::totp::STEP_S;
+    assert_eq!(env.call(&mut b, Method::POST, "/v1/accounts/me/totp/confirm", Some(json!({ "code": format!("{:06}", roll_auth::totp::totp(&seed, step)) }))).await.status, StatusCode::OK);
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::OK);
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/session", None).await.json["second_factor_required"], false);
+    // Off: nobody's held to it.
+    let invite = env.invite("bob@example.com").await;
+    let mut bob = Browser::default();
+    env.email_sign_in(&mut bob, "bob@example.com", Some(&invite)).await;
+    // The people list says who has a second factor.
+    let people = env.operator(Method::GET, "/v1/accounts/users", json!({})).await.json;
+    let factors = |email: &str| people.as_array().unwrap().iter().find(|u| u["email"] == email).map(|u| (u["totp"].as_bool().unwrap(), u["passkeys"].as_u64().unwrap())).unwrap();
+    assert_eq!((factors("ada@example.com"), factors("bob@example.com")), ((true, 0), (false, 0)), "{people}");
+    assert_eq!(env.call(&mut bob, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::FORBIDDEN);
+    env.operator(Method::PUT, "/v1/accounts/policy", json!({ "require_second_factor": false })).await;
+    assert_eq!(env.call(&mut bob, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::OK);
+}
+
+/// Allowed networks (docs/accounts.md): a person's session is used only from the company's
+/// networks; saving a list that leaves the saving admin's own address out is refused; the
+/// operator's token is never held to it.
+#[tokio::test]
+async fn sessions_are_used_only_from_allowed_networks() {
+    let env = Env::new().await;
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@example.com", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let mut office = Browser { ip: Some("203.0.113.20".into()), ..Default::default() };
+    env.email_sign_in(&mut office, "root@example.com", Some(&root_invite)).await;
+    let mut cafe = Browser { ip: Some("192.0.2.50".into()), ..Default::default() };
+    env.email_sign_in(&mut cafe, "root@example.com", None).await;
+    assert_eq!(env.call(&mut cafe, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK, "off: anywhere");
+
+    let put = |b: &mut Browser, body: Value| {
+        let env = &env;
+        let mut b = b.clone();
+        async move { env.call(&mut b, Method::PUT, "/v1/accounts/network-policy", Some(body)).await }
+    };
+    assert_eq!(put(&mut office, json!({ "on": true, "networks": [] })).await.json["code"], "networks");
+    assert_eq!(put(&mut office, json!({ "on": true, "networks": ["198.51.100.0/24"] })).await.json["code"], "lockout", "the admin's own address left out");
+    let on = put(&mut office, json!({ "on": true, "networks": ["203.0.113.7/24"] })).await;
+    assert_eq!((on.status, on.json["networks"].clone()), (StatusCode::OK, json!(["203.0.113.0/24"])), "{}", on.json);
+
+    assert_eq!(env.call(&mut office, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
+    let refused = env.call(&mut cafe, Method::GET, "/v1/accounts/me", None).await;
+    assert_eq!((refused.status, refused.json["code"].as_str()), (StatusCode::FORBIDDEN, Some("network")), "{}", refused.json);
+    assert_eq!(env.operator(Method::GET, "/v1/accounts/network-policy", json!({})).await.status, StatusCode::OK, "the operator's token isn't held to it");
+    // Off again, from the office: the café works again.
+    assert_eq!(put(&mut office, json!({ "on": false, "networks": ["203.0.113.0/24"] })).await.status, StatusCode::OK);
+    assert_eq!(env.call(&mut cafe, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK);
+}
+
+/// An idle timeout (docs/accounts.md): a session unused longer than the company's minutes ends;
+/// out-of-range values are refused.
+#[tokio::test]
+async fn a_company_sets_an_idle_timeout() {
+    let env = Env::new().await;
+    let invite = env.invite("ada@example.com").await;
+    let mut b = Browser::default();
+    env.email_sign_in(&mut b, "ada@example.com", Some(&invite)).await;
+    assert_eq!(env.operator(Method::PUT, "/v1/accounts/policy", json!({ "idle_minutes": 5 })).await.json["code"], "policy");
+    let set = env.operator(Method::PUT, "/v1/accounts/policy", json!({ "idle_minutes": 30 })).await;
+    assert_eq!(set.json["idle_minutes"], 30, "{}", set.json);
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::OK, "used just now");
+    // Unused for 31 minutes (as the database's clock sees it): gone.
+    let db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(env._dir.path().join("accounts.db")), "accounts").unwrap();
+    db.write(|c| c.execute("UPDATE sessions SET seen_at = seen_at - 31 * 60000", ())).unwrap();
+    assert_eq!(env.call(&mut b, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
+}
+
+/// Phishing-resistant sign-in (docs/accounts.md): on for admins, an admin's session that hasn't
+/// used a passkey reaches only their account, and confirming it's them with one (or signing in
+/// with one) opens the rest; people who aren't admins are untouched until it's everyone's. An
+/// admin can't turn it on from a session that hasn't used one (it would lock them out).
+#[tokio::test]
+async fn a_company_requires_phishing_resistant_sign_in() {
+    let env = Env::new().await;
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@example.com", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let mut root = Browser::default();
+    env.email_sign_in(&mut root, "root@example.com", Some(&root_invite)).await;
+    let mut ada = Browser::default();
+    env.email_sign_in(&mut ada, "ada@example.com", Some(&env.invite("ada@example.com").await)).await;
+    let admins = json!({ "phishing_resistant": "admins" });
+
+    assert_eq!(env.call(&mut root, Method::PUT, "/v1/accounts/policy", Some(admins.clone())).await.status, StatusCode::CONFLICT, "not from an email-code session");
+    // The admin adds a passkey and confirms it's them with it.
+    let opts = env.call(&mut root, Method::POST, "/v1/accounts/me/passkeys/options", None).await.json;
+    let mut key = Authenticator::new(0x04 | 0x10);
+    assert_eq!(env.call(&mut root, Method::POST, "/v1/accounts/me/passkeys", Some(json!({ "id": opts["id"], "name": "Root's key", "credential": key.create(&opts) }))).await.status, StatusCode::CREATED);
+    let o = env.call(&mut root, Method::POST, "/v1/accounts/me/reauth/passkey/options", None).await.json;
+    let confirmed = env.call(&mut root, Method::POST, "/v1/accounts/me/reauth", Some(json!({ "id": o["id"], "credential": key.get(&o, WEB) }))).await;
+    assert_eq!(confirmed.status, StatusCode::OK, "{}", confirmed.json);
+    let set = env.call(&mut root, Method::PUT, "/v1/accounts/policy", Some(admins)).await;
+    assert_eq!((set.status, set.json["phishing_resistant"].as_str()), (StatusCode::OK, Some("admins")), "{}", set.json);
+    for b in [&mut root, &mut ada] {
+        assert_eq!(env.call(b, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::OK);
+    }
+
+    // The admin by email code elsewhere: only their account, until a passkey is used.
+    let mut laptop = Browser::default();
+    env.email_sign_in(&mut laptop, "root@example.com", None).await;
+    let refused = env.call(&mut laptop, Method::GET, "/v1/workspace/projects", None).await;
+    assert_eq!((refused.status, refused.json["code"].as_str()), (StatusCode::FORBIDDEN, Some("passkey_required")), "{}", refused.json);
+    assert_eq!(env.call(&mut laptop, Method::GET, "/v1/accounts/session", None).await.json["passkey_required"], true);
+    let mut signed = Browser::default();
+    let o = env.call(&mut signed, Method::POST, "/v1/accounts/signin/passkey/options", None).await.json;
+    assert_eq!(env.call(&mut signed, Method::POST, "/v1/accounts/signin/passkey", Some(json!({ "id": o["id"], "credential": key.get(&o, WEB) }))).await.status, StatusCode::OK);
+    assert_eq!(env.call(&mut signed, Method::GET, "/v1/workspace/projects", None).await.status, StatusCode::OK, "a passkey sign-in");
+
+    // Everyone's (the operator has no session to check): Ada too.
+    assert_eq!(env.operator(Method::PUT, "/v1/accounts/policy", json!({ "phishing_resistant": "everyone" })).await.status, StatusCode::OK);
+    assert_eq!(env.call(&mut ada, Method::GET, "/v1/workspace/projects", None).await.json["code"], "passkey_required");
+}
+
+/// Mails to `to` whose subject has `about`, oldest first: (subject, text).
+async fn mails_about(outbox: &std::path::Path, to: &str, about: &str, n: usize) -> Vec<(String, String)> {
+    for _ in 0..400 {
+        let mut out: Vec<(String, String, String)> = std::fs::read_dir(outbox)
+            .map(|d| d.filter_map(|e| e.ok()).filter(|e| !e.file_name().to_string_lossy().starts_with('.')).map(|e| (e.file_name().to_string_lossy().into_owned(), serde_json::from_slice::<Value>(&std::fs::read(e.path()).unwrap()).unwrap())).filter(|(_, m)| m["to"] == to && m["subject"].as_str().unwrap().contains(about)).map(|(f, m)| (f, m["subject"].as_str().unwrap().to_string(), m["text"].as_str().unwrap().to_string())).collect())
+            .unwrap_or_default();
+        if out.len() >= n {
+            out.sort();
+            return out.into_iter().map(|(_, s, t)| (s, t)).collect();
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("no mail to {to} about {about:?}");
+}
+
+async fn change(env: &Env, b: &mut Browser, email: &str) -> Answer {
+    env.call(b, Method::POST, "/v1/accounts/me/email", Some(json!({ "email": email }))).await
+}
+
+async fn confirm(env: &Env, b: &mut Browser, challenge: &str, code: &str) -> Answer {
+    env.call(b, Method::POST, "/v1/accounts/me/email/confirm", Some(json!({ "challenge": challenge, "code": code }))).await
+}
+
+/// A person moves their account to another address (docs/accounts.md, "Your address"): from a
+/// fresh session, with the code sent there; the old address is told, and signs in no more.
+#[tokio::test]
+async fn a_person_moves_their_account_to_another_address() {
+    let env = Env::new().await;
+    let mut ada = Browser::default();
+    let id = env.email_sign_in(&mut ada, "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json["user"]["id"].as_str().unwrap().to_string();
+    let mut bob = Browser::default();
+    env.email_sign_in(&mut bob, "bob@example.com", Some(&env.invite("bob@example.com").await)).await;
+
+    // A stolen cookie alone can't move it.
+    env.accounts.set_sudo_window(0);
+    assert_eq!(change(&env, &mut ada, "ada@new.test").await.json["code"], "reauth_required");
+    env.accounts.set_sudo_window(2 * 60 * 60 * 1000);
+
+    let started = change(&env, &mut ada, "Ada@New.test").await;
+    assert_eq!(started.status, StatusCode::ACCEPTED, "{}", started.json);
+    let challenge = started.json["challenge"].as_str().unwrap().to_string();
+    let code = mails_about(&env.outbox, "ada@new.test", "is your code to move", 1).await[0].0[..6].to_string();
+    // Only Ada's session confirms Ada's change, and only with its code.
+    assert_eq!(confirm(&env, &mut bob, &challenge, &code).await.json["code"], "bad_code");
+    assert_eq!(confirm(&env, &mut ada, &challenge, "000000").await.json["code"], "bad_code");
+    let moved = confirm(&env, &mut ada, &challenge, &code).await;
+    assert_eq!((moved.status, moved.json["email"].as_str()), (StatusCode::OK, Some("ada@new.test")), "{}", moved.json);
+    assert_eq!(confirm(&env, &mut ada, &challenge, &code).await.json["code"], "bad_code", "single use");
+    let told = mails_about(&env.outbox, "ada@example.com", "moved to another address", 1).await;
+    assert!(told[0].1.contains("ada@new.test"), "{}", told[0].1);
+
+    // The new address signs Ada in; the old one gets no code.
+    let old_codes = count_codes(&env.outbox, "ada@example.com");
+    let a = env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "ada@example.com" }))).await;
+    assert_eq!(a.status, StatusCode::ACCEPTED);
+    let again = env.email_sign_in(&mut Browser::default(), "ada@new.test", None).await;
+    assert_eq!(again.json["user"]["id"].as_str(), Some(id.as_str()));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(count_codes(&env.outbox, "ada@example.com"), old_codes);
+
+    // Bob's address: the same answer, a note to Bob instead of a code, and nothing to confirm.
+    let taken = change(&env, &mut ada, "bob@example.com").await;
+    assert_eq!(taken.status, StatusCode::ACCEPTED);
+    assert!(mails_about(&env.outbox, "bob@example.com", "Someone tried to move", 1).await[0].1.contains("Nothing changed"));
+    let guess = env.call(&mut ada, Method::POST, "/v1/accounts/me/email/confirm", Some(json!({ "challenge": taken.json["challenge"], "code": "123456" }))).await;
+    assert_eq!(guess.json["code"], "bad_code");
+    assert_eq!(change(&env, &mut ada, "ada@new.test").await.status, StatusCode::BAD_REQUEST, "already hers");
+}
+
+async fn delete(env: &Env, b: &mut Browser, confirm: &str) -> Answer {
+    env.call(b, Method::DELETE, "/v1/accounts/me", Some(json!({ "confirm": confirm }))).await
+}
+
+/// A person deletes their own account (docs/accounts.md, "Deleting your account"): from a fresh
+/// session, typing their handle; every way in ends at once, the address can be invited again,
+/// and nothing (an admin included) brings it back. The last admin can't leave.
+#[tokio::test]
+async fn a_person_deletes_their_own_account() {
+    let env = Env::new().await;
+    let root_invite = env.operator(Method::POST, "/v1/accounts/invites", json!({ "email": "root@example.com", "admin": true })).await.json["token"].as_str().unwrap().to_string();
+    let mut root = Browser::default();
+    env.email_sign_in(&mut root, "root@example.com", Some(&root_invite)).await;
+    let mut ada = Browser::default();
+    let signed = env.email_sign_in(&mut ada, "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json;
+    let (id, handle) = (signed["user"]["id"].as_str().unwrap().to_string(), signed["user"]["handle"].as_str().unwrap().to_string());
+
+    env.accounts.set_sudo_window(0);
+    assert_eq!(delete(&env, &mut ada, &handle).await.json["code"], "reauth_required", "a stolen cookie alone can't");
+    env.accounts.set_sudo_window(2 * 60 * 60 * 1000);
+    assert_eq!(delete(&env, &mut ada, "not-me").await.json["code"], "confirm");
+    assert_eq!(delete(&env, &mut root, "root").await.status, StatusCode::CONFLICT, "roll's last admin stays");
+
+    let gone = delete(&env, &mut ada, &handle).await;
+    assert_eq!(gone.status, StatusCode::NO_CONTENT, "{}", gone.json);
+    assert!(gone.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap().contains("Max-Age=0"));
+    assert_eq!(env.call(&mut ada, Method::GET, "/v1/accounts/me", None).await.status, StatusCode::UNAUTHORIZED);
+    assert!(env.accounts.person(&id).unwrap().is_none(), "its tokens act as nobody");
+    assert!(mails_about(&env.outbox, "ada@example.com", "was deleted", 1).await[0].1.contains(&handle));
+    // Gone from the admin's list, and no admin turns it back on.
+    let people = env.call(&mut root, Method::GET, "/v1/accounts/users", None).await.json;
+    assert!(!people.to_string().contains(&id), "{people}");
+    assert_eq!(env.call(&mut root, Method::PATCH, &format!("/v1/accounts/users/{id}"), Some(json!({ "disabled": false }))).await.status, StatusCode::NOT_FOUND);
+
+    // The address signs nothing in; invited again, it's a new account.
+    let codes = count_codes(&env.outbox, "ada@example.com");
+    env.call(&mut Browser::default(), Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "ada@example.com" }))).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(count_codes(&env.outbox, "ada@example.com"), codes);
+    let again = env.email_sign_in(&mut Browser::default(), "ada@example.com", Some(&env.invite("ada@example.com").await)).await.json;
+    assert_ne!(again["user"]["id"].as_str(), Some(id.as_str()), "{again}");
 }

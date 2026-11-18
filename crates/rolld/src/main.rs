@@ -498,6 +498,7 @@ async fn run() -> anyhow::Result<()> {
     // Workspace projects: always on; the operator's, and each signed-in user's own.
     router = router.merge(roll_workspace::router(workspace.clone()));
     // roll previews: an environment per change of a project's repos (needs roll code).
+    let mut previews_engine: Option<std::sync::Arc<roll_previews::Engine>> = None;
     let preview_hosts = match &code {
         Some(c) => {
             let on_products = previews::Products {
@@ -511,6 +512,7 @@ async fn run() -> anyhow::Result<()> {
             };
             let p = previews::start(&args, &home, c, workspace.clone(), cluster.clone(), on_products, apps.as_ref().map(|a| a.apps.clone()))?;
             router = router.merge(roll_previews::api::router(p.engine.clone()));
+            previews_engine = Some(p.engine.clone());
             if let Some(internal) = p.internal {
                 router = router.merge(internal);
             }
@@ -582,13 +584,15 @@ async fn run() -> anyhow::Result<()> {
     workspace.set_owners(std::sync::Arc::new(people.clone()));
     // Its tokens are roll-access's: grants for syncs a token made, workload tokens for identities.
     let secrets = secrets::open(&args, &home, workspace.clone(), !auth.enforcing(), products_api.clone(), access.clone(), people)?;
+    // Its counters and gauges, a line a minute beside the cluster's (JSON logs only).
+    let _secrets_metrics = logs::SecretsMetrics::start(cluster.node_id().to_string(), secrets.clone());
     code_secrets.set(secrets.clone(), workspace.clone());
     apps_secrets.set(secrets.clone(), workspace.clone());
     let _ = secrets_envs.0.set(secrets.clone());
     if let Some(c) = &code {
         secrets.set_code_refs(std::sync::Arc::new(secrets::CodeRefs(c.code.clone())));
     }
-    router = router.merge(roll_secrets::router(secrets.clone()));
+    router = router.merge(roll_secrets::router(secrets.clone()).layer(axum::middleware::map_request(secrets::guard_header)));
     products_api.set(router.clone());
     // A product's own credential changes (a password reset, a restore) move live links' digests
     // at once. Layered after the copy above: roll secrets' own rotations say so themselves.
@@ -597,6 +601,10 @@ async fn run() -> anyhow::Result<()> {
     if let Some(a) = &apps {
         let apps = a.apps.clone();
         access.on_leaked("rlk_", move |secret, _why| apps.revoke_leaked_hook(secret));
+    }
+    // …and previews' (`rlb_`).
+    if let Some(e) = previews_engine.clone() {
+        access.on_leaked("rlb_", move |secret, _why| e.revoke_leaked_hook(secret));
     }
     // The audit log streamed to SIEMs (it needs ROLL_SECRET_KEY to keep each sink's secret).
     access::sinks(&access);

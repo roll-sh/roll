@@ -23,6 +23,7 @@ pub fn router(access: Arc<Access>) -> Router {
         .route("/v1/access/catalog", get(catalog_view))
         .route("/v1/access/check", post(check))
         .route("/v1/access/tokens", get(list).post(create))
+        .route("/v1/access/tokens/revoke", post(revoke_many))
         .route("/v1/access/tokens/{id}", get(get_one).patch(update).delete(revoke))
         .route("/v1/access/tokens/{id}/rotate", post(rotate))
         .route("/v1/access/tokens/{id}/approve", post(approve_token))
@@ -72,6 +73,7 @@ fn change_name(method: &axum::http::Method, route: &str) -> String {
         (&Method::POST, "/v1/access/tokens") => "create".into(),
         (&Method::PATCH, "/v1/access/tokens/{id}") => "change".into(),
         (&Method::DELETE, "/v1/access/tokens/{id}") => "revoke".into(),
+        (&Method::POST, "/v1/access/tokens/revoke") => "revoke_many".into(),
         (&Method::DELETE, "/v1/access/tokens/{id}/temporary/{approval}") => "forget".into(),
         (&Method::POST, "/v1/access/oauth/authorize") => "connect".into(),
         (&Method::POST, "/v1/access/oauth/devices/{code}") => "connect".into(),
@@ -549,12 +551,22 @@ impl Access {
     }
 
     async fn create_for(self: &Arc<Self>, ext: &Extensions, mut new: NewGrant) -> crate::Result<(crate::store::Grant, String)> {
+        // Sudo mode (docs/accounts.md): a token made from a person's session (theirs, or an
+        // admin's acting as the operator) needs a recent proof, so a stolen cookie can't mint a
+        // long-lived token. One a token makes is within that token; the operator's has no session.
+        if let (Some(u), None) = (ext.get::<roll_auth::SignedIn>(), ext.get::<roll_auth::Grant>())
+            && let Some(people) = self.people.get()
+            && !people.fresh(&u.user, &u.session).await.map_err(Error::Internal)?
+        {
+            return Err(Error::ReauthRequired("confirm it's you first (on your account page, or GET /v1/accounts/me/reauth): making a token needs a sign-in in the last two hours".into()));
+        }
         // A user's token is theirs, and so is one their token makes: it acts as them.
         let who = who(self, ext)?;
         // A person's own token past what the policy has an admin approve waits for one (one their
         // token makes is within that token, which was approved).
+        // A decoy allows nothing, so nothing about it waits for an admin.
         let asker = match &who {
-            Who::User(u) if self.policy_now().needs_approval(&new.rules, new.ask_otherwise) => Some(u.handle.clone()),
+            Who::User(u) if !new.decoy && self.policy_now().needs_approval(&new.rules, new.ask_otherwise) => Some(u.handle.clone()),
             _ => None,
         };
         new.pending = asker.is_some();
@@ -790,6 +802,59 @@ async fn revoke(State(a): S, ext: Extensions, Path(id): Path<String>) -> crate::
         may_touch(&a, &g, &target).await?;
     }
     Ok(Json(json!(blocking(a, move |a| a.store.revoke(&id)).await?)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevokeMany {
+    ids: Vec<String>,
+    why: String,
+}
+
+/// An incident's cut-off (docs/permissions.md, "Revoking at once"): every listed token at once,
+/// all or none. The operator's.
+async fn revoke_many(State(a): S, ext: Extensions, axum::Json(b): axum::Json<RevokeMany>) -> crate::Result<Json<Value>> {
+    operator_only(&a, &ext, "revoke tokens in bulk")?;
+    let by = actor(&ext);
+    let revoked = a.revoke_many(b.ids, &b.why, &by).await?;
+    Ok(Json(json!({ "revoked": revoked })))
+}
+
+impl Access {
+    /// Revoke every grant in `ids` at once (roll secrets' incident cut-off calls this in process,
+    /// its reach choosing the ids): all or none, an audit row per grant with why and who.
+    pub async fn revoke_many(self: &Arc<Self>, ids: Vec<String>, why: &str, by: &str) -> crate::Result<Vec<crate::store::Grant>> {
+        let why = why.trim().to_string();
+        if why.is_empty() {
+            return Err(Error::BadRequest("say why (the incident): it's on every revoked token".into()));
+        }
+        let (w, a2) = (why.clone(), self.clone());
+        let revoked = tokio::task::spawn_blocking(move || a2.store.revoke_many(&ids, &w)).await.map_err(|e| Error::Internal(e.to_string()))??;
+        let at = code_sql::now_ms();
+        for g in &revoked {
+            self.store.audit(&crate::store::AuditEvent {
+                id: crate::new_id("aud"),
+                at,
+                grant_id: Some(g.id.clone()),
+                grant_name: Some(g.name.clone()),
+                source: "access".into(),
+                tool: None,
+                method: "POST".into(),
+                route: "/v1/access/tokens/revoke".into(),
+                product: Some("access".into()),
+                action: Some("admin".into()),
+                resource: Some(format!("revoked by {by}: {why}").chars().take(300).collect()),
+                decision: "revoke".into(),
+                approval: None,
+                status: 200,
+                args: None,
+                ip: None,
+                duration_ms: 0,
+                client: None,
+            });
+        }
+        Ok(revoked)
+    }
 }
 
 /// Take back what an approval allowed a token for a while. The operator decides approvals, so
@@ -1249,32 +1314,76 @@ async fn audit(State(a): S, ext: Extensions, Query(mut q): Query<AuditQuery>) ->
     if let Some(user) = &me {
         q.grants = Some(grants_of(&a, user).await?.into_iter().collect());
     }
-    let mut events = blocking(a, move |a| a.store.audit_log(&q)).await?;
+    let mut events = blocking(a.clone(), move |a| a.store.audit_log(&q)).await?;
     if let Some(user) = &me {
         for e in events.iter_mut().filter(|e| e.source == "access" && e.args.as_ref().and_then(|v| v["by"].as_str()) != Some(user.as_str())) {
             e.ip = None;
         }
     }
+    let names = people_named(&a, &events).await;
     if format.as_deref() == Some("csv") {
         let headers = [(axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8"), (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"roll-audit.csv\"")];
-        return Ok((headers, audit_csv(&events)).into_response());
+        return Ok((headers, audit_csv(&events, &names)).into_response());
     }
+    let rows = events.iter().map(|e| {
+        let mut v = json!(e);
+        for (field, id) in [("actor_handle", actor_of(e)), ("resource_handle", e.resource.as_deref())] {
+            if let Some(h) = id.and_then(|id| names.get(id)) {
+                v[field] = json!(h);
+            }
+        }
+        v
+    });
     if jsonl {
         let mut out = String::new();
-        for e in &events {
-            out.push_str(&serde_json::to_string(e).unwrap_or_default());
+        for v in rows {
+            out.push_str(&v.to_string());
             out.push('\n');
         }
         let headers = [(axum::http::header::CONTENT_TYPE, "application/x-ndjson"), (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"roll-audit.jsonl\"")];
         return Ok((headers, out).into_response());
     }
-    Ok(Json(json!(events)).into_response())
+    Ok(Json(Value::Array(rows.collect())).into_response())
+}
+
+/// Who acted in a row, when it's a person: an account event's actor, or the person behind a change
+/// to tokens and access.
+fn actor_of(e: &crate::store::AuditEvent) -> Option<&str> {
+    let key = match e.source.as_str() {
+        "accounts" => "actor",
+        "access" => "by",
+        _ => return None,
+    };
+    e.args.as_ref().and_then(|v| v[key].as_str())
+}
+
+/// The handles of the people a page of the audit log names (`usr_` ids: who acted, who it was
+/// about), disabled and deleted people too, so a sign-in report reads as people. Looked up for
+/// each answer, never kept; without accounts, or on a failed lookup, the ids stay.
+async fn people_named(a: &Arc<Access>, events: &[crate::store::AuditEvent]) -> std::collections::HashMap<String, String> {
+    let Some(people) = a.people.get().cloned() else { return Default::default() };
+    let ids: std::collections::BTreeSet<String> = events.iter().flat_map(|e| [actor_of(e), e.resource.as_deref()]).flatten().filter(|id| id.starts_with("usr_")).map(str::to_string).collect();
+    if ids.is_empty() {
+        return Default::default();
+    }
+    let ids: Vec<String> = ids.into_iter().collect();
+    match tokio::task::spawn_blocking(move || people.handles(&ids)).await {
+        Ok(Ok(found)) => found.into_iter().collect(),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "access: naming the audit log's people");
+            Default::default()
+        }
+        Err(_) => Default::default(),
+    }
 }
 
 /// The audit log as CSV, for a spreadsheet: one event a row, the time in UTC. Token and client
 /// names and resources are anyone's text, so a cell that would start a formula (`=`, `+`, `-`, `@`,
 /// a tab or a carriage return) is prefixed with `'`, as OWASP's CSV injection advice says.
-pub fn audit_csv(events: &[crate::store::AuditEvent]) -> String {
+///
+/// The last two columns name the people a row is about by handle (`names`: who acted, and the
+/// resource when it's a person), after every older column so a spreadsheet's positions hold.
+pub fn audit_csv(events: &[crate::store::AuditEvent], names: &std::collections::HashMap<String, String>) -> String {
     // Every cell quoted; a formula character is defused at the start and after anything a
     // spreadsheet may split a cell on (`;` in many locales, a tab, `|`), past any spaces.
     fn cell(s: &str) -> String {
@@ -1293,7 +1402,8 @@ pub fn audit_csv(events: &[crate::store::AuditEvent]) -> String {
         }
         format!("\"{}\"", out.replace('"', "\"\""))
     }
-    let mut out = String::from("at,token,token_name,source,tool,method,route,product,action,resource,decision,approval,status,ip,duration_ms,client\n");
+    let mut out = String::from("at,token,token_name,source,tool,method,route,product,action,resource,decision,approval,status,ip,duration_ms,client,actor_handle,resource_handle\n");
+    let name = |id: Option<&str>| id.and_then(|id| names.get(id)).cloned().unwrap_or_default();
     for e in events {
         let at = chrono::DateTime::from_timestamp_millis(e.at).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)).unwrap_or_default();
         let row = [
@@ -1313,6 +1423,8 @@ pub fn audit_csv(events: &[crate::store::AuditEvent]) -> String {
             e.ip.clone().unwrap_or_default(),
             e.duration_ms.to_string(),
             e.client.clone().unwrap_or_default(),
+            name(actor_of(e)),
+            name(e.resource.as_deref()),
         ];
         out.push_str(&row.iter().map(|c| cell(c)).collect::<Vec<_>>().join(","));
         out.push('\n');
@@ -1374,13 +1486,13 @@ mod csv_tests {
             duration_ms: 3,
             client: Some("@evil".into()),
         };
-        let csv = super::audit_csv(std::slice::from_ref(&e));
+        let csv = super::audit_csv(std::slice::from_ref(&e), &Default::default());
         let row = csv.lines().nth(1).unwrap();
         assert!(row.starts_with("\"1970-01-01T00:00:00Z\",\"tok_1\",\"'=HYPERLINK(\"\"https://x.example\"\",\"\"click\"\")\""), "{row}");
-        assert!(row.contains(",\"a,b\",") && row.ends_with(",\"'@evil\""), "{row}");
+        assert!(row.contains(",\"a,b\",") && row.ends_with(",\"'@evil\",\"\",\"\""), "{row}");
         // A separator inside a cell starts another cell in some spreadsheets: defused there too.
         let e2 = crate::store::AuditEvent { grant_name: Some("x; =HYPERLINK(1)|@a".into()), ..e };
-        let row2 = super::audit_csv(&[e2]);
+        let row2 = super::audit_csv(&[e2], &Default::default());
         assert!(row2.lines().nth(1).unwrap().contains("\"x; '=HYPERLINK(1)|'@a\""), "{row2}");
     }
 }

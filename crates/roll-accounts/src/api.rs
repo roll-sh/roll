@@ -42,7 +42,16 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/signin/recovery", post(signin_recovery))
         .route("/v1/accounts/signin/passkey/options", post(signin_passkey_options))
         .route("/v1/accounts/signin/passkey", post(signin_passkey))
-        .route("/v1/accounts/me", get(me).patch(update_me))
+        .route("/v1/accounts/signin/reset-request", post(request_reset))
+        .route("/v1/accounts/reset-requests", get(list_resets))
+        .route("/v1/accounts/passkey-policy", get(passkey_policy).put(set_passkey_policy))
+        .route("/v1/accounts/policy", get(account_policy).put(set_account_policy))
+        .route("/v1/accounts/network-policy", get(network_policy).put(set_network_policy))
+        .route("/v1/accounts/reset-requests/{id}/approve", post(approve_reset))
+        .route("/v1/accounts/reset-requests/{id}/deny", post(deny_reset))
+        .route("/v1/accounts/me", get(me).patch(update_me).delete(delete_me))
+        .route("/v1/accounts/me/email", post(change_email))
+        .route("/v1/accounts/me/email/confirm", post(confirm_email))
         .route("/v1/accounts/me/sessions", get(my_sessions))
         .route("/v1/accounts/me/activity", get(my_activity))
         .route("/v1/accounts/me/sessions/{id}", delete(revoke_my_session))
@@ -52,6 +61,7 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/me/recovery-codes", post(recovery_codes))
         .route("/v1/accounts/me/passkeys", get(my_passkeys).post(add_passkey))
         .route("/v1/accounts/me/reauth", get(reauth_info).post(reauth))
+        .route("/v1/accounts/me/export", post(export_me))
         .route("/v1/accounts/me/reauth/email", post(reauth_email))
         .route("/v1/accounts/me/reauth/passkey/options", post(reauth_passkey_options))
         .route("/v1/accounts/me/passkeys/options", post(passkey_options))
@@ -67,6 +77,7 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
         .route("/v1/accounts/sso/{id}", axum::routing::patch(update_sso).delete(remove_sso))
         .route("/v1/accounts/sso/{id}/callback", get(sso_callback))
         .route("/v1/accounts/sso/{id}/verify", post(verify_sso))
+        .route("/v1/accounts/sso/{id}/backchannel-logout", post(backchannel_logout))
         .route("/v1/accounts/sso/{id}/scim", post(scim_token).delete(remove_scim_token))
         .merge(crate::scim::routes())
         .route_layer(axum::middleware::from_fn(json_only))
@@ -82,7 +93,11 @@ pub fn router(accounts: Arc<Accounts>) -> Router {
 async fn json_only(req: Request, next: Next) -> Response {
     let json = |v: &HeaderValue| v.to_str().ok().and_then(|s| s.split(';').next()).is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json"));
     let h = req.headers();
+    // OIDC Back-Channel Logout posts a form, by spec: it reads no cookie and sets none, and only a
+    // token the provider's key signed does anything, which no other site can make.
+    let logout = req.uri().path().starts_with("/v1/accounts/sso/") && req.uri().path().ends_with("/backchannel-logout");
     let form = !matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS)
+        && !logout
         && !h.contains_key(header::AUTHORIZATION)
         && h.get(header::CONTENT_TYPE).is_some_and(|v| !json(v));
     if form {
@@ -186,7 +201,12 @@ fn session_body(a: &Accounts, issued_token: &str, user: &str, session: &str, sec
     if second_factor {
         return Ok(json!({ "status": "mfa_required", "methods": second_methods(a, user), "csrf": csrf }));
     }
-    Ok(json!({ "status": "signed_in", "user": a.user(user)?, "session": a.session_info(session)?, "csrf": csrf }))
+    let missing = a.missing(user, session)?;
+    Ok(json!({
+        "status": "signed_in", "user": a.user(user)?, "session": a.session_info(session)?, "csrf": csrf,
+        "second_factor_required": missing == Some(roll_auth::Missing::SecondFactor),
+        "passkey_required": missing == Some(roll_auth::Missing::Passkey),
+    }))
 }
 
 /// How a person owing a second factor can give it: TOTP, a recovery code, and a passkey if they
@@ -383,10 +403,12 @@ async fn finish_redirect(a: &Arc<Accounts>, headers: &HeaderMap, done: Result<Fi
     match done {
         Err(e) => fail(&back, e.redirect_code()),
         Ok(Finished::Linked { return_to }) => redirect(format!("{web}{return_to}"), Vec::new()),
-        Ok(Finished::SignIn { user, return_to, .. }) => {
+        Ok(Finished::SignIn { user, return_to, sid, .. }) => {
             let ua = user_agent(headers);
             let (u2, m2, w2) = (user.clone(), method.to_string(), who.clone());
-            match blocking(a, move |a| if sso { a.issue_sso(&user, &ua) } else { a.issue(&user, &ua) }).await {
+            // An SSO sign-in's method is `sso:<connection>`: its session length applies.
+            let connection = method.strip_prefix("sso:").unwrap_or_default().to_string();
+            match blocking(a, move |a| if sso { a.issue_sso(&user, &ua, &connection, sid.as_deref()) } else { a.issue(&user, &ua) }).await {
                 Err(e) => {
                     a.record_sign_in(Some(&u2), &m2, Some(&e), false, &w2);
                     fail("/signin", e.redirect_code())
@@ -476,6 +498,24 @@ async fn remove_scim_token(State(a): S, me: Me, op: Op, Path(id): Path<String>) 
     admin_sudo(&a, &me, &op).await?;
     blocking(&a, move |a| a.remove_scim_token(&id)).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+struct LogoutForm {
+    logout_token: String,
+}
+
+/// OIDC Back-Channel Logout 1.0 (docs/accounts.md, "SSO"): the provider posts a signed logout
+/// token; the sessions it names end. No session or token: the token is the credential.
+async fn backchannel_logout(State(a): S, Path(id): Path<String>, axum::extract::Form(f): axum::extract::Form<LogoutForm>) -> Response {
+    let no_store = |mut r: Response| {
+        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        r
+    };
+    match a.backchannel_logout(&id, &f.logout_token).await {
+        Ok(_) => no_store(StatusCode::OK.into_response()),
+        Err(e) => no_store(e.into_response()),
+    }
 }
 
 /// Check the connection's domains' TXT records now; the ones that have it are verified.
@@ -572,7 +612,7 @@ async fn signin_passkey(State(a): S, owed: Owed, ip: Ip, headers: HeaderMap, b: 
         let user = checked.as_ref().ok().cloned().or_else(|| owed.as_ref().map(|o| o.user.clone()));
         let done = checked.and_then(|user| match &owed {
             // The challenge was this owing person's, and the passkey theirs (both checked).
-            Some(o) => a.complete(o, &ua),
+            Some(o) => a.complete(o, &ua).and_then(|issued| a.mark_passkey(&issued.id).map(|()| issued)),
             None => a.issue_passkey(&user, &ua),
         });
         match (done, user) {
@@ -593,6 +633,98 @@ async fn signin_passkey(State(a): S, owed: Owed, ip: Ip, headers: HeaderMap, b: 
         }
     })
     .await
+}
+
+// ── second-factor resets (docs/accounts.md, "Recovery") ──
+
+#[derive(Deserialize)]
+struct ResetAsk {
+    reason: String,
+}
+
+/// Someone signed in up to their second factor, who lost it, asks an admin to reset it.
+async fn request_reset(State(a): S, owed: Owed, ip: Ip, headers: HeaderMap, b: Bytes) -> Result<(StatusCode, Json<Value>)> {
+    let Some(Extension(owed)) = owed else { return Err(Error::Unauthorized("sign in with your first factor first (an email code, GitHub, Google)".into())) };
+    let ResetAsk { reason } = body(&b)?;
+    let who = Who::of(ip, &headers);
+    let a2 = a.clone();
+    let req = blocking(&a, move |_| a2.request_reset(&owed.user, &reason, &who)).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "id": req.id, "state": req.state, "created_at": req.created_at }))))
+}
+
+/// Hardware keys only (docs/accounts.md, "Passkeys"): which authenticator models count.
+async fn passkey_policy(State(a): S, me: Me, op: Op) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    Ok(Json(blocking(&a, |a| a.passkey_policy()).await?).into_response())
+}
+
+async fn set_passkey_policy(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response> {
+    admin_sudo(&a, &me, &op).await?;
+    let p: crate::attestation::Policy = body(&b)?;
+    Ok(Json(blocking(&a, move |a| a.set_passkey_policy(p)).await?).into_response())
+}
+
+/// Account policy (docs/accounts.md): a second factor for everyone.
+async fn account_policy(State(a): S, me: Me, op: Op) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    Ok(Json(blocking(&a, |a| a.account_policy()).await?).into_response())
+}
+
+async fn set_account_policy(State(a): S, me: Me, op: Op, b: Bytes) -> Result<Response> {
+    admin_sudo(&a, &me, &op).await?;
+    let p: crate::policy::AccountPolicy = body(&b)?;
+    let by = me.map(|Extension(u)| (u.user, u.session));
+    Ok(Json(blocking(&a, move |a| a.set_account_policy_by(p, by.as_ref().map(|(u, s)| (u.as_str(), s.as_str())))).await?).into_response())
+}
+
+/// Allowed networks (docs/accounts.md): where people's sessions may be used from.
+async fn network_policy(State(a): S, me: Me, op: Op) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    Ok(Json(blocking(&a, |a| a.network_policy()).await?).into_response())
+}
+
+async fn set_network_policy(State(a): S, me: Me, op: Op, ip: Ip, b: Bytes) -> Result<Response> {
+    admin_sudo(&a, &me, &op).await?;
+    let p: crate::networks::NetworkPolicy = body(&b)?;
+    // An admin's own address must stay on it; the operator's token has no session to lock out.
+    let from = me.as_ref().and(ip.map(|Extension(roll_auth::ClientIp(i))| i));
+    Ok(Json(blocking(&a, move |a| a.set_network_policy(p, from)).await?).into_response())
+}
+
+async fn list_resets(State(a): S, me: Me, op: Op) -> Result<Response> {
+    admin(&a, &me, &op)?;
+    Ok(Json(blocking(&a, |a| a.reset_requests()).await?).into_response())
+}
+
+async fn decide(a: Arc<Accounts>, me: Me, op: Op, ip: Ip, headers: HeaderMap, id: String, approve: bool) -> Result<Response> {
+    let by = admin_sudo(&a, &me, &op).await?;
+    let who = Who::of(ip, &headers);
+    let a2 = a.clone();
+    Ok(Json(blocking(&a, move |_| a2.decide_reset(&id, approve, &by, &who)).await?).into_response())
+}
+
+async fn approve_reset(State(a): S, me: Me, op: Op, ip: Ip, headers: HeaderMap, Path(id): Path<String>) -> Result<Response> {
+    decide(a, me, op, ip, headers, id, true).await
+}
+
+async fn deny_reset(State(a): S, me: Me, op: Op, ip: Ip, headers: HeaderMap, Path(id): Path<String>) -> Result<Response> {
+    decide(a, me, op, ip, headers, id, false).await
+}
+
+/// Your data (docs/accounts.md, "Your data"): one JSON file, a download, behind sudo mode.
+async fn export_me(State(a): S, me: Me, ip: Ip, headers: HeaderMap) -> Result<Response> {
+    let u = signed_in(me)?;
+    sudo(&a, &u).await?;
+    let who = Who::of(ip, &headers);
+    let (user, session) = (u.user.clone(), u.session.clone());
+    let data = blocking(&a, move |a| a.export(&user, &session)).await?;
+    a.record(crate::audit::AccountEvent { actor: u.user.clone(), action: "account.export".into(), method: "-".into(), target: Some(u.user.clone()), ok: true, status: 200, ip: who.ip, user_agent: who.user_agent, detail: json!({}) });
+    let name = format!("roll-account-{}.json", u.handle.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect::<String>());
+    let mut resp = Json(data).into_response();
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
+        resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+    }
+    Ok(resp)
 }
 
 // ── sudo mode (docs/accounts.md, "Sudo mode") ──
@@ -639,7 +771,13 @@ async fn reauth(State(a): S, me: Me, ip: Ip, headers: HeaderMap, b: Bytes) -> Re
                 }),
                 _ => return Err(Error::BadRequest("a code, an email's challenge and code, or a passkey".into(), None)),
             };
-            let done = proved.and_then(|()| a.mark_verified(&u.user, &u.session));
+            let done = proved.and_then(|()| a.mark_verified(&u.user, &u.session)).and_then(|until| {
+                // A passkey used now makes the session phishing-resistant (docs/accounts.md).
+                if method == "passkey" {
+                    a.mark_passkey(&u.session)?;
+                }
+                Ok(until)
+            });
             a.record_reauth(&u.user, method, done.as_ref().err(), &who);
             Ok(json!({ "fresh_until": done? }))
         })
@@ -731,6 +869,54 @@ async fn update_me(State(a): S, me: Me, b: Bytes) -> Result<Response> {
     let u = signed_in(me)?;
     let Name { name } = body(&b)?;
     Ok(Json(blocking(&a, move |a| a.rename(&u.user, &name)).await?).into_response())
+}
+
+#[derive(Deserialize)]
+struct Confirm {
+    confirm: String,
+}
+
+/// Delete your own account (docs/accounts.md, "Deleting your account"): signed out here too.
+async fn delete_me(State(a): S, me: Me, b: Bytes) -> Result<Response> {
+    let u = signed_in(me)?;
+    sudo(&a, &u).await?;
+    let Confirm { confirm } = body(&b)?;
+    let mail = blocking(&a, move |a| a.delete_self(&u.user, &confirm)).await?;
+    if a.mail_on() {
+        a.send_later(mail, "account deleted");
+    }
+    Ok(with_cookies(StatusCode::NO_CONTENT.into_response(), [cookie(&a, a.config.session_cookie(), "", 0)]))
+}
+
+#[derive(Deserialize)]
+struct NewEmail {
+    email: String,
+}
+
+/// Move your account to another address: a code goes there (docs/accounts.md, "Your address").
+async fn change_email(State(a): S, me: Me, b: Bytes) -> Result<(StatusCode, Json<Value>)> {
+    let u = signed_in(me)?;
+    sudo(&a, &u).await?;
+    if !a.mail_on() {
+        return Err(Error::Unavailable("email isn't configured on this server".into(), "email_off"));
+    }
+    let NewEmail { email } = body(&b)?;
+    let challenge = crate::new_id("chl");
+    let id = challenge.clone();
+    if let Some(mail) = blocking(&a, move |a| a.email_change_start(&u.user, &id, &email)).await? {
+        a.send_later(mail, "address change code");
+    }
+    Ok((StatusCode::ACCEPTED, Json(json!({ "challenge": challenge }))))
+}
+
+/// The code from the new address: the account moves, and the old address is told.
+async fn confirm_email(State(a): S, me: Me, b: Bytes) -> Result<Json<crate::User>> {
+    let u = signed_in(me)?;
+    sudo(&a, &u).await?;
+    let Verify { challenge, code } = body(&b)?;
+    let (user, mail) = blocking(&a, move |a| a.email_change_confirm(&u.user, &challenge, &code)).await?;
+    a.send_later(mail, "address changed");
+    Ok(Json(user))
 }
 
 #[derive(Deserialize)]

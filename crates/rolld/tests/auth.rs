@@ -309,6 +309,18 @@ async fn every_control_plane_route_needs_the_operator_token() {
     assert_eq!(off.status(), 200);
     assert_ne!(as_token(token).await, "owner", "a disabled account's roll code token still works");
     assert_eq!(http.get(format!("{api}/v1/code")).bearer_auth(&adas).send().await.unwrap().status(), 401, "a disabled account's scoped token still works");
+    // The audit log names people by handle, a disabled one too: the sign-in report reads as people.
+    let mut named = serde_json::Value::Null;
+    for _ in 0..50 {
+        named = http.get(format!("{api}/v1/access/audit?product=accounts")).header("authorization", &operator).send().await.unwrap().json().await.unwrap();
+        if named.as_array().is_some_and(|l| l.iter().any(|e| e["route"] == "sign_in" && e["actor_handle"] == "ada" && e["resource_handle"] == "ada")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(named.as_array().is_some_and(|l| l.iter().any(|e| e["route"] == "sign_in" && e["actor_handle"] == "ada")), "{named}");
+    let csv = http.get(format!("{api}/v1/access/audit?product=accounts&format=csv")).header("authorization", &operator).send().await.unwrap().text().await.unwrap();
+    assert!(csv.lines().next().unwrap().ends_with(",actor_handle,resource_handle") && csv.lines().any(|l| l.contains("\"sign_in\"") && l.ends_with(",\"ada\",\"ada\"")), "{csv}");
 
     // `/v1/info` answers before the gate: the dashboard's sidebar reads it before sign-in.
     assert_eq!(send("internal", "api".into(), "/v1/info".into(), None).await, 200);
@@ -336,6 +348,7 @@ async fn every_control_plane_route_needs_the_operator_token() {
         ("/v1/code/mcp", "roll code's own MCP server: grants use /v1/mcp"),
         ("/v1/code/review-apps", "review apps: their own tokens"),
         ("/v1/apps/hooks", "apps' deploy hooks: the secret in the URL"),
+        ("/v1/previews/hooks", "previews' deploy hooks: the secret in the URL"),
         ("/v1/code/names", "public name lookups"),
         ("/v1/apps/hooks", "deploy hooks: the secret in the URL"),
         ("/v1/accounts", "people's accounts: sign-in, sessions and invites are a person's, never a token's"),

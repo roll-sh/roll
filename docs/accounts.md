@@ -59,6 +59,10 @@ email_codes(id TEXT PRIMARY KEY,         -- chl_…
             email TEXT NOT NULL, user_id TEXT, invite_id TEXT,
             code_hash TEXT NOT NULL,     -- argon2id
             attempts INTEGER NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)
+email_changes(id TEXT PRIMARY KEY,       -- chl_…: a move to another address, one per person
+              user_id TEXT NOT NULL, email TEXT NOT NULL,  -- the new address
+              code_hash TEXT NOT NULL,   -- argon2id
+              attempts INTEGER NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)
 oauth_states(state_hash TEXT PRIMARY KEY, provider TEXT NOT NULL, intent TEXT NOT NULL,
              user_id TEXT, invite_id TEXT, verifier TEXT NOT NULL, nonce TEXT NOT NULL,
              browser_hash TEXT NOT NULL, return_to TEXT NOT NULL,
@@ -70,6 +74,8 @@ passkeys(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, credential_id TEXT NOT NULL
          public_key TEXT NOT NULL,                                -- COSE, base64url
          sign_count INTEGER NOT NULL, name TEXT NOT NULL,
          created_at INTEGER NOT NULL, last_used_at INTEGER, synced INTEGER)
+sign_in_places(user_id TEXT, place TEXT, first_at INTEGER, last_at INTEGER,  -- new-sign-in mail
+         PRIMARY KEY (user_id, place))                            -- place: sha256(browser, network)
 passkey_challenges(id TEXT PRIMARY KEY, user_id TEXT, purpose TEXT NOT NULL,  -- register | signin
          challenge TEXT NOT NULL, expires_at INTEGER NOT NULL)     -- used once, 5 minutes
 throttle(key TEXT PRIMARY KEY, n INTEGER NOT NULL, since INTEGER NOT NULL)
@@ -260,6 +266,21 @@ needs the person signed in (`intent: "link"`).
 Okta, Entra ID, Google Workspace, JumpCloud or any OpenID Connect provider signs people in, chosen
 by their email's domain, as Linear's, Vercel's and GitHub's enterprise sign-in do.
 
+- **Back-channel logout** (OIDC Back-Channel Logout 1.0, Okta's and Entra's "sign out
+  everywhere"): register the connection's `backchannel_logout_uri`
+  (`<api>/v1/accounts/sso/{id}/backchannel-logout`) at the provider, and when a person signs out
+  there (or an admin ends their sessions), the provider posts a `logout_token`. It's verified as an
+  ID token is (the provider's keys, issuer, roll's client as audience, `exp`), must carry the
+  back-channel logout event and no `nonce`, name a `sid` or a `sub`, and is used once (`jti`, kept
+  until it expires). The sessions this connection signed in end: the one with the provider's
+  `sid` (kept on the session at sign-in), else every one of the person (`sub`). A form body, by
+  the spec: the one write here that isn't JSON, safe because it reads and sets no cookie and only
+  the provider's signature counts. Each one is in the person's security log (`session.end`).
+- **Session length** (`PATCH /v1/accounts/sso/{id} {session_hours}`, 1 to 720; 0 takes it off), as
+  Okta's and Google Workspace's: a session the connection signs in lasts at most that long (kept
+  past a second factor, as `sessions.cap_ms`), then the person signs in through it again. A
+  shorter length applies at once to the sessions it already signed in; sign-ins another way keep
+  roll's 30 days. "Sessions last" on the account page.
 - **A connection** (admin): `POST /v1/accounts/sso {name?, issuer, client_id, client_secret,
   domains, enforce?, provision?}`. The issuer's discovery document must answer and name the same
   issuer before it's saved; roll keeps the issuer as the document states it (with or without a
@@ -309,7 +330,9 @@ by their email's domain, as Linear's, Vercel's and GitHub's enterprise sign-in d
 The same provider can sign people's agents in too (enterprise sign-in, docs/permissions.md,
 "Enterprise identity providers"): an enterprise identity provider with `sso` set to the
 connection's id vouches for the connection's verified domains, as they are at each sign-in
-(`roll_auth::Sessions::sso_trust`), so a domain is proven once for both.
+(`roll_auth::Sessions::sso_trust`), so a domain is proven once for both. On the account page each
+connection says whether agents sign in through it too, and "Use for agents too" adds it (one click,
+once its domains are proven); "Stop" takes it away.
 
 ### SCIM (the provider manages its people)
 
@@ -382,11 +405,115 @@ phished: a passkey works only on roll's own site.
 - Everything from the browser is hostile: the CBOR reader takes definite lengths only, believes
   a length or count only as far as the bytes present hold it, and stops at a small depth; a
   credential id is at most 1023 bytes; the blobs at most 16 KiB.
+- **Hardware keys only** (`src/attestation.rs`), for a company that requires its people's passkeys
+  on authenticators it chose: an admin lists models (`PUT /v1/accounts/passkey-policy {require,
+  models: [{aaguid, name, roots: [PEM]}]}`, sudo mode; "Hardware keys only" on the account page).
+  With `require` on, registration asks for `direct` attestation and keeps a passkey only when its
+  `packed` statement is verified (WebAuthn §8.2): the signature over the authenticator data and the
+  client data's hash by the attestation certificate; that certificate's version 3, OU
+  "Authenticator Attestation", not a CA, its FIDO AAGUID extension matching the authenticator data;
+  and its chain to one of the model's roots (webpki, at the current time). A self-attested or
+  unattested authenticator, an unlisted model, or another maker's chain is refused; the passkey
+  shows its model's name. A passkey that proved no listed model (made before, or its model taken
+  off the list) stops signing in while the policy is on; codes still work. An unverified AAGUID is
+  the authenticator's own say-so, so the list is never checked against one. Other formats (`tpm`,
+  `android-key`, `apple`, `fido-u2f`) are refused under the policy for now.
 - Anonymous challenges are throttled per address (60 every 10 minutes). Passkeys need
   `ROLL_WEB_URL` (503 `{code: "passkeys_off"}` without it); `GET /v1/accounts` says
   `providers.passkey`.
 - A refused passkey sign-in is in the passkey owner's security log (by `anonymous` when no
   session owed a second factor); adding, renaming and removing one are there too.
+
+### Your data
+
+A person exports everything roll keeps about them, as GitHub's account data export does (and as
+the GDPR's right to portability asks): `POST /v1/accounts/me/export` answers one JSON file
+(`Content-Disposition: attachment`, "Export your data" on the account page) with their account and
+sign-in methods, sessions, passkeys (never a key), the places they signed in from (when only:
+roll keeps a hash of where), second-factor resets they asked for, their security log (the newest
+1000 lines), and their roll tokens (names, rules and dates through `Audit::tokens`; never a secret
+or its hint). It's sudo mode (a stolen cookie can't take it), and the export is in their security
+log (`account.export`).
+
+### Recovery
+
+Someone who lost their authenticator app and their recovery codes asks an admin to reset their
+second factor, as Okta's and Google Workspace's admins reset factors (`src/recovery.rs`):
+
+- They sign in with their first factor (an email code, GitHub, Google), then, on the
+  second-factor step, ask with a reason: `POST /v1/accounts/signin/reset-request {reason}` (a
+  session owing a second factor; 1–500 characters). Their one pending request is answered again
+  rather than a second made; three a day at most.
+- Every other admin is mailed the request and its reason, with a link to the account page's
+  "Second-factor resets". An admin checks it's them some other way (a call, in person: the email
+  code alone got them this far), then approves or declines (sudo mode; never their own).
+- Approving takes their TOTP and recovery codes away and ends their sign-ins waiting for one;
+  their next sign-in is whole and they set it up again. They're mailed either way, and each step
+  is in their security log (`recovery.request`, `recovery.approve`, `recovery.deny`).
+- Passkeys aren't taken: one still works on its own.
+
+### New sign-ins
+
+As GitHub does, the first whole sign-in (nothing more owed) from a browser and network a person
+hasn't signed in from before mails them: "A new sign-in to your roll account", with the browser
+in words ("Firefox on Windows"), the address, and a link to their Recent activity. A stolen code
+or link shows up in their inbox, not only in their security log.
+
+- A place is the browser and OS from the User-Agent plus the network (an IPv4 /24, an IPv6 /48),
+  kept hashed in `sign_in_places` (the newest 50 per person), so a new address at the same home
+  or office isn't new.
+- A person's first sign-in mails nothing, and neither does the first after this shipped (nobody
+  is mailed for what they did before). Without mail configured nothing is sent.
+- The mail goes out off the request, after the sign-in's answer.
+
+### Second factor for everyone
+
+As GitHub's organizations and Google Workspace require it: an admin turns on `PUT
+/v1/accounts/policy {require_second_factor: true}` (sudo mode; "A second factor for everyone" on
+the account page), and a person whose session has no second factor (no authenticator app on, no
+passkey) reaches only `/v1/accounts…`, where they set one up; anything else is 403 `{code:
+"second_factor_required"}` (rolld's gate asks, `roll_auth::Sessions::missing`, never
+cached), and `GET /v1/accounts/session` says `second_factor_required` so the dashboard points them to
+their account page. Once they have one, their session works again. A session their company's SSO
+provider signed in passes (the provider checks). The operator's token and roll tokens aren't
+sessions.
+
+### Phishing-resistant sign-in
+
+As Okta's authenticator policy and Google's Advanced Protection: `PUT /v1/accounts/policy
+{phishing_resistant: "admins" | "everyone"}` (sudo mode; "Phishing-resistant sign-in" on the
+account page) holds those people's sessions to a passkey, because a lookalike page can relay an
+email code or an authenticator app's code and can't relay a passkey.
+
+- A session counts once it has used a passkey (`sessions.passkey_at`): signed in with one,
+  finished its second factor with one, or confirmed it's you with one (sudo mode's
+  `POST /me/reauth`). An SSO session counts too: the provider's own policy decides how it signs
+  in.
+- Until then it reaches only `/v1/accounts…` (to add a passkey and use it); anything else is 403
+  `{code: "passkey_required"}`, from the same gate check as a missing second factor
+  (`roll_auth::Missing::Passkey`), and `GET /v1/accounts/session` says `passkey_required` so the
+  dashboard points them to their account page.
+- An admin turning it on must be in a session that used a passkey (409 otherwise), or they'd hold
+  their own session to it; the operator's token has no session to check.
+
+### Allowed networks
+
+As GitHub Enterprise's IP allow list: an admin lists the company's networks (`PUT
+/v1/accounts/network-policy {on, networks}`: CIDRs or single addresses, at most 100; sudo mode;
+"Allowed networks" on the account page), and a person's session is used only from them. rolld's
+gate asks on every request with a session cookie (`roll_auth::Sessions::network_ok`, never
+cached), with the client's address as roll-access reads it (`ROLL_TRUSTED_PROXIES`); an unknown
+address is refused while it's on, and a session from elsewhere gets 403 `{code: "network"}`. A list
+that leaves out the saving admin's own address is refused (400 `lockout`). The operator's token and
+roll tokens aren't held to it (tokens have their own `ip_allow`).
+
+### Idle timeout
+
+The same policy sets how long an unused session lasts, as Okta's idle session lifetime:
+`PUT /v1/accounts/policy {require_second_factor, idle_minutes}` (15 minutes to a week; absent:
+roll's week). A session's last use is noted every five minutes, so the timeout holds to within
+that. It applies at once to every session, on its next use. ("Sessions and second factors" on
+the account page; a `PUT` sends the whole policy.)
 
 ### Sudo mode
 
@@ -397,10 +524,12 @@ or make someone an admin.
 
 - What needs it, from a person's own session: adding a passkey (`POST /me/passkeys/options` and
   `POST /me/passkeys`), removing one, setting up an authenticator app (`POST /me/totp`), unlinking
-  a sign-in method. From an admin's session: changing a person's `admin` or `disabled`, an invite
+  a sign-in method, moving to another address, deleting the account. From an admin's session: changing a person's `admin` or `disabled`, an invite
   that makes an admin, and adding, changing or removing an SSO connection or its SCIM token. The
   operator's token has no session: it's exempt. Turning TOTP off and new recovery codes already
-  take a code.
+  take a code. Making a roll token from a session (`POST /v1/access/tokens`, a person's or an
+  admin's) needs it too: roll-access asks `roll_auth::Sessions::fresh`, so a stolen cookie can't
+  mint a long-lived token (a token a token makes is within that token).
 - Without a recent proof: 403 `{code: "reauth_required"}`. `GET /v1/accounts/me/reauth` says
   until when the session is fresh and how its person can confirm (`totp`, `passkey`, `email`),
   and `POST /v1/accounts/me/reauth` takes `{code}` (TOTP or a recovery code), `{challenge, code}`
@@ -408,8 +537,50 @@ or make someone an admin.
   proves nothing) or `{id, credential}` (a passkey, from `POST /me/reauth/passkey/options`, only
   their own). It's fresh for another two hours (`sessions.verified_at`).
 - The dashboard asks in place: the change's call answers `reauth_required`, a "Confirm it's you"
-  dialog takes the proof, and the call runs once more (`onReauthRequired` in `accounts-api.ts`).
+  dialog (mounted by the app shell) takes the proof, and the call runs once more (`withReauth` in
+  `lib/reauth.ts`, used by the accounts client and every product's `call` in `roll-api.ts`).
 - Each confirmation, and each refused one, is in the person's security log (`reauth`).
+
+### Your address
+
+A person moves their account to another address as GitHub does: the new address proves itself,
+the old one is told.
+
+- `POST /v1/accounts/me/email {email}` (sudo mode) sends a six-digit code to the new address
+  and answers 202 `{challenge}`. `POST /me/email/confirm {challenge, code}` (sudo mode, the same
+  person's session) moves the account in one write: `users.email` is the address sign-in codes,
+  invites' matches and every mail roll sends go to, so the old address signs in no more. A code
+  works once, for 10 minutes, five tries, as a sign-in code; a new change replaces the last.
+- The old address then gets "Your roll account moved to another address", naming the new one.
+- An address that already has an account gets a note ("Someone tried to move a roll account to
+  this address") instead of a code; the answer is the same 202, so it doesn't say which.
+- An address a company manages stays with it: SCIM-provisioned people (403 `managed`: their
+  provider changes it), and a domain whose SSO connection enforces its sign-in, whether moving
+  from it or to it (403 `sso_required`). Checked again at the confirmation.
+- Five changes an hour per person (403 `throttled`), and the usual five mails an hour per address.
+- Both calls are in the person's security log (`POST /v1/accounts/me/email`, `…/confirm`).
+
+### Deleting your account
+
+As GitHub's "Delete your account": `DELETE /v1/accounts/me {confirm}` (sudo mode), `confirm`
+being the person's handle, answers 204 and clears the session cookie.
+
+- In one write, everything keyed by the person goes: sessions, sign-in links (GitHub, Google,
+  SSO), the authenticator app and recovery codes, passkeys, pending codes and address changes,
+  sign-in places and reset requests. The `users` row stays as a tombstone: the address becomes
+  `<id>@deleted.invalid` (so the real one can be invited again, as a new account), the name is
+  emptied, admin is dropped, and it's disabled for good (`disabled_by = 'self'`, `deleted_at`).
+  Ids in the audit log still name it, and the handle stays taken, as their roll code owner keeps
+  it.
+- Every token the person made dies with it (a user's own token acts as its person now, and there's
+  none), and their roll code owner is suspended as a disabled person's is: its tokens and machine
+  links stop. Its repositories stay for an admin to decide on.
+- Nothing brings it back: the People list leaves it out, and an admin's `PATCH /users/{id}` answers
+  404.
+- Refused for roll's last admin (409: make someone else an admin first) and for a company's people
+  (403 `managed` for SCIM-provisioned ones, `sso_required` on an SSO-enforced domain): their
+  admin removes them.
+- The old address gets "Your roll account was deleted", in case it wasn't them.
 
 ## Routes
 
@@ -422,7 +593,7 @@ token or an admin's session.
 
 ```ts
 type User = { id: string; email: string; handle: string; name: string; admin: boolean;
-              disabled: boolean; created_at: number; totp: boolean;
+              disabled: boolean; created_at: number; totp: boolean; passkeys: number;
               identities: { provider: "github" | "google" | `sso:${string}`; login: string; email: string }[] };
 type Session = { id: string; created_at: number; seen_at: number; expires_at: number;
                  user_agent: string; current: boolean };
@@ -448,6 +619,7 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | `GET /v1/accounts/sso/{id}/callback` | query `code`, `state` (or `error`) | 303 to the dashboard; `?error=` `unverified_email`, `domain`, `not_invited`, `link_required`, `linked_elsewhere`, `link_email`, `state` or `provider` |
 | `POST /v1/accounts/signin/passkey/options` | | `{id, publicKey}` for `navigator.credentials.get`: with a session owing a second factor, that person's passkeys; without, any (throttled per address); 503 `{code: "passkeys_off"}` |
 | `POST /v1/accounts/signin/passkey` | `{id, credential}` | 200 `SignedIn`, with `Set-Cookie`; 400 `{code: "passkey"}` (unknown, wrong site, unverified, copied, a used or another sign-in's challenge); 403 `{code: "sso_required"}` |
+| `POST /v1/accounts/signin/reset-request` | `{reason}` (a session owing a second factor) | 202 `{id, state, created_at}`: admins are mailed; 401 without a first factor |
 | `POST /v1/accounts/signout` | | 204, clears the cookie and deletes the session (any level; csrf) |
 
 ### Second factor (a session at level `mfa`, csrf)
@@ -463,6 +635,9 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | --- | --- | --- |
 | `GET /v1/accounts/me` | | `User` |
 | `PATCH /v1/accounts/me` | `{name}` | `User` (1–100 characters) |
+| `DELETE /v1/accounts/me` | `{confirm}` (your handle) | 204, signed out: the account is deleted (sudo mode; "Deleting your account"); 409 the last admin |
+| `POST /v1/accounts/me/email` | `{email}` | 202 `{challenge}`: a code to the new address (sudo mode; "Your address") |
+| `POST /v1/accounts/me/email/confirm` | `{challenge, code}` | `User` at the new address; 400 `{code: "bad_code"}`; 409 the address has an account now |
 | `GET /v1/accounts/me/sessions` | | `Session[]`, newest first |
 | `GET /v1/accounts/me/activity` | query `before?` (Unix ms), `limit?` (1–200, 50) | `{events: [{at, action, actor, ok, status, ip, user_agent, detail}]}`: your security log, newest first |
 | `DELETE /v1/accounts/me/sessions/{id}` | | 204; 404 if it isn't yours |
@@ -471,6 +646,7 @@ type MfaRequired = { status: "mfa_required"; methods: ("totp" | "recovery")[]; c
 | `POST /v1/accounts/me/totp/confirm` | `{code}` | `{recovery_codes: string[10]}`, shown once; 400 `{code: "bad_code"}`; 404 nothing to confirm |
 | `DELETE /v1/accounts/me/totp` | `{code}` (TOTP or recovery) | 204; 400 `{code: "bad_code"}` |
 | `POST /v1/accounts/me/recovery-codes` | `{code}` (TOTP) | `{recovery_codes}`, replacing the old ones |
+| `POST /v1/accounts/me/export` | | your data as one JSON file (an attachment; sudo mode) |
 | `GET /v1/accounts/me/reauth` | | `{fresh_until, methods: ("totp" \| "passkey" \| "email")[]}` (sudo mode) |
 | `POST /v1/accounts/me/reauth` | `{code}`, `{challenge, code}` or `{id, credential}` | `{fresh_until}`; 400 `{code: "bad_code"}` or `{code: "passkey"}` |
 | `POST /v1/accounts/me/reauth/email` | | 202 `{challenge}`: a code to the person's own address |
@@ -488,6 +664,15 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 
 | Route | Body | Answer |
 | --- | --- | --- |
+| `GET /v1/accounts/passkey-policy` | | `{require, models: [{aaguid, name, roots}]}` (hardware keys only) |
+| `PUT /v1/accounts/passkey-policy` | `{require, models}` | the policy, checked (UUIDs, names, PEM roots; a model when required); sudo mode; 400 `{code: "policy"}` |
+| `GET /v1/accounts/policy` | | `{require_second_factor, idle_minutes?, phishing_resistant?}` |
+| `PUT /v1/accounts/policy` | `{require_second_factor, idle_minutes?, phishing_resistant?: "admins" \| "everyone"}` | the policy (sudo mode; the whole of it); 400 `policy`; 409 turning on phishing-resistant sign-in from a session that hasn't used a passkey |
+| `GET /v1/accounts/network-policy` | | `{on, networks}` (allowed networks) |
+| `PUT /v1/accounts/network-policy` | `{on, networks}` | the policy, networks normalised; sudo mode; 400 `networks` or `lockout` |
+| `GET /v1/accounts/reset-requests` | | `ResetRequest[]`: `{id, user, email, handle, reason, ip, user_agent, created_at, state, decided_by, decided_at}`, pending first |
+| `POST /v1/accounts/reset-requests/{id}/approve` | | `ResetRequest`: TOTP and recovery codes gone (sudo mode; 403 `own_request` for your own; 409 decided) |
+| `POST /v1/accounts/reset-requests/{id}/deny` | | `ResetRequest` (sudo mode) |
 | `POST /v1/accounts/invites` | `{email, admin?, handle?}` | 201 `Invite & {token, url}` (the token is shown once, and mailed when mail is on); 409 an account has the email |
 | `GET /v1/accounts/invites` | | `Invite[]`, newest first |
 | `DELETE /v1/accounts/invites/{id}` | | 204 (unused invites only; 409 once used) |
@@ -521,6 +706,16 @@ and the SIEM sinks), as Okta's System Log and GitHub's audit log keep them:
 
 Never a body: no code, token, secret or password is in an event. Starting a sign-in isn't
 recorded (its end is).
+
+The sign-in report, as Okta's and Google Workspace's: an admin's account page links the People
+section to the audit log narrowed to accounts (`/dashboard/access/audit?product=accounts`),
+which downloads as CSV for a spreadsheet or JSON lines for a log tool. An admin's session reads
+it as the operator does (an admin carries `Operator`); its downloads send the session like every
+other call (`withSession`: `lib/session-fetch.test.ts` fails on a fetch to rolld without it).
+
+The audit log names people by handle as well as id (`actor_handle`, `resource_handle`; the CSV's
+last two columns), disabled and deleted people too, so filtered to accounts it reads as Okta's
+and Google Workspace's sign-in reports do.
 
 Each person reads their own (`GET /v1/accounts/me/activity`, "Recent activity" on the account
 page, as GitHub's security log): their sign-ins, refused ones too, with the method, address and
