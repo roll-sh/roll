@@ -83,6 +83,49 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return data as T;
 }
 
+/** One line of your security log (docs/accounts.md, "Audit"). */
+export interface Activity {
+  at: number;
+  /** `sign_in`, `user.create`, `identity.link`, `scim.update`, or `METHOD /route`. */
+  action: string;
+  /** You (your id), `operator`, an admin's id, or `scim:<connection>`. */
+  actor: string;
+  ok: boolean;
+  status: number;
+  ip?: string | null;
+  user_agent?: string | null;
+  detail?: { method?: string; refused?: string | null; second_factor?: string | null; via?: string; set?: Record<string, unknown>; active?: boolean | null } | null;
+}
+
+const METHODS: Record<string, string> = { email: "an email code", github: "GitHub", google: "Google", totp: "your authenticator app", recovery_code: "a recovery code" };
+
+/** A security log line in words: what happened, by whom (`me`: your own id). */
+export function activityText(e: Activity, me: string): string {
+  const d = e.detail ?? {};
+  const how = (m?: string) => (m ? (METHODS[m] ?? (m.startsWith("sso:") ? "your company's sign-in" : m)) : "");
+  const by = e.actor === me ? "you" : e.actor === "operator" ? "the operator" : e.actor.startsWith("scim:") ? "your company's provider (SCIM)" : "an admin";
+  switch (e.action) {
+    case "sign_in":
+      if (!e.ok) return `A sign-in with ${how(d.method)} was refused${d.refused ? ` (${d.refused.replace(/_/g, " ")})` : ""}`;
+      return d.second_factor === "owed" ? `Signed in with ${how(d.method)}, then asked for your second factor` : `Signed in with ${how(d.method)}`;
+    case "user.create":
+      return d.via === "provisioned" ? "Your account was made by your company's sign-in" : "Your account was made from your invite";
+    case "identity.link":
+      return e.ok ? `${how(d.method) || "A sign-in"} was linked to your account` : `Linking ${how(d.method)} was refused`;
+    case "scim.update":
+      return d.active === false ? "Your company's provider deactivated your account" : d.active === true ? "Your company's provider reactivated your account" : "Your company's provider updated your account";
+  }
+  const set = d.set ?? {};
+  if ("disabled" in set) return `Your account was ${set.disabled ? "disabled" : "turned back on"} by ${by}`;
+  if ("admin" in set) return `${by === "you" ? "You" : by[0].toUpperCase() + by.slice(1)} ${set.admin ? "made you an admin" : "removed your admin rights"}`;
+  if (e.action.includes("/me/totp")) return e.action.startsWith("DELETE") ? "Your authenticator app was turned off" : "Your authenticator app was set up";
+  if (e.action.includes("/me/recovery-codes")) return "New recovery codes were made";
+  if (e.action.includes("/me/identities")) return "A sign-in method was unlinked";
+  if (e.action.includes("/me/sessions") || e.action.endsWith("/sessions")) return `Sessions were ended by ${by}`;
+  if (e.action === "PATCH /v1/accounts/me") return "Your profile was changed";
+  return `${e.action} by ${by}`;
+}
+
 /** Which sign-ins this roll offers (`sso`: a company's provider answers for some domains). */
 export type Providers = { email: boolean; github: boolean; google: boolean; sso?: boolean };
 
@@ -125,6 +168,8 @@ export const accountsApi = {
   recoverySignin: (code: string) => call<SignInAnswer>("POST", "/signin/recovery", { code }),
 
   me: () => call<User>("GET", "/me"),
+  /** Your own security log: sign-ins and changes to your account, newest first. */
+  activity: (before?: number) => call<{ events: Activity[] }>("GET", `/me/activity${before ? `?before=${before}` : ""}`),
   updateMe: (name: string) => call<User>("PATCH", "/me", { name }),
   sessions: () => call<Session[]>("GET", "/me/sessions"),
   revokeSession: (id: string) => call<null>("DELETE", `/me/sessions/${encodeURIComponent(id)}`),

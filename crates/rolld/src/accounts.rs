@@ -92,4 +92,34 @@ impl roll_accounts::audit::Audit for AccessAudit {
     fn client_ip(&self, req: &axum::extract::Request) -> Option<std::net::IpAddr> {
         roll_access::evaluate::client_ip(req, &self.0.config)
     }
+
+    fn activity(&self, user: &str, before: Option<i64>, limit: usize) -> Vec<roll_accounts::audit::Activity> {
+        // Rows written in the last moment may still be in the batching writer's queue.
+        self.0.store.flush_audit(std::time::Duration::from_millis(200));
+        let q = roll_access::store::AuditQuery { product: Some("accounts".into()), resource: Some(user.to_string()), before, limit: Some(limit), ..Default::default() };
+        let rows = match self.0.store.audit_log(&q) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "accounts: reading a person's activity failed");
+                return Vec::new();
+            }
+        };
+        rows.into_iter()
+            // Only what's about them exactly (the query also matches ids under theirs).
+            .filter(|r| r.resource.as_deref() == Some(user))
+            .map(|r| {
+                let args = r.args.unwrap_or(serde_json::Value::Null);
+                roll_accounts::audit::Activity {
+                    at: r.at,
+                    action: r.route,
+                    actor: args["actor"].as_str().map(str::to_string).or(r.grant_name).unwrap_or_else(|| "operator".into()),
+                    ok: r.decision == "allow",
+                    status: r.status,
+                    ip: r.ip,
+                    user_agent: r.client,
+                    detail: args.get("detail").cloned().unwrap_or(serde_json::Value::Null),
+                }
+            })
+            .collect()
+    }
 }

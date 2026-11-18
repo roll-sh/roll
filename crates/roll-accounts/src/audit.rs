@@ -35,6 +35,24 @@ const FIELDS: &[&str] = &["admin", "disabled", "email", "handle", "enforce", "pr
 pub trait Audit: Send + Sync {
     fn record(&self, e: AccountEvent);
     fn client_ip(&self, req: &Request) -> Option<IpAddr>;
+    /// The events about `user` (their sign-ins and changes to their account), newest first,
+    /// before `before` (Unix ms), at most `limit`: a person's own security log.
+    fn activity(&self, user: &str, before: Option<i64>, limit: usize) -> Vec<Activity>;
+}
+
+/// One line of a person's security log.
+#[derive(Clone, Debug, Serialize)]
+pub struct Activity {
+    pub at: i64,
+    /// `sign_in`, `user.create`, `identity.link`, `scim.update`, or `METHOD /route`.
+    pub action: String,
+    /// Who did it: the person, `operator`, another person's id, `scim:<connection>`.
+    pub actor: String,
+    pub ok: bool,
+    pub status: u16,
+    pub ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub detail: Value,
 }
 
 /// One thing that happened to accounts.
@@ -105,6 +123,11 @@ impl Accounts {
 
     fn audit_hook(&self) -> Option<Arc<dyn Audit>> {
         self.audit.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// A person's own security log (their sign-ins and changes to their account), newest first.
+    pub fn activity(&self, user: &str, before: Option<i64>, limit: usize) -> Vec<Activity> {
+        self.audit_hook().map(|h| h.activity(user, before, limit.clamp(1, 200))).unwrap_or_default()
     }
 
     pub(crate) fn record(&self, e: AccountEvent) {
@@ -185,12 +208,13 @@ pub(crate) async fn layer(State(a): State<Arc<Accounts>>, mut req: Request, next
         _ => "anonymous".to_string(),
     };
     // The id the route names (`{id}`), decoded as the handler reads it, from the path's segment
-    // at the pattern's place.
-    let target = route
+    // at the pattern's place; a person's own routes (`/v1/accounts/me…`) are about them.
+    let own = route.starts_with("/v1/accounts/me").then(|| actor.clone());
+    let target = own.or_else(|| route
         .split('/')
         .zip(req.uri().path().split('/'))
         .find(|(p, _)| p.starts_with('{') && *p != "{provider}")
-        .map(|(_, v)| clean_id(&percent_encoding::percent_decode_str(v).decode_utf8_lossy()));
+        .map(|(_, v)| clean_id(&percent_encoding::percent_decode_str(v).decode_utf8_lossy())));
     let ua = req.headers().get(header::USER_AGENT).and_then(|v| v.to_str().ok()).map(|s| s.chars().filter(|c| !c.is_control()).take(120).collect::<String>());
     // The body, for its allowlisted fields (handed on as it came).
     let (parts, body) = req.into_parts();

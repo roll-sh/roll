@@ -708,6 +708,17 @@ impl roll_accounts::audit::Audit for Events {
     fn client_ip(&self, _req: &Request<Body>) -> Option<std::net::IpAddr> {
         Some("203.0.113.7".parse().unwrap())
     }
+    // As rolld answers it: the events about the person, newest first.
+    fn activity(&self, user: &str, _before: Option<i64>, limit: usize) -> Vec<roll_accounts::audit::Activity> {
+        let all = self.0.lock().unwrap();
+        all.iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, e)| e.target.as_deref() == Some(user))
+            .take(limit)
+            .map(|(i, e)| roll_accounts::audit::Activity { at: i as i64, action: e.action.clone(), actor: e.actor.clone(), ok: e.ok, status: e.status, ip: e.ip.map(|i| i.to_string()), user_agent: e.user_agent.clone(), detail: e.detail.clone() })
+            .collect()
+    }
 }
 
 /// Who signed in and how, who failed to, and every change to accounts go to the audit log, with
@@ -718,12 +729,19 @@ async fn account_events_are_audited() {
     let events = Arc::new(Events::default());
     env.accounts.set_audit(events.clone());
     let invite = env.invite("ada@example.com").await;
-    let ada = env.email_sign_in(&mut Browser::default(), "ada@example.com", Some(&invite)).await.json["user"]["id"].as_str().unwrap().to_string();
+    let mut adab = Browser::default();
+    let ada = env.email_sign_in(&mut adab, "ada@example.com", Some(&invite)).await.json["user"]["id"].as_str().unwrap().to_string();
     // A wrong code: a refused sign-in, by nobody yet.
     let mut b = Browser::default();
     let started = env.call(&mut b, Method::POST, "/v1/accounts/email/start", Some(json!({ "email": "ada@example.com" }))).await;
     let wrong = env.call(&mut b, Method::POST, "/v1/accounts/email/verify", Some(json!({ "challenge": started.json["challenge"], "code": "000000" }))).await;
     assert_eq!(wrong.status, StatusCode::BAD_REQUEST);
+    // Her own security log: her account made, her sign-in, and her own change, newest first.
+    assert_eq!(env.call(&mut adab, Method::PATCH, "/v1/accounts/me", Some(json!({ "name": "Ada L." }))).await.status, StatusCode::OK);
+    let log = env.call(&mut adab, Method::GET, "/v1/accounts/me/activity", None).await;
+    let actions: Vec<&str> = log.json["events"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
+    assert_eq!(actions, ["PATCH /v1/accounts/me", "sign_in", "user.create"], "{}", log.json);
+    assert_eq!((log.json["events"][1]["detail"]["method"].as_str(), log.json["events"][1]["ip"].as_str()), (Some("email"), Some("203.0.113.7")));
     assert_eq!(env.operator(Method::PATCH, &format!("/v1/accounts/users/{ada}"), json!({ "disabled": true })).await.status, StatusCode::OK);
 
     let got = events.0.lock().unwrap().clone();
