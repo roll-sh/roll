@@ -111,12 +111,53 @@ resource "roll_app_notification" "failures" {
 data "roll_app_service" "api" {
   name = "api"                   # made elsewhere: .url, .environments
 }
+
+# A machine client (docs/permissions.md, "Machine clients"): GitHub Actions on acme/web's main
+# branch trades the job's own OIDC token at .token_endpoint (client id .client_id) for an hour's
+# token that may deploy apps. Needs the operator's token (ROLL_TOKEN), not a scoped one.
+resource "roll_machine_client" "web_ci" {
+  name = "web-ci"
+
+  rule {
+    product   = "apps"
+    resources = "*"                # or one resource block per resource, below
+    actions   = { read = "allow", deploy = "allow" }
+  }
+  rule {
+    product = "secrets"
+    resource { project = "prj_…" } # or resource { id = "…" index = "…" }
+    environments = ["production"]
+    actions      = { read = "allow", reveal = "ask" }   # ask: a person approves each use
+  }
+
+  oidc {
+    issuer  = "https://token.actions.githubusercontent.com"
+    subject = "repo:acme/web:ref:refs/heads/main"
+    claims  = { repository_owner_id = "1234" }
+    # audience: roll's API URL when left out
+  }
+  # or, instead of oidc, a key it signs with: public_jwk = jsonencode({ kty = "OKP", crv = "Ed25519", x = "…" })
+}
 ```
+
+- A machine client has exactly one of `oidc` and `public_jwk`: roll's third way, a secret it
+  makes, isn't offered, so no secret lands in the state. A `rule` names its resources as
+  `resources = "*"` or as `resource` blocks (`id`, optionally `index`, or `project`), never both;
+  its other fields are roll_auth's scope names. Rules, `expires_at`, `ip_allow` and
+  `rate_per_minute` change in place on the client's grant. A changed `oidc` or `public_jwk`
+  rotates it, keeping its client id (`keep_old_for_s` keeps the old credential working that long).
+  A new `name` replaces it. It isn't in a project, so the provider's `project` doesn't apply.
+  Import it by its client id (`mcl_…`): `oidc` is read back except its `jwks` (roll only counts
+  the pinned keys), and a `public_jwk` isn't read back at all, so when either is in the file the
+  first apply after an import registers it again (a rotate).
 
 - An app's variable isn't read back (a sealed one never shows again): a change made outside
   Terraform is put back only when the value in the file changes. Its value lands in the state.
 
-- Identities, syncs and tokens don't change in place: every attribute replaces them.
+- Identities, syncs and tokens don't change in place: every attribute replaces them, and so do
+  `roll_secrets_ca`, `roll_secrets_ssh_ca`, `roll_secrets_transit_key` and
+  `roll_secrets_outside_database` (whose `admin_url_wo` is write-only: bump
+  `admin_url_wo_version` to register it again).
 
 - A notification target's URL is never read back, and a new URL is a new target. A webhook's
   signing secret is in `.secret` from when it's made. Filters left out are the defaults.
