@@ -140,15 +140,23 @@ impl roll_previews::ports::Apps for RollApps {
         if self.feedback {
             body["feedback"] = json!(t.feedback);
         }
-        let made = match self.api.call(Method::PUT, &path, Some(body.clone())).await {
-            // A roll apps older than #249 (a node not yet upgraded, on a fleet) refuses the field:
-            // the environment is made all the same, and its deploys report as well as previews.
-            Err(e) if e.downcast_ref::<super::Refused>().is_some_and(|r| r.status.as_u16() == 400 && r.error == "unknown field report") => {
-                body.as_object_mut().map(|o| o.remove("report"));
-                self.api.call(Method::PUT, &path, Some(body)).await?
-            }
-            r => r?,
-        };
+        // Its label under the project's own preview domain (`<label>.preview.acme.dev`, roll apps'
+        // project preview domain): apps routes that name to this environment.
+        body["preview_host"] = json!(t.host);
+        // A roll apps that predates a field refuses it (a node not yet upgraded, on a fleet):
+        // `report` (#249; then its deploys report as well as previews) or `preview_host` (its
+        // rolld preview URL still works). The environment is made without the fields it doesn't know.
+        let mut made = self.api.call(Method::PUT, &path, Some(body.clone())).await;
+        for _ in 0..2 {
+            let unknown = match &made {
+                Err(e) => e.downcast_ref::<super::Refused>().filter(|r| r.status.as_u16() == 400).and_then(|r| r.error.strip_prefix("unknown field ")).filter(|f| matches!(*f, "report" | "preview_host")).map(str::to_string),
+                Ok(_) => None,
+            };
+            let Some(field) = unknown else { break };
+            body.as_object_mut().map(|o| o.remove(&field));
+            made = self.api.call(Method::PUT, &path, Some(body.clone())).await;
+        }
+        let made = made?;
         // Roll only holds the build too: roll apps builds a closed environment without its secret
         // values (apps' #222, `build_closed`). One that doesn't say so would build with them on an
         // open network, where a fork's head could send them out: nothing is deployed there.
@@ -258,6 +266,15 @@ impl roll_previews::ports::Apps for RollApps {
         self.settle(&path, deployment).await?;
         let env = self.api.get(&path).await?;
         Ok(s(&env["url"]))
+    }
+
+    /// The project's verified preview domain (`GET /v1/apps/projects/{project}/preview-domain`:
+    /// `{hostname: "*.preview.acme.dev", status, tls, …}`; 404 when it has none).
+    async fn preview_domain(&self, project: &str) -> Option<(String, bool)> {
+        let d = self.api.get(&format!("/v1/apps/projects/{}/preview-domain", seg(project))).await.ok()?;
+        (d["status"].as_str() == Some("active")).then_some(())?;
+        let base = d["hostname"].as_str()?.strip_prefix("*.")?.to_ascii_lowercase();
+        Some((base, d["tls"].as_str() == Some("issued")))
     }
 
     async fn memory_mb(&self, preview: &str, service: &str) -> Option<u32> {
@@ -565,6 +582,10 @@ impl roll_previews::ports::Apps for Services {
 
     async fn memory_mb(&self, preview: &str, service: &str) -> Option<u32> {
         self.apps.memory_mb(preview, service).await
+    }
+
+    async fn preview_domain(&self, project: &str) -> Option<(String, bool)> {
+        self.apps.preview_domain(project).await
     }
 
     async fn deploy(&self, t: &roll_previews::ports::Target) -> anyhow::Result<Option<String>> {

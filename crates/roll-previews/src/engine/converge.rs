@@ -447,6 +447,9 @@ impl Engine {
 
         // (what's sent, its fingerprint, the revision, whether it's the change's own repo)
         let mut to_deploy: Vec<(Target, String, String, bool)> = Vec::new();
+
+        // The project's own preview domain, when it has one (`Store::set_project_domain`).
+        let domain = self.store.project_domain(&r.project_id)?;
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             if let Some(path) = &spec.health {
@@ -454,7 +457,7 @@ impl Engine {
             }
             // What it costs is what it runs with: a backend's preview size when it has one.
             let memory_mb = if on_apps { self.apps.memory_mb(&r.id, &spec.name).await.unwrap_or(spec.memory_mb) } else { spec.memory_mb };
-            let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, memory_mb, &|h| self.cfg.url(h))?;
+            let svc = self.store.want_service(&r.id, &spec.name, &repo, &rev, memory_mb, &|h| self.cfg.url_in(domain.as_ref(), h))?;
             // A redeploy when the revision moved, or what it's deployed with did (its variables:
             // a reset's new URLs, changed overrides; on roll apps its access): the runtime
             // restarts it on its next request, roll apps redeploys it.
@@ -478,7 +481,7 @@ impl Engine {
                 && r.trusted
                 && let Some(old) = svc.deployed.as_deref().filter(|d| *d != rev && !d.is_empty())
             {
-                for gone in self.store.pin(&r.id, &spec.name, old, &|h| self.cfg.url(h))? {
+                for gone in self.store.pin(&r.id, &spec.name, old, &|h| self.cfg.url_in(domain.as_ref(), h))? {
                     self.apps.remove(&r.id, &gone).await.map_err(|e| anyhow::anyhow!("removing {gone}: {e:#}"))?;
                 }
             }

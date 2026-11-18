@@ -183,6 +183,12 @@ CREATE TABLE IF NOT EXISTS hooks (
     created_at INTEGER NOT NULL,
     fired_at INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS project_domains (
+    project_id TEXT PRIMARY KEY,
+    base TEXT NOT NULL UNIQUE,
+    https INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS bypass (
     project_id TEXT PRIMARY KEY,
     hash TEXT NOT NULL,
@@ -800,6 +806,8 @@ impl Store {
             c.execute("DELETE FROM settings WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM bypass WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM hooks WHERE project_id = ?", [project])?;
+
+            c.execute("DELETE FROM project_domains WHERE project_id = ?", [project])?;
             c.execute("DELETE FROM budget_alerts WHERE project_id = ?", [project])?;
             Ok::<_, Error>(())
         })
@@ -2053,6 +2061,61 @@ impl Store {
 
     /// The preview and service a host label serves.
     /// The preview and service a host label is; an earlier push's host is `<service>@<revision>`.
+    /// The project's own preview domain as last read from roll apps (`(base, https)`).
+    pub fn project_domain(&self, project: &str) -> Result<Option<(String, bool)>> {
+        Ok(self.db.read(|c| c.query_row("SELECT base, https FROM project_domains WHERE project_id = ?", [project], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0))).optional())?)
+    }
+
+    /// Keeps `project`'s own preview domain: whether it changed. Its runtime services' URLs move
+    /// with it (`url`: a host label's URL under the domain now in force; `old_url`: under the one
+    /// before); a URL roll apps chose isn't previews' to move (apps says its own at each deploy).
+    pub fn set_project_domain(&self, project: &str, domain: Option<(&str, bool)>, url: &dyn Fn(&str) -> String, old_url: &dyn Fn(&str) -> String) -> Result<bool> {
+        if self.project_domain(project)?.as_ref().map(|(b, h)| (b.as_str(), *h)) == domain {
+            return Ok(false);
+        }
+        self.db.write(|c| {
+            match domain {
+                // roll apps verified one owner of a base: another project's row for it is stale.
+                Some((base, https)) => {
+                    c.execute("DELETE FROM project_domains WHERE base = ? AND project_id <> ?", [base, project])?;
+                    c.execute(
+                        "INSERT INTO project_domains (project_id, base, https) VALUES (?, ?, ?) ON CONFLICT (project_id) DO UPDATE SET base = excluded.base, https = excluded.https",
+                        params![project, base, https as i64],
+                    )?;
+                }
+                None => {
+                    c.execute("DELETE FROM project_domains WHERE project_id = ?", [project])?;
+                }
+            }
+            let hosts: Vec<(String, String, String, String)> = c.query(
+                "SELECT s.preview_id, s.name, s.host, s.url FROM services s JOIN previews p ON p.id = s.preview_id WHERE p.project_id = ?",
+                [project],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            for (preview, name, host, was) in hosts {
+                if was == old_url(&host) {
+                    c.execute("UPDATE services SET url = ? WHERE preview_id = ? AND name = ?", params![url(&host), preview, name])?;
+                }
+            }
+            Ok::<_, Error>(())
+        })?;
+        Ok(true)
+    }
+
+    /// Every project's own preview domain's base.
+    pub fn domain_bases(&self) -> Result<Vec<String>> {
+        Ok(self.db.read(|c| c.query("SELECT base FROM project_domains", (), |r| r.get(0)))?)
+    }
+
+    /// The preview and service `<label>.<base>` names under a project's own preview domain: only
+    /// a preview of the project that holds the domain.
+    pub fn service_for_domain_host(&self, label: &str, base: &str) -> Result<Option<(String, String)>> {
+        let Some(project) = self.db.read(|c| c.query_row("SELECT project_id FROM project_domains WHERE base = ?", [base], |r| r.get::<_, String>(0)).optional())? else { return Ok(None) };
+        let Some((preview, service)) = self.service_for_host(label)? else { return Ok(None) };
+        let theirs = self.db.read(|c| c.query_row("SELECT project_id FROM previews WHERE id = ?", [preview.as_str()], |r| r.get::<_, String>(0)).optional())?;
+        Ok((theirs.as_deref() == Some(project.as_str())).then_some((preview, service)))
+    }
+
     pub fn service_for_host(&self, host: &str) -> Result<Option<(String, String)>> {
         Ok(self.db.read(|c| {
             if let Some(found) = c.query_row("SELECT preview_id, name FROM services WHERE host = ?", [host], |r| Ok((r.get(0)?, r.get(1)?))).optional()? {

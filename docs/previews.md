@@ -346,6 +346,21 @@ behind the `Apps` trait:
   - Labels are cut to 63 characters, and a clash gets the preview id's last 4 characters.
   - The domain is rolld's preview domain (`--code-preview-domain`), served on the API port like
     roll code's own previews.
+- A project with its own preview domain (roll apps' project preview domain: a verified wildcard
+  custom domain, `*.preview.acme.dev`) has its previews answer at `<service>-<slug>.preview.acme.dev`
+  instead (Vercel's preview deployment suffix), so cookies scoped to the team's domain and OAuth
+  redirect allowlists work.
+  - **Who serves what:** one wildcard record (`*.preview.acme.dev`) points at roll apps'
+    ingress. A `pv-` environment says its label (`preview_host`), and apps serves that name.
+    Apps hands any other name under the domain to previews' router, in process (apps'
+    `PreviewRouter`, #278), which serves a roll-runtime service, and only for the project that
+    holds the domain. Previews answers the 404 for a name it doesn't hold. rolld's API port
+    serves the same names too (a node without apps' ingress).
+  - **Changes:** the domain is read from roll apps at most once a minute. When it's verified,
+    changed or removed, the project's runtime services' URLs move and every preview reports
+    again, so the pull request's links follow.
+  - **TLS:** plain HTTP for now, on a local node or behind the user's own TLS proxy. TLS waits on
+    wildcard certificates over DNS-01 (roll apps' "Wildcard certificates", on the edge).
 - A service gets this environment, later entries winning:
   1. its `roll.toml` `[preview] env`;
   2. the resolved secrets environment (`pv-<preview id>`, inheriting its base);
