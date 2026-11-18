@@ -293,15 +293,11 @@ impl Engine {
     /// code's `approve-run` for a Git URL service's preview). Only the head the preview is at; the
     /// next push waits again.
     pub fn approve(&self, id: &str, head: &str, by: &str) -> Result<Preview> {
-        // roll apps holds a pv- environment's instance to Roll only (apps' #143), not its build:
-        // the build sees the environment's variables on an open network, so a fork's head there
-        // would send its branched data wherever it liked. Not released under Roll only.
-        let row = self.store.row(id)?;
-        if row.repo.starts_with("git:") && self.store.settings(&row.project_id)?.egress_for(row.trusted) == crate::settings::EgressRule::Roll {
-            return Err(Error::Conflict(
-                "this project's forks reach roll only (egress_forks), and roll apps builds a fork's head with its variables on an open network: it isn't approved to run there (open forks' egress to run it)".into(),
-            ));
-        }
+        // Roll only holds on roll apps for the instance (apps' #143, its gateway isolated from the
+        // host's services since #240) and the build: it gets none of its secrets (#222; rolld's
+        // adapter deploys nothing to a closed environment that doesn't say so) on a network of
+        // its own, out only to public hosts through its proxy (#238). So a fork's head is
+        // released under it.
         self.store.approve_git_pull(id, head, by)?;
         self.store.log(id, &format!("{} approved by {by}", short(head)))?;
         let r = self.store.update(id, |row| {

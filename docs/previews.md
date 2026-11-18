@@ -404,10 +404,16 @@ none of the service's environments follows, after checking the branch really is 
   its services asleep meanwhile. One waiting holds a place under `max_previews` (anyone can open
   them). A close deletes the preview. A later push never makes a row trusted again. A fork's row
   is found by its number (a writer's branch named `pull/7` is another preview). Approving is a
-  person's call (a token gets 403). Under Roll only it's refused: roll apps holds the `pv-`
-  environment's instance to it (apps' #143) but not its build, which sees the environment's
-  variables on an open network (an adversarial review's finding). A title loses control and
-  invisible formatting characters.
+  person's call (a token gets 403). Under Roll only the instance runs closed: roll apps holds
+  the `pv-` environment's instance to it (apps' #143), on a gateway that doesn't reach the host's
+  services (#240). The build gets none of its secret values (#222, `build_closed`), on a network
+  of its own (#238). It can't reach the host's services, the metadata endpoint or any private
+  range. Its only way out is a proxy to public hosts, so a fork's build can fetch its packages but
+  never reaches roll or the node, and never has a secret to send. rolld's adapter deploys nothing
+  to a closed environment that doesn't say `build_closed`, and each deploy says `closed: true`.
+  A roll apps that predates either refuses it, so an older node can't build a fork's head
+  open.
+  A title loses control and invisible formatting characters.
   `a_forks_pull_request_on_a_git_url_service_runs_only_its_approved_head`; live in
   `scripts/preview-apps.sh` with GitHub's `pull_request` events through roll apps' hook (#115:
   `GitPushes::takes_pulls`).
@@ -553,9 +559,12 @@ previews' code may reach:
   for by the roll secrets thread (2026-11-17). It holds for its services and for its seed,
   release and teardown jobs: each runs on the preview's own network, with the listed hosts
   through its egress proxy (an adversarial review found the jobs ran on Docker's default bridge).
-  On roll apps it holds for the instance (apps' #143). A roll apps build isn't held to it: the
-  build sees the environment's variables on an open network. So a fork's head on a Git URL service
-  under Roll only isn't approved to run until roll apps builds closed environments that way.
+  On roll apps it holds for the instance (apps' #143; its gateway isolated from the host's
+  services, #240). The build has none of its secret values (#222, `build_closed`). It runs on a
+  network of its own whose only way out is a proxy to public hosts (#238), so it reaches neither
+  roll nor the node. A roll apps that doesn't say `build_closed` gets nothing
+  deployed under Roll only, trusted previews' included (a closed environment's build also loses
+  sealed values such as a private registry's token).
 
 Under `"roll"`, a preview's services resolve names through Docker's embedded DNS with
 TEST-NET-1 (`192.0.2.1`, never routed) as its upstream. The network's own names (`roll-egress`,
