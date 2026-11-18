@@ -108,22 +108,24 @@ function Form({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [suggested, setSuggested] = useState<MaskSuggestions>({ suggestions: [], unread: [] });
+  // Read only when asked: reading a parent's columns resets a running database's idle timer.
+  const [looking, setLooking] = useState<"no" | "reading" | "done">("no");
   const set = <K extends keyof PreviewSettings>(k: K, v: PreviewSettings[K]) => setS((x) => ({ ...x, [k]: v }));
   // A mask added from a suggestion joins the masks being edited, saved with the rest.
   const addMasks = (resource: string, add: MaskSuggestion[]) =>
     setS((x) => ({ ...x, masking: { ...x.masking, [resource]: { ...x.masking?.[resource], ...Object.fromEntries(add.map((m) => [m.path, m.rule])) } } }));
 
-  useEffect(() => {
-    let live = true;
-    // Only a hint: the dialog works the same without it.
+  // Only a hint: the dialog works the same without it.
+  const lookForPersonalData = () => {
+    setLooking("reading");
     previewsApi.maskSuggestions(projectId).then(
-      (r) => live && setSuggested(r),
-      () => {},
+      (r) => {
+        setSuggested(r);
+        setLooking("done");
+      },
+      () => setLooking("done"),
     );
-    return () => {
-      live = false;
-    };
-  }, [projectId]);
+  };
 
   useEffect(() => setError(null), [s, branches, paths, ignorePaths, skipAuthors, pages, widths, openapi, endpoints, states, hide, env, perBranch]);
 
@@ -203,6 +205,14 @@ function Form({
         <Field group label="By default" note="A branch has every row; schema only has the structure and no rows.">
           <Choice value={s.data} options={["branch", "schema"]} onChange={(v) => set("data", v)} labels={{ branch: "Branch", schema: "Schema only" }} />
         </Field>
+        {resources.length > 0 && looking !== "done" && (
+          <p className="text-[12px] text-muted">
+            <button type="button" disabled={looking === "reading"} onClick={lookForPersonalData} className="text-accent hover:underline disabled:opacity-50">
+              {looking === "reading" ? "Reading the columns…" : "Look for personal data that isn't masked"}
+            </button>{" "}
+            <span className="text-subtle">(reads each database's columns; a sleeping one isn't woken)</span>
+          </p>
+        )}
         {resources.length > 0 && (
           <div className="overflow-hidden rounded-lg border border-line-2">
             {resources.map((r) => {

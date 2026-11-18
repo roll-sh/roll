@@ -755,7 +755,9 @@ as a private address.
     the whole preview and "Add all" applies every one.
     - What's read, and what isn't. At most 2,000 columns per resource (`SUGGEST_COLUMNS_MAX`),
       each resource for at most 10 s (`SUGGEST_READ_FOR`). A Postgres parent whose compute
-      sleeps isn't woken for it (reading would start it and reset its idle timer); it's named in
+      sleeps isn't woken for it (reading would start it and reset its idle timer), and the rules
+      dialog reads them only when asked ("Look for personal data that isn't masked"), so opening
+      it never resets a running parent's idle timer either; a sleeping one is named in
       `unread` ("asleep: open it to read its columns"), as is one that wasn't read in time,
       couldn't be read, or has more columns than are read. The dialog shows that under the
       resource.
