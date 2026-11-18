@@ -472,20 +472,22 @@ fn walk_row(steps: &mut [Step<'_>], r: usize, bytes: &[u8], buf: Option<(u32, us
                     }
                 }
             }
+            // (A value's tag and length bytes read with one bounds check; scale and length
+            // under 0x80 together: their OR.)
             Step::Nums(count) => {
                 for _ in 0..*count {
-                    match (data.get(pos), data.get(pos + 1), data.get(pos + 2)) {
-                        (Some(&tag::NUMERIC), Some(&sc), Some(&n)) if sc < 0x80 && n < 0x80 => pos += 3 + n as usize,
-                        (Some(&tag::NULL), ..) => pos += 1,
+                    match data.get(pos..pos + 3) {
+                        Some(&[tag::NUMERIC, sc, n]) if (sc | n) < 0x80 => pos += 3 + n as usize,
+                        _ if data.get(pos) == Some(&tag::NULL) => pos += 1,
                         _ => return false,
                     }
                 }
             }
             Step::Strs(count) => {
                 for _ in 0..*count {
-                    match (data.get(pos), data.get(pos + 1)) {
-                        (Some(&(tag::TEXT | tag::BYTEA)), Some(&l)) if l < 0x80 => pos += 2 + l as usize,
-                        (Some(&tag::NULL), _) => pos += 1,
+                    match data.get(pos..pos + 2) {
+                        Some(&[tag::TEXT | tag::BYTEA, l]) if l < 0x80 => pos += 2 + l as usize,
+                        _ if data.get(pos) == Some(&tag::NULL) => pos += 1,
                         _ => return false,
                     }
                 }
@@ -515,16 +517,16 @@ fn walk_row(steps: &mut [Step<'_>], r: usize, bytes: &[u8], buf: Option<(u32, us
                 }
                 _ => null_or!(v, nulls, Default::default()),
             },
-            Step::Num { v, nulls } => match (data.get(pos), data.get(pos + 1), data.get(pos + 2)) {
-                (Some(&tag::NUMERIC), Some(&sc), Some(&n)) if sc < 0x80 && n < 0x80 && pos + 3 + n as usize <= data.len() => {
+            Step::Num { v, nulls } => match data.get(pos..pos + 3) {
+                Some(&[tag::NUMERIC, sc, n]) if (sc | n) < 0x80 && pos + 3 + n as usize <= data.len() => {
                     let Some(x) = num_bytes(data, pos + 3, n as usize) else { return false };
                     v[r] = (x, sc as u32);
                     pos += 3 + n as usize;
                 }
                 _ => null_or!(v, nulls, Default::default()),
             },
-            Step::Bytes { tag, v, nulls } => match (data.get(pos), data.get(pos + 1), buf) {
-                (Some(t), Some(&l), Some((b, at))) if t == tag && l < 0x80 && pos + 2 + l as usize <= data.len() => {
+            Step::Bytes { tag, v, nulls } => match (data.get(pos..pos + 2), buf) {
+                (Some(&[t, l]), Some((b, at))) if t == *tag && l < 0x80 && pos + 2 + l as usize <= data.len() => {
                     let s = (at + base + pos + 2) as u32;
                     v[r] = (b, s, s + l as u32);
                     pos += 2 + l as usize;
