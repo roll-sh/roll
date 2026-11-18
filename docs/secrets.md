@@ -3637,7 +3637,10 @@ cache waited out. Ranked now:
    Fixed (3b1757d45): a project admin could revoke the operator's all-projects tokens (a cross-project
    denial of service); now only grants whose every rule names this project are revoked, the rest are
    listed as `skipped` ("the operator revokes it"); the operator and roll admins revoke all.
-4. **The dashboard's "Store in roll"** for #303's notices (building, on #303), and **R5, `roll://`
+4. **The dashboard's "Store in roll"** for #303's notices (#330, on #303): roll reads the credential
+   from the change's own file and stores it in the project trusted for the repo (a writer on the repo
+   with `write` on the folder; never overwrites, never returns the value); it found #303 naming the
+   wrong line past blank context (fixed on both). And **R5, `roll://`
    wherever another roll product takes a key** (#329): `Secrets::resolve_for(resource, roll://…)`, the
    project from the resource's trusted canvas (a reference may only name that one), read as that
    project's runtime (an untrusted ephemeral environment never reaches a protected one; dynamic
