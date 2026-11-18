@@ -41,6 +41,7 @@ pub mod clouds;
 pub mod issuer;
 mod oidc;
 mod read;
+mod metrics;
 pub mod reach;
 pub mod refs;
 mod notices;
@@ -63,6 +64,7 @@ pub use audit::{AuditEntry, AuditFilter};
 pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
 pub use links::{Link, LinkProvider, Links, Mode};
+pub use metrics::Metrics;
 pub use read::{Followed, Grid, Problem, Secret, Source, Values, Version};
 pub use requests::{Request, RequestValue, Review, Verdict};
 pub use exports::Export;
@@ -363,6 +365,8 @@ pub struct Secrets {
     public_api: Arc<std::sync::OnceLock<String>>,
     /// Signed CRLs by CA, with when they were made (pki.rs): the public route signs one a minute.
     crls: pki::Crls,
+    /// What rolld's metrics count (metrics.rs).
+    counters: metrics::Counters,
     /// Live links' fingerprints as last read (read.rs): what digests count.
     live_fps: read::LiveFps,
 }
@@ -496,7 +500,7 @@ impl Secrets {
         if let (Some(github), Ok(keys)) = (&opts.github, &opts.keyring) {
             links.register(Arc::new(github_app::Provider { db: db.clone(), keys: keys.clone(), unwrap: unwrap.clone(), github: github.clone() }));
         }
-        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, github: opts.github, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default() })
+        Ok(Secrets { db, keys: opts.keyring, key_source: opts.key_source, workspace, links, syncs: opts.syncs, deliver: opts.deliver, grants: opts.grants, people: opts.people, workloads: opts.workloads, unwrap: unwrap.clone(), open: opts.open, trust_forwarded_for: opts.trust_forwarded_for, web_url: opts.web_url, outside: opts.outside, github: opts.github, oidc: Default::default(), logins: Default::default(), code_refs: Default::default(), sts: opts.sts.clone(), clouds: opts.clouds, public_api, crls, live_fps: Default::default(), counters: Default::default() })
     }
 
     pub fn links(&self) -> &Links {
@@ -535,7 +539,11 @@ impl Secrets {
                 })?
             }
         };
-        let inner = self.unwrap.inner(project, &sealed)?;
+        let inner = self.unwrap.inner(project, &sealed).inspect_err(|e| {
+            if matches!(e, Error::KeyDenied(_)) {
+                metrics::Counters::add(&self.counters.kms_refusals, 1);
+            }
+        })?;
         let (dek, resealed) = keys.open_dek(project, &inner)?;
         // Sealed by the previous deployment key (a rotation): resealed with the current one. A
         // wrapped key stays wrapped by the same customer key; if KMS won't wrap it now, the key

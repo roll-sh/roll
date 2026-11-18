@@ -465,6 +465,7 @@ impl Secrets {
         let narrowed = self.caller_for(project, slug, caller)?;
         let caller = &narrowed;
         let dek = self.project(project)?;
+        crate::metrics::Counters::add(&self.counters.reads, 1);
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let e = entries.iter().find(|e| e.row.key == key).ok_or_else(|| Error::NotFound(format!("no secret {key} in {slug}:{path}")))?;
         if names::sensitive(&e.row.tags) && !caller.runtime {
@@ -496,6 +497,7 @@ impl Secrets {
         let narrowed = self.caller_for(project, slug, caller)?;
         let caller = &narrowed;
         let dek = self.project(project)?;
+        crate::metrics::Counters::add(&self.counters.reads, 1);
         let entries = self.view(project, slug, &path, caller, false, Action::Reveal)?;
         let who = consumer.unwrap_or(&caller.principal).to_string();
         let mut r = Resolver::new(self, project, slug, &dek, caller, resolve, &who)?;
@@ -1226,6 +1228,7 @@ impl<'a> Resolver<'a> {
         let by = self.caller.principal.clone();
         let project = self.project.to_string();
         let ids: Vec<String> = issued.iter().map(|_| names::new_id("lse", 16)).collect();
+        crate::metrics::Counters::add(&self.s.counters.dynamic_issued, ids.len() as u64);
         let res = self.s.db.write(|c| {
             for ((env_id, handle, link, (key, path)), id) in issued.iter().zip(&ids) {
                 c.execute(

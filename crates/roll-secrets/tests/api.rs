@@ -997,7 +997,9 @@ async fn a_token_reaches_only_its_environments_folders_and_actions() {
     // As `POST /v1/access/tokens` makes it from secrets' page; roll-access keeps it (expiry, client
     // addresses, revocation), secrets checks each second resource against it.
     let token = api.token(json!({ "environments": ["production"], "paths": ["/api"], "actions": ["read", "reveal"] }));
+    let reads = api.secrets.metrics().unwrap().reads;
     let (s, v) = api.req(Method::GET, "/environments/production/values?path=/api", None, Some(&token)).await;
+    assert_eq!(api.secrets.metrics().unwrap().reads, reads + 1, "rolld's metrics count each read");
     assert_eq!((s, v["values"]["STRIPE"].as_str()), (StatusCode::OK, Some("sk_live")));
     for (method, path, body) in [
         (Method::GET, "/environments/production/values?path=/", None),
