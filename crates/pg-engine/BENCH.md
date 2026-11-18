@@ -296,6 +296,65 @@ load 45-70 throughout: HANDOFF "MultiXact").
 | `6d3b7e9e5` (h249 on `6913fd09c`: others' commits too) | 5 | 3 | +0.42% (-1.96 .. +4.65%) | -2.8% | +12.2% |
 | `6913fd09c` (h249's parent) | 5 | 0 (1.04-2.62 foreign cores after 4 tries each) | none (-7.6 .. +2.7%) | | |
 
+## Bulk writes, round 16: the reclaim trigger (2026-11-18, agent 253)
+
+HANDOFF "Bulk writes, round 16" has what changed. Lane C, the 1M-row bulk script, joined windows
+(`bulkx.sh` with `JOIN=1`: each step's window runs on through the background work it left), plain
+dist builds (`tools/dist.sh`) of separate source snapshots: **b0** origin's `483b87253` (before
+format 4), **h0** origin's `c55ecbb73` (format 4), **h1** h0 with the reclaim trigger
+(`cand/a253`). G user instructions of the server's cgroup;
+every counter ran 100% of its window. **Foreign load was over 1.0 core in every run** (wall-weighted
+over a run: 1.1-3.8 cores, other users' unpinned processes and builds on lane C's CPUs, the host
+at load 40-95: no pair met the 1.0 bar. The instruction counts repeat within
+0.1% run to run regardless (PostgreSQL's match agent 246's to the last digit); cycles don't (all
+steps 27.5-34.6 G on h0 and h1 alike) and aren't used. Rows equal in every run (count and sums
+of every column of both tables).
+
+### Same day, same lane and settings (medians; PostgreSQL, pgrust and b0 2 runs each, h0 and h1 5 each; plain dist builds)
+
+| step | PostgreSQL 18.6 | pgrust | b0 | h0 | h1 | h1 / PostgreSQL |
+|---|---|---|---|---|---|---|
+| COPY in | 6.476 | 4.973 | 10.249 | 10.282 | 10.282 | 1.59 |
+| CREATE INDEX | 3.131 | 2.904 | 5.286 | 5.292 | 5.291 | 1.69 |
+| CREATE UNIQUE INDEX | 2.245 | 1.878 | 3.458 | 3.466 | 3.468 | 1.54 |
+| COPY out | 3.211 | 2.029 | 3.088 | 3.088 | 3.088 | 0.96 |
+| INSERT … SELECT | 4.319 | 4.370 | 6.782 | 6.823 | 6.831 | 1.58 |
+| UPDATE half | 27.503 | 22.918 | 11.928 | 11.910 | 11.913 | 0.43 |
+| DELETE a quarter, with its compaction | 1.670 | 1.542 | 13.184 | 13.800 | 10.086 | 6.04 |
+| VACUUM | 2.529 | 3.280 | 1.797 | 1.786 | 5.500 | 2.17 |
+| ANALYZE | 0.502 | 0.587 | 0.469 | 0.472 | 0.472 | 0.94 |
+| `count(*), sum(c)` | 0.589 | 0.208 | 0.372 | 0.374 | 0.374 | 0.63 |
+| TRUNCATE | 0.028 | 0.062 | 0.005 | 0.003 | 0.004 | |
+| DROP TABLE | 0.036 | 0.070 | 0.003 | 0.005 | 0.004 | |
+| **all steps** | 52.24 | 44.82 | 56.62 | 57.31 | 57.31 | **1.097** |
+| x pgrust | 1.17 | 1 | 1.26 | 1.28 | 1.28 | |
+| count(*) by Seq Scan (extra) | 0.290 | 0.098 | 0.179 | 0.180 | 0.180 | 0.62 |
+| sum(a) by Seq Scan (extra) | 0.395 | 0.139 | 0.344 | 0.345 | 0.345 | 0.87 |
+
+b0's DELETE window holds agent 247's quiet-moment rewrite of the two index files (13.18 against
+agent 246's 9.65 G before it); h0 adds format 4's dictionary compression in the compaction after
+the DELETE (+0.62 G).
+
+Peak memory (cgroup): PostgreSQL 879-913 MB, pgrust 907-1,225, b0 382-388, h0 333-353, h1 340-408
+(VACUUM's rewrite now in its window's page cache); VmHWM b0 280-283, h0 268-295, h1 272-300.
+
+### The reclaim trigger: h0 against h1 (5 alternating pairs, % per pair)
+
+| step | h0 | h1 | % per pair |
+|---|---|---|---|
+| DELETE a quarter, with its compaction | 13.800 | 10.086 | -26.9 x5 |
+| VACUUM | 1.786 | 5.500 | +208.0 / +208.0 / +208.1 / +208.0 / +208.0 |
+| every other step | | | -0.3 to +0.6 (TRUNCATE and DROP TABLE: 3-5 M instructions, ±1-2 M) |
+| **all steps** | 57.31 | 57.31 | -0.0 / -0.0 / +0.1 / +0.0 / +0.0 |
+
+The store's files (`ls` steps, one run each: after the DELETE's compaction settled, 5 s later,
+after VACUUM): h0 41.88 MB each time (the two index files written again within 2 s of the
+compaction); h1 42.39 MB of files and 0.28 MB of dead-entry sets until VACUUM, then 41.88 MB.
+
+Not measured: TPC-H q01/q06 and lane A's point reads. The change isn't on a read path (the
+trigger runs only in the reclaim thread, which a store without marked files never starts), and the scans of the bulk script are level in every
+pair.
+
 ## Bulk writes, round 15, part 2: integer filter kernels, kept index measures (2026-11-18, agent 246)
 
 HANDOFF "Bulk writes, round 15, part 2" has what changed. Harness, lane and settings as in part 1

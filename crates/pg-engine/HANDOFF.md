@@ -10623,6 +10623,86 @@ and confirm on PGO:
 Agent 218's short-transaction stack (ten steps, `wip/a218`) was gated this way and landed: BENCH
 "Profile-guided build", part 2.
 
+## Bulk writes, round 16: the reclaim trigger (agent 253)
+
+BENCH.md "Bulk writes, round 16" has the measurements (joined windows, plain dist, lane C).
+One commit (`cand/a253`) on origin's `fec3375ea`. No format change.
+
+**The same-day three-server table first.** On `483b87253` (b0, before format 4) and on `c55ecbb73`
+(h0, format 4), the bulk script's twelve steps: PostgreSQL 52.24 G, pgrust 44.82, b0 56.62, h0
+57.31. Since agent 246's part 2 (53.21) two changes landed: agent 247's quiet-moment reclaim
+(the two index files the DELETE's compaction marks written again about 2 s later, in the DELETE's
+window: 9.65 -> 13.18 G) and format 4 (the compaction after the DELETE compresses against
+dictionaries: 13.18 -> 13.80 G).
+
+- **The reclaim trigger** (`storage::Reclaim`, `Store::schedule_reclaim`; the coordinator's
+  decision). A marked file (`Store::mark_dead`) is no longer written again 2 s after every commit
+  went quiet. VACUUM of a table still writes its files again (`reclaim_dead`, as PostgreSQL's
+  VACUUM returns a table's space), and the reclaim thread does it by itself only on real
+  pressure or an idle store: the dead entries of the store's files at least
+  `--reclaim-dead-percent` of their entries (default 20, as autovacuum's scale factor; 0: not
+  for that alone), or no commit and no client statement for `--reclaim-idle-secs` (default 300;
+  0: never). Never while a client statement runs on the database: the engine's backends of the
+  database in state active (`engine::statement_running`, read under `try_lock` only, a held lock
+  counting as running; no counter on the statement path), checked before each file and every 64
+  blocks of a rewrite, which a statement's start abandons as a close does. The thread looks once a
+  second (it was 0.5 s) and exists only while a reclaimable file does; under pressure it writes the
+  file with the most dead entries first and looks again after each. The settings are the server's
+  (`roll-engine` flags into `storage::set_reclaim`, as `--plan-cache-mb` goes to `lru`), not GUCs:
+  pg_settings is unchanged. The bulk script (a quarter of the entries of two index files dead)
+  stays under the pressure threshold (in every run the rewrite came in its VACUUM, none in the
+  DELETE's window) and vacuums right after its DELETE, so it pays for the rewrite once. Five
+  alternating pairs against h0: DELETE with its compaction 13.80 -> 10.09 G (-26.9% in every
+  pair), VACUUM 1.79 -> 5.50 G, all steps 57.31 both (-0.0 to +0.1%), every other step within
+  0.6%; VmHWM the same (268-295, 272-300 MB). Every run had over 1.0 foreign core on lane C (other
+  users' unpinned processes and builds); the instruction counts repeated within 0.1% regardless.
+  Between the DELETE and the VACUUM the store is 1.9% larger (42.39 MB of files and 0.28 MB of
+  sets against 41.88 MB), after it the same 41.88 MB.
+  Test: `storage::tests::reclaim_thread_waits_for_pressure_or_idle_and_no_statement` (under the
+  threshold kept; over it, kept while a statement runs and written once none does; idle, the
+  same; rows equal).
+
+Verification: `tools/quick-check.sh` on `fec3375ea` with this commit and `cand/a253-2`'s COPY
+commit (one run for both): Clippy 16 warnings, none new in a changed file; 375 tests in 19 binaries
+(the new test among them); crash_random seeds 1-3 x 2, power_cut_at_every_point; regress 51,148 /
+51,150, 0 newly differing; isolation 1,647 / 1,648; pg_dump_tap 14,609 passed. Before agent 249's
+MultiXact landed, the same green for this commit alone on `7e470fc3b` and on `c55ecbb73` (the
+first run on `7e470fc3b` failed `wire::protocol_cases`: 8 of 218 cases got no answer to their
+startup at host load 89-92, "startup quiet"; the binary alone passed at once, and the whole check
+again). `--profile verify-checked` (debug assertions, overflow checks) with the COPY commit, on
+`7e470fc3b`: the lib's unit tests 238 passed, big_tables 21, crash_bulk 6, storage_linked_gc 4,
+power_cut_at_every_point (`--features powerloss`).
+
+**Considered and not built: reclaiming block by block** (`~/.cache/a253/patches/reclaim-block-through.patch`,
+not measured). VACUUM's rewrite of the two index files is 3.7 G: zstd decompression ~12%,
+`Block::without` 9%, `Block::read`, `SstWriter::add` and the merge's cursor ~24%, compression
+~15%. `Block::without`'s form is a format 2 block's (`decode_with` makes what `body2` writes), so
+a reclaim could hand each block, without its dead entries, to the writer whole
+(`Block::file_body`, `SstWriter::add_block`), skipping the per-entry decode and encode (~1.3 G,
+2.3% of the script). But the files it rewrites here are CREATE INDEX's linked runs, written in
+16 kB blocks without a dictionary (`plain_blocks`); writing them again is what brings them to
+L1's 4 kB index blocks with a dictionary (otherwise only a compaction or a clean close does), and
+keeping their blocks' bounds would leave 12 kB index blocks in L1 for good, which point probes
+decompress whole (agent 247: 4 kB index blocks cut a probe's decompression to a third). Done only
+for files already in L1's form, it doesn't touch this script.
+
+**Left (largest first):**
+1. DELETE with its compaction, 10.09 against PostgreSQL's 1.67 G: the statement ~5.7 G (the
+   merging scan over the UPDATE's versions; 750,000 deferred tombstones: `SstWriter::add`,
+   `bloom_set`, sorting, an allocation per key in `defer_entry_delete`, ~0.5% of the window an
+   arena would save; row locks), the compaction rewriting the table ~4.5 G (zstd 15%).
+2. VACUUM 5.50 against 2.53 G: the reclaim's rewrite (3.7 G, above) and the table's measure
+   (`stored_tuple_len`, `measure_rows_with`: ~15%).
+3. COPY in 10.28 against 6.48: `parse_copy_data` alone 1.1 G (`str::split` by char: a `memchr`
+   and a `bcmp` call for each line and field, a byte-at-a-time newline count), zstd ~11%, the
+   size model ~10% over a dozen calls (`inserted_with`, `untracked_write`, `read_from`,
+   `CopyLoad::model`...), float and int parsing ~9%.
+4. CREATE INDEX 5.29 against 3.13: `stored_tuple_len` ~6% across the build's threads (a COPY
+   into a table found empty could keep its measure, as a load after TRUNCATE does; it needs a
+   check that no other commit wrote the table between the load's snapshot and its commit, which
+   the files' max ts can't tell apart from the load's own: not done), decompressing COPY's
+   runs, the sort.
+
 ## Bulk writes, round 15, part 2: integer filter kernels, kept index measures, COPY's record text (agent 246)
 
 BENCH.md "Bulk writes, round 15, part 2" has the measurements (joined windows, plain dist, lane C).
@@ -11049,7 +11129,8 @@ the old one's place, its set deleted with it):
 - **At a quiet moment**: after the background flush/compaction thread's work (and when a store
   opens) while L1 has a marked file, a thread `roll-reclaim` (SCHED_IDLE: it runs only on CPUs nothing else wants) looks
   every 0.5 s and writes one marked file once no commit has come for 2 s (by `assigned_ts`, so
-  the commit path is unchanged), until none is left or the store closes.
+  the commit path is unchanged), until none is left or the store closes. (Since "Bulk writes,
+  round 16" (agent 253): only on pressure or an idle store, never while a statement runs.)
 - Only files whose dead entries are at least a sixteenth of them (`RECLAIM_DEAD`): rewriting a
   64 MB file for a few dead rows costs more than the space.
 - **Without hurting foreground work**: a file is written outside the compaction lock (`bg`); only
