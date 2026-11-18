@@ -27,6 +27,7 @@ cleanup() {
   [ -n "${PID:-}" ] && { kill "$PID" 2>/dev/null || true; for _ in $(seq 1 20); do kill -0 "$PID" 2>/dev/null || break; sleep 0.5; done; kill -9 "$PID" 2>/dev/null || true; }
   for c in $(docker ps -aq --filter "label=sh.roll.code.home=$H"); do docker rm -f "$c" >/dev/null; done
   [ -n "$GITD" ] && kill "$GITD" 2>/dev/null
+  [ -n "${GHD:-}" ] && kill "$GHD" 2>/dev/null
   for one in $SVC $SVC2 $SVC3; do
     s=${one#svc_}
     for c in $(docker ps -aq --filter "name=^roll-apps-$s-"); do docker rm -f "$c" >/dev/null; done
@@ -34,12 +35,26 @@ cleanup() {
     for v in $(docker volume ls -q | grep "^roll-apps-vol-$s-" || true); do docker volume rm -f "$v" >/dev/null || true; done
   done
   if [ -n "$PRJ" ]; then
+    # A closed environment's egress proxy, and the project's closed builder (buildx, named as its
+    # network) with its proxy: left running when rolld stops before the environment's delete.
+    for c in $(docker ps -aq --filter "name=roll-apps-egress-closed-${PRJ#prj_}" --filter "name=roll-apps-build-${PRJ#prj_}"); do docker rm -f "$c" >/dev/null; done
+    docker buildx rm -f "roll-apps-build-${PRJ#prj_}" >/dev/null 2>&1 || true
+    docker network rm "roll-apps-build-${PRJ#prj_}" >/dev/null 2>&1 || true
     for n in $(docker network ls --format '{{.Name}}' | grep "^roll-apps-net-${PRJ#prj_}-" || true); do docker network rm "$n" >/dev/null || true; done
   fi
 }
 trap cleanup EXIT
 if curl -s -o /dev/null --max-time 1 "http://$API/v1/info"; then echo "something answers on $API" >&2; exit 1; fi
 rm -rf "$H" && mkdir -p "$H"
+# roll's GitHub App, pointed at a fake GitHub (scripts/lib/fake-github.py) whose one installation
+# sees acme/shop, served by git's own smart HTTP on GIT_PORT (the App's web host).
+GIT_PORT=${PORTS}417
+GH_PORT=${PORTS}418
+openssl genrsa -traditional -out "$H/gh.pem" 2048 2>/dev/null
+python3 "$ROOT/scripts/lib/fake-github.py" "$GH_PORT" >"$H/fake-github.log" 2>&1 &
+GHD=$!
+export ROLL_GITHUB_APP_ID=1 ROLL_GITHUB_PRIVATE_KEY_PATH=$H/gh.pem ROLL_GITHUB_WEBHOOK_SECRET=live-check ROLL_GITHUB_APP_SLUG=roll \
+  ROLL_GITHUB_API_URL=http://127.0.0.1:$GH_PORT ROLL_GITHUB_WEB_URL=http://127.0.0.1:$GIT_PORT
 export ROLL_HOME=$H ROLL_API=$API ROLL_PROXY=127.0.0.1:${PORTS}432 ROLL_REDIS=127.0.0.1:${PORTS}380 ROLL_REDIS_HTTP=127.0.0.1:${PORTS}081 ROLL_KAFKA=127.0.0.1:${PORTS}092 \
   ROLL_APPS_LISTEN=127.0.0.1:${PORTS}080 ROLL_APPS_DOMAIN=apps.localhost ROLL_CODE_PREVIEW_DOMAIN=preview.localhost \
   ROLL_PRODUCTS=code,redis,streams,apps ROLL_APPS_ALLOW_PRIVATE=1 RUST_LOG=${RUST_LOG:-info}
@@ -132,6 +147,8 @@ for _ in $(seq 1 600); do
   sleep 1
 done
 [ "$(echo "$E" | jq_ "(d.get('egress') or {}).get('mode')")" = roll ] || { echo "the pv- environment should be closed: $(echo "$E" | jq_ "d.get('egress')")"; exit 1; }
+# One voice on the pull request: previews reports the pv- environment, roll apps doesn't (#249).
+[ "$(echo "$E" | jq_ "d.get('report')")" = False ] || { echo "the pv- environment should leave reporting to previews (report: false): $(echo "$E" | jq_ "d.get('report')")"; exit 1; }
 curl -sS -o /dev/null -H "Host: $HOSTPART" "http://127.0.0.1:${PORTS}080/" --max-time 120
 INST=""
 for _ in $(seq 1 60); do INST=$(docker ps --format '{{.Names}}' | grep "^roll-apps-${SVC#svc_}-$ENV-" | head -1); [ -n "$INST" ] && break; sleep 1; done
@@ -345,9 +362,8 @@ done
 # code's git takes no such ref, so the fork's repository is served by git's own smart HTTP
 # (git http-backend behind a few lines of Python), refs/pull/7/head written by a file push.
 GIT_ROOT="$H/gitroot"
-mkdir -p "$GIT_ROOT" && git init -q --bare "$GIT_ROOT/shop.git"
-gitc push -q "file://$GIT_ROOT/shop.git" HEAD:refs/heads/main HEAD:refs/pull/7/head
-GIT_PORT=${PORTS}417
+mkdir -p "$GIT_ROOT/acme" && git init -q --bare "$GIT_ROOT/acme/shop.git"
+gitc push -q "file://$GIT_ROOT/acme/shop.git" HEAD:refs/heads/main HEAD:refs/pull/7/head
 python3 - "$GIT_ROOT" "$GIT_PORT" >"$H/githttp.log" 2>&1 <<'PY' &
 import http.server, os, subprocess, sys
 root, port = sys.argv[1], int(sys.argv[2])
@@ -380,8 +396,11 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
 PY
 GITD=$!
-for _ in $(seq 1 40); do curl -sf -o /dev/null "http://127.0.0.1:$GIT_PORT/shop.git/info/refs?service=git-upload-pack" && break; sleep 0.25; done
-SVC3=$(api POST "/v1/apps/projects/$PRJ/services" "{\"name\":\"shopfront\",\"source\":{\"kind\":\"git\",\"url\":\"http://127.0.0.1:$GIT_PORT/shop.git\"},\"run\":{\"type\":\"web\",\"port\":8000}}" | jq_ "d['id']")
+for _ in $(seq 1 40); do curl -sf -o /dev/null "http://127.0.0.1:$GIT_PORT/acme/shop.git/info/refs?service=git-upload-pack" && break; sleep 0.25; done
+SVC3=$(api POST "/v1/apps/projects/$PRJ/services" "{\"name\":\"shopfront\",\"source\":{\"kind\":\"git\",\"url\":\"http://127.0.0.1:$GIT_PORT/acme/shop.git\"},\"run\":{\"type\":\"web\",\"port\":8000}}" | jq_ "d['id']")
+# On roll's GitHub App (the operator's call): its previews report where its code lives.
+[ "$(api PUT "/v1/apps/services/$SVC3/github" | jq_ "(d.get('github') or {}).get('repo')")" = acme/shop ] || { echo "the Git URL service should connect to roll's GitHub App: $(api PUT "/v1/apps/services/$SVC3/github")"; exit 1; }
+gh_log() { curl -sS "http://127.0.0.1:$GH_PORT/_fake/log"; }
 HOOK3=$(api POST "/v1/apps/services/$SVC3/environments/production/hook" | jq_ "d['path']")
 SAID=$(pr_event opened 7 cart "$CART" 2 "$HOOK3")
 case "$SAID" in *"handed to roll previews"*) ;; *) echo "a fork's pull request should be handed to roll previews: $SAID"; exit 1;; esac
@@ -393,20 +412,27 @@ for _ in $(seq 1 120); do
 done
 case "$FORK" in *"|awaiting_approval|False") ;; *) echo "a fork's pull request should wait for an approval, untrusted: $FORK"; exit 1;; esac
 FORK_ID=${FORK%%|*}
+# Said on GitHub while it waits: roll/preview pending on its head, with no link to what hasn't run.
+for _ in $(seq 1 60); do gh_log | grep -q '"roll/preview"' && break; sleep 0.5; done
+[ "$(gh_log | jq_ "[s['state'] for s in d if s['kind'] == 'status' and s['context'] == 'roll/preview' and s['sha'] == '$CART'][-1:]")" = "['pending']" ] || { echo "a fork's waiting preview should be roll/preview pending on its head: $(gh_log)"; exit 1; }
 [ "$(api GET "/v1/previews/$FORK_ID" | jq_ "any(s.get('deployed') for s in d['services'])")" = False ] || { echo "nothing of a fork's should be deployed before an approval: $(api GET "/v1/previews/$FORK_ID" | jq_ "[(s['name'], s.get('deployed')) for s in d['services']]")"; exit 1; }
 STALE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$FORK_ID/approve" -H 'content-type: application/json' -d '{"head":"0000000000000000000000000000000000000000"}')
 [ "$STALE" = 409 ] || { echo "approving another head should be refused: $STALE"; exit 1; }
-# A fork's preview reaches roll only by default (egress_forks), and roll apps' build of its head
-# isn't held to that: not approved until the project opens forks' egress.
-HELD=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://$API/v1/previews/$FORK_ID/approve" -H 'content-type: application/json' -d "{\"head\":\"$CART\"}")
-[ "$HELD" = 409 ] || { echo "a fork's head on roll apps should wait while forks reach roll only: $HELD"; exit 1; }
-api PUT "/v1/previews/projects/$PRJ/settings" '{"egress_forks":"open"}' >/dev/null
+# A fork's preview reaches roll only by default (egress_forks): roll apps runs it closed, its
+# build without its secrets (build_closed, apps' #222).
 api POST "/v1/previews/$FORK_ID/approve" "{\"head\":\"$CART\"}" >/dev/null
 for _ in $(seq 1 600); do
   [ "$(api GET "/v1/previews/$FORK_ID" | jq_ "d['state']")" = ready ] && break
   sleep 1
 done
 [ "$(api GET "/v1/previews/$FORK_ID" | jq_ "d['state']")" = ready ] || { echo "the approved head should run: $(api GET "/v1/previews/$FORK_ID" | jq_ "{k: d.get(k) for k in ('state', 'error')}")"; exit 1; }
+# Ready: roll/preview success, and the pull request's comment, made once and edited after.
+for _ in $(seq 1 120); do
+  [ "$(gh_log | jq_ "[s['state'] for s in d if s['kind'] == 'status' and s['context'] == 'roll/preview' and s['sha'] == '$CART'][-1:]")" = "['success']" ] && gh_log | grep -q '"number": 7' && break
+  sleep 0.5
+done
+GH_SAID=$(gh_log | jq_ "'%s; %d comment(s) on #7, %d edit(s)' % ('/'.join(s['state'] for s in d if s['kind'] == 'status' and s['context'] == 'roll/preview' and s['sha'] == '$CART'), sum(1 for c in d if c['kind'] == 'comment' and c['number'] == 7), sum(1 for c in d if c['kind'] == 'edit'))")
+case "$GH_SAID" in *success\;*" 1 comment(s) on #7"*) ;; *) echo "the approved fork's preview should be roll/preview success with one comment on #7: $GH_SAID"; gh_log; exit 1;; esac
 pr_event closed 7 cart "$CART" 2 "$HOOK3" >/dev/null
 for _ in $(seq 1 120); do [ -z "$(api GET "/v1/previews?project=$PRJ" | jq_ "''.join(p['id'] for p in d if p['branch'] == 'pull/7')")" ] && break; sleep 0.5; done
 [ -z "$(api GET "/v1/previews?project=$PRJ" | jq_ "''.join(p['id'] for p in d if p['branch'] == 'pull/7')")" ] || { echo "closing the fork's pull request should delete its preview"; exit 1; }
@@ -432,4 +458,5 @@ cat <<EOF
 | After landing: previews left / the environment | $N / HTTP $GONE |
 | A Git URL service's branch (a git push and its webhook): its preview | $GIT_SAID |
 | A Git URL service's pull requests: same repo / a fork's | named and trusted, deleted when closed / $PR_FORK |
+| … on GitHub, through roll's GitHub App (a fake): the fork's roll/preview / its comment | $GH_SAID |
 EOF

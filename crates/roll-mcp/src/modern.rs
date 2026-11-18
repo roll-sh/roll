@@ -79,9 +79,12 @@ pub fn check(h: &HeaderMap, msg: &Value, legacy: &[&str]) -> Result<(), (StatusC
         None => return mismatch("MCP-Protocol-Version is missing".into()),
     }
     let method = msg["method"].as_str().unwrap_or_default();
+    // A notification (no id) may come without it: the TypeScript SDK sends `notifications/cancelled`
+    // so, and there's no answer for a proxy to route.
     match header_value(h, "mcp-method") {
         Some(v) if v == method => {}
         Some(v) => return mismatch(format!("Mcp-Method {v:?} isn't the body's {method:?}")),
+        None if msg.get("id").is_none() => {}
         None => return mismatch("Mcp-Method is missing".into()),
     }
     let named = match method {
