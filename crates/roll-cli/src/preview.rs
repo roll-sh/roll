@@ -60,6 +60,9 @@ pub enum Preview {
         /// Give up waiting after this many seconds (exit 1).
         #[arg(long, default_value_t = 600)]
         timeout: u64,
+        /// Push untracked files over 50 MB too (refused without it).
+        #[arg(long)]
+        force: bool,
     },
     /// Delete what `roll preview up` made: the preview of `preview/<you>/<name>` and that branch.
     Down {
@@ -286,8 +289,9 @@ impl Working {
             (None, None) => String::new(),
         };
         let me = api.get("/v1/access").await?;
-        // A person (signed in, or their own token); else the operator, as roll previews names it.
-        let who = segment(me["user"]["handle"].as_str().or(me["as_user"].as_str()).unwrap_or("operator"));
+        // A person (signed in, or their own token); else the operator: `_operator`, which no
+        // handle can be (handles are `a-z0-9-`), so nobody shares its branches.
+        let who = segment(me["user"]["handle"].as_str().or(me["as_user"].as_str()).unwrap_or("_operator"));
         let branch = format!("preview/{who}/{}", segment(&name));
         let auth = api.key.as_ref().map(|k| {
             use base64::Engine as _;
@@ -297,16 +301,37 @@ impl Working {
     }
 
     /// The working tree as a commit, on HEAD (none without one): built in an index of its own,
-    /// from HEAD's tree then `git add -A` (so `.gitignore` holds, and a tracked file it names
-    /// stays), so the user's index, HEAD, refs and files are never touched.
-    fn snapshot(&self) -> anyhow::Result<String> {
+    /// a copy of the user's (as `git stash` makes, so `add -A` hashes only what changed; HEAD's
+    /// tree without one), then `git add -A` (so `.gitignore` holds, and a tracked file it names
+    /// stays). The user's index, HEAD, refs and files are never touched. The untracked files it
+    /// adds are listed, and one over [`BIG`] is refused unless `force`.
+    fn snapshot(&self, force: bool) -> anyhow::Result<String> {
         let top = self.top.as_deref().ok_or_else(|| anyhow::anyhow!("not in a git checkout: roll preview up previews one"))?;
         let dir = tempfile::tempdir()?;
         let index = dir.path().join("index");
-        let mut env: Vec<(&str, std::ffi::OsString)> = vec![("GIT_INDEX_FILE", index.into_os_string())];
-        let head = git(top, &["rev-parse", "-q", "--verify", "HEAD^{commit}"], &env).ok();
-        if let Some(h) = &head {
+        let mut env: Vec<(&str, std::ffi::OsString)> = vec![("GIT_INDEX_FILE", index.clone().into_os_string())];
+        let head = git(top, &["rev-parse", "-q", "--verify", "HEAD^{commit}"], &[]).ok();
+        let theirs = top.join(git(top, &["rev-parse", "--git-path", "index"], &[])?);
+        if theirs.is_file() {
+            std::fs::copy(&theirs, &index)?;
+        } else if let Some(h) = &head {
             git(top, &["read-tree", h], &env)?;
+        }
+        let others = git_raw(top, &["ls-files", "-z", "--others", "--exclude-standard"], &env)?;
+        let others: Vec<(&str, u64)> = others.split('\0').filter(|p| !p.is_empty()).map(|p| (p, std::fs::symlink_metadata(top.join(p)).ok().filter(|m| m.is_file()).map_or(0, |m| m.len()))).collect();
+        let big: Vec<String> = others.iter().filter(|(_, n)| *n > BIG).map(|(p, n)| format!("{p} ({})", bytes(*n as f64))).collect();
+        if !big.is_empty() && !force {
+            bail!("untracked and not ignored, so it would be pushed: {} (over {}): add it to .gitignore, or say --force", big.join(", "), bytes(BIG as f64));
+        }
+        if !others.is_empty() {
+            let total: u64 = others.iter().map(|(_, n)| n).sum();
+            eprintln!("adding {} untracked file{} ({}), readable by whoever can read {}:", others.len(), if others.len() == 1 { "" } else { "s" }, bytes(total as f64), self.repo);
+            for (p, _) in others.iter().take(20) {
+                eprintln!("  {p}");
+            }
+            if others.len() > 20 {
+                eprintln!("  … and {} more", others.len() - 20);
+            }
         }
         git(top, &["add", "-A"], &env)?;
         let tree = git(top, &["write-tree"], &env)?;
@@ -329,7 +354,9 @@ impl Working {
 
     /// `git push <roll's clone URL> <refspec>`: one ref, from the checkout (or an empty
     /// repository outside one). The credential goes in the environment for this push only: never
-    /// the command line, the user's config or a remote; their credential helpers aren't asked.
+    /// the command line, the user's config or a remote. It's sent only to that URL
+    /// (`http.<url>.extraHeader`), and a config that would rewrite the URL (`insteadOf`,
+    /// `pushInsteadOf`) is refused; no hook runs and no credential helper or askpass is asked.
     fn push(&self, refspec: &str) -> anyhow::Result<()> {
         let scratch;
         let dir = match &self.top {
@@ -340,12 +367,34 @@ impl Working {
                 scratch.path()
             }
         };
-        // An empty value first clears what the user's config has for the key.
-        let mut config = vec![("credential.helper", ""), ("http.followRedirects", "false"), ("http.extraHeader", "")];
-        if let Some(a) = &self.auth {
-            config.push(("http.extraHeader", a.as_str()));
+        for entry in git_raw(dir, &["config", "-z", "--get-regexp", r"^url\..*\.(push)?insteadof$"], &[]).unwrap_or_default().split('\0') {
+            let Some((key, prefix)) = entry.split_once('\n') else { continue };
+            if !prefix.is_empty() && self.clone_url.starts_with(prefix) {
+                bail!("git config has {key} = {prefix}, which would send this push somewhere other than {}: roll preview pushes only there (remove it, or run this in another checkout)", self.clone_url);
+            }
         }
-        let mut env: Vec<(String, std::ffi::OsString)> = vec![("GIT_CONFIG_COUNT".into(), config.len().to_string().into()), ("GIT_TERMINAL_PROMPT".into(), "0".into())];
+        // The environment's config comes after the user's, so it wins; an empty value first clears
+        // what theirs has for a list.
+        let header = format!("http.{}.extraHeader", self.clone_url);
+        let mut config = vec![
+            ("credential.helper", ""),
+            ("http.followRedirects", "false"),
+            // A hook would see the credential in its environment (git-lfs's pre-push would also
+            // send it to its own server).
+            ("core.hooksPath", "/dev/null"),
+            // That one ref only: no submodules, no tags along with it, no signing.
+            ("push.recurseSubmodules", "no"),
+            ("push.followTags", "false"),
+            ("push.gpgSign", "false"),
+            ("http.extraHeader", ""),
+            (header.as_str(), ""),
+        ];
+        if let Some(a) = &self.auth {
+            config.push((header.as_str(), a.as_str()));
+        }
+        // An empty GIT_ASKPASS also stops core.askPass and SSH_ASKPASS from being asked.
+        let mut env: Vec<(String, std::ffi::OsString)> =
+            vec![("GIT_CONFIG_COUNT".into(), config.len().to_string().into()), ("GIT_TERMINAL_PROMPT".into(), "0".into()), ("GIT_ASKPASS".into(), "".into())];
         for (i, (k, v)) in config.iter().enumerate() {
             env.push((format!("GIT_CONFIG_KEY_{i}"), (*k).into()));
             env.push((format!("GIT_CONFIG_VALUE_{i}"), (*v).into()));
@@ -403,13 +452,21 @@ fn segment(name: &str) -> String {
     if out.is_empty() { "local".into() } else { out.to_string() }
 }
 
+/// An untracked file `roll preview up` refuses to push without `--force`.
+const BIG: u64 = 50 << 20;
+
 /// `git <args>` in `dir`, its trimmed stdout; a failure is its stderr.
 fn git(dir: &std::path::Path, args: &[&str], env: &[(&str, std::ffi::OsString)]) -> anyhow::Result<String> {
+    git_raw(dir, args, env).map(|s| s.trim().to_string())
+}
+
+/// As [`git`], stdout as it is (`-z` output).
+fn git_raw(dir: &std::path::Path, args: &[&str], env: &[(&str, std::ffi::OsString)]) -> anyhow::Result<String> {
     let out = std::process::Command::new("git").current_dir(dir).args(args).envs(env.iter().map(|(k, v)| (*k, v))).stdin(std::process::Stdio::null()).output().map_err(|e| anyhow::anyhow!("running git: {e}"))?;
     if !out.status.success() {
         bail!("git {}: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&out.stderr).trim());
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 fn usd(v: &Value) -> String {
@@ -627,13 +684,13 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
             }
             v
         }
-        Preview::Up { project, repo, name, no_wait, timeout } => {
+        Preview::Up { project, repo, name, no_wait, timeout, force } => {
             let w = Working::find(api, repo, name).await?;
             let project = match project {
                 Some(p) => project_id(api, &p).await?,
                 None => project_of(api, &w.repo).await?,
             };
-            let commit = w.snapshot()?;
+            let commit = w.snapshot(force)?;
             w.push(&format!("+{commit}:refs/heads/{}", w.branch))?;
             if !as_json {
                 eprintln!("pushed {} to {} in {}", &commit[..12], w.branch, w.repo);
@@ -657,19 +714,22 @@ pub async fn run(api: &Api, as_json: bool, cmd: Preview) -> anyhow::Result<()> {
                 api.call(reqwest::Method::DELETE, &format!("/v1/previews/{id}"), None).await?;
                 deleted.push(id);
             }
-            let refs = api.get(&format!("/v1/code/repos/{}/refs", w.repo)).await?;
-            let had_branch = refs.as_array().into_iter().flatten().any(|r| r["name"] == w.branch.as_str());
-            if had_branch {
-                w.push(&format!(":refs/heads/{}", w.branch))?;
+            // Always pushed (a delete of a branch that's gone is one too): a tag of the same
+            // name is never taken for it.
+            if let Err(e) = w.push(&format!(":refs/heads/{}", w.branch))
+                && !format!("{e:#}").contains("remote ref does not exist")
+            {
+                return Err(e);
             }
             if !as_json {
-                match (deleted.is_empty(), had_branch) {
-                    (true, false) => println!("nothing to remove: no preview or branch {} in {}", w.branch, w.repo),
-                    _ => println!("removed {}{}", deleted.iter().map(|d| format!("{d} and ")).collect::<String>(), if had_branch { format!("branch {}", w.branch) } else { "no branch (it was gone)".into() }),
+                if deleted.is_empty() {
+                    println!("no preview of {} in {}; the branch is gone", w.branch, w.repo);
+                } else {
+                    println!("removed {} and branch {}", deleted.join(", "), w.branch);
                 }
                 return Ok(());
             }
-            json!({ "repo": w.repo, "branch": w.branch, "deleted": deleted, "branch_deleted": had_branch })
+            json!({ "repo": w.repo, "branch": w.branch, "deleted": deleted })
         }
         Preview::Wait { preview, change, service, timeout } => return wait(api, as_json, preview, change, service, timeout).await,
         Preview::Rm { preview } => {

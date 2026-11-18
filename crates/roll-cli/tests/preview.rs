@@ -164,8 +164,8 @@ impl Server {
     }
 
     /// What `branch` holds in roll code: its commit's subject and parents, and `index.html`,
-    /// `new.txt` and whether `secret.env` is there. `None`: no such branch.
-    fn pushed(&self, branch: &str) -> Option<(String, String, String, bool)> {
+    /// `new.txt`, `staged.txt` and whether `secret.env` is there. `None`: no such branch.
+    fn pushed(&self, branch: &str) -> Option<(String, String, String, String, bool)> {
         let dir = tempfile::tempdir_in(self._home.path()).unwrap();
         let url = format!("{}/git/acme/web.git", self.api);
         if self.git(dir.path(), true, &["ls-remote", &url, &format!("refs/heads/{branch}")]).is_empty() {
@@ -174,7 +174,7 @@ impl Server {
         self.git(dir.path(), true, &["clone", "-q", "--branch", branch, &url, "c"]);
         let c = dir.path().join("c");
         let read = |f: &str| std::fs::read_to_string(c.join(f)).unwrap_or_default();
-        Some((self.git(&c, false, &["log", "-1", "--format=%s %P"]), read("index.html"), read("new.txt"), c.join("secret.env").exists()))
+        Some((self.git(&c, false, &["log", "-1", "--format=%s %P"]), read("index.html"), read("new.txt"), read("staged.txt"), c.join("secret.env").exists()))
     }
 }
 
@@ -194,6 +194,39 @@ fn up_previews_the_working_tree_and_down_removes_it() {
     std::fs::write(work.join("new.txt"), "new").unwrap();
     std::fs::write(work.join(".gitignore"), "secret.env\n").unwrap();
     std::fs::write(work.join("secret.env"), "KEY=1").unwrap();
+    // A hook that would see the push's environment (husky's way: core.hooksPath).
+    let hooks = s._home.path().join("hooks");
+    let hooked = s._home.path().join("hook-ran");
+    std::fs::create_dir(&hooks).unwrap();
+    std::fs::write(hooks.join("pre-push"), format!("#!/bin/sh\nenv > '{}'\n", hooked.display())).unwrap();
+    std::fs::set_permissions(hooks.join("pre-push"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    s.git(&work, false, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+
+    // An untracked file over 50 MB isn't pushed without --force.
+    std::fs::File::create(work.join("dump.sql")).unwrap().set_len(51 << 20).unwrap();
+    let (ok, _, err) = s.roll_in(&work, &["up", "--no-wait"]);
+    assert!(!ok && err.contains("dump.sql") && err.contains("--force"), "{err}");
+    std::fs::remove_file(work.join("dump.sql")).unwrap();
+    // A config that rewrites roll's URL to another host: refused, and that host gets nothing.
+    let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let other_url = format!("http://{}/", other.local_addr().unwrap());
+    let heard = Arc::new(std::sync::Mutex::new(String::new()));
+    let ear = heard.clone();
+    std::thread::spawn(move || {
+        for c in other.incoming().flatten() {
+            let mut c = c;
+            let mut buf = [0u8; 4096];
+            let n = std::io::Read::read(&mut c, &mut buf).unwrap_or(0);
+            ear.lock().unwrap().push_str(&String::from_utf8_lossy(&buf[..n]));
+            let _ = std::io::Write::write_all(&mut c, b"HTTP/1.1 500 Nope\r\nContent-Length: 0\r\n\r\n");
+        }
+    });
+    let rewrite = format!("url.{other_url}.insteadOf");
+    s.git(&work, false, &["config", &rewrite, &format!("{}/", s.api)]);
+    let (ok, _, err) = s.roll_in(&work, &["up", "--no-wait"]);
+    assert!(!ok && err.contains("insteadof"), "{err}");
+    assert!(!heard.lock().unwrap().to_ascii_lowercase().contains("authorization"), "{}", heard.lock().unwrap());
+    s.git(&work, false, &["config", "--unset", &rewrite]);
     let mine = |s: &Server| [&["rev-parse", "HEAD"][..], &["ls-files", "--stage"], &["status", "--porcelain"], &["for-each-ref"], &["config", "--list", "--local"]].map(|a| s.git(&work, false, a));
     let before = mine(&s);
     let head = before[0].clone();
@@ -201,19 +234,22 @@ fn up_previews_the_working_tree_and_down_removes_it() {
     let up = |s: &Server| {
         let (ok, out, err) = s.roll_in(&work, &["--json", "up", "--no-wait"]);
         assert!(ok, "roll preview up:\n{out}\n{err}");
-        serde_json::from_str::<Value>(&out).unwrap()
+        (serde_json::from_str::<Value>(&out).unwrap(), err)
     };
-    let p = up(&s);
+    let (p, err) = up(&s);
+    // The untracked files it adds are listed; what .gitignore leaves out isn't one.
+    assert!(err.contains("adding 2 untracked files") && err.contains("new.txt") && !err.contains("secret.env"), "{err}");
     let id = p["id"].as_str().unwrap().to_string();
     assert_eq!((p["branch"].as_str(), p["repo"].as_str()), (Some("preview/ana/feat-x"), Some("acme/web")), "{p}");
-    let (log, index, new, secret) = s.pushed("preview/ana/feat-x").expect("the branch");
-    assert_eq!((log, index.as_str(), new.as_str(), secret), (format!("roll preview up {head}"), "changed", "new", false));
+    let (log, index, new, staged, secret) = s.pushed("preview/ana/feat-x").expect("the branch");
+    assert_eq!((log, index.as_str(), new.as_str(), staged.as_str(), secret), (format!("roll preview up {head}"), "changed", "new", "staged", false));
     // Nothing of the user's moved: HEAD, the index, refs, files, config (no credential written).
     assert_eq!(mine(&s), before);
+    assert!(!hooked.exists(), "no hook runs with the credential in its environment");
 
     // Again, after another edit: the same preview, its branch moved (forced: both are on HEAD).
     std::fs::write(work.join("index.html"), "again").unwrap();
-    let again = up(&s);
+    let (again, _) = up(&s);
     assert_eq!(again["id"].as_str(), Some(id.as_str()));
     assert_eq!(s.pushed("preview/ana/feat-x").unwrap().1, "again");
 
