@@ -14,6 +14,16 @@ describe("activityText", () => {
   });
 });
 
+describe("refused changes in the security log", () => {
+  const e = (a: Partial<Activity>): Activity => ({ at: 0, action: "sign_in", actor: "usr_me", ok: true, status: 200, ...a });
+  it("say what was refused, never what it would have done", () => {
+    expect(activityText(e({ action: "DELETE /v1/accounts/me/passkeys/{id}" }), "usr_me")).toBe("A passkey was removed");
+    expect(activityText(e({ action: "DELETE /v1/accounts/me/passkeys/{id}", ok: false, status: 403 }), "usr_me")).toBe("Removing a passkey was refused");
+    expect(activityText(e({ action: "POST /v1/accounts/me/totp", ok: false, status: 403 }), "usr_me")).toBe("Setting up an authenticator app was refused");
+    expect(activityText(e({ action: "PATCH /v1/accounts/users/{id}", actor: "usr_admin", ok: false, status: 403, detail: { set: { admin: true } } }), "usr_me")).toBe("Making you an admin was refused");
+  });
+});
+
 describe("sudo mode", () => {
   afterEach(() => {
     onReauthRequired(null);

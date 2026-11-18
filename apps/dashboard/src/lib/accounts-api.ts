@@ -125,16 +125,19 @@ export function activityText(e: Activity, me: string): string {
     case "scim.update":
       return d.active === false ? "Your company's provider deactivated your account" : d.active === true ? "Your company's provider reactivated your account" : "Your company's provider updated your account";
   }
+  // A change that was refused (sudo mode asking, a wrong code) says so, never what it would have done.
+  const was = (done: string, tried: string) => (e.ok ? done : `${tried} was refused`);
   const set = d.set ?? {};
-  if ("disabled" in set) return `Your account was ${set.disabled ? "disabled" : "turned back on"} by ${by}`;
-  if ("admin" in set) return `${by === "you" ? "You" : by[0].toUpperCase() + by.slice(1)} ${set.admin ? "made you an admin" : "removed your admin rights"}`;
-  if (e.action.includes("/me/totp")) return e.action.startsWith("DELETE") ? "Your authenticator app was turned off" : "Your authenticator app was set up";
-  if (e.action.includes("/me/recovery-codes")) return "New recovery codes were made";
-  if (e.action.includes("/me/passkeys")) return e.action.startsWith("DELETE") ? "A passkey was removed" : e.action.startsWith("PATCH") ? "A passkey was renamed" : "A passkey was added";
-  if (e.action.includes("/me/identities")) return "A sign-in method was unlinked";
-  if (e.action.includes("/me/sessions") || e.action.endsWith("/sessions")) return `Sessions were ended by ${by}`;
-  if (e.action === "PATCH /v1/accounts/me") return "Your profile was changed";
-  return `${e.action} by ${by}`;
+  if ("disabled" in set) return was(`Your account was ${set.disabled ? "disabled" : "turned back on"} by ${by}`, `${set.disabled ? "Disabling" : "Turning back on"} your account`);
+  if ("admin" in set) return was(`${by === "you" ? "You" : by[0].toUpperCase() + by.slice(1)} ${set.admin ? "made you an admin" : "removed your admin rights"}`, set.admin ? "Making you an admin" : "Removing your admin rights");
+  const verb = e.action.split(" ")[0];
+  if (e.action.includes("/me/totp")) return verb === "DELETE" ? was("Your authenticator app was turned off", "Turning off your authenticator app") : was("Your authenticator app was set up", "Setting up an authenticator app");
+  if (e.action.includes("/me/recovery-codes")) return was("New recovery codes were made", "Making new recovery codes");
+  if (e.action.includes("/me/passkeys")) return verb === "DELETE" ? was("A passkey was removed", "Removing a passkey") : verb === "PATCH" ? was("A passkey was renamed", "Renaming a passkey") : was("A passkey was added", "Adding a passkey");
+  if (e.action.includes("/me/identities")) return was("A sign-in method was unlinked", "Unlinking a sign-in method");
+  if (e.action.includes("/me/sessions") || e.action.endsWith("/sessions")) return was(`Sessions were ended by ${by}`, "Ending sessions");
+  if (e.action === "PATCH /v1/accounts/me") return was("Your profile was changed", "A change to your profile");
+  return e.ok ? `${e.action} by ${by}` : `${e.action} by ${by} was refused`;
 }
 
 /** Which sign-ins this roll offers (`sso`: a company's provider answers for some domains). */
