@@ -391,6 +391,12 @@ phished: a passkey works only on roll's own site.
   (user verification `required`) signs its person in, as both factors, TOTP on or not (GitHub
   counts a passkey the same way). An authenticator that didn't verify the person (no PIN or
   biometric) is refused. An enforced SSO domain still signs in only through its provider.
+- **Autofill** (GitHub's and Google's): where the browser offers it (WebAuthn conditional
+  mediation), the sign-in page asks for those options as it loads and keeps a conditional request
+  open, and its email field is `autocomplete="username webauthn"`: the browser lists the person's
+  passkeys among the field's suggestions, and picking one signs in. "Sign in with a passkey"
+  cancels that request first (a browser runs one at a time). Checked in Chromium with its virtual
+  authenticator (`users-live/autofill-shot.sh`).
 - **As the second factor** (the same two routes with a session owing one): the person's own
   passkeys, user verification `preferred` (presence is enough on top of the first factor).
 - A challenge is used once, within five minutes, and only for the sign-in it was made for: one
