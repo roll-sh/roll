@@ -588,7 +588,11 @@ type TraceSummary = { trace: string; name: string; service: string; start_ms: nu
 type Span = { trace: string; span: string; parent?: string; name: string; service?: string; start: number; end: number; error?: boolean; attrs?: [string, string][] };
 type Analytics = { minutes: number; step: number /* minutes a point of series stands for */; page_views: number; visitors: number;
   pages: { path: string; views: number; visitors: number }[]; referrers: { host: string /* the referring site's, never this one's */; views: number }[];
-  countries: { country: string /* the edge's CF-IPCountry */; views: number }[]; series: { t: number; views: number; visitors: number }[]; cut: boolean /* only the newest 200,000 requests read */ };
+  countries: { country: string /* the edge's CF-IPCountry */; views: number }[];
+  campaigns: { source: string; medium: string; campaign: string /* a page view's utm_source, utm_medium, utm_campaign, lowercased, "" where not given */; views: number; visitors: number }[];
+  devices: { browsers: { browser: string; views: number }[]; os: { os: string; views: number }[]; classes: { class: "mobile" | "tablet" | "desktop" | "bot"; views: number }[] } /* from the user agent */;
+  events: { name: string; count: number; props: { [name: string]: { value: string; count: number }[] /* its 5 most common */ } }[] /* POST /__roll/event {name, props?, path?} on the environment's host (or /__roll/track.js's roll.track), the 20 most counted */;
+  series: { t: number; views: number; visitors: number }[]; cut: boolean /* only the newest 200,000 requests (and events) read */ };
 type RouteStats = { minutes: number; requests: number; cut: boolean /* only the newest 50,000 requests read */; routes: RouteStat[] };
 
 type Metrics = {

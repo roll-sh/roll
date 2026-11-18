@@ -748,12 +748,26 @@ async fn analytics_count_page_views_and_visitors() {
     assert_eq!(visit("/", "browser-a", true, Some("https://news.example.com/item?id=1".into())).await, StatusCode::OK);
     visit("/", "browser-a", true, None).await;
     visit("/about", "browser-a", true, Some(format!("http://{h}/"))).await;
-    visit("/", "browser-b", true, Some("https://www.news.example.com/".into())).await;
-    visit("/api/items", "browser-b", false, None).await;
+    // A phone, from a campaign's link (only its utm_* are read, never the rest of the query).
+    let iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1";
+    visit("/?utm_source=Newsletter&utm_campaign=launch&token=s3cret", iphone, true, Some("https://www.news.example.com/".into())).await;
+    visit("/api/items", iphone, false, None).await;
+    // Custom events (`roll.track`): kept with their bounded properties, read back by name.
+    let event = |body: &'static str| {
+        let req = Request::builder().method("POST").uri("/__roll/event").header("host", h.clone()).header("content-type", "application/json").body(Body::from(body)).unwrap();
+        let public = w.public.clone();
+        async move { public.oneshot(req).await.unwrap().status() }
+    };
+    assert_eq!(event(r#"{"name":"Signup","props":{"plan":"pro"},"path":"/pricing"}"#).await, StatusCode::NO_CONTENT);
+    assert_eq!(event(r#"{"name":"Signup","props":{"plan":"pro"}}"#).await, StatusCode::NO_CONTENT);
+    assert_eq!(event(r#"{"name":"Signup","props":{"plan":"free"}}"#).await, StatusCode::NO_CONTENT);
+    assert_eq!(event(r#"{"name":"Signup","props":{"plan":{"nested":1}}}"#).await, StatusCode::BAD_REQUEST);
+    let script = w.public.clone().oneshot(Request::builder().uri("/__roll/track.js").header("host", h.clone()).body(Body::empty()).unwrap()).await.unwrap();
+    assert!(script.status() == StatusCode::OK && script.headers()["content-type"].to_str().unwrap().starts_with("text/javascript"));
     let mut a = Value::Null;
     for _ in 0..100 {
         a = call(&w.api, "GET", &format!("/v1/apps/services/{id}/environments/production/analytics?minutes=60"), None).await.1;
-        if a["page_views"] == 4 {
+        if a["page_views"] == 4 && a["events"][0]["count"] == 3 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -762,6 +776,11 @@ async fn analytics_count_page_views_and_visitors() {
     assert_eq!(a["pages"][0], json!({"path": "/", "views": 3, "visitors": 2}), "{a}");
     assert_eq!(a["referrers"], json!([{"host": "news.example.com", "views": 2}]), "its own host isn't a referrer: {a}");
     assert_eq!(a["countries"], json!([{"country": "DE", "views": 4}]), "{a}");
+    assert_eq!(a["campaigns"], json!([{"source": "newsletter", "medium": "", "campaign": "launch", "views": 1, "visitors": 1}]), "{a}");
+    assert_eq!((&a["devices"]["classes"], &a["devices"]["os"][0]), (&json!([{"class": "desktop", "views": 3}, {"class": "mobile", "views": 1}]), &json!({"os": "Other", "views": 3})), "{a}");
+    assert_eq!(a["events"], json!([{"name": "Signup", "count": 3, "props": {"plan": [{"value": "pro", "count": 2}, {"value": "free", "count": 1}]}}]), "{a}");
+    let access: Vec<String> = w.apps.logs.follow(&format!("http:{id}/production"), 50).0.into_iter().map(|l| l.text).collect();
+    assert!(access.iter().any(|l| l.contains("\"utm\"")) && !access.iter().any(|l| l.contains("s3cret")), "the query's other parameters are never kept: {access:?}");
 }
 
 /// An answer its app lets a shared cache keep (`s-maxage`) is answered from the owner's cache

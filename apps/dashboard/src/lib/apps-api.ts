@@ -857,6 +857,12 @@ export interface Analytics {
   referrers: { host: string; views: number }[];
   /** The edge's country codes (Cloudflare's), where it said one. */
   countries: { country: string; views: number }[];
+  /** Page views that came with UTM parameters (empty strings where one wasn't given). */
+  campaigns?: { source: string; medium: string; campaign: string; views: number; visitors: number }[];
+  /** From the user agent: browsers, operating systems, and `mobile`/`tablet`/`desktop`/`bot`. */
+  devices?: { browsers: { browser: string; views: number }[]; os: { os: string; views: number }[]; classes: { class: string; views: number }[] };
+  /** Custom events (`roll.track(name, props)` or `POST /__roll/event`), by name, each property's most common values. */
+  events?: { name: string; count: number; props: Record<string, { value: string; count: number }[]> }[];
   series: { t: number; views: number; visitors: number }[];
   cut: boolean;
 }

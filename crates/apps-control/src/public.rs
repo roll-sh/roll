@@ -1111,6 +1111,15 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         let Ok(body) = axum::body::to_bytes(req.into_body(), crate::vitals::MAX_BODY).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
         return apps.vitals_beacon(service, env, &body, country).into_response();
     }
+    // Custom events: on every environment's own host, as its access log's page views are.
+    if req.uri().path() == crate::track::SCRIPT_PATH && req.method() == axum::http::Method::GET {
+        return crate::track::script();
+    }
+    if req.uri().path() == crate::track::BEACON && req.method() == axum::http::Method::POST {
+        let country = req.headers().get("cf-ipcountry").and_then(|v| v.to_str().ok()).filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_alphabetic())).map(|c| c.to_ascii_uppercase());
+        let Ok(body) = axum::body::to_bytes(req.into_body(), crate::track::MAX_BODY).await else { return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
+        return apps.event_beacon(service, env, &body, country).into_response();
+    }
     let feedback = Tags { feedback: target.is_some() && page_load, vitals: gate.vitals && page_load };
     if feedback.feedback || feedback.vitals {
         // The page as the app wrote it, so the tag can go in as it streams.
@@ -1656,6 +1665,28 @@ struct Seen {
     referrer: Option<String>,
     /// The visitor's country as the edge saw it (Cloudflare's `CF-IPCountry`), when there is one.
     country: Option<String>,
+    /// A page view's campaign: its `utm_source`, `utm_medium` and `utm_campaign` (nothing else
+    /// of the query, which can carry tokens), when it has one.
+    utm: Option<[Option<String>; 3]>,
+}
+
+/// A query's UTM campaign parameters, each at most 100 printable characters.
+fn utm_of(query: Option<&str>) -> Option<[Option<String>; 3]> {
+    let q = query?;
+    let mut out: [Option<String>; 3] = Default::default();
+    for (k, v) in url::form_urlencoded::parse(q.as_bytes()) {
+        let i = match k.as_ref() {
+            "utm_source" => 0,
+            "utm_medium" => 1,
+            "utm_campaign" => 2,
+            _ => continue,
+        };
+        let v: String = v.trim().chars().filter(|c| !c.is_control()).take(100).collect();
+        if !v.is_empty() && out[i].is_none() {
+            out[i] = Some(v.to_ascii_lowercase());
+        }
+    }
+    out.iter().any(Option::is_some).then_some(out)
 }
 
 impl Seen {
@@ -1669,6 +1700,9 @@ impl Seen {
         }
         if let Some(c) = &self.country {
             line["country"] = c.clone().into();
+        }
+        if let (true, Some([source, medium, campaign])) = (self.page, &self.utm) {
+            line["utm"] = serde_json::json!({ "source": source, "medium": medium, "campaign": campaign });
         }
     }
 
@@ -1698,6 +1732,7 @@ impl Seen {
                     own.as_deref() != Some(h.as_str()) && h.len() <= 255
                 }),
             country: req.headers().get("cf-ipcountry").and_then(|v| v.to_str().ok()).filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_alphabetic()) && *c != "XX" && *c != "T1").map(|c| c.to_ascii_uppercase()),
+            utm: utm_of(req.uri().query()),
         }
     }
 }
