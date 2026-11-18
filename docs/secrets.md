@@ -1311,7 +1311,7 @@ roll secrets envs    ls | add NAME [--base ENV --ephemeral] | rename OLD NEW | r
 roll secrets history [KEY]   roll secrets rollback --to SEQ | --at TIME
 roll secrets diff    --from development --to staging | --file .env   # two environments, or a local copy
 roll secrets promote --from development --to staging [KEY…]
-roll secrets audit   [--key KEY] [--format csv|jsonl]
+roll secrets audit   [--key KEY] [--format csv|jsonl] | verify [--since TIME] [--file F [--jwks F]]
 roll secrets syncs   ls | add KIND --target name=value… | run ID | rm ID
 roll secrets sinks   ls | add URL [--from-start] [--format splunk|datadog|bearer] (token on stdin) | rm ID
 roll secrets purge   KEY [--before N]        roll secrets retention 365|forever
@@ -2425,7 +2425,7 @@ activity show it as "approved by …". This is how roll secrets does access requ
 `reveal` an approver grants, as Infisical's and 1Password's): a token that asks for `reveal`.
 Listing metadata isn't audited. Revealing, exporting, resolving and every write are.
 `GET …/audit?env=&key=&actor=&action=&before=&limit=` reads it newest first. Rows are kept for 400
-days.
+days, and each project's rows are a hash chain roll signs hourly ("Tamper evidence" below).
 
 - **Export**: `GET …/audit?format=csv` or `format=jsonl` (with the same filters, `since` too)
   answers up to 10,000 rows as a file.
@@ -2459,6 +2459,50 @@ every delivery), writes each batch as an object `roll-secrets/audit/<sink>/<deli
   every delivery like a bucket) produces each audit event to that topic as one record, keyed by its
   audit `id`, through roll streams in process: consumers react as it's written. A retried batch can
   produce an event again, so a consumer dedupes by key.
+
+### Tamper evidence
+
+Audit rows sit in the same database as everything else, so someone who can write it could edit or
+delete them. As CloudTrail's log file integrity validation does, each project's log is a hash chain
+with signed digests, so such a change shows:
+
+- **The chain.** Each row has a `seq` (1, 2, 3… per project) and `hash = sha256(previous hash,
+  row)`, written in the row's own transaction. The row's bytes are a length-prefixed encoding of
+  every field the API shows but `id` (`crates/roll-secrets-chain`, `canonical`), so they hash the same from SQLite,
+  Postgres or an export. The project's head (`audit_heads`) is updated in that transaction too:
+  on Postgres a second writer loses the head's row lock and its serializable write is re-run, and a
+  unique index on `(project_id, seq)` refuses a second row at one number anyway, so racing writers,
+  on one node or several, never fork the chain.
+- **Digests.** About hourly, the sweeper appends an `audit.digest` row (actor `roll:audit`) for
+  each project whose chain moved. Its `digest` is a JWS (RS256, `typ` `roll-audit-digest`) signed
+  with roll's OIDC issuer key: `{project, seq, hash, last_at, at, start}`, the row before it and
+  where the log starts. The digest is claimed per project in its own write, so two nodes don't sign
+  one twice. Sinks get digests like any other row, so a SIEM or a locked bucket holds roll's
+  signatures outside the database: recomputing every hash after an edit no longer matches what
+  roll signed.
+- **Verifying.** `GET …/audit/verify?since=` (`read`) walks the chain from its start, or from the
+  last digest before `since`, and answers `AuditVerification`: the rows walked (`from`–`head`), how
+  far a valid digest vouches for them (`through`, `signed_at`), and the first thing that doesn't
+  hold (`broken: {seq, reason, detail}`): `edited` (a row doesn't match its hash), `missing` (a
+  gap), `rewritten` (the chain isn't what a digest signed), `signature` (a digest no key of roll's
+  signed), `truncated` (rows gone from the end; the head still counts them), `cut` (rows gone from
+  the start other than by retention) or `unchained` (a row added outside the chain). The dashboard's
+  audit log shows "Verified through #N" or the break. `roll secrets audit verify [--since TIME]`
+  asks the same.
+- **Offline.** `roll secrets audit verify --file audit.jsonl [--jwks keys.json]` checks an export
+  (`audit --format jsonl`, unfiltered: a filtered one has gaps) on the machine it runs on, with
+  roll's public keys from `/v1/secrets/oidc/jwks`, served whether or not clouds are set up. The
+  digests name their project. An export of the newest 10,000 rows starts checking at its first
+  digest. The server's own check trusts the keys in its database; to rule that out, save the JWKS
+  once and pass `--jwks`.
+- **Retention** cuts the chain only at a digest at least 400 days old, which is then where the log
+  starts: a signed anchor, its hash the one before it. The digest written in the cut's own
+  transaction signs the new start, so rows removed from the start any other way are a `cut`.
+- **Older rows** written before the chain have no `seq` or hash: they count as `unchained`, the
+  chain starts at the first row after them, and they're dropped by age as before. A row written by
+  a node still running an older roll during an upgrade shows as `unchained` too.
+- **What it can't show**: rows deleted from the end together with the head, after the last digest
+  a sink delivered. A sink keeps that window to about an hour.
 
 
 ## HTTP API
@@ -2548,6 +2592,7 @@ isn't in the workspace is 404.
 | `POST /syncs/{id}/run` | | `Sync` after pushing every key (`admin`; 409 `running` while another push holds it) |
 | `GET /v1/secrets/shares/{id}` (public) | | `{note, views_left, expires_at}` |
 | `POST /v1/secrets/shares/{id}/open` (public) | | `{ciphertext}` (one open used) |
+| `GET /audit/verify?since=` | | `AuditVerification`: the chain walked from its start (or the last digest before `since`) and the first break |
 | `GET /audit/sinks` | | `Sink[]` (`admin`) |
 | `POST /audit/sinks` | `{url, from_start?, format?, token?}` (an HTTPS endpoint, or on the canvas `bucket:<name>`, `search:<cluster>/<index>` or `stream:<id>/<topic>`; `format` `splunk`, `datadog` or `bearer` takes an HTTPS endpoint and its `token`, sealed) | 201 `Sink & {secret}` (shown once; a `Sink` names its `format`, never its token) |
 | `DELETE /audit/sinks/{id}` | | 204 |
@@ -2583,7 +2628,7 @@ isn't in the workspace is 404.
 | `POST /github-apps` | `{name, app_id, installation_id, private_key, repositories, permissions, api_base?}` | 201 `GitHubApp` (`admin`; gets and revokes a token first: 400 with GitHub's reason) |
 | `DELETE /github-apps/{id}` | | 204; 409 while a key links to it or a lease holds a token (`admin`) |
 | `GET /v1/secrets/oidc/.well-known/openid-configuration` | | roll's issuer's discovery document (public) |
-| `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public) |
+| `GET /v1/secrets/oidc/jwks` | | roll's issuer's public keys (public; they verify the audit log's digests, so served without clouds too) |
 | `GET /cas` | | `Ca[]` (`read` on the project; certificates, never keys) |
 | `POST /cas` | `{name, domains, allow_ip?, max_days?}` | 201 `Ca` (`admin`) |
 | `DELETE /cas/{id}` | | 204; 409 while a key links to it (`admin`) |
@@ -2701,7 +2746,8 @@ type Sync = {
 };
 type NewSync = { environment: string; path?: string; kind: string; target: Record<string, unknown>; keys?: string[]; prefix?: string };
 type SyncKind = { kind: string; label: string; values: boolean; signed: boolean; fields: { name: string; label: string; required: boolean; placeholder: string }[] };
-type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval };
+type AuditEntry = { id: number; seq?: number; hash?: string; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval; digest?: string };
+type AuditVerification = { ok: boolean; from: number | null; through: number | null; signed_at: number | null; head: number | null; rows: number; digests: number; unchained: number; broken: { seq?: number; reason: string; detail: string } | null };
 // The approval that let the request through roll-access's gate (docs/permissions.md, "What a
 // product is told about an approval"): an `ask` approved (no `until`), or a rule an approval
 // remembered for a while (`until`: when it lapses). CSV exports carry `approval` and `approved_by`
@@ -2729,7 +2775,9 @@ tokens(id PK, project_id, name, hash UNIQUE, prefix, environments, paths, action
        created_at, created_by, last_used_at, revoked_at, identity)  -- identity: a login's
 identities(id PK, project_id, name, issuer, audience, subject, claims, environments, paths,
        actions, ttl_minutes, created_at, created_by, last_used_at, last_subject)
-audit(id INTEGER PK, project_id, at, actor, action, env_id, path, keys, summary, ip)
+audit(id INTEGER PK, project_id, at, actor, action, env_id, path, keys, summary, ip, approval,
+      seq, hash, digest)  -- UNIQUE (project_id, seq); digest: an audit.digest row's JWS
+audit_heads(project_id PK, seq, hash, at, digest_seq, digest_at, start_seq)
 syncs(id PK, project_id, env_id, path, kind, target, keys, prefix, secret BLOB, status, error,
       last_digest, state, last_synced_at, running_until, retry_at, checked_at, created_at, created_by)
       -- secret: the sealed signing secret; state: {name: stamp} of what was pushed (no values)

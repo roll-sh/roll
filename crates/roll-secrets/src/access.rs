@@ -334,25 +334,13 @@ pub struct Caller {
     pub approval: Option<Approval>,
 }
 
-/// An approval from roll-access's gate (`roll_auth::Approved`), as the audit log records it.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Approval {
-    /// `apr_…`
-    pub id: String,
-    /// Who approved it, in order (`operator`, a person's `usr_…`, a chat approver's `slack:U…`):
-    /// more than one when a policy asks for two people. Empty when it wasn't recorded.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub by: Vec<String>,
-    /// Unix ms: the remembered rule that allowed it lasts until then; absent when it was approved
-    /// for this request alone.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub until: Option<i64>,
-}
+/// An approval from roll-access's gate, as the audit log records it (roll-secrets-chain, so an
+/// export is verified with the same type).
+pub use roll_secrets_chain::Approval;
 
-impl From<&roll_auth::Approved> for Approval {
-    fn from(a: &roll_auth::Approved) -> Approval {
-        Approval { id: a.id.to_string(), by: a.by.iter().map(|b| b.to_string()).collect(), until: a.until }
-    }
+/// The audit log's record of roll-access's approval.
+pub(crate) fn approval(a: &roll_auth::Approved) -> Approval {
+    Approval { id: a.id.to_string(), by: a.by.iter().map(|b| b.to_string()).collect(), until: a.until }
 }
 
 /// roll previews' in-process consumer: the operator's equal for an environment's branches.

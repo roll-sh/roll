@@ -1240,6 +1240,8 @@ static ROWS: &[Row] = &[
     row("*", "/v1/secrets/projects/{project}/syncs", "secrets", ADMIN, one(&["project"], "project")).reveals(&["signing_secret"]),
     row("GET", "/v1/secrets/projects/{project}/syncs", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/syncs/", "secrets", ADMIN, one(&["project"], "project")),
+    // Checking the audit log's chain answers where it breaks, never what a row says.
+    row("GET", "/v1/secrets/projects/{project}/audit/verify", "secrets", R, one(&["project"], "project")),
     row("*", "/v1/secrets/projects/{project}/audit/sinks", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
     row("*", "/v1/secrets/projects/{project}/audit/sinks/", "secrets", ADMIN, one(&["project"], "project")),
     row("PUT", "/v1/secrets/projects/{project}/required", "secrets", ADMIN, one(&["project"], "project")),

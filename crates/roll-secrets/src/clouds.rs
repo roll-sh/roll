@@ -228,9 +228,10 @@ impl Secrets {
         Ok(crate::issuer::Issuer { url: c.issuer.clone() }.discovery())
     }
 
+    /// The issuer's public keys: they verify the audit log's digests too, so they're served
+    /// whether or not clouds are set up.
     pub fn oidc_jwks(&self) -> Result<Json> {
-        let c = self.clouds.as_ref().ok_or_else(|| Error::NotFound("roll's issuer isn't on this server".into()))?;
-        crate::issuer::Issuer { url: c.issuer.clone() }.jwks(&self.db)
+        crate::issuer::jwks(&self.db)
     }
 
     pub fn cloud_accounts(&self, project: &str, caller: &Caller) -> Result<Vec<CloudAccount>> {

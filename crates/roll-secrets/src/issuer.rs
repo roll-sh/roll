@@ -10,6 +10,8 @@
 //!   roll-secrets:<project>`, so a cloud's trust names one project and nobody else's.
 //! - The signing key is made once (RSA 2048), sealed with the deployment key, and shared by every
 //!   node through the database; a node that finds none makes one, and all published keys verify.
+//! - The same key signs the audit log's digests (roll-secrets-chain), so the JWKS is served even on a server
+//!   without a public URL for the issuer: it's what an export is verified with offline.
 
 use crate::crypto::Keyring;
 use crate::{Error, Result, Value, names};
@@ -91,6 +93,24 @@ fn signing_key(db: &Db, keys: &Keyring) -> Result<(String, zeroize::Zeroizing<Ve
     Ok((kid, zeroize::Zeroizing::new(der)))
 }
 
+/// The newest key, to sign the audit log's digests (roll-secrets-chain) with: (kid, key).
+pub(crate) fn signer(db: &Db, keys: &Keyring) -> Result<(String, ring::signature::RsaKeyPair)> {
+    let (kid, der) = signing_key(db, keys)?;
+    let pair = ring::signature::RsaKeyPair::from_pkcs8(&der).map_err(|e| Error::Internal(format!("the issuer's key: {e}")))?;
+    Ok((kid, pair))
+}
+
+/// Every key's public half by kid, to check digests with (nothing private is read).
+pub(crate) fn public_keys(db: &Db) -> Result<std::collections::HashMap<String, crate::chain::PublicKey>> {
+    Ok(crate::chain::PublicKey::from_jwks(&jwks(db)?).into_iter().collect())
+}
+
+/// Every key's public half, so a token or a digest from any node verifies.
+pub(crate) fn jwks(db: &Db) -> Result<Json> {
+    let rows: Vec<(String, String, String)> = db.read(|c| c.query("SELECT kid, n, e FROM oidc_keys ORDER BY created_at DESC, kid", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+    Ok(json!({ "keys": rows.into_iter().map(|(kid, n, e)| json!({ "kty": "RSA", "use": "sig", "alg": "RS256", "kid": kid, "n": n, "e": e })).collect::<Vec<_>>() }))
+}
+
 /// Reseal every signing key's data key with the current deployment key; how many still need the
 /// previous one (health's `resealed`).
 pub(crate) fn reseal(db: &Db, keys: &Keyring) -> Result<usize> {
@@ -133,11 +153,5 @@ impl Issuer {
             "id_token_signing_alg_values_supported": ["RS256"],
             "claims_supported": ["sub", "aud", "exp", "iat", "iss", "jti", "nbf", "project"],
         })
-    }
-
-    /// Every key's public half, so a token from any node verifies (nothing private is read).
-    pub(crate) fn jwks(&self, db: &Db) -> Result<Json> {
-        let rows: Vec<(String, String, String)> = db.read(|c| c.query("SELECT kid, n, e FROM oidc_keys ORDER BY created_at DESC, kid", (), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
-        Ok(json!({ "keys": rows.into_iter().map(|(kid, n, e)| json!({ "kty": "RSA", "use": "sig", "alg": "RS256", "kid": kid, "n": n, "e": e })).collect::<Vec<_>>() }))
     }
 }

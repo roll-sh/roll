@@ -23,6 +23,7 @@ regex.workspace = true
 ring.workspace = true
 roll-auth.workspace = true
 roll-oidc.workspace = true
+roll-secrets-chain.workspace = true
 roll-workspace.workspace = true
 rcgen = { workspace = true, features = ["x509-parser"] }
 rsa.workspace = true

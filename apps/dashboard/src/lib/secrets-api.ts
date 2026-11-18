@@ -7,7 +7,7 @@
  * revealed value for as long as it's shown and no longer.
  */
 
-import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, AwsUser, CloudAccount, NewCloudAccount, SignedCertificate, CaCertificate, Ca, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat } from "@roll/secrets/types";
+import type { Action, SecretType, Environment, NewEnvironment, Overview, Folder, Import, Link, Secret, SetSecret, Batch, Change, Written, Applied, ChangeDetail, Version, Problem, Values, Grid, Compare, RequestState, RequestValue, Insights, ChangeRequest, LinkTarget, Lease, Token, Export, Ensure, Ensured, Suggestion, Identity, NewIdentity, Required, KeyType, Share, NewShare, NewToken, AuditEntry, AuditFilter, AuditVerification, AuditFormat, Sink, Imported, ImportedAsRequest, ExportFormat, Sync, NewSync, SyncKind, Health, WhoAmI, Place, Rotator, AwsRole, Finding, ProjectFindings, SyncPreview, FileDiff, OutsideDatabase, AwsUser, CloudAccount, NewCloudAccount, SignedCertificate, CaCertificate, Ca, SshCa, HostCertificate, UserCertificate, TransitKey, TransitPublicKey, Rotation, FolderPolicy, Reach, GitHubApp, SinkFormat } from "@roll/secrets/types";
 import type { Grant } from "./access-api";
 import { withSession } from "./code-token";
 import { grantFor, tokenOf } from "./secrets-tokens";
@@ -209,6 +209,8 @@ export function secretsApi(project: string) {
     audit: (f: AuditFilter = {}) => req<AuditEntry[]>("GET", `${P}/audit${qs(f)}`),
     /** The audit log with these filters as a file (up to 10,000 rows): text, not JSON. */
     auditText: (f: AuditFilter, format: AuditFormat) => text(`${P}/audit${qs({ ...f, before: undefined, limit: undefined, format })}`),
+    /** Walks the audit log's hash chain and checks roll's signed digests (from the last before `since`). */
+    verifyAudit: (since?: number) => req<AuditVerification>("GET", `${P}/audit/verify${qs({ since })}`),
     sinks: () => req<Sink[]>("GET", `${P}/audit/sinks`),
     /** The `whsec_…` signing secret comes back once. */
     /** Postgres outside roll: registering one connects to it and checks both roles. */

@@ -8,7 +8,7 @@
 
 use crate::access::{Action, Caller, Scope};
 use crate::audit::AuditEntry;
-use crate::{Error, Result, Secrets, Value, audit, from_json, names};
+use crate::{Error, Result, Secrets, Value, audit, names};
 use code_sql::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
@@ -260,26 +260,7 @@ impl Secrets {
             if self.db.write(|c| c.execute("UPDATE audit_sinks SET running_until = ? WHERE id = ? AND running_until <= ? AND cursor = ?", params![hold, id, now, cursor]))? != 1 {
                 continue;
             }
-            let mut rows = self.db.read(|c| {
-                c.query(
-                    "SELECT id, at, actor, action, env, path, keys, summary, ip, approval FROM audit WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?",
-                    params![project, cursor, BATCH],
-                    |r| {
-                        Ok(AuditEntry {
-                            id: r.get(0)?,
-                            at: r.get(1)?,
-                            actor: r.get(2)?,
-                            action: r.get(3)?,
-                            environment: r.get(4)?,
-                            path: r.get(5)?,
-                            keys: from_json(&r.get::<_, String>(6)?),
-                            summary: r.get(7)?,
-                            ip: r.get(8)?,
-                            approval: r.get::<_, Option<String>>(9)?.and_then(|a| serde_json::from_str(&a).ok()),
-                        })
-                    },
-                )
-            })?;
+            let mut rows = self.db.read(|c| c.query(&format!("SELECT {} FROM audit WHERE project_id = ? AND id > ? ORDER BY id LIMIT ?", crate::audit::COLUMNS), params![project, cursor, BATCH], crate::audit::row))?;
             // Up to the first row that hasn't settled (by id, so nothing before it is skipped).
             if let Some(at) = rows.iter().position(|r| r.at > settled) {
                 rows.truncate(at);

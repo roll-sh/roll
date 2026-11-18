@@ -19,6 +19,8 @@ aes-gcm.workspace = true
 curve25519-dalek.workspace = true
 hkdf.workspace = true
 sha2.workspace = true
+# `roll secrets audit verify --file`: the audit chain's walk, without the server.
+roll-secrets-chain.workspace = true
 agent-host.workspace = true
 apps-build.workspace = true
 # `roll apps cp`: files to and from an instance as tar (Docker's `docker cp`).

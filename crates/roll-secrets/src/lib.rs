@@ -22,6 +22,7 @@ pub mod iam;
 pub mod rotators;
 mod strength;
 mod audit;
+pub use roll_secrets_chain as chain;
 pub mod backup;
 pub mod crypto;
 pub mod dotenv;
@@ -59,7 +60,8 @@ mod write;
 pub use access::{Action, Approval, Caller, Minted, People, Person, Scope, Workloads, PREVIEWS};
 pub use api::router;
 pub use crypto::{Keyring, Value};
-pub use audit::{AuditEntry, AuditFilter};
+pub use audit::{AuditEntry, AuditFilter, VerifyQuery};
+pub use chain::Verification;
 pub use envs::{Branch, EnvChange, Ensure, Ensured, Environment, Folder, Import, Kind as EnvironmentKind, NewEnvironment, Policy};
 pub use leaks::Leak;
 pub use links::{Link, LinkProvider, Links, Mode};
@@ -403,6 +405,11 @@ impl Secrets {
         db.ensure_schema("CREATE INDEX IF NOT EXISTS syncs_due ON syncs (retry_at) WHERE checked_at IS NULL;")?;
         db.add_column("leases", "path", "TEXT")?;
         db.add_column("audit", "approval", "TEXT")?;
+        // The audit log's hash chain and signed digests (roll-secrets-chain): rows before it have none.
+        db.add_column("audit", "seq", "INTEGER")?;
+        db.add_column("audit", "hash", "TEXT")?;
+        db.add_column("audit", "digest", "TEXT")?;
+        db.ensure_schema(audit::SCHEMA)?;
         // Workload identities (identities.rs); their logins' tokens are roll-access's.
         db.ensure_schema(identities::SCHEMA)?;
         // Secrets' own `rlst_` tokens are gone (roll-access's grants instead); never on main.

@@ -68,8 +68,9 @@ async fn gate(axum::extract::State(tokens): axum::extract::State<Tokens>, mut re
     next.run(req).await
 }
 
-#[tokio::test]
-async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_references() {
+/// The workspace (with the project `shop`) and secrets routers on a local port: the API's URL,
+/// secrets itself, the workspace, and the directory they keep their databases in.
+async fn serve() -> (String, Arc<roll_secrets::Secrets>, Arc<roll_workspace::Workspace>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let ws_db = code_sql::Db::open_or_test(&code_sql::Target::Sqlite(dir.path().join("workspace.db")), "workspace").unwrap();
     let ws = Arc::new(roll_workspace::Workspace::new(ws_db).unwrap());
@@ -94,13 +95,20 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
         workloads: None,
     };
     let secrets = Arc::new(roll_secrets::Secrets::new(db, ws.clone(), opts).unwrap());
+    let served = secrets.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
     let projects = ws.clone();
     let tokens = Tokens::default();
     let access = axum::Router::new().route("/v1/access/tokens", axum::routing::post(create_token)).with_state(tokens.clone());
-    let router = roll_workspace::router(ws).merge(roll_secrets::router(secrets)).merge(access).layer(axum::middleware::from_fn_with_state(tokens, gate));
+    let router = roll_workspace::router(ws).merge(roll_secrets::router(served)).merge(access).layer(axum::middleware::from_fn_with_state(tokens, gate));
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (api, secrets, projects, dir)
+}
+
+#[tokio::test]
+async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_references() {
+    let (api, _secrets, projects, dir) = serve().await;
 
     let at = ["secrets", "-p", "shop", "-e", "production"];
     ok(&api, &[], &[&at[..], &["set", "HOST=db.internal", "PORT=5432"]].concat(), None).await;
@@ -243,4 +251,27 @@ async fn roll_run_injects_an_environments_secrets_and_refuses_unresolved_referen
     ok(&api, &[], &["secrets", "-p", "copy", "restore", file, "--key", key], None).await;
     let restored = ok(&api, &[], &["run", "-p", "copy", "-e", "production", "--allow-unresolved", "--no-mask", "--", "sh", "-c", "echo $HOST $PASSWORD"], None).await;
     assert_eq!(restored.trim(), "db.internal s3cret");
+}
+
+#[tokio::test]
+async fn an_exported_audit_log_verifies_offline_with_rolls_public_keys_and_an_edit_fails_it() {
+    let (api, secrets, _, _dir) = serve().await;
+    let at = ["secrets", "-p", "shop", "-e", "production"];
+    ok(&api, &[], &[&at[..], &["set", "HOST=db.internal", "PORT=5432"]].concat(), None).await;
+    let s = secrets.clone();
+    tokio::task::spawn_blocking(move || s.sweep_audit_chain(i64::MAX / 2).unwrap()).await.unwrap();
+    ok(&api, &[], &[&at[..], &["set", "PORT=6543"]].concat(), None).await;
+    let export = ok(&api, &[], &["secrets", "-p", "shop", "audit", "--format", "jsonl", "--limit", "10000"], None).await;
+    let files = tempfile::tempdir().unwrap();
+    let (log, keys) = (files.path().join("audit.jsonl"), files.path().join("jwks.json"));
+    std::fs::write(&keys, secrets.oidc_jwks().unwrap().to_string()).unwrap();
+    std::fs::write(&log, &export).unwrap();
+    // Nothing but the file and the keys: the API isn't there.
+    let offline = "http://127.0.0.1:9";
+    let verify = ["secrets", "audit", "verify", "--file", log.to_str().unwrap(), "--jwks", keys.to_str().unwrap()];
+    let out = ok(offline, &[], &verify, None).await;
+    assert!(out.contains("signed through #"), "{out}");
+    std::fs::write(&log, export.replacen("\"summary\":\"", "\"summary\":\"not ", 1)).unwrap();
+    let o = roll(offline, &[], &verify, None).await;
+    assert!(o.code != Some(0) && o.stderr.contains("edited"), "{}{}", o.stdout, o.stderr);
 }

@@ -439,8 +439,11 @@ pub enum Secrets {
         #[arg(long)]
         revoke: Option<String>,
     },
-    /// Who read and changed what (never values).
+    /// Who read and changed what (never values). `audit verify` checks it wasn't tampered with.
+    #[command(args_conflicts_with_subcommands = true)]
     Audit {
+        #[command(subcommand)]
+        cmd: Option<AuditCmd>,
         #[arg(long)]
         key: Option<String>,
         #[arg(long)]
@@ -450,6 +453,24 @@ pub enum Secrets {
         /// Export instead: `csv` or `jsonl` (up to 10,000 rows).
         #[arg(long)]
         format: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuditCmd {
+    /// Walk the audit log's hash chain and check roll's signed digests: where it breaks, if it
+    /// does (an edited row, a gap, rows cut from either end).
+    Verify {
+        /// Only from the last digest before this time (RFC 3339 or a date).
+        #[arg(long)]
+        since: Option<String>,
+        /// Check an export (`audit --format jsonl`) on this machine instead, with nothing but
+        /// roll's public keys.
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        /// roll's public keys as saved from `/v1/secrets/oidc/jwks` (default: fetched now).
+        #[arg(long, requires = "file")]
+        jwks: Option<std::path::PathBuf>,
     },
 }
 
@@ -1205,6 +1226,10 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             println!("{:<20} {:<14} {:<16} {:<28} v{:<4} {}{}", s(&p["project_name"]), s(&p["environment"]), s(&p["path"]), s(&p["key"]), p["version"], ago(p["updated_at"].as_i64().unwrap_or(0)), if p["linked"] == true { "  linked" } else { "" });
         }
         return Ok(());
+    }
+    // An export is checked on this machine: the digests name their project.
+    if let Secrets::Audit { cmd: Some(AuditCmd::Verify { file: Some(file), jwks, .. }), .. } = &cmd {
+        return verify_audit_file(api, file, jwks.as_deref(), json_out).await;
     }
     // A key pair is this machine's, not a project's.
     if let Secrets::Keygen { out } = &cmd {
@@ -2500,7 +2525,15 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 println!("{}  {:<8} {:<12} {:<24} {}  {state}", s(&l["id"]), s(&l["kind"]), s(&l["environment"]), s(&l["key"]), s(&l["consumer"]));
             }
         }
-        Secrets::Audit { key, actor, limit, format: Some(f) } => {
+        Secrets::Audit { cmd: Some(AuditCmd::Verify { since, .. }), .. } => {
+            let q = since.as_deref().map(parse_time).transpose()?.map(|t| format!("?since={t}")).unwrap_or_default();
+            let v = c.call(Method::GET, &format!("{}/audit/verify{q}", c.base()), None).await?;
+            if json_out {
+                print(&v)?;
+            }
+            report_verification(&v, json_out)?;
+        }
+        Secrets::Audit { cmd: None, key, actor, limit, format: Some(f) } => {
             let mut q = format!("limit={limit}&format={}", enc(&f));
             if let Some(k) = &key {
                 q.push_str(&format!("&key={}", enc(k)));
@@ -2510,7 +2543,7 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
             }
             print!("{}", text_of(c.api, &format!("{}/audit?{q}", c.base())).await?);
         }
-        Secrets::Audit { key, actor, limit, format: None } => {
+        Secrets::Audit { cmd: None, key, actor, limit, format: None } => {
             let mut q = format!("limit={limit}");
             if let Some(k) = &key {
                 q.push_str(&format!("&key={}", enc(k)));
@@ -2532,6 +2565,68 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
 
 fn s(v: &Value) -> String {
     crate::s(v)
+}
+
+/// Unix ms of a time given as RFC 3339 or a date (UTC midnight).
+fn parse_time(t: &str) -> anyhow::Result<i64> {
+    if let Ok(at) = chrono::DateTime::parse_from_rfc3339(t) {
+        return Ok(at.timestamp_millis());
+    }
+    let day = chrono::NaiveDate::parse_from_str(t, "%Y-%m-%d").with_context(|| format!("{t} isn't a time (2026-11-01 or 2026-11-01T09:00:00Z)"))?;
+    Ok(day.and_hms_opt(0, 0, 0).expect("midnight").and_utc().timestamp_millis())
+}
+
+/// `audit verify --file`: an export's chain and digests, checked here against roll's public keys.
+async fn verify_audit_file(api: &Api, file: &std::path::Path, jwks: Option<&std::path::Path>, json_out: bool) -> anyhow::Result<()> {
+    use roll_secrets_chain::{PublicKey, Walk};
+    let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let mut rows = text.lines().filter(|l| !l.trim().is_empty()).map(serde_json::from_str::<roll_secrets_chain::AuditEntry>).collect::<Result<Vec<_>, _>>().context("that isn't a JSONL export of the audit log (audit --format jsonl)")?;
+    rows.sort_by_key(|r| r.seq);
+    let jwks: Value = match jwks {
+        Some(p) => serde_json::from_str(&std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?).context("that isn't a JWKS")?,
+        None => api.get("/v1/secrets/oidc/jwks").await?,
+    };
+    let keys: std::collections::HashMap<String, PublicKey> = PublicKey::from_jwks(&jwks).into_iter().collect();
+    let opened = |jws: &str| roll_secrets_chain::kid(jws).and_then(|k| keys.get(&k)).and_then(|k| roll_secrets_chain::open(jws, k));
+    let Some(project) = rows.iter().filter_map(|r| r.digest.as_deref()).find_map(opened).map(|d| d.project) else {
+        bail!("no digest in the file is signed by roll's keys: there's nothing to start from");
+    };
+    let mut walk = Walk::new(&project, false);
+    for r in &rows {
+        if !walk.push(r, &mut |k| keys.get(k).cloned()) {
+            break;
+        }
+    }
+    let skipped = walk.skipped;
+    let v = walk.finish();
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    } else if skipped > 0 {
+        println!("{skipped} rows before the first digest in the file weren't checked");
+    }
+    report_verification(&serde_json::to_value(&v)?, json_out)
+}
+
+/// A verification's answer, as a line; an error (a failed exit) when the log is broken.
+fn report_verification(v: &Value, json_out: bool) -> anyhow::Result<()> {
+    if !json_out {
+        let (from, head) = (v["from"].as_i64(), v["head"].as_i64());
+        match (from, head) {
+            (Some(from), Some(head)) => println!("#{from}–#{head}: {} rows, {} signed digests", v["rows"], v["digests"]),
+            _ => println!("nothing chained yet"),
+        }
+        if let Some(through) = v["through"].as_i64() {
+            println!("signed through #{through} ({})", ago(v["signed_at"].as_i64().unwrap_or(0)));
+        }
+        if v["unchained"].as_i64().unwrap_or(0) > 0 {
+            println!("{} rows from before the chain began have no hash (unchained before #{})", v["unchained"], from.unwrap_or(1));
+        }
+    }
+    if v["ok"] != true {
+        let b = &v["broken"];
+        bail!("the audit log is broken ({}): {}", s(&b["reason"]), s(&b["detail"]));
+    }
+    Ok(())
 }
 
 /// How long ago a time in unix milliseconds was.

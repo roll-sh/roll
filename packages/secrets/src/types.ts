@@ -225,7 +225,12 @@ export type Identity = {
 export type NewIdentity = { name: string; issuer: string; audience: string; subject: string; claims?: Record<string, string>; environments?: string[]; paths?: string[]; actions: Action[]; ttl_minutes?: number; allowed_ips?: string[]; jwks?: string };
 export type NewToken = { name: string; environments?: string[]; paths?: string[]; actions: Action[]; expires_at?: number; ttl_days?: number; allowed_ips?: string[] };
 /** `approval`: the approval that let the request through roll-access's gate (an `ask` approved; `until` when a rule it remembered allowed it). */
-export type AuditEntry = { id: number; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval };
+/** `seq` and `hash` place a row in its project's chain (absent on rows from before it); an `audit.digest` row's `digest` is roll's signed JWS of it. */
+export type AuditEntry = { id: number; seq?: number; hash?: string; at: number; actor: string; action: string; environment: string | null; path: string | null; keys: string[]; summary: string; ip: string | null; approval?: Approval; digest?: string };
+/** Where the chain breaks: `edited`, `missing`, `rewritten`, `signature`, `truncated`, `cut` or `unchained`. */
+export type AuditBreak = { seq?: number; reason: string; detail: string };
+/** `GET …/audit/verify`: rows `from`–`head` walked, signed by a digest `through` a row. */
+export type AuditVerification = { ok: boolean; from: number | null; through: number | null; signed_at: number | null; head: number | null; rows: number; digests: number; unchained: number; broken: AuditBreak | null };
 /** `by`: who approved it, in order (more than one when a policy asks for two people). */
 export type Approval = { id: string; by?: string[]; until?: number };
 /** `since`: rows at or after this time (ms); `before`: rows older than this id. */

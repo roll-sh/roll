@@ -1372,7 +1372,9 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     let sent = api.sent.0.lock().unwrap().clone();
     assert_eq!(sent.len(), 1, "one batch, not delivered twice");
     let actions: Vec<&str> = sent[0]["events"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
-    assert_eq!(actions, ["sink.create", "secrets.write", "secrets.export"]);
+    // The sweep's signed digest of the log goes out as its own event.
+    assert_eq!(actions, ["sink.create", "secrets.write", "secrets.export", "audit.digest"]);
+    assert!(sent[0]["events"][3]["digest"].as_str().is_some_and(|d| d.split('.').count() == 3));
     assert!(!serde_json::to_string(&sent).unwrap().contains("sk_live_never_sent"));
     // A SIEM's own format with its token, sealed: never shown again, sent only with the batch.
     assert_eq!(api.call(Method::POST, "/audit/sinks", Some(json!({ "url": "https://splunk.example:8088/services/collector/event", "format": "splunk" }))).await.0, StatusCode::BAD_REQUEST, "a token is needed");
@@ -1422,6 +1424,44 @@ async fn the_audit_log_exports_and_streams_to_a_sink_without_values() {
     let (_, csv) = api.call(Method::GET, "/audit?format=csv", None).await;
     let csv = csv.as_str().unwrap();
     assert!(csv.starts_with("id,at,actor,action,") && csv.contains("\"secrets.export\"") && !csv.contains("sk_live"));
+}
+
+#[tokio::test]
+async fn the_audit_log_is_a_signed_chain_that_shows_an_edit_and_a_deletion_and_starts_again_at_retentions_anchor() {
+    let api = Api::new().await;
+    for k in ["A", "B", "C", "D"] {
+        api.set("production", k, "v").await;
+    }
+    api.values("production", "/").await;
+    let sweep = |keep_ms: i64| {
+        let s = api.secrets.clone();
+        async move { tokio::task::spawn_blocking(move || s.sweep_audit_chain(keep_ms).unwrap()).await.unwrap() }
+    };
+    assert_eq!(sweep(i64::MAX / 2).await, 1, "a digest of the chain so far");
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["from"].as_i64(), v["through"].as_i64(), v["head"].as_i64()), (Some(true), Some(1), Some(5), Some(6)), "{v}");
+
+    // A row edited in the database, and put back.
+    let p = api.project.clone();
+    let summary = |c: &code_sql::Conn<'_>| c.query_row("SELECT summary FROM audit WHERE project_id = ? AND seq = 3", [p.as_str()], |r| r.get::<_, String>(0));
+    let original = api.db.read(summary).unwrap();
+    let edit = |to: &str| api.db.write(|c| c.execute("UPDATE audit SET summary = ? WHERE project_id = ? AND seq = 3", [to, p.as_str()])).unwrap();
+    edit("nothing happened");
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["broken"]["seq"].as_i64(), v["broken"]["reason"].as_str()), (Some(false), Some(3), Some("edited")), "{v}");
+    edit(&original);
+    assert_eq!(api.ok(Method::GET, "/audit/verify", None).await["ok"], true);
+    // A row deleted: a gap.
+    api.db.write(|c| c.execute("DELETE FROM audit WHERE project_id = ? AND seq = 4", [p.as_str()])).unwrap();
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["broken"]["seq"].as_i64(), v["broken"]["reason"].as_str()), (Some(4), Some("missing")), "{v}");
+
+    // Retention cuts at the digest, which the log then starts from; the cut's own digest says so.
+    api.set("production", "E", "v").await;
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    assert_eq!(sweep(0).await, 1);
+    let v = api.ok(Method::GET, "/audit/verify", None).await;
+    assert_eq!((v["ok"].as_bool(), v["from"].as_i64(), v["through"].as_i64(), v["digests"].as_i64()), (Some(true), Some(6), Some(7), Some(2)), "{v}");
 }
 
 #[tokio::test]

@@ -485,8 +485,10 @@ impl Secrets {
         self.sweep_retention()?;
         self.sweep_reminders()?;
         self.sweep_alerts()?;
-        let cutoff = now - crate::audit::RETENTION_DAYS * 86_400_000;
-        self.db.write(|c| c.execute("DELETE FROM audit WHERE at < ?", [cutoff]))?;
+        // Digests of the audit log, and its retention (at a digest: audit.rs).
+        if let Err(e) = self.sweep_audit_chain(crate::audit::RETENTION_DAYS * 86_400_000) {
+            tracing::warn!("signing the audit log's digests failed: {e}");
+        }
         Ok(out)
     }
 
