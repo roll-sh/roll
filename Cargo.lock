@@ -6893,6 +6893,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "crc32fast",
  "flate2",
  "getrandom 0.4.3",
  "qrcode",
@@ -7066,6 +7067,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower",
+ "tracing",
  "url",
 ]
 

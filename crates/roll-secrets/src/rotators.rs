@@ -54,6 +54,23 @@ pub struct NewRotator {
     pub url: String,
 }
 
+/// A rotator's changes (`PATCH …/rotators/{id}`): what's absent stays.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RotatorChange {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+fn check_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
+        return Err(Error::BadRequest("a rotator's name is letters, digits, - and _ (64 at most)".into()));
+    }
+    Ok(())
+}
+
 fn aad(project: &str, id: &str, what: &str) -> String {
     format!("roll-secrets:rotator:{project}:{id}:{what}")
 }
@@ -147,9 +164,7 @@ impl Secrets {
     pub fn add_rotator(&self, project: &str, n: NewRotator, caller: &Caller) -> Result<(Rotator, String)> {
         caller.need(Action::Admin, &Scope::project(project))?;
         let deliver = self.deliver.as_ref().ok_or_else(|| Error::BadRequest("rotators aren't on this server".into()))?;
-        if n.name.is_empty() || n.name.len() > 64 || !n.name.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
-            return Err(Error::BadRequest("a rotator's name is letters, digits, - and _ (64 at most)".into()));
-        }
+        check_name(&n.name)?;
         deliver.check(&n.url)?;
         let dek = self.project(project)?;
         let id = names::new_id("rot", 16);
@@ -167,6 +182,78 @@ impl Secrets {
                 params![id, project, r.name, r.host, url, sealed, now, r.created_by],
             )?;
             audit::record(c, project, caller, "rotator.add", None, None, &[], &format!("added rotator {} ({})", r.name, r.host), now)
+        })?;
+        Ok((r, secret))
+    }
+
+    fn rotator(&self, project: &str, id: &str) -> Result<Rotator> {
+        self.db
+            .read(|c| c.query_row("SELECT id, name, host, created_at, created_by FROM rotators WHERE project_id = ? AND id = ?", [project, id], |r| Ok(Rotator { id: r.get(0)?, name: r.get(1)?, host: r.get(2)?, created_at: r.get(3)?, created_by: r.get(4)? })).optional())?
+            .ok_or_else(|| Error::NotFound(format!("no rotator {id}")))
+    }
+
+    /// Change a rotator in place (its name, or a URL checked as adding one checks it); links,
+    /// their values and retired credentials carry on.
+    pub fn update_rotator(&self, project: &str, id: &str, ch: RotatorChange, caller: &Caller) -> Result<Rotator> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        let deliver = self.deliver.as_ref().ok_or_else(|| Error::BadRequest("rotators aren't on this server".into()))?;
+        let dek = self.project(project)?;
+        let r = self.rotator(project, id)?;
+        if let Some(n) = &ch.name {
+            check_name(n)?;
+        }
+        let url = match ch.url.as_deref().map(str::trim) {
+            Some(u) => {
+                deliver.check(u)?;
+                Some((names::url_host(u), dek.seal(&aad(project, id, "url"), &Value::new(u.to_string()))))
+            }
+            None => None,
+        };
+        let now = self.db.now_ms()?;
+        let mut changed: Vec<&str> = vec![];
+        self.db.write(|c| {
+            changed.clear();
+            if let Some(n) = ch.name.as_ref().filter(|n| **n != r.name) {
+                if c.query_row("SELECT 1 FROM rotators WHERE project_id = ? AND name = ?", [project, n.as_str()], |_| Ok(())).optional()?.is_some() {
+                    return Err(Error::Conflict("exists", format!("a rotator named {n} exists")));
+                }
+                c.execute("UPDATE rotators SET name = ? WHERE id = ?", [n.as_str(), id])?;
+                changed.push("name");
+            }
+            if let Some((host, sealed)) = &url {
+                // A retired credential in its grace is revoked through the rotator that issued it:
+                // a new endpoint would get handles that aren't its own (and might answer 200).
+                let waiting: i64 = c.query_row(
+                    "SELECT COUNT(*) FROM leases WHERE project_id = ? AND revoked_at IS NULL AND link LIKE ? AND link LIKE ?",
+                    params![project, format!("%\"kind\":\"{KIND}\"%"), format!("%\"ref\":\"{id}\"%")],
+                    |r| r.get(0),
+                )?;
+                if waiting > 0 {
+                    return Err(Error::Conflict("in_use", format!("{} has {waiting} retired credential(s) still to revoke through its endpoint: move it once they're revoked", r.name)));
+                }
+                c.execute("UPDATE rotators SET url = ?, host = ? WHERE id = ?", params![sealed, host, id])?;
+                changed.push("URL");
+            }
+            if !changed.is_empty() {
+                audit::record(c, project, caller, "rotator.update", None, None, &[], &format!("changed rotator {}'s {}", r.name, changed.join(", ")), now)?;
+            }
+            Ok(())
+        })?;
+        self.rotator(project, id)
+    }
+
+    /// A new signing secret for a rotator, shown once; it signs every call from now on (a call
+    /// your endpoint refuses before it has the new one fails, changes nothing, and is retried).
+    pub fn rotate_rotator_secret(&self, project: &str, id: &str, caller: &Caller) -> Result<(Rotator, String)> {
+        caller.need(Action::Admin, &Scope::project(project))?;
+        let dek = self.project(project)?;
+        let r = self.rotator(project, id)?;
+        let secret = names::new_id("whsec", 32);
+        let sealed = dek.seal(&aad(project, id, "secret"), &Value::new(secret.clone()));
+        let now = self.db.now_ms()?;
+        self.db.write(|c| {
+            c.execute("UPDATE rotators SET secret = ? WHERE id = ?", params![sealed, id])?;
+            audit::record(c, project, caller, "rotator.rotate_secret", None, None, &[], &format!("rotated rotator {}'s signing secret", r.name), now)
         })?;
         Ok((r, secret))
     }

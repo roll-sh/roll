@@ -33,6 +33,7 @@
 //! whatever the route and whether or not the operator's token is set, so a token's limits hold
 //! everywhere. It sends allowed requests on with [`Operator`] and a [`Grant`] in their extensions.
 
+pub mod credentials;
 pub mod scope;
 pub mod totp;
 
@@ -251,6 +252,12 @@ pub trait Sessions: Send + Sync + 'static {
     /// disabled or gone. Never cached.
     fn person<'a>(&'a self, user: &'a str) -> BoxFuture<'a, Result<Option<SignedIn>, String>> {
         let _ = user;
+        Box::pin(async { Ok(None) })
+    }
+    /// The person whose account has this email, as they are now (`None`: no such account, or
+    /// disabled): an enterprise identity assertion names a person by email. Never cached.
+    fn person_by_email<'a>(&'a self, email: &'a str) -> BoxFuture<'a, Result<Option<SignedIn>, String>> {
+        let _ = email;
         Box::pin(async { Ok(None) })
     }
     /// [`Sessions::person`] for callers off the request path (a product's background work checking

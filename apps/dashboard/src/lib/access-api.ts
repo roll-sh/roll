@@ -174,8 +174,43 @@ export function approvalWhere(a: Pick<Approval, "environment" | "scope_path">): 
   return [a.environment, a.scope_path && a.scope_path !== "/" ? `folder ${a.scope_path}` : null].filter(Boolean).join(" · ");
 }
 
-/** Whether an approval is about one resource, so approving it can be remembered. */
-export const rememberable = (a: Pick<Approval, "resource">) => Boolean(a.resource && !a.resource.startsWith("new in "));
+/** Whether approving it can be remembered: it's about one resource, and roll's policy doesn't ask several people for it. */
+export const rememberable = (a: Pick<Approval, "resource" | "gates"> & { method?: string; args?: unknown }) => Boolean(a.resource && !a.resource.startsWith("new in ")) && !a.gates?.length && !accessRequest(a);
+
+/** An access request (a token asking for one more rule for a while): how long and why, or null for a request waiting to run. */
+export function accessRequest(a: { method?: string; args?: unknown }): { for: string; reason: string } | null {
+  if (a.method !== "GRANT") return null;
+  const args = (a.args ?? {}) as { for?: unknown; reason?: unknown };
+  return { for: String(args.for ?? ""), reason: String(args.reason ?? "") };
+}
+
+const FOR_LABEL: Record<string, string> = { "15m": "15 minutes", "1h": "an hour", "8h": "8 hours", "1d": "a day" };
+export const forLabel = (f: string) => FOR_LABEL[f] ?? f;
+
+/** The name an approval records for whoever is looking (`operator`, or a person's `usr_…`). */
+export function deciderName(me: Me | null): string | null {
+  if (!me) return null;
+  if (me.kind === "operator") return me.user?.id ?? "operator";
+  return me.kind === "user" ? me.user.id : null;
+}
+
+/** One rule of roll's policy a pending approval must pass: so many approvals from whom, so many so far. */
+export interface Gate {
+  approvals: number;
+  approvers?: string[];
+  approved: number;
+}
+
+/** What a pending approval still needs under roll's policy ("approved by usr_bob · 1 more needed"), or null. */
+export function gateProgress(a: Pick<Approval, "gates" | "approved_by">): string | null {
+  const gates = a.gates ?? [];
+  if (!gates.length) return null;
+  const more = gates.reduce((n, g) => n + Math.max(0, g.approvals - g.approved), 0);
+  const from = [...new Set(gates.flatMap((g) => g.approvers ?? []))];
+  const by = a.approved_by?.length ? `approved by ${a.approved_by.join(", ")} · ` : "";
+  const needs = more === 1 ? "1 more approval needed" : `${more} more approvals needed`;
+  return `${by}${needs}${from.length ? ` (from ${from.join(", ")})` : ""}`;
+}
 
 export type ApprovalState = "pending" | "approved" | "denied" | "expired" | "used";
 
@@ -199,6 +234,10 @@ export interface Approval {
   decided_at: number | null;
   decided_by: string | null;
   expires_at: number;
+  /** Who approved it so far, in order (several when roll's policy asks for more than one). */
+  approved_by?: string[];
+  /** While pending: what roll's policy asks of it. */
+  gates?: Gate[];
   /** The environment and path the request is about (what remembering it keeps to). */
   environment?: string | null;
   scope_path?: string | null;
@@ -269,7 +308,8 @@ export interface Catalog {
 }
 
 export type Me =
-  | { kind: "operator"; locked: boolean }
+  /** The operator's token, or a signed-in admin (`user`), who acts as the operator. */
+  | { kind: "operator"; user?: { id: string; handle: string }; locked: boolean }
   | { kind: "token" | "oauth"; grant: Grant; locked: boolean }
   /** A signed-in user who isn't an admin: their tokens act as them and reach only `reach`. */
   | { kind: "user"; user: { id: string; handle: string }; reach: string[]; approve_people?: Action[]; locked: boolean };
@@ -301,6 +341,27 @@ export interface Policy {
   max_idle_days?: number | null;
   /** A person's token reaching any of these waits for an admin's approval (GitHub's organizations' rule). */
   approve_people?: Action[];
+  /** What needs more than one approver, and whose (each rule covering a request is a gate). */
+  approval_rules?: ApprovalRule[];
+}
+
+/** A rule of the policy: requests it covers need `approvals` approvals from `approvers` (anyone who may decide when left out), never from the token's own person. */
+export interface ApprovalRule {
+  /** A product, or "*". */
+  product: string;
+  /** Every action when left out. */
+  actions?: Action[];
+  /** Every environment when left out (pv-* covers pv-42). */
+  environments?: string[];
+  approvals: number;
+  approvers?: string[];
+}
+
+/** "Postgres · delete · production: 2 approvals (from usr_a, usr_b)". */
+export function describeApprovalRule(r: ApprovalRule): string {
+  const what = [productName(r.product), r.actions?.length ? r.actions.join(", ") : "anything", r.environments?.join(", ")].filter(Boolean).join(" · ");
+  const n = r.approvals === 1 ? "1 approval" : `${r.approvals} approvals`;
+  return `${what}: ${n}${r.approvers?.length ? ` from ${r.approvers.join(", ")}` : ""}`;
 }
 
 /** The actions an admin may require approval for in people's tokens, strongest first. */
@@ -379,7 +440,24 @@ export interface ChatTarget {
   install: string;
   channel: string;
   approvers: string[];
+  /** An approver's roll account: they decide as that person (they count toward the policy's approval rules). */
+  people?: Record<string, string>;
 }
+
+/** Approvers as typed (`U0123=usr_ana, U0456`): the chat ids, and the accounts some are linked to. */
+export function parseApprovers(text: string): { approvers: string[]; people: Record<string, string> } {
+  const approvers: string[] = [];
+  const people: Record<string, string> = {};
+  for (const raw of text.split(/[\s,]+/).map((s) => s.trim().replace(/^@/, "")).filter(Boolean)) {
+    const [id, user] = raw.split("=");
+    if (!approvers.includes(id)) approvers.push(id);
+    if (user) people[id] = user;
+  }
+  return { approvers, people };
+}
+
+/** The approvers as the form shows them (`U0123=usr_ana`). */
+export const approversText = (c: Pick<ChatTarget, "approvers" | "people">) => c.approvers.map((a) => (c.people?.[a] ? `${a}=${c.people[a]}` : a)).join(", ");
 
 /**
  * A machine client (docs/permissions.md, "Machine clients"): automation with no person that trades
@@ -489,6 +567,75 @@ export function publicJwk(text: string): { jwk: Record<string, string> } | { pro
   return { problem: "An Ed25519 or P-256 PEM public key (for RSA, paste its JWK)" };
 }
 
+/**
+ * An identity provider roll trusts to vouch for its people (docs/permissions.md, "Enterprise
+ * identity providers"): an app trades the provider's ID-JAG for a token acting as the person.
+ */
+export interface EnterpriseIdp {
+  issuer: string;
+  /** Its keys pinned (a JWKS document), for a provider roll can't reach. */
+  jwks?: string;
+  /** `email` (verified, in one of `domains`) or `aud_sub` (the assertion names the `usr_…`). */
+  matching?: "email" | "aud_sub";
+  domains?: string[];
+  /** Whether it may sign in roll's admins. */
+  admins?: boolean;
+  name?: string;
+  /** A multi-tenant issuer's one tenant roll trusts (its assertions' `tenant`). */
+  tenant?: string;
+}
+
+/** An app a trusted provider may vouch for: never its secret. */
+export interface EnterpriseApp {
+  client_id: string;
+  name: string;
+  rules: Rule[];
+  signs_with_key: boolean;
+  /** Until when the secret before a rotation still works (Unix ms). */
+  old_until?: number | null;
+  /** Where its secret was found leaked: roll dropped it, and it signs in again once rotated. */
+  leaked?: string | null;
+  created_at: number;
+}
+
+export interface Enterprise {
+  idps: EnterpriseIdp[];
+  apps: EnterpriseApp[];
+  /** What a provider puts in an assertion's `aud`: roll's API URL. */
+  audience: string;
+  token_endpoint: string;
+}
+
+/** The trust-a-provider form as a provider, or what's wrong with it (the API checks it again). */
+export function idpFromForm(f: { issuer: string; name: string; matching: "email" | "aud_sub"; domains: string; jwks: string; admins: boolean; tenant?: string }): { idp: EnterpriseIdp } | { problem: string } {
+  const issuer = f.issuer.trim();
+  if (!/^https:\/\/[^\s/]+/.test(issuer)) return { problem: "The issuer is an https URL" };
+  const domains = [...new Set(f.domains.split(/[\s,]+/).map((d) => d.trim().toLowerCase().replace(/^@/, "")).filter(Boolean))];
+  const bad = domains.find((d) => !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d));
+  if (bad) return { problem: `${bad} isn't a domain` };
+  if (f.matching === "email" && domains.length === 0) return { problem: "Name the email domains it vouches for" };
+  const jwks = f.jwks.trim();
+  if (jwks) {
+    try {
+      const doc = JSON.parse(jwks);
+      if (!Array.isArray(doc?.keys)) return { problem: "Pinned keys are a JWKS document ({\"keys\": [...]})" };
+    } catch {
+      return { problem: "The pinned keys aren't valid JSON" };
+    }
+  }
+  return {
+    idp: {
+      issuer,
+      matching: f.matching,
+      ...(domains.length ? { domains } : {}),
+      ...(jwks ? { jwks } : {}),
+      ...(f.admins ? { admins: true } : {}),
+      ...(f.name.trim() ? { name: f.name.trim() } : {}),
+      ...(f.tenant?.trim() ? { tenant: f.tenant.trim() } : {}),
+    },
+  };
+}
+
 export const accessApi = {
   me: () => call<Me>("GET", "/v1/access"),
   /** The operator's machine clients, newest first (a 403 for anyone else). */
@@ -497,6 +644,20 @@ export const accessApi = {
   /** A new key (or, without one, a new secret, in the answer this once), keeping the id. */
   rotateMachineClient: (id: string, r: { public_jwk?: Record<string, string> | null; oidc?: TrustedIdentity | null; keep_old_for_s?: number }) =>
     call<{ grant: Grant; client_secret?: string }>("POST", `/v1/access/clients/${encodeURIComponent(id)}/rotate`, r),
+  /** The operator's enterprise identity providers and apps (a 403 for anyone else). */
+  enterprise: () => call<Enterprise>("GET", "/v1/access/enterprise"),
+  /** Every trusted provider at once: the list replaces the old one. */
+  setIdps: (idps: EnterpriseIdp[]) => call<{ idps: EnterpriseIdp[] }>("PUT", "/v1/access/enterprise/idps", { idps }),
+  /** A new app: with no key, its secret is in the answer this once. */
+  addEnterpriseApp: (a: { name: string; rules: Rule[]; public_jwk?: Record<string, string> | null }) =>
+    call<EnterpriseApp & { client_secret?: string }>("POST", "/v1/access/enterprise/apps", a),
+  /** A new name or rules: its people's connections take the rules at once. */
+  updateEnterpriseApp: (id: string, c: { name?: string; rules?: Rule[] }) => call<EnterpriseApp>("PATCH", `/v1/access/enterprise/apps/${encodeURIComponent(id)}`, c),
+  /** A new key, or a new secret in the answer this once; the old secret kept a while or stopped now. */
+  rotateEnterpriseApp: (id: string, r: { public_jwk?: Record<string, string> | null; keep_old_for_s?: number }) =>
+    call<EnterpriseApp & { client_secret?: string }>("POST", `/v1/access/enterprise/apps/${encodeURIComponent(id)}/rotate`, r),
+  /** Removes an app and revokes every person's connection to it. */
+  removeEnterpriseApp: (id: string) => call<{ revoked: number }>("DELETE", `/v1/access/enterprise/apps/${encodeURIComponent(id)}`),
   catalog: () => call<Catalog>("GET", "/v1/access/catalog"),
   tokens: () => call<Grant[]>("GET", "/v1/access/tokens"),
   /** The latest workload tokens (they're not in `tokens`). */
@@ -635,6 +796,9 @@ const PRODUCT_NAMES: Record<string, string> = {
 };
 
 export const productName = (p: string) => PRODUCT_NAMES[p] ?? p;
+
+/** Every product a rule can name ("*" first). */
+export const PRODUCTS = Object.keys(PRODUCT_NAMES);
 
 export const ACTION_HELP: Record<Action, string> = {
   read: "See metadata and data",
