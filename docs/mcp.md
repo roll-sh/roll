@@ -829,17 +829,16 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Accounts as GitHub has them, built 2026-11-18 and stacked for the next turn:** passkeys
-   (#256: on their own or as the second factor; a bounded CBOR reader, `ring`), sudo mode (#257: a
-   proof in the last two hours before changing how an account is reached; a Confirm it's you
-   dialog) and mail on a sign-in from somewhere new (#258), on #254 (refused codes in the security
-   log). Next on it (now): roll-access's token creation from a person's session behind sudo mode
-   too (a stolen cookie minting a long-lived token is GitHub's reason for sudo), through a
-   `Sessions` hook rather than a second check; then a review screenshot pass of all three.
-2. **Accounts, after that:** account recovery an admin can see (a person locked out of their
-   second factor asks, an admin approves after checking, both in the audit log); WebAuthn
-   attestation for companies that require hardware keys (an allowlist of AAGUIDs, off by
-   default).
+1. **Accounts as GitHub has them, built 2026-11-18, stacked for the next turn:** #254 (refused
+   codes in the security log) → #256 passkeys → #257 sudo mode → #258 new-sign-in mail → #260
+   tokens from a session behind sudo mode, the dialog app-wide (checked end to end in a real
+   Chromium's virtual authenticator, `users-live/passkeys-shot.sh`) → #263 second-factor resets an
+   admin decides. Land them in one turn, in that order (each PR's base is the one before; retarget
+   each to main after its base squashes).
+2. **Accounts, next (now):** WebAuthn attestation for companies that require hardware keys (an
+   AAGUID allowlist per roll, off by default, with the FIDO metadata's names shown on each
+   passkey); then a person's own data export (GitHub's account data export: their account, its
+   sessions, security log and tokens' names, as JSON).
 3. **Enterprise:** a provider made once in the dashboard for both people and agents (#252 picks
    an existing connection today).
 4. **People's accounts, enterprise-grade:** on main since 2026-11-18: SSO (#225), SCIM
