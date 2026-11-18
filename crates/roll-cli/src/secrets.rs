@@ -340,6 +340,10 @@ pub enum Secrets {
     /// an environment into a cluster.
     #[command(subcommand, name = "kubernetes-clusters")]
     KubernetesClusters(KubernetesClustersCmd),
+    /// The project's GitHub Apps, for an installation token per lease (narrowed by the link's
+    /// options.repositories and options.permissions): list, add, remove.
+    #[command(subcommand, name = "github-apps")]
+    GithubApps(GithubAppsCmd),
     /// AWS roles for dynamic AWS credentials: list, add (roll assumes it to check), remove.
     #[command(subcommand, name = "aws-roles")]
     AwsRoles(AwsRolesCmd),
@@ -363,8 +367,8 @@ pub enum Secrets {
     /// Back the project up, sealed to a public key (`keygen`): every environment, folder, value,
     /// link, import, policy and required key. Written to stdout or --out.
     Backup {
-        /// The recipient's public key (base64url X25519).
-        #[arg(long)]
+        /// The recipient's public key (base64url X25519). It may start with `-`.
+        #[arg(long, allow_hyphen_values = true)]
         to: String,
         #[arg(long)]
         out: Option<std::path::PathBuf>,
@@ -485,12 +489,17 @@ pub enum Syncs {
 pub enum Sinks {
     #[command(alias = "list")]
     Ls,
-    /// Stream the audit log to an HTTPS URL (its signing secret is printed once).
+    /// Stream the audit log to an HTTPS URL (its signing secret is printed once). `--format splunk`,
+    /// `datadog` or `bearer` sends the SIEM's own format with its token, read from stdin.
     Add {
         url: String,
         /// Send the rows the project already has first.
         #[arg(long)]
         from_start: bool,
+        /// roll (signed JSON, the default), splunk (HTTP Event Collector), datadog (Logs intake)
+        /// or bearer (roll's JSON with Authorization: Bearer).
+        #[arg(long, default_value = "roll")]
+        format: String,
     },
     #[command(alias = "remove")]
     Rm { id: String },
@@ -607,8 +616,14 @@ pub enum AwsRolesCmd {
     #[command(alias = "list")]
     Ls,
     /// Register a role: its trust policy lets roll's role assume it with
-    /// `sts:ExternalId = roll-secrets:<project>`.
-    Add { name: String, role_arn: String },
+    /// `sts:ExternalId = roll-secrets:<project>`, or (`--oidc`) trusts roll's issuer with
+    /// `aud = sts.amazonaws.com` and `sub = roll-secrets:<project>` (no AWS credential of roll's).
+    Add {
+        name: String,
+        role_arn: String,
+        #[arg(long)]
+        oidc: bool,
+    },
     Rm { id: String },
 }
 
@@ -628,6 +643,48 @@ pub enum DatabasesCmd {
         /// The server's CA certificates (PEM file), when the system's don't cover it (Amazon RDS).
         #[arg(long)]
         ca: Option<std::path::PathBuf>,
+    },
+    /// Change a registration in place: its name, its CA, or (--url) its admin URL from stdin,
+    /// checked before it's kept.
+    Set {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// The server's CA certificates (PEM file); --no-ca clears them.
+        #[arg(long, conflicts_with = "no_ca")]
+        ca: Option<std::path::PathBuf>,
+        #[arg(long)]
+        no_ca: bool,
+        /// Read a new admin URL from stdin (after its password changed elsewhere).
+        #[arg(long)]
+        url: bool,
+    },
+    /// Rotate the admin URL's own password to one only roll knows, as Vault's rotate-root.
+    RotateAdmin { id: String },
+    Rm { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum GithubAppsCmd {
+    #[command(alias = "list")]
+    Ls,
+    /// Register an App's installation: the App's private key (the PEM GitHub gave) on stdin.
+    /// roll gets a token once (and revokes it) to check.
+    Add {
+        name: String,
+        #[arg(long)]
+        app_id: u64,
+        #[arg(long)]
+        installation: u64,
+        /// GitHub Enterprise Server's API (https://github.example.com/api/v3).
+        #[arg(long)]
+        api_base: Option<String>,
+        /// A repository tokens may reach at most (repeat it).
+        #[arg(long = "repo", required = true)]
+        repositories: Vec<String>,
+        /// A permission tokens may have at most, `name:level` (`contents:read`; repeat it).
+        #[arg(long = "permission", required = true)]
+        permissions: Vec<String>,
     },
     Rm { id: String },
 }
@@ -1732,8 +1789,72 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                 }
                 println!("Added {} ({}): link DB_USER and DB_PASSWORD to it, managed (the roles take turns) or dynamic (a login per lease).", s(&v["name"]), s(&v["id"]));
             }
+            DatabasesCmd::Set { id, name, ca, no_ca, url } => {
+                let mut body = json!({});
+                if let Some(n) = name {
+                    body["name"] = json!(n);
+                }
+                if let Some(p) = ca {
+                    body["ca"] = json!(std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?);
+                } else if no_ca {
+                    body["ca"] = json!("");
+                }
+                if url {
+                    // The admin URL holds a password: never an argument.
+                    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                        eprint!("New admin URL, then Enter and Ctrl-D: ");
+                    }
+                    let mut u = String::new();
+                    std::io::stdin().read_to_string(&mut u).context("reading the admin URL from stdin")?;
+                    body["url"] = json!(u.trim());
+                }
+                let v = c.call(Method::PATCH, &format!("{}/outside-databases/{}", c.base(), enc(&id)), Some(body)).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Changed {} ({})", s(&v["name"]), s(&v["host"]));
+            }
+            DatabasesCmd::RotateAdmin { id } => {
+                let v = c.call(Method::POST, &format!("{}/outside-databases/{}/rotate-admin", c.base(), enc(&id)), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Rotated {}'s admin password: only roll knows it now.", s(&v["name"]));
+            }
             DatabasesCmd::Rm { id } => {
                 c.call(Method::DELETE, &format!("{}/outside-databases/{}", c.base(), enc(&id)), None).await?;
+                println!("Removed {id}");
+            }
+        },
+        Secrets::GithubApps(g) => match g {
+            GithubAppsCmd::Ls => {
+                let v = c.call(Method::GET, &format!("{}/github-apps", c.base()), None).await?;
+                if json_out {
+                    return print(&v);
+                }
+                for a in v.as_array().into_iter().flatten() {
+                    println!("{}  {:<16} app {}  installation {}  {}", s(&a["id"]), s(&a["name"]), a["app_id"], a["installation_id"], s(&a["api_base"]));
+                }
+            }
+            GithubAppsCmd::Add { name, app_id, installation, api_base, repositories, permissions } => {
+                let permissions: serde_json::Map<String, Value> = permissions
+                    .iter()
+                    .map(|p| p.split_once(':').map(|(k, v)| (k.trim().to_string(), json!(v.trim()))).ok_or_else(|| anyhow::anyhow!("--permission is name:level (contents:read)")))
+                    .collect::<anyhow::Result<_>>()?;
+                // The private key: never an argument.
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("The App's private key (PEM), then Enter and Ctrl-D: ");
+                }
+                let mut key = String::new();
+                std::io::stdin().read_to_string(&mut key).context("reading the private key from stdin")?;
+                let v = c.call(Method::POST, &format!("{}/github-apps", c.base()), Some(json!({ "name": name, "app_id": app_id, "installation_id": installation, "private_key": key.trim(), "api_base": api_base, "repositories": repositories, "permissions": permissions }))).await?;
+                if json_out {
+                    return print(&v);
+                }
+                println!("Added {} ({}): link GITHUB_TOKEN to it, dynamic, for a token per lease.", s(&v["name"]), s(&v["id"]));
+            }
+            GithubAppsCmd::Rm { id } => {
+                c.call(Method::DELETE, &format!("{}/github-apps/{}", c.base(), enc(&id)), None).await?;
                 println!("Removed {id}");
             }
         },
@@ -1788,12 +1909,13 @@ pub async fn run(api: &Api, json_out: bool, args: AtArgs, cmd: Secrets) -> anyho
                     return print(&v);
                 }
                 for r in v.as_array().into_iter().flatten() {
-                    println!("{}  {:<16} {}", s(&r["id"]), s(&r["name"]), s(&r["role_arn"]));
+                    println!("{}  {:<16} {:<11} {}", s(&r["id"]), s(&r["name"]), s(&r["trust"]), s(&r["role_arn"]));
                 }
-                eprintln!("Trust policies need sts:ExternalId = roll-secrets:{}", c.project);
+                eprintln!("Trust policies pin roll-secrets:{} (sts:ExternalId, or sub for roll's issuer)", c.project);
             }
-            AwsRolesCmd::Add { name, role_arn } => {
-                let v = c.call(Method::POST, &format!("{}/aws-roles", c.base()), Some(json!({ "name": name, "role_arn": role_arn }))).await?;
+            AwsRolesCmd::Add { name, role_arn, oidc } => {
+                let trust = if oidc { "oidc" } else { "external_id" };
+                let v = c.call(Method::POST, &format!("{}/aws-roles", c.base()), Some(json!({ "name": name, "role_arn": role_arn, "trust": trust }))).await?;
                 if json_out {
                     return print(&v);
                 }
@@ -2793,10 +2915,26 @@ async fn sinks(c: &Client<'_>, cmd: Sinks, json_out: bool) -> anyhow::Result<()>
                 println!("{}  {:<6} {}  delivered {when}{}", s(&x["id"]), s(&x["status"]), s(&x["url"]), x["error"].as_str().map(|e| format!("  ({e})")).unwrap_or_default());
             }
         }
-        Sinks::Add { url, from_start } => {
-            let v = c.call(Method::POST, &base, Some(json!({ "url": url, "from_start": from_start }))).await?;
-            println!("{}", s(&v["secret"]));
-            eprintln!("Streaming the audit log to {url} ({}). That's its signing secret, shown this once.", s(&v["id"]));
+        Sinks::Add { url, from_start, format } => {
+            let mut body = json!({ "url": url, "from_start": from_start });
+            if format != "roll" {
+                // The SIEM's token: never an argument (it would sit in the shell's history).
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    eprint!("The {format} token, then Enter and Ctrl-D: ");
+                }
+                let mut token = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut token).context("reading the token from stdin")?;
+                body["format"] = json!(format);
+                body["token"] = json!(token.trim());
+            }
+            let v = c.call(Method::POST, &base, Some(body)).await?;
+            if format == "roll" {
+                println!("{}", s(&v["secret"]));
+                eprintln!("Streaming the audit log to {url} ({}). That's its signing secret, shown this once.", s(&v["id"]));
+            } else {
+                // Its batches carry the SIEM's token, not roll's signature: nothing to keep.
+                eprintln!("Streaming the audit log to {url} as {format} ({}); the token is sealed in roll.", s(&v["id"]));
+            }
         }
         Sinks::Rm { id } => {
             c.call(Method::DELETE, &format!("{base}/{}", enc(&id)), None).await?;

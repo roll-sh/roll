@@ -223,6 +223,27 @@ impl Hooks {
         Ok(u)
     }
 
+    /// GET `url` (the same guards: https, public addresses, no redirects), a 2xx only, at most
+    /// `limit` bytes: an OIDC issuer's discovery document and keys.
+    fn get_bounded(&self, url: &str, limit: usize) -> Result<Vec<u8>> {
+        let u = self.url(url)?;
+        let host = u.host_str().unwrap_or_default().to_string();
+        block_on(async {
+            let mut resp = self.client.get(u).header("accept", "application/json").send().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))?;
+            if !resp.status().is_success() {
+                return Err(Error::Link(format!("{host} answered {}", resp.status())));
+            }
+            let mut out = Vec::new();
+            while let Some(c) = resp.chunk().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))? {
+                if out.len() + c.len() > limit {
+                    return Err(Error::Link(format!("{host}: an answer over {limit} bytes")));
+                }
+                out.extend_from_slice(&c);
+            }
+            Ok(out)
+        })
+    }
+
     /// POST `body`, signed with the sync's secret.
     fn post(&self, url: &url::Url, p: &Push<'_>, body: &Json) -> Result<()> {
         let secret = p.secret.ok_or_else(|| Error::Internal("a signed sync has no secret".into()))?;
@@ -237,6 +258,31 @@ impl Hooks {
     /// the answer is read up to [`ANSWER_MAX`] and dropped.
     fn post_signed(&self, url: &url::Url, who: (&str, &str), delivery: &str, secret: &Value, body: &Json) -> Result<()> {
         self.send_signed(url, who, delivery, secret, body, None).map(|_| ())
+    }
+
+    /// POST `body` as is with `headers` (a SIEM's own format and credential): the same guards, any
+    /// 2xx is success, the answer drained up to [`ANSWER_MAX`].
+    fn post_plain(&self, url: &url::Url, content_type: &str, headers: &[(&str, String)], body: Vec<u8>) -> Result<()> {
+        let host = url.host_str().unwrap_or_default().to_string();
+        block_on(async {
+            let mut req = self.client.post(url.clone()).header("content-type", content_type);
+            for (k, v) in headers {
+                req = req.header(*k, v);
+            }
+            let mut resp = req.body(body).send().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))?;
+            let status = resp.status();
+            let mut read = 0;
+            while read < ANSWER_MAX {
+                match resp.chunk().await {
+                    Ok(Some(c)) => read += c.len(),
+                    _ => break,
+                }
+            }
+            if !status.is_success() {
+                return Err(Error::Link(format!("{host} answered {status}")));
+            }
+            Ok(())
+        })
     }
 
     /// POST `body` signed; with `keep`, the 2xx answer (at most `keep` bytes), else it's drained.
@@ -291,6 +337,13 @@ impl Hooks {
     }
 }
 
+/// An audit event with its project named (an index or a SIEM holds many projects' events).
+fn with_project(e: &Json, project: &str) -> Json {
+    let mut e = e.clone();
+    e["project"] = Json::String(project.to_string());
+    e
+}
+
 /// Audit sinks' deliveries (roll_secrets::sinks): the same client, signature and guards.
 /// The products' routes too: a sink can be a roll bucket (`bucket:<name>`).
 pub struct AuditDeliver(Hooks, Api);
@@ -320,10 +373,65 @@ impl roll_secrets::Deliver for AuditDeliver {
             let records: Vec<Json> = body["events"].as_array().into_iter().flatten().map(|e| serde_json::json!({ "key": e["id"].to_string(), "value": e })).collect();
             return self.1.call(axum::http::Method::POST, &format!("/v1/streams/{}/topics/{}/records", urlencoding::encode(stream), urlencoding::encode(topic)), Some(serde_json::json!({ "records": records }))).map(|_| ());
         }
+        // An index of a roll search cluster: one document per event, its id the audit id, so a
+        // retried batch writes the same documents again (bulk, in one request).
+        if let Some(rest) = url.strip_prefix(roll_secrets::sinks::SEARCH) {
+            let (cluster, index) = rest.split_once('/').ok_or_else(|| Error::BadRequest(format!("{url}: search:<cluster>/<index>")))?;
+            let project = body["project"].as_str().unwrap_or_default();
+            let mut ndjson = String::new();
+            for e in body["events"].as_array().into_iter().flatten() {
+                ndjson.push_str(&serde_json::json!({ "index": { "_id": e["id"].to_string() } }).to_string());
+                ndjson.push('\n');
+                ndjson.push_str(&with_project(e, project).to_string());
+                ndjson.push('\n');
+            }
+            let path = format!("/v1/search/clusters/{}/indices/{}/bulk", urlencoding::encode(cluster), urlencoding::encode(index));
+            let (status, v) = self.1.post_raw(&path, "application/x-ndjson", ndjson.into_bytes())?;
+            if !status.is_success() {
+                return Err(Error::Link(format!("search {cluster}/{index}: {} {}", status.as_u16(), v.get("error").map(|e| e.to_string()).unwrap_or_default())));
+            }
+            // Bulk answers 200 with per-document errors: any is a failed batch, sent again later.
+            if v["errors"].as_bool() == Some(true) {
+                let first = v["items"].as_array().into_iter().flatten().find_map(|i| i["index"]["error"]["reason"].as_str()).unwrap_or("a document was refused");
+                return Err(Error::Link(format!("search {cluster}/{index}: {first}")));
+            }
+            return Ok(());
+        }
         let u = self.0.url(url)?;
         // A retried batch (or notice) is the same body: the same delivery.
         let delivery = delivery_id(&format!("{id}:{body}"));
         self.0.post_signed(&u, ("x-roll-sink", id), &delivery, secret, body)
+    }
+
+    /// A batch as a SIEM takes it (roll_secrets::sinks::FORMATS): Splunk's HTTP Event Collector
+    /// (one event per line), Datadog's Logs intake (a JSON array), or roll's JSON with a bearer
+    /// token. Never a value: audit rows hold none, and the token goes only in its header.
+    fn post_format(&self, url: &str, id: &str, secret: &Value, format: &str, token: Option<&Value>, body: &Json) -> Result<()> {
+        if format == "roll" {
+            return self.post(url, id, secret, body);
+        }
+        let token = token.ok_or_else(|| Error::BadRequest(format!("a {format} sink needs its token")))?;
+        let u = self.0.url(url)?;
+        let (project, events) = (body["project"].as_str().unwrap_or_default(), body["events"].as_array().cloned().unwrap_or_default());
+        let (content_type, header, payload) = match format {
+            "splunk" => {
+                let lines: Vec<String> = events
+                    .iter()
+                    .map(|e| serde_json::json!({ "time": e["at"].as_i64().unwrap_or_default() as f64 / 1000.0, "host": "roll", "source": "roll-secrets", "sourcetype": "roll:audit", "event": with_project(e, project) }).to_string())
+                    .collect();
+                ("application/json", ("authorization", format!("Splunk {}", token.expose())), lines.join("\n").into_bytes())
+            }
+            "datadog" => {
+                let logs: Vec<Json> = events
+                    .iter()
+                    .map(|e| serde_json::json!({ "ddsource": "roll", "service": "roll-secrets", "ddtags": format!("project:{project},action:{}", e["action"].as_str().unwrap_or_default()), "message": e["summary"], "roll": with_project(e, project) }))
+                    .collect();
+                ("application/json", ("dd-api-key", token.expose().to_string()), serde_json::to_vec(&logs).expect("JSON"))
+            }
+            "bearer" => ("application/json", ("authorization", format!("Bearer {}", token.expose())), serde_json::to_vec(body).expect("JSON")),
+            f => return Err(Error::BadRequest(format!("no sink format {f}"))),
+        };
+        self.0.post_plain(&u, content_type, &[header, ("x-roll-sink", id.to_string())], payload)
     }
 
     /// A Kubernetes API server (roll_secrets::kubernetes): with its own CA, [`Self::request`]
@@ -382,22 +490,23 @@ impl roll_secrets::Deliver for AuditDeliver {
 
     /// An OIDC issuer's documents: the same guards, a 2xx only, at most `limit` bytes.
     fn get(&self, url: &str, limit: usize) -> Result<Vec<u8>> {
-        let u = self.0.url(url)?;
-        let host = u.host_str().unwrap_or_default().to_string();
-        block_on(async {
-            let mut resp = self.0.client.get(u).header("accept", "application/json").send().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))?;
-            if !resp.status().is_success() {
-                return Err(Error::Link(format!("{host} answered {}", resp.status())));
-            }
-            let mut out = Vec::new();
-            while let Some(c) = resp.chunk().await.map_err(|e| Error::Link(format!("{host}: {}", e.without_url())))? {
-                if out.len() + c.len() > limit {
-                    return Err(Error::Link(format!("{host}: an answer over {limit} bytes")));
-                }
-                out.extend_from_slice(&c);
-            }
-            Ok(out)
-        })
+        self.0.get_bounded(url, limit)
+    }
+}
+
+/// The guarded client as roll-oidc's fetcher, for roll-access's trusted machine clients: the same
+/// one roll secrets' identities fetch with.
+pub struct OidcFetch(Hooks);
+
+impl OidcFetch {
+    pub fn new(allow_private: bool) -> OidcFetch {
+        OidcFetch(Hooks::new(allow_private))
+    }
+}
+
+impl roll_oidc::Fetch for OidcFetch {
+    fn get(&self, url: &str, limit: usize) -> std::result::Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        self.0.get_bounded(url, limit).map_err(|e| Box::new(e) as _)
     }
 }
 
@@ -491,7 +600,88 @@ impl SyncTarget for Notify {
 }
 
 #[cfg(test)]
+mod search_sink {
+    use roll_secrets::Deliver as _;
+    use serde_json::{Value as Json, json};
+    use std::sync::{Arc, Mutex};
+
+    /// An index of a roll search cluster gets each event as a document through its bulk route, its
+    /// id the audit id (a retried batch writes the same ones); per-document errors fail the batch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_search_sink_bulk_indexes_events_by_their_audit_id() {
+        let seen: Arc<Mutex<Vec<(String, String, String)>>> = Arc::default();
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (s, r) = (seen.clone(), refuse.clone());
+        let router = axum::Router::new().route(
+            "/v1/search/clusters/{id}/indices/{index}/bulk",
+            axum::routing::post(move |axum::extract::Path((id, index)): axum::extract::Path<(String, String)>, h: axum::http::HeaderMap, body: String| async move {
+                s.lock().unwrap().push((format!("{id}/{index}"), h["content-type"].to_str().unwrap().to_string(), body));
+                if r.load(std::sync::atomic::Ordering::SeqCst) {
+                    return axum::Json(json!({ "errors": true, "items": [{ "index": { "error": { "reason": "mapper_parsing_exception" } } }] }));
+                }
+                axum::Json(json!({ "errors": false, "items": [] }))
+            }),
+        );
+        let api = super::super::Api::default();
+        api.set(router);
+        let d = Arc::new(super::AuditDeliver::new(false, api));
+        let body = json!({ "sink": "snk_1", "project": "prj_a", "events": [{ "id": 7, "at": 1, "action": "secrets.write" }, { "id": 8, "at": 2, "action": "secrets.export" }] });
+        let send = |d: Arc<super::AuditDeliver>, body: Json| tokio::task::spawn_blocking(move || d.post("search:cl_1/roll-audit", "snk_1", &roll_secrets::Value::new("whsec_x"), &body));
+        send(d.clone(), body.clone()).await.unwrap().unwrap();
+        let (target, ct, ndjson) = seen.lock().unwrap()[0].clone();
+        let lines: Vec<Json> = ndjson.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!((target.as_str(), ct.as_str(), lines.len()), ("cl_1/roll-audit", "application/x-ndjson", 4));
+        assert_eq!((lines[0]["index"]["_id"].as_str(), lines[1]["action"].as_str(), lines[3]["project"].as_str()), (Some("7"), Some("secrets.write"), Some("prj_a")));
+        refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = send(d, body).await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("mapper_parsing_exception"), "{err}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use roll_secrets::Deliver as _;
+    use serde_json::{Value as Json, json};
+    use std::sync::{Arc, Mutex};
+
+    /// A SIEM sink gets the batch as that SIEM takes it, with its token in its own header (and no
+    /// roll signature): Splunk's events one per line, Datadog's logs as an array.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn siem_sinks_get_their_own_format_and_header() {
+        type Seen = Arc<Mutex<Vec<(String, Option<String>, Option<String>, String)>>>;
+        let seen: Seen = Arc::default();
+        let s = seen.clone();
+        let app = axum::Router::new().fallback(move |h: axum::http::HeaderMap, body: String| {
+            let s = s.clone();
+            async move {
+                let get = |k: &str| h.get(k).map(|v| v.to_str().unwrap().to_string());
+                s.lock().unwrap().push((get("authorization").or(get("dd-api-key")).unwrap_or_default(), get("x-roll-signature-256"), get("x-roll-sink"), body));
+                "ok"
+            }
+        });
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/ingest", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let d = Arc::new(super::AuditDeliver::new(true, super::super::Api::default()));
+        let body = json!({ "sink": "snk_1", "project": "prj_a", "events": [{ "id": 1, "at": 1_700_000_000_000i64, "action": "secrets.write", "summary": "set A" }, { "id": 2, "at": 1_700_000_001_000i64, "action": "secrets.export", "summary": "read" }] });
+        for (format, token) in [("splunk", "hec-1"), ("datadog", "dd-key")] {
+            let (d, url, body) = (d.clone(), url.clone(), body.clone());
+            tokio::task::spawn_blocking(move || d.post_format(&url, "snk_1", &roll_secrets::Value::new("whsec_x"), format, Some(&roll_secrets::Value::new(token)), &body)).await.unwrap().unwrap();
+        }
+        let seen = seen.lock().unwrap().clone();
+        let (auth, signature, sink, splunk) = &seen[0];
+        assert_eq!((auth.as_str(), signature, sink.as_deref()), ("Splunk hec-1", &None, Some("snk_1")));
+        let events: Vec<Json> = splunk.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!((events.len(), events[0]["time"].as_f64(), events[0]["sourcetype"].as_str(), events[1]["event"]["project"].as_str()), (2, Some(1_700_000_000.0), Some("roll:audit"), Some("prj_a")));
+        let (key, _, _, datadog) = &seen[1];
+        let logs: Json = serde_json::from_str(datadog).unwrap();
+        assert_eq!((key.as_str(), logs[0]["message"].as_str(), logs[1]["ddtags"].as_str()), ("dd-key", Some("set A"), Some("project:prj_a,action:secrets.export")));
+    }
+}
+
+/// A cluster's own CA (`request_trusting`).
+#[cfg(test)]
+mod cluster_ca_tests {
     use super::*;
     use roll_secrets::Deliver;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

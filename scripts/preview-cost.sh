@@ -205,7 +205,8 @@ for _ in $(seq 1 60); do
 done
 case "$CHG_RELEASE" in [0-9]*) ;; *) echo "the change should carry the release's time: $CHG_RELEASE"; exit 1;; esac
 # Its link with access as a QR code, for a phone (a PNG, never cached: it carries the token).
-QR=$(curl -sS -D "$HOME_DIR/qr.h" "http://$API/v1/previews/$PV/qr.png" | head -c 8 | od -An -c | tr -d ' \n')
+curl -sS -D "$HOME_DIR/qr.h" -o "$HOME_DIR/qr.png" "http://$API/v1/previews/$PV/qr.png"
+QR=$(head -c 8 "$HOME_DIR/qr.png" | od -An -c | tr -d ' \n')
 grep -qi '^cache-control: no-store' "$HOME_DIR/qr.h" && [ "$QR" = '211PNG\r\n032\n' ] || { echo "the preview's link should come as a QR code PNG, never cached: $QR"; exit 1; }
 # The preview's NoSQL branch reads masked; the parent's policy is untouched.
 BRANCH_NOSQL=$(echo "$P" | jq_ "[r['ref'] for r in d['resources'] if r['kind']=='nosql'][0]")
@@ -237,6 +238,14 @@ T4=$(now_ms); curl -sS -o /dev/null -b "$JAR" -H "Host: $HOST" "http://$API/"; T
 ROBOTS=$(curl -sS -o /dev/null -D - -b "$JAR" -H "Host: $HOST" "http://$API/" | tr -d '\r' | sed -n 's/^x-robots-tag: //Ip')
 ROBOTS_LOCKED=$(curl -sS -o /dev/null -D - -H "Host: $HOST" "http://$API/" | tr -d '\r' | sed -n 's/^x-robots-tag: //Ip')
 [ "$ROBOTS" = noindex ] && [ "$ROBOTS_LOCKED" = noindex ] || { echo "a preview's pages should be kept out of search engines: '$ROBOTS' / '$ROBOTS_LOCKED'"; exit 1; }
+# Its request log (Vercel's): the visits above through roll, newest first, never with a query
+# (the first carried the share token).
+RQ=$(curl -sS "http://$API/v1/previews/$PV/requests")
+REQS=$(echo "$RQ" | python3 -c "import json,sys; r=json.load(sys.stdin)['requests']; print('%d; newest: %s; queries: %s' % (len(r), ' '.join(str(r[0][k]) for k in ('method', 'path', 'status')) if r else 'none', any('?' in x['path'] for x in r)))")
+case "$REQS" in *"newest: GET / 200; queries: False") ;; *) echo "the preview's request log should list its visits without their queries: $REQS"; exit 1;; esac
+# And from the CLI (`roll preview requests`): its visits, and none with --errors.
+ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" | grep -q " 200 GET    /  " || { echo "roll preview requests should list GET / 200: $(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" | head -3)"; exit 1; }
+[ -z "$(ROLL_API_URL="http://$API" "$ROOT/target/debug/roll" preview requests "$PV" --errors)" ] || { echo "roll preview requests --errors should list only 4xx and 5xx"; exit 1; }
 # The service's DATABASE_URL is the branch's own role, which can't read the WAL (where the pages
 # from before the mask are) and isn't a superuser.
 APP_DB=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^DATABASE_URL=//p' | sed 's#host.docker.internal#127.0.0.1#')
@@ -302,6 +311,13 @@ ES_TERMS=$(TERMS "$APP_ES")
 curl -sf -XPUT "$APP_ES/products/_doc/2?refresh=true" -H 'content-type: application/json' -d '{"name":"branch","price":9.5}' >/dev/null
 ES_PARENT_SEES=$(curl -s -o /dev/null -w '%{http_code}' "$SEARCH_URL_PARENT/products/_doc/2")
 [ "$ES_PARENT_SEES" = 404 ] || { echo "a write to the search branch reached the parent ($ES_PARENT_SEES)"; exit 1; }
+# The branch's data-only key, as production's link gets: it reads and writes documents, and is
+# refused making keys (the branch's own login in ELASTICSEARCH_URL stays for roll's runtime).
+APP_KEY=$(curl -sS -b "$JAR" -H "Host: $HOST" "http://$API/env.txt" | sed -n 's/^ELASTICSEARCH_API_KEY=//p')
+ES_PLAIN=$(echo "$APP_ES" | sed -E 's#://[^@/]*@#://#')
+KEY_READ=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: ApiKey $APP_KEY" "$ES_PLAIN/products/_doc/1")
+KEY_MINT=$(curl -s -o /dev/null -w '%{http_code}' -XPOST -H "Authorization: ApiKey $APP_KEY" -H 'content-type: application/json' "$ES_PLAIN/_security/api_key" -d '{"name":"more"}')
+[ -n "$APP_KEY" ] && [ "$KEY_READ" = 200 ] && [ "$KEY_MINT" = 403 ] || { echo "the search branch's ELASTICSEARCH_API_KEY should read (200, got $KEY_READ) and be refused making keys (403, got $KEY_MINT); key set: $([ -n "$APP_KEY" ] && echo yes || echo no)"; exit 1; }
 APP_WAL=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT length(pg_read_binary_file('pg_wal/' || pg_walfile_name(pg_current_wal_lsn())))" 2>&1 | head -1 || true)
 case "$APP_WAL" in *"permission denied"*) ;; *) echo "the branch's role should be refused the WAL: $APP_WAL"; exit 1;; esac
 APP_MASKED=$(docker run --rm --name roll-previews-psqltest --network host postgres:18-alpine psql "$APP_DB" -Atc "SELECT email FROM users WHERE id = 1" 2>&1 | head -1 || true)
@@ -706,7 +722,9 @@ for _ in $(seq 1 240); do
   sleep 0.5
 done
 [ -n "$CROP_NOTE" ] || { echo "the open note should get a picture of its element: $(api GET "/v1/previews/$PV/notes")"; exit 1; }
-CROP=$(curl -sS "http://$API/v1/previews/$PV/notes/$CROP_NOTE/crop" | head -c 8 | od -An -tx1 | tr -d ' \n')
+# Saved, then read (piped into head, curl can fail writing the rest: exit 23 under pipefail).
+curl -sS -o "$HOME_DIR/crop.png" "http://$API/v1/previews/$PV/notes/$CROP_NOTE/crop"
+CROP=$(head -c 8 "$HOME_DIR/crop.png" | od -An -tx1 | tr -d ' \n')
 [ "$CROP" = 89504e470d0a1a0a ] || { echo "the note's crop should be a PNG: $CROP"; exit 1; }
 
 say "[skip preview] in the title removes the preview; without it, a new one comes"
@@ -850,6 +868,7 @@ cat <<EOF
 | The first page's broken links (HEAD only) / new against main | $LINKS / $LINKS_NEW |
 | Visual review under a 5% visual threshold | $UNDER |
 | X-Robots-Tag on the service's page / on the 401 without the link | $ROBOTS / $ROBOTS_LOCKED |
+| Its request log through roll (count; newest; any query kept) | $REQS |
 | The release's time on the preview's data (at its head) / on the change | $RELEASE / $CHG_RELEASE ms |
 | The preview's link as a QR code (PNG, no-store) | $QR |
 | Mail: the provider's key in the service / sent as the preview, caught | gone / $MAIL |
@@ -884,6 +903,7 @@ cat <<EOF
 | The first page's speed, timed with its screenshot | $SPEED |
 | The push before, at its own URL | ${EARLIER_HOST%%.*}: its own page, on the same data |
 | Search: products.name in the branch / in the parent / the branch's term dictionary | $ES_READ / $ES_PARENT / $ES_TERMS |
+| Search: the branch's data-only ELASTICSEARCH_API_KEY reads / makes a key | $KEY_READ / $KEY_MINT |
 | Search: an address in an array of objects / under a dotted key / in an index named logs.2024, in the branch | $ES_DEEP / $ES_DOTTED |
 | After landing: parents present / preview Redis branches left | $PARENTS_OK of 4 / $BRANCHES_LEFT |
 EOF

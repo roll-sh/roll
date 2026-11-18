@@ -112,7 +112,7 @@ fn ser_search_analyzer(f: &FieldMapper, ctx: &MappingCtx) -> bool {
     f.is_configured("search_analyzer", ctx) || f.effective("search_analyzer", ctx) != f.effective("search_quote_analyzer", ctx)
 }
 
-const ANALYZER: ParamDef = p("analyzer", Analyzer, Dv::Str("default"), Fixed).ser(Ser::Fn(ser_index_analyzer));
+const ANALYZER: ParamDef = p("analyzer", IndexAnalyzer, Dv::Str("default"), Fixed).ser(Ser::Fn(ser_index_analyzer));
 const SEARCH_ANALYZER: ParamDef = p("search_analyzer", Analyzer, Dv::Param("analyzer"), Updatable).ser(Ser::Fn(ser_search_analyzer));
 const SEARCH_QUOTE_ANALYZER: ParamDef = p("search_quote_analyzer", Analyzer, Dv::Param("search_analyzer"), Updatable);
 
