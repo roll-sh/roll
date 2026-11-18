@@ -311,7 +311,7 @@ async fn email_verify(State(a): S, ip: Ip, headers: HeaderMap, b: Bytes) -> Resu
             a.record_new(&user, "invite", "email", &who);
         }
         // Past the code, the person is known: a refusal now (disabled, SSO required) is theirs.
-        let issued = a.issue(&user, &ua).inspect_err(|e| a.record_sign_in(Some(&user), "email", Some(e), false, &who))?;
+        let issued = a.issue(&user, &ua, "email").inspect_err(|e| a.record_sign_in(Some(&user), "email", Some(e), false, &who))?;
         a.record_sign_in(Some(&user), "email", None, issued.second_factor, &who);
         signed_in_response(a, &user, issued)
     })
@@ -408,7 +408,8 @@ async fn finish_redirect(a: &Arc<Accounts>, headers: &HeaderMap, done: Result<Fi
             let (u2, m2, w2) = (user.clone(), method.to_string(), who.clone());
             // An SSO sign-in's method is `sso:<connection>`: its session length applies.
             let connection = method.strip_prefix("sso:").unwrap_or_default().to_string();
-            match blocking(a, move |a| if sso { a.issue_sso(&user, &ua, &connection, sid.as_deref()) } else { a.issue(&user, &ua) }).await {
+            let how = m2.clone();
+            match blocking(a, move |a| if sso { a.issue_sso(&user, &ua, &connection, sid.as_deref()) } else { a.issue(&user, &ua, &how) }).await {
                 Err(e) => {
                     a.record_sign_in(Some(&u2), &m2, Some(&e), false, &w2);
                     fail("/signin", e.redirect_code())

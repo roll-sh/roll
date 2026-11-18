@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { accountsApi, activityText, onReauthRequired, type Activity } from "./accounts-api";
+import { accountsApi, activityText, onReauthRequired, phishingResistant, sessionMethod, type Activity } from "./accounts-api";
 
 describe("activityText", () => {
   const e = (a: Partial<Activity>): Activity => ({ at: 0, action: "sign_in", actor: "usr_me", ok: true, status: 200, ...a });
@@ -74,5 +74,13 @@ describe("sudo mode", () => {
 describe("a provider's logout in the security log", () => {
   it("says the provider signed the person out", () => {
     expect(activityText({ at: 0, action: "session.end", actor: "sso:sso_okta", ok: true, status: 200 }, "usr_me")).toBe("Your company's provider signed you out (its back-channel logout)");
+  });
+});
+
+describe("sessions", () => {
+  it("say how they signed in, and which are phishing-resistant", () => {
+    expect(sessionMethod({ method: "github" })).toBe("GitHub");
+    expect(sessionMethod({ method: null })).toBeNull();
+    expect([{ method: "email" }, { method: "email", passkey: true }, { method: "sso" }, { method: "passkey" }].map((s) => phishingResistant(s as never))).toEqual([false, true, true, true]);
   });
 });
