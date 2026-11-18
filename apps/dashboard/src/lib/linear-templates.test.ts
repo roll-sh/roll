@@ -29,7 +29,7 @@ const by = (id: string) => linearTemplates.find((x) => x.id === id)!.spec;
 describe("Linear templates", () => {
   it("have unique ids, and each spec decodes strictly to itself", () => {
     expect(new Set(linearTemplates.map((t) => t.id)).size).toBe(linearTemplates.length);
-    expect(linearTemplates.map((t) => t.id)).toEqual(["linear-agent", "linear-answer-comment", "linear-steer-comments", "linear-label-agent", "linear-bug-triage"]);
+    expect(linearTemplates.map((t) => t.id)).toEqual(["linear-agent", "linear-answer-comment", "linear-steer-comments", "linear-label-agent", "linear-bug-triage", "linear-preview-on-issue"]);
     for (const t of linearTemplates) {
       const json = JSON.parse(JSON.stringify(t.spec)) as unknown;
       expect(decode(automationSpecD, json, { strict: true })).toEqual(t.spec);
