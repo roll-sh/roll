@@ -512,8 +512,7 @@ impl Database {
         Txn {
             id,
             xid: 0,
-            mx_cache: Vec::new(),
-            state: Vec::new(),
+            mx: None,
             pin_slot,
             xmin_slot,
             db: self.clone(),
@@ -974,18 +973,25 @@ impl hashbrown::Equivalent<HeldLock> for HeldKey<'_> {
     }
 }
 
+/// A transaction's MultiXact bookkeeping (`multixact`), made when it first needs any.
+#[derive(Default)]
+struct TxnMx {
+    /// The multis it made or read, least recently used first (its MultiXact cache,
+    /// mXactCache: a member set made again reuses its multi).
+    cache: Vec<(u32, Arc<[multixact::Member]>)>,
+    /// Its MultiXact state records (`put_state`), in the order written: committed with its
+    /// writes, else on their own when it rolls back or prepares (no savepoint's rollback
+    /// takes one back).
+    state: Vec<(Vec<u8>, Option<Bytes>)>,
+}
+
 pub struct Txn {
     /// Lock owner id (every transaction has one).
     pub id: u64,
     /// The Postgres transaction id, once it has one (0: none yet).
     xid: u64,
-    /// The multis it made or read, least recently used first (its MultiXact cache,
-    /// mXactCache: a member set made again reuses its multi).
-    mx_cache: Vec<(u32, Arc<[multixact::Member]>)>,
-    /// Its MultiXact state records (`put_state`), in the order written: committed with its
-    /// writes, else on their own when it rolls back or prepares (no savepoint's rollback
-    /// takes one back).
-    state: Vec<(Vec<u8>, Option<Bytes>)>,
+    /// Its MultiXact bookkeeping, once it has any (`TxnMx`).
+    mx: Option<Box<TxnMx>>,
     /// Its session's slot for snapshot pins (`Database::begin_in`), if it has one.
     pin_slot: Option<Arc<crate::storage::PinSlot>>,
     /// Its session's slot for snapshot xmins, if it has one.
@@ -1988,10 +1994,11 @@ impl Txn {
     /// MultiXactIdCreateFromMembers for this transaction: the multi of `members` (sorted) it
     /// has in its cache, else the one `create` makes, cached.
     pub fn multi_for(&mut self, members: &[multixact::Member], create: impl FnOnce() -> u32) -> u32 {
-        if let Some(i) = self.mx_cache.iter().rposition(|(_, m)| **m == *members) {
-            let e = self.mx_cache.remove(i);
+        let cache = &mut self.mx.get_or_insert_with(Default::default).cache;
+        if let Some(i) = cache.iter().rposition(|(_, m)| **m == *members) {
+            let e = cache.remove(i);
             let id = e.0;
-            self.mx_cache.push(e);
+            cache.push(e);
             return id;
         }
         let id = create();
@@ -2002,10 +2009,11 @@ impl Txn {
     /// GetMultiXactIdMembers for this transaction: from its cache, else as `fetch` reads
     /// them, cached.
     pub fn multi_members(&mut self, multi: u32, fetch: impl FnOnce() -> Option<Arc<[multixact::Member]>>) -> Arc<[multixact::Member]> {
-        if let Some(i) = self.mx_cache.iter().rposition(|(id, _)| *id == multi) {
-            let e = self.mx_cache.remove(i);
+        let cache = &mut self.mx.get_or_insert_with(Default::default).cache;
+        if let Some(i) = cache.iter().rposition(|(id, _)| *id == multi) {
+            let e = cache.remove(i);
             let m = e.1.clone();
-            self.mx_cache.push(e);
+            cache.push(e);
             return m;
         }
         match fetch() {
@@ -2019,10 +2027,11 @@ impl Txn {
 
     fn cache_multi(&mut self, multi: u32, members: Arc<[multixact::Member]>) {
         // (MAX_CACHE_ENTRIES.)
-        if self.mx_cache.len() >= 256 {
-            self.mx_cache.remove(0);
+        let cache = &mut self.mx.get_or_insert_with(Default::default).cache;
+        if cache.len() >= 256 {
+            cache.remove(0);
         }
-        self.mx_cache.push((multi, members));
+        cache.push((multi, members));
     }
 
     /// The transaction id, if it has been given one.
@@ -2107,17 +2116,17 @@ impl Txn {
     pub fn put_state(&mut self, key: Vec<u8>, value: Option<Vec<u8>>) -> Result<()> {
         // (Not in the write buffer: a lock's xmax outlives a rollback, as PostgreSQL's WAL
         // record of it does.)
-        self.state.push((key, value.map(Bytes::from)));
+        self.mx.get_or_insert_with(Default::default).state.push((key, value.map(Bytes::from)));
         Ok(())
     }
 
     /// The MultiXact state records alone, in a commit of their own that doesn't wait for an
     /// fsync (a rollback's, a PREPARE's): the last of each key.
     pub(crate) fn flush_state(&mut self) {
-        if self.state.is_empty() {
+        let Some(mx) = self.mx.as_mut().filter(|m| !m.state.is_empty()) else {
             return;
-        }
-        let last: BTreeMap<Vec<u8>, Option<Bytes>> = std::mem::take(&mut self.state).into_iter().collect();
+        };
+        let last: BTreeMap<Vec<u8>, Option<Bytes>> = std::mem::take(&mut mx.state).into_iter().collect();
         let _ = self.db.store.commit_async(last.into_iter().collect(), |_, _| Ok(()), STATE_ONLY_DELAY_MS);
     }
 
@@ -3925,8 +3934,10 @@ impl Txn {
         // (A statement's deferred index entry deletes go in at its end at the latest.)
         self.flush_entry_deletes()?;
         // (Its MultiXact state records go in with its writes.)
-        for (k, v) in std::mem::take(&mut self.state) {
-            self.record(k, v, false);
+        if let Some(state) = self.mx.as_mut().map(|m| std::mem::take(&mut m.state)) {
+            for (k, v) in state {
+                self.record(k, v, false);
+            }
         }
         self.close_sink()?;
         if self.sxact
