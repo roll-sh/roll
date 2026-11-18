@@ -2853,3 +2853,38 @@ async fn another_product_resolves_a_reference_only_for_a_resource_its_project_st
     assert_ne!(api.secrets.digest_for(&photos, reference).unwrap(), before);
     assert_eq!(resolve(&photos, reference).unwrap().value.expose(), "fake-secret-two");
 }
+
+#[tokio::test]
+async fn an_untrusted_resource_ref_never_reads_a_protected_environment_or_a_sensitive_key() {
+    use roll_secrets::{Refusal, ResourceRef};
+    use roll_workspace::Kind;
+    let api = Api::new().await;
+    api.set("production", "AWS_SECRET_ACCESS_KEY", "fake-protected").await;
+    api.ok(Method::PUT, "/environments/staging/secrets/STRIPE_KEY", Some(json!({ "value": "fake-sensitive", "tags": ["sensitive"] }))).await;
+    api.set("staging", "PLAIN_KEY", "fake-plain").await;
+    api.ok(Method::PUT, "/environments/production/policy", Some(json!({ "protected": true, "approvals": 1 }))).await;
+    api.ok(Method::PUT, &format!("/v1/workspace/projects/{}/resources/bucket/photos", api.project), Some(json!({ "x": 0, "y": 0 }))).await;
+    let (trusted, branch) = (ResourceRef::new(Kind::Bucket, "photos"), ResourceRef::new(Kind::Bucket, "photos").untrusted());
+    let (protected, sensitive, plain) = ("roll://production/AWS_SECRET_ACCESS_KEY", "roll://staging/STRIPE_KEY", "roll://staging/PLAIN_KEY");
+
+    // The resource itself reads as its project's runtime.
+    assert_eq!(api.secrets.resolve_for(&trusted, protected).unwrap().value.expose(), "fake-protected");
+    assert_eq!(api.secrets.resolve_for(&trusted, sensitive).unwrap().value.expose(), "fake-sensitive");
+    // The same ref as an untrusted copy: refused both, the digest refused the same way.
+    for (reference, what) in [(protected, "protected"), (sensitive, "sensitive")] {
+        let refused = api.secrets.resolve_for(&branch, reference).unwrap_err();
+        let ok = match what {
+            "protected" => matches!(refused, Refusal::Protected(_)),
+            _ => matches!(refused, Refusal::Unusable(_)),
+        };
+        assert!(ok && !refused.to_string().contains("fake-"), "{what}: {refused}");
+        let digest = api.secrets.digest_for(&branch, reference).unwrap_err();
+        assert_eq!(std::mem::discriminant(&digest), std::mem::discriminant(&refused), "{what}: {digest}");
+        assert!(api.secrets.digest_for(&trusted, reference).is_ok());
+    }
+    // What an untrusted reader may read still resolves, audited as the untrusted copy.
+    assert_eq!(api.secrets.resolve_for(&branch, plain).unwrap().value.expose(), "fake-plain");
+    assert!(api.secrets.digest_for(&branch, plain).is_ok());
+    let audit = api.ok(Method::GET, "/audit?action=secrets.resolve", None).await;
+    assert_eq!((audit[0]["actor"].as_str(), audit[0]["keys"].clone()), (Some("storage:bucket:photos (untrusted)"), json!(["PLAIN_KEY"])), "{audit}");
+}

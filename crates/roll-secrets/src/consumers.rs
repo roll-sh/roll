@@ -12,27 +12,50 @@
 //! reference): what only comes from there is refused as protected. No dynamic credential: a
 //! product keeps its connection past any lease.
 //!
-//! Every read is audited as `secrets.resolve` by the resource (`storage:bucket:<ref>`). Nothing is
-//! cached here: a product polls [`Secrets::digest_for`] (no value, not audited) and resolves again
-//! when it moves.
+//! **Untrusted copies.** A resource whose code or data didn't come through its owner (a search
+//! branch keeps its cluster's id, as a preview keeps its service's) asks with
+//! [`ResourceRef::untrusted`]: it then reads as checks, sandboxes and previews do
+//! (`Secrets::untrusted`, not a runtime), so a protected environment is refused as protected and a
+//! sensitive key as unusable. The hint only narrows; nothing widens a resource past its project's
+//! runtime.
+//!
+//! Every read is audited as `secrets.resolve` by the resource (`storage:bucket:<ref>`, with
+//! ` (untrusted)` after it for an untrusted copy). Nothing is cached here: a product polls
+//! [`Secrets::digest_for`] (no value, not audited; refused exactly as the resolve would be) and
+//! resolves again when it moves.
 
 use crate::access::Caller;
 use crate::{Error, Secrets, Value, names};
 use roll_workspace::Kind;
 
-/// The product resource asking, as on the workspace canvas: its kind and ref.
+/// The product resource asking, as on the workspace canvas: its kind and ref, and whether it's an
+/// untrusted copy (private: set only by [`ResourceRef::untrusted`], so it can't be cleared).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourceRef {
     pub kind: Kind,
     pub r#ref: String,
+    untrusted: bool,
 }
 
 impl ResourceRef {
     pub fn new(kind: Kind, r#ref: impl Into<String>) -> ResourceRef {
-        ResourceRef { kind, r#ref: r#ref.into() }
+        ResourceRef { kind, r#ref: r#ref.into(), untrusted: false }
     }
 
-    /// Who it is in the audit log: `storage:bucket:<ref>`, `search:search:<ref>`, ….
+    /// The same resource as a copy nobody vetted (a branch, a clone, anything whose code or data
+    /// didn't come through the resource's owner): it reads as an untrusted caller, never a
+    /// protected environment or a sensitive key. A restore of the resource itself stays trusted.
+    pub fn untrusted(mut self) -> ResourceRef {
+        self.untrusted = true;
+        self
+    }
+
+    pub fn is_untrusted(&self) -> bool {
+        self.untrusted
+    }
+
+    /// Who it is in the audit log: `storage:bucket:<ref>`, `search:search:<ref>`, …, with
+    /// ` (untrusted)` after it for an untrusted copy.
     pub fn consumer(&self) -> String {
         let product = match self.kind {
             Kind::Bucket => "storage",
@@ -42,7 +65,8 @@ impl ResourceRef {
             Kind::Service => "apps",
             k => k.as_str(),
         };
-        format!("{product}:{}:{}", self.kind.as_str(), self.r#ref)
+        let untrusted = if self.untrusted { " (untrusted)" } else { "" };
+        format!("{product}:{}:{}{untrusted}", self.kind.as_str(), self.r#ref)
     }
 }
 
@@ -70,10 +94,12 @@ pub enum Refusal {
     NotTrusted(String),
     #[error("no such key: {0}")]
     NoSuchKey(String),
-    /// Only reachable through a protected environment, from an untrusted ephemeral one.
+    /// A protected environment, or only reachable through one, for an untrusted reader (an
+    /// untrusted ephemeral environment, or an untrusted [`ResourceRef`]).
     #[error("protected: {0}")]
     Protected(String),
-    /// Set, but not usable here (a dynamic credential, a reference inside it that doesn't resolve).
+    /// Set, but not usable here (a dynamic credential, a sensitive key for an untrusted reader, a
+    /// reference inside it that doesn't resolve).
     #[error("can't be used: {0}")]
     Unusable(String),
     #[error("{0}")]
@@ -124,16 +150,17 @@ impl Secrets {
     pub fn resolve_for(&self, resource: &ResourceRef, reference: &str) -> Result<Resolved, Refusal> {
         let r = Reference::required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
-        let consumer = resource.consumer();
-        self.resolve_one(&project, &r.env, &r.path, &r.key, &consumer, &Caller::consumer(&consumer))
+        self.resolve_one(&project, &r.env, &r.path, &r.key, &Caller::consumer(&resource.consumer()), resource.untrusted)
     }
 
     /// The digest of the folder `reference` reads, under the same rules (no value, not audited):
-    /// it moves when the value would, so a product polls it and resolves again only then.
+    /// refused as the resolve would be, and it moves when the value would, so a product polls it
+    /// and resolves again only then.
     pub fn digest_for(&self, resource: &ResourceRef, reference: &str) -> Result<String, Refusal> {
         let r = Reference::required(reference)?;
         let project = self.project_for(resource, r.project.as_deref())?;
-        match self.digest(&project, &r.env, &r.path, &Caller::consumer(&resource.consumer())) {
+        let (reader, _) = self.consumer_entry(&project, &r.env, &r.path, &r.key, &Caller::consumer(&resource.consumer()), resource.untrusted)?;
+        match self.digest(&project, &r.env, &r.path, &reader) {
             Err(Error::NotFound(m)) => Err(Refusal::NoSuchKey(m)),
             d => Ok(d?),
         }
@@ -184,5 +211,6 @@ mod tests {
             assert!(matches!(Reference::parse(bad), Err(Refusal::BadReference(_))), "{bad}");
         }
         assert_eq!(ResourceRef::new(Kind::Bucket, "photos").consumer(), "storage:bucket:photos");
+        assert_eq!(ResourceRef::new(Kind::Bucket, "photos").untrusted().consumer(), "storage:bucket:photos (untrusted)");
     }
 }

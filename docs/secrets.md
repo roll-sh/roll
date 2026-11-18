@@ -1784,11 +1784,20 @@ Agent's templates do).
   included. An ephemeral environment that isn't trusted never reaches a protected one (its base,
   an import or a reference), and what only comes from there is refused as protected. A dynamic
   credential is refused: a product keeps its connection past any lease.
+- **Untrusted copies.** A product passes `ResourceRef::untrusted()` for a resource that keeps
+  another's id but whose code or data didn't come through that resource's owner: a branch (roll
+  search's branches keep their cluster's id), a copy or a clone, anything like a preview. It then
+  reads as checks, sandboxes and previews do (`Secrets::untrusted`, not a runtime): a protected
+  environment, or a key only one holds, is refused as protected, and a sensitive key as can't be
+  used. The hint only narrows; nothing widens a resource past its project's runtime. A restore of
+  the resource itself (its own snapshot or backup, back into it) stays trusted.
 - **Audit.** Every read is `secrets.resolve` by the resource, named `<product>:<kind>:<ref>`
-  (`storage:bucket:photos`), with the one key read.
+  (`storage:bucket:photos`, `search:search:logs (untrusted)` for an untrusted copy), with the one
+  key read.
 - **Refusals** say which part failed, never the value: no project, not trusted, no such key,
-  protected, or can't be used (a dynamic credential, a reference inside the value that doesn't
-  resolve).
+  protected, or can't be used (a dynamic credential, a sensitive key for an untrusted reader, a
+  reference inside the value that doesn't resolve). `Secrets::digest_for` refuses exactly what
+  the resolve would.
 - **Rotation.** Nothing is cached across calls in roll secrets. A product keeps what it built
   (storage: one client per target and source bucket) while the folder's digest
   (`Secrets::digest_for`, no value, not audited) stays the same, and resolves again when it
