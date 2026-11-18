@@ -720,8 +720,7 @@ fn wants(s: &Settings, c: &ChangeInfo) -> bool {
     }
     match asks(c) {
         Some(asked) => asked,
-        // A `preview/…` branch is `roll preview up`'s: it has its own branch preview already.
-        None => !s.manual && (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*")) && !crate::glob::any(&s.skip_authors, &c.author) && !c.branch.as_deref().is_some_and(|b| b.starts_with("preview/")),
+        None => !s.manual && (s.drafts || !c.draft) && crate::glob::any(&s.branches, c.branch.as_deref().unwrap_or("*")) && !crate::glob::any(&s.skip_authors, &c.author),
     }
 }
 
@@ -840,8 +839,6 @@ mod tests {
         let bump = ChangeInfo { author: "dependabot[bot]".into(), ..ch.clone() };
         assert!(wants(&bots, &ChangeInfo { author: "ada".into(), ..ch.clone() }) && !wants(&bots, &bump));
         assert!(wants(&bots, &ChangeInfo { labels: vec!["preview".into()], ..bump.clone() }), "a label asks");
-        // `roll preview up`'s branch has a branch preview of its own: its change gets none.
-        assert!(!wants(&s, &ChangeInfo { branch: Some("preview/ana/local".into()), ..ch.clone() }));
         assert!(wants(&s, &ChangeInfo { title: "[preview] try the new nav".into(), branch: Some("fix/x".into()), draft: true, ..ch.clone() }));
         assert!(!wants(&s, &ChangeInfo { title: "[preview]".into(), open: false, ..ch.clone() }));
         // Unused for 6 of a week's hours: quiet; within a day: when. A 4-hour TTL warns an hour ahead.
