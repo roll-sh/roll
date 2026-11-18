@@ -23,6 +23,45 @@ pub enum Tri {
     Out,
 }
 
+/// `substring(x FROM start FOR count)` of a string column (`K::Substr`; `trim`: of a bpchar
+/// column cast to text, its trailing spaces gone first).
+#[derive(Clone, Copy)]
+pub struct Sub {
+    start: i64,
+    count: i64,
+    trim: bool,
+}
+
+impl Sub {
+    /// `x`'s substring (`string::substr_chars` of its characters, by their bytes: `x` is UTF-8).
+    #[inline]
+    fn of<'x>(&self, x: &'x [u8]) -> &'x [u8] {
+        let x = if self.trim { crate::storage::cols::trim_spaces(x) } else { x };
+        let end = self.start.saturating_add(self.count);
+        let from = self.start.max(1);
+        if end <= from {
+            return &[];
+        }
+        // (Where characters `from - 1` and `end - 1` start: a byte not a continuation
+        // byte starts one.)
+        let (skip, stop) = (from - 1, end - 1);
+        let (mut a, mut b, mut n) = (x.len(), x.len(), 0i64);
+        for (i, &c) in x.iter().enumerate() {
+            if c & 0xC0 != 0x80 {
+                if n == skip {
+                    a = i;
+                }
+                if n == stop {
+                    b = i;
+                    break;
+                }
+                n += 1;
+            }
+        }
+        &x[a..b]
+    }
+}
+
 /// An exact number (`K::num`'s): a column, a constant, or + − × of two.
 pub enum VN {
     Col(usize),
@@ -62,8 +101,10 @@ pub enum VB {
     /// without trailing spaces (the constant trimmed already).
     Str { test: fn(Ordering) -> bool, col: usize, k: Box<[u8]>, bp: bool, col_first: bool },
     /// `col [NOT] IN (strings)` by bytes (each item's `=` a byte comparison), and
-    /// `col = ANY (array)` / `col <> ALL (array)` of strings.
-    StrIn { col: usize, items: Vec<Option<Box<[u8]>>>, bp: bool, neg: bool },
+    /// `col = ANY (array)` / `col <> ALL (array)` of strings; `sub`: of `substring(col FROM
+    /// start FOR count)`'s (a bpchar column's cast to text first: without trailing spaces),
+    /// TPC-H q22's country codes.
+    StrIn { col: usize, items: Vec<Option<Box<[u8]>>>, bp: bool, neg: bool, sub: Option<Sub> },
     /// `col [NOT] LIKE 'pattern'` of a text column (`K::Like`).
     Like { col: usize, pat: Box<crate::sql::func::string::LikePattern>, neg: bool },
     /// `col = ANY (array)` / `col <> ALL (array)` of exact numbers (None: a NULL item).
@@ -469,7 +510,7 @@ impl VB {
                     let K::Const(v) = item else { return None };
                     items.push(text_const(v, b)?);
                 }
-                VB::StrIn { col, items, bp: bp?, neg: *neg }
+                VB::StrIn { col, items, bp: bp?, neg: *neg, sub: None }
             }
             K::Like(a, pat, neg) => match **a {
                 K::Col(col) if matches!(types.get(col), Some(DataType::Text | DataType::Varchar(_))) => {
@@ -479,11 +520,31 @@ impl VB {
             },
             K::ArrayOp(args, f, all) => {
                 // (An empty array is false for ANY even for a NULL: left to the row path.)
-                let [K::Col(col), K::Const(Value::Array(a))] = &**args else { return None };
+                let [x, K::Const(Value::Array(a))] = &**args else { return None };
                 if a.items.is_empty() {
                     return None;
                 }
+                // (A column, or a substring of a text column or of a bpchar one cast to text.)
+                let (col, sub) = match x {
+                    K::Col(c) => (c, None),
+                    K::Substr(y, start, count) => match &**y {
+                        K::Col(c) if matches!(types.get(*c), Some(DataType::Text | DataType::Varchar(_))) => {
+                            (c, Some(Sub { start: *start, count: *count, trim: false }))
+                        }
+                        K::Cast(z, ft, _) if matches!(&**ft, (DataType::Bpchar(_), DataType::Text)) => match &**z {
+                            K::Col(c) if matches!(types.get(*c), Some(DataType::Bpchar(_))) => {
+                                (c, Some(Sub { start: *start, count: *count, trim: true }))
+                            }
+                            _ => return None,
+                        },
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
                 let (test, bp) = str_cmp(*f)?;
+                if sub.is_some() && bp {
+                    return None;
+                }
                 let eq = test(Ordering::Equal) && !test(Ordering::Less) && !test(Ordering::Greater);
                 let ne = !test(Ordering::Equal) && test(Ordering::Less) && test(Ordering::Greater);
                 let neg = match (*all, eq, ne) {
@@ -493,8 +554,8 @@ impl VB {
                 };
                 if text_col(types, *col) {
                     let items = a.items.iter().map(|v| text_const(v, bp)).collect::<Option<_>>()?;
-                    VB::StrIn { col: *col, items, bp, neg }
-                } else if !bp && matches!(types.get(*col), Some(DataType::Int2 | DataType::Int4 | DataType::Int8 | DataType::Numeric(_))) {
+                    VB::StrIn { col: *col, items, bp, neg, sub }
+                } else if sub.is_none() && !bp && matches!(types.get(*col), Some(DataType::Int2 | DataType::Int4 | DataType::Int8 | DataType::Numeric(_))) {
                     let num = |v: &Value| if v.is_null() { Some(None) } else { super::kernel::small_num(v).map(Some) };
                     VB::NumIn { col: *col, items: a.items.iter().map(num).collect::<Option<_>>()?, neg }
                 } else {
@@ -606,13 +667,14 @@ impl VB {
                     };
                 }
             }
-            VB::StrIn { col, items, bp, neg } => {
+            VB::StrIn { col, items, bp, neg, sub } => {
                 let Some(c) = col_at(b, *col) else { return fill(sel, out, Tri::Out) };
                 let saw_null = items.iter().any(Option::is_none);
                 let (hit, miss) = if *neg { (Tri::F, Tri::T) } else { (Tri::T, Tri::F) };
                 for &r in sel {
                     let r = r as usize;
-                    out[r] = match (c.nulls[r], text_at(c, b, r, *bp)) {
+                    let x = text_at(c, b, r, *bp).map(|x| sub.map_or(x, |s| s.of(x)));
+                    out[r] = match (c.nulls[r], x) {
                         (true, _) => Tri::N,
                         (false, Some(x)) if items.iter().flatten().any(|i| **i == *x) => hit,
                         (false, Some(_)) if saw_null => Tri::N,
