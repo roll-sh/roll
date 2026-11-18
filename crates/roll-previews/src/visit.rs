@@ -65,7 +65,8 @@ impl Engine {
     /// session): a one-use ticket to `to` (a URL at one of the preview's own hosts), as the URL
     /// that opens it. Only a preview whose project has team access gives one. The URL is the
     /// service's own (its scheme, host and port); only `to`'s path and query are kept.
-    pub fn visit_ticket(&self, id: &str, user: &str, session: &str, to: &str) -> Result<String> {
+    /// `handle` names them in the preview's activity and visitors once they're in.
+    pub fn visit_ticket(&self, id: &str, user: &str, handle: &str, session: &str, to: &str) -> Result<String> {
         let row = self.store.row(id)?;
         if self.store.settings(&row.project_id)?.access != Access::Team {
             return Err(Error::BadRequest("this preview's project doesn't let people in by signing in (access: team)".into()));
@@ -82,7 +83,7 @@ impl Engine {
         }
         let ticket = format!("rlv_{}", crate::store::new_token());
         let until = self.store.now_ms()? + TICKET_MS;
-        if !self.store.put_visit_ticket(&crate::store::bypass_hash(&ticket), id, &row.project_id, user, session, until)? {
+        if !self.store.put_visit_ticket(&crate::store::bypass_hash(&ticket), id, &row.project_id, user, handle, session, until)? {
             return Err(Error::BadRequest("this preview's project doesn't let people in by signing in (access: team)".into()));
         }
         let mut path = url.path().to_string();
@@ -159,6 +160,8 @@ mod tests {
     /// preview; the session's cookie never reaches the app, and junk under its name doesn't shut
     /// it out; signing out of roll, the person losing the project, or a change of access (which
     /// also replaces the link's token) ends it. Share links and the CI bypass still open it.
+    /// Who signed in goes in the activity once per session, and in its visitors; a share link
+    /// once a day.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_signed_in_person_gets_into_a_team_preview() {
         let dir = tempfile::tempdir().unwrap();
@@ -235,7 +238,7 @@ mod tests {
         let ask_in = |preview: &str, who: Option<&str>, to: &str| {
             let mut req = Request::post(format!("/v1/previews/{preview}/visit")).body(axum::body::Body::from(serde_json::json!({ "to": to }).to_string())).unwrap();
             if let Some(user) = who {
-                req.extensions_mut().insert(roll_auth::SignedIn { user: user.into(), handle: user.into(), admin: false, code_owner: None, session: "ses_1".into() });
+                req.extensions_mut().insert(roll_auth::SignedIn { user: user.into(), handle: user.trim_start_matches("usr_").into(), admin: false, code_owner: None, session: "ses_1".into() });
             }
             send(req)
         };
@@ -275,12 +278,18 @@ mod tests {
         let elsewhere = Request::get(url.strip_prefix(&format!("http://{host}")).unwrap()).header(header::HOST, "web-pr2-shop.preview.test").body(axum::body::Body::empty()).unwrap();
         let (status, _, cookie, _) = send(elsewhere).await;
         assert_eq!((status, cookie.as_str()), (401, ""), "a ticket for one preview opens no other");
+        let opened = |what: &str| store.activity(&id).unwrap().iter().filter(|a| a.message == what).count();
         let (pq, session) = sign_in().await;
+        assert_eq!(opened("ada opened it (signed in to roll)"), 1, "the activity names who signed in");
         assert_eq!(visit(&pq, "text/html", None).await.0, 401, "a ticket is used once");
         // In: the app never sees the session (or the link's token), and junk under the session's
         // name (a sibling preview's host can set it on the parent domain) doesn't shut it out.
         let (status, _, _, body) = visit("/hello", "application/json", Some(&format!("a=b; roll_visit_{id}=junk; {session}; roll_access_{id}={token}"))).await;
         assert_eq!((status, body.as_str()), (200, "service saw /hello with cookies [a=b]"));
+        assert_eq!(opened("ada opened it (signed in to roll)"), 1, "once per session, not per request");
+        let (status, _, _, body) = send(Request::get(format!("/v1/previews/{id}/visitors")).body(axum::body::Body::empty()).unwrap()).await;
+        let visitors: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!((status, visitors[0]["who"].as_str(), visitors.as_array().map(Vec::len)), (200, Some("ada"), Some(1)), "{body}");
         // A URL with the link's token is the same URL without it.
         let (status, location, ..) = visit(&format!("/hello?roll_access={token}&y=2"), "text/html", Some(&session)).await;
         assert_eq!((status, location.as_str()), (302, "/hello?y=2"));
@@ -310,8 +319,11 @@ mod tests {
         assert_ne!(store.access(&id).unwrap().unwrap().token, token, "leaving link access replaces the link's token");
         // Share links and the CI bypass still open it.
         let (_, link) = engine.share(&id, 1, "ada").unwrap();
-        let (status, _, cookie, _) = visit(link.strip_prefix(&format!("http://{host}")).unwrap(), "text/html", None).await;
+        let link = link.strip_prefix(&format!("http://{host}")).unwrap();
+        let (status, _, cookie, _) = visit(link, "text/html", None).await;
         assert_eq!(status, 302);
+        visit(link, "text/html", None).await;
+        assert_eq!(opened("a share link opened it"), 1, "once per link per day");
         assert_eq!(visit("/hello", "application/json", Some(cookie.split(';').next().unwrap())).await.0, 200);
         let (secret, _) = store.rotate_bypass(&project).unwrap();
         let bypass = Request::get("/hello").header(header::HOST, host).header(crate::runtime::BYPASS_HEADER, secret).body(axum::body::Body::empty()).unwrap();

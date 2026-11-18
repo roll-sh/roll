@@ -836,6 +836,18 @@ as a private address.
       cookie never reaches a service under any access. Leaving `link` gives each of the
       project's previews a new token, so going back to `link` doesn't revive the old links.
       Share links and the bypass header for CI still work.
+    - *Who opened it.* Previews run on branches of production data, so a team sees who looked
+      (Vercel's deployment protection logs access too). When a ticket is traded for a session,
+      the same write adds "`<handle>` opened it (signed in to roll)" to the preview's activity
+      (the person's roll handle, as roll code names people): once per session, never per
+      request. It also keeps a `visits` row per person (`first_at`, `last_at`); `last_at` moves
+      at each 5-minute recheck, not at each request. `GET /v1/previews/{id}/visitors` lists
+      the last 8, latest first, as `[{who, last_at}]` (read access, like the activity), and
+      the sheet's Activity tab shows them as "Who opened it". A share link isn't a person
+      signed in: following one (`?roll_share=`) adds "a share link opened it" to the activity,
+      at most once per link per day (`shares.opened_day`), under any access. The CI bypass
+      header records nothing. Services on roll apps sign people in through roll apps, so they
+      don't show here.
     - *Services on roll apps.* They get `access: {signed_in: true, bypass_sha256}` on their `pv-`
       environment, so roll apps' own sign-in flow and its own check decide (its
       `AccountsVisitors` and `/dashboard/apps/visit`: admins only today), not previews'. roll
@@ -846,7 +858,9 @@ as a private address.
       preview, its URL at the service's scheme and port whatever `to` said, the ticket used
       once, the session the app never sees (nor junk cookies by its name shutting it out), the
       link's token taken off the URL, signing out of roll and the person losing the project each
-      ending it, and a new access ending it and replacing the link's token.
+      ending it, and a new access ending it and replacing the link's token. It also checks that
+      the activity names the person once per session and the visitors list names them, and that
+      a share link followed twice is one line.
   - Never indexed: every response through a preview's host, the service's own and roll's 401
     alike, carries `X-Robots-Tag: noindex` (as Vercel's previews do), whatever the service
     sends, so a public preview, a share link or an earlier push's URL isn't what a search
@@ -1149,6 +1163,7 @@ and admins see every project.
 | `GET /v1/previews/{id}/requests` | | `{requests: [{at, service, method, path, status, ms}]}`: its latest 200 requests through roll's runtime, newest first (Vercel's request log): never the query, which can carry a token, and the path masked as its logs are (a path is its code's to choose); `ms` until the answer's headers. Kept in memory on the preview's holder (runs there) and gone with its last service; a roll apps instance's requests are roll apps' own. The sheet's Requests tab, errors at a glance; `roll preview requests <id> [--errors]` |
 | `GET /v1/previews/{id}/metrics` | | `{services: [{service, cpu, memory_bytes, memory_mb}]}`: what its running services use right now (Render's and Railway's metrics): cores of CPU and resident memory, against the memory each runs with. It comes from `docker stats` for roll's runtime. For roll apps' instances it's their last finished minute (`…/environments/pv-…/metrics`), with memory per instance. A sleeping service isn't listed. 404 for no such preview. It runs on the preview's holder, and is read again at most every 10 s, however many sheets ask. The sheet shows it on each running service, read every 15 s while it's open |
 | `GET /v1/previews/{id}/activity` | | `Activity[]`, newest first |
+| `GET /v1/previews/{id}/visitors` | | `[{who, last_at}]`: the last 8 people signed in to roll who opened it (`access: "team"`), by their handle, latest first; `last_at` is as of their session's last 5-minute recheck. Share links and the CI bypass aren't people and aren't listed |
 | `GET /v1/previews/projects/{project}/settings` | | `Settings` |
 | `PUT /v1/previews/projects/{project}/settings` | `Settings` (partial) | `Settings` |
 | `GET /v1/previews/projects/{project}/usage` | | `{previews, sleeping_usd_month, active_usd_hour, month_to_date_usd, bytes, spent_usd_month, max_usd_month}` |

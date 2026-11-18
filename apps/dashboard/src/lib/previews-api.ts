@@ -149,6 +149,13 @@ export interface PreviewActivity {
   message: string;
 }
 
+/** Someone signed in to roll who opened a team-access preview: their handle, and when they were
+ * last in it (as of their session's 5-minute recheck). */
+export interface PreviewVisitor {
+  who: string;
+  last_at: number;
+}
+
 export type ResourceRule = "branch" | "schema" | "skip";
 
 /** A command on the change's tree: the seed, or the release. */
@@ -500,6 +507,7 @@ export const previewsApi = {
     call<{ service: string; lines: string[] }>("GET", `${one(id)}/logs${query(opts)}`),
   /** Newest first. */
   activity: (id: string) => call<PreviewActivity[]>("GET", `${one(id)}/activity`),
+  visitors: (id: string) => call<PreviewVisitor[]>("GET", `${one(id)}/visitors`),
   settings: (projectId: string) => call<PreviewSettings>("GET", `${project(projectId)}/settings`),
   putSettings: (projectId: string, patch: SettingsPatch) => call<PreviewSettings>("PUT", `${project(projectId)}/settings`, patch),
   usage: (projectId: string) => call<PreviewUsage>("GET", `${project(projectId)}/usage`),

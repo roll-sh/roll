@@ -719,7 +719,10 @@ impl Runtime {
         if let Some(t) = given("roll_share")
             && let Ok(Some(ends)) = self.store.share_ends(preview, t)
         {
-            let left = ((ends - self.store.now_ms().unwrap_or(ends)) / 1000).max(1);
+            let now = self.store.now_ms().unwrap_or(ends);
+            // Who followed it isn't known (nobody signed in): that it was, once a day.
+            let _ = self.store.share_opened(preview, t, now.div_euclid(86_400_000));
+            let left = ((ends - now) / 1000).max(1);
             return Some(self.enter(req, "roll_share", &share_cookie, t, left));
         }
         if team {
@@ -805,12 +808,13 @@ impl Runtime {
         }
         if s.checked_at <= now - self.cfg.visitor_recheck.as_millis() as i64 {
             let Ok(engine) = self.engine() else { return false };
+            let user = s.user.clone();
             let may = tokio::task::spawn_blocking(move || engine.may_open(&s.user, &s.roll_session, &s.project)).await.unwrap_or(false);
             if !may {
                 let _ = self.store.end_visit_session(&hash);
                 return false;
             }
-            let _ = self.store.visit_checked(&hash, now);
+            let _ = self.store.visit_checked(&hash, preview, &user, now);
         }
         true
     }
