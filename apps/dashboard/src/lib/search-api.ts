@@ -9,6 +9,7 @@
 import { apiHeaders, call, onApiStatus, ROLL_API } from "./roll-api";
 import { withSession } from "./code-token";
 import type { MetricsRange, SearchMetrics, SearchSlowLog } from "./search-performance";
+import type { AuditPage } from "./search-audit";
 
 export type Flavor = "elasticsearch" | "opensearch";
 
@@ -251,6 +252,13 @@ export const searchApi = {
   createKey: (id: string, name: string, access: KeyAccess, expiresInS?: number) =>
     call<NewSearchKey>("POST", `${cl(id)}/keys`, { name, access, expires_in_s: expiresInS }),
   revokeKey: (id: string, key: string) => call<null>("DELETE", `${cl(id)}/keys/${encodeURIComponent(key)}`),
+  /** The cluster's security audit log, newest first (never wakes it). `from`/`to`: Unix ms. */
+  audit: (id: string, q: { from?: number; to?: number; event?: string; size?: number } = {}) => {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== "") params.set(k, String(v));
+    const qs = params.toString();
+    return call<AuditPage>("GET", `${cl(id)}/audit${qs ? `?${qs}` : ""}`);
+  },
 };
 
 /**
