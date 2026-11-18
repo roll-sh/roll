@@ -1440,6 +1440,11 @@ static ROWS: &[Row] = &[
     row("PATCH", "/v1/code/changes/{id}/enqueue", "code", DEPLOY, one(PG, "change")),
     // Running a fork's code with the repo's data is the repo's owner's call.
     row("POST", "/v1/code/changes/{id}/approve-run", "code", ADMIN, one(PG, "change")),
+    // "Store in roll": a change's credential into roll secrets. A writer's (roll secrets then asks
+    // the same grant for `write` in the folder); the target lists the project's environments, so
+    // it's a writer's too.
+    row("GET", "/v1/code/changes/{id}/unstored/{fingerprint}", "code", W, one(PG, "change")),
+    row("POST", "/v1/code/changes/{id}/unstored/{fingerprint}/store", "code", W, one(PG, "change")),
     row("*", "/v1/code/threads/{id}", "code", M, one(PG, "thread")),
     row("*", "/v1/code/threads/{id}/", "code", M, one(PG, "thread")),
     row("*", "/v1/code/work/{id}", "code", M, one(PG, "work")),

@@ -29,7 +29,7 @@ const MAX_CANDIDATES: usize = 20_000;
 /// Added lines longer than this (bytes) are skipped: minified or generated text.
 const MAX_LINE: usize = 4096;
 /// Files larger than this (bytes, either side) aren't diffed.
-const MAX_FILE: u64 = 1 << 20;
+pub(crate) const MAX_FILE: u64 = 1 << 20;
 
 /// The most files a scan reads, the most candidates it checks, and how many go to roll secrets at
 /// once.
@@ -136,20 +136,27 @@ pub(crate) struct LeakFacts {
     leaks: Vec<(String, String)>,
     /// The credentials it adds that roll secrets doesn't hold, in order (placeholders left out;
     /// the allow-list is applied when they're shown, as it can change without the change moving).
-    unstored: Vec<Unstored>,
+    pub(crate) unstored: Vec<Unstored>,
 }
 pub(crate) type Leaks = Arc<LeakFacts>;
 
 /// A credential a change adds that roll secrets doesn't hold: never its value.
 #[derive(Debug, PartialEq, Eq)]
-struct Unstored {
-    kind: &'static str,
-    path: String,
+pub(crate) struct Unstored {
+    pub(crate) kind: &'static str,
+    pub(crate) path: String,
     /// 1-based, in the change's version of the file.
-    line: usize,
-    fingerprint: String,
+    pub(crate) line: usize,
+    pub(crate) fingerprint: String,
     /// The key it would be stored as (`credentials::suggested_key`).
-    key: String,
+    pub(crate) key: String,
+}
+
+impl Unstored {
+    /// Whether the default branch's `.roll/secrets-allow` keeps it, by fingerprint or path.
+    pub(crate) fn allowed(&self, allow: &roll_auth::credentials::Allow) -> bool {
+        allow.fingerprints.contains(&self.fingerprint) || code_review::glob::any(&allow.paths, &self.path)
+    }
 }
 
 /// A credential found in a change's added lines, before roll secrets is asked about it.
@@ -252,8 +259,7 @@ impl Code {
         }
         let Ok(Some(head)) = self.store.resolve(&r.id, &c.head) else { return Vec::new() };
         let Some((_, facts)) = self.leak_facts.get(&(r.id.clone(), head)) else { return Vec::new() };
-        let allow = &settings.secrets_allow;
-        let found: Vec<&Unstored> = facts.unstored.iter().filter(|u| !allow.fingerprints.contains(&u.fingerprint) && !code_review::glob::any(&allow.paths, &u.path)).collect();
+        let found: Vec<&Unstored> = facts.unstored.iter().filter(|u| !u.allowed(&settings.secrets_allow)).collect();
         let mut out: Vec<Blocker> = found
             .iter()
             .take(UNSTORED_SHOWN)

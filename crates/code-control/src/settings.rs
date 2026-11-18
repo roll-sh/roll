@@ -70,6 +70,9 @@ pub struct Settings {
     pub secrets: SecretsSettings,
     /// `.roll/secrets-allow` at the same head.
     pub secrets_allow: roll_auth::credentials::Allow,
+    /// The roll secrets environment (`development`, `staging:/api`) the first check that has one
+    /// names: where "Store in roll" suggests putting a credential a change adds.
+    pub secrets_environment: Option<String>,
     /// Names of the `[checks.*]` tables.
     pub declared_checks: Vec<String>,
     /// Why `roll.toml` couldn't be read (the defaults apply meanwhile).
@@ -119,7 +122,8 @@ pub fn parse(text: &str) -> Result<Settings, String> {
     };
     let main = raw.main.map(main).unwrap_or_default();
     let secrets = raw.secrets.map(secrets).transpose()?.unwrap_or_default();
-    Ok(Settings { queue, main, secrets, declared_checks: raw.checks.keys().cloned().collect(), ..Settings::default() })
+    let secrets_environment = raw.checks.values().find_map(|c| c.get("secrets")?.as_str().map(str::to_string));
+    Ok(Settings { queue, main, secrets, secrets_environment, declared_checks: raw.checks.keys().cloned().collect(), ..Settings::default() })
 }
 
 /// Validate `[queue]` (code-preview's strict parser hands it here).

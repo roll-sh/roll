@@ -1262,6 +1262,54 @@ impl code_control::SecretEnv for ForCode {
         })
         .await?
     }
+
+    async fn store_target(&self, repo: &str, asker: &code_control::SecretsAsker, prefer: Option<&str>) -> code_control::Result<code_control::StoreTarget> {
+        let secrets = self.secrets()?;
+        let (repo, asker, prefer) = (repo.to_string(), asker.clone(), prefer.map(str::to_string));
+        let t = tokio::task::spawn_blocking(move || {
+            let caller = secrets.caller_of(asker.operator, asker.user.as_ref(), asker.grant.as_ref())?;
+            secrets.found_target(&repo, prefer.as_deref(), &caller)
+        })
+        .await
+        .map_err(|e| code_control::Error::Internal(e.into()))?
+        .map_err(for_code)?;
+        Ok(code_control::StoreTarget { project: t.project, project_name: t.project_name, environments: t.environments, environment: t.environment })
+    }
+
+    async fn store(&self, repo: &str, asker: &code_control::SecretsAsker, c: code_control::StoreCredential) -> code_control::Result<code_control::StoredCredential> {
+        let secrets = self.secrets()?;
+        let (repo, asker) = (repo.to_string(), asker.clone());
+        let s = tokio::task::spawn_blocking(move || {
+            let caller = secrets.caller_of(asker.operator, asker.user.as_ref(), asker.grant.as_ref())?;
+            secrets.store_found(&repo, c.environment.as_deref(), c.prefer.as_deref(), &c.path, &c.key, c.value.0, c.message, &caller)
+        })
+        .await
+        .map_err(|e| code_control::Error::Internal(e.into()))?
+        .map_err(for_code)?;
+        Ok(code_control::StoredCredential { project: s.project, environment: s.environment, path: s.path, change: s.change, request: s.request })
+    }
+}
+
+impl ForCode {
+    fn secrets(&self) -> code_control::Result<Arc<Secrets>> {
+        Ok(self.0.get().ok_or_else(|| code_control::Error::Unavailable("roll secrets is starting".into()))?.0.clone())
+    }
+}
+
+/// roll secrets' answer as roll code's API answers it (the same statuses).
+fn for_code(e: Error) -> code_control::Error {
+    use code_control::Error as C;
+    match e {
+        Error::BadRequest(m) => C::Invalid(m),
+        Error::Unauthorized(_) => C::Unauthorized,
+        Error::Forbidden(m) => C::Forbidden(m),
+        // "no environment staging" reads "environment staging not found".
+        Error::NotFound(m) => C::NotFound(m.strip_prefix("no ").map(str::to_string).unwrap_or(m)),
+        Error::Conflict("no_project", m) => C::Unprocessable(m),
+        Error::Conflict(_, m) => C::Conflict(m),
+        Error::Unavailable(m) => C::Unavailable(m),
+        e => C::Internal(anyhow::anyhow!(e.to_string())),
+    }
 }
 
 #[cfg(test)]

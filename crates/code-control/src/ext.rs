@@ -60,4 +60,76 @@ pub trait SecretEnv: Send + Sync {
         let _ = (repo, keys);
         Ok(Vec::new())
     }
+    /// Where a credential found in a change of repo `owner/name` would be stored ("Store in
+    /// roll"): the project roll secrets trusts the repo for, as `asker` sees it, and its
+    /// environments, suggesting `prefer` (what the repo's `roll.toml` names) when it has it.
+    async fn store_target(&self, repo: &str, asker: &SecretsAsker, prefer: Option<&str>) -> crate::Result<StoreTarget> {
+        let _ = (repo, asker, prefer);
+        Err(crate::Error::Unprocessable("roll secrets isn't on this server".into()))
+    }
+    /// Store a credential read from a change as a new key, as `asker` (who needs `write` in the
+    /// folder): one change, or a change request where the folder needs approval.
+    async fn store(&self, repo: &str, asker: &SecretsAsker, credential: StoreCredential) -> crate::Result<StoredCredential> {
+        let _ = (repo, asker, credential);
+        Err(crate::Error::Unprocessable("roll secrets isn't on this server".into()))
+    }
+}
+
+/// Who asks roll secrets, as rolld's gate put them on the request: roll secrets decides with them
+/// as it would a request of its own (a roll-access grant first, then a signed-in person, then the
+/// operator).
+#[derive(Clone, Debug, Default)]
+pub struct SecretsAsker {
+    pub operator: bool,
+    pub user: Option<roll_auth::SignedIn>,
+    pub grant: Option<roll_auth::Grant>,
+}
+
+impl SecretsAsker {
+    pub fn of(ext: &axum::http::Extensions) -> SecretsAsker {
+        SecretsAsker { operator: roll_auth::Operator::on(ext), user: ext.get::<roll_auth::SignedIn>().cloned(), grant: roll_auth::Grant::on(ext).cloned() }
+    }
+}
+
+/// Where a found credential would go ([`SecretEnv::store_target`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoreTarget {
+    pub project: String,
+    pub project_name: String,
+    pub environments: Vec<String>,
+    /// The one to suggest; none when the project has neither `roll.toml`'s nor `development`.
+    pub environment: Option<String>,
+}
+
+/// A credential to store ([`SecretEnv::store`]).
+#[derive(Debug)]
+pub struct StoreCredential {
+    pub key: String,
+    /// None: [`StoreTarget::environment`].
+    pub environment: Option<String>,
+    pub prefer: Option<String>,
+    pub path: String,
+    pub value: CredentialValue,
+    pub message: String,
+}
+
+/// A credential's value on its way to roll secrets: never printed (`Debug` redacts it).
+pub struct CredentialValue(pub String);
+
+impl std::fmt::Debug for CredentialValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CredentialValue(<redacted>)")
+    }
+}
+
+/// What [`SecretEnv::store`] did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredCredential {
+    pub project: String,
+    pub environment: String,
+    pub path: String,
+    /// The change's number in the environment.
+    pub change: Option<i64>,
+    /// The change request opened instead (where the folder needs approval).
+    pub request: Option<String>,
 }
