@@ -327,7 +327,7 @@ pub fn unified_request(body: &Value) -> EsResult<Map> {
 }
 
 /// A message as the entity writes it: `content`, `role`, `name`, `tool_call_id`, `tool_calls`.
-fn message(v: &Value) -> Value {
+pub fn message(v: &Value) -> Value {
     let mut out = Map::new();
     for k in ["content", "role", "name", "tool_call_id", "tool_calls"] {
         if let Some(x) = v.get(k).filter(|x| !x.is_null()) {
