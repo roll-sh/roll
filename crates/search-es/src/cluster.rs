@@ -109,6 +109,11 @@ pub struct ClusterConfig {
     /// ([`crate::api::snapshots::install_default_repository`]): clusters whose snapshot
     /// contents are durable in roll's object storage (`None`: no default repository).
     pub default_repository: Option<String>,
+    /// Read service account tokens from `<path.conf>/service_tokens` too, as Elasticsearch
+    /// does. The file is the node's, so a token in it would sign in to every cluster the node
+    /// serves: the host sets this only for a node serving one cluster, or for the clusters its
+    /// operator names (`search_server::node::FILE_SERVICE_TOKEN_CLUSTERS`).
+    pub file_service_tokens: bool,
 }
 
 impl ClusterConfig {
@@ -123,6 +128,7 @@ impl ClusterConfig {
             host_metrics: false,
             sealer: None,
             default_repository: None,
+            file_service_tokens: false,
         }
     }
 

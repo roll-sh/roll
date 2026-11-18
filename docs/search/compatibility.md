@@ -460,7 +460,9 @@ and service accounts ignore the header, as in Elasticsearch. Service account tok
 security index and from `config/service_tokens` (`namespace/service/name:hash` lines, the
 `{PBKDF2_STRETCH}` hashes `elasticsearch-service-tokens` writes; read as the file is now, so
 edits take effect without a restart); `_credentials` lists the file's under
-`nodes_credentials.file_tokens`. An API key whose role descriptors
+`nodes_credentials.file_tokens`. The file is the node's, so on a node serving many clusters
+only the clusters named in the node setting `roll.security.service_token_file.clusters` read it
+(a dev-mode `search-dev` node serves one cluster, which always does). An API key whose role descriptors
 carry `restriction.workflows` runs only requests of those workflows (`search_application_query`:
 a search application's `_search`, with the searches it makes), anything else fails with
 `role_restriction_exception` ("access restricted by workflow"), `_authenticate` included. A search with `ignore_unavailable`
@@ -1078,7 +1080,14 @@ with the deployment key (`seal.rs`, kind `inference api key`); nothing prints th
 service settings without `api_key`, as Elasticsearch does) and they're opened only to send a
 request. Every URL is fetched through `roll_net::PublicOnly` with no redirects and no proxy,
 refusing private IP literals and `localhost`, reading at most 32 MiB
-(`roll.inference.allow_private_hosts` lifts the address rule, for test clusters only). Calls are
+(`roll.inference.allow_private_hosts` lifts the address rule, for test clusters only). A call
+waits at most the node's `roll.inference.max_timeout` (default 120s), retries and the rate
+limiter's wait included: a larger `timeout` is accepted and clamped to it. Elasticsearch 9.5.5
+accepts any `timeout` (`1000d`, `9223372036854775807ms`) and waits that long (checked: a `PUT`
+whose validation call went to a server that never answers was still waiting after 100 s), so
+one tenant could hold a shared node's connection and worker with an endpoint that never
+answers. Below the cap nothing differs; above it the call times out sooner, with the same
+`request timed out` error. Calls are
 authorized by the one security evaluator (`monitor_inference`, `manage_inference`). Answers are
 parsed as untrusted data: shapes are checked (a rerank index outside the inputs, a missing field
 or a wrong embedding count fail the call).
