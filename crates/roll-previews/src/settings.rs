@@ -81,8 +81,8 @@ pub struct Settings {
     /// at most 30 days back. Products without history branch as of now and say so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_at: Option<String>,
-    /// A feedback button on the pages of people who came in through roll (link access): it pins a
-    /// note to an element and posts it on the change, from roll.
+    /// A feedback button on the pages of people who came in through roll (link access, or a team
+    /// session): it pins a note to an element and posts it on the change, from roll.
     pub feedback: bool,
     /// Wake the change's services as soon as a new head is deployed, so the first visit (often
     /// the pull request comment's link) doesn't wait for a cold start.

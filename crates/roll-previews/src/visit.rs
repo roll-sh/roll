@@ -121,6 +121,10 @@ mod tests {
         async fn services(&self, _: &str, _: &str) -> anyhow::Result<Vec<ServiceSpec>> {
             Ok(Vec::new())
         }
+        /// Ada's note on `/hello`, as roll code names the person who posted it.
+        async fn feedback(&self, _: &str) -> anyhow::Result<Vec<crate::notes::Note>> {
+            Ok(vec![crate::notes::Note { id: "rev_1".into(), path: "/hello".into(), selector: "h1".into(), note: "bigger".into(), by: "ada".into(), at: 1, replies: Vec::new(), crop: false }])
+        }
         async fn report(&self, _: &Preview, _: &Settings) {}
         async fn forget(&self, _: &Preview, _: Option<&str>) {}
         fn nudges(&self) -> Option<tokio::sync::broadcast::Receiver<()>> {
@@ -158,7 +162,10 @@ mod tests {
     /// the preview's hosts, at the service's own scheme and port, and is used once, on its own
     /// preview; the session's cookie never reaches the app, and junk under its name doesn't shut
     /// it out; signing out of roll, the person losing the project, or a change of access (which
-    /// also replaces the link's token) ends it. Share links and the CI bypass still open it.
+    /// also replaces the link's token) ends it. The session holder gets the feedback button (its
+    /// script, sending notes to roll where they post as themselves, and the page's notes by
+    /// name); nobody without a session does. Share links and the CI bypass still open it, with
+    /// no button.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_signed_in_person_gets_into_a_team_preview() {
         let dir = tempfile::tempdir().unwrap();
@@ -207,8 +214,9 @@ mod tests {
                     let head = String::from_utf8_lossy(&buf[..n]).to_string();
                     let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
                     let cookies = head.lines().find_map(|l| l.strip_prefix("cookie: ").or_else(|| l.strip_prefix("Cookie: "))).unwrap_or("").to_string();
-                    let body = format!("service saw {path} with cookies [{cookies}]");
-                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+                    // A page (for the button's tag); anything else, what it saw.
+                    let (kind, body) = if path == "/page.html" { ("text/html", "<html><head></head><body>hi</body></html>".to_string()) } else { ("text/plain", format!("service saw {path} with cookies [{cookies}]")) };
+                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
                 });
             }
         });
@@ -281,6 +289,20 @@ mod tests {
         // name (a sibling preview's host can set it on the parent domain) doesn't shut it out.
         let (status, _, _, body) = visit("/hello", "application/json", Some(&format!("a=b; roll_visit_{id}=junk; {session}; roll_access_{id}={token}"))).await;
         assert_eq!((status, body.as_str()), (200, "service saw /hello with cookies [a=b]"));
+        // The feedback button: its script sends notes to the preview in roll's dashboard (where
+        // the person, signed in, posts them as themselves), and the page's notes name who left
+        // them. Nobody without a session gets either.
+        let target = format!("\"https://roll.test/dashboard/projects/{project}/previews?preview={id}\"");
+        let (status, _, _, script) = visit("/__roll/feedback.js", "*/*", Some(&session)).await;
+        assert!(status == 200 && script.contains(&target), "{status} {script}");
+        let (status, _, _, notes) = visit("/__roll/feedback.json?path=%2Fhello", "*/*", Some(&session)).await;
+        assert_eq!(status, 200);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&notes).unwrap()[0]["by"], "ada");
+        assert_eq!(visit("/__roll/feedback.js", "*/*", None).await.0, 401);
+        assert_eq!(visit("/__roll/feedback.json?path=%2Fhello", "*/*", None).await.0, 401);
+        // A session holder's page load carries the button's tag.
+        let (status, _, _, page) = visit("/page.html", "text/html", Some(&session)).await;
+        assert!(status == 200 && page.contains(std::str::from_utf8(crate::runtime::FEEDBACK_TAG).unwrap()), "{status} {page}");
         // A URL with the link's token is the same URL without it.
         let (status, location, ..) = visit(&format!("/hello?roll_access={token}&y=2"), "text/html", Some(&session)).await;
         assert_eq!((status, location.as_str()), (302, "/hello?y=2"));
@@ -312,9 +334,14 @@ mod tests {
         let (_, link) = engine.share(&id, 1, "ada").unwrap();
         let (status, _, cookie, _) = visit(link.strip_prefix(&format!("http://{host}")).unwrap(), "text/html", None).await;
         assert_eq!(status, 302);
-        assert_eq!(visit("/hello", "application/json", Some(cookie.split(';').next().unwrap())).await.0, 200);
+        let shared = cookie.split(';').next().unwrap().to_string();
+        assert_eq!(visit("/hello", "application/json", Some(&shared)).await.0, 200);
         let (secret, _) = store.rotate_bypass(&project).unwrap();
-        let bypass = Request::get("/hello").header(header::HOST, host).header(crate::runtime::BYPASS_HEADER, secret).body(axum::body::Body::empty()).unwrap();
-        assert_eq!(send(bypass).await.0, 200);
+        let bypass = |path: &str| Request::get(path).header(header::HOST, host).header(crate::runtime::BYPASS_HEADER, &secret).body(axum::body::Body::empty()).unwrap();
+        assert_eq!(send(bypass("/hello")).await.0, 200);
+        // Neither has a person to post as: no button (the app answers its own paths).
+        let (_, _, _, body) = visit("/__roll/feedback.js", "*/*", Some(&shared)).await;
+        assert!(body.starts_with("service saw /__roll/feedback.js "), "{body}");
+        assert_eq!(send(bypass("/__roll/feedback.js")).await.3, "service saw /__roll/feedback.js with cookies []");
     }
 }
