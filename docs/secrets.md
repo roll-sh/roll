@@ -2998,7 +2998,14 @@ guard's scans audited as `secrets.guard`, for roll MCP), #173 (MongoDB Atlas, on
 #284 (six more import sources), #290 (AWS IAM login), #303 (credentials roll doesn't hold yet); and
 on the #132 stack, #165/#166's engines through the gateway, their `rotate-admin`, and Cassandra's
 cache waited out. Ranked now:
-1. **The thirty-first security review** (running): today's PRs above, read cold, before they land.
+1. **The thirty-first security review** (2026-11-18 afternoon, today's PRs read cold): one high, three
+   medium, six low, all being fixed. High: #281's verify (and the public JWKS) trusted any key a
+   database writer added; now only keys whose sealed half opens under the deployment key. Medium:
+   #281's head forgeable after a tail cut (a keyed MAC and hourly digests with a staleness check);
+   #277's answer `${production.X}` became a reference (stored literally); #303's block mode failed open
+   when the lookup errored. Low: #290 replay and a shared default server ID, #262's rotator URL in state,
+   #274's ignored URL setters, #281's offline verify, #277's limiter reset, #248's cache clear-all.
+   Sound: #276, #279, #284 (one stderr note).
 2. **Land batch 2** (24 PRs, gated; waiter `rs79-lock` behind search and apps' #295), then batch 3
    (the #132 stack, #144, #86) and batch 4 (today's PRs).
 3. **R2, cut off everything that reaches a folder** (#304): tokens through roll-access's bulk revoke,
