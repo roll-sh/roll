@@ -25,7 +25,8 @@ pub struct Repository {
     pub ty: String,
     pub settings: Settings,
     /// Credentials given with the settings (an `s3` repository's `access_key`, `secret_key` and
-    /// `session_token`), sealed with the cluster's sealer when it has one ([`crate::seal`]).
+    /// `session_token`, a `gcs` one's `credentials_file`, an `azure` one's `account`, `key` and
+    /// `sas_token`), sealed with the cluster's sealer when it has one ([`crate::seal`]).
     /// Kept apart from `settings` so nothing that prints a repository can show them.
     pub secrets: BTreeMap<String, String>,
 }
@@ -56,9 +57,9 @@ impl Repository {
     }
 
     /// Whether the contents live in a bucket the tenant named (an `s3` repository other than
-    /// roll's default) rather than in the cluster's own storage.
+    /// roll's default, a `gcs` or an `azure` one) rather than in the cluster's own storage.
     pub fn in_bucket(&self) -> bool {
-        self.ty == "s3" && !self.roll_managed()
+        matches!(self.ty.as_str(), "s3" | "gcs" | "azure") && !self.roll_managed()
     }
 
     /// Where the repository's content lives: one key per type and location.
@@ -77,9 +78,12 @@ impl Repository {
         format!("{}:{loc}", self.ty)
     }
 
-    /// `readonly: true` (only that spelling; `url` repositories are read-only by nature).
+    /// `readonly: true` (only that spelling; `url` repositories are read-only by nature, and an
+    /// `azure` one reading only its secondary location, as Elasticsearch forces it).
     pub fn read_only(&self) -> bool {
-        self.ty == "url" || self.settings.get("readonly") == Some("true")
+        self.ty == "url"
+            || self.settings.get("readonly") == Some("true")
+            || (self.ty == "azure" && self.settings.get("location_mode").is_some_and(|m| m.eq_ignore_ascii_case("secondary_only")))
     }
 
     pub fn to_stored(&self) -> Value {
@@ -101,7 +105,7 @@ impl Repository {
 /// Where locations whose contents live in a tenant's bucket start ([`Repository::in_bucket`]):
 /// their snapshots hold no copies in the cluster's own storage.
 pub fn bucket_location(key: &str) -> bool {
-    key.starts_with("s3:")
+    key.starts_with("s3:") || key.starts_with("gcs:") || key.starts_with("azure:")
 }
 
 /// One snapshot.
