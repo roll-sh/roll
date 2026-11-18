@@ -421,6 +421,17 @@ or link shows up in their inbox, not only in their security log.
   is mailed for what they did before). Without mail configured nothing is sent.
 - The mail goes out off the request, after the sign-in's answer.
 
+### Allowed networks
+
+As GitHub Enterprise's IP allow list: an admin lists the company's networks (`PUT
+/v1/accounts/network-policy {on, networks}`: CIDRs or single addresses, at most 100; sudo mode;
+"Allowed networks" on the account page), and a person's session is used only from them. rolld's
+gate asks on every request with a session cookie (`roll_auth::Sessions::network_ok`, never
+cached), with the client's address as roll-access reads it (`ROLL_TRUSTED_PROXIES`); an unknown
+address is refused while it's on, and a session from elsewhere gets 403 `{code: "network"}`. A list
+that leaves out the saving admin's own address is refused (400 `lockout`). The operator's token and
+roll tokens aren't held to it (tokens have their own `ip_allow`).
+
 ### Sudo mode
 
 As GitHub does, a change to how an account is reached needs the person to have proved who they
@@ -525,6 +536,8 @@ same callback; on success it redirects to `return_to` (default `/dashboard/accou
 
 | Route | Body | Answer |
 | --- | --- | --- |
+| `GET /v1/accounts/network-policy` | | `{on, networks}` (allowed networks) |
+| `PUT /v1/accounts/network-policy` | `{on, networks}` | the policy, networks normalised; sudo mode; 400 `networks` or `lockout` |
 | `GET /v1/accounts/reset-requests` | | `ResetRequest[]`: `{id, user, email, handle, reason, ip, user_agent, created_at, state, decided_by, decided_at}`, pending first |
 | `POST /v1/accounts/reset-requests/{id}/approve` | | `ResetRequest`: TOTP and recovery codes gone (sudo mode; 403 `own_request` for your own; 409 decided) |
 | `POST /v1/accounts/reset-requests/{id}/deny` | | `ResetRequest` (sudo mode) |

@@ -164,6 +164,12 @@ export interface ResetRequest {
   decided_at: number | null;
 }
 
+/** Allowed networks (docs/accounts.md): where people's sessions may be used from. */
+export interface NetworkPolicy {
+  on: boolean;
+  networks: string[];
+}
+
 /** A passkey of yours (never its key): `synced` when your devices share it (iCloud, Google). */
 export interface Passkey {
   id: string;
@@ -238,6 +244,8 @@ export const accountsApi = {
   addPasskey: (id: string, name: string, credential: unknown) => call<Passkey>("POST", "/me/passkeys", { id, name, credential }),
   renamePasskey: (id: string, name: string) => call<Passkey>("PATCH", `/me/passkeys/${encodeURIComponent(id)}`, { name }),
   removePasskey: (id: string) => call<null>("DELETE", `/me/passkeys/${encodeURIComponent(id)}`),
+  networkPolicy: () => call<NetworkPolicy>("GET", "/network-policy"),
+  setNetworkPolicy: (p: NetworkPolicy) => call<NetworkPolicy>("PUT", "/network-policy", p),
   requestReset: (reason: string) => call<{ id: string; state: string }>("POST", "/signin/reset-request", { reason }),
   resetRequests: () => call<ResetRequest[]>("GET", "/reset-requests"),
   decideReset: (id: string, approve: boolean) => call<ResetRequest>("POST", `/reset-requests/${encodeURIComponent(id)}/${approve ? "approve" : "deny"}`),

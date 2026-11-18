@@ -14,6 +14,7 @@ pub mod audit;
 mod mail;
 mod oauth;
 pub mod passkeys;
+pub mod networks;
 mod places;
 pub mod recovery;
 mod sudo;
@@ -138,6 +139,10 @@ CREATE TABLE IF NOT EXISTS sign_in_places (
     last_at INTEGER NOT NULL,
     PRIMARY KEY (user_id, place)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS network_policy (
+    id INTEGER PRIMARY KEY,
+    policy TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS passkey_challenges (
     id TEXT PRIMARY KEY,
     user_id TEXT,
@@ -1038,6 +1043,13 @@ impl roll_auth::Sessions for Resolver {
         let (accounts, user, session) = (self.0.clone(), user.to_string(), session.to_string());
         Box::pin(async move {
             tokio::task::spawn_blocking(move || accounts.fresh_for(&user, &session).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
+        })
+    }
+
+    fn network_ok<'a>(&'a self, _user: &'a str, ip: Option<std::net::IpAddr>) -> roll_auth::BoxFuture<'a, Result<bool, String>> {
+        let accounts = self.0.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || accounts.network_policy().map(|p| p.allows(ip)).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
         })
     }
 
