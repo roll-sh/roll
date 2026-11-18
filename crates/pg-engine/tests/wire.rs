@@ -4363,6 +4363,11 @@ fn protocol_cases() {
         c("copy_done_trailing", |a| session(a, &["create temp table cp(a int)"], &[query("copy cp from stdin"), msg(b'c', b"x")])),
         c("copy_fail_nostr", |a| session(a, &["create temp table cp(a int)"], &[query("copy cp from stdin"), msg(b'f', b"boom")])),
         c("copy_flush_sync", |a| session(a, &["create temp table cp(a int)"], &[query("copy cp from stdin"), [flush(), sync(), msg(b'd', b"1\n"), msg(b'c', b"")].concat()])),
+        // COPY ... (FORMAT binary): a negative header extension length, a field cut short and
+        // a negative field size (CopyReadBinaryAttribute's errors name the column).
+        c("copy_bin_ext_neg", |a| session(a, &["create temp table cb(a int, b text)"], &[query("copy cb from stdin (format binary)"), [msg(b'd', b"PGCOPY\n\xff\r\n\0\0\0\0\0\xff\xff\xff\xfb"), msg(b'c', b"")].concat()])),
+        c("copy_bin_cut", |a| session(a, &["create temp table cb(a int, b text)"], &[query("copy cb from stdin (format binary)"), [msg(b'd', b"PGCOPY\n\xff\r\n\0\0\0\0\0\0\0\0\0\0\x02\0\0\0\x04\0\0\0\x01\0\0\0\x01"), msg(b'c', b"")].concat()])),
+        c("copy_bin_negsize", |a| session(a, &["create temp table cb(a int, b text)"], &[query("copy cb from stdin (format binary)"), [msg(b'd', b"PGCOPY\n\xff\r\n\0\0\0\0\0\0\0\0\0\0\x02\xff\xff\xff\xfe"), msg(b'c', b"")].concat()])),
         c("copy_ext_bad", |a| session(a, &["create temp table cp(a int)"], &[
             [parse("", "copy cp from stdin", &[]), bind("", "", &[], NONE, &[]), execute("", 0), sync()].concat(),
             parse("", "select 1", &[]),
