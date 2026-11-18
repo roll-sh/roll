@@ -133,6 +133,8 @@ pub struct NodeConfig {
     /// data is in object storage (`search_es::api::snapshots::install_default_repository`;
     /// `None`: none).
     pub default_repository: Option<String>,
+    /// How long and how much each cluster's audit log keeps ([`crate::audit`]).
+    pub audit: crate::audit::AuditConfig,
 }
 
 impl Default for NodeConfig {
@@ -154,6 +156,7 @@ impl Default for NodeConfig {
             snapshot_leftover_grace: search_es::api::snapshots::LEFTOVER_GRACE,
             sealer: None,
             default_repository: None,
+            audit: crate::audit::AuditConfig::default(),
         }
     }
 }
@@ -326,6 +329,8 @@ pub struct Node {
     /// Wakes and unloads since start.
     pub wakes: AtomicU64,
     pub unloads: AtomicU64,
+    /// Every cluster's security audit log.
+    pub audit: Arc<crate::audit::AuditLogs>,
 }
 
 /// Holds a cluster's transition lock; drops the map entry when nobody else wants it.
@@ -779,7 +784,9 @@ impl Node {
             0 => std::thread::available_parallelism().map_or(2, |n| n.get() * 2),
             n => n,
         };
+        let audit = crate::audit::AuditLogs::new(stores.data(), cfg.audit.clone());
         Arc::new(Node {
+            audit,
             catalog,
             stores,
             fair: (running != usize::MAX).then(|| FairScheduler::new(running)),
@@ -1087,6 +1094,7 @@ impl Node {
         cfg.sealer = self.cfg.sealer.clone();
         // Snapshot contents are durable only with object storage behind the cluster.
         cfg.default_repository = self.cfg.default_repository.clone().filter(|_| data_store.is_some());
+        cfg.audit = Some(search_es::xpack::security::audit::AuditLog(self.audit.clone()));
         let mut cluster = Cluster::open(cfg, store).await?;
         cluster.node.id = stable_node_id(&spec.name);
         if cluster.state().version <= 1 {
@@ -1200,6 +1208,8 @@ impl Node {
             l
         };
         self.hooks.unloading(&loaded.cluster).await;
+        // Failed logins the node refuses while it sleeps are recorded as it last asked.
+        self.audit.remember(name, search_es::xpack::security::audit::snapshot(&loaded.cluster));
         if flush
             && loaded.data.is_some()
             && let Err(e) = loaded.cluster.sync_async_results().await
@@ -1366,6 +1376,7 @@ impl Node {
     /// Deletes a cluster's data (unloading it first, without flushing).
     pub async fn delete_cluster(&self, name: &str) -> anyhow::Result<()> {
         self.force_unload(name).await;
+        self.audit.forget(name).await;
         self.stores.delete(name).await
     }
 
@@ -1525,6 +1536,7 @@ impl Node {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
+        self.audit.flush_all().await;
         if let Some(store) = self.stores.data() {
             store.close().await?;
         }
@@ -1753,6 +1765,7 @@ impl Node {
                 && !auth::verify(&spec, c)
             {
                 if !native_ok(&loaded) {
+                    self.audit_refusal(name, spec.dialect, Some(&*loaded), req, &presented, Some(c));
                     return Err(failed().into());
                 }
                 via_native = true;
@@ -1786,6 +1799,7 @@ impl Node {
             && !auth::verify(&spec, c)
         {
             if native.is_none() {
+                self.audit_refusal(name, spec.dialect, None, req, &presented, Some(c));
                 return Err(failed().into());
             }
             via_native = true;
@@ -1803,6 +1817,7 @@ impl Node {
                 Refused::Rejected(Rejected { error, dialect })
             })?;
             if via_native && !native_ok(&loaded) {
+                self.audit_refusal(name, dialect, Some(&*loaded), req, &presented, claim.as_ref());
                 return Err(failed().into());
             }
             match self.pin(loaded, dialect) {
@@ -1817,6 +1832,22 @@ impl Node {
                 Err(()) => tokio::task::yield_now().await,
             }
         }
+    }
+
+    /// Records in cluster `name`'s audit log that the node refused `req`'s credentials: as the
+    /// loaded cluster asks, or as it last asked when it was loaded here (its defaults if never).
+    /// Only a Basic user name is read from the credentials.
+    fn audit_refusal(&self, name: &str, dialect: Dialect, loaded: Option<&Loaded>, req: &EsRequest, presented: &Presented, claim: Option<&auth::Claim>) {
+        use search_es::xpack::security::audit;
+        let user = match presented {
+            Presented::Basic { user, .. } => Some(claim.and_then(|c| c.user.clone()).unwrap_or_else(|| user.clone())),
+            _ => None,
+        };
+        let snap = match loaded {
+            Some(l) => audit::snapshot(&l.cluster),
+            None => self.audit.remembered(name).unwrap_or_else(|| Arc::new(audit::Snapshot::defaults(dialect, name, &stable_node_id(name), &self.cfg.node_name))),
+        };
+        audit::failed_login(&audit::AuditLog(self.audit.clone()), &snap, req, user.as_deref());
     }
 
     /// Counts a request in flight on `loaded`, unless it is being unloaded (the residency
