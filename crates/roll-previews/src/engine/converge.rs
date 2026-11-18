@@ -443,7 +443,7 @@ impl Engine {
         let mut deployed: Vec<String> = Vec::new();
         // Rebuilds a deploy hook asked for: each one is a deploy of every service, built afresh.
         let rebuilds = self.store.rebuilds(&r.id)?;
-        let rebuilt = (rebuilds > 0).then(|| format!("#r{rebuilds}")).unwrap_or_default();
+        let rebuilt = if rebuilds > 0 { format!("#r{rebuilds}") } else { String::new() };
         for (spec, repo, rev, on_apps) in wanted {
             keep.push(spec.name.clone());
             if let Some(path) = &spec.health {
