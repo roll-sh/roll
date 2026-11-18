@@ -139,6 +139,12 @@ export function SsoSection() {
                   <Copy className="size-3.5" />
                 </button>
               </span>
+              <span className="flex min-w-0 items-center gap-1.5" title="Register it at the provider: signing out there (or an admin ending someone's sessions) ends their roll sessions from it at once">
+                back-channel logout URI <span className="truncate font-mono text-[11.5px] text-fg">{c.backchannel_logout_uri}</span>
+                <button onClick={() => navigator.clipboard.writeText(c.backchannel_logout_uri)} className={btn} aria-label="Copy the back-channel logout URI">
+                  <Copy className="size-3.5" />
+                </button>
+              </span>
             </div>
           </div>
         ))}

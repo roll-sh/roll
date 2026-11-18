@@ -128,6 +128,8 @@ export function activityText(e: Activity, me: string): string {
       return `${by === "you" ? "You" : by[0].toUpperCase() + by.slice(1)} declined to reset your second factor`;
     case "reauth":
       return e.ok ? `You confirmed it's you with ${how(d.method)}` : `Confirming it's you with ${how(d.method)} was refused`;
+    case "session.end":
+      return "Your company's provider signed you out (its back-channel logout)";
     case "scim.update":
       return d.active === false ? "Your company's provider deactivated your account" : d.active === true ? "Your company's provider reactivated your account" : "Your company's provider updated your account";
   }
@@ -193,6 +195,8 @@ export interface SsoConnection {
   created_at: number;
   /** What to register at the provider as the sign-in redirect. */
   redirect_uri: string;
+  /** What to register at the provider as its back-channel logout URI (it ends sessions there). */
+  backchannel_logout_uri: string;
   /** Domains a TXT record proved: only these route sign-ins, link, provision or enforce. */
   verified: string[];
   /** The TXT record that proves a domain (`name` with the domain in place of `<domain>`). */
