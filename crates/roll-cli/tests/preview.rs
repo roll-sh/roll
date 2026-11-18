@@ -270,3 +270,14 @@ fn up_previews_the_working_tree_and_down_removes_it() {
     assert!(s.pushed("preview/ana/feat-x").is_none(), "the branch is gone");
     assert_eq!(s.git(&work, false, &["rev-parse", "HEAD"]), head);
 }
+
+/// `roll preview masks` lists a project's mask suggestions (none here: its canvas holds only a
+/// repo), and `--apply` with none changes nothing.
+#[test]
+fn mask_suggestions_from_the_cli() {
+    let s = server();
+    s.ok(&["settings", "shop", "--set", "enabled=true"]);
+    assert!(s.ok(&["masks", "shop"]).contains("nothing unmasked looks like personal data"));
+    s.ok(&["masks", "shop", "--apply"]);
+    assert_eq!(s.json(&["masks", "shop"])["suggestions"].as_array().map(Vec::len), Some(0));
+}

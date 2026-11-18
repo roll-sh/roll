@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// How long one resource's columns are read for mask suggestions before it's named in `unread`.
+pub const SUGGEST_READ_FOR: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl Engine {
     pub(super) async fn converge_one(&self, r: Row) {
         let id = r.id.clone();
@@ -64,6 +67,72 @@ impl Engine {
             }
         }
         if problems.is_empty() { Ok(()) } else { Err(crate::Error::BadRequest(problems.join("; "))) }
+    }
+
+    /// Columns of the project's data that look like people's data and aren't masked yet
+    /// (`GET …/mask-suggestions`): of every Postgres, NoSQL and search resource on its canvas that
+    /// the project stands for (`Workspace::trusts`) and `may_read` allows (a scoped token's grant
+    /// for that resource), whatever its rule now (the dialog shows them under those on `branch`,
+    /// as the rule being edited says), at most [`crate::mask::SUGGEST_COLUMNS_MAX`] columns read
+    /// each. A resource that isn't read is named in `unread`, with why: it sleeps (reading it
+    /// would wake it), it didn't answer within [`SUGGEST_READ_FOR`], it couldn't be read, or it
+    /// has more columns than are read.
+    pub async fn mask_suggestions(&self, project_id: &str, may_read: impl Fn(Kind, &str) -> bool) -> crate::Result<serde_json::Value> {
+        let max = crate::mask::SUGGEST_COLUMNS_MAX;
+        let project = self.workspace_project(project_id)?;
+        let s = self.store.settings(project_id)?;
+        let resources: Vec<(Kind, String)> = project
+            .resources
+            .iter()
+            .filter(|r| self.workspace.trusts(&project, r.kind, &r.r#ref))
+            .filter_map(|r| Kind::of_workspace(r.kind).map(|k| (k, r.r#ref.clone())))
+            .filter(|(k, parent)| matches!(k, Kind::Postgres | Kind::Nosql | Kind::Search) && may_read(*k, parent))
+            .collect();
+        // `None`: not read in time.
+        let read = futures::future::join_all(resources.iter().map(|(k, parent)| async move {
+            let b = match self.brancher(*k) {
+                Ok(b) => b,
+                Err(e) => return Some(Err(e)),
+            };
+            tokio::time::timeout(SUGGEST_READ_FOR, b.columns(parent, max + 1)).await.ok()
+        }))
+        .await;
+        let (mut suggestions, mut unread) = (Vec::new(), Vec::new());
+        for ((kind, parent), columns) in resources.iter().zip(read) {
+            let key = format!("{}:{parent}", kind.as_str());
+            let why = match columns {
+                Some(Ok(c)) => Ok(c),
+                Some(Err(e)) if e.is::<crate::ports::Asleep>() => Err("asleep: open it to read its columns".to_string()),
+                Some(Err(e)) => {
+                    warn!(resource = %key, error = %format!("{e:#}"), "previews: reading columns for mask suggestions");
+                    Err("its columns couldn't be read".into())
+                }
+                None => Err(format!("its columns weren't read within {} s", SUGGEST_READ_FOR.as_secs())),
+            };
+            let mut columns = match why {
+                Ok(c) => c,
+                Err(why) => {
+                    unread.push(serde_json::json!({ "resource": key, "why": why }));
+                    continue;
+                }
+            };
+            if columns.len() > max {
+                columns.truncate(max);
+                unread.push(serde_json::json!({ "resource": key, "why": format!("only its first {max} columns were read") }));
+            }
+            let masked = s.masking.get(&key);
+            for c in &columns {
+                // Already masked, or a path the settings wouldn't take as a mask.
+                let unnameable = c.path.len() > 200 || (*kind == Kind::Search && c.path.contains(['*', ',', '/', ' ', '\\']));
+                if unnameable || masked.is_some_and(|m| m.contains_key(&c.path)) {
+                    continue;
+                }
+                if let Some(x) = crate::mask::suggest(*kind, c) {
+                    suggestions.push(serde_json::json!({ "resource": key, "path": c.path, "rule": x.rule, "why": x.why }));
+                }
+            }
+        }
+        Ok(serde_json::json!({ "suggestions": suggestions, "unread": unread }))
     }
 
     /// A head nobody approved yet: nothing of it runs (its services sleep) until a writer does.

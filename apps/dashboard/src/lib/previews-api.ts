@@ -53,6 +53,25 @@ export function unmaskedNote(kind: string, mode: "branch" | "schema" | "skip", m
   return "Previews get its data as it is (it can't be masked): a seed can replace it with made-up data, or skip it.";
 }
 
+/** A column (or search field) of a project's Postgres, NoSQL or search resource that looks like
+ * people's data and has no mask yet (`GET …/mask-suggestions`), with a rule its type and
+ * constraints take. Every such resource is read, whatever its rule; the dialog shows them under
+ * those on `branch`. */
+export interface MaskSuggestion {
+  /** `"postgres:<ref>"`, `"nosql:<ref>"` or `"search:<ref>"`, as `masking` keys it. */
+  resource: string;
+  path: string;
+  rule: string;
+  why: string;
+}
+
+export interface MaskSuggestions {
+  suggestions: MaskSuggestion[];
+  /** Resources whose columns weren't all read, and why: asleep (not woken for this), not read
+   * within 10 s, couldn't be read, or only the first 2,000 read. */
+  unread: { resource: string; why: string }[];
+}
+
 export interface PreviewCost {
   sleeping_usd_month: number;
   active_usd_hour: number;
@@ -512,6 +531,8 @@ export const previewsApi = {
   settings: (projectId: string) => call<PreviewSettings>("GET", `${project(projectId)}/settings`),
   putSettings: (projectId: string, patch: SettingsPatch) => call<PreviewSettings>("PUT", `${project(projectId)}/settings`, patch),
   usage: (projectId: string) => call<PreviewUsage>("GET", `${project(projectId)}/usage`),
+  /** Columns of the project's branched data that look like people's data and aren't masked. */
+  maskSuggestions: (projectId: string) => call<MaskSuggestions>("GET", `${project(projectId)}/mask-suggestions`),
   bypass: (projectId: string) => call<PreviewBypass>("GET", `${project(projectId)}/bypass`),
   /** A new secret (the old one stops working), shown only in this answer. */
   rotateBypass: (projectId: string) => call<PreviewBypass>("POST", `${project(projectId)}/bypass`),
