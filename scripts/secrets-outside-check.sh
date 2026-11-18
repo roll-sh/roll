@@ -2,9 +2,10 @@
 # roll secrets' databases outside roll against real servers (docs/secrets.md, "Databases outside
 # roll"): Elasticsearch, OpenSearch, Cassandra and ScyllaDB in Docker, each with authentication on
 # and TLS from a CA made here, then rolld's ignored tests for them (register, rotate, a dynamic
-# login with its group's grants, delete; for CQL, that tracing and ScyllaDB's audit log keep no
-# password roll sent). Containers are named roll-secrets-outside-check-… and
-# removed at the end; images are used as they are (pulled if missing, never removed here).
+# login with its group's grants, delete, the admin's own password; for CQL, that tracing and
+# ScyllaDB's audit log keep no password roll sent). Containers are named
+# roll-secrets-outside-check-… and removed at the end; images are used as they are (pulled if
+# missing, never removed here).
 #
 #   scripts/secrets-outside-check.sh [es] [os] [cassandra] [scylla]   (all four by default)
 #

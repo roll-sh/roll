@@ -209,8 +209,31 @@ impl roll_secrets::outside::OutsideDb for Guarded {
         if let Some(u) = self.rabbitmq(url)? {
             return self.rq(u, ca, async move |c| rabbitmq::set_password(c, &user, password).await);
         }
+        if let Some(u) = self.search(url)? {
+            return self.es(u, ca, async move |c| search::set_own_password(c, password).await);
+        }
+        if let Some(u) = self.cql(url)? {
+            let next = u.with_password(password);
+            self.cq(u, ca, async move |c| cql::set_own_password(c, password).await)?;
+            tokio::runtime::Handle::current().block_on(cql::settled(&next, ca, self.allow_private));
+            return Ok(());
+        }
+        if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
+            return Err(unrotatable(url));
+        }
         let sql = format!("ALTER ROLE CURRENT_USER PASSWORD '{}'", postgres_protocol::password::scram_sha_256(password.as_bytes()));
         self.run(url, ca, move |c| Box::pin(async move { c.batch_execute(&sql).await.map_err(db_error) }))
+    }
+}
+
+/// A URL no engine here rotates its own password for: named by its scheme alone (the rest holds
+/// the password).
+fn unrotatable(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, _)) if !scheme.is_empty() && scheme.len() <= 32 && scheme.bytes().all(|b| b.is_ascii_alphanumeric() || b"+.-".contains(&b)) => {
+            format!("roll can't rotate a {scheme}:// admin URL's own password")
+        }
+        _ => "roll can't rotate this admin URL's own password".into(),
     }
 }
 
@@ -422,6 +445,7 @@ fn connect_error(host: &str, e: tokio_postgres::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roll_secrets::outside::OutsideDb;
 
     #[tokio::test]
     async fn a_tenants_url_reaches_only_a_public_database_over_tls() {
@@ -462,6 +486,9 @@ mod tests {
         // Cassandra and ScyllaDB: CQL over TLS, an optional keyspace, no settings.
         assert!(g.cql("cassandra://a:b@db.example.com:9142/app?ssl=false").err().unwrap().contains("ssl"));
         assert!(g.cql("cassandra://a:b@db.example.com/app").unwrap().is_some());
+        // A scheme no engine rotates is refused by name, never tried as Postgres.
+        assert_eq!(g.set_own_password("snowflake://a:fake-pw@x.example.com/db", None, "x").unwrap_err(), "roll can't rotate a snowflake:// admin URL's own password");
+        assert!(!g.set_own_password("user=a password=fake-pw", None, "x").unwrap_err().contains("fake-pw"));
         assert!(resolve("127.0.0.1", 5432, false).await.unwrap_err().contains("private"));
         assert!(resolve("10.1.2.3", 5432, false).await.unwrap_err().contains("private"));
     }

@@ -912,7 +912,11 @@ The admin credential rotates too, as Vault's `rotate-root` does (`POST …/outsi
 `roll secrets databases rotate-admin ID`, or the key button in the dashboard): roll sets a password
 nobody chose on the user the admin URL logs in as (`ALTER ROLE CURRENT_USER`, MySQL's
 `ALTER USER CURRENT_USER()`, SQL Server's `ALTER LOGIN`, Redis' `ACL SETUSER`, MongoDB's
-`updateUser`, ClickHouse's `ALTER USER`, RabbitMQ's user API) and keeps it sealed, so after it
+`updateUser`, ClickHouse's `ALTER USER`, RabbitMQ's user API, Elasticsearch's
+`_security/user/_password` as that user, OpenSearch's account API with the URL's password as the
+current one, Cassandra's and ScyllaDB's `ALTER ROLE` on the URL's role, hashed where the server
+takes it, then up to 5 s until the new password logs in past Cassandra's credentials cache; any
+other URL is refused, never tried as Postgres) and keeps it sealed, so after it
 nobody knows the admin password but roll. Whatever else uses that admin login breaks: give roll
 an admin of its own. Redis' `default` user is refused (its password is every client's
 `requirepass`), and so is a Redis server that can't keep an ACL change across a restart. The new
