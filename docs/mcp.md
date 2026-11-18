@@ -838,15 +838,15 @@ previews are listed once those products are on.
 Ranked; the top item is in progress. A watchdog reads this list. Unblocked work comes first; what
 waits on a sibling PR reaching main is last.
 
-1. **Next, ranked (now):** a company's longest session (Okta's maximum session lifetime:
-   `max_session_hours` in the account policy, every session ends that long after its sign-in,
-   whatever its use); the sign-in method on each session (passkey, SSO, email code) so people and
-   admins can tell a phishing-resistant session from the rest; `previews_errors` and a
-   mask-suggestions tool once previews #326 and #324 are on main; `search_analytics` on #334 once
-   search #291 is on main; a removed person's repositories handed to someone else (waits for a
-   repository transfer in roll code).
-   Open for the next turn: passkey autofill (#322), this list (#323), an admin's per-person
-   security log (#328), admin alerts for security changes (#333), `search_audit` (#334).
+1. **Next, ranked (now):** `previews_errors` and a mask-suggestions tool once previews #326 and
+   #324 are on main (previews tells this thread); a person's own trusted devices (a session
+   marked "remember this browser" skips the second factor for 30 days, GitHub's and Google's,
+   revocable from the session list); an admin's view of where people sign in from (the sign-in
+   places, summarised per person in People); a removed person's repositories handed to someone
+   else (waits for a repository transfer in roll code).
+   Open for the next turn (after apps): passkey autofill (#322), this list (#323), an admin's
+   per-person security log (#328), admin alerts (#333), `search_audit` and `search_analytics`
+   (#334), the longest session (#337), how each session signed in (#338).
 2. **Landed 2026-11-18, turn 3 (main e84194b6f, ci green):** a person's own data export (#283),
    hardware keys only (#286), one provider for people and agents (#287), an SSO connection's
    session length (#289) and back-channel logout (#292), allowed networks (#294), a second factor
