@@ -836,6 +836,14 @@ as a private address.
       cookie never reaches a service under any access. Leaving `link` gives each of the
       project's previews a new token, so going back to `link` doesn't revive the old links.
       Share links and the bypass header for CI still work.
+    - *Feedback.* A session holder gets the feedback button, as a link visitor does under `link`
+      ("Feedback on the preview page"): the gate marks a request it let in through roll (the
+      link's cookie, or a live session; `ThroughRoll` in `runtime.rs`), and only such a request
+      gets the script, the page's notes and the tag. Its note opens roll's dashboard, where the
+      person is signed in and posts it as themselves (`POST /v1/code/changes/{id}/reviews`, a
+      comment review roll code names by the person's handle, as every person's review). The page never holds
+      a credential, so the app's own code can't post as them. A share link's visitor and a
+      bypass request get no button (nobody to post as).
     - *Who opened it.* Previews run on branches of production data, so a team sees who looked
       (Vercel's deployment protection logs access too). When a ticket is traded for a session,
       the same write adds "`<handle>` opened it (signed in to roll)" to the preview's activity
@@ -854,15 +862,20 @@ as a private address.
       environment, so roll apps' own sign-in flow and its own check decide (its
       `AccountsVisitors` and `/dashboard/apps/visit`: admins only today), not previews'. roll
       apps refuses `signed_in` on a node without roll's dashboard address (`web_url`), which
-      fails the deploy. Share links don't open services on roll apps, as under `link`.
+      fails the deploy. Share links don't open services on roll apps, as under `link`. roll
+      apps adds the feedback button only for a visitor with its access cookie (`via_link` in
+      `apps-control/src/public.rs`), never for one with its sign-in session, so a team
+      preview's services on roll apps have no button yet.
     - `visit.rs::a_signed_in_person_gets_into_a_team_preview` follows a page load to the
       dashboard, a ticket only for a person, only to the preview's hosts and only on its own
       preview, its URL at the service's scheme and port whatever `to` said, the ticket used
       once, the session the app never sees (nor junk cookies by its name shutting it out), the
       link's token taken off the URL, signing out of roll and the person losing the project each
-      ending it, and a new access ending it and replacing the link's token. It also checks that
-      the activity names the person once per session and the visitors list names them, and that
-      a share link followed twice is one line.
+      ending it, and a new access ending it and replacing the link's token; the session holder
+      getting the feedback button's script (its notes to the preview in roll's dashboard) and
+      the page's notes by who left them, and nobody without a session, nor a share link or the
+      bypass, getting either. It also checks that the activity names the person once per
+      session and the visitors list names them, and that a share link followed twice is one line.
   - Never indexed: every response through a preview's host, the service's own and roll's 401
     alike, carries `X-Robots-Tag: noindex` (as Vercel's previews do), whatever the service
     sends, so a public preview, a share link or an earlier push's URL isn't what a search
@@ -1035,7 +1048,8 @@ land on the change.
 
 - The preview's proxy adds `<script src="/__roll/feedback.js" defer>` before `</body>` of a
   page load (`Sec-Fetch-Dest: document`; not a fetch, a fragment or an iframe), only for a
-  visitor who came in through roll (the preview's access cookie) and when the project's
+  visitor who came in through roll (the preview's access cookie, or a team-access session: a
+  person signed in to roll, "Access") and when the project's
   `feedback` rule is on (the default). It asks the service for the page uncompressed and adds
   the tag as the page streams (streamed rendering stays streamed, memory stays one chunk);
   the page is then `Cache-Control: private` with no `ETag`. Anything compressed, not HTML or
@@ -1051,8 +1065,8 @@ land on the change.
   linked to the preview · `button.pay`", then the note), which reaches the pull request like any
   review. The page's own names are kept to one inert line each.
 - The button also lists what's been said about the page already (Vercel's comment pins): the
-  proxy answers `/__roll/feedback.json?path=…` for the same visitors only (link access, through
-  roll), from the change's feedback reviews (`roll_previews::notes` reads back the shape the
+  proxy answers `/__roll/feedback.json?path=…` for the same visitors only (link access or a
+  team session, through roll), from the change's feedback reviews (`roll_previews::notes` reads back the shape the
   dashboard posts and nothing else; dismissed ones don't show), the latest 50. Each note says
   who and when, and outlines its element on hover; all of it is text, never HTML.
 - A note is resolved from the page too (Vercel Comments): its Resolve opens roll
@@ -1084,7 +1098,8 @@ land on the change.
   naming any other review joins nothing), so it reaches the pull request as a GitHub review like
   the note did. The page lists the replies under their note, as text, and `roll preview notes`
   under each note too (live: a reply listed under its note).
-- Previews deployed on roll apps go through apps' own proxy, which doesn't add it yet.
+- Previews deployed on roll apps go through apps' own proxy, which adds it for its link
+  visitors only: under team access (apps' `signed_in` environments) they get none yet.
 - Public previews don't get it (anyone could see the button), and a branch's preview has no
   change to post on.
 

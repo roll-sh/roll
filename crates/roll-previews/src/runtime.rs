@@ -608,7 +608,7 @@ impl Runtime {
     }
 
     /// The notes left on `path` of the preview's pages, as JSON (the latest 50; for whoever has
-    /// the button: link access, through roll).
+    /// the button: link access or a team session, through roll).
     async fn feedback_notes(&self, preview: &str, path: &str) -> Response {
         let here = match self.engine() {
             Ok(e) => e.notes_of(preview, path).await.unwrap_or_default(),
@@ -646,14 +646,12 @@ impl Runtime {
     }
 
     /// Where a visitor's feedback goes (the preview in roll's dashboard), when they get the button:
-    /// they came in through roll (the link access cookie), the preview is a change's, the rules
-    /// have `feedback` on and roll's dashboard is known.
+    /// they came in through roll ([`ThroughRoll`]: the link's cookie, or a team session), the
+    /// preview is a change's, the rules have `feedback` on and roll's dashboard is known. The
+    /// note is posted there, by whoever is signed in to roll, as them.
     fn feedback_target(&self, preview: &str, req: &Request) -> Option<String> {
         let web = self.cfg.dashboard.as_deref()?;
-        let access = self.store.access(preview).ok().flatten()?;
-        if !access.link_token().is_some_and(|t| has_access_cookie(preview, t, req)) {
-            return None;
-        }
+        req.extensions().get::<ThroughRoll>()?;
         let row = self.store.row(preview).ok()?;
         row.change_id.as_ref()?;
         self.store.settings(&row.project_id).ok()?.feedback.then(|| format!("{}/dashboard/projects/{}/previews?preview={preview}", web.trim_end_matches('/'), row.project_id))
@@ -698,6 +696,7 @@ impl Runtime {
             // domain, and the browser sends both): one live session lets them in.
             for t in take_cookies(req, &crate::visit::cookie(preview)) {
                 if self.visitor(preview, &t).await {
+                    req.extensions_mut().insert(ThroughRoll);
                     return None;
                 }
             }
@@ -705,6 +704,7 @@ impl Runtime {
         let token = access.link_token().unwrap_or_default().to_string();
         let cookie = format!("roll_access_{preview}");
         if has_access_cookie(preview, &token, req) {
+            req.extensions_mut().insert(ThroughRoll);
             return None;
         }
         // A share link (someone outside the team, until it ends), checked again at every request
@@ -910,12 +910,18 @@ impl Runtime {
     }
 }
 
+/// A request [`Runtime::gate`] let in as someone who came through roll: link access's cookie, or
+/// a live session of a team-access preview (a person signed in to roll). Not a share link, the CI
+/// bypass or a public preview: those get no feedback button.
+#[derive(Clone, Copy)]
+struct ThroughRoll;
+
 /// Where a preview's pages load the feedback button from (its own host, so `script-src 'self'`
 /// allows it), and the tag that loads it.
 pub const FEEDBACK_PATH: &str = "/__roll/feedback.js";
 /// The feedback already left on a page (`?path=`), for the button to list.
 pub const FEEDBACK_NOTES_PATH: &str = "/__roll/feedback.json";
-const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
+pub(crate) const FEEDBACK_TAG: &[u8] = b"<script src=\"/__roll/feedback.js\" defer></script>";
 /// Adds the feedback button's tag to a page as it streams: before the first `</body>` (matched
 /// across chunk boundaries, in any case), or at the end of a page without one. Chunks pass on as
 /// they come, so streamed rendering stays streamed and memory stays one chunk.
