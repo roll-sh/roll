@@ -1063,6 +1063,14 @@ impl ResourceState {
     }
 }
 
+/// Someone signed in to roll who opened a team-access preview ([`Store::visitors`]): their
+/// handle, and when they were last in it (ms, as of their session's last recheck).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Visitor {
+    pub who: String,
+    pub last_at: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Activity {
     pub at: i64,
