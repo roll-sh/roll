@@ -970,7 +970,8 @@ function Users({ me }: { me: string }) {
   const act = (p: Promise<unknown>) => p.then(load, (e) => setError(errorText(e)));
   const [open, setOpen] = useState<string | null>(null);
   const without = (list ?? []).filter((u) => !u.disabled && !u.totp && !u.passkeys).length;
-  const idle = (list ?? []).filter((u) => dormant(u)).length;
+  const idle = (list ?? []).filter((u) => dormant(u) && u.id !== me).length;
+  const [offering, setOffering] = useState(false);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<PeopleFilter>("everyone");
   const shown = findPeople(list ?? [], query, filter);
@@ -986,7 +987,29 @@ function Users({ me }: { me: string }) {
       {error && <p className="mb-2 text-[12px] text-danger">{error}</p>}
       {list && idle > 0 && (
         <p className="mb-2 text-[12px] text-muted">
-          {idle === 1 ? "One person hasn't" : `${idle} people haven't`} used roll in {DORMANT_DAYS} days: turning off accounts nobody uses closes a way in.
+          {idle === 1 ? "One person hasn't" : `${idle} people haven't`} used roll in {DORMANT_DAYS} days: turning off accounts nobody uses closes a way in.{" "}
+          {offering ? (
+            <>
+              <button
+                onClick={() => {
+                  setOffering(false);
+                  // One at a time: each is an admin's change (sudo mode asks once, then holds).
+                  const them = (list ?? []).filter((u) => dormant(u) && u.id !== me);
+                  void them.reduce((p, u) => p.then(() => accountsApi.updateUser(u.id, { disabled: true })), Promise.resolve() as Promise<unknown>).then(load, (e) => setError(errorText(e)));
+                }}
+                className="font-medium text-danger hover:underline"
+              >
+                Turn off {idle === 1 ? "that person" : `all ${idle}`}
+              </button>{" "}
+              <button onClick={() => setOffering(false)} className="hover:text-fg">
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button onClick={() => setOffering(true)} className="text-accent hover:underline">
+              Turn them off…
+            </button>
+          )}
         </p>
       )}
       {list && without > 0 && (
@@ -1001,6 +1024,7 @@ function Users({ me }: { me: string }) {
             <option value="everyone">Everyone</option>
             <option value="admins">Admins</option>
             <option value="no-second-factor">No second factor</option>
+            <option value="dormant">Dormant</option>
             <option value="turned-off">Turned off</option>
           </select>
           <span className="text-[11.5px] tabular-nums text-subtle">
