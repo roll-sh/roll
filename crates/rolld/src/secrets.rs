@@ -20,6 +20,7 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
 mod clouds;
+mod github;
 
 mod outside;
 mod syncs;
@@ -40,6 +41,21 @@ impl Api {
         let mut req = Request::builder().method(method).uri(path).header("content-type", "application/json");
         req.extensions_mut().map(|e| e.insert(roll_auth::Operator));
         let req = req.body(body.map_or(Body::empty(), |b| Body::from(b.to_string()))).map_err(|e| Error::Internal(e.to_string()))?;
+        tokio::runtime::Handle::current().block_on(async move {
+            let resp = router.oneshot(req).await.map_err(|e| Error::Link(e.to_string()))?;
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.map_err(|e| Error::Link(e.to_string()))?.to_bytes();
+            Ok((status, if bytes.is_empty() { Json::Null } else { serde_json::from_slice(&bytes).unwrap_or(Json::Null) }))
+        })
+    }
+
+    /// POST `body` as is (`content_type`) to a product's route as the operator: its status and JSON
+    /// answer (roll search's bulk takes NDJSON).
+    fn post_raw(&self, path: &str, content_type: &str, body: Vec<u8>) -> roll_secrets::Result<(axum::http::StatusCode, Json)> {
+        let router = self.0.get().ok_or_else(|| Error::Link("the product APIs aren't up yet".into()))?.clone();
+        let mut req = Request::builder().method(Method::POST).uri(path).header("content-type", content_type);
+        req.extensions_mut().map(|e| e.insert(roll_auth::Operator));
+        let req = req.body(Body::from(body)).map_err(|e| Error::Internal(e.to_string()))?;
         tokio::runtime::Handle::current().block_on(async move {
             let resp = router.oneshot(req).await.map_err(|e| Error::Link(e.to_string()))?;
             let status = resp.status();
@@ -363,7 +379,7 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
         grants: Some(access.clone() as Arc<dyn roll_auth::Grants>),
         workloads: Some(Arc::new(Workloads(access))),
         people: Some(Arc::new(people)),
-        kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private })), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
+        kms: Some(Arc::new(CustomerKms::new(None))), sts: Some(Arc::new(RollSts::new(None))), outside: Some(Arc::new(outside::Guarded { allow_private })), github: Some(Arc::new(github::RollGitHub::new(allow_private))), clouds: Some(roll_secrets::clouds::Clouds { issuer: issuer_url(args), tokens: Arc::new(clouds::RollClouds::new()) }),
     };
     // Opening blocks on the database.
     let secrets = Arc::new(tokio::task::block_in_place(|| Secrets::open(&target, pg, workspace.clone(), opts))?);
@@ -384,6 +400,22 @@ pub fn open(args: &crate::Args, home: &Path, workspace: Arc<roll_workspace::Work
     // rows), and deliveries outside it (notices, syncs, sinks), so a slow platform holds up neither.
     sweeper(secrets.clone(), "local", Secrets::sweep_local);
     sweeper(secrets.clone(), "outbound", Secrets::sweep_outbound);
+    // Syncs a change marked due, within seconds rather than at the next 30 s sweep.
+    let s = secrets.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let s = s.clone();
+            match tokio::task::spawn_blocking(move || s.sweep_due_syncs()).await {
+                Ok(Ok((_, failed))) if failed > 0 => tracing::warn!(failed, "roll secrets: some syncs failed"),
+                Ok(Ok(_)) | Ok(Err(Error::Unavailable(_))) => {}
+                Ok(Err(e)) => tracing::warn!("roll secrets: syncing failed: {e}"),
+                Err(e) => tracing::warn!("roll secrets: syncing panicked: {e}"),
+            }
+        }
+    });
     Ok(secrets)
 }
 
@@ -1045,7 +1077,9 @@ impl apps_control::integrations::SecretSource for ForApps {
             // Sensitive keys (and keys holding one through a reference) are flagged: apps seals
             // them and never shows them, not even to whoever may reveal the environment.
             let sensitive: std::collections::HashSet<String> = v.sensitive.into_iter().collect();
-            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: sensitive.contains(&name), value: value.expose().to_string(), name }).collect())
+            // Link fields that aren't credentials (a host, a port): apps' logs may show these.
+            let plain: std::collections::HashSet<String> = v.plain.into_iter().collect();
+            Ok(v.values.into_iter().map(|(name, value)| apps_control::integrations::SecretVar { linked: linked.contains(&name), sensitive: sensitive.contains(&name), plain: plain.contains(&name), value: value.expose().to_string(), name }).collect())
         })
         .await?
     }
@@ -1271,6 +1305,7 @@ mod tests {
             kms: None,
             sts: None,
             outside: None,
+            github: None,
             clouds: None,
             workloads: None,
         };

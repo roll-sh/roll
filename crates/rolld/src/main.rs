@@ -511,6 +511,9 @@ async fn run() -> anyhow::Result<()> {
             };
             let p = previews::start(&args, &home, c, workspace.clone(), cluster.clone(), on_products, apps.as_ref().map(|a| a.apps.clone()))?;
             router = router.merge(roll_previews::api::router(p.engine.clone()));
+            if let Some(internal) = p.internal {
+                router = router.merge(internal);
+            }
             Some(p.runtime)
         }
         None => None,
@@ -523,6 +526,7 @@ async fn run() -> anyhow::Result<()> {
     // roll apps emails a project's owner what needs them, through their account.
     if let Some(a) = &apps {
         a.apps.set_mailbox(std::sync::Arc::new(apps::AccountsMail(accounts.clone())));
+        a.apps.set_visitors(std::sync::Arc::new(apps::AccountsVisitors(accounts.clone())));
     }
     router = router.merge(roll_accounts::router(accounts.clone()));
     // The products this node runs, as rules name them: MCP lists their tools, the token builder

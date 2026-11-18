@@ -33,6 +33,7 @@
 //! whatever the route and whether or not the operator's token is set, so a token's limits hold
 //! everywhere. It sends allowed requests on with [`Operator`] and a [`Grant`] in their extensions.
 
+pub mod credentials;
 pub mod scope;
 pub mod totp;
 

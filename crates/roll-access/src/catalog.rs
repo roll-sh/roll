@@ -293,6 +293,8 @@ pub const OPERATOR_ONLY: &[(&str, &str)] = &[
     ("/v1/access/audit/sinks", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}", "where the audit log is sent is the operator's choice"),
     ("/v1/access/audit/sinks/{id}/retry", "where the audit log is sent is the operator's choice"),
+    ("/v1/apps/services/{id}/environments/{env}/visit", "a browser session in a sign-in-gated environment is a signed-in person's (rolld's gate sees their session), never a token's"),
+    ("/v1/apps/services/{id}/github", "roll's GitHub App installations span tenants: connecting a service to one (its tokens fetch any repository the installation sees) is the operator's, as connecting a repo is roll code's admin token's"),
 ];
 
 pub fn rows() -> &'static [Row] {
@@ -743,10 +745,11 @@ fn apps_create_action(b: &Value) -> Action {
 /// A service's run settings that change only how much of it runs and how it's watched: its size,
 /// scale, health checks, timers, alerts, rollout and restarts. Every other run key decides what
 /// production runs, when, or who reaches it (start, pre-deploy, schedule, schedules and their
-/// timezone and retries, kind, port, volume, public, tcp, and `rollback_on_crash`, which has roll
+/// timezone and retries, kind, port, volume, public, tcp, a worker's `health_command`, which runs
+/// in its instances, and `rollback_on_crash`, which has roll
 /// put an older deployment live by itself), and so does any key apps adds later until it's listed
 /// here: a new setting is never a quiet way into production.
-const APPS_WRITE_RUN: [&str; 18] = [
+const APPS_WRITE_RUN: [&str; 21] = [
     "min_instances",
     "max_instances",
     "concurrency",
@@ -754,6 +757,8 @@ const APPS_WRITE_RUN: [&str; 18] = [
     "memory_mb",
     "health_path",
     "health_timeout_s",
+    "health_every_s",
+    "health_failures",
     "suspend_after_s",
     "sleep_after_s",
     "alerts",
@@ -761,6 +766,7 @@ const APPS_WRITE_RUN: [&str; 18] = [
     "scale",
     "drain_s",
     "cpu_target",
+    "memory_target",
     "restart",
     "restart_tries",
     "affinity",
@@ -860,6 +866,8 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/access/checkup", "access", R, Tgt::Product),
     row("POST", "/v1/access/tokens/{id}/tighten", "access", ADMIN, Tgt::Product),
     row("DELETE", "/v1/access/tokens/{id}/temporary/{approval}", "access", ADMIN, Tgt::Product),
+    // A token asks for more for itself (a person decides): any grant may ask, as it may ask whoami.
+    row("POST", "/v1/access/requests", "access", R, Tgt::AnyGrant),
     row("GET", "/v1/access/approvals", "access", R, Tgt::Product),
     // A grant waits on its own approvals (the handler checks it's its own, or access read).
     row("GET", "/v1/access/approvals/{id}", "access", R, Tgt::AnyGrant),
@@ -1102,6 +1110,8 @@ static ROWS: &[Row] = &[
     row("DELETE", "/v1/search/clusters/{id}", "search", D, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/branches", "search", W, one(PG, "cluster")).reveals(SEARCH_SECRETS),
     row("POST", "/v1/search/clusters/{id}/password", "search", REVEAL, one(PG, "cluster")),
+    // A deleted cluster back (its id still resolves while it is kept): a write, like a create.
+    row("POST", "/v1/search/clusters/{id}/restore", "search", W, one(PG, "cluster")),
     row("POST", "/v1/search/clusters/{id}/request", "search", ADMIN, one(PG, "cluster")),
     // An API key: its secret is in the answer.
     row("POST", "/v1/search/clusters/{id}/keys", "search", REVEAL, one(PG, "cluster")),
@@ -1173,6 +1183,8 @@ static ROWS: &[Row] = &[
     // A signing secret signs calls that mint vendor keys: shown only to who may also reveal.
     row("POST", "/v1/secrets/projects/{project}/rotators", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
     row("DELETE", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/rotators/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/rotators/{id}/rotate-secret", "secrets", ADMIN, one(&["project"], "project")).reveals(&["secret"]),
     row("GET", "/v1/secrets/projects/{project}/transit", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/transit", "secrets", ADMIN, one(&["project"], "project")),
     // Each key's routes name it (`.index("name")`): a rule can grant one key
@@ -1203,9 +1215,14 @@ static ROWS: &[Row] = &[
     row("GET", "/v1/secrets/projects/{project}/cloud-accounts", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/cloud-accounts", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/cloud-accounts/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("GET", "/v1/secrets/projects/{project}/github-apps", "secrets", R, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/github-apps", "secrets", ADMIN, one(&["project"], "project")),
+    row("DELETE", "/v1/secrets/projects/{project}/github-apps/{id}", "secrets", ADMIN, one(&["project"], "project")),
     row("GET", "/v1/secrets/projects/{project}/outside-databases", "secrets", R, one(&["project"], "project")),
     row("POST", "/v1/secrets/projects/{project}/outside-databases", "secrets", ADMIN, one(&["project"], "project")),
     row("DELETE", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("PATCH", "/v1/secrets/projects/{project}/outside-databases/{id}", "secrets", ADMIN, one(&["project"], "project")),
+    row("POST", "/v1/secrets/projects/{project}/outside-databases/{id}/rotate-admin", "secrets", ADMIN, one(&["project"], "project")),
     // A backup seals every environment's values to a key the caller chooses; a restore loads a
     // whole project. Both are admin in secrets too.
     row("POST", "/v1/secrets/projects/{project}/backup", "secrets", ADMIN, one(&["project"], "project")),
