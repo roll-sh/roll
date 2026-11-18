@@ -58,6 +58,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
     let env = "/v1/apps/services/{id}/environments/{env}";
     let service_routes = Router::new()
         .route("/v1/apps/services/{id}", get(get_service).patch(patch_service).delete(delete_service))
+        .route("/v1/apps/services/{id}/restore", post(restore_service))
         .route("/v1/apps/services/{id}/links", get(links))
         .route("/v1/apps/services/{id}/activity", get(activity))
         .route("/v1/apps/services/{id}/links/{kind}/{ref}", put(put_link).delete(delete_link))
@@ -97,6 +98,7 @@ pub fn router(apps: Arc<Apps>) -> Router {
         .route(&format!("{env}/sleep"), post(sleep))
         .route(&format!("{env}/wake"), post(wake))
         .route(&format!("{env}/variables"), get(variables).patch(change_variables))
+        .route(&format!("{env}/diff"), get(env_diff))
         .route(&format!("{env}/pending"), get(pending))
         .route(&format!("{env}/variables/values"), get(reveal))
         .route(&format!("{env}/logs"), get(env_logs))
@@ -145,6 +147,15 @@ async fn on_owner(State(apps): S, req: Request, next: Next) -> Response {
     let Some(id) = req.uri().path().strip_prefix("/v1/apps/services/").map(|r| r.split('/').next().unwrap_or("").to_string()) else {
         return next.run(req).await;
     };
+    // A deleted service is no service but to restore it or delete it for good.
+    let root = req.uri().path().trim_end_matches('/') == format!("/v1/apps/services/{id}");
+    let keeps = (root && req.method() == axum::http::Method::DELETE) || req.uri().path() == format!("/v1/apps/services/{id}/restore");
+    if !keeps {
+        let sid = id.clone();
+        if let Ok((_, Some(_))) = apps.db(move |s| s.service_any(&sid)).await {
+            return Error::NotFound(format!("no service {id}")).into_response();
+        }
+    }
     let cluster = apps.deps.cluster.clone();
     cluster.dispatch(&lease_key(&id), req, |req, _guard| next.run(req)).await
 }
@@ -374,9 +385,14 @@ async fn plan(State(apps): S, b: Bytes) -> R {
 #[derive(Deserialize)]
 struct ProjectQuery {
     project: Option<String>,
+    /// The deleted services instead, kept for a restore.
+    deleted: Option<bool>,
 }
 
 async fn list_services(State(apps): S, Query(q): Query<ProjectQuery>) -> R {
+    if q.deleted == Some(true) {
+        return ok(apps.deleted_services(q.project).await?);
+    }
     ok(apps.services(q.project).await?)
 }
 
@@ -440,9 +456,13 @@ async fn patch_service(State(apps): S, Path(id): Path<String>, ext: Extensions, 
     ok(s)
 }
 
-async fn delete_service(State(apps): S, Path(id): Path<String>) -> R {
-    apps.delete_service(&id).await?;
+async fn delete_service(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    apps.delete_service(&id, actor(&ext)).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn restore_service(State(apps): S, Path(id): Path<String>, ext: Extensions) -> R {
+    ok(apps.restore_service(&id, actor(&ext)).await?)
 }
 
 async fn links(State(apps): S, Path(id): Path<String>) -> R {
@@ -1098,8 +1118,39 @@ async fn reveal(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Ex
     ok(v)
 }
 
+#[derive(Deserialize)]
+struct DiffQuery {
+    from: String,
+}
+
+async fn env_diff(State(apps): S, Path((id, env)): Path<(String, String)>, Query(q): Query<DiffQuery>, ext: Extensions) -> R {
+    ok(apps.environment_diff(&id, &env, &q.from, roll_auth::Grant::on(&ext)).await?)
+}
+
 async fn change_variables(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Extensions, b: Bytes) -> R {
-    let change = body(&b)?;
+    let mut change = body(&b)?;
+    // Another environment's values copied (`copy_from`, `copy`: names): set here as given there.
+    if let Some(from) = change.get("copy_from").cloned() {
+        let Value::String(from) = from else { return Err(Error::BadRequest("copy_from is another environment's name".into())) };
+        if from == env {
+            return Err(Error::BadRequest("copy_from is another environment".into()));
+        }
+        let names: Vec<String> = change["copy"].as_array().map(|a| a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect()).filter(|n: &Vec<String>| !n.is_empty()).ok_or_else(|| Error::BadRequest("copy is a list of the names to copy".into()))?;
+        let copied = apps.copied_variables(&id, &from, &names).await?;
+        let o = change.as_object_mut().expect("an object");
+        o.remove("copy_from");
+        o.remove("copy");
+        let set = o.entry("set").or_insert_with(|| json!({}));
+        let Some(set) = set.as_object_mut() else { return Err(Error::BadRequest("set is an object of names to values".into())) };
+        for (k, v) in copied {
+            if set.contains_key(&k) {
+                return Err(Error::BadRequest(format!("{k} is both set and copied")));
+            }
+            set.insert(k, Value::String(v));
+        }
+    } else if change.get("copy").is_some() {
+        return Err(Error::BadRequest("copy needs copy_from, the environment to copy from".into()));
+    }
     let values: Vec<&str> = change["set"].as_object().into_iter().flatten().filter_map(|(_, v)| v.as_str()).collect();
     if values.iter().any(|v| v.contains("${{")) {
         let svc = apps.service(&id).await?;
@@ -1169,7 +1220,7 @@ async fn visit(State(apps): S, Path((id, env)): Path<(String, String)>, ext: Ext
     let Some(user) = ext.get::<roll_auth::SignedIn>() else {
         return Err(Error::Forbidden("signing in to an environment is for a person signed in to roll, not a token".into()));
     };
-    ok(json!({ "url": apps.visit_ticket(&id, &env, &user.user, &b.to).await? }))
+    ok(json!({ "url": apps.visit_ticket(&id, &env, &user.user, &user.session, &b.to).await? }))
 }
 
 async fn trace(State(apps): S, Path((id, env, trace)): Path<(String, String, String)>) -> R {

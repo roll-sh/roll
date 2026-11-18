@@ -81,9 +81,54 @@ pub struct Inst {
     /// The stop a crash started: a start of the same instance waits for it, so it never stops
     /// the restarted process.
     stopping: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Its last hour by minute (Railway's per replica): `(minute, CPU seconds, seconds measured,
+    /// peak memory bytes)`, from the reaper's samples.
+    minutes: Mutex<std::collections::VecDeque<(i64, f64, f64, u64)>>,
+}
+
+/// An instance's last hour by minute ([`EnvLive::by_instance`]).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct InstanceSeries {
+    pub instance: String,
+    pub deployment: String,
+    pub minutes: Vec<i64>,
+    /// Cores in use, on average over each minute.
+    pub cpu: Vec<f64>,
+    /// The minute's peak.
+    pub memory_bytes: Vec<u64>,
 }
 
 impl Inst {
+    /// One sample: `cpu_s` CPU seconds over `elapsed` seconds, and memory in use now.
+    fn record(&self, minute: i64, cpu_s: f64, elapsed: f64, memory: u64) {
+        let mut m = self.minutes.lock();
+        match m.back_mut() {
+            Some(last) if last.0 == minute => {
+                last.1 += cpu_s;
+                last.2 += elapsed;
+                last.3 = last.3.max(memory);
+            }
+            _ => m.push_back((minute, cpu_s, elapsed, memory)),
+        }
+        while m.front().is_some_and(|f| f.0 <= minute - 60) {
+            m.pop_front();
+        }
+    }
+
+    fn series(&self) -> Option<InstanceSeries> {
+        let m = self.minutes.lock();
+        if m.is_empty() {
+            return None;
+        }
+        Some(InstanceSeries {
+            instance: self.name.clone(),
+            deployment: self.deployment.clone(),
+            minutes: m.iter().map(|x| x.0).collect(),
+            cpu: m.iter().map(|x| if x.2 > 0.0 { (x.1 / x.2 * 1000.0).round() / 1000.0 } else { 0.0 }).collect(),
+            memory_bytes: m.iter().map(|x| x.3).collect(),
+        })
+    }
+
     fn new(name: String, deployment: String) -> Arc<Inst> {
         Arc::new(Inst {
             name,
@@ -98,6 +143,7 @@ impl Inst {
             private_checked: Mutex::new(None),
             health_fails: AtomicU32::new(0),
             stopping: Mutex::new(None),
+            minutes: Mutex::new(std::collections::VecDeque::new()),
         })
     }
 
@@ -236,6 +282,8 @@ pub struct Gate {
     pub traces: bool,
     /// Its pages carry roll's Web Vitals tag.
     pub vitals: bool,
+    /// Its challenge rules' key ([`crate::challenge`]), when it has such a rule.
+    pub challenge_key: Option<Vec<u8>>,
 }
 
 /// A rate-limit bucket: which (0 the environment's, 1 + i firewall rule i's) and whose.
@@ -247,6 +295,8 @@ pub enum Verdict {
     Allow,
     Deny,
     Limit(u16, crate::model::RateLimit),
+    /// In with a pass ([`crate::challenge`]); else its page.
+    Challenge,
 }
 
 /// Clients a rate limit remembers at most (a full bucket is the same as none, so those go first).
@@ -262,6 +312,7 @@ impl Gate {
             None => Verdict::Allow,
             Some((_, r)) if r.action == crate::model::FirewallAction::Allow => Verdict::Allow,
             Some((i, r)) if r.action == crate::model::FirewallAction::Limit => Verdict::Limit(i as u16 + 1, crate::model::RateLimit { per_minute: r.per_minute.unwrap_or(60), burst: r.burst }),
+            Some((_, r)) if r.action == crate::model::FirewallAction::Challenge => Verdict::Challenge,
             Some(_) => Verdict::Deny,
         }
     }
@@ -1751,6 +1802,7 @@ impl EnvLive {
                     let mut seen = i.cpu_seen.lock();
                     if let Some(prev) = *seen {
                         let d = u.cpu_ns.saturating_sub(prev) as f64 / 1e9;
+                        i.record(now_ms() / 60_000, d, elapsed, u.memory_bytes);
                         cpu += d;
                         if let Some(tpl) = self.serving(&i.deployment) {
                             used += d;
@@ -1787,6 +1839,13 @@ impl EnvLive {
             }
         }
         insts
+    }
+
+    /// Its instances' last hour by minute (those it has now, that were measured), by name.
+    pub fn by_instance(&self) -> Vec<InstanceSeries> {
+        let mut v: Vec<InstanceSeries> = self.instances().iter().filter_map(|i| i.series()).collect();
+        v.sort_by(|a, b| a.instance.cmp(&b.instance));
+        v
     }
 
     /// Its awake instances' CPU over the last `cpu_window`, in percent of what they could use;
