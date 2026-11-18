@@ -252,6 +252,15 @@ export function RuntimeLogs({ service, env, onGroup }: { service: string; env: s
         lines={found ? found.lines : shown}
         columns
         onGroup={onGroup}
+        onBlock={async (ip) => {
+          // First in the list (the first match decides), unless a rule denies it already.
+          const now = await appsApi.environment(service, env);
+          const rules = now.firewall ?? [];
+          // Addresses are kept as networks (`a.b.c.d/32`).
+          const as = [ip, `${ip}/32`, `${ip}/128`];
+          if (rules.some((r) => r.action === "deny" && r.ips?.some((n) => as.includes(n)) && !r.path && !r.methods?.length)) return;
+          await appsApi.putEnvironment(service, env, { firewall: [{ action: "deny", ips: [ip] }, ...rules] });
+        }}
         className="h-[min(560px,65svh)]"
         empty={
           lines.length ? (

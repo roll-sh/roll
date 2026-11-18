@@ -1106,8 +1106,9 @@ pub enum AppsCmd {
         #[arg(long)]
         no_rate_limit: bool,
         /// A firewall rule, in order (the first match decides): `deny /admin/*`,
-        /// `deny method=DELETE,PUT`, `allow /admin/health`, `deny ua=BadBot`. Repeatable; the
-        /// rules replace the ones it has.
+        /// `deny method=DELETE,PUT`, `allow /admin/health`, `deny ip=203.0.113.0/24`,
+        /// `deny header=X-Bot`, `deny cookie=beta:1`, `deny query=debug`, `deny ua=BadBot` (ua=
+        /// last). Repeatable; the rules replace the ones it has.
         #[arg(long = "firewall", value_name = "RULE", conflicts_with = "no_firewall")]
         firewall: Vec<String>,
         /// No firewall rules.
@@ -4271,10 +4272,18 @@ fn firewall_rule(line: &str) -> anyhow::Result<Value> {
             break;
         } else if let Some(m) = w.strip_prefix("method=") {
             rule["methods"] = json!(m.split(',').filter(|m| !m.is_empty()).collect::<Vec<_>>());
+        } else if let Some(ips) = w.strip_prefix("ip=") {
+            rule["ips"] = json!(ips.split(',').filter(|m| !m.is_empty()).collect::<Vec<_>>());
+        } else if let Some((k, v)) = ["header=", "cookie=", "query="].iter().find_map(|p| w.strip_prefix(p).map(|v| (p.trim_end_matches('='), v))) {
+            // `name[:contains]`: there, or there and holding that.
+            rule[k] = match v.split_once(':') {
+                Some((name, contains)) => json!({ "name": name, "contains": contains }),
+                None => json!({ "name": v }),
+            };
         } else if w.starts_with('/') {
             rule["path"] = json!(w);
         } else {
-            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, or ua=…");
+            anyhow::bail!("{w:?} in {line:?}: a path (/…), method=…, ip=…, header=…, cookie=…, query=…, or ua=…");
         }
     }
     Ok(rule)

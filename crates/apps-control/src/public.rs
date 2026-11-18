@@ -1063,7 +1063,10 @@ async fn proxy_inner(apps: Arc<Apps>, service: &str, env: &str, deployment: Opti
         return by("challenge", r);
     }
     if !ours && !gate.firewall.is_empty() {
-        match gate.firewall_verdict(req.method().as_str(), &crate::model::normal_path(req.uri().path()), &ua) {
+        let path = crate::model::normal_path(req.uri().path());
+        let asked = crate::model::Asked { method: req.method().as_str(), path: &path, user_agent: &ua, ip: crate::live::client_ip(client.as_deref()), headers: req.headers(), query: req.uri().query() };
+        let verdict = gate.firewall_verdict(&asked);
+        match verdict {
             crate::live::Verdict::Allow => {}
             // A browser with this hour's pass goes on (the cookie is roll's: the app never sees it);
             // anything else gets the page that earns one.

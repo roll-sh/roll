@@ -1321,12 +1321,70 @@ pub struct FirewallRule {
     /// Text the `User-Agent` contains (case aside).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// Clients by the address the fleet vouches for: addresses or networks (`203.0.113.7`,
+    /// `203.0.113.0/24`, an IPv6 `/n`), at most 100, kept canonical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ips: Vec<String>,
+    /// A request header, cookie or query parameter there (and containing `contains`, case aside).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<FieldMatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie: Option<FieldMatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<FieldMatch>,
     /// `limit`'s: each client's requests a minute through this rule, and how many at once
     /// (default: a minute's worth).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_minute: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub burst: Option<u32>,
+}
+
+/// A named part of a request a firewall rule reads ([`FirewallRule::header`]): there, or there
+/// and containing `contains` (case aside).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldMatch {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<String>,
+}
+
+impl FieldMatch {
+    fn check(&mut self, what: &str, lower_name: bool) -> Result<()> {
+        let n = self.name.trim();
+        if n.is_empty() || n.len() > 128 || !n.bytes().all(|b| b.is_ascii_graphic() && !b";,=\"".contains(&b)) {
+            return Err(Error::BadRequest(format!("firewall: a {what}'s name is 1–128 characters, no spaces")));
+        }
+        self.name = if lower_name { n.to_ascii_lowercase() } else { n.to_string() };
+        if let Some(c) = &self.contains {
+            if c.is_empty() || c.len() > 256 {
+                return Err(Error::BadRequest(format!("firewall: a {what}'s contains is 1–256 characters")));
+            }
+            self.contains = Some(c.to_ascii_lowercase());
+        }
+        Ok(())
+    }
+
+    /// Whether `values` (the request's under this name) has one, holding `contains` if it says.
+    fn takes<'a>(&self, mut values: impl Iterator<Item = &'a str>) -> bool {
+        match &self.contains {
+            None => values.next().is_some(),
+            Some(c) => values.any(|v| v.to_ascii_lowercase().contains(c.as_str())),
+        }
+    }
+}
+
+/// What a firewall rule reads of a request ([`FirewallRule::matches`]).
+pub struct Asked<'a> {
+    pub method: &'a str,
+    /// As [`normal_path`] gives it.
+    pub path: &'a str,
+    pub user_agent: &'a str,
+    /// The address the fleet vouches for.
+    pub ip: Option<std::net::IpAddr>,
+    pub headers: &'a axum::http::HeaderMap,
+    pub query: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1386,8 +1444,27 @@ impl FirewallRule {
             }
             self.user_agent = Some(ua.trim().to_ascii_lowercase());
         }
-        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() {
-            return bad("a rule matches on a path, methods or a user agent");
+        if self.ips.len() > 100 {
+            return bad("a rule names at most 100 addresses or networks");
+        }
+        let mut ips = Vec::with_capacity(self.ips.len());
+        for c in &self.ips {
+            let c = c.trim();
+            let net = c
+                .parse::<ipnet::IpNet>()
+                .or_else(|_| c.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
+                .map_err(|_| Error::BadRequest(format!("firewall: {c:?} isn't an address or a network (a.b.c.d/n, an IPv6 /n)")))?;
+            ips.push(net.trunc().to_string());
+        }
+        self.ips = ips;
+        // Header names are any case; a cookie's and a query parameter's are as written.
+        for (m, what, lower) in [(&mut self.header, "header", true), (&mut self.cookie, "cookie", false), (&mut self.query, "query parameter", false)] {
+            if let Some(m) = m {
+                m.check(what, lower)?;
+            }
+        }
+        if self.path.is_none() && self.methods.is_empty() && self.user_agent.is_none() && self.ips.is_empty() && self.header.is_none() && self.cookie.is_none() && self.query.is_none() {
+            return bad("a rule matches on a path, methods, a user agent, addresses, a header, a cookie or a query parameter");
         }
         if self.action == FirewallAction::Challenge && !self.methods.is_empty() && self.methods.iter().any(|m| m != "GET") {
             return bad("a challenge is a page a browser opens: GET only");
@@ -1401,14 +1478,26 @@ impl FirewallRule {
         Ok(self)
     }
 
-    /// `path` as [`normal_path`] gives it. Paths compare in any case and without a trailing
-    /// slash (`/admin/*` takes `/admin` too); HEAD is a GET.
-    pub fn matches(&self, method: &str, path: &str, user_agent: &str) -> bool {
-        let path_ok = self.path.as_deref().is_none_or(|p| path_matches(p, path));
-        let method = if method.eq_ignore_ascii_case("HEAD") { "GET" } else { method };
+    /// Whether every field it gives matches. Paths compare in any case and without a trailing
+    /// slash (`/admin/*` takes `/admin` too); HEAD is a GET; addresses by the one the fleet
+    /// vouches for (none: no address rule matches); a cookie and a query parameter as the
+    /// request carries them, decoded.
+    pub fn matches(&self, a: &Asked<'_>) -> bool {
+        let path_ok = self.path.as_deref().is_none_or(|p| path_matches(p, a.path));
+        let method = if a.method.eq_ignore_ascii_case("HEAD") { "GET" } else { a.method };
         let method_ok = self.methods.is_empty() || self.methods.iter().any(|m| m.eq_ignore_ascii_case(method));
-        let ua_ok = self.user_agent.as_deref().is_none_or(|u| user_agent.to_ascii_lowercase().contains(u));
-        path_ok && method_ok && ua_ok
+        let ua_ok = self.user_agent.as_deref().is_none_or(|u| a.user_agent.to_ascii_lowercase().contains(u));
+        let ip_ok = self.ips.is_empty() || a.ip.is_some_and(|ip| self.ips.iter().any(|n| n.parse::<ipnet::IpNet>().is_ok_and(|n| n.contains(&ip))));
+        let header_ok = self.header.as_ref().is_none_or(|m| m.takes(a.headers.get_all(m.name.as_str()).iter().filter_map(|v| v.to_str().ok())));
+        let cookie_ok = self.cookie.as_ref().is_none_or(|m| {
+            let jar: Vec<&str> = a.headers.get_all(axum::http::header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|c| c.split(';')).collect();
+            m.takes(jar.iter().filter_map(|kv| kv.trim().split_once('=')).filter(|(k, _)| *k == m.name).map(|(_, v)| v))
+        });
+        let query_ok = self.query.as_ref().is_none_or(|m| {
+            let pairs: Vec<(String, String)> = url::form_urlencoded::parse(a.query.unwrap_or("").as_bytes()).map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
+            m.takes(pairs.iter().filter(|(k, _)| *k == m.name).map(|(_, v)| v.as_str()))
+        });
+        path_ok && method_ok && ua_ok && ip_ok && header_ok && cookie_ok && query_ok
     }
 }
 

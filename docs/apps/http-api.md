@@ -317,6 +317,8 @@ type EnvironmentSummary = {
   ephemeral: boolean;        // a preview environment
 };
 
+type FieldMatch = { name: string /* 1–128, no spaces */; contains?: string /* 1–256 */ };
+
 type InstanceState = "none" | "stopped" | "suspended" | "waking" | "running" | "crashed" | "deploying";
 
 type Patch<T> = { [K in keyof T]?: T[K] | null }; // null: back to the default
@@ -427,9 +429,12 @@ type EnvironmentPut = {
   /** Firewall rules (Vercel's), at most 50, in order: the first whose given fields all match
    *  decides (`allow` lets it in, `deny` is a 403 naming nothing); none matching lets it in.
    *  `path` exact or a prefix ending in `*`, matched on the path as an app reads it (decoded,
-   *  `//` and dot segments resolved); `methods` any of; `user_agent` contained, case aside.
-   *  Checked after allow_ips, before the rate limit and any wake; HTTP only. null: none. */
-  firewall?: { action: "allow" | "deny" | "limit" | "challenge"; path?: string; methods?: string[]; user_agent?: string; per_minute?: number /* limit's: 1–100000 a client */; burst?: number /* limit's (default a minute's worth) */ }[] | null;
+   *  `//` and dot segments resolved); `methods` any of; `user_agent` contained, case aside;
+   *  `ips` the address the fleet vouches for in any of them (at most 100, kept canonical);
+   *  `header` (any case), `cookie` or `query` (as written) there, holding `contains` (case
+   *  aside) when it says. Checked after allow_ips, before the rate limit and any wake; HTTP
+   *  only. null: none. */
+  firewall?: { action: "allow" | "deny" | "limit" | "challenge"; path?: string; methods?: string[]; user_agent?: string; ips?: string[]; header?: FieldMatch; cookie?: FieldMatch; query?: FieldMatch; per_minute?: number /* limit's: 1–100000 a client */; burst?: number /* limit's (default a minute's worth) */ }[] | null;
   headers?: { path?: string; set: Record<string, string>; replace?: boolean }[] | null; // at most 20; the app's own header wins unless replace; no framing or x-roll-* names
   routes?: { path: string; service: string }[] | null; // at most 20: a path (a prefix ends in *) another service of the project answers, by name (not this one; 400 for one the project hasn't), its environment of the same name, the path and query as they came; the first that takes a path decides; checked after this environment's gates, past the target's
   /** Its own size and scale over the service's (min_instances, max_instances, cpu, memory_mb,
