@@ -4966,8 +4966,10 @@ async fn a_public_git_url_deploys_its_branch_and_follows_new_commits() {
     let pushes = Arc::new(FakePushes::default());
     w.apps.set_git_pushes(pushes.clone());
     git.branches.lock().insert("feature".into(), code.parse().unwrap());
-    let (st, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": code, "head_commit": { "message": "try it" } }))).await;
+    let (st, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": code, "head_commit": { "message": "try it" }, "sender": { "login": "renovate[bot]" } }))).await;
     assert!(st == StatusCode::OK && v["ignored"].as_str().unwrap().contains("roll previews"), "{v}");
+    // Who pushed, for roll previews' `skip_authors` (untrusted: never for trust).
+    assert_eq!(pushes.0.lock()[0].pusher.as_deref(), Some("renovate[bot]"));
     let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/feature", "after": first }))).await;
     assert!(v["ignored"].as_str().unwrap().contains("the repository has it at"), "{v}");
     let (_, v) = call(&w.api, "POST", &hook, Some(json!({ "ref": "refs/heads/gone", "after": "0".repeat(40), "deleted": true }))).await;
