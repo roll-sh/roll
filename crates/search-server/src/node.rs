@@ -244,8 +244,9 @@ impl Loaded {
     fn pinned(&self) -> bool {
         // Open contexts' searchers live only in memory: pinned exactly until the last one is
         // closed or expires.
-        // Running OpenSearch jobs (ISM steps) write through the cluster like requests do.
-        self.cluster.contexts.latest_expiry().is_some() || !self.cluster.tasks.is_empty() || self.cluster.jobs.busy()
+        // Running OpenSearch jobs (ISM steps) and connector syncs write through the cluster like
+        // requests do.
+        self.cluster.contexts.latest_expiry().is_some() || !self.cluster.tasks.is_empty() || self.cluster.jobs.busy() || self.cluster.xpack.connector_syncs.busy()
     }
 }
 

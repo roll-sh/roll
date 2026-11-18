@@ -74,6 +74,8 @@ pub struct Runtime {
     pub rollups: rollup::Runs,
     /// Snapshot lifecycle policies taking a snapshot right now.
     pub slm_running: std::sync::atomic::AtomicUsize,
+    /// Connectors syncing right now.
+    pub connector_syncs: entsearch::sync::Syncs,
 }
 
 /// The `_nodes` header plus the node, as the cache-clearing APIs answer.

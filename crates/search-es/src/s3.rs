@@ -376,6 +376,32 @@ impl Client {
         }
     }
 
+    /// One page of the objects under `prefix` (at most `max_keys`, S3's own cap is 1,000) after
+    /// `token`, and the token of the next page when there is one. A page's body is read up to
+    /// 4 MiB.
+    pub async fn list_page(&self, prefix: &str, token: Option<&str>, max_keys: usize) -> Result<(Vec<Object>, Option<String>), Error> {
+        let max = max_keys.clamp(1, 1000).to_string();
+        let mut q = vec![("list-type", "2"), ("prefix", prefix), ("max-keys", max.as_str())];
+        if let Some(t) = token {
+            q.push(("continuation-token", t));
+        }
+        let r = self.send(reqwest::Method::GET, "", &q, &[], Bytes::new()).await?;
+        if !r.status().is_success() {
+            return Err(failure(r).await);
+        }
+        let page = read_bounded(r, 4 << 20).await?;
+        let page = String::from_utf8_lossy(&page);
+        let objects = elements(&page, "Contents")
+            .map(|item| {
+                let one = |name: &str| elements(item, name).next().map(xml_unescape).unwrap_or_default();
+                Object { key: one("Key"), size: one("Size").trim().parse().unwrap_or(0), last_modified: one("LastModified"), etag: one("ETag").trim_matches('"').to_string() }
+            })
+            .collect();
+        let truncated = elements(&page, "IsTruncated").next().is_some_and(|t| t.trim() == "true");
+        let next = elements(&page, "NextContinuationToken").next().map(xml_unescape).filter(|t| truncated && !t.is_empty() && Some(t.as_str()) != token);
+        Ok((objects, next))
+    }
+
     /// Every object under `prefix`, as `(key, size)`. The endpoint decides how many pages there
     /// are, so pages, objects and the bytes of their keys are bounded ([`LIST_PAGES_MAX`],
     /// [`LIST_ENTRIES_MAX`], [`LIST_KEY_BYTES_MAX`]): past one, the listing fails.
@@ -412,6 +438,16 @@ impl Client {
         }
         Err(err("TooLarge", format!("the listing of [{prefix}] is more than [{LIST_PAGES_MAX}] pages")))
     }
+}
+
+/// An object a listing names ([`Client::list_page`]).
+#[derive(Clone, Debug)]
+pub struct Object {
+    pub key: String,
+    pub size: u64,
+    /// ISO 8601, as S3 writes it (`2026-11-18T10:00:00.000Z`).
+    pub last_modified: String,
+    pub etag: String,
 }
 
 /// An object being read ([`Client::open`]).
