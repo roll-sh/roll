@@ -65,7 +65,8 @@ export interface Pipeline {
 
 export function pipelineFromJson(json: unknown): Pipeline {
   if (!json || typeof json !== "object" || Array.isArray(json)) throw new Error("A pipeline is an object with a processors list.");
-  const { description, processors, on_failure, ...rest } = json as Record<string, unknown>;
+  // The dates the cluster keeps (`GET` gives them; `PUT` refuses them) aren't the pipeline's.
+  const { description, processors, on_failure, created_date, created_date_millis, modified_date, modified_date_millis, ...rest } = json as Record<string, unknown>;
   if (processors !== undefined && !Array.isArray(processors)) throw new Error("processors must be a list.");
   if (on_failure !== undefined && !Array.isArray(on_failure)) throw new Error("on_failure must be a list.");
   return {

@@ -12,7 +12,7 @@ import {
 } from "./search-pipelines";
 
 describe("the processor form", () => {
-  it("round-trips a pipeline's JSON, options it doesn't know included", () => {
+  it("round-trips a pipeline's JSON, options it doesn't know included, without the dates the cluster keeps", () => {
     const json = {
       description: "web logs",
       processors: [
@@ -24,7 +24,7 @@ describe("the processor form", () => {
       version: 3,
       _meta: { owner: "web" },
     };
-    const p = pipelineFromJson(json);
+    const p = pipelineFromJson({ ...json, created_date_millis: 1, modified_date_millis: 2 });
     expect(p.processors.map((x) => x.type)).toEqual(["grok", "geoip", "script"]);
     expect(p.processors[0].onFailure?.[0].options).toEqual({ field: "error", value: "{{_ingest.on_failure_message}}" });
     expect(pipelineToJson(p)).toEqual({ ...json, processors: [json.processors[0], json.processors[1], { script: { source: "ctx.n = 1" } }] });

@@ -23,6 +23,7 @@ import {
 } from "@/lib/search-pipelines";
 import { Field, Segmented } from "../redis/shared";
 import { btn, ErrorNote, input, Panel, primary } from "../ui";
+import { DeleteButton } from "./actions";
 import { JsonText } from "./json-view";
 import { consoleText, RequestPreview } from "./request-preview";
 
@@ -179,20 +180,6 @@ export function PipelinesTab({ cluster, onOpenConsole }: { cluster: SearchCluste
         />
       )}
     </div>
-  );
-}
-
-function DeleteButton({ label, busy, onDelete }: { label: string; busy: boolean; onDelete: () => void }) {
-  const [armed, setArmed] = useState(false);
-  if (busy) return <span className="shimmer text-[12px] text-muted">Deleting…</span>;
-  return armed ? (
-    <button onClick={onDelete} onBlur={() => setArmed(false)} autoFocus className="rounded-md px-1.5 py-0.5 text-[12px] text-danger transition hover:bg-danger/10">
-      Delete?
-    </button>
-  ) : (
-    <button onClick={() => setArmed(true)} className="rounded-md p-1 text-subtle transition hover:text-danger" title={`Delete ${label}`} aria-label={`Delete ${label}`}>
-      <Trash2 className="size-3.5" />
-    </button>
   );
 }
 
