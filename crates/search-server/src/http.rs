@@ -491,13 +491,19 @@ fn with_headers_first(mut r: Response<Full<Bytes>>, headers: Vec<(&'static str, 
     r
 }
 
+fn header_string(h: &hyper::HeaderMap, name: hyper::header::HeaderName) -> Option<String> {
+    h.get(name).and_then(|v| v.to_str().ok()).map(str::to_string)
+}
+
 async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&str>, origin: Origin, timeouts: (Duration, Duration)) -> Result<Response<Full<Bytes>>, DropConnection> {
-    let header = |n: hyper::header::HeaderName| req.headers().get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
-    let Some(page) = header(hyper::header::ORIGIN) else { return answer(node, req, sni, origin, timeouts, None).await };
-    let host = header(hyper::header::HOST);
+    // Owned copies: nothing borrowed from `req` may live across an await (its body needn't be `Sync`).
+    let page = header_string(req.headers(), hyper::header::ORIGIN);
+    let Some(page) = page else { return answer(node, req, sni, origin, timeouts, None).await };
+    let host = header_string(req.headers(), hyper::header::HOST);
     // A preflight carries no credentials: answered from the cluster's settings, after its IP
     // allowlist. A cluster without CORS (or none at all) answers it as any other request.
-    if crate::cors::is_preflight(req.method().as_str(), true, req.headers().contains_key(hyper::header::ACCESS_CONTROL_REQUEST_METHOD)) {
+    let preflight = crate::cors::is_preflight(req.method().as_str(), true, req.headers().contains_key(hyper::header::ACCESS_CONTROL_REQUEST_METHOD));
+    if preflight {
         let head = head_of(&req);
         match Box::pin(node.cors_of(&head, sni, origin)).await {
             Err(_) => return Ok(filtered()),
@@ -516,7 +522,8 @@ async fn respond<B: RequestBody>(node: Arc<Node>, req: Request<B>, sni: Option<&
     }
     let mut cross = CrossOrigin { origin: page, host, allowed: None };
     let r = Box::pin(answer(node, req, sni, origin, timeouts, Some(&mut cross))).await?;
-    Ok(match cross.allowed.as_ref().and_then(|c| c.answer_headers(&cross.origin, cross.host.as_deref())) {
+    let throttled = r.headers().contains_key(hyper::header::RETRY_AFTER);
+    Ok(match cross.allowed.as_ref().and_then(|c| c.answer_headers(&cross.origin, cross.host.as_deref(), throttled)) {
         Some(h) => with_headers_first(r, h),
         None => r,
     })
@@ -562,7 +569,7 @@ async fn answer<B: RequestBody>(
     };
     // Authenticated: a cross-origin request its cluster doesn't allow gets an empty 403 (and a
     // cluster without CORS answers it as any other request, without CORS headers).
-    if let Some(x) = cross.as_deref_mut()
+    if let Some(x) = cross
         && let Some(cors) = lease.loaded.spec().cors.clone()
     {
         x.allow(Some(cors));

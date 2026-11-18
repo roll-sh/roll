@@ -20,6 +20,11 @@ struct Node {
 }
 
 async fn node(id: &str, leases: &MemoryStore, objects: &search_store::Objects, catalog: &Arc<search_control::store::Store>) -> Node {
+    node_with(id, leases, objects, catalog, |_| {}).await
+}
+
+/// [`node`] with `f` applied to its config.
+async fn node_with(id: &str, leases: &MemoryStore, objects: &search_store::Objects, catalog: &Arc<search_control::store::Store>, f: impl FnOnce(&mut SearchConfig)) -> Node {
     let home = tempfile::tempdir().unwrap();
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://{}", api_listener.local_addr().unwrap());
@@ -35,6 +40,7 @@ async fn node(id: &str, leases: &MemoryStore, objects: &search_store::Objects, c
     cfg.http_port = rest_listener.local_addr().unwrap().port();
     cfg.sync_objects = true;
     cfg.gc_interval = None;
+    f(&mut cfg);
     let control = Control::with_catalog(cfg, objects.clone(), catalog.clone()).await.unwrap();
     control.join(cluster.clone()).unwrap();
     let router = search_control::api::router(control.clone())
@@ -193,6 +199,51 @@ async fn the_default_repository_snapshots_and_restores_on_the_fleet() {
 
     let (s, v) = call(&http, reqwest::Method::DELETE, format!("{}/_snapshot/found-snapshots", owner.rest), auth, None).await;
     assert_eq!((s, v["error"]["type"].as_str()), (400, Some("illegal_argument_exception")), "{v}");
+}
+
+/// On a fleet a cluster's CORS settings travel with it: whichever node a browser's preflight
+/// reaches, it is answered the same way (on the cluster's owner, as every request is), also right
+/// after a change made through another node.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_node_answers_a_preflight_the_same_way() {
+    let leases = MemoryStore::new();
+    let objects = search_store::test_objects("fleet-cors");
+    let catalog = Arc::new(search_control::store::Store::memory().unwrap());
+    let domain = |c: &mut SearchConfig| c.domain = Some("search.test".into());
+    let a = node_with("a", &leases, &objects, &catalog, domain).await;
+    let b = node_with("b", &leases, &objects, &catalog, domain).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while a.cluster.nodes().len() != 2 || b.cluster.nodes().len() != 2 {
+        assert!(tokio::time::Instant::now() < deadline, "the nodes never saw each other");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let http = reqwest::Client::new();
+    let (s, c) = call(&http, reqwest::Method::POST, format!("{}/v1/search/clusters", a.api), None, Some(json!({"name": "web", "cors": {"allow_origin": ["https://shop.example"]}}))).await;
+    assert_eq!(s, 200, "{c}");
+    let pw = c["password"].as_str().unwrap().to_string();
+    let r = http.get(format!("{}/", a.rest)).header("host", "web.search.test").basic_auth("elastic", Some(&pw)).send().await.unwrap();
+    assert_eq!(r.status(), 200, "loaded on its owner");
+    let preflight = |base: &str, origin: &str| {
+        http.request(reqwest::Method::OPTIONS, format!("{base}/products/_search"))
+            .header("host", "web.search.test")
+            .header("origin", origin)
+            .header("access-control-request-method", "POST")
+            .send()
+    };
+    let allowed = |r: &reqwest::Response| r.headers().get("access-control-allow-origin").map(|v| v.to_str().unwrap().to_string());
+    for node in [&a, &b] {
+        let r = preflight(&node.rest, "https://shop.example").await.unwrap();
+        assert_eq!((r.status().as_u16(), allowed(&r).as_deref()), (200, Some("https://shop.example")), "through {}", node.api);
+    }
+    // Changed through the other node: every node answers with the new origins at once.
+    let (s, v) = call(&http, reqwest::Method::PATCH, format!("{}/v1/search/clusters/web", b.api), None, Some(json!({"cors": {"allow_origin": ["https://new.example"]}}))).await;
+    assert_eq!(s, 200, "{v}");
+    for node in [&a, &b] {
+        let r = preflight(&node.rest, "https://shop.example").await.unwrap();
+        assert_eq!((r.status().as_u16(), allowed(&r)), (403, None), "through {}", node.api);
+        let r = preflight(&node.rest, "https://new.example").await.unwrap();
+        assert_eq!(r.status().as_u16(), 200, "through {}", node.api);
+    }
 }
 
 /// A cluster's IP allowlist is checked on its owner against the client's own address, which the

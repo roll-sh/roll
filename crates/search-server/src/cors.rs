@@ -216,16 +216,14 @@ impl Cors {
         same_origin(origin, host) || self.origins.iter().any(|o| o.matches(origin))
     }
 
-    /// The headers every answer to an allowed `origin` carries (`None`: not allowed).
-    pub fn answer_headers(&self, origin: &str, host: Option<&str>) -> Option<Vec<(&'static str, String)>> {
+    /// The headers every answer to an allowed `origin` carries (`None`: not allowed). A
+    /// browser key's 429 (`throttled`) also exposes its `Retry-After`, so the page can back off.
+    pub fn answer_headers(&self, origin: &str, host: Option<&str>, throttled: bool) -> Option<Vec<(&'static str, String)>> {
         if !self.allows(origin, host) {
             return None;
         }
-        Some(vec![
-            ("access-control-allow-origin", self.allow_origin_value(origin, host)),
-            ("vary", "origin".into()),
-            ("access-control-expose-headers", EXPOSED_HEADERS.into()),
-        ])
+        let exposed = if throttled { format!("{EXPOSED_HEADERS},Retry-After") } else { EXPOSED_HEADERS.into() };
+        Some(vec![("access-control-allow-origin", self.allow_origin_value(origin, host)), ("vary", "origin".into()), ("access-control-expose-headers", exposed)])
     }
 
     /// A preflight's 200 headers for `origin` (`None`: answer an empty 403).
@@ -320,7 +318,7 @@ mod tests {
         assert!(!c.allows("https://evil.com", None));
         // Same origin as the request's host (isSameOrigin).
         assert!(c.allows("http://c1.search.example:9200", Some("c1.search.example:9200")));
-        let h = c.answer_headers("https://shop.example.com", None).unwrap();
+        let h = c.answer_headers("https://shop.example.com", None, false).unwrap();
         assert_eq!(h[0], ("access-control-allow-origin", "https://shop.example.com".to_string()));
         assert!(h.contains(&("vary", "origin".to_string())));
         let p = c.preflight_headers("https://shop.example.com", None).unwrap();
@@ -329,7 +327,7 @@ mod tests {
         assert!(p.contains(&("access-control-max-age", "1728000".to_string())));
         assert!(c.preflight_headers("https://evil.com", None).is_none());
         let any = cors(&["*"]);
-        assert_eq!(any.answer_headers("https://anyone.example", None).unwrap()[0].1, "*");
+        assert_eq!(any.answer_headers("https://anyone.example", None, false).unwrap()[0].1, "*");
         let shown = c.settings();
         assert!(shown.contains(&("http.cors.allow-origin".into(), "/https://shop\\.example\\.com|(?:https://.*\\.preview\\.example)/".into())), "{shown:?}");
         assert!(shown.contains(&("http.cors.allow-credentials".into(), "false".into())));

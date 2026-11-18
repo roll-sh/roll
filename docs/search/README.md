@@ -153,13 +153,82 @@ owner must allow for roll apps and previews, is in architecture.md, "Client addr
 allowlists". `crates/search-control/tests/control.rs` `ip_allowlists_turn_addresses_away_before_credentials`
 and `tests/cluster.rs` `a_forward_carries_the_clients_address_to_the_owner` cover it.
 
+**Search from the browser** (Algolia's search-only and secured API keys, Typesense's scoped keys,
+Meilisearch's tenant tokens, Elastic Cloud's per-deployment `http.cors.*` and Elastic's search
+applications). A web page calls a cluster directly, with no backend of its own in front:
+
+- *Allowed origins.* A cluster's `cors` (`PATCH {"cors": {"allow_origin": [...], "allow_methods"?,
+  "allow_headers"?, "max_age"?}}`, the dashboard's Settings → Browser search; `null` or no origins
+  turns it off, the default) is Elasticsearch's `http.cors.*` with its semantics
+  (`search_server::cors`): each origin `scheme://host[:port]` (kept as browsers send it: lower
+  case, no default port), `/regex/` (matching the whole origin) or `*`, at most 32; methods,
+  headers and max age default to Elasticsearch's (`OPTIONS,HEAD,GET,POST,PUT,DELETE`;
+  `X-Requested-With,Content-Type,Content-Length,Authorization,Accept,User-Agent,X-Elastic-Client-Meta`;
+  20 days). `allow-credentials` is always false: pages send keys in `Authorization`, never
+  cookies. The cluster shows them in `_nodes/settings` and `_cluster/settings?include_defaults` as
+  Elasticsearch shows `http.cors.*` node settings, changed live. Branches start with their
+  parent's.
+- *How requests are answered* (diffed against Elasticsearch 9.5.5 with `http.cors.enabled: true`):
+  a preflight (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) is answered before
+  authentication, since browsers send none, and without waking a sleeping cluster: 200 with
+  `Access-Control-Allow-Origin`, `Vary: origin`, one `Access-Control-Allow-Methods` line per method
+  and one `Access-Control-Allow-Headers` line per header, and `Access-Control-Max-Age`; another
+  origin gets an empty 403. Any other request is authenticated first; then an origin the cluster
+  doesn't allow gets an empty 403 (wrong credentials get their 401, without CORS headers), and
+  an allowed one gets `Access-Control-Allow-Origin`, `Vary: origin` and
+  `Access-Control-Expose-Headers: X-elastic-product` on every answer, errors included, so a page
+  can read a 401 or a 429. A request from the cluster's own host (`isSameOrigin`) passes. One
+  difference: `*` is answered with `Vary: origin` too (Elasticsearch leaves it out), so a cache in
+  front never hands one origin's answer to another. A cluster without CORS answers a preflight
+  as any unauthenticated request (401).
+- *A preflight names its cluster by host*: it has no credentials, so the cluster is the `Host`
+  label under `--search-domain` (`<name>.<domain>`). A node without a domain serves every cluster
+  at one address, and browsers can't call its clusters; the dashboard says so.
+- *The IP allowlist comes first*, preflights included: a cluster with an allowlist refuses
+  browsers outside it with the traffic-filter 403 before anything else, so a public site needs
+  its visitors' networks allowed (usually: no allowlist).
+- *Browser keys* (`/v1/search/clusters/{id}/browser-keys`, Elasticsearch-flavor clusters): API
+  keys of the cluster made through its own `_security/api_key`, so Elasticsearch's clients need
+  nothing new. One role descriptor with `read` on named indices, or on one search application
+  with `restriction.workflows: ["search_application_query"]` (the key runs only that
+  application's template, its `params` checked against the template's `dictionary`); no cluster
+  privilege, so no write, no `manage` and no `_security`. An optional `filter` is the role's
+  document-level `query` (Algolia's secured-key filters), and `expires_in_s` its `expiration`.
+  The encoded key (`base64(<key id>@<cluster>:<key>)`, `Authorization: ApiKey …`) is in the
+  create answer only; the list shows what each reaches, its filter, expiry and limit, never a
+  secret; revoking refuses any key that isn't a browser key. Hidden and system indices (`.…`)
+  can't be named.
+- *Rate limits per key* (Algolia's `maxQueriesPerIPPerHour`): `rate_limit: {per_minute,
+  per_ip_per_minute?}` (default 600 a minute, at most 1,000,000), kept in the key's
+  `metadata.roll_browser`, so they travel with the cluster. The cluster's owner node counts each
+  request a browser key authenticates (token buckets: the key's, and the key's per client
+  address), and an empty bucket answers 429 `es_rejected_execution_exception` (as Elasticsearch
+  rejects work it can't take) with `Retry-After` in seconds (exposed to the page through `Access-Control-Expose-Headers`); a refused request takes nothing from
+  the other bucket. The buckets are in memory on the owner and bounded (50,000 addresses per
+  cluster, idle ones forgotten first): a takeover, a drain or an unload starts them full again.
+  roll's own requests (the console) aren't counted.
+- *The safe surface* is `_application/search_application/{name}/_search` with a key limited to
+  that application: a page sends only the template's `params`. Search UI's
+  `@elastic/search-ui-elasticsearch-connector` and InstantSearch through Searchkit send whole
+  queries to `{index}/_search` and `_msearch`, so they take a key that reads indices (an
+  application's name is an alias of its indices, so a key reading that alias works for them),
+  ideally with a `filter`. The dashboard's quickstart has all three filled in with the cluster's
+  endpoint.
+- *Billing*: a public key means public traffic. Browser requests are metered like any other, and
+  a sleeping cluster wakes for them; each key's rate limit is what bounds them.
+
+`crates/search-server/tests/http.rs` `cors_preflights_are_answered_before_authentication`,
+`crates/search-control/tests/control.rs` `browsers_search_with_browser_keys` and
+`tests/cluster.rs` `every_node_answers_a_preflight_the_same_way` cover it; an end-to-end run with
+Searchkit and InstantSearch in Chromium is in the review pack (`94-browser-*`).
+
 | method | path | |
 | ------ | ---- | - |
 | GET | `/v1/search` | version, endpoint, defaults, pricing; for a person their `caps`; for the operator and admins also `storage`, `loaded` clusters and the `cache` |
 | GET | `/v1/search/clusters` | list (a person: their own); `?deleted=true`: recently deleted clusters kept for restoring, newest first, with `deleted_at` and `purge_at` (Unix seconds), the name each had and its last figures (`stored_bytes` is still billed) |
 | POST | `/v1/search/clusters` | create `{name, flavor?, parent?, at?, idle_timeout_s?, max_in_flight?, max_body_mb?, destructive_requires_name?}`; answers with `url`, `username`, `password` (once) and `id` — the shape `search-yaml run --cluster-hook` expects; `owner` is the signed-in person who isn't an admin, and a branch's is its parent's |
 | GET | `/v1/search/clusters/{id or name}` | settings, `status` (`loaded` with live index count and requests in flight, and live `docs` once every index is open, or `asleep` with `wakes_at`, unix seconds, when a background job is due to wake it), last metered `indices`/`docs`/`stored_bytes` and `own_bytes` (what a branch references that its parent's latest commit points don't; all of `stored_bytes` for a cluster that isn't a branch), `url`, `branches` |
-| PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`, `ip_allowlist` (below); the idle timeout, body limit, `max_in_flight` and allowlist apply at once (also to a cluster that is waking up); a new flavor or `destructive_requires_name` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
+| PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`, `ip_allowlist` (below), `cors` (above: browser search); the idle timeout, body limit, `max_in_flight`, allowlist and CORS apply at once (also to a cluster that is waking up); a new flavor or `destructive_requires_name` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
 | DELETE | `/v1/search/clusters/{id}` | waits for running requests and for a wake in progress (which is locked out and unloaded, never left serving); the cluster leaves the list, its REST endpoint answers as for a missing cluster and its name is free at once, but its storage is kept for `--search-deleted-retention-days` (7) and billed as storage, for `restore` (0 days: removed at once); branches keep working |
 | POST | `/v1/search/clusters/{id}/restore` | a deleted cluster (by its id) back as it was within its window: data, snapshots, settings, owner, password and API keys; under its own name, else 409 and `{"name": "…"}` restores it under another (the new name is its Basic auth user, API key id suffix and host label; the password stays). Scoped like every per-cluster route (owner, admins, the operator); 404 once purged |
 | GET, POST | `/v1/search/clusters/{id}/branches` | list; branch `{name, at?}` (`at`: Unix seconds within `--search-history`) |
@@ -172,6 +241,9 @@ and `tests/cluster.rs` `a_forward_carries_the_clients_address_to_the_owner` cove
 | GET | `/v1/search/clusters/{id}/slowlog` | the search and indexing slow logs, newest first, at most 500: `{entries, max_entries}`, each entry Elasticsearch's JSON slow log line (`@timestamp`, `log.level`, `log.logger`, `elasticsearch.index.name`, `elasticsearch.shard.id`, `elasticsearch.slowlog.{message,took,took_millis,source,total_hits,stats,search_type,total_shards,id,routing}`) |
 | POST | `/v1/search/clusters/{id}/keys` | a new API key of the cluster `{name, expires_in_s?, access?}` (`access`: `admin`, the default, or `data`: a link's role, data, templates, pipelines and lifecycle policies without security) → `{id, name, access, api_key, url, expires_at?}` (`access`: the access the key was made with): `api_key` is `base64(<key id>@<cluster>:<key>)` for `Authorization: ApiKey …`, in this answer only (roll secrets' managed links use it instead of sharing the password); on an OpenSearch-flavor cluster (whose clients sign in with a user) the key is an internal user of its own: `{id, name, access, username, password, url, expires_at?}` without `api_key`, `username` being `<user>@<cluster>`, refused once `expires_in_s` passes |
 | DELETE | `/v1/search/clusters/{id}/keys/{key}` | revoke it (204; 404 when it's gone). On a deleted cluster (by its id) the revoke is kept and applied by its restore (204) |
+| GET | `/v1/search/clusters/{id}/browser-keys` | `{keys}`: the browser keys that still work, newest first, each `{id, name, indices or application, filter?, rate_limit, created_at, expires_at}` (no secret). Wakes the cluster |
+| POST | `/v1/search/clusters/{id}/browser-keys` | a key a web page ships (above) `{name, indices or application, filter?, expires_in_s?, rate_limit?: {per_minute?, per_ip_per_minute?}}` → the same fields plus `api_key` (once) and `url`. 400 on an OpenSearch-flavor cluster |
+| DELETE | `/v1/search/clusters/{id}/browser-keys/{key}` | revoke a browser key (204; 404 for any other key of the cluster). On a deleted cluster it is kept for the restore, as `keys/{key}` |
 | GET, PUT, DELETE | `/v1/search/clusters/{id}/indices/{index}` | Elasticsearch's `GET`/`PUT`/`DELETE /<index>`: mappings, settings and aliases; create (body: `mappings`, `settings`); delete |
 | GET, PUT | `/v1/search/clusters/{id}/indices/{index}/mapping` | `GET`/`PUT /<index>/_mapping` |
 | GET | `/v1/search/clusters/{id}/indices/{index}/settings` | `GET /<index>/_settings` |

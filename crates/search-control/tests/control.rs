@@ -725,6 +725,104 @@ async fn ip_allowlists_turn_addresses_away_before_credentials() {
     assert_eq!(s, 200);
 }
 
+/// Search from the browser: a cluster's allowed origins (validated, kept as browsers send
+/// them, shown as `http.cors.*`, behind the IP allowlist) and browser keys made through
+/// `/browser-keys`: they read through their filter, never write, one limited to a search
+/// application runs only its template (params checked against its dictionary), each is rate
+/// limited with a 429 and `Retry-After` a page can read, and revoking one stops it at once.
+#[tokio::test]
+async fn browsers_search_with_browser_keys() {
+    let e = env_with(|c| c.domain = Some("search.example.test".into())).await;
+    let c = e.post("/v1/search/clusters", json!({"name": "shop"})).await;
+    let path = format!("/v1/search/clusters/{}", c["id"].as_str().unwrap());
+    let (request, keys) = (format!("{path}/request"), format!("{path}/browser-keys"));
+    let console = |method: &str, p: &str, body: Value| e.post(&request, json!({"method": method, "path": p, "body": body}));
+    let bulk = "{\"index\":{\"_index\":\"products\",\"_id\":\"1\"}}\n{\"title\":\"trail shoes\",\"public\":true}\n{\"index\":{\"_index\":\"products\",\"_id\":\"2\"}}\n{\"title\":\"secret shoes\",\"public\":false}\n";
+    assert_eq!(console("POST", "/_bulk?refresh=true", json!(bulk)).await["status"], 200);
+    let app = json!({"indices": ["products"], "template": {
+        "script": {"source": {"query": {"match": {"title": "{{query}}"}}}, "params": {"query": ""}},
+        "dictionary": {"properties": {"query": {"type": "string"}}, "additionalProperties": false}}});
+    let r = console("PUT", "/_application/search_application/shop-search", app).await;
+    assert_eq!(r["status"], 201, "{r}");
+
+    for bad in [json!({"allow_origin": ["shop.example.com"]}), json!({"allow_origin": ["/(/"]}), json!({"allow_origin": ["*"], "allow_methods": ["FETCH"]})] {
+        let (s, v) = e.call(reqwest::Method::PATCH, &path, Some(json!({ "cors": bad }))).await;
+        assert_eq!(s, 400, "{bad}: {v}");
+    }
+    let (s, v) = e.call(reqwest::Method::PATCH, &path, Some(json!({"cors": {"allow_origin": ["HTTPS://Shop.Example.com:443"]}}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["cors"], json!({"allow_origin": ["https://shop.example.com"]}));
+    let r = console("GET", "/_cluster/settings?include_defaults&flat_settings", Value::Null).await;
+    assert_eq!(body(&r)["defaults"]["http.cors.allow-origin"], "https://shop.example.com", "{r}");
+
+    let made = |k: Value| e.post(&keys, k);
+    let reader = made(json!({"name": "shop page", "indices": ["products"], "filter": {"term": {"public": true}}})).await;
+    let runner = made(json!({"name": "app page", "application": "shop-search", "rate_limit": {"per_minute": 3}})).await;
+    assert_eq!((reader["rate_limit"]["per_minute"].as_u64(), runner["application"].as_str()), (Some(600), Some("shop-search")));
+    let browser = |key: &Value, method: reqwest::Method, p: &str, body: Option<Value>| {
+        let mut r = e
+            .http
+            .request(method, format!("{}{p}", e.es))
+            .header("host", "shop.search.example.test")
+            .header("origin", "https://shop.example.com")
+            .header("authorization", format!("ApiKey {}", key["api_key"].as_str().unwrap()));
+        if let Some(b) = body {
+            r = r.json(&b);
+        }
+        r.send()
+    };
+    let r = browser(&reader, reqwest::Method::POST, "/products/_search", Some(json!({"query": {"match_all": {}}}))).await.unwrap();
+    assert_eq!(r.headers()["access-control-allow-origin"], "https://shop.example.com");
+    assert_eq!(r.headers()["vary"], "origin");
+    let v: Value = r.json().await.unwrap();
+    let titles: Vec<&str> = v["hits"]["hits"].as_array().unwrap().iter().filter_map(|h| h["_source"]["title"].as_str()).collect();
+    assert_eq!(titles, ["trail shoes"], "the filter holds: {v}");
+    let r = browser(&reader, reqwest::Method::PUT, "/products/_doc/3", Some(json!({"title": "x"}))).await.unwrap();
+    assert_eq!(r.status().as_u16(), 403, "a browser key never writes");
+
+    // The application key runs the template, its params checked, and nothing else.
+    let run = |params: Value| browser(&runner, reqwest::Method::POST, "/_application/search_application/shop-search/_search", Some(json!({ "params": params })));
+    let r = run(json!({"query": "shoes"})).await.unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap()["hits"]["total"]["value"], 2);
+    assert_eq!(run(json!({"query": 5})).await.unwrap().status().as_u16(), 400, "params are checked against the dictionary");
+    let r = browser(&runner, reqwest::Method::POST, "/products/_search", Some(json!({}))).await.unwrap();
+    assert_eq!(r.status().as_u16(), 403, "only the application's search");
+    // Its fourth request in a minute is over its limit, and the page can read why.
+    let r = run(json!({"query": "shoes"})).await.unwrap();
+    assert_eq!(r.status().as_u16(), 429);
+    assert!(r.headers()["retry-after"].to_str().unwrap().parse::<u64>().unwrap() >= 1);
+    assert_eq!(r.headers()["access-control-allow-origin"], "https://shop.example.com");
+    assert_eq!(r.json::<Value>().await.unwrap()["error"]["type"], "es_rejected_execution_exception");
+
+    let listed = e.get(&keys).await;
+    assert_eq!(listed["keys"].as_array().unwrap().len(), 2, "{listed}");
+    assert!(listed.to_string().find("api_key").is_none(), "secrets aren't listed");
+    // Only browser keys: another key of the cluster isn't this route's to revoke.
+    let other = e.post(&format!("{path}/keys"), json!({"name": "ingest", "access": "data"})).await;
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("{path}/browser-keys/{}", other["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, 404);
+    let (s, _) = e.call(reqwest::Method::DELETE, &format!("{path}/browser-keys/{}", reader["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, 204);
+    let r = browser(&reader, reqwest::Method::POST, "/products/_search", Some(json!({}))).await.unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+
+    // The IP allowlist comes first, preflights included.
+    let (s, _) = e.call(reqwest::Method::PATCH, &path, Some(json!({"ip_allowlist": ["203.0.113.0/24"]}))).await;
+    assert_eq!(s, 200);
+    let r = e
+        .http
+        .request(reqwest::Method::OPTIONS, format!("{}/products/_search", e.es))
+        .header("host", "shop.search.example.test")
+        .header("origin", "https://shop.example.com")
+        .header("access-control-request-method", "POST")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    assert_eq!(r.text().await.unwrap(), r#"{"ok":false,"message":"Forbidden due to traffic filtering"}"#);
+}
+
 #[tokio::test]
 async fn documents() {
     let e = env().await;
