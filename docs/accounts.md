@@ -311,7 +311,9 @@ by their email's domain, as Linear's, Vercel's and GitHub's enterprise sign-in d
 The same provider can sign people's agents in too (enterprise sign-in, docs/permissions.md,
 "Enterprise identity providers"): an enterprise identity provider with `sso` set to the
 connection's id vouches for the connection's verified domains, as they are at each sign-in
-(`roll_auth::Sessions::sso_trust`), so a domain is proven once for both.
+(`roll_auth::Sessions::sso_trust`), so a domain is proven once for both. On the account page each
+connection says whether agents sign in through it too, and "Use for agents too" adds it (one click,
+once its domains are proven); "Stop" takes it away.
 
 ### SCIM (the provider manages its people)
 
