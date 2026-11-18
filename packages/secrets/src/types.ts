@@ -97,6 +97,8 @@ export type Change = { seq: number; environment: string; path: string; message: 
 /** `what`: added | changed | deleted | comment | tags | link | rotated */
 export type Item = { key: string; path: string; type: SecretType; what: string[]; from_fp: string | null; to_fp: string | null };
 export type Written = { change: Change | null; secret: Secret | null; warnings: string[] };
+/** The client's `delete`: `deleted` is false when the key wasn't there. */
+export type Deleted = { deleted: boolean; change: Change | null };
 /** `change` is null when nothing changed. */
 /** `request`: the change request opened instead (a promotion into a protected environment). */
 export type Applied = { change: Change | null; items: Item[]; warnings: string[]; request?: ChangeRequest };

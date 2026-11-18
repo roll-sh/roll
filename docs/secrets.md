@@ -86,11 +86,25 @@ Everything below works the same from the dashboard (a project's **Secrets**) and
    // then a conditional read that costs a 304 (nothing read, issued or audited) while unchanged.
    const cached = createClient({ api: process.env.ROLL_API_URL!, token: process.env.ROLL_TOKEN!, cacheTtlMs: 30_000 });
 
+   // A reader that can't renew a lease (a playbook, a one-off script): no dynamic credential is
+   // issued, those keys are left out and named in `dynamic`, and the answer can be kept.
+   const { values: plain, dynamic } = await secrets.values("staging", { dynamic: false });
+
+   // One key's writes (`PUT`/`DELETE …/secrets/{key}`). A set replaces a link the key had; a
+   // delete of a key that isn't there is `{deleted: false}`. A protected environment, or a folder
+   // that needs approval, throws `SecretsError` with the code `approval_required` (open a change
+   // request instead). Errors never hold the value, and both drop the client's cached reads.
+   await secrets.set("staging", "FEATURE_FLAGS", "beta", { path: "/api", comment: "rollout" });
+   const { deleted } = await secrets.delete("staging", "OLD_KEY", { path: "/api" });
+
    // An encryption key (below, "Encryption keys"): the key stays in roll.
    const cards = secrets.transit("cards");
    const ct = await cards.encrypt(cardNumber, `order:${id}`);
    const index = await cards.hmac(email); // a lookup column over encrypted emails
    ```
+
+   The Go and Python clients name these `Values(…, secrets.WithoutDynamic())`, `Set` and
+   `Delete`, and `values(…, dynamic=False)`, `set` and `delete`.
 
    In Go, `sdk/go/secrets` has the same surface, and `FromEnv` logs a workload identity in with
    its own OIDC token as `roll run` does (`ROLL_IDENTITY`). It logs in again before the login's
