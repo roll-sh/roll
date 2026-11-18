@@ -42,6 +42,9 @@ pub struct InstanceSpec {
     pub vars: Vec<(String, String)>,
     /// The port the app listens on (none for workers and cron runs).
     pub port: Option<u16>,
+    /// Other ports of the app a custom domain sends to (published as `port` is; never a closed
+    /// instance's), each reached through [`Runtime::port_address`].
+    pub ports: Vec<u16>,
     pub cpu: f64,
     pub memory_mb: u32,
     /// The project's private network for this environment, and the names it answers to there.
@@ -166,6 +169,10 @@ pub trait Runtime: Send + Sync {
     /// Start a created (or stopped) instance and say where its port answers. Its output goes
     /// to `log` until it stops. It may start with more CPU than its limit (a startup boost).
     async fn start(&self, name: &str, log: LogSink) -> anyhow::Result<Option<SocketAddr>>;
+    /// Where a started instance answers on another of its ports ([`InstanceSpec::ports`]).
+    async fn port_address(&self, _name: &str, _port: u16) -> Option<SocketAddr> {
+        None
+    }
     /// The instance is up: it runs within its CPU limit from here.
     async fn settle(&self, _name: &str) {}
     /// Freeze a running instance (memory kept). Only called when [`Runtime::can_suspend`].

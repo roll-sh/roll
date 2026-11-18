@@ -1763,6 +1763,11 @@ pub struct Domain {
     /// Requests to it are sent, `308`, to this hostname of the same environment (www → apex),
     /// path and query kept.
     pub redirect_to: Option<String>,
+    /// The app's port this hostname is sent to, when it's another than the service's own
+    /// (Railway's target port, Fly's services): an admin UI on 9000 beside the app on 8080.
+    /// Health checks and wakes stay on the main port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 /// A hostname a user may add: lowercase labels of `[a-z0-9-]`, at least two, at most 253

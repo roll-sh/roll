@@ -129,7 +129,7 @@ route as. "deploy*" means `deploy` when `{env}` is `production`, else `write`.
 | `GET /v1/apps/services/{id}/environments/{env}/domains` | | `Domain[]` | read |
 | `POST /v1/apps/services/{id}/environments/{env}/domains` | `{hostname}` | 201 `Domain` | deploy* |
 | `POST /v1/apps/services/{id}/environments/{env}/domains/{host}/verify` | | `Domain` | read |
-| `PATCH /v1/apps/services/{id}/environments/{env}/domains/{host}` | `{ redirect_to: string \| null }` | `Domain` (another hostname of the environment that serves it: no loops or chains; null serves the app again) | deploy* (it changes what a hostname serves) |
+| `PATCH /v1/apps/services/{id}/environments/{env}/domains/{host}` | `{ redirect_to?: string \| null, port?: number \| null }` (a field left out stays) | `Domain` (`redirect_to`: another hostname of the environment that serves it: no loops or chains; null serves the app again. `port`: another of the app's ports this hostname goes to, Railway's target port, published from the next deploy (until then the host answers 502, never the main port); null: the service's own. A web service's custom domain only, not in a closed environment (409)) | deploy* (it changes what a hostname serves) |
 | `DELETE /v1/apps/services/{id}/environments/{env}/domains/{host}` | | 204 | delete |
 
 - Creating a service makes its `production` environment, places its card on the project's canvas

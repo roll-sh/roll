@@ -84,6 +84,10 @@ pub struct Inst {
     /// Its last hour by minute (Railway's per replica): `(minute, CPU seconds, seconds measured,
     /// peak memory bytes)`, from the reaper's samples.
     minutes: Mutex<std::collections::VecDeque<(i64, f64, f64, u64)>>,
+    /// Its template's other ports (custom domains' own), and where they answer, learned at each
+    /// start.
+    wanted: Vec<u16>,
+    ports: Mutex<HashMap<u16, SocketAddr>>,
 }
 
 /// An instance's last hour by minute ([`EnvLive::by_instance`]).
@@ -144,7 +148,23 @@ impl Inst {
             health_fails: AtomicU32::new(0),
             stopping: Mutex::new(None),
             minutes: Mutex::new(std::collections::VecDeque::new()),
+            wanted: Vec::new(),
+            ports: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// An instance of `tpl`'s deployment, knowing the other ports it publishes.
+    fn of(name: String, tpl: &Template) -> Arc<Inst> {
+        let mut i = Inst::new(name, tpl.deployment.clone());
+        if let Some(i) = Arc::get_mut(&mut i) {
+            i.wanted = tpl.spec.ports.clone();
+        }
+        i
+    }
+
+    /// Where it answers on `port` (a custom domain's own), if it publishes it.
+    pub fn port_addr(&self, port: u16) -> Option<SocketAddr> {
+        self.ports.lock().get(&port).copied()
     }
 
     fn phase(&self) -> Phase {
@@ -627,7 +647,7 @@ impl EnvLive {
         };
         spec.vars.push(("ROLL_INSTANCE".into(), spec.name.clone()));
         self.runtime.create(&spec).await?;
-        Ok(Inst::new(spec.name, tpl.deployment.clone()))
+        Ok(Inst::of(spec.name, tpl))
     }
 
     async fn make(&self, tpl: &Template) -> anyhow::Result<Arc<Inst>> {
@@ -639,7 +659,7 @@ impl EnvLive {
         spec.vars.push(("ROLL_INSTANCE".into(), spec.name.clone()));
         self.mine.lock().insert(spec.name.clone());
         self.runtime.create(&spec).await?;
-        Ok(Inst::new(spec.name, tpl.deployment.clone()))
+        Ok(Inst::of(spec.name, tpl))
     }
 
     /// Whether something answers HTTP at `addr` (`path`: a 2xx or 3xx there; none: any answer,
@@ -721,6 +741,14 @@ impl EnvLive {
                 }
             }
         }
+        // Its other ports (custom domains' own) answer where the runtime published them.
+        let mut found = HashMap::new();
+        for p in inst.wanted.iter().copied() {
+            if let Some(a) = self.runtime.port_address(&inst.name, p).await {
+                found.insert(p, a);
+            }
+        }
+        *inst.ports.lock() = found;
         *inst.phase.lock() = Phase::Running(addr);
         *inst.last_used.lock() = Instant::now();
         // Up: from here it runs within its CPU limit (it started with a boost).
@@ -1496,7 +1524,14 @@ impl EnvLive {
                 self.runtime.remove(&name).await;
                 continue;
             };
-            let i = Inst::new(name.clone(), tpl.deployment.clone());
+            let i = Inst::of(name.clone(), tpl);
+            let mut found = HashMap::new();
+            for p in i.wanted.iter().copied() {
+                if let Some(a) = self.runtime.port_address(&name, p).await {
+                    found.insert(p, a);
+                }
+            }
+            *i.ports.lock() = found;
             *i.phase.lock() = phase;
             *i.started_at.lock() = Some(now_ms());
             self.insts.lock().push(i);
@@ -2272,6 +2307,7 @@ mod tests {
                 command: None,
                 vars: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
                 port: Some(8080),
+                ports: vec![],
                 cpu: 0.5,
                 memory_mb: 512,
                 network: None,

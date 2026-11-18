@@ -1764,7 +1764,7 @@
         "x-roll-action": "delete"
       },
       "patch": {
-        "description": "Answers `Domain` (another hostname of the environment that serves it: no loops or chains; null serves the app again).",
+        "description": "Answers `Domain` (`redirect_to`: another hostname of the environment that serves it: no loops or chains; null serves the app again. `port`: another of the app's ports this hostname goes to, Railway's target port, published from the next deploy (until then the host answers 502, never the main port); null: the service's own. A web service's custom domain only, not in a closed environment (409)).",
         "operationId": "patchServicesIdEnvironmentsEnvDomainsHost",
         "parameters": [
           {
@@ -1800,11 +1800,11 @@
               }
             }
           },
-          "description": "`{ redirect_to: string | null }`"
+          "description": "`{ redirect_to?: string | null, port?: number | null }` (a field left out stays)"
         },
         "responses": {
           "200": {
-            "description": "`Domain` (another hostname of the environment that serves it: no loops or chains; null serves the app again)"
+            "description": "`Domain` (`redirect_to`: another hostname of the environment that serves it: no loops or chains; null serves the app again. `port`: another of the app's ports this hostname goes to, Railway's target port, published from the next deploy (until then the host answers 502, never the main port); null: the service's own. A web service's custom domain only, not in a closed environment (409))"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

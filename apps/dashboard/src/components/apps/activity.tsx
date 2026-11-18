@@ -27,6 +27,8 @@ export function describe(e: AppEvent): string {
       return `removed ${String(d.hostname)}${where}`;
     case "audit.domain.redirect":
       return d.redirect_to ? `redirected ${String(d.hostname)} to ${String(d.redirect_to)}` : `stopped redirecting ${String(d.hostname)}`;
+    case "audit.domain.port":
+      return d.port ? `sent ${String(d.hostname)} to port ${String(d.port)}` : `sent ${String(d.hostname)} back to the service's port`;
     case "audit.link.added":
       return `linked ${String(d.kind)} ${String(d.ref)}`;
     case "audit.link.removed":

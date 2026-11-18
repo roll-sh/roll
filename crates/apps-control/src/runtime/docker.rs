@@ -148,6 +148,13 @@ impl Docker {
             Some(_) if !spec.closed => Some(free_port()?),
             _ => None,
         };
+        // Other ports a domain sends to: published on loopback as the main one is.
+        let mut extra = Vec::new();
+        if host_port.is_some() {
+            for p in spec.ports.iter().filter(|p| Some(**p) != spec.port) {
+                extra.push((*p, free_port()?));
+            }
+        }
         let host_gateway = match (&spec.network, spec.closed) {
             (Some(net), true) => gateway(net).await,
             _ => Some("host-gateway".to_string()),
@@ -165,7 +172,7 @@ impl Docker {
                 };
                 let ing = ingress.as_ref().map(|(d, u, g)| (d.as_path(), *u, *g));
                 let made = async {
-                    let config = sandbox_config(spec, host_port, host_gateway.as_deref(), ing);
+                    let config = sandbox_config(spec, host_port, &extra, host_gateway.as_deref(), ing);
                     match engine.create(&sandbox, &config).await {
                         // The relay's image isn't here yet: pulled once.
                         Err(e) if ing.is_some() && e.to_string().contains("No such image") => {
@@ -180,7 +187,7 @@ impl Docker {
                 }
                 .await;
                 match made {
-                    Ok(()) => match engine.create(&spec.name, &joined(engine_config(spec, None, None)?, &sandbox)).await {
+                    Ok(()) => match engine.create(&spec.name, &joined(engine_config(spec, None, &[], None)?, &sandbox)).await {
                         Ok(id) => {
                             self.known.lock().containers.insert(spec.name.clone(), (id, host_port, Some(nanos(spec.cpu))));
                             // Without a waker a stopped instance only wakes through rolld.
@@ -209,7 +216,7 @@ impl Docker {
                     }
                 }
             }
-            match engine.create(&spec.name, &engine_config(spec, host_port, host_gateway.as_deref())?).await {
+            match engine.create(&spec.name, &engine_config(spec, host_port, &extra, host_gateway.as_deref())?).await {
                 Ok(id) => {
                     self.known.lock().containers.insert(spec.name.clone(), (id, host_port, Some(nanos(spec.cpu))));
                     return Ok(());
@@ -260,7 +267,10 @@ impl Docker {
             args.extend(["--cap-drop".into(), c.into()]);
         }
         if let (Some(p), Some(hp)) = (spec.port, host_port) {
-            args.extend(["--publish".into(), format!("127.0.0.1:{hp}:{p}")]);
+            args.extend(["--publish".into(), format!("127.0.0.1:{hp}:{p}"), "--label".into(), format!("{LABEL}.port={p}")]);
+            for (cp, hp) in &extra {
+                args.extend(["--publish".into(), format!("127.0.0.1:{hp}:{cp}")]);
+            }
         }
         if let Some(net) = &spec.network {
             args.extend(["--network".into(), net.clone()]);
@@ -668,6 +678,20 @@ impl Runtime for Docker {
         }
         Ok(())
     }
+    async fn port_address(&self, name: &str, port: u16) -> Option<SocketAddr> {
+        // Published on the sandbox when it has one, else on the instance.
+        for c in [sandbox_name(name), name.to_string()] {
+            let hp = match &self.engine {
+                Some(e) => e.inspect(&c).await.ok().and_then(|i| i.published.get(&port).copied()),
+                None => docker(&["port", &c, &format!("{port}/tcp")]).await.ok().and_then(|o| o.lines().next()?.rsplit_once(':')?.1.trim().parse().ok()),
+            };
+            if let Some(hp) = hp {
+                return Some(SocketAddr::from(([127, 0, 0, 1], hp)));
+            }
+        }
+        None
+    }
+
     async fn start(&self, name: &str, log: LogSink) -> anyhow::Result<Option<SocketAddr>> {
         let now = chrono::Utc::now();
         let (o, e) = (log.stream(Stream::Stdout), log.stream(Stream::Stderr));
@@ -1081,7 +1105,7 @@ pub const CAP_DROP: [&str; 4] = ["NET_RAW", "MKNOD", "AUDIT_WRITE", "SETFCAP"];
 /// The sandbox holding an instance's network. `ingress` (a closed web instance's, with the owner
 /// to run as): `socat` joins each caller on `<dir>/s.sock` to the app's port in the sandbox's
 /// network namespace, instead of only sleeping.
-fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>, host_gateway: Option<&str>, ingress: Option<(&std::path::Path, u32, u32)>) -> serde_json::Value {
+fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>, extra: &[(u16, u16)], host_gateway: Option<&str>, ingress: Option<(&std::path::Path, u32, u32)>) -> serde_json::Value {
     use serde_json::json;
     let mut host = json!({
         "Memory": 16i64 << 20,
@@ -1108,6 +1132,12 @@ fn sandbox_config(spec: &InstanceSpec, host_port: Option<u16>, host_gateway: Opt
         config["ExposedPorts"] = json!({ &port: {} });
         if let Some(hp) = host_port {
             host["PortBindings"] = json!({ &port: [{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}] });
+            config["Labels"][format!("{LABEL}.port")] = json!(p.to_string());
+            for (cp, hp) in extra {
+                let k = format!("{cp}/tcp");
+                config["ExposedPorts"][&k] = json!({});
+                host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}]);
+            }
         }
         if spec.closed {
             config["Labels"][format!("{LABEL}.closed")] = json!(p.to_string());
@@ -1174,7 +1204,7 @@ fn joined(mut config: serde_json::Value, sandbox: &str) -> serde_json::Value {
     config
 }
 
-fn engine_config(spec: &InstanceSpec, host_port: Option<u16>, host_gateway: Option<&str>) -> anyhow::Result<serde_json::Value> {
+fn engine_config(spec: &InstanceSpec, host_port: Option<u16>, extra: &[(u16, u16)], host_gateway: Option<&str>) -> anyhow::Result<serde_json::Value> {
     use serde_json::json;
     let mut env = Vec::with_capacity(spec.vars.len());
     for (k, v) in &spec.vars {
@@ -1212,6 +1242,12 @@ fn engine_config(spec: &InstanceSpec, host_port: Option<u16>, host_gateway: Opti
         let port = format!("{p}/tcp");
         config["ExposedPorts"] = json!({ &port: {} });
         host["PortBindings"] = json!({ &port: [{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}] });
+        config["Labels"][format!("{LABEL}.port")] = json!(p.to_string());
+        for (cp, hp) in extra {
+            let k = format!("{cp}/tcp");
+            config["ExposedPorts"][&k] = json!({});
+            host["PortBindings"][&k] = json!([{"HostIp": "127.0.0.1", "HostPort": hp.to_string()}]);
+        }
     }
     if let Some(net) = &spec.network {
         host["NetworkMode"] = json!(net);
@@ -1480,6 +1516,7 @@ mod tests {
             command: None,
             vars: vec![("TLS_KEY".into(), pem.into())],
             port: Some(8080),
+            ports: vec![9000],
             cpu: 0.5,
             memory_mb: 512,
             network: Some("roll-apps-net-p-production".into()),
@@ -1491,13 +1528,14 @@ mod tests {
             files: vec![],
             health: None,
         };
-        let c = engine_config(&spec, Some(41234), Some("host-gateway")).unwrap();
+        let c = engine_config(&spec, Some(41234), &[(9000, 41235)], Some("host-gateway")).unwrap();
+        assert_eq!((c["HostConfig"]["PortBindings"]["9000/tcp"][0]["HostPort"].as_str(), c["Labels"]["sh.roll.apps.port"].as_str()), (Some("41235"), Some("8080")));
         assert_eq!(c["Env"][0], format!("TLS_KEY={pem}"));
         assert_eq!(c["HostConfig"]["PortBindings"]["8080/tcp"][0]["HostIp"], "127.0.0.1");
         assert_eq!(c["HostConfig"]["CapDrop"][0], "NET_RAW");
         assert_eq!(c["NetworkingConfig"]["EndpointsConfig"]["roll-apps-net-p-production"]["Aliases"][0], "web");
         assert_eq!(c["Labels"]["sh.roll.apps"], "svc_x");
         let nul = InstanceSpec { vars: vec![("A".into(), "a\0b".into())], ..spec };
-        assert!(engine_config(&nul, None, None).is_err());
+        assert!(engine_config(&nul, None, &[], None).is_err());
     }
 }

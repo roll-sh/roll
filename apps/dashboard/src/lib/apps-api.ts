@@ -506,6 +506,8 @@ export interface Domain {
   created_at: number;
   /** Its requests go, 308, to this hostname of the same environment (www → apex). */
   redirect_to?: string | null;
+  /** The app's port it's sent to, when it isn't the service's own (published from the next deploy). */
+  port?: number;
 }
 
 /** What an environment's code may reach: `roll` keeps it on a network with no route out, the
@@ -1198,6 +1200,8 @@ export const appsApi = {
   verifyDomain: (id: string, e: string, host: string) => call<Domain>("POST", `${env(id, e)}/domains/${enc(host)}/verify`),
   removeDomain: (id: string, e: string, host: string) => call<null>("DELETE", `${env(id, e)}/domains/${enc(host)}`),
   redirectDomain: (id: string, e: string, host: string, to: string | null) => call<Domain>("PATCH", `${env(id, e)}/domains/${enc(host)}`, { redirect_to: to }),
+  /** Send a custom domain to another of the app's ports (null: the service's own). */
+  domainPort: (id: string, e: string, host: string, port: number | null) => call<Domain>("PATCH", `${env(id, e)}/domains/${enc(host)}`, { port }),
 };
 
 /**

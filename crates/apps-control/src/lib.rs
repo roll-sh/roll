@@ -375,7 +375,11 @@ type NeedsDeploy = (std::time::Instant, u64, String, Option<String>, bool);
 /// A service id looked up by name, as of when (none: no such web service).
 type NameLookup = (std::time::Instant, Option<String>);
 /// A host's kept answer: when, at which generation, and the service, environment and deployment.
-type HostAnswer = (Instant, u64, Option<(String, String, Option<String>)>);
+type HostAnswer = (Instant, u64, Option<HostTarget>);
+
+/// What a hostname names: the service, the environment, a deployment's own (`<dep>--<slug>`),
+/// and another of the app's ports when it's a custom domain sent there.
+pub type HostTarget = (String, String, Option<String>, Option<u16>);
 
 /// Another service's values a reference may read, and which of them are sealed.
 type ServiceValues = (HashMap<String, String>, BTreeSet<String>);
@@ -2720,6 +2724,7 @@ impl Apps {
             tls_error: None,
             created_at: row.created_at,
             redirect_to: None,
+            port: None,
         };
         Ok(std::iter::once(own).chain(custom).collect())
     }
@@ -2863,27 +2868,46 @@ impl Apps {
         Ok(hosts)
     }
 
-    /// `PATCH …/domains/{host} {redirect_to}`: send a custom domain's requests to another of the
-    /// environment's hostnames (its own, or another custom domain that doesn't redirect), or
-    /// (`null`) serve them again.
-    pub async fn set_domain_redirect(self: &Arc<Self>, service: &str, env: &str, host: &str, body: Value) -> Result<Domain> {
-        // What a hostname names is about to change: no host answer kept from before.
-        self.hosts_changed();
+    /// `PATCH …/domains/{host} {redirect_to?, port?}`: send a custom domain's requests to another
+    /// of the environment's hostnames (its own, or another custom domain that doesn't redirect),
+    /// or (`null`) serve them again; `port`: to another of the app's ports, published from the
+    /// next deploy (`null`: the service's own). A field left out stays as it is.
+    pub async fn patch_domain(self: &Arc<Self>, service: &str, env: &str, host: &str, body: Value) -> Result<Domain> {
         let o = body.as_object().cloned().unwrap_or_default();
-        if let Some(k) = o.keys().find(|k| k.as_str() != "redirect_to") {
+        if let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "redirect_to" | "port")) {
             return Err(Error::BadRequest(format!("unknown field {k}")));
         }
         let h = host.to_ascii_lowercase();
-        let to = match o.get("redirect_to") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(t)) => Some(t.trim().trim_end_matches('.').to_ascii_lowercase()),
-            Some(_) => return Err(Error::BadRequest("redirect_to is a hostname or null".into())),
-        };
         let all = self.domains(service, env).await?;
         if !all.iter().any(|d| d.kind == DomainKind::Custom && d.hostname == h) {
             return Err(Error::NotFound(format!("{h} isn't a custom domain of {service} in {env}")));
         }
-        if let Some(t) = &to {
+        let port = match o.get("port") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(v) => match v.as_u64() {
+                Some(p) if (1..=65535).contains(&p) => Some(Some(p as u16)),
+                _ => return Err(Error::BadRequest("port is the app's port this hostname goes to (1–65535), or null".into())),
+            },
+        };
+        if let Some(Some(_)) = port {
+            let (sid, e) = (service.to_string(), env.to_string());
+            let (svc, row) = self.db(move |s| Ok((s.service(&sid)?, s.environment(&sid, &e)?))).await?;
+            if svc.run.tcp || svc.run.kind != crate::model::RunType::Web {
+                return Err(Error::BadRequest("port is for a web service's custom domain".into()));
+            }
+            // Its instances answer rolld through their sandbox's socket, on their own port.
+            if row.egress.closed() {
+                return Err(Error::Conflict("a closed environment's instances are reached on their own port only".into()));
+            }
+        }
+        let to = match o.get("redirect_to") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(t)) => Some(Some(t.trim().trim_end_matches('.').to_ascii_lowercase())),
+            Some(_) => return Err(Error::BadRequest("redirect_to is a hostname or null".into())),
+        };
+        if let Some(Some(t)) = &to {
             if t.starts_with("*.") {
                 return Err(Error::BadRequest("redirect_to is one hostname, not a wildcard".into()));
             }
@@ -2895,8 +2919,18 @@ impl Apps {
                 return Err(Error::BadRequest(format!("another domain redirects to {h}: it serves, so it can't redirect")));
             }
         }
-        let (hh, t) = (h.clone(), to.clone());
-        self.db(move |s| s.set_redirect(&hh, t.as_deref())).await?;
+        let hh = h.clone();
+        self.db(move |s| {
+            if let Some(t) = &to {
+                s.set_redirect(&hh, t.as_deref())?;
+            }
+            if let Some(p) = port {
+                s.set_domain_port(&hh, p)?;
+            }
+            Ok(())
+        })
+        .await?;
+        // What a hostname names changed: no host answer kept from before.
         self.hosts_changed();
         self.domains(service, env).await?.into_iter().find(|d| d.hostname == h).ok_or_else(|| Error::NotFound(h.clone()))
     }
@@ -2945,7 +2979,7 @@ impl Apps {
     /// The environment a request's `Host` names: a generated hostname, or an active custom domain.
     /// The service and environment a hostname is, and the deployment when it's one's own
     /// (`<deployment>--<slug>`: the id without `dep_`).
-    pub async fn env_for_host(self: &Arc<Self>, host: &str) -> Option<(String, String, Option<String>)> {
+    pub async fn env_for_host(self: &Arc<Self>, host: &str) -> Option<HostTarget> {
         // Every request asks: kept a second (another node's change shows within it), and
         // forgotten at once on any change here. It was two queries a request, about 150 µs of the
         // proxy's 260 (`docker.rs::the_proxys_own_cost_is_measured`, release).
@@ -2974,7 +3008,7 @@ impl Apps {
         v
     }
 
-    async fn env_for_host_now(self: &Arc<Self>, host: &str) -> Option<(String, String, Option<String>)> {
+    async fn env_for_host_now(self: &Arc<Self>, host: &str) -> Option<HostTarget> {
         let found = self.host_target(host).await?;
         // A private service has no public names: the same 404 as an address nobody has, read
         // from its settings now (making it private takes effect at once, not with a deploy).
@@ -2983,19 +3017,19 @@ impl Apps {
         self.db(move |s| s.service(&sid)).await.ok().is_some_and(|svc| svc.run.public && !svc.run.tcp).then_some(found)
     }
 
-    async fn host_target(self: &Arc<Self>, host: &str) -> Option<(String, String, Option<String>)> {
+    async fn host_target(self: &Arc<Self>, host: &str) -> Option<HostTarget> {
         let host = host.rsplit_once(':').filter(|(_, p)| p.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(h, _)| h);
         let host = host.trim_end_matches('.').to_ascii_lowercase();
         if let Some(label) = host.strip_suffix(&self.cfg.domain).and_then(|s| s.strip_suffix('.')).filter(|s| !s.contains('.')) {
             let slug = label.to_string();
             if let Some(e) = self.db(move |s| s.environment_by_slug(&slug)).await.ok().flatten() {
-                return Some((e.service, e.name, None));
+                return Some((e.service, e.name, None, None));
             }
             let (dep, slug) = label.split_once("--").filter(|(d, s)| d.len() == 12 && d.bytes().all(|b| b.is_ascii_alphanumeric()) && !s.is_empty())?;
             let (dep, slug) = (format!("dep_{dep}"), slug.to_string());
-            return self.db(move |s| s.environment_by_slug(&slug)).await.ok().flatten().map(|e| (e.service, e.name, Some(dep)));
+            return self.db(move |s| s.environment_by_slug(&slug)).await.ok().flatten().map(|e| (e.service, e.name, Some(dep), None));
         }
-        self.active_domain(&host).await.map(|(s, e, _)| (s, e, None))
+        self.active_domain(&host).await.map(|(s, e, d)| (s, e, None, d.port))
     }
 
     /// What the environment's public names let through ([`live::Gate`]): the live state's copy,

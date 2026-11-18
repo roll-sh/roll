@@ -1889,6 +1889,37 @@ async fn www_redirects_to_the_apex() {
     assert_eq!(st, StatusCode::BAD_REQUEST, "no loop");
 }
 
+/// A custom domain sent to another of the app's ports (Railway's target port): from the next
+/// deploy that host's requests reach that port of the same instance; the service's own names
+/// stay on its port, and health checks and wakes too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_custom_domain_reaches_another_port_of_the_app() {
+    let w = world().await;
+    let (svc, _) = image_service(&w, "panel", json!({"port": 8080})).await;
+    let id = svc["id"].as_str().unwrap().to_string();
+    let env = format!("/v1/apps/services/{id}/environments/production");
+    let h = "admin.example.org";
+    let (_, d) = call(&w.api, "POST", &format!("{env}/domains"), Some(json!({ "hostname": h }))).await;
+    w.dns.add(h, "CNAME", d["target"].as_str().unwrap());
+    w.dns.add(&format!("_roll-challenge.{h}"), "TXT", d["token"].as_str().unwrap());
+    assert_eq!(call(&w.api, "POST", &format!("{env}/domains/{h}/verify"), None).await.1["status"], "active");
+    assert_eq!(call(&w.api, "PATCH", &format!("{env}/domains/{h}"), Some(json!({"port": 0}))).await.0, StatusCode::BAD_REQUEST);
+    let (st, d) = call(&w.api, "PATCH", &format!("{env}/domains/{h}"), Some(json!({"port": 9000}))).await;
+    assert_eq!((st, &d["port"], &d["status"]), (StatusCode::OK, &json!(9000), &json!("active")), "{d}");
+    // Not published by the live deployment yet: said so, not sent to the main port.
+    assert_eq!(visit(&w, h, "/").await.0, StatusCode::BAD_GATEWAY);
+    let (_, r) = call(&w.api, "POST", &format!("{env}/redeploy"), Some(json!({}))).await;
+    settled(&w, &id, "production", r["id"].as_str().unwrap()).await;
+    let (st, body) = visit(&w, h, "/").await;
+    assert_eq!((st, &body["port"]), (StatusCode::OK, &json!(9000)), "{body}");
+    let (st, body) = visit(&w, &host(&svc["environments"][0]["url"]), "/").await;
+    assert_eq!((st, &body["port"]), (StatusCode::OK, &json!(8080)), "the service's own name: {body}");
+    // Back to the service's port.
+    let (_, d) = call(&w.api, "PATCH", &format!("{env}/domains/{h}"), Some(json!({"port": null}))).await;
+    assert!(d.get("port").is_none(), "{d}");
+    assert_eq!(visit(&w, h, "/").await.1["port"], json!(8080));
+}
+
 /// Where every tenant's CNAME points at one target (Cloudflare for SaaS), a CNAME proves nothing:
 /// a hostname someone else already points there (or left pointing) needs its TXT challenge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
